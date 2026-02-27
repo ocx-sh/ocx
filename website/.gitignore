@@ -1,0 +1,10 @@
+/node_modules
+/src/node_modules
+auto-imports.d.ts
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vitepress/cache
+.vitepress/dist
+.task/

@@ -1,0 +1,57 @@
+/// Common type aliases of the external OCI related libraries.
+pub mod native {
+    pub use oci_client;
+
+    pub use oci_client::client::Client as Client;
+    pub use oci_client::client::ClientConfig as ClientConfig;
+
+    pub use oci_client::Reference as Reference;
+    pub use oci_client::manifest::Platform as Platform;
+
+    pub use oci_client::config::Architecture as Arch;
+    pub use oci_client::config::Os as Os;
+
+    pub use oci_client::manifest::OciManifest as Manifest;
+    pub use oci_client::manifest::OciImageManifest as ImageManifest;
+    pub use oci_client::manifest::OciImageIndex as ImageIndex;
+
+    pub use oci_client::secrets::RegistryAuth as Auth;
+
+    pub use docker_credential;
+    pub use docker_credential::CredentialRetrievalError as DockerCredentialRetrievalError;
+    pub use docker_credential::DockerCredential as DockerCredential;
+    pub use docker_credential::get_credential as get_docker_credential;
+}
+
+pub use oci_client::{
+    ParseError, Reference, RegistryOperation,
+    manifest::{
+        ImageIndexEntry, OCI_IMAGE_INDEX_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE, OciDescriptor as Descriptor,
+        OciImageIndex as ImageIndex, OciImageManifest as ImageManifest, OciManifest as Manifest,
+    },
+};
+
+pub const INDEX_SCHEMA_VERSION: u8 = 2;
+
+pub mod client;
+pub use client::Client;
+pub use client::ClientBuilder;
+
+pub mod index;
+pub use index::Index;
+
+mod identifier;
+pub use identifier::Identifier;
+pub use identifier::DEFAULT_REGISTRY;
+
+mod platform;
+pub use platform::Platform;
+
+mod digest;
+pub use digest::Digest;
+
+mod file_structure;
+pub use file_structure::FileStructure;
+
+mod file_storage;
+pub use file_storage::FileStorage;

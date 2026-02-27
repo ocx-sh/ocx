@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+includes:
+  website:
+    taskfile: ./website/taskfile.yml
+    dir: ./website
+
+tasks:
+  push:
+    vars:
+      DATE:
+        sh: date -u +"%Y-%m-%dT%H:%M:%SZ"
+    cmds:
+      - git add .
+      - git commit -m "{{ .DATE }}"
+      - git push {{ .CLI_ARGS }}
+
+  default:
+    cmd: cargo check

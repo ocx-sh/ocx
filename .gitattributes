@@ -1,0 +1,14 @@
+# Set default behavior to automatically normalize line endings.
+* text=auto eol=lf
+
+# Migrate binary files to GIT LFS
+*.jpeg filter=lfs diff=lfs merge=lfs -text
+*.jpg filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
+# Archives
+*.[zZ][iI][pP] binary
+*.[tT][aA][rR] binary
+*.[tT][aA][rR].[gG][zZ] binary
+*.[tT][aA][rR].[bB][zZ] binary
+*.[tT][aA][rR].[xX][zZ] binary
+*.gif filter=lfs diff=lfs merge=lfs -text
