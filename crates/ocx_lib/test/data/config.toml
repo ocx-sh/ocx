@@ -1,0 +1,7 @@
+[[registry]]
+prefix = "ocx.io/packages/"
+
+[[registry]]
+prefix = "custom.registry/packages/"
+location = "registry.custom.io/packages/"
+auth = { type = "env", token = "CUSTOM" }

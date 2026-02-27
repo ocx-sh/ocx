@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/ocx_cli","crates/ocx_lib"]
+
+[patch.crates-io]
+oci-client = { path = "external/rust-oci-client" }
+
+[workspace.dependencies]
+ocx_lib = { path = "crates/ocx_lib" }
+tokio = { version = "1", features = ["full"] }
+
+[workspace.lints]

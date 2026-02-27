@@ -1,0 +1,103 @@
+use ocx_lib::log;
+
+use crate::options;
+
+#[derive(Default, Debug, Clone)]
+pub struct LogSettings {
+    filter: Vec<String>,
+    console_filter: Vec<String>,
+    console_events: bool,
+    console_level: Option<options::LogLevel>,
+}
+
+impl LogSettings {
+    pub fn with_console_level(mut self, level: Option<options::LogLevel>) -> Self {
+        self.console_level = level;
+        self
+    }
+
+    pub fn init(self) -> anyhow::Result<()> {
+        use tracing_subscriber::{util::SubscriberInitExt, layer::SubscriberExt};
+        tracing_subscriber::registry()
+                .with(self.console_layer())
+                .init();
+        Ok(())
+    }
+
+    fn console_layer<S>(&self) -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>
+    where
+        S: tracing::Subscriber,
+        for<'a> S: tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        use tracing_subscriber::prelude::*;
+
+        let subscriber = tracing_subscriber::fmt::layer().compact();
+        let subscriber = if self.console_events {
+            subscriber.with_span_events(
+                tracing_subscriber::fmt::format::FmtSpan::NEW | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+            )
+        } else {
+            subscriber
+        };
+
+        Box::new(
+            subscriber
+                .with_file(false)
+                .with_target(false)
+                .with_writer(std::io::stderr)
+                .with_filter(self.common_filter("CONSOLE", self.console_filter.iter())),
+        )
+    }
+
+    fn common_filter<'a>(
+        &'a self,
+        extra_name: &str,
+        extra_filter: impl Iterator<Item = &'a String>,
+    ) -> tracing_subscriber::filter::EnvFilter {
+        let name_env = format!("OCX_LOG_{extra_name}");
+
+        let builder = tracing_subscriber::EnvFilter::builder();
+        let builder = {
+            if std::env::var(&name_env).is_ok() {
+                builder.with_env_var(name_env)
+            } else if std::env::var("OCX_LOG").is_ok() {
+                builder.with_env_var("OCX_LOG")
+            } else if std::env::var("RUST_LOG").map(|v| v.is_empty()).unwrap_or(false) {
+                builder.with_env_var("RUST_LOG")
+            } else {
+                builder
+            }
+        };
+
+        let builder = {
+            if self.filter.is_empty() {
+                let log_level = self.console_level.map(tracing_subscriber::filter::LevelFilter::from);
+                builder.with_default_directive(log_level.unwrap_or(tracing_subscriber::filter::LevelFilter::WARN).into())
+            } else {
+                builder
+            }
+        };
+
+        let filter = if let Some(console_level) = self.console_level {
+            let console_level: tracing_subscriber::filter::LevelFilter = console_level.into();
+            builder.parse(console_level.to_string()).expect("Failed to initialize log filter!")
+        } else {
+            builder.from_env().expect("Failed to initialize log filter!")
+        };
+
+
+        self.filter
+            .iter()
+            .chain(extra_filter)
+            .fold(filter, |filter, directive| {
+                let directive = match directive.parse() {
+                    Ok(directive) => directive,
+                    Err(error) => {
+                        log::error!("Failed to parse log filter directive: {error}");
+                        return filter;
+                    }
+                };
+                filter.add_directive(directive)
+            })
+    }
+}

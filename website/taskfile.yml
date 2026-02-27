@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  install:
+    cmd: bun install
+
+  serve:
+    deps:
+      - install
+    cmd: bunx vitepress dev
+
+  build:
+    deps:
+      - install
+    cmd: bunx vitepress build
