@@ -66,6 +66,18 @@ impl FileStructure {
         Ok(self.object(identifier)?.join("content"))
     }
 
+    /// Resolves `content_path` (following symlinks) and returns the object root
+    /// directory that contains it.  Used internally to derive sibling paths such
+    /// as `metadata.json` and `refs/`.
+    fn object_dir_for_content(&self, content_path: &std::path::Path) -> Result<std::path::PathBuf> {
+        let canonical = std::fs::canonicalize(content_path)
+            .map_err(|e| crate::error::Error::InternalFile(content_path.to_path_buf(), e))?;
+        canonical.parent()
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| crate::error::Error::InternalPathInvalid(canonical))
+    }
+
+
     pub fn indices(&self) -> std::path::PathBuf {
         self.root.join("index")
     }

@@ -17,5 +17,12 @@ tasks:
       - git commit -m "{{ .DATE }}"
       - git push {{ .CLI_ARGS }}
 
+  checkpoint:
+    cmds:
+      - if: '! git show -s --format=%s HEAD | grep -q "Checkpoint"'
+        cmd: git commit --allow-empty -m "Checkpoint"
+      - cmd: git add .
+      - cmd: git commit --amend --no-edit
+
   default:
     cmd: cargo check
