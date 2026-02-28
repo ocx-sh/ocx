@@ -208,3 +208,52 @@ Generate shell completion scripts for ocx.
 
 - `--shell <SHELL>`: The shell to generate the completions for (e.g., `bash`, `zsh`, `fish`).
   By default, ocx will attempt to auto-detect the shell and generate the appropriate completions.
+
+### `package` {#package}
+
+#### `create` {#package-create}
+
+Bundles a local directory into a compressed package archive (`.tar.xz`) ready for publishing.
+
+**Usage**
+
+```shell
+ocx package create [OPTIONS] <PATH>
+```
+
+**Arguments**
+
+- `<PATH>`: Path to the directory to bundle.
+
+**Options**
+
+- `-i`, `--identifier <IDENTIFIER>`: Package identifier, used to infer the output filename when `--output` is a directory.
+- `-p`, `--platform <PLATFORM>`: Platform of the package, used to infer the output filename.
+- `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform.
+- `-f`, `--force`: Overwrite the output file if it already exists.
+- `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the output bundle.
+- `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`.
+- `-h`, `--help`: Print help information.
+
+#### `push` {#package-push}
+
+Publishes a package bundle to the registry. A [candidate symlink](../user-guide.md#path-resolution) is created locally after a successful push.
+
+**Usage**
+
+```shell
+ocx package push [OPTIONS] <IDENTIFIER> <CONTENT>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1+20260216120000`.
+- `<CONTENT>`: Path to the package bundle (`.tar.xz`) to publish.
+
+**Options**
+
+- `-p`, `--platform <PLATFORM>`: Target platform of the package (required).
+- `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1+20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
+- `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
+- `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the bundle.
+- `-h`, `--help`: Print help information.
