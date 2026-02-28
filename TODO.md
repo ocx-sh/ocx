@@ -22,6 +22,11 @@
  - shims & lazy loading
  - infrastructure extensions
 
+## Qualit y of Life
+
+ - advanced log settings with layers and filters
+ - progress bars for long operations
+
 ## Ideas
 
  - testing packages

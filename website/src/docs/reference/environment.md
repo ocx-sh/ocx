@@ -54,6 +54,28 @@ For `basic` authentication, this value will be used as the password.
 
 This value is ignored if the `OCX_AUTH_<REGISTRY>_TYPE` is not set to `bearer` or `basic`.
 
+### `OCX_DEFAULT_REGISTRY` {#ocx-default-registry}
+
+The default registry to use when no registry is specified in a package reference on the [command line](./command-line.md).
+If not set, OCX will default to `ocx.sh`.
+
+::: warning
+Thus this variable is mostly intended for testing.
+It is recommended to specify the registry explicitly or use [mirrors](../user-guide.md#mirrors).
+:::
+
+### `OCX_LOG` {#ocx-log}
+
+The log level for OCX.
+You can set this variable to the same values as the [`--log-level`](command-line.md#arg-log-level) command line option (e.g. `warn`, `info`, etc.).
+If [`--log-level`](command-line.md#arg-log-level) is specified, it will take precedence over this environment variable.
+For more information on log levels, see the [command line reference](command-line.md#arg-log-level).
+
+### `OCX_LOG_CONSOLE` {#ocx-log-console}
+
+Similar to [`OCX_LOG`](#ocx-log), but specifically for configuring the log level of messages emitted to the console.
+If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) for console messages.
+
 ### `OCX_OFFLINE` {#ocx-offline}
 
 When set to a [truthy value](#truthy-values), OCX will run in offline mode, which will not attempt to fetch any remote information.
@@ -69,3 +91,9 @@ The command line option [`--remote`](command-line#remote) takes precedence over 
 ### `DOCKER_CONFIG` {#external-docker-config}
 
 The location of the docker configuration file.
+
+### `RUST_LOG` {#external-rust-log}
+
+A fallback for configuring the log level of OCX and its dependencies.
+If [`OCX_LOG`](#ocx-log) is not set, OCX will respect the log level configured via `RUST_LOG`.
+The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
