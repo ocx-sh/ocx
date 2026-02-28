@@ -1,0 +1,12 @@
+{
+    "recommendations": [
+        // Rust language support
+        "rust-lang.rust-analyzer",
+        // Inline coverage highlighting from lcov.info (run: task coverage)
+        "ryanluker.vscode-coverage-gutters",
+        // TOML files (Cargo.toml, taskfile configs)
+        "tamasfe.even-better-toml",
+        // Task runner support (run: task <task-name>)
+        "task.vscode-task",
+    ]
+}

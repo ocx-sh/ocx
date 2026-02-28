@@ -68,3 +68,75 @@ impl InstallStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci;
+
+    fn id_with_tag() -> oci::Identifier {
+        oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28")
+    }
+
+    fn id_no_tag() -> oci::Identifier {
+        oci::Identifier::new_registry("cmake", "example.com")
+    }
+
+    // ── path structure ────────────────────────────────────────────────────────
+
+    #[test]
+    fn current_path_structure() {
+        let store = InstallStore::new("/installs");
+        assert_eq!(
+            store.current(&id_with_tag()),
+            PathBuf::from("/installs/example.com/cmake/current")
+        );
+    }
+
+    #[test]
+    fn candidates_dir_path_structure() {
+        let store = InstallStore::new("/installs");
+        assert_eq!(
+            store.candidates(&id_with_tag()),
+            PathBuf::from("/installs/example.com/cmake/candidates")
+        );
+    }
+
+    #[test]
+    fn candidate_uses_tag() {
+        let store = InstallStore::new("/installs");
+        assert_eq!(
+            store.candidate(&id_with_tag()),
+            PathBuf::from("/installs/example.com/cmake/candidates/3.28")
+        );
+    }
+
+    #[test]
+    fn candidate_falls_back_to_latest_when_no_tag() {
+        let store = InstallStore::new("/installs");
+        assert_eq!(
+            store.candidate(&id_no_tag()),
+            PathBuf::from("/installs/example.com/cmake/candidates/latest")
+        );
+    }
+
+    // ── symlink dispatch ──────────────────────────────────────────────────────
+
+    #[test]
+    fn symlink_candidate_returns_candidate_path() {
+        let store = InstallStore::new("/installs");
+        assert_eq!(
+            store.symlink(&id_with_tag(), SymlinkKind::Candidate),
+            store.candidate(&id_with_tag()),
+        );
+    }
+
+    #[test]
+    fn symlink_current_returns_current_path() {
+        let store = InstallStore::new("/installs");
+        assert_eq!(
+            store.symlink(&id_with_tag(), SymlinkKind::Current),
+            store.current(&id_with_tag()),
+        );
+    }
+}
