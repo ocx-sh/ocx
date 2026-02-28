@@ -6,6 +6,20 @@ outline: deep
 
 ## General Options
 
+The following options are available for all commands and must be specified before the command name.
+
+### `--log-level` {#arg-log-level}
+
+The log level for OCX, which can be set to one of the following values:
+
+- `off`: No logs will be emitted.
+- `error`: Only error messages will be emitted.
+- `warn`: Warning messages and error messages will be emitted.
+  This is the default log level.
+- `info`: Informational messages, warning messages, and error messages will be emitted.
+- `debug`: Debug messages, informational messages, warning messages, and error messages will be emitted.
+- `trace`: All messages will be emitted, including trace messages.
+
 ### `--format` {#arg-format}
 
 When set, ocx will output information in the specified format instead of plain text.
@@ -111,6 +125,8 @@ Downloads and installs one or more packages into the local object store.
 
 **Usage**
 
+Installs packages into the local object store and create a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands.
+
 ```shell
 ocx install [OPTIONS] <PACKAGE>...
 ```
@@ -122,7 +138,7 @@ ocx install [OPTIONS] <PACKAGE>...
 **Options**
 
 - `-p`, `--platform`: Target platforms to consider.
-- `-s`, `--select`: After installing, update the `current` symlink for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
+- `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
 - `-h`, `--help`: Print help information.
 
 ### `shell` {#shell}
@@ -137,7 +153,7 @@ eval "$(ocx shell env mypackage)"
 ```
 
 In the default mode this command does not auto-install packages — if a package is not already available locally it will fail with an error.
-With `--candidate` or `--current`, no auto-install is performed either — see [path resolution modes](#path-resolution).
+With `--candidate` or `--current`, no auto-install is performed either — see [path resolution modes](../user-guide.md#path-resolution).
 
 **Usage**
 

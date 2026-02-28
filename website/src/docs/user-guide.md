@@ -59,7 +59,9 @@ docker login "<registry>"
 
 The docker configuration file location can be overridden by setting the [`DOCKER_CONFIG`](./reference/environment.md#external-docker-config) environment variable.
 
-## Path resolution modes {#path-resolution}
+## File Structure {#file-structure}
+
+### Path Resolution {#path-resolution}
 
 Several commands resolve package content to a filesystem path that is embedded in their output.
 The path you receive determines how stable that output is across future package updates.
@@ -99,5 +101,7 @@ Set it up once by installing and selecting a version, then inspect the stable pa
 ocx env --current clangd
 ```
 :::
+
+## Mirrors {#mirrors}
 
 [docker-credential]: https://github.com/keirlawson/docker_credential
