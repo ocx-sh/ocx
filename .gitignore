@@ -2,3 +2,4 @@
 out/
 target/
 .user.env
+lcov.info

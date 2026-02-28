@@ -61,6 +61,7 @@ These are ordered by dependency — each group should be completed before the ne
  - get urls from manifests not supported atm, breaking SHA?
  - mirrors config
  - homebrew style auto codesigning on macOS, incl. user-friendly error messages when it fails and docs on how to fix it
+ - make rustdoc type links less verbose (e.g. `ocx_lib::reference_manager::ReferenceManager` → `ReferenceManager`)
 
 ## Ideas
 

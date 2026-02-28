@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  # Install cargo-llvm-cov if not already present. Skipped when already installed.
+  install:
+    internal: true
+    cmds:
+      - cargo install cargo-llvm-cov --locked
+    status:
+      - cargo llvm-cov --version
+
+  # Run tests with LLVM-based coverage instrumentation.
+  # Produces target/lcov.info for VSCode Coverage Gutters and an HTML report
+  # under target/llvm-cov/html/. Installs cargo-llvm-cov automatically if needed.
+  default:
+    desc: Run tests with LLVM coverage and generate reports.
+    deps: [install]
+    cmds:
+      - cargo llvm-cov --no-report --workspace --ignore-run-fail
+      - cargo llvm-cov report --lcov --output-path lcov.info
+      - cargo llvm-cov report --html
+
+  # Open the HTML coverage report in the system browser.
+  # Supports WSL2, Linux (xdg-open), and macOS (open).
+  open:
+    desc: Open the HTML coverage report in the system browser.
+    cmds:
+      - |
+        HTML=target/llvm-cov/html/index.html
+        if command -v wslview >/dev/null 2>&1; then
+          wslview "$HTML"
+        elif [ -n "$WSL_DISTRO_NAME" ] && command -v explorer.exe >/dev/null 2>&1; then
+          explorer.exe "$(wslpath -w "$HTML")"
+        elif command -v xdg-open >/dev/null 2>&1; then
+          xdg-open "$HTML"
+        elif command -v open >/dev/null 2>&1; then
+          open "$HTML"
+        else
+          echo "Cannot detect a browser opener. Open manually: $(realpath $HTML)"
+          exit 1
+        fi

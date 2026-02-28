@@ -175,3 +175,158 @@ impl ObjectStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci;
+
+    // hex = 43567c07 | f1a6b07b | 5e8dc052108c9d4c | 4a32130e18bcbd8a78c53af3e90325d9
+    const SHA256_HEX: &str = "43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
+
+    fn digest() -> oci::Digest {
+        oci::Digest::Sha256(SHA256_HEX.to_string())
+    }
+
+    fn id_with_digest() -> oci::Identifier {
+        oci::Identifier::new_registry("cmake", "example.com").clone_with_digest(digest())
+    }
+
+    fn id_tag_only() -> oci::Identifier {
+        oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28")
+    }
+
+    // ── digest_path ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn path_sharding_sha256() {
+        let store = ObjectStore::new("/store");
+        let p = store.path(&id_with_digest()).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from(
+                "/store/example.com/cmake/sha256/43567c07/f1a6b07b/5e8dc052108c9d4c"
+            )
+        );
+    }
+
+    #[test]
+    fn path_requires_digest() {
+        let store = ObjectStore::new("/store");
+        assert!(store.path(&id_tag_only()).is_err());
+    }
+
+    // ── content / metadata ────────────────────────────────────────────────────
+
+    #[test]
+    fn content_is_path_join_content() {
+        let store = ObjectStore::new("/store");
+        let p = store.content(&id_with_digest()).unwrap();
+        assert_eq!(p.file_name().unwrap(), "content");
+        assert_eq!(p.parent().unwrap(), store.path(&id_with_digest()).unwrap());
+    }
+
+    #[test]
+    fn metadata_is_path_join_metadata_json() {
+        let store = ObjectStore::new("/store");
+        let p = store.metadata(&id_with_digest()).unwrap();
+        assert_eq!(p.file_name().unwrap(), "metadata.json");
+        assert_eq!(p.parent().unwrap(), store.path(&id_with_digest()).unwrap());
+    }
+
+    // ── metadata_for_content / refs_dir_for_content ───────────────────────────
+
+    #[test]
+    fn metadata_for_content_returns_sibling_metadata_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let obj = dir.path().join("obj");
+        let content = obj.join("content");
+        std::fs::create_dir_all(&content).unwrap();
+
+        let store = ObjectStore::new(dir.path());
+        let result = store.metadata_for_content(&content).unwrap();
+        assert_eq!(result, obj.join("metadata.json"));
+    }
+
+    #[test]
+    fn refs_dir_for_content_returns_sibling_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let obj = dir.path().join("obj");
+        let content = obj.join("content");
+        std::fs::create_dir_all(&content).unwrap();
+
+        let store = ObjectStore::new(dir.path());
+        let result = store.refs_dir_for_content(&content).unwrap();
+        assert_eq!(result, obj.join("refs"));
+    }
+
+    #[test]
+    fn metadata_for_content_follows_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let obj = dir.path().join("obj");
+        let content = obj.join("content");
+        std::fs::create_dir_all(&content).unwrap();
+
+        let link = dir.path().join("link");
+        crate::symlink::create(&content, &link).unwrap();
+
+        let store = ObjectStore::new(dir.path());
+        let result = store.metadata_for_content(&link).unwrap();
+        assert_eq!(result, obj.join("metadata.json"));
+    }
+
+    // ── list_all ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_all_returns_empty_when_root_absent() {
+        let store = ObjectStore::new("/nonexistent/path/that/does/not/exist");
+        assert_eq!(store.list_all().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn list_all_finds_single_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = dir.path().join("reg/repo/sha256/aa/bb/cc/content");
+        std::fs::create_dir_all(&content).unwrap();
+
+        let store = ObjectStore::new(dir.path());
+        let objects = store.list_all().unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].content(), content);
+    }
+
+    #[test]
+    fn list_all_finds_multiple_objects_at_different_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("reg/cmake/sha256/aa/bb/cc/content")).unwrap();
+        std::fs::create_dir_all(dir.path().join("reg/cmake/sha256/dd/ee/ff/content")).unwrap();
+        std::fs::create_dir_all(dir.path().join("reg/clang/sha256/11/22/33/content")).unwrap();
+
+        let store = ObjectStore::new(dir.path());
+        let objects = store.list_all().unwrap();
+        assert_eq!(objects.len(), 3);
+    }
+
+    #[test]
+    fn list_all_does_not_recurse_into_content_subdirs() {
+        // A nested `content/` inside the package files must not be treated as
+        // another object directory.
+        let dir = tempfile::tempdir().unwrap();
+        let content = dir.path().join("reg/repo/sha256/aa/bb/cc/content");
+        std::fs::create_dir_all(content.join("subdir/content")).unwrap();
+
+        let store = ObjectStore::new(dir.path());
+        let objects = store.list_all().unwrap();
+        assert_eq!(objects.len(), 1);
+    }
+
+    // ── ObjectDir accessors ───────────────────────────────────────────────────
+
+    #[test]
+    fn object_dir_accessors() {
+        let obj_dir = ObjectDir { dir: PathBuf::from("/store/reg/cmake/sha256/a/b/c") };
+        assert_eq!(obj_dir.content(), PathBuf::from("/store/reg/cmake/sha256/a/b/c/content"));
+        assert_eq!(obj_dir.metadata(), PathBuf::from("/store/reg/cmake/sha256/a/b/c/metadata.json"));
+        assert_eq!(obj_dir.refs_dir(), PathBuf::from("/store/reg/cmake/sha256/a/b/c/refs"));
+    }
+}

@@ -109,3 +109,93 @@ impl IndexStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci;
+
+    const SHA256_HEX: &str = "43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
+
+    fn digest() -> oci::Digest {
+        oci::Digest::Sha256(SHA256_HEX.to_string())
+    }
+
+    fn id() -> oci::Identifier {
+        oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28")
+    }
+
+    // ── path methods ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn tags_path_structure() {
+        let store = IndexStore::new("/index");
+        let p = store.tags(&id());
+        assert_eq!(p, PathBuf::from("/index/example.com/tags/cmake.json"));
+    }
+
+    #[test]
+    fn blob_path_structure() {
+        let store = IndexStore::new("/index");
+        let p = store.blob(&id(), &digest());
+        assert_eq!(
+            p,
+            PathBuf::from("/index/example.com/objects/sha256/43567c07/f1a6b07b/5e8dc052108c9d4c")
+        );
+    }
+
+    #[test]
+    fn manifest_path_is_blob_with_json_extension() {
+        let store = IndexStore::new("/index");
+        let p = store.manifest(&id(), &digest());
+        assert_eq!(
+            p,
+            PathBuf::from(
+                "/index/example.com/objects/sha256/43567c07/f1a6b07b/5e8dc052108c9d4c.json"
+            )
+        );
+    }
+
+    #[test]
+    fn blob_with_extension_appends_extension() {
+        let store = IndexStore::new("/index");
+        let p = store.blob_with_extension(&id(), &digest(), "toml");
+        assert!(p.to_str().unwrap().ends_with(".toml"));
+    }
+
+    // ── list_repositories ────────────────────────────────────────────────────
+
+    #[test]
+    fn list_repositories_returns_empty_when_registry_dir_absent() {
+        let store = IndexStore::new("/nonexistent/path/that/does/not/exist");
+        assert_eq!(store.list_repositories("example.com").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn list_repositories_returns_sorted_repository_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let tags_dir = dir.path().join("example.com/tags");
+        std::fs::create_dir_all(&tags_dir).unwrap();
+        std::fs::write(tags_dir.join("zlib.json"), b"{}").unwrap();
+        std::fs::write(tags_dir.join("cmake.json"), b"{}").unwrap();
+        std::fs::write(tags_dir.join("clang.json"), b"{}").unwrap();
+
+        let store = IndexStore::new(dir.path());
+        let repos = store.list_repositories("example.com").unwrap();
+        assert_eq!(repos, vec!["clang", "cmake", "zlib"]);
+    }
+
+    #[test]
+    fn list_repositories_ignores_non_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let tags_dir = dir.path().join("example.com/tags");
+        std::fs::create_dir_all(&tags_dir).unwrap();
+        std::fs::write(tags_dir.join("cmake.json"), b"{}").unwrap();
+        std::fs::write(tags_dir.join("README.txt"), b"ignore me").unwrap();
+        std::fs::write(tags_dir.join("notes"), b"no extension").unwrap();
+
+        let store = IndexStore::new(dir.path());
+        let repos = store.list_repositories("example.com").unwrap();
+        assert_eq!(repos, vec!["cmake"]);
+    }
+}

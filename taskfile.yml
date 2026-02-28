@@ -3,6 +3,7 @@
 version: '3'
 
 includes:
+  coverage: ./taskfiles/coverage.taskfile.yml
   website:
     taskfile: ./website/taskfile.yml
     dir: ./website
