@@ -30,7 +30,7 @@ impl IndexList {
         if ! self.with_platforms {
             let tags_report = futures::future::join_all(tags_report).await.into_iter().collect::<anyhow::Result<Vec<_>>>()?;
             let tags_report = tags_report.into_iter().collect::<std::collections::HashMap<_, _>>();
-            context.api().report_tags(api::data::tag::TagCollection::without_platforms(tags_report))?;
+            context.api().report_tags(api::data::tag::Tags::without_platforms(tags_report))?;
             return Ok(ExitCode::SUCCESS);
         }
 
@@ -64,7 +64,7 @@ impl IndexList {
             }
         }
         
-        context.api().report_tags(api::data::tag::TagCollection::with_platforms(tags_report))?;
+        context.api().report_tags(api::data::tag::Tags::with_platforms(tags_report))?;
         Ok(ExitCode::SUCCESS)
     }
 }

@@ -42,7 +42,7 @@ impl Install {
         .install_all(oci_packages.clone())
         .await?;
 
-        let install_data = api::data::install::InstallCollection::new(
+        let install_data = api::data::install::Installs::new(
             self.packages
                 .iter()
                 .map(|p| p.raw().to_string())

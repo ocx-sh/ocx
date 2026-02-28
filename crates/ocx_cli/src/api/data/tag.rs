@@ -3,15 +3,15 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 #[derive(Serialize)]
-pub struct TagCollection {
+pub struct Tags {
     #[serde(flatten)]
-    pub packages: TagCollectionData,
+    pub packages: TagsData,
 }
 
-impl TagCollection {
+impl Tags {
     pub fn without_platforms(packages: HashMap<String, impl IntoIterator<Item = String>>) -> Self {
         Self {
-            packages: TagCollectionData::WithoutPlatforms(
+            packages: TagsData::WithoutPlatforms(
                 packages
                     .into_iter()
                     .map(|(k, v)| (k, v.into_iter().collect()))
@@ -22,14 +22,14 @@ impl TagCollection {
 
     pub fn with_platforms(packages: HashMap<String, HashMap<String, Vec<String>>>) -> Self {
         Self {
-            packages: TagCollectionData::WithPlatforms(packages),
+            packages: TagsData::WithPlatforms(packages),
         }
     }
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-pub enum TagCollectionData {
+pub enum TagsData {
     WithoutPlatforms(HashMap<String, Vec<String>>),
     WithPlatforms(HashMap<String, HashMap<String, Vec<String>>>),
 }

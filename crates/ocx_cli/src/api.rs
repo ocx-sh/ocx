@@ -12,7 +12,7 @@ impl Api {
         Self { format }
     }
 
-    pub fn report_installs(&self, install: data::install::InstallCollection) -> anyhow::Result<()> {
+    pub fn report_installs(&self, install: data::install::Installs) -> anyhow::Result<()> {
         match self.format {
             options::Format::Json => {
                 println!("{}", serde_json::to_string_pretty(&install)?);
@@ -33,7 +33,7 @@ impl Api {
         Ok(())
     }
 
-    pub fn report_tags(&self, tags_report: data::tag::TagCollection) -> anyhow::Result<()> {
+    pub fn report_tags(&self, tags_report: data::tag::Tags) -> anyhow::Result<()> {
         match self.format {
             options::Format::Json => {
                 println!("{}", serde_json::to_string_pretty(&tags_report)?);
@@ -41,7 +41,7 @@ impl Api {
             options::Format::Plain => {
                 let mut rows: [Vec<String>; _] = [Vec::new(), Vec::new(), Vec::new()];
                 match tags_report.packages {
-                    data::tag::TagCollectionData::WithoutPlatforms(tags) => {
+                    data::tag::TagsData::WithoutPlatforms(tags) => {
                         for (package, package_tags) in tags {
                             for tag in package_tags {
                                 rows[0].push(package.clone());
@@ -50,7 +50,7 @@ impl Api {
                         }
                         stdout::print_table(&["Package", "Tag"], &rows);
                     }
-                    data::tag::TagCollectionData::WithPlatforms(tags) => {
+                    data::tag::TagsData::WithPlatforms(tags) => {
                         for (package, platform_tags) in tags {
                             for (platform, platform_tags) in platform_tags {
                                 for tag in platform_tags {
