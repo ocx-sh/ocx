@@ -77,6 +77,21 @@ impl FileStructure {
             .ok_or_else(|| crate::error::Error::InternalPathInvalid(canonical))
     }
 
+    /// Returns the `metadata.json` path for the object that owns `content_path`.
+    ///
+    /// `content_path` may be a real path or a symlink; symlinks are resolved
+    /// before navigating to the sibling file.
+    pub fn object_metadata_for_content(&self, content_path: &std::path::Path) -> Result<std::path::PathBuf> {
+        Ok(self.object_dir_for_content(content_path)?.join("metadata.json"))
+    }
+
+    /// Returns the `refs/` directory for the object that owns `content_path`.
+    ///
+    /// `content_path` may be a real path or a symlink; symlinks are resolved
+    /// before navigating to the sibling directory.
+    pub fn object_refs_dir(&self, content_path: &std::path::Path) -> Result<std::path::PathBuf> {
+        Ok(self.object_dir_for_content(content_path)?.join("refs"))
+    }
 
     pub fn indices(&self) -> std::path::PathBuf {
         self.root.join("index")
