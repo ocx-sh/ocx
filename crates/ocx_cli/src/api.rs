@@ -68,6 +68,24 @@ impl Api {
         Ok(())
     }
 
+    pub fn report_env(&self, env: data::env::EnvVars) -> anyhow::Result<()> {
+        match self.format {
+            options::Format::Json => {
+                println!("{}", serde_json::to_string_pretty(&env)?);
+            }
+            options::Format::Plain => {
+                let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+                for entry in env.entries {
+                    rows[0].push(entry.key);
+                    rows[1].push(entry.value);
+                    rows[2].push(entry.kind.to_string());
+                }
+                stdout::print_table(&["Key", "Value", "Type"], &rows);
+            }
+        }
+        Ok(())
+    }
+
     pub fn report_catalog(&self, catalog: data::catalog::Catalog) -> anyhow::Result<()> {
         match self.format {
             options::Format::Json => {
