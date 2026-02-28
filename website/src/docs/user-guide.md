@@ -61,6 +61,45 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 
 ## File Structure {#file-structure}
 
+ocx stores everything under a single root directory, by default `~/.ocx`.
+The root is split into three independent stores, each with a distinct role:
+
+```
+~/.ocx/
+├── objects/                       ← content-addressed binary store (immutable)
+│   └── {registry}/
+│       └── {repo}/
+│           └── sha256/{a}/{b}/{c}/
+│               ├── content/       ← package files (executables, headers, …)
+│               ├── metadata.json  ← package metadata
+│               └── refs/          ← back-references to install symlinks
+│
+├── index/                         ← cached OCI index (no binaries)
+│   └── {registry}/
+│       ├── tags/
+│       │   └── {repo}.json        ← { "3.28": "sha256:abc…" }
+│       └── objects/
+│           └── sha256/{a}/{b}/{c}.json  ← cached manifest
+│
+└── installs/                      ← stable symlinks for tools and shell profiles
+    └── {registry}/
+        └── {repo}/
+            ├── current            → objects/…/{selected}/content
+            └── candidates/
+                └── {tag}          → objects/…/{digest}/content
+```
+
+**objects** stores the actual package binaries.
+Paths are sharded by the first three segments of the digest hex string to keep individual directories small.
+Each object directory is self-contained: `content/` holds the package files, `metadata.json` describes the package, and `refs/` records back-references to every install symlink that currently points here (enabling safe garbage collection).
+
+**index** mirrors remote OCI registry metadata locally — tags and manifests, but no binaries.
+It lets ocx resolve tags and check versions without hitting the network.
+`ocx index update` refreshes it; `ocx --remote` bypasses it and queries the registry directly.
+
+**installs** provides stable paths that are safe to embed in shell profiles, IDE configs, or build files.
+Unlike object-store paths (which change with every digest update), install symlink paths remain constant — only their targets are silently re-pointed when you upgrade or select a different version.
+
 ### Path Resolution {#path-resolution}
 
 Several commands resolve package content to a filesystem path that is embedded in their output.
