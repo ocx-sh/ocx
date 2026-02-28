@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log, oci, package::metadata::env::exporter::Exporter};
+use ocx_lib::{oci, package::metadata::env::exporter::Exporter};
 
 use crate::{api, conventions::*, options, task};
 
@@ -29,38 +29,13 @@ impl Env {
         let identifiers =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
-        let info = task::package::find::Find {
+        let info = task::package::find_or_install::FindOrInstall {
             context: context.clone(),
             file_structure: context.file_structure().clone(),
-            platforms: platforms.clone(),
+            platforms,
         }
-        .find_all(identifiers.clone())
-        .await;
-
-        let info = match info {
-            Ok(info) => info,
-            Err(ocx_lib::Error::PackageNotFound(error)) => {
-                if context.is_offline() {
-                    log::error!("Package not found and offline mode is enabled: {}", error);
-                    return Err(anyhow::anyhow!(
-                        "Package not found and offline mode is enabled: {}",
-                        error
-                    ));
-                } else {
-                    log::info!("Package not found, will attempt to install: {}", error);
-                    task::package::install::Install {
-                        context: context.clone(),
-                        file_structure: context.file_structure().clone(),
-                        platforms,
-                        candidate: false,
-                        select: false,
-                    }
-                    .install_all(identifiers)
-                    .await?
-                }
-            }
-            Err(e) => return Err(anyhow::anyhow!("Error finding package: {:?}", e)),
-        };
+        .find_or_install_all(identifiers)
+        .await?;
 
         let mut all_entries: Vec<api::data::env::EnvEntry> = Vec::new();
 
