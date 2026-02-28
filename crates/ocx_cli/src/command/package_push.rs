@@ -96,7 +96,7 @@ impl PackagePush {
 
         if let Some(identifier) = versions_to_push.first() {
             log::info!("Pushing package with identifier {}", identifier);
-            let digest = context
+            let (digest, manifest) = context
                 .remote_client()?
                 .push_package(package_info.clone(), self.content.clone())
                 .await?;
@@ -104,7 +104,7 @@ impl PackagePush {
             for identifier in versions_to_push {
                 context
                     .remote_client()?
-                    .copy_manifest(&source_identifier, identifier.tag_or_latest())
+                    .copy_manifest_data(&manifest, &source_identifier, identifier.tag_or_latest())
                     .await?;
             }
         }

@@ -224,7 +224,7 @@ impl Client {
         })
     }
 
-    pub async fn push_package(&self, package_info: Info, file: impl AsRef<std::path::Path>) -> Result<Digest> {
+    pub async fn push_package(&self, package_info: Info, file: impl AsRef<std::path::Path>) -> Result<(Digest, oci::Manifest)> {
         let path = file.as_ref();
         log::debug!(
             "Pushing package {} from file {}",
@@ -359,7 +359,29 @@ impl Client {
             .unwrap();
         log::info!("Successfully updated index for image {}", image);
 
-        Ok(index_digest)
+        Ok((index_digest, oci::Manifest::ImageIndex(index)))
+    }
+
+    /// Copies a manifest to a new tag using a pre-fetched manifest, bypassing the registry fetch.
+    ///
+    /// This avoids the race condition that can occur on load-balanced / caching registries
+    /// (e.g. Artifactory) where the manifest pushed in a previous step may not yet be visible
+    /// on every node. Pass the manifest returned by [`push_package`] directly instead of
+    /// letting [`copy_manifest`] re-fetch it by digest.
+    pub async fn copy_manifest_data(
+        &self,
+        manifest: &oci::Manifest,
+        source_identifier: &Identifier,
+        target: impl Into<String>,
+    ) -> Result<()> {
+        let target_identifier = source_identifier.clone_with_tag(target);
+        self.do_authenticate(&target_identifier.reference, oci::RegistryOperation::Push)
+            .await?;
+        self.client
+            .push_manifest(&target_identifier.reference, manifest)
+            .await
+            .map_to_undefined_error()?;
+        Ok(())
     }
 
     /// Authenticates with the registry for the given image and operation.
