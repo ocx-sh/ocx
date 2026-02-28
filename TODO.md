@@ -1,4 +1,3 @@
- - env command
  - select command
  - retry push, if manifest unknown
  - get urls from manifests not supported atm, breaking SHA?
