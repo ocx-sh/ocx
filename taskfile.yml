@@ -23,7 +23,7 @@ tasks:
       - if: '! [[ $(git show -s --format=%s HEAD) == "Checkpoint" ]]'
         cmd: git commit --allow-empty -m "Checkpoint"
       - cmd: git add .
-      - cmd: git commit --amend --no-edit
+      - cmd: git commit --amend --no-edit --allow-empty
 
   default:
     cmd: cargo check

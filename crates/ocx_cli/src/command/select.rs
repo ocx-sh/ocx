@@ -1,7 +1,7 @@
 use std::{collections::HashMap, process::ExitCode};
 
 use clap::Parser;
-use ocx_lib::{oci, package::install_info, symlink};
+use ocx_lib::{oci, package::install_info, reference_manager::ReferenceManager};
 
 use crate::{api, conventions::platforms_or_default, options, task};
 
@@ -29,6 +29,7 @@ impl Select {
         )?;
 
         let fs = context.file_structure().clone();
+        let rm = ReferenceManager::new(fs.clone());
         let platforms = platforms_or_default(&self.platforms);
 
         // Find resolves the identifier via the index and verifies the content
@@ -45,7 +46,7 @@ impl Select {
 
         for (raw, info) in self.packages.iter().zip(package_infos) {
             let current_path = fs.installs.current(&info.identifier);
-            symlink::update(&info.content, &current_path)?;
+            rm.link(&current_path, &info.content)?;
 
             packages.insert(
                 raw.raw().to_string(),
