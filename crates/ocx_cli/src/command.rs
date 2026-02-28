@@ -13,6 +13,7 @@ pub mod package_create;
 pub mod package_push;
 pub mod env;
 pub mod exec;
+pub mod select;
 pub mod version;
 pub mod shell;
 pub mod shell_env;
@@ -34,6 +35,8 @@ pub enum Command {
     /// Operations related to packages (e.g. bundling or deploying)
     #[command(subcommand)]
     Package(package::Package),
+    /// Set the current version of one or more packages.
+    Select(select::Select),
     #[command(subcommand)]
     Shell(shell::Shell),
     /// Print the version of ocx
@@ -49,6 +52,7 @@ impl Command {
             Command::Exec(exec) => exec.execute(context).await,
             Command::Env(env) => env.execute(context).await,
             Command::Package(package) => package.execute(context).await,
+            Command::Select(select) => select.execute(context).await,
             Command::Shell(shell) => shell.execute(context).await,
             Command::Version(version) => version.execute().await,
         }

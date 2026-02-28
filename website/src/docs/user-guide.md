@@ -102,6 +102,14 @@ ocx env --current clangd
 ```
 :::
 
+## Indices {#indices}
+
+### Remote Index {#indices-remote}
+
+### Local Index {#indices-local}
+
+### Selected Index {#indices-selected}
+
 ## Mirrors {#mirrors}
 
 [docker-credential]: https://github.com/keirlawson/docker_credential
