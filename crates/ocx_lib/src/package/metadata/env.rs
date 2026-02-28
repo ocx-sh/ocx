@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod accumulator;
 pub mod constant;
 pub mod exporter;
+pub mod modifier;
 pub mod path;
 pub mod var;
 

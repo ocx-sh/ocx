@@ -1,4 +1,4 @@
-use super::{accumulator::Accumulator, var::{ModifierKind, Var}};
+use super::{accumulator::Accumulator, modifier::ModifierKind, var::Var};
 
 /// A resolved environment variable entry produced by [`Exporter`].
 pub struct Entry {
