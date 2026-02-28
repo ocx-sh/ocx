@@ -77,10 +77,10 @@ impl Api {
                 let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
                 for entry in env.entries {
                     rows[0].push(entry.key);
-                    rows[1].push(entry.value);
-                    rows[2].push(entry.kind.to_string());
+                    rows[1].push(entry.kind.to_string());
+                    rows[2].push(entry.value);
                 }
-                stdout::print_table(&["Key", "Value", "Type"], &rows);
+                stdout::print_table(&["Key", "Type", "Value"], &rows);
             }
         }
         Ok(())
