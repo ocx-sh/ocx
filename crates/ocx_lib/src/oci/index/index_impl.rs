@@ -4,6 +4,7 @@ use crate::{Result, oci};
 
 #[async_trait]
 pub trait IndexImpl: Send + Sync {
+    async fn list_repositories(&self, registry: &str) -> Result<Vec<String>>;
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Vec<String>>;
 
     async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<(oci::Digest, oci::Manifest)>;

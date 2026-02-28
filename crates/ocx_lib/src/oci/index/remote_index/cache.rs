@@ -8,11 +8,20 @@ use crate::oci;
 /// This is shared across all instances of the index, and is used to avoid redundant file reads.
 #[derive(Default)]
 pub struct Cache {
+    repositories: RwLock<HashMap<String, Vec<String>>>,
     tags: RwLock<HashMap<oci::Identifier, Vec<String>>>,
     tag_digests: RwLock<HashMap<oci::Identifier, oci::Digest>>,
 }
 
 impl Cache {
+    pub async fn get_repositories(&self, registry: &str) -> Option<Vec<String>> {
+        self.repositories.read().await.get(registry).cloned()
+    }
+
+    pub async fn set_repositories(&self, registry: String, repositories: Vec<String>) {
+        self.repositories.write().await.insert(registry, repositories);
+    }
+
     pub async fn get_tags(&self, identifier: &oci::Identifier) -> Option<Vec<String>> {
         self.tags.read().await.get(identifier).cloned()
     }

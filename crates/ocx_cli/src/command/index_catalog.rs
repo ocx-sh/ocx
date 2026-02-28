@@ -16,7 +16,7 @@ impl IndexCatalog {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let registry = context.default_registry();
 
-        let repositories = context.remote_client()?.list_repositories(context.default_registry()).await?;
+        let repositories = context.default_index().list_repositories(&registry).await?;
         if !self.with_tags {
             let catalog = api::data::catalog::Catalog::without_tags(repositories);
             context.api().report_catalog(catalog)?;
@@ -28,7 +28,7 @@ impl IndexCatalog {
             let identifier = oci::Identifier::new_registry(repository.clone(), registry.clone());
             let context = context.clone();
             join_set.spawn(async move {
-                let tags = context.remote_client()?.list_tags(identifier.clone()).await?;
+                let tags = context.default_index().list_tags(&identifier).await?;
                 Ok((identifier.repository().into(), tags))
             });
         }

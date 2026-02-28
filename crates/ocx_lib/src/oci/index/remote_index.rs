@@ -25,6 +25,24 @@ impl Index {
 
 #[async_trait]
 impl index_impl::IndexImpl for Index {
+    async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
+        {
+            let cache = self.cache.read().await;
+            if let Some(cached) = cache.get_repositories(registry).await {
+                return Ok(cached);
+            }
+        }
+
+        let repositories = self.client.list_repositories(registry).await?;
+
+        {
+            let cache = self.cache.write().await;
+            cache.set_repositories(registry.to_string(), repositories.clone()).await;
+        }
+
+        Ok(repositories)
+    }
+
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Vec<String>> {
         {
             let cache = self.cache.read().await;

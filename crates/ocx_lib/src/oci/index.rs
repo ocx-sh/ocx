@@ -33,6 +33,11 @@ impl Index {
         }
     }
 
+    /// List all repositories available in the given registry.
+    pub async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
+        self.inner.list_repositories(registry).await
+    }
+
     /// List all tags available for the given identifier.
     pub async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Vec<String>> {
         self.inner.list_tags(identifier).await.map(|v| v.sorted())
