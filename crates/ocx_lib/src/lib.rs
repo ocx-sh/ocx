@@ -20,6 +20,7 @@ pub mod file_structure;
 pub mod package;
 pub mod utility;
 pub mod oci;
+pub mod reference_manager;
 pub mod symlink;
 pub mod shell;
 pub mod log;

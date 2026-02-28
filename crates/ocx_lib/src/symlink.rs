@@ -4,7 +4,7 @@ pub fn update(target_path: impl AsRef<std::path::Path>, link_path: impl AsRef<st
     let link_path = link_path.as_ref();
     let target_path = target_path.as_ref();
 
-    if link_path.exists() {
+    if link_path.exists() || link_path.is_symlink() {
         let link_resolved =
             std::fs::read_link(link_path).map_err(|error| Error::InternalFile(link_path.to_path_buf(), error))?;
         if link_resolved == target_path {
@@ -29,7 +29,7 @@ pub fn create(target: impl AsRef<std::path::Path>, link_path: impl AsRef<std::pa
 
 pub fn remove(link_path: impl AsRef<std::path::Path>) -> Result<()> {
     let link_path = link_path.as_ref();
-    if link_path.exists() {
+    if link_path.exists() || link_path.is_symlink() {
         symlink::remove_symlink_auto(link_path)
             .map_err(|error| Error::InternalFile(link_path.to_path_buf(), error))?;
     }

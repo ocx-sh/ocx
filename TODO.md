@@ -9,7 +9,9 @@
  - auto-index of unknown packages
  - target platform specific symlink structure
  - reconsider install lock and atomicity of installs. maybe temporary directory and rename on success, or symlink to a temporary directory and then rename the symlink on success?
+ - document required windows developer mode for symlinks
  - refactor oci reference
+ - local installed catalog
 
 ## Long Term
 
