@@ -11,6 +11,7 @@ pub mod install;
 pub mod package;
 pub mod package_create;
 pub mod package_push;
+pub mod env;
 pub mod exec;
 pub mod version;
 pub mod shell;
@@ -28,6 +29,8 @@ pub enum Command {
     Install(install::Install),
     /// Runs installed packages.
     Exec(exec::Exec),
+    /// Print resolved environment variables for one or more packages.
+    Env(env::Env),
     /// Operations related to packages (e.g. bundling or deploying)
     #[command(subcommand)]
     Package(package::Package),
@@ -44,6 +47,7 @@ impl Command {
             Command::Info(info) => info.execute().await,
             Command::Install(install) => install.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,
+            Command::Env(env) => env.execute(context).await,
             Command::Package(package) => package.execute(context).await,
             Command::Shell(shell) => shell.execute(context).await,
             Command::Version(version) => version.execute().await,
