@@ -21,7 +21,9 @@ pub struct ContentPath {
     /// (`~/.ocx/installs/<registry>/<repo>/current`).
     ///
     /// A version of the package must be selected before this flag can be used.
-    /// Digest identifiers are rejected.
+    /// Digest identifiers are rejected.  The tag portion of the identifier is
+    /// not validated against the selected version — only the registry and
+    /// repository are used to locate the symlink.
     /// No auto-install is performed.
     #[clap(long = "current", conflicts_with = "candidate")]
     current: bool,

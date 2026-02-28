@@ -4,6 +4,7 @@ use clap::Subcommand;
 
 pub mod clean;
 pub mod deselect;
+pub mod find;
 pub mod index;
 pub mod index_catalog;
 pub mod index_list;
@@ -28,6 +29,8 @@ pub enum Command {
     Clean(clean::Clean),
     /// Remove the current-version symlink for one or more packages.
     Deselect(deselect::Deselect),
+    /// Resolve packages and print their content directory paths.
+    Find(find::Find),
     /// Operations related to the package index
     #[command(subcommand)]
     Index(index::Index),
@@ -57,6 +60,7 @@ impl Command {
         match self {
             Command::Clean(clean) => clean.execute(context).await,
             Command::Deselect(deselect) => deselect.execute(context).await,
+            Command::Find(find) => find.execute(context).await,
             Command::Index(index) => index.execute(context).await,
             Command::Info(info) => info.execute().await,
             Command::Install(install) => install.execute(context).await,

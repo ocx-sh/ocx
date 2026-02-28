@@ -17,13 +17,10 @@ These are ordered by dependency — each group should be completed before the ne
 - [x] `uninstall` command — unlink candidate (and optionally current) via `ReferenceManager::unlink()`; if `refs/` becomes empty, offer to remove object from store
 - [x] `clean` command — remove unreferenced objects from store, with `--dry-run` option to report what would be removed without actually removing it
 
-### 4. Reverse operations
-- [ ] `link` command — link a package to a new tag without reinstalling, via `ReferenceManager::link()`, user specifies the reference
-- [ ] `unlink` command — unlink a tag from a package without uninstalling, via `ReferenceManager::unlink()`, user specifies the reference; if `refs/` becomes empty, offer to remove object from store
-
-### 5. Documentation
+### 4. Documentation
 - [ ] User guide `## File Structure` section - explain intend, and reference all cli commands that work on the index.
 - [ ] User guide `## File Structure` section — ASCII diagram of `~/.ocx/` layout, explain objects vs index vs installs, explain symlinks
+- [ ] `--current` tag-not-validated caveat: with `--current` the tag portion of the identifier is silently ignored (only registry+repo are used to locate the symlink). The note currently lives in `options/content_path.rs`. Verify it surfaces in the `--help` output of every command that accepts `ContentPath` (`find`, `env`, `shell env`) and decide whether a `log::warn!` at runtime is warranted.
 
 ### N. Spec (side note)
 - [ ] Internal architecture spec: explain OCI-as-package-store design, local store layout, index vs object store, symlink/ref model, Windows notes, future layered storage
@@ -38,9 +35,11 @@ These are ordered by dependency — each group should be completed before the ne
  - ~~env command path is resolved correct but metadata may be picked from a different install~~
  - ~~file structure refactoring (ObjectStore / IndexStore / InstallStore composite)~~
  - ~~link/unlink (→ done in §2 + §3)~~
+ - `link`/`unlink` commands — GC-aware user-managed symlinks: `ocx link <PACKAGE> <PATH>` creates a symlink at an arbitrary user-provided filesystem path pointing to the package's content dir, with a back-reference registered in `refs/` so `clean` does not GC the object; `ocx unlink <PATH>` removes the symlink and its back-ref; deferred until there is a concrete use case (most users are served by `candidates/{tag}` and `current`)
  - move tasks to library with CLI as thin wrapper
  - process refs, a process can lock a package to prevent deletion, especiall if the program does not require a ref.
  - symlink env/profile
+  - should support common files and maybe search if a specific comment is present? To not add the same again? Or garbage in garbage out?
  - layered storage for cached packages
  - more robust cascade, that is platform-aware (ie. migrating published platform and compute rolling releases relative to the same platform)
  - auto-index of unknown packages

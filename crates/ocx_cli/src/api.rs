@@ -53,6 +53,10 @@ impl Api {
         self.report(&catalog)
     }
 
+    pub fn report_paths(&self, paths: data::paths::Paths) -> anyhow::Result<()> {
+        self.report(&paths)
+    }
+
     pub fn report_removed(&self, removed: data::removed::Removed) -> anyhow::Result<()> {
         self.report(&removed)
     }
