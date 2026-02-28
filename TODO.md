@@ -9,6 +9,7 @@
  - auto-index of unknown packages
  - target platform specific symlink structure
  - refactor oci reference
+ - mirrors config
 
 ## Long Term
 

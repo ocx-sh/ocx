@@ -11,7 +11,7 @@ pub struct ContentPath {
     /// Resolve env paths relative to the installed candidate symlink
     /// (`~/.ocx/installs/<registry>/<repo>/candidates/<tag>`).
     ///
-    /// The symlink must already exist (i.e. the package must have been installed).
+    /// The package must be installed before this flag can be used.
     /// Digest identifiers are rejected — use a tag-only identifier instead.
     /// No auto-install is performed.
     #[clap(long = "candidate", conflicts_with = "current")]
@@ -20,8 +20,7 @@ pub struct ContentPath {
     /// Resolve env paths relative to the current-selected symlink
     /// (`~/.ocx/installs/<registry>/<repo>/current`).
     ///
-    /// The symlink must already exist (i.e. the package must have been installed
-    /// with `ocx install --select`).
+    /// A version of the package must be selected before this flag can be used.
     /// Digest identifiers are rejected.
     /// No auto-install is performed.
     #[clap(long = "current", conflicts_with = "candidate")]

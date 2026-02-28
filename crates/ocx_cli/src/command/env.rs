@@ -16,7 +16,8 @@ use crate::{api, conventions::*, options, task};
 /// By default, env values are rooted in the content-addressed object store and
 /// may change when a package is updated.  Use `--candidate` or `--current` to
 /// root them in a stable symlink path instead — suitable for embedding in editor
-/// or IDE configuration files that must not change on every package update.
+/// or IDE configuration files that should not change on every package update.
+/// See the path resolution modes documentation for details.
 #[derive(Parser)]
 pub struct Env {
     /// Target platforms to consider when resolving packages.

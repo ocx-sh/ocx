@@ -59,10 +59,45 @@ docker login "<registry>"
 
 The docker configuration file location can be overridden by setting the [`DOCKER_CONFIG`](./reference/environment.md#external-docker-config) environment variable.
 
-## Deploying Packages
+## Path resolution modes {#path-resolution}
 
+Several commands resolve package content to a filesystem path that is embedded in their output.
+The path you receive determines how stable that output is across future package updates.
 
+| Mode | Flag | Path used | Auto-install | Use case |
+|---|---|---|---|---|
+| Object store *(default)* | *(none)* | `~/.ocx/objects/…/<digest>/content` | yes (online) | CI, scripts, one-shot queries |
+| Candidate symlink | `--candidate` | `~/.ocx/installs/…/candidates/<tag>/content` | **no** | Pinning to a specific tag in editor or IDE config |
+| Current symlink | `--current` | `~/.ocx/installs/…/current/content` | **no** | "Always selected" path in shell profiles or IDE settings |
 
-## Mirrors
+**Object store** paths are content-addressed and change whenever the package digest changes (i.e. on every update).
+They are precise and self-verifying but unsuitable for static configuration.
+
+**Candidate** and **Current** paths go through symlinks managed by ocx.
+Because the symlink path itself does not change, any tool that hardcodes the path continues to work after the package is updated — only the symlink target is re-pointed.
+
+- `--candidate` requires the package to be installed (the candidate symlink must exist).
+  A digest component in the identifier is rejected; use a tag-only identifier.
+- `--current` requires a version of the package to be selected (the current symlink must exist),
+  mirroring the `update-alternatives` model on Linux.
+  `current` is not automatically the latest installed version — it only moves when explicitly selected.
+  A digest component in the identifier is rejected.
+
+Both symlink modes fail immediately if the required symlink is absent.
+They never attempt to install or select a package as a side effect.
+
+::: tip Example — stable path for VSCode `settings.json`
+```jsonc
+{
+  // This path remains valid across package updates — only the symlink target changes.
+  "clangd.path": "/home/user/.ocx/installs/ocx.sh/clangd/current/content/bin/clangd"
+}
+```
+
+Set it up once by installing and selecting a version, then inspect the stable path:
+```shell
+ocx env --current clangd
+```
+:::
 
 [docker-credential]: https://github.com/keirlawson/docker_credential

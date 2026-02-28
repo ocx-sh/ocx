@@ -15,7 +15,8 @@ use crate::{conventions::*, options, task};
 ///
 /// Use `--candidate` or `--current` to emit paths rooted in a stable symlink
 /// rather than the content-addressed object store — useful for shell profiles
-/// that should survive package updates without re-evaluating this command.
+/// that should not change on every package update.
+/// See the path resolution modes documentation for details.
 #[derive(Parser)]
 pub struct ShellEnv {
     /// Platforms to consider when looking for the package. If not specified, it will use the current supported platform.
