@@ -2,6 +2,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+pub mod clean;
+pub mod deselect;
 pub mod index;
 pub mod index_catalog;
 pub mod index_list;
@@ -14,6 +16,7 @@ pub mod package_push;
 pub mod env;
 pub mod exec;
 pub mod select;
+pub mod uninstall;
 pub mod version;
 pub mod shell;
 pub mod shell_env;
@@ -21,6 +24,10 @@ pub mod shell_completion;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Remove unreferenced objects from the local object store.
+    Clean(clean::Clean),
+    /// Remove the current-version symlink for one or more packages.
+    Deselect(deselect::Deselect),
     /// Operations related to the package index
     #[command(subcommand)]
     Index(index::Index),
@@ -28,6 +35,8 @@ pub enum Command {
     Info(info::Info),
     /// Install packages from a local or remote index.
     Install(install::Install),
+    /// Remove an installed candidate for one or more packages.
+    Uninstall(uninstall::Uninstall),
     /// Runs installed packages.
     Exec(exec::Exec),
     /// Print resolved environment variables for one or more packages.
@@ -46,9 +55,12 @@ pub enum Command {
 impl Command {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
+            Command::Clean(clean) => clean.execute(context).await,
+            Command::Deselect(deselect) => deselect.execute(context).await,
             Command::Index(index) => index.execute(context).await,
             Command::Info(info) => info.execute().await,
             Command::Install(install) => install.execute(context).await,
+            Command::Uninstall(uninstall) => uninstall.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,
             Command::Env(env) => env.execute(context).await,
             Command::Package(package) => package.execute(context).await,
