@@ -3,6 +3,17 @@ use crate::{
     oci
 };
 
+/// Selects which install symlink path [`FileStructure`] should return.
+///
+/// - `Candidate` — the tag-pinned symlink written by `ocx install`.
+/// - `Current`   — the selection symlink written by `ocx install --select`,
+///                 analogous to `update-alternatives --set` on Linux.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymlinkKind {
+    Candidate,
+    Current,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileStructure {
     root: std::path::PathBuf,
@@ -81,6 +92,14 @@ impl FileStructure {
 
     pub fn install_candidate(&self, identifier: &oci::Identifier) -> std::path::PathBuf {
         self.install_candidates(identifier).join(identifier.tag_or_latest())
+    }
+
+    /// Returns the symlink path for `identifier` selected by `kind`.
+    pub fn install_symlink(&self, identifier: &oci::Identifier, kind: SymlinkKind) -> std::path::PathBuf {
+        match kind {
+            SymlinkKind::Candidate => self.install_candidate(identifier),
+            SymlinkKind::Current => self.install_current(identifier),
+        }
     }
 }
 

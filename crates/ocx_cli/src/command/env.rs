@@ -12,11 +12,19 @@ use crate::{api, conventions::*, options, task};
 ///
 /// This allows external tools (Python scripts, Bazel rules, CI steps) to correctly
 /// configure child process environments without going through `ocx exec`.
+///
+/// By default, env values are rooted in the content-addressed object store and
+/// may change when a package is updated.  Use `--candidate` or `--current` to
+/// root them in a stable symlink path instead — suitable for embedding in editor
+/// or IDE configuration files that must not change on every package update.
 #[derive(Parser)]
 pub struct Env {
     /// Target platforms to consider when resolving packages.
     #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM", num_args = 0..)]
     platforms: Vec<oci::Platform>,
+
+    #[clap(flatten)]
+    content_path: options::ContentPath,
 
     /// Package identifiers to resolve the environment for.
     #[clap(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -29,13 +37,23 @@ impl Env {
         let identifiers =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
-        let info = task::package::find_or_install::FindOrInstall {
-            context: context.clone(),
-            file_structure: context.file_structure().clone(),
-            platforms,
-        }
-        .find_or_install_all(identifiers)
-        .await?;
+        let info = if let Some(kind) = self.content_path.symlink_kind() {
+            task::package::find_symlink::FindSymlink {
+                context: context.clone(),
+                file_structure: context.file_structure().clone(),
+                kind,
+            }
+            .find_all(identifiers)
+            .await?
+        } else {
+            task::package::find_or_install::FindOrInstall {
+                context: context.clone(),
+                file_structure: context.file_structure().clone(),
+                platforms,
+            }
+            .find_or_install_all(identifiers)
+            .await?
+        };
 
         let mut all_entries: Vec<api::data::env::EnvEntry> = Vec::new();
 
