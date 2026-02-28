@@ -20,6 +20,7 @@ These are ordered by dependency — each group should be completed before the ne
 ### 4. Documentation
 - [ ] User guide `## File Structure` section - explain intend, and reference all cli commands that work on the index.
 - [ ] User guide `## File Structure` section — ASCII diagram of `~/.ocx/` layout, explain objects vs index vs installs, explain symlinks
+- [ ] All new commands should have a secion in the command line reference.
 - [ ] `--current` tag-not-validated caveat: with `--current` the tag portion of the identifier is silently ignored (only registry+repo are used to locate the symlink). The note currently lives in `options/content_path.rs`. Verify it surfaces in the `--help` output of every command that accepts `ContentPath` (`find`, `env`, `shell env`) and decide whether a `log::warn!` at runtime is warranted.
 
 ### N. Spec (side note)

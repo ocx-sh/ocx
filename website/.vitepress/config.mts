@@ -19,7 +19,8 @@ export default defineConfig({
         text: 'Help',
         items: [
           { text: 'MD', link: '/help/markdown-examples' },
-          { text: 'API', link: '/help/api-examples' }
+          { text: 'API', link: '/help/api-examples' },
+          { text: 'Components', link: '/help/component-examples' }
         ]
       }
     ],

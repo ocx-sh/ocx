@@ -8,5 +8,6 @@
         "tamasfe.even-better-toml",
         // Task runner support (run: task <task-name>)
         "task.vscode-task",
+        "vue.volar",
     ]
 }
