@@ -1,5 +1,6 @@
+ - ~~env command~~
  - select command
- - retry push, if manifest unknown
+ - ~~retry push, if manifest unknown~~ (fixed: manifest passed through from push_package, no re-fetch)
  - get urls from manifests not supported atm, breaking SHA?
  - symlink env/profile
  - link/unlink
