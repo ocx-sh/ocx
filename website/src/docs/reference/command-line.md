@@ -141,6 +141,34 @@ ocx install [OPTIONS] <PACKAGE>...
 - `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
 - `-h`, `--help`: Print help information.
 
+### `select` {#select}
+
+Selects one or more packages as the current version by updating the [current symlink](../user-guide.md#path-resolution).
+
+Each package is resolved using the [selected index](../user-guide.md#indices-selected).
+No downloading is performed — the package must already be installed.
+
+**Usage**
+
+```shell
+ocx select [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to select.
+
+**Options**
+
+- `-p`, `--platform`: Target platforms to consider when resolving packages.
+- `-h`, `--help`: Print help information.
+
+::: tip
+`ocx install --select` installs and selects in one step.
+:::
+
+See [path resolution modes](#path-resolution) for how the `current` symlink is used downstream.
+
 ### `shell` {#shell}
 
 #### `env` {#shell-env}
