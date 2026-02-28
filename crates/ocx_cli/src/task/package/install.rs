@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ocx_lib::{
-    Error, file_structure, log, oci, package::install_info, symlink
+    Error, file_structure, log, oci, package::install_info, reference_manager::ReferenceManager,
 };
 use tokio::task::JoinSet;
 
@@ -30,13 +30,14 @@ impl Install {
         let install_info = self.context.remote_client()?.pull_package(identifier.clone(), &storage).await?;
         log::debug!("Package install succeeded for '{}'.", &identifier);
 
+        let rm = ReferenceManager::new(self.file_structure.clone());
         if self.candidate {
             let link_path = self.file_structure.installs.candidate(package);
-            symlink::update(&install_info.content, link_path)?;
+            rm.link(&link_path, &install_info.content)?;
         }
         if self.select {
             let link_path = self.file_structure.installs.current(package);
-            symlink::update(&install_info.content, link_path)?;
+            rm.link(&link_path, &install_info.content)?;
         }
 
         Ok(install_info)
