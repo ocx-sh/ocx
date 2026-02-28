@@ -1,6 +1,8 @@
 use ocx_lib::package::metadata::env::var::ModifierKind;
 use serde::Serialize;
 
+use crate::api::Reportable;
+
 /// A single resolved environment variable entry, tagged with its modifier kind.
 #[derive(Serialize)]
 pub struct EnvEntry {
@@ -34,5 +36,17 @@ impl Serialize for EnvVars {
         S: serde::Serializer,
     {
         self.entries.serialize(serializer)
+    }
+}
+
+impl Reportable for EnvVars {
+    fn print_plain(&self) {
+        let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for entry in &self.entries {
+            rows[0].push(entry.key.clone());
+            rows[1].push(entry.kind.to_string());
+            rows[2].push(entry.value.clone());
+        }
+        crate::stdout::print_table(&["Key", "Type", "Value"], &rows);
     }
 }

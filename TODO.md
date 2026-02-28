@@ -12,12 +12,14 @@ These are ordered by dependency — each group should be completed before the ne
 - [x] `command/select.rs` — replace `symlink::update()` with `ReferenceManager::link()` for current symlink
 - [x] Add doc note to `symlink::update` and `symlink::create` warning to use `ReferenceManager` for package install symlinks (so back-refs are maintained)
 
-### 3. Reverse operations
-- [ ] `deselect` command — remove current symlink via `ReferenceManager::unlink()`; report which packages were deselected
-- [ ] `uninstall` command — unlink candidate (and optionally current) via `ReferenceManager::unlink()`; if `refs/` becomes empty, offer to remove object from store
+### 3. Reverse operations ✓
+- [x] `deselect` command — remove current symlink via `ReferenceManager::unlink()`; report which packages were deselected
+- [x] `uninstall` command — unlink candidate (and optionally current) via `ReferenceManager::unlink()`; if `refs/` becomes empty, offer to remove object from store
+- [x] `clean` command — remove unreferenced objects from store, with `--dry-run` option to report what would be removed without actually removing it
 
-### 3. Reverse operations
- - [ ] `clean` command — remove unreferenced objects from store, with `--dry-run` option to report what would be removed without actually removing it
+### 4. Reverse operations
+- [ ] `link` command — link a package to a new tag without reinstalling, via `ReferenceManager::link()`, user specifies the reference
+- [ ] `unlink` command — unlink a tag from a package without uninstalling, via `ReferenceManager::unlink()`, user specifies the reference; if `refs/` becomes empty, offer to remove object from store
 
 ### 5. Documentation
 - [ ] User guide `## File Structure` section - explain intend, and reference all cli commands that work on the index.
@@ -35,7 +37,9 @@ These are ordered by dependency — each group should be completed before the ne
  - ~~retry push, if manifest unknown~~ (fixed: manifest passed through from push_package, no re-fetch)
  - ~~env command path is resolved correct but metadata may be picked from a different install~~
  - ~~file structure refactoring (ObjectStore / IndexStore / InstallStore composite)~~
- - link/unlink (→ see Next Steps §2)
+ - ~~link/unlink (→ done in §2 + §3)~~
+ - move tasks to library with CLI as thin wrapper
+ - process refs, a process can lock a package to prevent deletion, especiall if the program does not require a ref.
  - symlink env/profile
  - layered storage for cached packages
  - more robust cascade, that is platform-aware (ie. migrating published platform and compute rolling releases relative to the same platform)
@@ -44,11 +48,14 @@ These are ordered by dependency — each group should be completed before the ne
  - reconsider install lock and atomicity of installs. maybe temporary directory and rename on success, or symlink to a temporary directory and then rename the symlink on success?
  - document required windows developer mode for symlinks
  - refactor oci reference
+ - api reports with , seperated tags and platforms
+ - composite errors, ie. uninstall_all should not fail on first error, incl. other commands
  - local installed catalog (enabled by `ObjectStore::list_all()`)
 
 ## Long Term
 
  - gitlab steps for consuming ocx packages
+ - make the error handling more robust and user-friendly, ie. if a symlink to uninstall is not existent, report that instead of just failing with a broken symlink error
  - bazel rule for consuming ocx packages
  - dependencies and lockfiles
  - multiple layer
@@ -65,7 +72,9 @@ These are ordered by dependency — each group should be completed before the ne
  - mirrors config
  - homebrew style auto codesigning on macOS, incl. user-friendly error messages when it fails and docs on how to fix it
  - make rustdoc type links less verbose (e.g. `ocx_lib::reference_manager::ReferenceManager` → `ReferenceManager`)
+ - modern ui components for website
 
 ## Ideas
 
  - testing packages
+
