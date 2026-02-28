@@ -6,6 +6,16 @@ outline: deep
 
 ## General Options
 
+### `--format` {#arg-format}
+
+When set, ocx will output information in the specified format instead of plain text.
+Supported formats are:
+
+- `plain` (default): Human-readable plain text.
+- `json`: Machine-readable JSON format.
+
+The available data depends on the command being executed.
+
 ### `--offline` {#arg-offline}
 
 When set, ocx will run in offline mode, which will not attempt to fetch any remote information.
@@ -16,57 +26,12 @@ If any command requires information that is not already available locally, it wi
 When set, ocx will use the remote index by default instead of the local index.
 Combining this flag with [`--offline`](#arg-offline) will most likely result in an error.
 
-## Path resolution modes {#path-resolution}
-
-Several commands resolve package content to a filesystem path that is embedded in their output.
-The path you receive determines how stable that output is across future package updates.
-
-| Mode | Flag | Path used | Auto-install | Use case |
-|---|---|---|---|---|
-| Object store *(default)* | *(none)* | `~/.ocx/objects/…/<digest>/content` | yes (online) | CI, scripts, one-shot queries |
-| Candidate symlink | `--candidate` | `~/.ocx/installs/…/candidates/<tag>/content` | **no** | Pinning to a specific tag in editor or IDE config |
-| Current symlink | `--current` | `~/.ocx/installs/…/current/content` | **no** | "Always selected" path in shell profiles or IDE settings |
-
-**Object store** paths are content-addressed and change whenever the package digest changes (i.e. on every update).
-They are precise and self-verifying but unsuitable for static configuration.
-
-**Candidate** and **Current** paths go through symlinks maintained by `ocx install`.
-Because the symlink path itself does not change, any tool that hardcodes the path continues to work after the package is updated — only the symlink target is re-pointed by the next install.
-
-- `--candidate` requires the package to have been installed at least once (`ocx install <pkg>`).
-  A digest component in the identifier is rejected; use a tag-only identifier.
-- `--current` requires the package to have been explicitly selected (`ocx install --select <pkg>`),
-  mirroring the `update-alternatives` model on Linux.
-  `current` is not automatically the latest installed version — it only moves when `--select` is used.
-  A digest component in the identifier is rejected.
-
-Both symlink modes fail immediately with an actionable error if the required symlink is absent.
-They never attempt to install or select a package as a side effect.
-
-::: tip Example — stable path for VSCode `settings.json`
-```jsonc
-{
-  // This path survives `ocx install --select clangd` without any manual edits.
-  "clangd.path": "/home/user/.ocx/installs/ocx.sh/clangd/current/content/bin/clangd"
-}
-```
-
-Set it up once:
-```shell
-# Install and select a version
-ocx install --select clangd:18
-
-# Inspect the stable path
-ocx env --current clangd
-```
-:::
-
 ## Commands
 
 ### `exec` {#exec}
 
 Executes a command within the environment of one or more packages.
-Packages are auto-installed if not already available locally (unless `--offline` is set).
+Packages are auto-installed if not already available locally (unless [`--offline`](#arg-offline) is set).
 
 **Usage**
 
@@ -90,11 +55,11 @@ ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
 
 Print the resolved environment variables for one or more packages.
 
-Plain format outputs an aligned table with `Key`, `Value`, and `Type` columns.
+Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
 JSON format (`--json`) outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
 
 In the default mode, packages are auto-installed if not already available locally.
-With `--candidate` or `--current`, no auto-install is performed — see [path resolution modes](#path-resolution).
+With `--candidate` or `--current`, no auto-install is performed — see [path resolution modes](../user-guide.md#path-resolution).
 
 **Usage**
 
@@ -109,8 +74,8 @@ ocx env [OPTIONS] <PACKAGE>...
 **Options**
 
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
-- `--candidate`: Resolve env paths via the candidate symlink. Mutually exclusive with `--current`. See [path resolution modes](#path-resolution).
-- `--current`: Resolve env paths via the current-selected symlink. Mutually exclusive with `--candidate`. See [path resolution modes](#path-resolution).
+- `--candidate`: Resolve env paths via the candidate symlink. Mutually exclusive with `--current`.
+- `--current`: Resolve env paths via the current-selected symlink. Mutually exclusive with `--candidate`.
 - `-h`, `--help`: Print help information.
 
 ### `index` {#index}
@@ -186,11 +151,10 @@ ocx shell env [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-p`, `--platform`: Target platforms to consider.
-- `-s`, `--shell <SHELL>`: Shell dialect to emit (`bash`, `zsh`, `fish`). Auto-detected by default.
-- `--candidate`: Resolve env paths via the candidate symlink. Mutually exclusive with `--current`. See [path resolution modes](#path-resolution).
-- `--current`: Resolve env paths via the current-selected symlink. Mutually exclusive with `--candidate`. See [path resolution modes](#path-resolution).
-- `-h`, `--help`: Print help information.
+- `-p`, `--platform`: Target platforms to consider. Auto-detected by default.
+- `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
+- `--candidate`: Resolve env paths via the candidate symlink. Mutually exclusive with `--current`.
+- `--current`: Resolve env paths via the current-selected symlink. Mutually exclusive with `--candidate`.
 
 #### `completion` {#shell-completion}
 
