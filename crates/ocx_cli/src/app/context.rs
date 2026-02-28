@@ -39,7 +39,7 @@ impl Context {
         let local_index = index::LocalIndex::new(index::LocalConfig {
             root: match &options.index {
                 Some(path) => path.clone(),
-                None => file_structure.indices(),
+                None => file_structure.index.root().clone(),
             },
         });
 

@@ -50,8 +50,5 @@ pub use platform::Platform;
 mod digest;
 pub use digest::Digest;
 
-mod file_structure;
-pub use file_structure::FileStructure;
-
 mod file_storage;
 pub use file_storage::FileStorage;

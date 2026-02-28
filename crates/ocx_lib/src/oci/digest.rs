@@ -19,38 +19,6 @@ impl Digest {
         Self::Sha256(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(data)))
     }
 
-    /// Converts the digest to a path, which is used to index blob in filesystem alike storages.
-    pub fn to_path(&self) -> std::path::PathBuf {
-        match self {
-            Digest::Sha256(digest) => {
-                let path = format!(
-                    "sha256/{}/{}/{}",
-                    &digest[0..8],
-                    &digest[8..16],
-                    &digest[16..32]
-                );
-                std::path::PathBuf::from(path)
-            }
-            Digest::Sha384(digest) => {
-                let path = format!(
-                    "sha384/{}/{}/{}",
-                    &digest[0..8],
-                    &digest[8..16],
-                    &digest[16..32]
-                );
-                std::path::PathBuf::from(path)
-            }
-            Digest::Sha512(digest) => {
-                let path = format!(
-                    "sha512/{}/{}/{}",
-                    &digest[0..8],
-                    &digest[8..16],
-                    &digest[16..32]
-                );
-                std::path::PathBuf::from(path)
-            }
-        }
-    }
 }
 
 impl std::fmt::Display for Digest {

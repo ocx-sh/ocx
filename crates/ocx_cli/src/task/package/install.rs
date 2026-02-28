@@ -26,16 +26,16 @@ impl Install {
             .await?
             .ok_or(Error::PackageNotFound(package.clone()))?;
         log::trace!("Resolved package identifier: {}", &identifier);
-        let storage = self.file_structure.object(&identifier)?;
+        let storage = self.file_structure.objects.path(&identifier)?;
         let install_info = self.context.remote_client()?.pull_package(identifier.clone(), &storage).await?;
         log::debug!("Package install succeeded for '{}'.", &identifier);
 
         if self.candidate {
-            let link_path = self.file_structure.install_candidate(package);
+            let link_path = self.file_structure.installs.candidate(package);
             symlink::update(&install_info.content, link_path)?;
         }
         if self.select {
-            let link_path = self.file_structure.install_current(package);
+            let link_path = self.file_structure.installs.current(package);
             symlink::update(&install_info.content, link_path)?;
         }
 
