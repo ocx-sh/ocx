@@ -27,6 +27,7 @@ pub enum Error {
     PackageSymlinkNotFound(oci::Identifier, crate::file_structure::SymlinkKind),
 
     InternalFile(std::path::PathBuf, std::io::Error),
+    InternalPathInvalid(std::path::PathBuf),
 
     UnsupportedArchive(String),
     UnsupportedClapShell(shell::Shell),
@@ -130,6 +131,7 @@ impl std::fmt::Display for Error {
             },
 
             Error::InternalFile(path, error) => write!(f, "Internal file error for '{}': {}", path.display(), error),
+            Error::InternalPathInvalid(path) => write!(f, "Path '{}' has an unexpected structure", path.display()),
 
             Error::UnsupportedArchive(file) => write!(f, "Unsupported archive format: {}", file),
             Error::UnsupportedClapShell(shell) => write!(f, "Shell '{}' is not supported for clap completions", shell),

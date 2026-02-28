@@ -35,29 +35,9 @@ impl FindSymlink {
             return Err(Error::PackageSymlinkNotFound(package.clone(), self.kind));
         }
 
-        // The symlink points to the content directory inside the object store.
-        // Follow it once to locate the sibling metadata.json, but keep the
-        // symlink path itself as the content root so that resolved env paths
-        // remain stable.
-        let resolved_content = std::fs::canonicalize(&symlink_path)
-            .map_err(|e| Error::InternalFile(symlink_path.clone(), e))?;
-
-        let metadata_path = resolved_content
-            .parent()
-            .ok_or_else(|| Error::UndefinedWithMessage(format!(
-                "Unexpected path structure for '{}'", resolved_content.display()
-            )))?
-            .join("metadata.json");
-
+        let metadata_path = self.file_structure.object_metadata_for_content(&symlink_path)?;
         let metadata = metadata::Metadata::read_json_from_path(&metadata_path)?;
-
-        log::debug!(
-            "Resolved '{}' via {:?} symlink: {} → {}",
-            package,
-            self.kind,
-            symlink_path.display(),
-            resolved_content.display(),
-        );
+        log::debug!("Resolved '{}' via {:?} symlink at '{}'", package, self.kind, symlink_path.display());
 
         Ok(install_info::InstallInfo {
             identifier: package.clone(),

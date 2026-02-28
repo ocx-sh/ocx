@@ -1,13 +1,14 @@
  - ~~env command~~
  - ~~select command~~
  - ~~retry push, if manifest unknown~~ (fixed: manifest passed through from push_package, no re-fetch)
- - env command path is resovled corrent but metadata may be picked from a different install
+ - ~~env command path is resovled corrent but metadata may be picked from a different install~~
  - link/unlink
  - symlink env/profile
  - layered storage for cached packages
  - more robust cascade, that is platform-aware (ie. migrating published platform and compute rolling releases relative to the same platform)
  - auto-index of unknown packages
  - target platform specific symlink structure
+ - reconsider install lock and atomicity of installs. maybe temporary directory and rename on success, or symlink to a temporary directory and then rename the symlink on success?
  - refactor oci reference
 
 ## Long Term
