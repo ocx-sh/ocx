@@ -26,12 +26,11 @@ impl Find {
             .await?
             .ok_or(Error::PackageNotFound(package.clone()))?;
         log::debug!("Resolved package identifier: {}", &identifier);
-        let content = self.file_structure.object_content(&identifier)?;
+        let content = self.file_structure.objects.content(&identifier)?;
         if !content.exists() {
             return Err(Error::PackageNotFound(identifier.clone()));
         }
-        // TODO: Code duplication, file structure should be return an encapsulated accessor to package artifacts
-        let metadata = self.file_structure.object_metadata(&identifier)?;
+        let metadata = self.file_structure.objects.metadata(&identifier)?;
         let metadata = metadata::Metadata::read_json_from_path(metadata)?;
         Ok(install_info::InstallInfo {
             identifier,

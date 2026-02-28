@@ -43,7 +43,7 @@ impl ReferenceManager {
     /// Returns the back-reference path inside the object that `content_path`
     /// belongs to, keyed by `forward_path`.
     fn back_ref_path(&self, content_path: &Path, forward_path: &Path) -> Result<PathBuf> {
-        Ok(self.file_structure.object_refs_dir(content_path)?.join(Self::ref_name(forward_path)))
+        Ok(self.file_structure.objects.refs_dir_for_content(content_path)?.join(Self::ref_name(forward_path)))
     }
 
     /// Creates or updates a forward symlink from `forward_path` to `content_path`,
@@ -130,16 +130,23 @@ impl ReferenceManager {
     /// - The forward path no longer points to the expected content (the object
     ///   was re-linked without going through [`ReferenceManager`]).
     ///
-    /// Walk does not descend into `content/` directories to avoid traversing
-    /// arbitrary package-installed files.
+    /// Uses [`ObjectStore::list_all`] to enumerate object directories, so only
+    /// `refs/` entries inside known object dirs are inspected.  Package-installed
+    /// files under `content/` are never traversed.
     pub fn broken_refs(&self) -> Result<Vec<PathBuf>> {
-        let objects = self.file_structure.objects();
-        if !objects.exists() {
-            log::trace!("broken_refs: objects directory '{}' does not exist.", objects.display());
+        let object_dirs = self.file_structure.objects.list_all()?;
+        if object_dirs.is_empty() {
+            log::trace!("broken_refs: no objects found in store.");
             return Ok(Vec::new());
         }
         let mut broken = Vec::new();
-        self.collect_broken(&objects, &mut broken)?;
+        for obj in &object_dirs {
+            let refs_dir = obj.refs_dir();
+            if !refs_dir.is_dir() {
+                continue;
+            }
+            self.check_refs_dir(&refs_dir, &obj.content(), &mut broken)?;
+        }
         if broken.is_empty() {
             log::debug!("broken_refs: no broken back-refs found.");
         } else {
@@ -148,31 +155,10 @@ impl ReferenceManager {
         Ok(broken)
     }
 
-    fn collect_broken(&self, dir: &Path, broken: &mut Vec<PathBuf>) -> Result<()> {
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| Error::InternalFile(dir.to_path_buf(), e))?;
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name();
-            if name == "refs" {
-                let expected_content = path.parent().map(|p| p.join("content"));
-                self.check_refs_dir(&path, expected_content.as_deref(), broken)?;
-            } else if name != "content" {
-                // Do not recurse into package content — only into object store dirs.
-                self.collect_broken(&path, broken)?;
-            }
-        }
-        Ok(())
-    }
-
     fn check_refs_dir(
         &self,
         refs_dir: &Path,
-        expected_content: Option<&Path>,
+        expected_content: &Path,
         broken: &mut Vec<PathBuf>,
     ) -> Result<()> {
         let entries = std::fs::read_dir(refs_dir)
@@ -198,27 +184,25 @@ impl ReferenceManager {
                 broken.push(back_ref);
                 continue;
             }
-            if let Some(expected) = expected_content {
-                // Verify the forward symlink still points to this object's content.
-                let Ok(actual) = std::fs::read_link(&forward_path) else {
-                    log::trace!(
-                        "Broken back-ref '{}': could not read target of forward symlink '{}'.",
-                        back_ref.display(),
-                        forward_path.display(),
-                    );
-                    broken.push(back_ref);
-                    continue;
-                };
-                let actual_canon = std::fs::canonicalize(&actual).unwrap_or(actual);
-                let expected_canon = std::fs::canonicalize(expected).ok();
-                if Some(actual_canon) != expected_canon {
-                    log::trace!(
-                        "Broken back-ref '{}': forward symlink '{}' points to wrong content.",
-                        back_ref.display(),
-                        forward_path.display(),
-                    );
-                    broken.push(back_ref);
-                }
+            // Verify the forward symlink still points to this object's content.
+            let Ok(actual) = std::fs::read_link(&forward_path) else {
+                log::trace!(
+                    "Broken back-ref '{}': could not read target of forward symlink '{}'.",
+                    back_ref.display(),
+                    forward_path.display(),
+                );
+                broken.push(back_ref);
+                continue;
+            };
+            let actual_canon = std::fs::canonicalize(&actual).unwrap_or(actual);
+            let expected_canon = std::fs::canonicalize(expected_content).ok();
+            if Some(actual_canon) != expected_canon {
+                log::trace!(
+                    "Broken back-ref '{}': forward symlink '{}' points to wrong content.",
+                    back_ref.display(),
+                    forward_path.display(),
+                );
+                broken.push(back_ref);
             }
         }
         Ok(())

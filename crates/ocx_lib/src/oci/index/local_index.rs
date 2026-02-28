@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::{Error, Result, log, oci, prelude::*};
+use crate::{Error, Result, file_structure::IndexStore, log, oci, prelude::*};
 
 use super::index_impl;
 
@@ -12,14 +12,14 @@ pub use config::Config;
 
 #[derive(Clone)]
 pub struct LocalIndex {
-    file_structure: oci::FileStructure,
+    index_store: IndexStore,
     cache: cache::SharedCache,
 }
 
 impl LocalIndex {
     pub fn new(config: Config) -> Self {
         Self {
-            file_structure: oci::FileStructure::new(config.root),
+            index_store: IndexStore::new(config.root),
             cache: cache::SharedCache::default(),
         }
     }
@@ -50,7 +50,7 @@ impl LocalIndex {
                 this_tags.insert(tag, other_digest);
             } else {
                 let digest = index.fetch_manifest_digest(&identifier).await?;
-                let path = self.file_structure.manifest(&identifier, &digest);
+                let path = self.index_store.manifest(&identifier, &digest);
 
                 if !path.exists() {
                     self.update_manifest(index, &identifier, &digest).await?;
@@ -59,7 +59,7 @@ impl LocalIndex {
             }
         }
 
-        let tags_path = self.file_structure.tags(identifier);
+        let tags_path = self.index_store.tags(identifier);
         this_tags.write_json_to_path(tags_path)?;
 
         {
@@ -77,7 +77,7 @@ impl LocalIndex {
         digest: &oci::Digest,
     ) -> Result<()> {
         let (_, manifest) = index.fetch_manifest(identifier).await?;
-        let path = self.file_structure.manifest(identifier, digest);
+        let path = self.index_store.manifest(identifier, digest);
         manifest.write_json_to_path(path)?;
 
         if let oci::Manifest::ImageIndex(image_index) = manifest {
@@ -85,7 +85,7 @@ impl LocalIndex {
                 let digest = manifest.digest.clone().try_into()?;
                 let identifier = identifier.clone_with_digest(digest);
                 let (digest, manifest) = index.fetch_manifest(&identifier).await?;
-                let path = self.file_structure.manifest(&identifier, &digest);
+                let path = self.index_store.manifest(&identifier, &digest);
                 manifest.write_json_to_path(path)?;
             }
         }
@@ -101,7 +101,7 @@ impl LocalIndex {
             }
         }
 
-        let tags_path = self.file_structure.tags(identifier);
+        let tags_path = self.index_store.tags(identifier);
         if !tags_path.exists() {
             log::debug!(
                 "Tags file '{}' not found for identifier '{}'.",
@@ -133,7 +133,7 @@ impl LocalIndex {
             }
         }
 
-        let manifest_path = self.file_structure.manifest(identifier, digest);
+        let manifest_path = self.index_store.manifest(identifier, digest);
         if !manifest_path.exists() {
             log::debug!(
                 "Manifest file not found for identifier '{}' and digest '{}'.",
@@ -168,26 +168,7 @@ impl LocalIndex {
 #[async_trait]
 impl index_impl::IndexImpl for LocalIndex {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
-        let tags_dir = self.file_structure.root().join(registry).join("tags");
-        if !tags_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let entries = std::fs::read_dir(&tags_dir)
-            .map_err(|e| crate::error::file_error(&tags_dir, e))?;
-
-        let mut repositories = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| crate::error::file_error(&tags_dir, e))?;
-            let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    repositories.push(stem.to_string());
-                }
-            }
-        }
-        repositories.sort();
-        Ok(repositories)
+        self.index_store.list_repositories(registry)
     }
 
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Vec<String>> {
@@ -249,7 +230,7 @@ impl index_impl::IndexImpl for LocalIndex {
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(Self {
-            file_structure: self.file_structure.clone(),
+            index_store: self.index_store.clone(),
             cache: self.cache.clone(),
         })
     }

@@ -29,13 +29,13 @@ impl FindSymlink {
             return Err(Error::PackageSymlinkRequiresTag(package.clone()));
         }
 
-        let symlink_path = self.file_structure.install_symlink(package, self.kind);
+        let symlink_path = self.file_structure.installs.symlink(package, self.kind);
 
         if !symlink_path.exists() {
             return Err(Error::PackageSymlinkNotFound(package.clone(), self.kind));
         }
 
-        let metadata_path = self.file_structure.object_metadata_for_content(&symlink_path)?;
+        let metadata_path = self.file_structure.objects.metadata_for_content(&symlink_path)?;
         let metadata = metadata::Metadata::read_json_from_path(&metadata_path)?;
         log::debug!("Resolved '{}' via {:?} symlink at '{}'", package, self.kind, symlink_path.display());
 
