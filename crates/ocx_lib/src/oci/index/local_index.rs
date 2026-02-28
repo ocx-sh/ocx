@@ -167,6 +167,29 @@ impl LocalIndex {
 
 #[async_trait]
 impl index_impl::IndexImpl for LocalIndex {
+    async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
+        let tags_dir = self.file_structure.root().join(registry).join("tags");
+        if !tags_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries = std::fs::read_dir(&tags_dir)
+            .map_err(|e| crate::error::file_error(&tags_dir, e))?;
+
+        let mut repositories = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| crate::error::file_error(&tags_dir, e))?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "json").unwrap_or(false) {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    repositories.push(stem.to_string());
+                }
+            }
+        }
+        repositories.sort();
+        Ok(repositories)
+    }
+
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Vec<String>> {
         self.get_tags(identifier).await.map(|tags| tags.into_keys().collect())
     }
