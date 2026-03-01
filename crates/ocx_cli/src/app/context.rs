@@ -1,6 +1,7 @@
 use ocx_lib::{
     env, file_structure, log,
     oci::{self, index},
+    package_manager,
 };
 
 use crate::{api, app::LogSettings};
@@ -16,6 +17,7 @@ pub struct Context {
     file_structure: file_structure::FileStructure,
     api: api::Api,
     default_index: oci::index::Index,
+    manager: package_manager::PackageManager,
 }
 
 impl Context {
@@ -53,6 +55,15 @@ impl Context {
             index::Index::from_local(local_index.clone())
         };
 
+        let default_registry = env::string("OCX_DEFAULT_REGISTRY", ocx_lib::oci::DEFAULT_REGISTRY.into());
+
+        let manager = package_manager::PackageManager::new(
+            file_structure.clone(),
+            selected_index.clone(),
+            remote_client.clone(),
+            &default_registry,
+        );
+
         Ok(Context {
             remote_client,
             remote_index,
@@ -61,6 +72,7 @@ impl Context {
             api,
             local_index,
             default_index: selected_index,
+            manager,
         })
     }
 
@@ -98,6 +110,10 @@ impl Context {
 
     pub fn api(&self) -> &api::Api {
         &self.api
+    }
+
+    pub fn manager(&self) -> &package_manager::PackageManager {
+        &self.manager
     }
 }
 

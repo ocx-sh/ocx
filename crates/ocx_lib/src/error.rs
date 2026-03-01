@@ -18,7 +18,6 @@ pub enum Error {
     PackageVersionInvalid(String),
     PackageDigestInvalid(String),
     PackageNotFound(oci::Identifier),
-    PackageInstallFailed(Vec<oci::Identifier>),
     PackageSelectionAmbiguous(Vec<oci::Identifier>),
     /// A symlink-based path was requested but the identifier carries a digest,
     /// which already uniquely addresses content and cannot be indirected through a symlink.
@@ -32,6 +31,9 @@ pub enum Error {
     UnsupportedArchive(String),
     UnsupportedClapShell(shell::Shell),
     UnsupportedMediaType(String, &'static [&'static str]),
+    /// A package manager operation failed.
+    PackageManager(crate::package_manager::error::Error),
+
     Undefined,
     UndefinedWithMessage(String),
 }
@@ -98,11 +100,6 @@ impl std::fmt::Display for Error {
             Error::PackageVersionInvalid(version) => write!(f, "Invalid package version: {}", version),
             Error::PackageDigestInvalid(digest) => write!(f, "Invalid package digest: {}", digest),
             Error::PackageNotFound(identifier) => write!(f, "Package not found: {}", identifier),
-            Error::PackageInstallFailed(references) => write!(
-                f,
-                "Failed to install package(s): {}",
-                references.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", "),
-            ),
             Error::PackageSelectionAmbiguous(candidates) => write!(
                 f,
                 "Multiple candidates found for package selection: {}",
@@ -141,6 +138,7 @@ impl std::fmt::Display for Error {
                 media_type,
                 supported.join(", ")
             ),
+            Error::PackageManager(error) => write!(f, "{error}"),
             Error::Undefined => write!(f, "An undefined error occurred"),
             Error::UndefinedWithMessage(message) => write!(f, "An undefined error occurred: {}", message),
         }
@@ -154,6 +152,12 @@ impl std::error::Error for Error {
 impl From<oci::ParseError> for Error {
     fn from(_value: oci::ParseError) -> Self {
         Error::Undefined
+    }
+}
+
+impl From<crate::package_manager::error::Error> for Error {
+    fn from(error: crate::package_manager::error::Error) -> Self {
+        Error::PackageManager(error)
     }
 }
 

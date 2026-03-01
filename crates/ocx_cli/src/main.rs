@@ -11,7 +11,6 @@ mod command;
 mod conventions;
 mod options;
 mod stdout;
-mod task;
 
 #[tokio::main]
 async fn main() -> ExitCode {

@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::{api, options, task};
+use crate::{api, options};
 
 /// Remove the installed candidate for one or more packages.
 ///
@@ -34,12 +34,9 @@ impl Uninstall {
             context.default_registry(),
         )?;
 
-        task::package::uninstall::Uninstall {
-            file_structure: context.file_structure().clone(),
-            deselect: self.deselect,
-            purge: self.purge,
-        }
-        .uninstall_all(&identifiers)?;
+        context
+            .manager()
+            .uninstall_all(&identifiers, self.deselect, self.purge)?;
 
         context.api().report_removed(api::data::removed::Removed::new(
             self.packages.iter().map(|p| p.raw().to_string()).collect(),

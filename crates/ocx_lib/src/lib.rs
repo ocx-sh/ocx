@@ -18,6 +18,7 @@ pub mod error;
 pub mod file_lock;
 pub mod file_structure;
 pub mod package;
+pub mod package_manager;
 pub mod utility;
 pub mod oci;
 pub mod reference_manager;

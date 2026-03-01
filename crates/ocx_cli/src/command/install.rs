@@ -4,7 +4,7 @@ use clap::Parser;
 
 use ocx_lib::{log, oci};
 
-use crate::{api, conventions::platforms_or_default, options, task};
+use crate::{api, conventions::platforms_or_default, options};
 
 #[derive(Parser, Clone)]
 pub struct Install {
@@ -32,15 +32,10 @@ impl Install {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let install_infos = task::package::install::Install {
-            context: context.clone(),
-            file_structure: context.file_structure().clone(),
-            platforms: platforms_or_default(&self.platforms),
-            candidate: true,
-            select: self.select,
-        }
-        .install_all(oci_packages.clone())
-        .await?;
+        let install_infos = context
+            .manager()
+            .install_all(oci_packages.clone(), platforms_or_default(&self.platforms), true, self.select)
+            .await?;
 
         let install_data = api::data::install::Installs::new(
             self.packages
