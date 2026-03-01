@@ -97,6 +97,15 @@ For more information on log levels, see the [command line reference](command-lin
 Similar to [`OCX_LOG`](#ocx-log), but specifically for configuring the log level of messages emitted to the console.
 If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) for console messages.
 
+### `OCX_DISABLE_CODESIGN` {#ocx-disable-codesign}
+
+When set to a [truthy value](#truthy-values), OCX will skip ad-hoc code signing of macOS binaries after installation.
+By default, OCX automatically applies ad-hoc code signatures to extracted [Mach-O][mach-o] binaries on macOS,
+which is required for execution on Apple Silicon.
+See the [FAQ][faq-codesign] for details on why this is necessary and how it works.
+
+This variable has no effect on non-macOS systems.
+
 ### `OCX_OFFLINE` {#ocx-offline}
 
 When set to a [truthy value](#truthy-values), OCX will run in offline mode, which will not attempt to fetch any remote information.
@@ -119,7 +128,11 @@ A fallback for configuring the log level of OCX and its dependencies.
 If [`OCX_LOG`](#ocx-log) is not set, OCX will respect the log level configured via `RUST_LOG`.
 The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
+<!-- external -->
+[mach-o]: https://en.wikipedia.org/wiki/Mach-O
+
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects
 [fs-index]: ../user-guide.md#file-structure-index
 [fs-installs]: ../user-guide.md#file-structure-installs
+[faq-codesign]: ../faq.md#macos-codesign

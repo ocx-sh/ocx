@@ -42,6 +42,10 @@ export default defineConfig({
           link: "/docs/user-guide",
         },
         {
+          text: "FAQ",
+          link: "/docs/faq",
+        },
+        {
           text: "Reference",
           collapsed: true,
           items: [

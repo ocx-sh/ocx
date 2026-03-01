@@ -194,8 +194,8 @@ impl ReferenceManager {
                 broken.push(back_ref);
                 continue;
             };
-            let actual_canon = std::fs::canonicalize(&actual).unwrap_or(actual);
-            let expected_canon = std::fs::canonicalize(expected_content).ok();
+            let actual_canon = dunce::canonicalize(&actual).unwrap_or(actual);
+            let expected_canon = dunce::canonicalize(expected_content).ok();
             if Some(actual_canon) != expected_canon {
                 log::trace!(
                     "Broken back-ref '{}': forward symlink '{}' points to wrong content.",
@@ -218,11 +218,12 @@ mod tests {
     use super::*;
     use crate::file_structure::FileStructure;
 
-    fn setup() -> (TempDir, ReferenceManager) {
+    fn setup() -> (TempDir, PathBuf, ReferenceManager) {
         let dir = tempfile::tempdir().unwrap();
-        let fs = FileStructure::with_root(dir.path().to_path_buf());
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let fs = FileStructure::with_root(root.clone());
         let rm = ReferenceManager::new(fs);
-        (dir, rm)
+        (dir, root, rm)
     }
 
     /// Creates a real content directory at `{root}/objects/reg/repo/{id}/content`.
@@ -270,9 +271,9 @@ mod tests {
 
     #[test]
     fn link_creates_forward_symlink_and_back_ref() {
-        let (dir, rm) = setup();
-        let content = make_content(dir.path(), "d1");
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, "d1");
+        let forward = fwd(&root, "link1");
 
         rm.link(&forward, &content).unwrap();
 
@@ -284,9 +285,9 @@ mod tests {
 
     #[test]
     fn link_is_noop_when_already_pointing_to_same_content() {
-        let (dir, rm) = setup();
-        let content = make_content(dir.path(), "d1");
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, "d1");
+        let forward = fwd(&root, "link1");
 
         rm.link(&forward, &content).unwrap();
         let refs_dir = content.parent().unwrap().join("refs");
@@ -298,10 +299,10 @@ mod tests {
 
     #[test]
     fn link_updates_forward_and_moves_back_ref_on_relink() {
-        let (dir, rm) = setup();
-        let content_a = make_content(dir.path(), "d_a");
-        let content_b = make_content(dir.path(), "d_b");
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let content_a = make_content(&root, "d_a");
+        let content_b = make_content(&root, "d_b");
+        let forward = fwd(&root, "link1");
 
         rm.link(&forward, &content_a).unwrap();
         rm.link(&forward, &content_b).unwrap();
@@ -316,11 +317,11 @@ mod tests {
     #[test]
     fn link_tolerates_missing_old_content_on_relink() {
         // Forward symlink already points to a GC'd (non-existent) content path.
-        let (dir, rm) = setup();
-        let content_b = make_content(dir.path(), "d_b");
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let content_b = make_content(&root, "d_b");
+        let forward = fwd(&root, "link1");
 
-        let gone = dir.path().join("objects").join("reg").join("repo").join("gone").join("content");
+        let gone = root.join("objects").join("reg").join("repo").join("gone").join("content");
         crate::symlink::create(&gone, &forward).unwrap();
 
         rm.link(&forward, &content_b).unwrap();
@@ -329,14 +330,14 @@ mod tests {
 
     #[test]
     fn link_replaces_stale_back_ref_at_target_location() {
-        let (dir, rm) = setup();
-        let content = make_content(dir.path(), "d1");
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, "d1");
+        let forward = fwd(&root, "link1");
 
         // Pre-plant a stale symlink at the exact back-ref path.
         let back_ref = back_ref_for(&content, &forward);
         std::fs::create_dir_all(back_ref.parent().unwrap()).unwrap();
-        crate::symlink::create(&dir.path().join("nowhere"), &back_ref).unwrap();
+        crate::symlink::create(&root.join("nowhere"), &back_ref).unwrap();
 
         rm.link(&forward, &content).unwrap();
 
@@ -348,15 +349,15 @@ mod tests {
 
     #[test]
     fn unlink_is_noop_when_path_is_not_a_symlink() {
-        let (dir, rm) = setup();
-        rm.unlink(&dir.path().join("nonexistent")).unwrap();
+        let (_dir, root, rm) = setup();
+        rm.unlink(&root.join("nonexistent")).unwrap();
     }
 
     #[test]
     fn unlink_removes_forward_symlink_and_back_ref() {
-        let (dir, rm) = setup();
-        let content = make_content(dir.path(), "d1");
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, "d1");
+        let forward = fwd(&root, "link1");
 
         rm.link(&forward, &content).unwrap();
         let back_ref = back_ref_for(&content, &forward);
@@ -371,10 +372,10 @@ mod tests {
     #[test]
     fn unlink_tolerates_dangling_forward_symlink() {
         // Forward points to a non-existent path — back_ref_path cannot canonicalize it.
-        let (dir, rm) = setup();
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let forward = fwd(&root, "link1");
 
-        let gone = dir.path().join("objects").join("reg").join("repo").join("gone").join("content");
+        let gone = root.join("objects").join("reg").join("repo").join("gone").join("content");
         crate::symlink::create(&gone, &forward).unwrap();
 
         rm.unlink(&forward).unwrap();
@@ -385,15 +386,15 @@ mod tests {
 
     #[test]
     fn broken_refs_empty_when_objects_dir_absent() {
-        let (_, rm) = setup();
+        let (_dir, _root, rm) = setup();
         assert_eq!(rm.broken_refs().unwrap(), Vec::<PathBuf>::new());
     }
 
     #[test]
     fn broken_refs_empty_when_all_refs_valid() {
-        let (dir, rm) = setup();
-        let content = make_content(dir.path(), "d1");
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, "d1");
+        let forward = fwd(&root, "link1");
         rm.link(&forward, &content).unwrap();
 
         assert_eq!(rm.broken_refs().unwrap(), Vec::<PathBuf>::new());
@@ -401,11 +402,11 @@ mod tests {
 
     #[test]
     fn broken_refs_detects_missing_forward_symlink() {
-        let (dir, rm) = setup();
-        let content = make_content(dir.path(), "d1");
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, "d1");
 
         // Back-ref points to a forward path that does not exist.
-        let ghost_fwd = dir.path().join("fwd").join("ghost");
+        let ghost_fwd = root.join("fwd").join("ghost");
         let refs_dir = content.parent().unwrap().join("refs");
         std::fs::create_dir_all(&refs_dir).unwrap();
         let back_ref = refs_dir.join(ReferenceManager::ref_name(&ghost_fwd));
@@ -416,10 +417,10 @@ mod tests {
 
     #[test]
     fn broken_refs_detects_forward_pointing_to_wrong_content() {
-        let (dir, rm) = setup();
-        let content_a = make_content(dir.path(), "d_a");
-        let content_b = make_content(dir.path(), "d_b");
-        let forward = fwd(dir.path(), "link1");
+        let (_dir, root, rm) = setup();
+        let content_a = make_content(&root, "d_a");
+        let content_b = make_content(&root, "d_b");
+        let forward = fwd(&root, "link1");
 
         // forward → content_a, but back-ref lives in content_b's refs/.
         crate::symlink::create(&content_a, &forward).unwrap();
@@ -433,8 +434,8 @@ mod tests {
 
     #[test]
     fn broken_refs_does_not_recurse_into_content_dirs() {
-        let (dir, rm) = setup();
-        let content = make_content(dir.path(), "d1");
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, "d1");
 
         // A "refs" dir inside the content dir must never be inspected.
         std::fs::create_dir_all(content.join("refs")).unwrap();
@@ -444,8 +445,8 @@ mod tests {
 
     #[test]
     fn broken_refs_skips_non_symlinks_in_refs_dir() {
-        let (dir, rm) = setup();
-        let content = make_content(dir.path(), "d1");
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, "d1");
         let refs_dir = content.parent().unwrap().join("refs");
         std::fs::create_dir_all(&refs_dir).unwrap();
         std::fs::write(refs_dir.join("not_a_symlink"), b"data").unwrap();
@@ -455,8 +456,8 @@ mod tests {
 
     #[test]
     fn broken_refs_skips_non_dir_entries_in_objects() {
-        let (dir, rm) = setup();
-        let objects = dir.path().join("objects");
+        let (_dir, root, rm) = setup();
+        let objects = root.join("objects");
         std::fs::create_dir_all(&objects).unwrap();
         std::fs::write(objects.join("stray_file"), b"junk").unwrap();
 

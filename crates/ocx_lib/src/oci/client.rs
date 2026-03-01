@@ -287,6 +287,10 @@ impl Client {
         Self::move_path(&temp_path.join("metadata.json"), &final_metadata)?;
         Self::move_path(&temp_content_path, &final_content)?;
 
+        crate::codesign::sign_extracted_content(&final_content)
+            .await
+            .map_err(|e| ClientError::Internal(Box::new(e)))?;
+
         download
             .manifest
             .write_json_to_path(&final_manifest)

@@ -1347,6 +1347,7 @@ dependencies = [
  "clap_builder",
  "clap_complete",
  "docker_credential",
+ "dunce",
  "flate2",
  "fs2",
  "futures",

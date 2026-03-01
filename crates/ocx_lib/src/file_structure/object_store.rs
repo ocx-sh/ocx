@@ -127,7 +127,7 @@ impl ObjectStore {
     /// directory that contains it.  Used internally to derive sibling paths such
     /// as `metadata.json` and `refs/`.
     fn object_dir_for_content(content_path: &Path) -> Result<PathBuf> {
-        let canonical = std::fs::canonicalize(content_path)
+        let canonical = dunce::canonicalize(content_path)
             .map_err(|e| Error::InternalFile(content_path.to_path_buf(), e))?;
         canonical
             .parent()
@@ -239,11 +239,12 @@ mod tests {
     #[test]
     fn metadata_for_content_returns_sibling_metadata_json() {
         let dir = tempfile::tempdir().unwrap();
-        let obj = dir.path().join("obj");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let obj = root.join("obj");
         let content = obj.join("content");
         std::fs::create_dir_all(&content).unwrap();
 
-        let store = ObjectStore::new(dir.path());
+        let store = ObjectStore::new(&root);
         let result = store.metadata_for_content(&content).unwrap();
         assert_eq!(result, obj.join("metadata.json"));
     }
@@ -251,11 +252,12 @@ mod tests {
     #[test]
     fn refs_dir_for_content_returns_sibling_refs() {
         let dir = tempfile::tempdir().unwrap();
-        let obj = dir.path().join("obj");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let obj = root.join("obj");
         let content = obj.join("content");
         std::fs::create_dir_all(&content).unwrap();
 
-        let store = ObjectStore::new(dir.path());
+        let store = ObjectStore::new(&root);
         let result = store.refs_dir_for_content(&content).unwrap();
         assert_eq!(result, obj.join("refs"));
     }
@@ -263,14 +265,15 @@ mod tests {
     #[test]
     fn metadata_for_content_follows_symlink() {
         let dir = tempfile::tempdir().unwrap();
-        let obj = dir.path().join("obj");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let obj = root.join("obj");
         let content = obj.join("content");
         std::fs::create_dir_all(&content).unwrap();
 
-        let link = dir.path().join("link");
+        let link = root.join("link");
         crate::symlink::create(&content, &link).unwrap();
 
-        let store = ObjectStore::new(dir.path());
+        let store = ObjectStore::new(&root);
         let result = store.metadata_for_content(&link).unwrap();
         assert_eq!(result, obj.join("metadata.json"));
     }
