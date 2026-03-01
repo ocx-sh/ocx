@@ -1,6 +1,15 @@
 name: Build Binaries
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  checks: write
+  pull-requests: write
 
 jobs:
   build:
@@ -31,6 +40,8 @@ jobs:
           profile: minimal
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ steps.build.outcome == 'success' }}
       # - name: Setup Zig
       #   uses: mlugg/setup-zig@v2
       #   with:
@@ -41,8 +52,71 @@ jobs:
           command: install
           args: --locked cargo-zigbuild@0.22.1
       - name: Build
+        id: build
         uses: actions-rs/cargo@v1
         with:
           # command: zigbuild
           command: build
           args: --release --target=${{ matrix.job.target }} --locked
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Test
+        run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci
+      - name: Prepare Binary
+        shell: bash
+        run: |
+          src="target/${{ matrix.job.target }}/release/ocx${{ runner.os == 'Windows' && '.exe' || '' }}"
+          dst="ocx-${{ matrix.job.target }}${{ runner.os == 'Windows' && '.exe' || '' }}"
+          cp "$src" "$dst"
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocx-${{ matrix.job.target }}
+          path: ocx-${{ matrix.job.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Upload Test Results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.job.target }}
+          path: target/nextest/ci/junit.xml
+
+  snapshot-release:
+    name: Snapshot Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Download Binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ocx-*
+          path: artifacts
+          merge-multiple: true
+      - name: Create Snapshot Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: canary
+          name: Canary Snapshot
+          body: |
+            Automated snapshot build from `main` branch.
+            Commit: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          files: artifacts/ocx-*
+
+  test-results:
+    name: Publish Test Results
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: artifacts
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: "artifacts/**/junit.xml"
+          check_name: "Test Results"

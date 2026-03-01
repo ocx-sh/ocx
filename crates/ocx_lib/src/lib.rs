@@ -12,6 +12,7 @@ pub(crate) use media_type::*;
 
 pub mod auth;
 pub mod archive;
+pub mod codesign;
 pub mod compression;
 pub mod env;
 pub mod error;

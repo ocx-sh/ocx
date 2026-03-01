@@ -17,6 +17,8 @@ pub enum ClientError {
     Io(PathBuf, std::io::Error),
     /// JSON serialization or deserialization failed.
     Serialization(String),
+    /// An internal library error (e.g. codesign, archive processing).
+    Internal(Box<crate::Error>),
 }
 
 impl std::fmt::Display for ClientError {
@@ -31,6 +33,7 @@ impl std::fmt::Display for ClientError {
             ClientError::Registry(msg) => write!(f, "Registry operation failed: {}", msg),
             ClientError::Io(path, err) => write!(f, "I/O error for '{}': {}", path.display(), err),
             ClientError::Serialization(msg) => write!(f, "Serialization error: {}", msg),
+            ClientError::Internal(err) => write!(f, "{}", err),
         }
     }
 }
