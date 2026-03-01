@@ -19,7 +19,13 @@ impl LogSettings {
     pub fn init(self) -> anyhow::Result<()> {
         use tracing_subscriber::{util::SubscriberInitExt, layer::SubscriberExt, prelude::*};
 
-        let indicatif_layer = tracing_indicatif::IndicatifLayer::new();
+        let indicatif_layer = tracing_indicatif::IndicatifLayer::new()
+            .with_progress_style(
+                indicatif::ProgressStyle::with_template(
+                    "{span_child_prefix}{spinner} {span_name} {span_fields}",
+                )
+                .expect("valid indicatif template"),
+            );
         let writer = indicatif_layer.get_stderr_writer();
 
         let fmt_layer = {

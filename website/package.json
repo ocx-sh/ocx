@@ -4,6 +4,7 @@
   },
   "dependencies": {
     "@vueuse/core": "^14.2.1",
+    "asciinema-player": "^3.15.1",
     "radix-vue": "^1.9.17",
     "vitepress-plugin-group-icons": "^1.7.1"
   }

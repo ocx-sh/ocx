@@ -8,3 +8,4 @@ yarn-error.log*
 .vitepress/cache
 .vitepress/dist
 .task/
+src/public/casts

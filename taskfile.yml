@@ -4,6 +4,7 @@ version: '3'
 
 includes:
   coverage: ./taskfiles/coverage.taskfile.yml
+  recordings: ./taskfiles/recordings.taskfile.yml
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test
