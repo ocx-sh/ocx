@@ -61,13 +61,13 @@ This <Tooltip term="content-addressed layout">A storage scheme where every item'
 The [Nix package manager][nix] stores every package at `/nix/store/{hash}-name/` using the same principle: the path is a function of the content. This is what makes Nix derivations reproducible across machines — the same hash always means the same files. Git's internal object store (`.git/objects/`) works identically. ocx applies this model to OCI-distributed binaries.
 :::
 
-**Garbage collection via `refs/`.** The `refs/` subdirectory inside each object tracks every install symlink that currently points to it. `ocx clean` only removes objects whose `refs/` is empty — anything still referenced by an active install is never touched.
+**Garbage collection via `refs/`.** The `refs/` subdirectory inside each object tracks every install symlink that currently points to it. [`ocx clean`][cmd-clean] only removes objects whose `refs/` is empty — anything still referenced by an active install is never touched.
 
 ::: details How back-references work
-When `ocx install cmake:3.28` creates the symlink `installs/…/cmake/candidates/3.28 → objects/…/sha256:abc123…/content`, it simultaneously writes a corresponding back-reference entry inside `objects/…/sha256:abc123…/refs/`. Removing the symlink via `ocx uninstall` removes that back-reference entry. `ocx clean` then applies a simple rule: if `refs/` is empty, the object is orphaned and can be safely deleted. No reference counting, no graph traversal — just check whether the directory is empty.
+When `ocx install cmake:3.28` creates the symlink `installs/…/cmake/candidates/3.28 → objects/…/sha256:abc123…/content`, it simultaneously writes a corresponding back-reference entry inside `objects/…/sha256:abc123…/refs/`. Removing the symlink via [`ocx uninstall`][cmd-uninstall] removes that back-reference entry. [`ocx clean`][cmd-clean] then applies a simple rule: if `refs/` is empty, the object is orphaned and can be safely deleted. No reference counting, no graph traversal — just check whether the directory is empty.
 :::
 
-*Commands: [`ocx install`][cmd-install] adds objects; `ocx uninstall --purge` removes a specific one; `ocx clean` removes all unreferenced objects.*
+*Commands: [`ocx install`][cmd-install] adds objects; [`ocx uninstall --purge`][cmd-uninstall] removes a specific one; [`ocx clean`][cmd-clean] removes all unreferenced objects.*
 
 #### Index {#file-structure-index}
 
@@ -160,7 +160,7 @@ export PATH="$HOME/.ocx/installs/ocx.sh/cmake/current/content/bin:$PATH"
 When you later run `ocx install --select cmake:3.32`, `current` is re-pointed. Your IDE and shell pick up the new version automatically — no config changes needed.
 :::
 
-*Commands: [`ocx install`][cmd-install], [`ocx select`][cmd-select]; `ocx deselect`, `ocx uninstall`*
+*Commands: [`ocx install`][cmd-install], [`ocx select`][cmd-select]; [`ocx deselect`][cmd-deselect], [`ocx uninstall`][cmd-uninstall]*
 
 ### Path Resolution {#path-resolution}
 
@@ -202,6 +202,8 @@ Set it up once by installing and selecting a version, then inspect the stable pa
 ocx env --current clangd
 ```
 :::
+
+Use [`ocx find`][cmd-find] to print the resolved content path directly, without setting environment variables. Supports the same `--candidate` and `--current` modes and is useful for scripting.
 
 ## Versioning {#versioning}
 
@@ -416,8 +418,12 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 [docker-credential]: https://github.com/keirlawson/docker_credential
 
 <!-- commands -->
+[cmd-clean]: ./reference/command-line.md#clean
+[cmd-deselect]: ./reference/command-line.md#deselect
+[cmd-find]: ./reference/command-line.md#find
 [cmd-install]: ./reference/command-line.md#install
 [cmd-select]: ./reference/command-line.md#select
+[cmd-uninstall]: ./reference/command-line.md#uninstall
 [cmd-index-catalog]: ./reference/command-line.md#index-catalog
 [cmd-index-update]: ./reference/command-line.md#index-update
 [cmd-package-push]: ./reference/command-line.md#package-push

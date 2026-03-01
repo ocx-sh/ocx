@@ -42,6 +42,70 @@ Combining this flag with [`--offline`](#arg-offline) will most likely result in 
 
 ## Commands
 
+### `clean` {#clean}
+
+Removes unreferenced objects from the local object store.
+
+An object is unreferenced when its `refs/` directory is empty — no candidate or current symlink points to it. This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually.
+
+**Usage**
+
+```shell
+ocx clean [OPTIONS]
+```
+
+**Options**
+
+- `--dry-run`: Show what would be removed without making any changes.
+- `-h`, `--help`: Print help information.
+
+### `deselect` {#deselect}
+
+Removes the current-version symlink for one or more packages.
+
+The package is deselected but not uninstalled: its [candidate symlink](../user-guide.md#path-resolution) and object-store content remain intact. To also remove the installed files, use [`uninstall`](#uninstall).
+
+**Usage**
+
+```shell
+ocx deselect <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to deselect.
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+### `env` {#env}
+
+Print the resolved environment variables for one or more packages.
+
+Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
+JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
+
+In the default mode, packages are auto-installed if not already available locally.
+With `--candidate` or `--current`, no auto-install is performed — see [path resolution modes](../user-guide.md#path-resolution).
+
+**Usage**
+
+```shell
+ocx env [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to resolve the environment for.
+
+**Options**
+
+- `-p`, `--platform`: Target platforms to consider when resolving packages.
+- `--candidate`: Resolve env paths via the candidate symlink. Mutually exclusive with `--current`.
+- `--current`: Resolve env paths via the current-selected symlink. Mutually exclusive with `--candidate`.
+- `-h`, `--help`: Print help information.
+
 ### `exec` {#exec}
 
 Executes a command within the environment of one or more packages.
@@ -65,32 +129,38 @@ ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
 - `-i`, `--interactive`: Run in interactive mode, forwarding stdin to the child process.
 - `-h`, `--help`: Print help information.
 
-### `env` {#env}
+### `find` {#find}
 
-Print the resolved environment variables for one or more packages.
+Resolves one or more packages and prints their content directory paths.
 
-Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
-JSON format (`--json`) outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
+By default returns the content-addressed path in the [object store](../user-guide.md#file-structure-objects). Use `--candidate` or `--current` to return a stable install symlink path instead — useful for paths embedded in editor configs, Makefiles, or shell scripts that should not change on every package update.
 
-In the default mode, packages are auto-installed if not already available locally.
-With `--candidate` or `--current`, no auto-install is performed — see [path resolution modes](../user-guide.md#path-resolution).
+No downloading is performed — the package must already be installed.
 
 **Usage**
 
 ```shell
-ocx env [OPTIONS] <PACKAGE>...
+ocx find [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to resolve the environment for.
+- `<PACKAGE>`: Package identifiers to resolve.
 
 **Options**
 
-- `-p`, `--platform`: Target platforms to consider when resolving packages.
-- `--candidate`: Resolve env paths via the candidate symlink. Mutually exclusive with `--current`.
-- `--current`: Resolve env paths via the current-selected symlink. Mutually exclusive with `--candidate`.
+- `-p`, `--platform`: Platforms to consider when resolving. Defaults to the current platform. Ignored when `--candidate` or `--current` is set.
+- `--candidate`: Return the [candidate symlink](../user-guide.md#path-resolution) path. Mutually exclusive with `--current`.
+- `--current`: Return the [current symlink](../user-guide.md#path-resolution) path. Mutually exclusive with `--candidate`.
 - `-h`, `--help`: Print help information.
+
+::: tip
+Use `--json` with `jq` to embed the path in a script:
+
+```shell
+cmake_root=$(ocx find --candidate --json cmake:3.28 | jq -r '.["cmake:3.28"]')
+```
+:::
 
 ### `index` {#index}
 
@@ -100,12 +170,28 @@ ocx env [OPTIONS] <PACKAGE>...
 ocx index catalog [OPTIONS]
 ```
 
-Lists available package catalogs from the remote index.
+Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly.
 
 **Options**
 
-- `--with-tags`: Include package tags in the output.
-  This will slow down the command significantly, as it requires fetching additional information from the remote index for each package.
+- `--with-tags`: Include available tags for each package. Slower — requires fetching additional information for each package.
+
+#### `list` {#index-list}
+
+```bash
+ocx index list [OPTIONS] <PACKAGE>...
+```
+
+Lists available tags for one or more packages.
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to list tags for.
+
+**Options**
+
+- `--with-platforms`: Include platform availability for each tag. Slower — requires fetching each manifest individually.
+- `-h`, `--help`: Print help information.
 
 #### `update` {#index-update}
 
@@ -119,13 +205,23 @@ Updates the local index by fetching the latest information from the remote index
 
 - `<PACKAGE>`: Package identifiers to update in the local index for.
 
+### `info` {#info}
+
+Prints build information: the ocx version, supported platforms, and the detected shell.
+
+**Usage**
+
+```shell
+ocx info
+```
+
 ### `install` {#install}
 
 Downloads and installs one or more packages into the local object store.
 
-**Usage**
+Installs packages into the [object store](../user-guide.md#file-structure-objects) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands.
 
-Installs packages into the local object store and create a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands.
+**Usage**
 
 ```shell
 ocx install [OPTIONS] <PACKAGE>...
@@ -167,7 +263,7 @@ ocx select [OPTIONS] <PACKAGE>...
 `ocx install --select` installs and selects in one step.
 :::
 
-See [path resolution modes](#path-resolution) for how the `current` symlink is used downstream.
+See [path resolution modes](../user-guide.md#path-resolution) for how the `current` symlink is used downstream.
 
 ### `shell` {#shell}
 
@@ -204,16 +300,54 @@ ocx shell env [OPTIONS] <PACKAGE>...
 
 Generate shell completion scripts for ocx.
 
+**Usage**
+
+```shell
+ocx shell completion [OPTIONS]
+```
+
 **Options**
 
 - `--shell <SHELL>`: The shell to generate the completions for (e.g., `bash`, `zsh`, `fish`).
   By default, ocx will attempt to auto-detect the shell and generate the appropriate completions.
 
+### `uninstall` {#uninstall}
+
+Removes the installed candidate for one or more packages.
+
+Removes the [candidate symlink](../user-guide.md#path-resolution) and its back-reference. Object-store content is preserved unless `--purge` is given. To also remove the current symlink, pass `--deselect` or run [`deselect`](#deselect) separately. To remove all unreferenced objects at once, use [`clean`](#clean).
+
+**Usage**
+
+```shell
+ocx uninstall [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to uninstall.
+
+**Options**
+
+- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution). Equivalent to running `ocx deselect` after uninstall.
+- `--purge`: Delete the object from the store when no other references remain after uninstall.
+- `-h`, `--help`: Print help information.
+
+### `version` {#version}
+
+Prints the ocx version number.
+
+**Usage**
+
+```shell
+ocx version
+```
+
 ### `package` {#package}
 
 #### `create` {#package-create}
 
-Bundles a local directory into a compressed package archive (`.tar.xz`) ready for publishing.
+Bundles a local directory into a compressed package archive ready for publishing.
 
 **Usage**
 
@@ -229,10 +363,10 @@ ocx package create [OPTIONS] <PATH>
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier, used to infer the output filename when `--output` is a directory.
 - `-p`, `--platform <PLATFORM>`: Platform of the package, used to infer the output filename.
-- `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform.
+- `-o`, `--output <PATH>`: Output file or directory. If a directory is given, the filename is inferred from the identifier and platform. The file extension controls the compression algorithm: `.tar.xz` (LZMA, default) or `.tar.gz` (Gzip).
 - `-f`, `--force`: Overwrite the output file if it already exists.
-- `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the output bundle.
-- `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`.
+- `-m`, `--metadata <PATH>`: Path to a metadata file to bundle with the package. When provided, it is copied as a sidecar file next to the output archive. If omitted, no metadata sidecar is written.
+- `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
 - `-h`, `--help`: Print help information.
 
 #### `push` {#package-push}
