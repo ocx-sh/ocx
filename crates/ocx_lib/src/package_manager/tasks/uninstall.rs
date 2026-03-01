@@ -1,3 +1,5 @@
+use tracing::info_span;
+
 use crate::{
     log, oci,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
@@ -14,11 +16,12 @@ impl PackageManager {
         package: &oci::Identifier,
         deselect: bool,
         purge: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<(), PackageErrorKind> {
+        let _span = info_span!("Uninstalling", package = %package).entered();
         log::debug!("Uninstalling package '{}'.", package);
 
         if package.digest().is_some() {
-            return Err(crate::Error::PackageSymlinkRequiresTag(package.clone()));
+            return Err(PackageErrorKind::SymlinkRequiresTag);
         }
 
         let rm = ReferenceManager::new(self.file_structure().clone());
@@ -27,7 +30,7 @@ impl PackageManager {
         let content_path = if candidate_path.is_symlink() {
             let path = std::fs::read_link(&candidate_path).ok();
             log::trace!("Candidate content path: {:?}", path);
-            rm.unlink(&candidate_path)?;
+            rm.unlink(&candidate_path).map_err(PackageErrorKind::Internal)?;
             path
         } else {
             log::warn!(
@@ -41,7 +44,7 @@ impl PackageManager {
         if deselect {
             let current_path = self.file_structure().installs.current(package);
             if current_path.is_symlink() {
-                rm.unlink(&current_path)?;
+                rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
             } else {
                 log::debug!(
                     "Package '{}' has no current symlink at '{}' — skipping deselect.",
@@ -62,7 +65,9 @@ impl PackageManager {
                         if let Some(obj_dir) = content.parent() {
                             log::info!("Purging unreferenced object: {}", obj_dir.display());
                             std::fs::remove_dir_all(obj_dir).map_err(|e| {
-                                crate::Error::InternalFile(obj_dir.to_path_buf(), e)
+                                PackageErrorKind::Internal(
+                                    crate::Error::InternalFile(obj_dir.to_path_buf(), e),
+                                )
                             })?;
                         }
                     } else {
@@ -89,10 +94,10 @@ impl PackageManager {
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in packages {
-            if let Err(e) = self.uninstall(package, deselect, purge) {
+            if let Err(kind) = self.uninstall(package, deselect, purge) {
                 errors.push(PackageError::new(
                     package.clone(),
-                    PackageErrorKind::Internal(e),
+                    kind,
                 ));
             }
         }

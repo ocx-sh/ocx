@@ -43,11 +43,11 @@ impl index_impl::IndexImpl for Index {
         Ok(repositories)
     }
 
-    async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Vec<String>> {
+    async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get_tags(identifier).await {
-                return Ok(cached);
+                return Ok(Some(cached));
             }
         }
 
@@ -58,18 +58,18 @@ impl index_impl::IndexImpl for Index {
             cache.set_tags(identifier.clone(), tags.clone()).await;
         }
 
-        Ok(tags)
+        Ok(Some(tags))
     }
 
-    async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<(oci::Digest, oci::Manifest)> {
-        self.client.fetch_manifest(identifier).await
+    async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+        Ok(Some(self.client.fetch_manifest(identifier).await?))
     }
 
-    async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<oci::Digest> {
+    async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get_tag_digest(identifier).await {
-                return Ok(cached);
+                return Ok(Some(cached));
             }
         }
 
@@ -79,7 +79,7 @@ impl index_impl::IndexImpl for Index {
             cache.set_tag_digest(identifier, digest.clone()).await;
         }
 
-        Ok(digest)
+        Ok(Some(digest))
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {

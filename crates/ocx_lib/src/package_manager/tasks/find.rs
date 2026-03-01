@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
 use tokio::task::JoinSet;
+use tracing::{info_span, Instrument};
 
 use crate::{
     log, oci,
+    oci::index::SelectResult,
     package::{install_info::InstallInfo, metadata},
     package_manager::{self, error::PackageError, error::PackageErrorKind},
     prelude::SerdeExt,
@@ -16,24 +18,29 @@ impl PackageManager {
         &self,
         package: &oci::Identifier,
         platforms: Vec<oci::Platform>,
-    ) -> crate::Result<InstallInfo> {
+    ) -> Result<InstallInfo, PackageErrorKind> {
         log::debug!("Finding package: {}", package);
 
-        let identifier = self
-            .index()
-            .select(package, platforms)
-            .await?
-            .ok_or(crate::Error::PackageNotFound(package.clone()))?;
+        let identifier = match self.index().select(package, platforms).await {
+            Ok(SelectResult::Found(id)) => id,
+            Ok(SelectResult::Ambiguous(v)) => return Err(PackageErrorKind::SelectionAmbiguous(v)),
+            Ok(SelectResult::NotFound) => return Err(PackageErrorKind::NotFound),
+            Err(e) => return Err(PackageErrorKind::Internal(e)),
+        };
 
         log::debug!("Resolved package identifier: {}", &identifier);
 
-        let content = self.file_structure().objects.content(&identifier)?;
+        let content = self.file_structure().objects.content(&identifier)
+            .map_err(PackageErrorKind::Internal)?;
         if !content.exists() {
-            return Err(crate::Error::PackageNotFound(identifier.clone()));
+            log::debug!("Content directory not found locally for '{}'.", identifier);
+            return Err(PackageErrorKind::NotFound);
         }
 
-        let metadata_path = self.file_structure().objects.metadata(&identifier)?;
-        let metadata = metadata::Metadata::read_json_from_path(metadata_path)?;
+        let metadata_path = self.file_structure().objects.metadata(&identifier)
+            .map_err(PackageErrorKind::Internal)?;
+        let metadata = metadata::Metadata::read_json_from_path(metadata_path)
+            .map_err(PackageErrorKind::Internal)?;
 
         Ok(InstallInfo {
             identifier,
@@ -53,11 +60,12 @@ impl PackageManager {
         if packages.len() == 1 {
             let info = self
                 .find(&packages[0], platforms)
+                .instrument(info_span!("Finding", package = %packages[0]))
                 .await
-                .map_err(|e| {
+                .map_err(|kind| {
                     package_manager::error::Error::FindFailed(vec![PackageError::new(
                         packages[0].clone(),
-                        PackageErrorKind::Internal(e),
+                        kind,
                     )])
                 })?;
             return Ok(vec![info]);
@@ -68,10 +76,11 @@ impl PackageManager {
             let mgr = self.clone();
             let package = package.clone();
             let platforms = platforms.clone();
+            let span = info_span!("Finding", package = %package);
             tasks.spawn(async move {
                 let result = mgr.find(&package, platforms).await;
                 (package, result)
-            });
+            }.instrument(span));
         }
 
         let mut results: HashMap<oci::Identifier, InstallInfo> =
@@ -83,8 +92,8 @@ impl PackageManager {
                 Ok((id, Ok(info))) => {
                     results.insert(id, info);
                 }
-                Ok((id, Err(e))) => {
-                    errors.push(PackageError::new(id, PackageErrorKind::Internal(e)));
+                Ok((id, Err(kind))) => {
+                    errors.push(PackageError::new(id, kind));
                 }
                 Err(e) => log::error!("Task panicked: {}", e),
             }

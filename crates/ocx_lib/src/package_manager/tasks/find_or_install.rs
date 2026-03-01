@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use tokio::task::JoinSet;
+use tracing::{info_span, Instrument};
 
 use crate::{
     log, oci,
@@ -22,31 +23,32 @@ impl PackageManager {
             return Ok(Vec::new());
         }
 
-        let mut tasks: JoinSet<(oci::Identifier, crate::Result<InstallInfo>)> = JoinSet::new();
+        let mut tasks: JoinSet<(oci::Identifier, Result<InstallInfo, PackageErrorKind>)> = JoinSet::new();
 
         for package in &packages {
             let mgr = self.clone();
             let pkg = package.clone();
             let plat = platforms.clone();
 
+            let span = info_span!("Resolving", package = %pkg);
             tasks.spawn(async move {
                 let result = match mgr.find(&pkg, plat.clone()).await {
                     Ok(info) => Ok(info),
-                    Err(crate::Error::PackageNotFound(_)) if !mgr.is_offline() => {
+                    Err(PackageErrorKind::NotFound) if !mgr.is_offline() => {
                         log::info!("Package '{}' not found locally, installing.", pkg);
                         mgr.install(&pkg, plat, false, false).await
                     }
-                    Err(crate::Error::PackageNotFound(_)) => {
+                    Err(PackageErrorKind::NotFound) => {
                         log::error!(
                             "Package not found and offline mode is enabled: {}",
                             pkg
                         );
-                        Err(crate::Error::PackageNotFound(pkg.clone()))
+                        Err(PackageErrorKind::NotFound)
                     }
                     Err(e) => Err(e),
                 };
                 (pkg, result)
-            });
+            }.instrument(span));
         }
 
         let mut results: HashMap<oci::Identifier, InstallInfo> =
@@ -58,8 +60,8 @@ impl PackageManager {
                 Ok((id, Ok(info))) => {
                     results.insert(id, info);
                 }
-                Ok((id, Err(e))) => {
-                    errors.push(PackageError::new(id, PackageErrorKind::Internal(e)));
+                Ok((id, Err(kind))) => {
+                    errors.push(PackageError::new(id, kind));
                 }
                 Err(e) => log::error!("Task panicked: {}", e),
             }
