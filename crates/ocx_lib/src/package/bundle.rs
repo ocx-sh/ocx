@@ -1,98 +1,109 @@
 use std::path::PathBuf;
 
-use crate::{Error, ErrorExt, Result, archive, compression, log};
+use crate::{Result, archive, compression};
 
-#[derive(Debug, Clone)]
-enum BundleSource {
-    Directory(PathBuf),
-    Executable(PathBuf),
-}
-
+/// Builds a compressed tar archive from a directory tree.
+///
+/// The compression algorithm is determined by the file extension of the output
+/// path passed to [`BundleBuilder::create`]: `.tar.xz` selects LZMA (the
+/// default when the filename is inferred), `.tar.gz` / `.tgz` selects Gzip.
+/// The compression level can be overridden with [`BundleBuilder::with_compression`].
 pub struct BundleBuilder {
-    source: BundleSource,
+    source: PathBuf,
     compression: compression::CompressionOptions,
-    temp_dir: Option<tempfile::TempDir>,
 }
 
 impl BundleBuilder {
-    /// Creates a new bundle builder from the given path.
-    /// If the path is a directory, it will be bundled as is.
-    /// If the path is a file, it will be bundled as an executable (placed in a "bin" directory in the bundle).
-    pub fn from(path: impl AsRef<std::path::Path>) -> Self {
-        let path: &std::path::Path = path.as_ref();
-        if path.is_dir() {
-            Self::from_dir(path)
-        } else {
-            Self::from_executable(path)
-        }
-    }
-
-    pub fn from_dir(path: impl AsRef<std::path::Path>) -> Self {
-        let path = path.as_ref().to_path_buf();
+    /// Creates a new `BundleBuilder` for the given source path.
+    ///
+    /// The path is stored as-is; it is not validated until [`BundleBuilder::create`]
+    /// is called.  Passing a file rather than a directory will result in an error
+    /// at that point.
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> Self {
         Self {
-            source: BundleSource::Directory(path),
+            source: path.as_ref().to_path_buf(),
             compression: Default::default(),
-            temp_dir: None,
         }
     }
 
-    pub fn from_executable(path: impl AsRef<std::path::Path>) -> Self {
-        let path = path.as_ref().to_path_buf();
-        Self {
-            source: BundleSource::Executable(path),
-            compression: Default::default(),
-            temp_dir: None,
-        }
-    }
-
+    /// Overrides the compression options (algorithm and level).
+    ///
+    /// When `algorithm` is `None` inside the options, the algorithm is inferred
+    /// from the output file extension at creation time.
     pub fn with_compression(mut self, compression: compression::CompressionOptions) -> Self {
         self.compression = compression;
         self
     }
 
+    /// Creates the archive at `output`.
+    ///
+    /// The compression algorithm is inferred from the output file extension if
+    /// not already set via [`BundleBuilder::with_compression`].
+    /// All files and directories under the source path are added to the archive
+    /// root (no extra top-level directory is inserted).
     pub async fn create(self, output: impl AsRef<std::path::Path>) -> Result<()> {
-        let source = self.source.clone();
-        match source {
-            BundleSource::Directory(dir) => self.create_from_dir(dir, output).await,
-            BundleSource::Executable(exe) => self.create_from_executable(exe, output).await,
-        }
-    }
-
-    async fn create_from_dir(
-        self,
-        dir: impl AsRef<std::path::Path>,
-        output: impl AsRef<std::path::Path>,
-    ) -> Result<()> {
-        let compression = self.compression;
-        let mut archive = archive::Archive::create_with_compression(output, compression).await?;
-        archive.add_dir_all("", dir).await?;
+        let mut archive = archive::Archive::create_with_compression(output, self.compression).await?;
+        archive.add_dir_all("", self.source).await?;
         archive.finish().await?;
         Ok(())
     }
+}
 
-    async fn create_from_executable(
-        mut self,
-        executable: impl AsRef<std::path::Path>,
-        output: impl AsRef<std::path::Path>,
-    ) -> Result<()> {
-        let executable = executable.as_ref();
-        if !executable.is_file() {
-            log::error!("Executable path {} is not a file", executable.display());
-            return Err(Error::Undefined);
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::archive::Archive;
 
-        let temp_dir = self.required_temp_dir()?;
-        let bin_dir = &temp_dir.join("bin");
-        std::fs::create_dir_all(bin_dir).map_to_undefined_error()?;
-        let target_path = bin_dir.join(executable.file_name().map_to_undefined_error()?);
-        std::fs::copy(executable, &target_path).map_to_undefined_error()?;
-        self.create_from_dir(temp_dir, output).await
+    /// Creates a temporary source directory with a known file layout, bundles
+    /// it, then extracts the bundle and asserts the layout is preserved.
+    async fn round_trip(extension: &str) {
+        let src = tempfile::tempdir().unwrap();
+        let bin_dir = src.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("tool"), b"#!/bin/sh\necho hello").unwrap();
+        std::fs::write(src.path().join("README"), b"test package").unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join(format!("pkg.{extension}"));
+
+        BundleBuilder::from_path(src.path())
+            .create(&archive_path)
+            .await
+            .expect("bundle creation failed");
+
+        assert!(archive_path.exists(), "archive file was not created");
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&archive_path, extract_dir.path())
+            .await
+            .expect("extraction failed");
+
+        assert!(extract_dir.path().join("bin/tool").exists(), "bin/tool missing after extraction");
+        assert!(extract_dir.path().join("README").exists(), "README missing after extraction");
+        assert_eq!(
+            std::fs::read(extract_dir.path().join("README")).unwrap(),
+            b"test package",
+        );
     }
 
-    fn required_temp_dir(&mut self) -> Result<std::path::PathBuf> {
-        if self.temp_dir.is_none() {
-            self.temp_dir = Some(tempfile::TempDir::new().map_to_undefined_error()?);
-        }
-        Ok(self.temp_dir.as_ref().unwrap().path().to_path_buf())
+    #[tokio::test]
+    async fn test_round_trip_xz() {
+        round_trip("tar.xz").await;
+    }
+
+    #[tokio::test]
+    async fn test_round_trip_gz() {
+        round_trip("tar.gz").await;
+    }
+
+    #[tokio::test]
+    async fn test_file_path_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"data").unwrap();
+
+        let out = dir.path().join("out.tar.xz");
+        let result = BundleBuilder::from_path(&file).create(&out).await;
+        assert!(result.is_err(), "expected error when source is a file");
     }
 }

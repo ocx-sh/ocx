@@ -59,7 +59,7 @@ impl PackageCreate {
             self.path.display(),
             self.compression_level
         );
-        package::bundle::BundleBuilder::from(&self.path)
+        package::bundle::BundleBuilder::from_path(&self.path)
             .with_compression(compression_options)
             .create(&output)
             .await?;

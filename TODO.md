@@ -21,6 +21,7 @@ These are ordered by dependency — each group should be completed before the ne
 - [ ] User guide `## File Structure` section - explain intend, and reference all cli commands that work on the index.
 - [ ] All new commands should have a secion in the command line reference.
 - [ ] `--current` tag-not-validated caveat: with `--current` the tag portion of the identifier is silently ignored (only registry+repo are used to locate the symlink). The note currently lives in `options/content_path.rs`. Verify it surfaces in the `--help` output of every command that accepts `ContentPath` (`find`, `env`, `shell env`) and decide whether a `log::warn!` at runtime is warranted.
+- [ ] User guide: document `.tar.xz` vs `.tar.gz` trade-off for `ocx package create`. LZMA (`.tar.xz`) compresses significantly better but is slower to compress and decompress; Gzip (`.tar.gz`) is faster for both and may be preferable when network transfer cost is low or decompression speed matters (e.g. CI caches). The algorithm is selected implicitly by the output file extension.
 
 ### N. Spec (side note)
 - [ ] Internal architecture spec: explain OCI-as-package-store design, local store layout, index vs object store, symlink/ref model, Windows notes, future layered storage

@@ -105,6 +105,32 @@ impl CompressionOptions {
     }
 }
 
+mod xz {
+    /// Wraps [`lzma_rust2::XzWriter`] and calls [`lzma_rust2::XzWriter::finish`] on drop.
+    ///
+    /// `XzWriter` does not implement `Drop` itself, so when it is erased to
+    /// `Box<dyn Write>` the XZ stream footer is never written unless `finish()` is
+    /// called explicitly.  This wrapper restores that guarantee.
+    pub struct WriterWrapper<W: std::io::Write>(pub Option<lzma_rust2::XzWriter<W>>);
+
+    impl<W: std::io::Write> std::io::Write for WriterWrapper<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.as_mut().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.as_mut().unwrap().flush()
+        }
+    }
+
+    impl<W: std::io::Write> Drop for WriterWrapper<W> {
+        fn drop(&mut self) {
+            if let Some(w) = self.0.take() {
+                let _ = w.finish(); // best-effort; errors cannot be surfaced from Drop
+            }
+        }
+    }
+}
+
 /// Opens a writer for the given file and compression options.
 /// If the algorithm is not specified, it will be tried to infer it from the file extension of the output path.
 /// The file will be created if it does not exist, and truncated if it does exist.
@@ -127,7 +153,7 @@ pub async fn write_file(
     let writer: Box<dyn std::io::Write> = match algorithm {
         CompressionAlgorithm::Lzma => {
             let writer = lzma_rust2::XzWriter::new(output, level.into()).map_to_undefined_error()?;
-            Box::new(writer)
+            Box::new(xz::WriterWrapper(Some(writer)))
         }
         CompressionAlgorithm::Gzip => {
             let writer = flate2::write::GzEncoder::new(output, level.into());
