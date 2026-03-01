@@ -1,82 +1,61 @@
-## Next Steps
+## Next
 
-These are ordered by dependency — each group should be completed before the next.
+High-impact items that fix existing gaps or unblock future work.
 
-### 1. File structure finish-up ✓
-- [x] Tests for `ObjectStore` (path sharding, content, metadata, metadata_for_content, refs_dir_for_content, list_all)
-- [x] Tests for `IndexStore` (tags, manifest, blob, list_repositories)
-- [x] Tests for `InstallStore` (current, candidate, candidates, symlink kinds)
-
-### 2. Reference manager wiring ✓
-- [x] `task/package/install.rs` — replace `symlink::update()` with `ReferenceManager::link()` for candidate and current symlinks
-- [x] `command/select.rs` — replace `symlink::update()` with `ReferenceManager::link()` for current symlink
-- [x] Add doc note to `symlink::update` and `symlink::create` warning to use `ReferenceManager` for package install symlinks (so back-refs are maintained)
-
-### 3. Reverse operations ✓
-- [x] `deselect` command — remove current symlink via `ReferenceManager::unlink()`; report which packages were deselected
-- [x] `uninstall` command — unlink candidate (and optionally current) via `ReferenceManager::unlink()`; if `refs/` becomes empty, offer to remove object from store
-- [x] `clean` command — remove unreferenced objects from store, with `--dry-run` option to report what would be removed without actually removing it
-
-### 4. Documentation
-- [x] `--current` tag-not-validated caveat: documented in `content_path.rs` clap help (surfaces in `--help` for `find`, `env`, `shell env`); runtime `log::warn!` added in `FindSymlink::find()` when `--current` is used with a tagged identifier.
-- [ ] User guide: document `.tar.xz` vs `.tar.gz` trade-off for `ocx package create`. LZMA (`.tar.xz`) compresses significantly better but is slower to compress and decompress; Gzip (`.tar.gz`) is faster for both and may be preferable when network transfer cost is low or decompression speed matters (e.g. CI caches). The algorithm is selected implicitly by the output file extension.
-
-### N. Spec (side note)
-- [ ] Internal architecture spec: explain OCI-as-package-store design, local store layout, index vs object store, symlink/ref model, Windows notes, future layered storage
-
----
+- Composite errors: batch operations (`uninstall_all`, etc.) should collect errors instead of failing on the first one. Applies to all commands that accept multiple packages.
+- Atomic installs: write to a temporary directory, rename on success. Prevents partial state if the process is interrupted mid-install.
+- Move tasks to library: extract shared command logic (e.g. find-or-install) from `ocx_cli` into `ocx_lib` so the CLI is a thin wrapper and the library is usable standalone.
+- Local installed catalog: `ocx index catalog --installed` (or similar) listing locally installed packages, enabled by `ObjectStore::list_all()`.
+- User guide: document `.tar.xz` vs `.tar.gz` trade-off for `ocx package create` (compression ratio vs speed, network vs CPU).
 
 ## Backlog
 
- - ~~env command~~
- - ~~select command~~
- - ~~retry push, if manifest unknown~~ (fixed: manifest passed through from push_package, no re-fetch)
- - ~~env command path is resolved correct but metadata may be picked from a different install~~
- - ~~file structure refactoring (ObjectStore / IndexStore / InstallStore composite)~~
- - ~~link/unlink (→ done in §2 + §3)~~
- - `link`/`unlink` commands — GC-aware user-managed symlinks: `ocx link <PACKAGE> <PATH>` creates a symlink at an arbitrary user-provided filesystem path pointing to the package's content dir, with a back-reference registered in `refs/` so `clean` does not GC the object; `ocx unlink <PATH>` removes the symlink and its back-ref; deferred until there is a concrete use case (most users are served by `candidates/{tag}` and `current`)
- - move tasks to library with CLI as thin wrapper
- - rework ci: run tests on all platforms, add coverage, run doc tests, etc., support more platforms (windows aarch64, macos, musl, linux arm64 etc.)
- - continously deploy snapshot releases to github releases, and maybe a package registry (github packages, gitlab registry, etc.)
- - support multiple install method for ocx itself, ie. homebrew on macOS, chocolatey/scoop on windows, etc. (maybe via a separate `ocx self` command? or just document it and provide install scripts?)
- - fix github pages base path `/ocx/` that is different to the reverse proxy path `/`. This causes issues with relative links in the documentation and website.
- - process refs, a process can lock a package to prevent deletion, especiall if the program does not require a ref.
- - symlink env/profile, should support common files and maybe search if a specific comment is present? To not add the same again? Or garbage in garbage out?
- - layered storage for cached packages
- - more robust cascade, that is platform-aware (ie. migrating published platform and compute rolling releases relative to the same platform)
- - auto-index of unknown packages
- - target platform specific symlink structure
- - reconsider install lock and atomicity of installs. maybe temporary directory and rename on success, or symlink to a temporary directory and then rename the symlink on success?
- - document required windows developer mode for symlinks
- - refactor oci reference
- - api reports with , seperated tags and platforms
- - composite errors, ie. uninstall_all should not fail on first error, incl. other commands
- - local installed catalog (enabled by `ObjectStore::list_all()`)
- - reverse the index cache. remove the inner cache of indices and provide an `IndexCache` that can be implemented by the caller, so the caller can decide how to cache indices. The documentation should explain the tradeoffs and risks. Ie. if you push to the remote using the remote_client the index may be invalid and does not see newly pushed packages, so the caller may want to invalidate the cache after pushing. Or if the caller is a long-running process it may want to periodically refresh the cache. Or if the caller is a short-lived process it may not want to cache at all.
+### Robustness
+
+- Process refs: a running process can lock a package to prevent GC, even without a persistent symlink ref.
+- Windows: document required developer mode for symlink support.
+
+### Architecture
+
+- Refactor OCI reference types for clarity and consistency.
+- Externalize index cache: replace the internal `RwLock` cache in `RemoteIndex` with a caller-provided `IndexCache` trait, so consumers control invalidation, TTL, and refresh strategy.
+- Layered storage: cached/temporary package layers that sit above the content-addressed store.
+
+### Features
+
+- `link`/`unlink` commands: GC-aware user-managed symlinks at arbitrary paths, with back-refs in `refs/`. Deferred until a concrete use case arises.
+- Shell profile integration: `ocx shell install` writes export blocks directly into `.bashrc`/`.zshrc`/etc. with marker comments for idempotent updates.
+- Auto-index of unknown packages: automatically sync index metadata when a package is referenced but not yet indexed locally.
+- Platform-aware cascade: rolling releases that are aware of published platforms, so updates are computed relative to the same platform.
+- Platform-specific symlink structure: install symlink layout that accounts for platform differences.
+
+### CI & Distribution
+
+- CI rework: multi-platform test matrix (Windows aarch64, macOS, musl, Linux arm64), coverage, doc tests.
+- Snapshot releases: continuously deploy to GitHub Releases (and optionally a package registry).
+- Multiple install methods for ocx itself: Homebrew, Chocolatey/Scoop, install scripts.
+- Fix GitHub Pages base path (`/ocx/`) vs reverse proxy path (`/`) causing broken relative links.
+
+### Developer Experience
+
+- Progress bars for long operations (downloads, extractions).
+- Advanced log settings with layers and filters.
+- API output: support comma-separated tags and platforms in report formatting.
+- Rustdoc: shorten type links (e.g. `ocx_lib::reference_manager::ReferenceManager` → `ReferenceManager`).
 
 ## Long Term
 
- - gitlab steps for consuming ocx packages
- - make the error handling more robust and user-friendly, ie. if a symlink to uninstall is not existent, report that instead of just failing with a broken symlink error
- - bazel rule for consuming ocx packages
- - dependencies and lockfiles
- - multiple layer
- - mirror cli for github/gitlab releases, cargo crates, npm packages, etc.
- - sbom and signature
- - shims & lazy loading
- - infrastructure extensions
-
-## Quality of Life
-
- - advanced log settings with layers and filters
- - progress bars for long operations
- - get urls from manifests not supported atm, breaking SHA?
- - mirrors config
- - homebrew style auto codesigning on macOS, incl. user-friendly error messages when it fails and docs on how to fix it
- - make rustdoc type links less verbose (e.g. `ocx_lib::reference_manager::ReferenceManager` → `ReferenceManager`)
- - modern ui components for website
+- Dependencies and lockfiles.
+- OCI manifest mirror URLs: allow manifests to carry download mirror URLs. Challenge: adding a URL mutates the manifest digest, which breaks lockfile integrity.
+- Mirror CLI: `ocx mirror` to re-publish packages from external sources (GitHub/GitLab releases, Cargo crates, npm).
+- SBOM and signature support.
+- Shims and lazy loading: on-demand download triggered by a shim executable.
+- GitLab CI steps for consuming ocx packages.
+- Bazel rules for consuming ocx packages.
+- Package hooks/plugins: company-specific post-install actions (e.g. setting proxy/mirror env vars, downloading default configs). Declarative, per-package extension points.
+- macOS auto codesigning (Homebrew-style), with user-friendly error messages on failure.
+- Modern UI components for the documentation website.
 
 ## Ideas
 
- - testing packages
-
+- `ocx test`: packages declare test scripts; ocx runs them to verify correct installation.

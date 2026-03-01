@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::oci;
 
-use crate::{api, conventions::platforms_or_default, options, task};
+use crate::{api, conventions::platforms_or_default, options};
 
 /// Resolve one or more packages and print their content directory paths.
 ///
@@ -39,25 +39,13 @@ impl Find {
             context.default_registry(),
         )?;
 
-        let fs = context.file_structure().clone();
+        let manager = context.manager();
 
         let infos = if let Some(kind) = self.content_path.symlink_kind() {
-            task::package::find_symlink::FindSymlink {
-                context: context.clone(),
-                file_structure: fs,
-                kind,
-            }
-            .find_all(identifiers)
-            .await?
+            manager.find_symlink_all(identifiers, kind).await?
         } else {
             let platforms = platforms_or_default(&self.platforms);
-            task::package::find::Find {
-                context: context.clone(),
-                file_structure: fs,
-                platforms,
-            }
-            .find_all(identifiers)
-            .await?
+            manager.find_all(identifiers, platforms).await?
         };
 
         let entries = self

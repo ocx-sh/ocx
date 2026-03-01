@@ -3,7 +3,7 @@ use std::{collections::HashMap, process::ExitCode};
 use clap::Parser;
 use ocx_lib::{oci, package::install_info, reference_manager::ReferenceManager};
 
-use crate::{api, conventions::platforms_or_default, options, task};
+use crate::{api, conventions::platforms_or_default, options};
 
 /// Set the current version of one or more packages.
 ///
@@ -32,15 +32,10 @@ impl Select {
         let rm = ReferenceManager::new(fs.clone());
         let platforms = platforms_or_default(&self.platforms);
 
-        // Find resolves the identifier via the index and verifies the content
-        // exists in the local object store. It does not auto-install.
-        let package_infos = task::package::find::Find {
-            context: context.clone(),
-            file_structure: fs.clone(),
-            platforms,
-        }
-        .find_all(identifiers)
-        .await?;
+        let package_infos = context
+            .manager()
+            .find_all(identifiers, platforms)
+            .await?;
 
         let mut packages = HashMap::with_capacity(package_infos.len());
 

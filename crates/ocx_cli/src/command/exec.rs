@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::{env, log, oci};
 
-use crate::{conventions::*, options, task};
+use crate::{conventions::*, options};
 
 /// Runs installed packages.
 #[derive(Parser)]
@@ -33,13 +33,10 @@ impl Exec {
         let identifier =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
-        let info = task::package::find_or_install::FindOrInstall {
-            context: context.clone(),
-            file_structure: context.file_structure().clone(),
-            platforms,
-        }
-        .find_or_install_all(identifier)
-        .await?;
+        let info = context
+            .manager()
+            .find_or_install_all(identifier, platforms)
+            .await?;
 
         use std::process::Stdio;
         use tokio::process::Command;

@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::{oci, package::metadata::env::exporter::Exporter};
 
-use crate::{api, conventions::*, options, task};
+use crate::{api, conventions::*, options};
 
 /// Print the resolved environment variables for one or more installed packages.
 ///
@@ -38,22 +38,12 @@ impl Env {
         let identifiers =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
+        let manager = context.manager();
+
         let info = if let Some(kind) = self.content_path.symlink_kind() {
-            task::package::find_symlink::FindSymlink {
-                context: context.clone(),
-                file_structure: context.file_structure().clone(),
-                kind,
-            }
-            .find_all(identifiers)
-            .await?
+            manager.find_symlink_all(identifiers, kind).await?
         } else {
-            task::package::find_or_install::FindOrInstall {
-                context: context.clone(),
-                file_structure: context.file_structure().clone(),
-                platforms,
-            }
-            .find_or_install_all(identifiers)
-            .await?
+            manager.find_or_install_all(identifiers, platforms).await?
         };
 
         let mut all_entries: Vec<api::data::env::EnvEntry> = Vec::new();

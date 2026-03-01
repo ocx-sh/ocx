@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::{log, oci, shell};
 
-use crate::{conventions::*, options, task};
+use crate::{conventions::*, options};
 
 /// Prints shell export statements for the environment variables declared by one or more packages.
 ///
@@ -52,22 +52,12 @@ impl ShellEnv {
         let identifiers =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
+        let manager = context.manager();
+
         let package_infos = if let Some(kind) = self.content_path.symlink_kind() {
-            task::package::find_symlink::FindSymlink {
-                context: context.clone(),
-                file_structure: context.file_structure().clone(),
-                kind,
-            }
-            .find_all(identifiers)
-            .await?
+            manager.find_symlink_all(identifiers, kind).await?
         } else {
-            task::package::find::Find {
-                context: context.clone(),
-                platforms,
-                file_structure: context.file_structure().clone(),
-            }
-            .find_all(identifiers)
-            .await?
+            manager.find_all(identifiers, platforms).await?
         };
 
         for package_info in package_infos {
