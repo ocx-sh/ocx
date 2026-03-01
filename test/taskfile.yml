@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  default:
+    desc: Run acceptance tests (builds binary + starts registry automatically)
+    cmd: uv run pytest {{ .CLI_ARGS | default "-v" }}
+
+  quick:
+    desc: Run acceptance tests without rebuilding the binary
+    cmd: uv run pytest --no-build {{ .CLI_ARGS | default "-v" }}
+
+  parallel:
+    desc: Run acceptance tests in parallel
+    cmd: uv run pytest -n auto {{ .CLI_ARGS | default "-v" }}

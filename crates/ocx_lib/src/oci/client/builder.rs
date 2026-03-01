@@ -15,6 +15,14 @@ impl ClientBuilder {
         }
     }
 
+    /// Registries that should be contacted over plain HTTP instead of HTTPS.
+    pub fn plain_http_registries(mut self, registries: Vec<String>) -> Self {
+        if !registries.is_empty() {
+            self.config.protocol = oci::native::ClientProtocol::HttpsExcept(registries);
+        }
+        self
+    }
+
     pub fn build(self) -> Client {
         Client {
             auth: self.auth,

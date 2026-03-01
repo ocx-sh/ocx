@@ -9,5 +9,6 @@
         // Task runner support (run: task <task-name>)
         "task.vscode-task",
         "vue.volar",
+        "donjayamanne.python-extension-pack",
     ]
 }

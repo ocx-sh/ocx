@@ -49,6 +49,24 @@ impl FileStructure {
     }
 }
 
+/// Returns the OCX data root directory.
+///
+/// Resolution order:
+/// 1. `OCX_HOME` environment variable (if set and non-empty)
+/// 2. `~/.ocx` (fallback)
 pub fn default_ocx_root() -> Option<std::path::PathBuf> {
+    if let Ok(home) = std::env::var("OCX_HOME") {
+        if !home.is_empty() {
+            return Some(std::path::PathBuf::from(home));
+        }
+    }
     std::env::home_dir().map(|home| home.join(".ocx"))
+}
+
+use crate::prelude::StringExt;
+
+/// Convert an OCI identifier component (registry, repository, tag) into a
+/// filesystem-safe path segment using [`StringExt::to_relaxed_slug`].
+pub(crate) fn slugify(value: &str) -> String {
+    value.to_relaxed_slug()
 }

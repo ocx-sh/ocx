@@ -4,6 +4,7 @@ pub mod native {
 
     pub use oci_client::client::Client as Client;
     pub use oci_client::client::ClientConfig as ClientConfig;
+    pub use oci_client::client::ClientProtocol as ClientProtocol;
 
     pub use oci_client::Reference as Reference;
     pub use oci_client::manifest::Platform as Platform;
