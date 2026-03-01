@@ -38,9 +38,12 @@ These are ordered by dependency — each group should be completed before the ne
  - ~~link/unlink (→ done in §2 + §3)~~
  - `link`/`unlink` commands — GC-aware user-managed symlinks: `ocx link <PACKAGE> <PATH>` creates a symlink at an arbitrary user-provided filesystem path pointing to the package's content dir, with a back-reference registered in `refs/` so `clean` does not GC the object; `ocx unlink <PATH>` removes the symlink and its back-ref; deferred until there is a concrete use case (most users are served by `candidates/{tag}` and `current`)
  - move tasks to library with CLI as thin wrapper
+ - rework ci: run tests on all platforms, add coverage, run doc tests, etc., support more platforms (windows aarch64, macos, musl, linux arm64 etc.)
+ - continously deploy snapshot releases to github releases, and maybe a package registry (github packages, gitlab registry, etc.)
+ - support multiple install method for ocx itself, ie. homebrew on macOS, chocolatey/scoop on windows, etc. (maybe via a separate `ocx self` command? or just document it and provide install scripts?)
+ - fix github pages base path `/ocx/` that is different to the reverse proxy path `/`. This causes issues with relative links in the documentation and website.
  - process refs, a process can lock a package to prevent deletion, especiall if the program does not require a ref.
- - symlink env/profile
-  - should support common files and maybe search if a specific comment is present? To not add the same again? Or garbage in garbage out?
+ - symlink env/profile, should support common files and maybe search if a specific comment is present? To not add the same again? Or garbage in garbage out?
  - layered storage for cached packages
  - more robust cascade, that is platform-aware (ie. migrating published platform and compute rolling releases relative to the same platform)
  - auto-index of unknown packages

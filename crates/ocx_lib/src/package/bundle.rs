@@ -2,7 +2,11 @@ use std::path::PathBuf;
 
 use crate::{Result, archive, compression};
 
-/// Builds a compressed tar archive from a directory tree.
+/// Builds a compressed tar archive from a file or directory tree.
+///
+/// When the source is a directory, all files and subdirectories are added to
+/// the archive root.  When the source is a single file (e.g. an executable),
+/// it is archived under its filename.
 ///
 /// The compression algorithm is determined by the file extension of the output
 /// path passed to [`BundleBuilder::create`]: `.tar.xz` selects LZMA (the
@@ -16,9 +20,8 @@ pub struct BundleBuilder {
 impl BundleBuilder {
     /// Creates a new `BundleBuilder` for the given source path.
     ///
-    /// The path is stored as-is; it is not validated until [`BundleBuilder::create`]
-    /// is called.  Passing a file rather than a directory will result in an error
-    /// at that point.
+    /// The path may point to a directory or a single file.  It is stored as-is
+    /// and not validated until [`BundleBuilder::create`] is called.
     pub fn from_path(path: impl AsRef<std::path::Path>) -> Self {
         Self {
             source: path.as_ref().to_path_buf(),
@@ -39,11 +42,18 @@ impl BundleBuilder {
     ///
     /// The compression algorithm is inferred from the output file extension if
     /// not already set via [`BundleBuilder::with_compression`].
-    /// All files and directories under the source path are added to the archive
-    /// root (no extra top-level directory is inserted).
+    ///
+    /// If the source is a directory, all files and subdirectories are added to
+    /// the archive root (no extra top-level directory is inserted).  If the
+    /// source is a single file, it is added under its filename.
     pub async fn create(self, output: impl AsRef<std::path::Path>) -> Result<()> {
         let mut archive = archive::Archive::create_with_compression(output, self.compression).await?;
-        archive.add_dir_all("", self.source).await?;
+        if self.source.is_dir() {
+            archive.add_dir_all("", &self.source).await?;
+        } else {
+            let name = self.source.file_name().unwrap_or(self.source.as_os_str());
+            archive.add_file(name, &self.source).await?;
+        }
         archive.finish().await?;
         Ok(())
     }
@@ -97,13 +107,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_file_path_is_rejected() {
+    async fn test_single_file_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("not-a-dir");
-        std::fs::write(&file, b"data").unwrap();
+        let file = dir.path().join("my-tool");
+        std::fs::write(&file, b"#!/bin/sh\necho hello").unwrap();
 
         let out = dir.path().join("out.tar.xz");
-        let result = BundleBuilder::from_path(&file).create(&out).await;
-        assert!(result.is_err(), "expected error when source is a file");
+        BundleBuilder::from_path(&file)
+            .create(&out)
+            .await
+            .expect("bundle creation failed");
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&out, extract_dir.path())
+            .await
+            .expect("extraction failed");
+
+        let extracted = extract_dir.path().join("my-tool");
+        assert!(extracted.exists(), "file missing after extraction");
+        assert_eq!(std::fs::read(&extracted).unwrap(), b"#!/bin/sh\necho hello");
     }
 }
