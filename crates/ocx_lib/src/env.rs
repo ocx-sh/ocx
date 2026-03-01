@@ -59,6 +59,12 @@ impl IntoIterator for Env {
 }
 
 pub fn var(key: impl AsRef<str>) -> Option<String> {
+    #[cfg(test)]
+    match crate::test::env::get_override(key.as_ref()) {
+        Some(Some(val)) => return Some(val),
+        Some(None) => return None,
+        None => {}
+    }
     match std::env::var(key.as_ref()) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,

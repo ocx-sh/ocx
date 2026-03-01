@@ -138,28 +138,24 @@ mod tests {
 
     #[test]
     fn test_get_docker_auth_no_credentials() {
-        test::env::lock!();
+        let _env = test::env::lock();
         let auth = get_docker_auth("nonexistent.registry").unwrap();
         assert!(auth.is_none());
     }
 
     #[test]
     fn test_get_env_auth_basic() {
-        test::env::lock!();
-        unsafe {
-            std::env::set_var("OCX_AUTH_test_registry_TYPE", "basic");
-            std::env::set_var("OCX_AUTH_test_registry_USER", "TEST_USER");
-            std::env::set_var("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
-        }
+        let env = test::env::lock();
+        env.set("OCX_AUTH_test_registry_TYPE", "basic");
+        env.set("OCX_AUTH_test_registry_USER", "TEST_USER");
+        env.set("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
 
         let auth = get_env_auth("test.registry").unwrap();
         assert!(
             matches!(auth, Some(oci::native::Auth::Basic(user, token)) if user == "TEST_USER" && token == "TEST_TOKEN")
         );
 
-        unsafe {
-            std::env::remove_var("OCX_AUTH_test_registry_TYPE");
-        }
+        env.remove("OCX_AUTH_test_registry_TYPE");
 
         let auth = get_env_auth("test.registry").unwrap();
         assert!(
@@ -169,17 +165,14 @@ mod tests {
 
     #[test]
     fn test_get_env_auth_token() {
-        test::env::lock!();
-        unsafe {
-            std::env::set_var("OCX_AUTH_test_registry_TYPE", "token");
-            std::env::set_var("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
-        }
+        let env = test::env::lock();
+        env.set("OCX_AUTH_test_registry_TYPE", "token");
+        env.set("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
+
         let auth = get_env_auth("test.registry").unwrap();
         assert!(matches!(auth, Some(oci::native::Auth::Bearer(token)) if token == "TEST_TOKEN"));
 
-        unsafe {
-            std::env::remove_var("OCX_AUTH_test_registry_TYPE");
-        }
+        env.remove("OCX_AUTH_test_registry_TYPE");
 
         let auth = get_env_auth("test.registry").unwrap();
         assert!(matches!(auth, Some(oci::native::Auth::Bearer(token)) if token == "TEST_TOKEN"));

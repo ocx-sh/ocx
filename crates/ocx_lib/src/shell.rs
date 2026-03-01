@@ -64,7 +64,7 @@ impl Shell {
 
     /// Tries to resolve the shell from the `SHELL` environment variable.
     pub fn from_env() -> Option<Self> {
-        std::env::var("SHELL").ok().and_then(Self::from_path)
+        crate::env::var("SHELL").and_then(Self::from_path)
     }
 
     /// Tries to resolve the shell by inspecting the current and parent process information.
@@ -237,18 +237,12 @@ mod tests {
 
     #[test]
     fn test_from_env() {
-        test::env::lock!();
-        unsafe {
-            std::env::set_var("SHELL", "/bin/bash");
-        }
+        let env = test::env::lock();
+        env.set("SHELL", "/bin/bash");
         assert_eq!(Shell::from_env(), Some(Shell::Bash));
-        unsafe {
-            std::env::set_var("SHELL", "/usr/bin/fish");
-        }
+        env.set("SHELL", "/usr/bin/fish");
         assert_eq!(Shell::from_env(), Some(Shell::Fish));
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
+        env.remove("SHELL");
         assert_eq!(Shell::from_env(), None);
     }
 
