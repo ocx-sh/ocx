@@ -58,6 +58,19 @@ impl Archive {
         output: impl AsRef<std::path::Path>,
         options: Option<ExtractOptions>,
     ) -> Result<()> {
+        /// Map a tar/io error to our error type, walking the full error chain
+        /// so inner causes (e.g. xz decompression errors) are not lost.
+        fn tar_error(e: std::io::Error) -> crate::Error {
+            let mut msg = e.to_string();
+            let mut source = std::error::Error::source(&e);
+            while let Some(cause) = source {
+                msg.push_str(": ");
+                msg.push_str(&cause.to_string());
+                source = cause.source();
+            }
+            crate::Error::UndefinedWithMessage(msg)
+        }
+
         fn extract_impl(
             archive: impl std::io::Read,
             output: impl AsRef<std::path::Path>,
@@ -66,13 +79,13 @@ impl Archive {
             let mut archive = tar::Archive::new(archive);
             archive.set_preserve_permissions(true);
             if options.strip_components == 0 {
-                archive.unpack(output).map_to_undefined_error()?;
+                archive.unpack(output).map_err(tar_error)?;
                 return Ok(());
             }
 
-            for entry in archive.entries().map_to_undefined_error()? {
-                let mut entry = entry.map_to_undefined_error()?;
-                let path = entry.path().map_to_undefined_error()?;
+            for entry in archive.entries().map_err(tar_error)? {
+                let mut entry = entry.map_err(tar_error)?;
+                let path = entry.path().map_err(tar_error)?;
                 let stripped_path = path
                     .iter()
                     .skip(options.strip_components)
@@ -84,7 +97,7 @@ impl Archive {
                 if let Some(parent) = output_path.parent() {
                     std::fs::create_dir_all(parent).map_to_undefined_error()?;
                 }
-                entry.unpack(output_path).map_to_undefined_error()?;
+                entry.unpack(output_path).map_err(tar_error)?;
             }
 
             Ok(())

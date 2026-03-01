@@ -64,6 +64,27 @@ Thus this variable is mostly intended for testing.
 It is recommended to specify the registry explicitly or use [mirrors](../user-guide.md#mirrors).
 :::
 
+### `OCX_HOME` {#ocx-home}
+
+The root directory for all OCX data — the [object store][fs-objects], [local index][fs-index], and [install symlinks][fs-installs].
+If not set, defaults to `~/.ocx`.
+
+```sh
+export OCX_HOME="/opt/ocx"
+```
+
+### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
+
+A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
+
+```sh
+export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
+```
+
+::: warning
+This variable disables TLS for the listed registries. Only use it for local development registries that do not support HTTPS.
+:::
+
 ### `OCX_LOG` {#ocx-log}
 
 The log level for OCX.
@@ -97,3 +118,8 @@ The location of the docker configuration file.
 A fallback for configuring the log level of OCX and its dependencies.
 If [`OCX_LOG`](#ocx-log) is not set, OCX will respect the log level configured via `RUST_LOG`.
 The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
+
+<!-- internal -->
+[fs-objects]: ../user-guide.md#file-structure-objects
+[fs-index]: ../user-guide.md#file-structure-index
+[fs-installs]: ../user-guide.md#file-structure-installs

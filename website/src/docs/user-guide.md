@@ -9,7 +9,7 @@ Most package managers store everything in a single mutable tree — installing a
 
 ### Storage
 
-ocx separates concerns into three independent stores under `~/.ocx/`:
+ocx separates concerns into three independent stores under `~/.ocx/` (configurable via [`OCX_HOME`][env-ocx-home]):
 
 <Tree>
   <Node name="~/.ocx/" icon="🏠" open>
@@ -26,6 +26,10 @@ ocx separates concerns into three independent stores under `~/.ocx/`:
 </Tree>
 
 Each store has a single responsibility. Upgrading a package updates symlinks in `installs/` and may add a new object to `objects/`, but never touches `index/`. The stores can be understood — and reasoned about — one at a time.
+
+::: details Path component encoding
+Registry names, repository names, and tags that appear as directory or file names in the stores are <Tooltip term="slugified">Characters outside `[a-zA-Z0-9._-]` are replaced with underscores. For example, `localhost:5000` becomes `localhost_5000`. This prevents the POSIX PATH separator (`:`) from corrupting environment variables that embed these paths.</Tooltip> before they become filesystem path components. Dots and hyphens are preserved so that domain names (e.g. `ghcr.io`) and semantic versions (e.g. `3.28.1`) remain readable on disk.
+:::
 
 #### Objects {#file-structure-objects}
 
@@ -430,6 +434,7 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 [arg-remote]: ./reference/command-line.md#arg-remote
 
 <!-- environment -->
+[env-ocx-home]: ./reference/environment.md#ocx-home
 [env-auth-type]: ./reference/environment.md#ocx-auth-registry-type
 [env-auth-user]: ./reference/environment.md#ocx-auth-registry-user
 [env-auth-token]: ./reference/environment.md#ocx-auth-registry-token

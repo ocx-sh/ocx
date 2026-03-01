@@ -28,10 +28,18 @@ impl Context {
 
         let api = api::Api::new(options.format);
 
+        let plain_http_registries: Vec<String> = env::string("OCX_INSECURE_REGISTRIES", String::new())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         let (remote_client, remote_index) = if options.offline {
             (None, None)
         } else {
-            let client = oci::ClientBuilder::new().build();
+            let client = oci::ClientBuilder::new()
+                .plain_http_registries(plain_http_registries)
+                .build();
             (
                 Some(client.clone()),
                 Some(index::RemoteIndex::new(index::RemoteConfig { client })),

@@ -35,7 +35,7 @@ impl IndexStore {
     /// Path to the tag-to-digest map JSON file for the given identifier.
     pub fn tags(&self, identifier: &oci::Identifier) -> PathBuf {
         self.root
-            .join(identifier.registry())
+            .join(super::slugify(identifier.registry()))
             .join("tags")
             .join(identifier.repository())
             .with_added_extension("json")
@@ -49,7 +49,7 @@ impl IndexStore {
     /// Path to a raw blob file (no extension) for the given identifier and digest.
     pub fn blob(&self, identifier: &oci::Identifier, digest: &oci::Digest) -> PathBuf {
         self.root
-            .join(identifier.registry())
+            .join(super::slugify(identifier.registry()))
             .join("objects")
             .join(Self::digest_path(digest))
     }
@@ -71,7 +71,7 @@ impl IndexStore {
     ///
     /// Returns an empty vec if the directory does not exist.
     pub fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
-        let tags_dir = self.root.join(registry).join("tags");
+        let tags_dir = self.root.join(super::slugify(registry)).join("tags");
         if !tags_dir.exists() {
             return Ok(Vec::new());
         }

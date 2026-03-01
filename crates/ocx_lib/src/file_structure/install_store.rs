@@ -41,7 +41,7 @@ impl InstallStore {
     /// Returns the base directory for all symlinks belonging to the given identifier.
     fn base(&self, identifier: &oci::Identifier) -> PathBuf {
         self.root
-            .join(identifier.reference.registry())
+            .join(super::slugify(identifier.reference.registry()))
             .join(identifier.reference.repository())
     }
 
