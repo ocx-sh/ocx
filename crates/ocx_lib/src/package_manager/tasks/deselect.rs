@@ -23,7 +23,7 @@ impl PackageManager {
         let rm = ReferenceManager::new(self.file_structure().clone());
         let current_path = self.file_structure().installs.current(package);
 
-        if current_path.is_symlink() {
+        if crate::symlink::is_link(&current_path) {
             rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
         } else {
             log::warn!(
