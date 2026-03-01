@@ -27,7 +27,7 @@ impl PackageManager {
         let rm = ReferenceManager::new(self.file_structure().clone());
         let candidate_path = self.file_structure().installs.candidate(package);
 
-        let content_path = if candidate_path.is_symlink() {
+        let content_path = if crate::symlink::is_link(&candidate_path) {
             let path = std::fs::read_link(&candidate_path).ok();
             log::trace!("Candidate content path: {:?}", path);
             rm.unlink(&candidate_path).map_err(PackageErrorKind::Internal)?;
@@ -43,7 +43,7 @@ impl PackageManager {
 
         if deselect {
             let current_path = self.file_structure().installs.current(package);
-            if current_path.is_symlink() {
+            if crate::symlink::is_link(&current_path) {
                 rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
             } else {
                 log::debug!(

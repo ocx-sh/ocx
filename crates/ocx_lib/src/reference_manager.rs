@@ -53,7 +53,7 @@ impl ReferenceManager {
     /// back-reference is removed before the new one is created (re-link).  If it
     /// already points to `content_path`, the call is a no-op.
     pub fn link(&self, forward_path: &Path, content_path: &Path) -> Result<()> {
-        if forward_path.is_symlink() {
+        if symlink::is_link(forward_path) {
             if let Ok(current_target) = std::fs::read_link(forward_path) {
                 if current_target == content_path {
                     log::trace!(
@@ -91,7 +91,7 @@ impl ReferenceManager {
                 .map_err(|e| Error::InternalFile(parent.to_path_buf(), e))?;
         }
         // Idempotent: recreate if a stale back-ref already exists at this path.
-        if ref_path.is_symlink() {
+        if symlink::is_link(&ref_path) {
             log::trace!("Replacing stale back-ref '{}'.", ref_path.display());
             symlink::remove(&ref_path)?;
         }
@@ -107,7 +107,7 @@ impl ReferenceManager {
     /// a stale back-reference is tolerated — the broken ref will be reported by
     /// [`broken_refs`] and can be cleaned up separately.
     pub fn unlink(&self, forward_path: &Path) -> Result<()> {
-        if !forward_path.is_symlink() {
+        if !symlink::is_link(forward_path) {
             log::trace!("unlink '{}': path is not a symlink, skipping.", forward_path.display());
             return Ok(());
         }
@@ -166,7 +166,7 @@ impl ReferenceManager {
 
         for entry in entries.flatten() {
             let back_ref = entry.path();
-            if !back_ref.is_symlink() {
+            if !symlink::is_link(&back_ref) {
                 continue;
             }
             let Ok(forward_path) = std::fs::read_link(&back_ref) else {
@@ -174,7 +174,7 @@ impl ReferenceManager {
                 broken.push(back_ref);
                 continue;
             };
-            if !forward_path.is_symlink() {
+            if !symlink::is_link(&forward_path) {
                 // Forward symlink no longer exists.
                 log::trace!(
                     "Broken back-ref '{}': forward symlink '{}' no longer exists.",
@@ -279,7 +279,7 @@ mod tests {
 
         assert_eq!(std::fs::read_link(&forward).unwrap(), content);
         let back_ref = back_ref_for(&content, &forward);
-        assert!(back_ref.is_symlink());
+        assert!(crate::symlink::is_link(&back_ref));
         assert_eq!(std::fs::read_link(&back_ref).unwrap(), forward);
     }
 
@@ -309,7 +309,7 @@ mod tests {
 
         assert_eq!(std::fs::read_link(&forward).unwrap(), content_b);
         // New back-ref present.
-        assert!(back_ref_for(&content_b, &forward).is_symlink());
+        assert!(crate::symlink::is_link(&back_ref_for(&content_b, &forward)));
         // Old back-ref removed.
         assert!(!back_ref_for(&content_a, &forward).exists());
     }
@@ -361,11 +361,11 @@ mod tests {
 
         rm.link(&forward, &content).unwrap();
         let back_ref = back_ref_for(&content, &forward);
-        assert!(back_ref.is_symlink());
+        assert!(crate::symlink::is_link(&back_ref));
 
         rm.unlink(&forward).unwrap();
 
-        assert!(!forward.is_symlink());
+        assert!(!crate::symlink::is_link(&forward));
         assert!(!back_ref.exists());
     }
 
@@ -379,7 +379,7 @@ mod tests {
         crate::symlink::create(&gone, &forward).unwrap();
 
         rm.unlink(&forward).unwrap();
-        assert!(!forward.is_symlink());
+        assert!(!crate::symlink::is_link(&forward));
     }
 
     // ── broken_refs ───────────────────────────────────────────────────────────
