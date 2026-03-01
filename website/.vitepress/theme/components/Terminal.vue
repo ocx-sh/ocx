@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, useSlots } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick, useSlots } from 'vue'
 import 'asciinema-player/dist/bundle/asciinema-player.css'
 
 const props = withDefaults(defineProps<{
@@ -21,12 +21,25 @@ const props = withDefaults(defineProps<{
   loop?: boolean
   /** How the player scales: 'width', 'height', 'both', or 'none'. */
   fit?: 'width' | 'height' | 'both' | 'none'
+  /** Start with the terminal collapsed (click title bar to expand). */
+  collapsed?: boolean
 }>(), {
   speed: 1,
   idleTimeLimit: 2,
   loop: false,
   fit: 'width',
+  collapsed: false,
 })
+
+// ── Collapse state ────────────────────────────────────────────────────── //
+
+const isOpen = ref(!props.collapsed)
+const isCollapsible = computed(() => props.collapsed)
+
+function toggle() {
+  if (!isCollapsible.value) return
+  isOpen.value = !isOpen.value
+}
 
 // ── VNode introspection ────────────────────────────────────────────────── //
 
@@ -88,16 +101,25 @@ const castData = computed(() => {
 
 // ── Player lifecycle (client-side only) ────────────────────────────────── //
 
+const rootEl = ref<HTMLElement | null>(null)
 const containerEl = ref<HTMLElement | null>(null)
+const playerReady = ref(!props.collapsed)
 let player: any = null
+let playerInitialized = false
 
-onMounted(async () => {
-  if (!containerEl.value) return
+async function initPlayer(autoPlay: boolean) {
+  if (playerInitialized || !containerEl.value) return
 
   const AsciinemaPlayer = await import('asciinema-player')
 
-  const src = props.src ?? { data: castData.value }
-  const autoPlay = props.autoPlay ?? !props.src
+  // Pre-fetch cast file so the player has dimensions immediately (no layout flash).
+  let src: string | { data: string | null }
+  if (props.src) {
+    const res = await fetch(props.src)
+    src = { data: await res.text() }
+  } else {
+    src = { data: castData.value }
+  }
 
   player = AsciinemaPlayer.create(src, containerEl.value, {
     ...(props.cols != null && { cols: props.cols }),
@@ -110,6 +132,32 @@ onMounted(async () => {
     theme: 'vitepress',
     terminalFontFamily: 'var(--vp-font-family-mono)',
   })
+  playerInitialized = true
+}
+
+onMounted(() => {
+  if (isOpen.value) {
+    const autoPlay = props.autoPlay ?? !props.src
+    initPlayer(autoPlay)
+  }
+})
+
+watch(isOpen, async (open: boolean) => {
+  if (open) {
+    playerReady.value = false
+    await nextTick()
+    if (!playerInitialized) {
+      await initPlayer(true)
+    } else if (player) {
+      player.play()
+    }
+    await nextTick()
+    playerReady.value = true
+    rootEl.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  } else if (player) {
+    player.pause()
+    player.seek(0)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -119,14 +167,15 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="vp-terminal">
-    <div class="vp-terminal-chrome">
+  <div ref="rootEl" class="vp-terminal" :class="{ 'vp-terminal--collapsible': isCollapsible, 'vp-terminal--closed': !isOpen }">
+    <div class="vp-terminal-chrome" @click="toggle">
       <span class="vp-terminal-dot vp-terminal-dot--red" />
       <span class="vp-terminal-dot vp-terminal-dot--yellow" />
       <span class="vp-terminal-dot vp-terminal-dot--green" />
       <span v-if="title" class="vp-terminal-title">{{ title }}</span>
+      <span v-if="isCollapsible" class="vp-terminal-chevron" :class="{ 'vp-terminal-chevron--open': isOpen }" />
     </div>
-    <div ref="containerEl" class="vp-terminal-player" />
+    <div v-show="isOpen" ref="containerEl" class="vp-terminal-player" :class="{ 'vp-terminal-player--ready': playerReady }" />
   </div>
 </template>
 
@@ -147,6 +196,19 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--vp-c-border);
 }
 
+.vp-terminal--collapsible .vp-terminal-chrome {
+  cursor: pointer;
+  user-select: none;
+}
+
+.vp-terminal--collapsible .vp-terminal-chrome:hover {
+  background: var(--vp-c-default-soft);
+}
+
+.vp-terminal--closed .vp-terminal-chrome {
+  border-bottom: none;
+}
+
 .vp-terminal-dot {
   width: 10px;
   height: 10px;
@@ -161,10 +223,50 @@ onBeforeUnmount(() => {
 .vp-terminal-title {
   flex: 1;
   text-align: center;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--vp-c-text-3);
   font-family: var(--vp-font-family-mono);
   margin-right: 48px;
+}
+
+.vp-terminal--collapsible .vp-terminal-title {
+  margin-right: 0;
+  color: var(--vp-c-brand-1);
+  font-weight: 500;
+}
+
+.vp-terminal-chevron {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  position: relative;
+  transition: transform 0.2s ease;
+  transform: rotate(0deg);
+}
+
+.vp-terminal-chevron::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 3px;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--vp-c-yellow-1);
+  border-bottom: 2px solid var(--vp-c-yellow-1);
+  transform: rotate(-45deg);
+}
+
+.vp-terminal-chevron--open {
+  transform: rotate(90deg);
+}
+
+.vp-terminal-player {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.vp-terminal-player--ready {
+  opacity: 1;
 }
 
 .vp-terminal-player :deep(.ap-wrapper) {

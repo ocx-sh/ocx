@@ -227,6 +227,7 @@ simultaneously (multi-line output).
 | `idle-time-limit` | `number` | `2` | Compress pauses longer than this (seconds) |
 | `loop` | `boolean` | `false` | Loop playback |
 | `fit` | `'width' \| 'height' \| 'both' \| 'none'` | `'width'` | How the player scales |
+| `collapsed` | `boolean` | `false` | Start collapsed; click title bar to expand (auto-plays on open) |
 
 **`<Frame>` attributes**
 

@@ -54,6 +54,20 @@ class CastRecording:
             ]))
         return "\n".join(lines) + "\n"
 
+    def auto_height(self, padding: int = 2, minimum: int = 5) -> CastRecording:
+        """Set height based on the actual number of lines in the recording."""
+        max_y = 0
+        y = 0
+        for event in self.events:
+            if event.event_type != "o":
+                continue
+            for char in event.data:
+                if char == "\n":
+                    y += 1
+                    max_y = max(max_y, y)
+        self.height = max(max_y + padding, minimum)
+        return self
+
     def sanitize(self, replacements: dict[str, str]) -> CastRecording:
         """Replace literal strings in all event data (paths, registry names, etc.)."""
         for event in self.events:
