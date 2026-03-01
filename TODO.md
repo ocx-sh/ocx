@@ -51,6 +51,7 @@ These are ordered by dependency — each group should be completed before the ne
  - api reports with , seperated tags and platforms
  - composite errors, ie. uninstall_all should not fail on first error, incl. other commands
  - local installed catalog (enabled by `ObjectStore::list_all()`)
+ - reverse the index cache. remove the inner cache of indices and provide an `IndexCache` that can be implemented by the caller, so the caller can decide how to cache indices. The documentation should explain the tradeoffs and risks. Ie. if you push to the remote using the remote_client the index may be invalid and does not see newly pushed packages, so the caller may want to invalidate the cache after pushing. Or if the caller is a long-running process it may want to periodically refresh the cache. Or if the caller is a short-lived process it may not want to cache at all.
 
 ## Long Term
 
