@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::task::JoinSet;
 use tracing::{info_span, Instrument};
@@ -83,6 +83,7 @@ impl PackageManager {
             }.instrument(span));
         }
 
+        let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
         let mut results: HashMap<oci::Identifier, InstallInfo> =
             HashMap::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
@@ -90,13 +91,21 @@ impl PackageManager {
         while let Some(join_result) = tasks.join_next().await {
             match join_result {
                 Ok((id, Ok(info))) => {
+                    pending.remove(&id);
                     results.insert(id, info);
                 }
                 Ok((id, Err(kind))) => {
+                    pending.remove(&id);
                     errors.push(PackageError::new(id, kind));
                 }
                 Err(e) => log::error!("Task panicked: {}", e),
             }
+        }
+
+        for id in pending {
+            errors.push(PackageError::new(id, PackageErrorKind::Internal(
+                crate::Error::UndefinedWithMessage("task panicked unexpectedly".into()),
+            )));
         }
 
         // Preserve input order.
