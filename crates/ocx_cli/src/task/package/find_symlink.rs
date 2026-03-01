@@ -1,4 +1,8 @@
-use ocx_lib::{Error, Result, file_structure, log, oci, package::{install_info, metadata}, prelude::SerdeExt};
+use ocx_lib::{
+    Error, Result, file_structure, log, oci,
+    package::{install_info, metadata},
+    prelude::SerdeExt,
+};
 
 pub use ocx_lib::file_structure::SymlinkKind;
 
@@ -29,6 +33,12 @@ impl FindSymlink {
             return Err(Error::PackageSymlinkRequiresTag(package.clone()));
         }
 
+        if self.kind == SymlinkKind::Current {
+            if let Some(tag) = package.tag() {
+                log::warn!("--current ignores the tag '{tag}' of '{package}'");
+            }
+        }
+
         let symlink_path = self.file_structure.installs.symlink(package, self.kind);
 
         if !symlink_path.exists() {
@@ -37,7 +47,12 @@ impl FindSymlink {
 
         let metadata_path = self.file_structure.objects.metadata_for_content(&symlink_path)?;
         let metadata = metadata::Metadata::read_json_from_path(&metadata_path)?;
-        log::debug!("Resolved '{}' via {:?} symlink at '{}'", package, self.kind, symlink_path.display());
+        log::debug!(
+            "Resolved '{}' via {:?} symlink at '{}'",
+            package,
+            self.kind,
+            symlink_path.display()
+        );
 
         Ok(install_info::InstallInfo {
             identifier: package.clone(),
