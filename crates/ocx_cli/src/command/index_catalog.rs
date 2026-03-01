@@ -28,7 +28,13 @@ impl IndexCatalog {
             let identifier = oci::Identifier::new_registry(repository.clone(), registry.clone());
             let context = context.clone();
             join_set.spawn(async move {
-                let tags = context.default_index().list_tags(&identifier).await?;
+                let tags = match context.default_index().list_tags(&identifier).await? {
+                    Some(tags) => tags,
+                    None => {
+                        log::warn!("No tags found for repository '{}'.", identifier);
+                        Vec::new()
+                    }
+                };
                 Ok((identifier.repository().into(), tags))
             });
         }

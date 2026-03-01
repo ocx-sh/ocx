@@ -1,7 +1,6 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{Error, log, reference_manager::ReferenceManager};
 
 use crate::{api, options};
 
@@ -24,28 +23,7 @@ impl Deselect {
             context.default_registry(),
         )?;
 
-        let fs = context.file_structure().clone();
-        let rm = ReferenceManager::new(fs.clone());
-
-        for identifier in &identifiers {
-            log::debug!("Deselecting package '{}'.", identifier);
-
-            if identifier.digest().is_some() {
-                return Err(Error::PackageSymlinkRequiresTag(identifier.clone()).into());
-            }
-
-            let current_path = fs.installs.current(identifier);
-
-            if current_path.is_symlink() {
-                rm.unlink(&current_path)?;
-            } else {
-                log::warn!(
-                    "Package '{}' has no current symlink at '{}' — nothing to deselect.",
-                    identifier,
-                    current_path.display(),
-                );
-            }
-        }
+        context.manager().deselect_all(&identifiers)?;
 
         context.api().report_removed(api::data::removed::Removed::new(
             self.packages.iter().map(|p| p.raw().to_string()).collect(),

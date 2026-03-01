@@ -12,6 +12,18 @@ mod index_impl;
 mod local_index;
 mod remote_index;
 
+/// The result of a platform-aware package selection.
+pub enum SelectResult {
+    /// Exactly one candidate matched.
+    Found(oci::Identifier),
+    /// Multiple candidates matched — the caller must decide how to handle the
+    /// ambiguity (e.g. ask the user or report an error).
+    Ambiguous(Vec<oci::Identifier>),
+    /// No candidates matched the requested platforms (or the package was not
+    /// found in the index at all).
+    NotFound,
+}
+
 /// Note, some operations are cached and the cache is shared between clones of the index.
 /// This means that if you clone the index, they will share the same cache and benefit from each other's cached data.
 /// On the other hand, if you have a long-running index instance, you may want to periodically clear the cache to avoid memory bloat and ensure that you always have the latest data.
@@ -35,36 +47,47 @@ impl Index {
 
     /// List all repositories available in the given registry.
     pub async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
+        log::debug!("Listing repositories for registry '{}'.", registry);
         self.inner.list_repositories(registry).await
     }
 
     /// List all tags available for the given identifier.
-    pub async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Vec<String>> {
-        self.inner.list_tags(identifier).await.map(|v| v.sorted())
+    ///
+    /// Returns `None` when the package is not known to this index.
+    pub async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
+        log::debug!("Listing tags for '{}'.", identifier);
+        self.inner.list_tags(identifier).await.map(|opt| opt.map(|v| v.sorted()))
     }
 
-    pub async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<(oci::Digest, oci::Manifest)> {
+    /// Fetch the manifest for the given identifier.
+    ///
+    /// Returns `None` when the manifest is not available.
+    pub async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         log::trace!("Fetching candidates for identifier '{}'.", identifier);
         self.inner.fetch_manifest(identifier).await
     }
 
     /// Find the manifest digest for the given identifier and tag.
-    pub async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<oci::Digest> {
+    ///
+    /// Returns `None` when the identifier cannot be resolved.
+    pub async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
         self.inner.fetch_manifest_digest(identifier).await
     }
 
     pub async fn fetch_candidates(
         &self,
         identifier: &oci::Identifier,
-    ) -> Result<Vec<(oci::Identifier, oci::Platform)>> {
-        let (digest, manifest) = self.fetch_manifest(identifier).await?;
+    ) -> Result<Option<Vec<(oci::Identifier, oci::Platform)>>> {
+        let Some((digest, manifest)) = self.fetch_manifest(identifier).await? else {
+            return Ok(None);
+        };
         log::trace!(
             "Fetched manifest for identifier '{}'. Determining candidates based on manifest type.",
             identifier
         );
 
         match manifest {
-            oci::Manifest::Image(_) => Ok(vec![(identifier.clone_with_digest(digest), oci::Platform::default())]),
+            oci::Manifest::Image(_) => Ok(Some(vec![(identifier.clone_with_digest(digest), oci::Platform::default())])),
             oci::Manifest::ImageIndex(index) => {
                 let mut candidates = Vec::with_capacity(index.manifests.len());
                 for manifest in index.manifests {
@@ -81,7 +104,7 @@ impl Index {
                     candidates.len(),
                     identifier
                 );
-                Ok(candidates)
+                Ok(Some(candidates))
             }
         }
     }
@@ -90,8 +113,13 @@ impl Index {
         &self,
         identifier: &oci::Identifier,
         platforms: Vec<oci::Platform>,
-    ) -> Result<Option<oci::Identifier>> {
-        let candidates = self.fetch_candidates(identifier).await?;
+    ) -> Result<SelectResult> {
+        log::debug!("Selecting package '{}' for platforms {:?}.", identifier, platforms);
+
+        let Some(candidates) = self.fetch_candidates(identifier).await? else {
+            log::debug!("No candidates found for '{}'.", identifier);
+            return Ok(SelectResult::NotFound);
+        };
 
         let mut matching_candidates = Vec::new();
         for platform in &platforms {
@@ -105,15 +133,27 @@ impl Index {
             }
         }
 
-        let first_candidate = match matching_candidates.first() {
-            Some(candidate) => candidate,
-            None => return Ok(None),
+        let result = match matching_candidates.len() {
+            0 => SelectResult::NotFound,
+            1 => SelectResult::Found(matching_candidates.into_iter().next().unwrap()),
+            _ => SelectResult::Ambiguous(matching_candidates),
         };
 
-        if matching_candidates.len() > 1 {
-            return Err(Error::PackageSelectionAmbiguous(matching_candidates));
+        match &result {
+            SelectResult::Found(id) => log::debug!("Selected '{}'.", id),
+            SelectResult::Ambiguous(ids) => log::debug!(
+                "Selection ambiguous for '{}': {} candidates.",
+                identifier,
+                ids.len()
+            ),
+            SelectResult::NotFound => log::debug!(
+                "No matching platform for '{}' among {} candidate(s).",
+                identifier,
+                candidates.len()
+            ),
         }
-        Ok(Some(first_candidate.clone()))
+
+        Ok(result)
     }
 }
 

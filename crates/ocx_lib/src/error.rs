@@ -17,13 +17,6 @@ pub enum Error {
 
     PackageVersionInvalid(String),
     PackageDigestInvalid(String),
-    PackageNotFound(oci::Identifier),
-    PackageSelectionAmbiguous(Vec<oci::Identifier>),
-    /// A symlink-based path was requested but the identifier carries a digest,
-    /// which already uniquely addresses content and cannot be indirected through a symlink.
-    PackageSymlinkRequiresTag(oci::Identifier),
-    /// The requested symlink does not exist for the given package.
-    PackageSymlinkNotFound(oci::Identifier, crate::file_structure::SymlinkKind),
 
     InternalFile(std::path::PathBuf, std::io::Error),
     InternalPathInvalid(std::path::PathBuf),
@@ -99,33 +92,6 @@ impl std::fmt::Display for Error {
 
             Error::PackageVersionInvalid(version) => write!(f, "Invalid package version: {}", version),
             Error::PackageDigestInvalid(digest) => write!(f, "Invalid package digest: {}", digest),
-            Error::PackageNotFound(identifier) => write!(f, "Package not found: {}", identifier),
-            Error::PackageSelectionAmbiguous(candidates) => write!(
-                f,
-                "Multiple candidates found for package selection: {}",
-                candidates
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Error::PackageSymlinkRequiresTag(identifier) => write!(
-                f,
-                "Symlink path resolution requires a tag identifier, but '{}' contains a digest component.",
-                identifier,
-            ),
-            Error::PackageSymlinkNotFound(identifier, kind) => match kind {
-                crate::file_structure::SymlinkKind::Candidate => write!(
-                    f,
-                    "Package '{}' has no installed candidate — the package must be installed first.",
-                    identifier,
-                ),
-                crate::file_structure::SymlinkKind::Current => write!(
-                    f,
-                    "Package '{}' has no selected version — a version of the package must be selected first.",
-                    identifier,
-                ),
-            },
 
             Error::InternalFile(path, error) => write!(f, "Internal file error for '{}': {}", path.display(), error),
             Error::InternalPathInvalid(path) => write!(f, "Path '{}' has an unexpected structure", path.display()),

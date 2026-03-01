@@ -17,36 +17,32 @@ impl LogSettings {
     }
 
     pub fn init(self) -> anyhow::Result<()> {
-        use tracing_subscriber::{util::SubscriberInitExt, layer::SubscriberExt};
-        tracing_subscriber::registry()
-                .with(self.console_layer())
-                .init();
-        Ok(())
-    }
+        use tracing_subscriber::{util::SubscriberInitExt, layer::SubscriberExt, prelude::*};
 
-    fn console_layer<S>(&self) -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>
-    where
-        S: tracing::Subscriber,
-        for<'a> S: tracing_subscriber::registry::LookupSpan<'a>,
-    {
-        use tracing_subscriber::prelude::*;
+        let indicatif_layer = tracing_indicatif::IndicatifLayer::new();
+        let writer = indicatif_layer.get_stderr_writer();
 
-        let subscriber = tracing_subscriber::fmt::layer().compact();
-        let subscriber = if self.console_events {
-            subscriber.with_span_events(
-                tracing_subscriber::fmt::format::FmtSpan::NEW | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
-            )
-        } else {
-            subscriber
-        };
-
-        Box::new(
+        let fmt_layer = {
+            let subscriber = tracing_subscriber::fmt::layer().compact();
+            let subscriber = if self.console_events {
+                subscriber.with_span_events(
+                    tracing_subscriber::fmt::format::FmtSpan::NEW | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+                )
+            } else {
+                subscriber
+            };
             subscriber
                 .with_file(false)
                 .with_target(false)
-                .with_writer(std::io::stderr)
-                .with_filter(self.common_filter("CONSOLE", self.console_filter.iter())),
-        )
+                .with_writer(writer)
+                .with_filter(self.common_filter("CONSOLE", self.console_filter.iter()))
+        };
+
+        tracing_subscriber::registry()
+            .with(indicatif_layer)
+            .with(fmt_layer)
+            .init();
+        Ok(())
     }
 
     fn common_filter<'a>(

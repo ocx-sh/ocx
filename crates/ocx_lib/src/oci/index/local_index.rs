@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::{Error, Result, file_structure::IndexStore, log, oci, prelude::*};
+use crate::{Result, file_structure::IndexStore, log, oci, prelude::*};
 
 use super::index_impl;
 
@@ -27,14 +27,18 @@ impl LocalIndex {
     /// Updates the local index with the tags and manifests from the given index for the specified identifier.
     /// Usually you would want to call this method with a `RemoteIndex` to sync the local index with the remote registry.
     pub async fn update(&mut self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
-        let other_tags = index.list_tags(identifier).await?;
-        let mut this_tags = self.get_tags(identifier).await.unwrap_or_default();
+        let other_tags = index.list_tags(identifier).await?.unwrap_or_default();
+        let mut this_tags = self.get_tags(identifier).await?.unwrap_or_default();
 
         for tag in other_tags {
             log::info!("Updating tag '{}' for identifier '{}'.", tag, identifier);
             let identifier = identifier.clone_with_tag(&tag);
+
             if let Some(this_digest) = this_tags.get(&tag) {
-                let other_digest = index.fetch_manifest_digest(&identifier).await?;
+                let Some(other_digest) = index.fetch_manifest_digest(&identifier).await? else {
+                    log::debug!("Remote has no digest for tag '{}' — skipping.", tag);
+                    continue;
+                };
 
                 if this_digest == &other_digest {
                     log::debug!(
@@ -49,7 +53,10 @@ impl LocalIndex {
                 self.update_manifest(index, &identifier, &other_digest).await?;
                 this_tags.insert(tag, other_digest);
             } else {
-                let digest = index.fetch_manifest_digest(&identifier).await?;
+                let Some(digest) = index.fetch_manifest_digest(&identifier).await? else {
+                    log::debug!("Remote has no digest for tag '{}' — skipping.", tag);
+                    continue;
+                };
                 let path = self.index_store.manifest(&identifier, &digest);
 
                 if !path.exists() {
@@ -76,7 +83,10 @@ impl LocalIndex {
         identifier: &oci::Identifier,
         digest: &oci::Digest,
     ) -> Result<()> {
-        let (_, manifest) = index.fetch_manifest(identifier).await?;
+        let (_, manifest) = index.fetch_manifest(identifier).await?
+            .ok_or_else(|| crate::Error::UndefinedWithMessage(
+                format!("Remote manifest not found for '{identifier}' during index update"),
+            ))?;
         let path = self.index_store.manifest(identifier, digest);
         manifest.write_json_to_path(path)?;
 
@@ -84,7 +94,10 @@ impl LocalIndex {
             for manifest in image_index.manifests {
                 let digest = manifest.digest.clone().try_into()?;
                 let identifier = identifier.clone_with_digest(digest);
-                let (digest, manifest) = index.fetch_manifest(&identifier).await?;
+                let (digest, manifest) = index.fetch_manifest(&identifier).await?
+                    .ok_or_else(|| crate::Error::UndefinedWithMessage(
+                        format!("Remote platform manifest not found for '{identifier}' during index update"),
+                    ))?;
                 let path = self.index_store.manifest(&identifier, &digest);
                 manifest.write_json_to_path(path)?;
             }
@@ -93,11 +106,11 @@ impl LocalIndex {
         Ok(())
     }
 
-    async fn get_tags(&self, identifier: &oci::Identifier) -> Result<HashMap<String, oci::Digest>> {
+    async fn get_tags(&self, identifier: &oci::Identifier) -> Result<Option<HashMap<String, oci::Digest>>> {
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get_tags(identifier).await {
-                return Ok(cached);
+                return Ok(Some(cached));
             }
         }
 
@@ -108,7 +121,7 @@ impl LocalIndex {
                 tags_path.display(),
                 identifier
             );
-            return Err(Error::PackageNotFound(identifier.clone()));
+            return Ok(None);
         }
 
         let tags = HashMap::<String, oci::Digest>::read_json_from_path(tags_path)?;
@@ -117,10 +130,10 @@ impl LocalIndex {
             cache.set_tags(identifier.clone(), tags.clone()).await;
         }
 
-        Ok(tags)
+        Ok(Some(tags))
     }
 
-    async fn get_manifest(&self, identifier: &oci::Identifier, digest: &oci::Digest) -> Result<oci::Manifest> {
+    async fn get_manifest(&self, identifier: &oci::Identifier, digest: &oci::Digest) -> Result<Option<oci::Manifest>> {
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get_manifest(identifier, digest).await {
@@ -129,7 +142,7 @@ impl LocalIndex {
                     identifier,
                     digest
                 );
-                return Ok(cached);
+                return Ok(Some(cached));
             }
         }
 
@@ -140,7 +153,7 @@ impl LocalIndex {
                 identifier,
                 digest
             );
-            return Err(Error::PackageNotFound(identifier.clone()));
+            return Ok(None);
         }
 
         log::trace!(
@@ -161,7 +174,7 @@ impl LocalIndex {
                 .set_manifest(identifier.clone(), digest.clone(), manifest.clone())
                 .await;
         }
-        Ok(manifest)
+        Ok(Some(manifest))
     }
 }
 
@@ -171,11 +184,11 @@ impl index_impl::IndexImpl for LocalIndex {
         self.index_store.list_repositories(registry)
     }
 
-    async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Vec<String>> {
-        self.get_tags(identifier).await.map(|tags| tags.into_keys().collect())
+    async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
+        Ok(self.get_tags(identifier).await?.map(|tags| tags.into_keys().collect()))
     }
 
-    async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<(oci::Digest, oci::Manifest)> {
+    async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         log::trace!(
             "Fetching manifest for identifier '{}'.",
             identifier
@@ -188,26 +201,28 @@ impl index_impl::IndexImpl for LocalIndex {
         };
 
         if let Some(queried_digest) = &queried_digest {
-            return self
+            return Ok(self
                 .get_manifest(identifier, queried_digest)
-                .await
-                .map(|m| (queried_digest.clone(), m));
+                .await?
+                .map(|m| (queried_digest.clone(), m)));
         } else if let Some(queried_tag) = queried_tag {
-            let available_tags = self.get_tags(identifier).await?;
+            let Some(available_tags) = self.get_tags(identifier).await? else {
+                return Ok(None);
+            };
             let digest = match available_tags.get(queried_tag) {
                 Some(digest) => digest,
                 None => {
                     log::debug!("Tag '{}' not found for identifier '{}'.", queried_tag, identifier);
-                    return Err(Error::PackageNotFound(identifier.clone()));
+                    return Ok(None);
                 }
             };
-            return self.get_manifest(identifier, digest).await.map(|m| (digest.clone(), m));
+            return Ok(self.get_manifest(identifier, digest).await?.map(|m| (digest.clone(), m)));
         }
 
-        Err(Error::PackageNotFound(identifier.clone()))
+        Ok(None)
     }
 
-    async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<oci::Digest> {
+    async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
         let queried_digest = identifier.digest();
         let queried_tag = if queried_digest.is_some() {
             identifier.tag()
@@ -216,16 +231,20 @@ impl index_impl::IndexImpl for LocalIndex {
         };
 
         if let Some(queried_digest) = queried_digest {
-            self.get_manifest(identifier, &queried_digest).await?;
-            return Ok(queried_digest);
+            if self.get_manifest(identifier, &queried_digest).await?.is_some() {
+                return Ok(Some(queried_digest));
+            }
+            return Ok(None);
         } else if let Some(queried_tag) = queried_tag {
-            let available_tags = self.get_tags(identifier).await?;
+            let Some(available_tags) = self.get_tags(identifier).await? else {
+                return Ok(None);
+            };
             if let Some(digest) = available_tags.get(queried_tag) {
-                return Ok(digest.clone());
+                return Ok(Some(digest.clone()));
             }
         }
 
-        Err(Error::PackageNotFound(identifier.clone()))
+        Ok(None)
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {

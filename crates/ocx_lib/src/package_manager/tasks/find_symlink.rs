@@ -1,3 +1,5 @@
+use tracing::info_span;
+
 use crate::{
     file_structure::SymlinkKind, log, oci,
     package::{install_info::InstallInfo, metadata},
@@ -19,9 +21,11 @@ impl PackageManager {
         &self,
         package: &oci::Identifier,
         kind: SymlinkKind,
-    ) -> crate::Result<InstallInfo> {
+    ) -> Result<InstallInfo, PackageErrorKind> {
+        log::debug!("Finding {:?} symlink for '{}'.", kind, package);
+
         if package.digest().is_some() {
-            return Err(crate::Error::PackageSymlinkRequiresTag(package.clone()));
+            return Err(PackageErrorKind::SymlinkRequiresTag);
         }
 
         if kind == SymlinkKind::Current {
@@ -33,14 +37,16 @@ impl PackageManager {
         let symlink_path = self.file_structure().installs.symlink(package, kind);
 
         if !symlink_path.exists() {
-            return Err(crate::Error::PackageSymlinkNotFound(package.clone(), kind));
+            return Err(PackageErrorKind::SymlinkNotFound(kind));
         }
 
         let metadata_path = self
             .file_structure()
             .objects
-            .metadata_for_content(&symlink_path)?;
-        let metadata = metadata::Metadata::read_json_from_path(&metadata_path)?;
+            .metadata_for_content(&symlink_path)
+            .map_err(PackageErrorKind::Internal)?;
+        let metadata = metadata::Metadata::read_json_from_path(&metadata_path)
+            .map_err(PackageErrorKind::Internal)?;
 
         log::debug!(
             "Resolved '{}' via {:?} symlink at '{}'",
@@ -65,11 +71,12 @@ impl PackageManager {
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in &packages {
+            let _span = info_span!("Resolving", package = %package).entered();
             match self.find_symlink(package, kind).await {
                 Ok(info) => infos.push(info),
-                Err(e) => errors.push(PackageError::new(
+                Err(kind) => errors.push(PackageError::new(
                     package.clone(),
-                    PackageErrorKind::Internal(e),
+                    kind,
                 )),
             }
         }

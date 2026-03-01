@@ -22,7 +22,13 @@ impl IndexList {
         let tags_report = self.packages.iter().zip(identifiers.clone().into_iter()).map(|(package, identifier)| {
             let context = context.clone();
             async move {
-                let tags = context.default_index().list_tags(&identifier).await?;
+                let tags = match context.default_index().list_tags(&identifier).await? {
+                    Some(tags) => tags,
+                    None => {
+                        log::warn!("Package '{}' not found in the index.", identifier);
+                        Vec::new()
+                    }
+                };
                 Ok((package.raw().to_string(), tags.into_iter()))
             }
         });
@@ -43,7 +49,10 @@ impl IndexList {
             join_set.spawn(async move {
                 let mut platform_tags = HashMap::<_, Vec<_>>::new();
                 for tag in tags {
-                    let (_, manifest) = context.default_index().fetch_manifest(&identifier).await?;
+                    let Some((_, manifest)) = context.default_index().fetch_manifest(&identifier).await? else {
+                        log::warn!("Manifest not found for tag '{}' of '{}' — skipping.", tag, identifier);
+                        continue;
+                    };
                     let platforms = oci::Platform::from_manifest(&manifest)?;
                     for platform in platforms {
                         platform_tags.entry(platform.to_string()).or_insert_with(Vec::new).push(tag.clone());
