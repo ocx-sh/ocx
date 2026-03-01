@@ -68,5 +68,6 @@ def test_record(
         .stretch_progress()
         .truncate_digests()
         .realign_tables()
+        .auto_height()
         .write(cast_dir / f"{cast_name}.cast")
     )

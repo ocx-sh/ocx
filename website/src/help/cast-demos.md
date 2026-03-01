@@ -10,9 +10,7 @@ Regenerate with `task recordings`.
 ocx install hello-world:1.0.0
 ```
 
-::: details Terminal recording
-<Terminal src="/casts/install.cast" title="Installing a package" :autoPlay="false" />
-:::
+<Terminal src="/casts/install.cast" title="Installing a package" collapsed />
 
 ## Exec
 
@@ -20,9 +18,7 @@ ocx install hello-world:1.0.0
 ocx exec hello-world:1.0.0 -- hello
 ```
 
-::: details Terminal recording
-<Terminal src="/casts/exec.cast" title="Running a package" :autoPlay="false" />
-:::
+<Terminal src="/casts/exec.cast" title="Running a package" collapsed />
 
 ## Env
 
@@ -30,9 +26,7 @@ ocx exec hello-world:1.0.0 -- hello
 ocx env hello-world:1.0.0
 ```
 
-::: details Terminal recording
-<Terminal src="/casts/env.cast" title="Package environment" :autoPlay="false" />
-:::
+<Terminal src="/casts/env.cast" title="Package environment" collapsed />
 
 ## Index
 
@@ -41,6 +35,4 @@ ocx index catalog
 ocx index list hello-world
 ```
 
-::: details Terminal recording
-<Terminal src="/casts/index.cast" title="Browsing the index" :autoPlay="false" />
-:::
+<Terminal src="/casts/index.cast" title="Browsing the index" collapsed />
