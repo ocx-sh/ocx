@@ -26,6 +26,8 @@ pub enum Error {
     UnsupportedMediaType(String, &'static [&'static str]),
     /// A package manager operation failed.
     PackageManager(crate::package_manager::error::Error),
+    /// An OCI client operation failed.
+    OciClient(crate::oci::client::error::ClientError),
 
     Undefined,
     UndefinedWithMessage(String),
@@ -105,6 +107,7 @@ impl std::fmt::Display for Error {
                 supported.join(", ")
             ),
             Error::PackageManager(error) => write!(f, "{error}"),
+            Error::OciClient(error) => write!(f, "{error}"),
             Error::Undefined => write!(f, "An undefined error occurred"),
             Error::UndefinedWithMessage(message) => write!(f, "An undefined error occurred: {}", message),
         }
@@ -124,6 +127,12 @@ impl From<oci::ParseError> for Error {
 impl From<crate::package_manager::error::Error> for Error {
     fn from(error: crate::package_manager::error::Error) -> Self {
         Error::PackageManager(error)
+    }
+}
+
+impl From<crate::oci::client::error::ClientError> for Error {
+    fn from(error: crate::oci::client::error::ClientError) -> Self {
+        Error::OciClient(error)
     }
 }
 

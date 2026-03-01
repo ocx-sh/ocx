@@ -1,10 +1,12 @@
 mod object_store;
 mod index_store;
 mod install_store;
+mod temp_store;
 
 pub use object_store::{ObjectDir, ObjectStore};
 pub use index_store::IndexStore;
 pub use install_store::{InstallStore, SymlinkKind};
+pub use temp_store::{TempAcquireResult, TempDir, TempStore};
 
 /// Root layout of the local OCX data directory.
 ///
@@ -24,6 +26,7 @@ pub struct FileStructure {
     pub objects: ObjectStore,
     pub index: IndexStore,
     pub installs: InstallStore,
+    pub temp: TempStore,
 }
 
 impl Default for FileStructure {
@@ -45,6 +48,7 @@ impl FileStructure {
             objects: ObjectStore::new(root.join("objects")),
             index: IndexStore::new(root.join("index")),
             installs: InstallStore::new(root.join("installs")),
+            temp: TempStore::new(root.join("temp")),
         }
     }
 }

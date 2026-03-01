@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::task::JoinSet;
 use tracing::{info_span, Instrument};
@@ -34,9 +34,28 @@ impl PackageManager {
 
         let storage = self.file_structure().objects.path(&identifier)
             .map_err(PackageErrorKind::Internal)?;
-        let install_info = self.client()
+        let temp_path = self.file_structure().temp.path(&identifier)
+            .map_err(PackageErrorKind::Internal)?;
+
+        let client = self.client().map_err(PackageErrorKind::Internal)?;
+        let acquire = match self.file_structure().temp.try_acquire(&temp_path)
             .map_err(PackageErrorKind::Internal)?
-            .pull_package(identifier.clone(), &storage).await
+        {
+            Some(r) => r,
+            None => {
+                log::debug!("Temp dir locked by another process, waiting: {}", temp_path.display());
+                self.file_structure().temp
+                    .acquire_with_timeout(&temp_path, client.lock_timeout())
+                    .await
+                    .map_err(PackageErrorKind::Internal)?
+            }
+        };
+        if acquire.was_cleaned {
+            log::debug!("Cleaned previous temp data at {}", temp_path.display());
+        }
+
+        let install_info = client
+            .pull_package(identifier.clone(), &storage, acquire).await
             .map_err(PackageErrorKind::Internal)?;
 
         log::debug!("Package install succeeded for '{}'.", &identifier);
@@ -92,6 +111,7 @@ impl PackageManager {
             }.instrument(span));
         }
 
+        let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
         let mut results: HashMap<oci::Identifier, InstallInfo> =
             HashMap::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
@@ -99,13 +119,21 @@ impl PackageManager {
         while let Some(join_result) = tasks.join_next().await {
             match join_result {
                 Ok((id, Ok(info))) => {
+                    pending.remove(&id);
                     results.insert(id, info);
                 }
                 Ok((id, Err(kind))) => {
+                    pending.remove(&id);
                     errors.push(PackageError::new(id, kind));
                 }
                 Err(e) => log::error!("Task panicked: {}", e),
             }
+        }
+
+        for id in pending {
+            errors.push(PackageError::new(id, PackageErrorKind::Internal(
+                crate::Error::UndefinedWithMessage("task panicked unexpectedly".into()),
+            )));
         }
 
         let mut infos = Vec::with_capacity(packages.len());

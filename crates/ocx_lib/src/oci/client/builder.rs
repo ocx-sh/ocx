@@ -1,10 +1,12 @@
 use crate::{auth, oci};
 
 use super::Client;
+use super::native_transport::NativeTransport;
 
 pub struct ClientBuilder {
     auth: auth::Auth,
     config: oci::native::ClientConfig,
+    lock_timeout: Option<std::time::Duration>,
 }
 
 impl ClientBuilder {
@@ -12,6 +14,7 @@ impl ClientBuilder {
         ClientBuilder {
             auth: auth::Auth::default(),
             config: oci::native::ClientConfig::default(),
+            lock_timeout: None,
         }
     }
 
@@ -23,11 +26,20 @@ impl ClientBuilder {
         self
     }
 
+    /// Timeout for acquiring file locks during install and status checks.
+    pub fn lock_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.lock_timeout = Some(timeout);
+        self
+    }
+
     pub fn build(self) -> Client {
+        let transport = NativeTransport::new(
+            oci::native::Client::new(self.config),
+            self.auth,
+        );
         Client {
-            auth: self.auth,
-            client: oci::native::Client::new(self.config),
-            lock_timeout: std::time::Duration::from_secs(30),
+            transport: Box::new(transport),
+            lock_timeout: self.lock_timeout.unwrap_or(std::time::Duration::from_secs(30)),
             tag_chunk_size: 100,
             repository_chunk_size: 100,
         }

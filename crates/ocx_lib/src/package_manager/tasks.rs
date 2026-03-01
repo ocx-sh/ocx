@@ -1,3 +1,4 @@
+mod clean;
 mod deselect;
 mod find;
 mod find_or_install;
