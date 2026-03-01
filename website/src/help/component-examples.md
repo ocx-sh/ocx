@@ -193,3 +193,58 @@ is rendered as **Markdown** and shown in the detail panel when that step is clic
 
   </Step>
 </Steps>
+
+---
+
+## Terminal
+
+Embeds an animated terminal session using [asciinema-player](https://docs.asciinema.org/manual/player/).
+Use `<Terminal>` with nested `<Frame>` tags — each frame is one line of output
+at a given timestamp.  Multiple frames sharing the same `at` value appear
+simultaneously (multi-line output).
+
+**Usage**
+
+```html
+<Terminal title="Installing a package">
+  <Frame at="0">$ ocx install cmake</Frame>
+  <Frame at="0.5">Downloading cmake@3.28.0...</Frame>
+  <Frame at="1.5">Extracting to ~/.ocx/objects/...</Frame>
+  <Frame at="2">Done. Installed cmake@3.28.0</Frame>
+</Terminal>
+```
+
+**`<Terminal>` attributes**
+
+| Attribute | Type | Default | Description |
+|---|---|---|---|
+| `title` | `string` | — | Title shown in the terminal chrome title bar |
+| `src` | `string` | — | Path to a `.cast` file (alternative to inline frames) |
+| `cols` | `number` | `80` | Terminal width in columns |
+| `rows` | `number` | auto | Terminal height in rows (calculated from frame count) |
+| `autoPlay` | `boolean` | `true` | Start playback automatically |
+| `speed` | `number` | `1` | Playback speed multiplier |
+| `idle-time-limit` | `number` | `2` | Compress pauses longer than this (seconds) |
+| `loop` | `boolean` | `false` | Loop playback |
+| `fit` | `'width' \| 'height' \| 'both' \| 'none'` | `'width'` | How the player scales |
+
+**`<Frame>` attributes**
+
+| Attribute | Type | Description |
+|---|---|---|
+| `at` | `number` | Time in seconds when this line appears |
+
+**Live example — inline frames**
+
+<Terminal title="Getting started with ocx">
+  <Frame at="0">$ ocx install hello-world</Frame>
+  <Frame at="1">Resolving hello-world@latest...</Frame>
+  <Frame at="1.5">Downloading hello-world@1.0.0 [================] 100%</Frame>
+  <Frame at="2.5">Installed hello-world@1.0.0</Frame>
+  <Frame at="3.5">$ ocx exec hello-world -- hello</Frame>
+  <Frame at="4.5">Hello, World!</Frame>
+</Terminal>
+
+**Live example — from `.cast` file**
+
+<Terminal src="/casts/demo.cast" title="ocx workflow" :autoPlay="false" />

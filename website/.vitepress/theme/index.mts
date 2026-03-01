@@ -11,6 +11,8 @@ import Node from './components/Node.vue'
 import Steps from './components/Steps.vue'
 import Step from './components/Step.vue'
 import Description from './components/Description.vue'
+import Terminal from './components/Terminal.vue'
+import Frame from './components/Frame.vue'
 
 export default {
   extends: DefaultTheme,
@@ -25,5 +27,7 @@ export default {
     app.component('Steps', Steps)
     app.component('Step', Step)
     app.component('Description', Description)
+    app.component('Terminal', Terminal)
+    app.component('Frame', Frame)
   },
 } satisfies Theme

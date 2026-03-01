@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from uuid import uuid4
+
+from src.runner import OcxRunner, PackageInfo, current_platform
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+COMPOSE_FILE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+
+# ---------------------------------------------------------------------------
+# Docker-compose helpers
+# ---------------------------------------------------------------------------
+
+
+def registry_is_reachable(registry: str) -> bool:
+    """Return True if the registry responds to ``GET /v2/``."""
+    try:
+        urllib.request.urlopen(f"http://{registry}/v2/", timeout=2)
+        return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def start_registry(registry: str) -> None:
+    """Start the registry via docker-compose if it is not already running."""
+    if registry_is_reachable(registry):
+        return
+
+    subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d"],
+        check=True,
+        capture_output=True,
+    )
+
+    # Wait for the registry to become reachable (up to 15 s).
+    for _ in range(30):
+        if registry_is_reachable(registry):
+            return
+        time.sleep(0.5)
+
+    raise RuntimeError(f"Registry at {registry} did not become reachable")
+
+
+# ---------------------------------------------------------------------------
+# Package publishing
+# ---------------------------------------------------------------------------
+
+
+def make_package(
+    ocx: OcxRunner,
+    repo: str,
+    tag: str,
+    tmp_path: Path,
+    *,
+    new: bool = True,
+    cascade: bool = True,
+    size_mb: int = 0,
+    platform: str | None = None,
+    bins: list[str] | None = None,
+    env: list[dict] | None = None,
+) -> PackageInfo:
+    """Create, bundle, push, and index a test package.
+
+    Parameters
+    ----------
+    size_mb:
+        Approximate size in MB of random padding data.  Useful for making
+        downloads large enough to show progress bars.
+    platform:
+        OCI platform string (e.g. ``linux/amd64``).  Defaults to the
+        current host platform.
+    bins:
+        List of binary names to create.  Each gets a shell script that
+        echoes a unique marker.  Defaults to ``["hello"]``.
+    env:
+        Custom metadata env entries.  Defaults to PATH + HELLO_HOME.
+    """
+    plat = platform or current_platform()
+    marker = f"marker-{uuid4().hex[:12]}"
+    bin_names = bins or ["hello"]
+
+    # Build content
+    pkg_dir = tmp_path / f"pkg-{repo}-{tag}"
+    bin_dir = pkg_dir / "bin"
+    bin_dir.mkdir(parents=True)
+
+    for name in bin_names:
+        script = bin_dir / name
+        if sys.platform == "win32":
+            script = script.with_suffix(".bat")
+            script.write_text(f"@echo {marker}\n")
+        else:
+            script.write_text(f"#!/bin/sh\necho {marker}\n")
+            script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    # Add random padding for realistic download sizes
+    if size_mb > 0:
+        lib_dir = pkg_dir / "lib"
+        lib_dir.mkdir(parents=True)
+        data_file = lib_dir / "data.bin"
+        data_file.write_bytes(os.urandom(size_mb * 1024 * 1024))
+
+    # Write metadata
+    metadata_path = tmp_path / f"metadata-{repo}-{tag}.json"
+    metadata_env = env or [
+        {
+            "key": "PATH",
+            "type": "path",
+            "required": True,
+            "value": "${installPath}/bin",
+        },
+        {
+            "key": "HELLO_HOME",
+            "type": "constant",
+            "value": "${installPath}",
+        },
+    ]
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "type": "bundle",
+                "version": 1,
+                "env": metadata_env,
+            }
+        )
+    )
+
+    # Create bundle
+    bundle = tmp_path / f"bundle-{repo}-{tag}.tar.xz"
+    ocx.plain(
+        "package",
+        "create",
+        "-m",
+        str(metadata_path),
+        "-o",
+        str(bundle),
+        str(pkg_dir),
+    )
+
+    # Push
+    fq = f"{ocx.registry}/{repo}:{tag}"
+    push_args = ["package", "push", "-p", plat, "-m", str(metadata_path)]
+    if new:
+        push_args.append("-n")
+    if cascade:
+        push_args.append("--cascade")
+    push_args += [fq, str(bundle)]
+    ocx.plain(*push_args)
+
+    # Update local index so install/find can discover the package
+    short = f"{repo}:{tag}"
+    ocx.plain("index", "update", short)
+
+    return PackageInfo(
+        repo=repo,
+        tag=tag,
+        short=short,
+        fq=fq,
+        content_dir=pkg_dir,
+        marker=marker,
+        platform=plat,
+    )

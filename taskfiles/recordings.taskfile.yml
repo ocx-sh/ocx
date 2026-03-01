@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  CASTS_DIR: "{{.ROOT_DIR}}/website/src/public/casts"
+  GIFS_DIR: "{{.ROOT_DIR}}/out/recordings"
+  FONTS_DIR: "{{.ROOT_DIR}}/.fonts"
+  FONT_URL: "https://github.com/ryanoasis/nerd-fonts/releases/latest/download/CascadiaCode.tar.xz"
+
+tasks:
+  ensure-font:
+    desc: Download CaskaydiaCove Nerd Font if not present
+    internal: true
+    status:
+      - test -d {{.FONTS_DIR}}/CascadiaCode
+    cmds:
+      - mkdir -p {{.FONTS_DIR}}/CascadiaCode
+      - curl -fsSL "{{.FONT_URL}}" | tar -xJf - -C {{.FONTS_DIR}}/CascadiaCode
+
+  build:
+    desc: Generate all .cast recordings (builds binary + starts registry)
+    dir: "{{.ROOT_DIR}}/test"
+    cmd: uv run pytest recordings/ {{ .CLI_ARGS | default "-v" }}
+
+  gifs:
+    desc: Convert all .cast files to animated GIFs (requires agg)
+    deps: [ensure-font]
+    dir: "{{.ROOT_DIR}}/test"
+    cmd: uv run python recordings/cast_to_gif.py --font-dir "{{.FONTS_DIR}}/CascadiaCode" "{{.CASTS_DIR}}" "{{.GIFS_DIR}}"
+
+  default:
+    desc: Build all recordings and convert to GIFs
+    cmds:
+      - task: build
+      - task: gifs
