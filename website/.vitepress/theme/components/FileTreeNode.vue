@@ -92,9 +92,12 @@ function handleClick() {
   padding: 3px 8px;
   border-radius: 5px;
   line-height: 1.6;
-  cursor: pointer;
   transition: background 0.12s;
   user-select: none;
+}
+
+.ft-row--dir {
+  cursor: pointer;
 }
 
 .ft-row:hover {
