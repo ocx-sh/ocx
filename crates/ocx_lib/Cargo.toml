@@ -34,6 +34,7 @@ clap_builder = "4.5.60"
 clap_complete = "4.5.66"
 tracing = "0.1.44"
 tracing-log = "0.2.0"
+which = "7"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2.0"

@@ -46,4 +46,8 @@ def test_shell_env_outputs_export_statements(
     ocx.plain("install", pkg.short)
 
     result = ocx.plain("shell", "env", pkg.short)
-    assert "export PATH=" in result.stdout or "set PATH=" in result.stdout
+    assert (
+        "export PATH=" in result.stdout
+        or "set PATH=" in result.stdout
+        or "$env:PATH" in result.stdout
+    )

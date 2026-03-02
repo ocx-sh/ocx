@@ -127,6 +127,7 @@ ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
 
 - `-p`, `--platform`: Specify the platforms to use.
 - `-i`, `--interactive`: Run in interactive mode, forwarding stdin to the child process.
+- `--clean`: Start with a clean environment containing only the package-defined variables, instead of inheriting the current shell environment.
 - `-h`, `--help`: Print help information.
 
 ### `find` {#find}

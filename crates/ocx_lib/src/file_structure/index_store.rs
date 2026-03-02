@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{Result, oci};
 
@@ -96,17 +96,15 @@ impl IndexStore {
     /// Uses the same three-level sharding scheme as [`ObjectStore`]:
     /// `{algorithm}/{hex[0..8]}/{hex[8..16]}/{hex[16..32]}`
     fn digest_path(digest: &oci::Digest) -> PathBuf {
-        match digest {
-            oci::Digest::Sha256(h) => {
-                PathBuf::from(format!("sha256/{}/{}/{}", &h[0..8], &h[8..16], &h[16..32]))
-            }
-            oci::Digest::Sha384(h) => {
-                PathBuf::from(format!("sha384/{}/{}/{}", &h[0..8], &h[8..16], &h[16..32]))
-            }
-            oci::Digest::Sha512(h) => {
-                PathBuf::from(format!("sha512/{}/{}/{}", &h[0..8], &h[8..16], &h[16..32]))
-            }
-        }
+        let (algorithm, h) = match digest {
+            oci::Digest::Sha256(h) => ("sha256", h.as_str()),
+            oci::Digest::Sha384(h) => ("sha384", h.as_str()),
+            oci::Digest::Sha512(h) => ("sha512", h.as_str()),
+        };
+        Path::new(algorithm)
+            .join(&h[0..8])
+            .join(&h[8..16])
+            .join(&h[16..32])
     }
 }
 
@@ -138,22 +136,28 @@ mod tests {
     fn blob_path_structure() {
         let store = IndexStore::new("/index");
         let p = store.blob(&id(), &digest());
-        assert_eq!(
-            p,
-            PathBuf::from("/index/example.com/objects/sha256/43567c07/f1a6b07b/5e8dc052108c9d4c")
-        );
+        let expected = Path::new("/index")
+            .join("example.com")
+            .join("objects")
+            .join("sha256")
+            .join("43567c07")
+            .join("f1a6b07b")
+            .join("5e8dc052108c9d4c");
+        assert_eq!(p, expected);
     }
 
     #[test]
     fn manifest_path_is_blob_with_json_extension() {
         let store = IndexStore::new("/index");
         let p = store.manifest(&id(), &digest());
-        assert_eq!(
-            p,
-            PathBuf::from(
-                "/index/example.com/objects/sha256/43567c07/f1a6b07b/5e8dc052108c9d4c.json"
-            )
-        );
+        let expected = Path::new("/index")
+            .join("example.com")
+            .join("objects")
+            .join("sha256")
+            .join("43567c07")
+            .join("f1a6b07b")
+            .join("5e8dc052108c9d4c.json");
+        assert_eq!(p, expected);
     }
 
     #[test]

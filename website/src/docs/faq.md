@@ -3,7 +3,7 @@ outline: deep
 ---
 # FAQ
 
-## macOS 
+## macOS
 
 ### Code Signing {#macos-codesign}
 
@@ -76,12 +76,31 @@ The macOS [Developer Mode][developer-mode] setting (since Ventura 13) relaxes re
 Ad-hoc signing via ocx is the simplest solution — no certificates, no system changes.
 :::
 
+## Windows
+
+### Executable Resolution {#windows-exec-resolution}
+
+Windows does not treat scripts the same way Unix does. On Unix, any file with a `#!/bin/sh` shebang and the execute bit set can be launched directly. On Windows, the kernel's [CreateProcessW][createprocessw] API only searches for `.exe` files — it ignores `.bat`, `.cmd`, and other script types entirely.
+
+Package metadata often exposes tools as shell scripts (`.bat` on Windows). When [`ocx exec`][cmd-exec] runs a command, it needs to find these scripts by consulting the <Tooltip term="PATHEXT">`PATHEXT` is a semicolon-separated list of file extensions (e.g. `.COM;.EXE;.BAT;.CMD`) that Windows uses to resolve bare command names. When you type `hello` in a terminal, the shell appends each extension in turn — `hello.COM`, `hello.EXE`, `hello.BAT` — and searches `PATH` for the first match.</Tooltip> environment variable, just like a Windows shell would.
+
+ocx resolves this automatically using the [which][which-crate] crate: before spawning the child process, it searches `PATH` with `PATHEXT`-aware extension matching. If resolution fails — for example because `PATHEXT` is not set in a stripped-down CI environment — ocx logs a warning and falls back to the bare command name, letting the OS attempt its own lookup.
+
+::: warning PATHEXT must be set
+In environments with a minimal set of environment variables (containers, CI runners, custom shells), `PATHEXT` may not be present. Without it, ocx cannot resolve `.bat` or `.cmd` scripts by name. If you see `Could not resolve 'hello' via PATH`, ensure `PATHEXT` is set — the default Windows value is `.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC`.
+:::
+
 <!-- external -->
 [mach-o]: https://en.wikipedia.org/wiki/Mach-O
+[createprocessw]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+[which-crate]: https://crates.io/crates/which
 [gatekeeper]: https://support.apple.com/guide/security/gatekeeper-and-runtime-protection-sec5599b66df/web
 [homebrew]: https://brew.sh/
 [homebrew-codesign]: https://github.com/Homebrew/brew/blob/master/Library/Homebrew/extend/os/mac/keg.rb
 [sip]: https://support.apple.com/en-us/102149
+
+<!-- commands -->
+[cmd-exec]: ./reference/command-line.md#exec
 
 <!-- environment -->
 [env-disable-codesign]: ./reference/environment.md#ocx-disable-codesign

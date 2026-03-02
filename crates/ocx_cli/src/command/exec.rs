@@ -14,6 +14,10 @@ pub struct Exec {
     #[clap(short = 'i', long = "interactive", default_value_t = false)]
     interactive: bool,
 
+    /// Start with a clean environment containing only the package variables, instead of inheriting the current shell environment.
+    #[clap(long = "clean", default_value_t = false)]
+    clean: bool,
+
     /// Target platforms to consider when resolving packages. If not specified, only supported platforms will be considered.
     #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM", num_args = 0..)]
     platforms: Vec<oci::Platform>,
@@ -41,7 +45,11 @@ impl Exec {
         use std::process::Stdio;
         use tokio::process::Command;
 
-        let mut process_env = env::Env::clean();
+        let mut process_env = if self.clean {
+            env::Env::clean()
+        } else {
+            env::Env::new()
+        };
         for info in info {
             log::debug!("Setting environment variables for package: {}", info.identifier);
             if let Some(env) = info.metadata.env() {
@@ -53,7 +61,9 @@ impl Exec {
             return Err(anyhow::anyhow!("No command provided to execute."));
         };
 
-        let mut child_process = Command::new(command)
+        let resolved = process_env.resolve_command(command);
+
+        let mut child_process = Command::new(&resolved)
             .args(args)
             .stdin(if self.interactive {
                 Stdio::inherit()

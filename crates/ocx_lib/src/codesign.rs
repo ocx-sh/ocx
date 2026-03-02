@@ -159,15 +159,7 @@ async fn sign_targets(targets: Vec<SignTarget>) {
 }
 
 fn codesign_available() -> bool {
-    find_in_path("codesign").is_some()
-}
-
-/// Search `PATH` for an executable by name. Returns the first match.
-fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+    which::which("codesign").is_ok()
 }
 
 /// Remove quarantine extended attributes from the content directory.
