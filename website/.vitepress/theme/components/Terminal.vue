@@ -107,19 +107,25 @@ const playerReady = ref(!props.collapsed)
 let player: any = null
 let playerInitialized = false
 
+// Pre-fetched cast data — loaded eagerly on mount so clicks are instant.
+let prefetchedData: string | null = null
+let prefetchPromise: Promise<void> | null = null
+
+async function prefetch() {
+  if (!props.src || prefetchedData != null) return
+  const res = await fetch(props.src)
+  prefetchedData = await res.text()
+}
+
 async function initPlayer(autoPlay: boolean) {
   if (playerInitialized || !containerEl.value) return
 
-  const AsciinemaPlayer = await import('asciinema-player')
+  const [AsciinemaPlayer] = await Promise.all([
+    import('asciinema-player'),
+    prefetchPromise,
+  ])
 
-  // Pre-fetch cast file so the player has dimensions immediately (no layout flash).
-  let src: string | { data: string | null }
-  if (props.src) {
-    const res = await fetch(props.src)
-    src = { data: await res.text() }
-  } else {
-    src = { data: castData.value }
-  }
+  const src = { data: prefetchedData ?? castData.value }
 
   player = AsciinemaPlayer.create(src, containerEl.value, {
     ...(props.cols != null && { cols: props.cols }),
@@ -136,6 +142,9 @@ async function initPlayer(autoPlay: boolean) {
 }
 
 onMounted(() => {
+  // Start prefetching cast data immediately so it's ready when the user clicks.
+  prefetchPromise = prefetch()
+
   if (isOpen.value) {
     const autoPlay = props.autoPlay ?? !props.src
     initPlayer(autoPlay)
@@ -144,8 +153,6 @@ onMounted(() => {
 
 watch(isOpen, async (open: boolean) => {
   if (open) {
-    playerReady.value = false
-    await nextTick()
     if (!playerInitialized) {
       await initPlayer(true)
     } else if (player) {
@@ -155,6 +162,7 @@ watch(isOpen, async (open: boolean) => {
     playerReady.value = true
     rootEl.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   } else if (player) {
+    playerReady.value = false
     player.pause()
     player.seek(0)
   }
@@ -175,7 +183,7 @@ onBeforeUnmount(() => {
       <span v-if="title" class="vp-terminal-title">{{ title }}</span>
       <span v-if="isCollapsible" class="vp-terminal-chevron" :class="{ 'vp-terminal-chevron--open': isOpen }" />
     </div>
-    <div v-show="isOpen" ref="containerEl" class="vp-terminal-player" :class="{ 'vp-terminal-player--ready': playerReady }" />
+    <div v-show="isOpen" ref="containerEl" class="vp-terminal-player" />
   </div>
 </template>
 
@@ -258,15 +266,6 @@ onBeforeUnmount(() => {
 
 .vp-terminal-chevron--open {
   transform: rotate(90deg);
-}
-
-.vp-terminal-player {
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-
-.vp-terminal-player--ready {
-  opacity: 1;
 }
 
 .vp-terminal-player :deep(.ap-wrapper) {
