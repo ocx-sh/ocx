@@ -162,17 +162,15 @@ impl ObjectStore {
     /// filesystem directory entry limits:
     /// `{algorithm}/{hex[0..8]}/{hex[8..16]}/{hex[16..32]}`
     fn digest_path(digest: &oci::Digest) -> PathBuf {
-        match digest {
-            oci::Digest::Sha256(h) => {
-                PathBuf::from(format!("sha256/{}/{}/{}", &h[0..8], &h[8..16], &h[16..32]))
-            }
-            oci::Digest::Sha384(h) => {
-                PathBuf::from(format!("sha384/{}/{}/{}", &h[0..8], &h[8..16], &h[16..32]))
-            }
-            oci::Digest::Sha512(h) => {
-                PathBuf::from(format!("sha512/{}/{}/{}", &h[0..8], &h[8..16], &h[16..32]))
-            }
-        }
+        let (algorithm, h) = match digest {
+            oci::Digest::Sha256(h) => ("sha256", h.as_str()),
+            oci::Digest::Sha384(h) => ("sha384", h.as_str()),
+            oci::Digest::Sha512(h) => ("sha512", h.as_str()),
+        };
+        Path::new(algorithm)
+            .join(&h[0..8])
+            .join(&h[8..16])
+            .join(&h[16..32])
     }
 }
 
@@ -202,12 +200,14 @@ mod tests {
     fn path_sharding_sha256() {
         let store = ObjectStore::new("/store");
         let p = store.path(&id_with_digest()).unwrap();
-        assert_eq!(
-            p,
-            PathBuf::from(
-                "/store/example.com/cmake/sha256/43567c07/f1a6b07b/5e8dc052108c9d4c"
-            )
-        );
+        let expected = Path::new("/store")
+            .join("example.com")
+            .join("cmake")
+            .join("sha256")
+            .join("43567c07")
+            .join("f1a6b07b")
+            .join("5e8dc052108c9d4c");
+        assert_eq!(p, expected);
     }
 
     #[test]

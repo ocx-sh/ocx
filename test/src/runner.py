@@ -77,8 +77,8 @@ class OcxRunner:
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", str(Path.home())),
         }
-        # Windows needs these for subprocess spawning
-        for key in ("SYSTEMROOT", "TEMP", "TMP"):
+        # Windows needs these for subprocess spawning and executable resolution
+        for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT"):
             if key in os.environ:
                 self.env[key] = os.environ[key]
 
