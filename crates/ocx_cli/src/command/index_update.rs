@@ -14,16 +14,15 @@ pub struct IndexUpdate {
 impl IndexUpdate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let remote_index = index::Index::from_remote(context.remote_index()?.clone());
-        let packages = options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
+        let packages =
+            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
         let mut join_set = tokio::task::JoinSet::new();
         for identifier in &packages {
             let remote_index = remote_index.clone();
             let mut context = context.clone();
             let identifier = identifier.clone();
-            join_set.spawn(async move {
-                context.local_index_mut().update(&remote_index, &identifier).await
-            });
+            join_set.spawn(async move { context.local_index_mut().update(&remote_index, &identifier).await });
         }
 
         while let Some(result) = join_set.join_next().await {

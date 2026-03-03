@@ -48,8 +48,7 @@ impl PackageManager {
                     obj.dir.display(),
                 );
                 if !dry_run {
-                    std::fs::remove_dir_all(&obj.dir)
-                        .map_err(|e| crate::Error::InternalFile(obj.dir.clone(), e))?;
+                    std::fs::remove_dir_all(&obj.dir).map_err(|e| crate::Error::InternalFile(obj.dir.clone(), e))?;
                 }
                 removed.push(obj.dir.clone());
             }
@@ -90,8 +89,7 @@ impl PackageManager {
                 // Remove while holding the lock — prevents races with
                 // concurrent installs. The fd-based advisory lock remains
                 // valid even after the file is unlinked (POSIX semantics).
-                std::fs::remove_dir_all(&dir_path)
-                    .map_err(|e| crate::Error::InternalFile(dir_path.clone(), e))?;
+                std::fs::remove_dir_all(&dir_path).map_err(|e| crate::Error::InternalFile(dir_path.clone(), e))?;
             }
             drop(acquired);
             removed.push(dir_path);

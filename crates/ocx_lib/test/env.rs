@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
-static OVERRIDES: LazyLock<Mutex<HashMap<String, Option<String>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static OVERRIDES: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Called by [`crate::env::var`] in `#[cfg(test)]`.
 ///

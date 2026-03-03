@@ -6,7 +6,7 @@ use crate::oci;
 ///
 /// - `Candidate` — the tag-pinned symlink written by `ocx install`.
 /// - `Current`   — the selection symlink written by `ocx install --select`,
-///                 analogous to `update-alternatives --set` on Linux.
+///   analogous to `update-alternatives --set` on Linux.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymlinkKind {
     Candidate,

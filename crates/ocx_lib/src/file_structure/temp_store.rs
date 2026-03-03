@@ -93,11 +93,7 @@ impl TempStore {
 
     /// Like [`try_acquire`](Self::try_acquire) but blocks until the lock is
     /// available or `timeout` expires.
-    pub async fn acquire_with_timeout(
-        &self,
-        path: &Path,
-        timeout: std::time::Duration,
-    ) -> Result<TempAcquireResult> {
+    pub async fn acquire_with_timeout(&self, path: &Path, timeout: std::time::Duration) -> Result<TempAcquireResult> {
         let file = Self::prepare_lock_file(path)?;
         let lock_path = path.join(LOCK_FILE_NAME);
         let lock = file_lock::FileLock::lock_exclusive_with_timeout(file, timeout)
@@ -108,16 +104,16 @@ impl TempStore {
 
     /// Creates the temp directory and lock file, returning the file handle.
     fn prepare_lock_file(path: &Path) -> Result<std::fs::File> {
-        std::fs::create_dir_all(path)
-            .map_err(|e| Error::InternalFile(path.to_path_buf(), e))?;
+        std::fs::create_dir_all(path).map_err(|e| Error::InternalFile(path.to_path_buf(), e))?;
         let lock_path = path.join(LOCK_FILE_NAME);
-        std::fs::File::create(&lock_path)
-            .map_err(|e| Error::InternalFile(lock_path, e))
+        std::fs::File::create(&lock_path).map_err(|e| Error::InternalFile(lock_path, e))
     }
 
     /// Shared post-lock logic: check for and clean leftover artifacts.
     fn finish_acquire(path: &Path, lock: file_lock::FileLock) -> Result<TempAcquireResult> {
-        let dir = TempDir { dir: path.to_path_buf() };
+        let dir = TempDir {
+            dir: path.to_path_buf(),
+        };
         let was_cleaned = dir.has_artifacts()?;
         if was_cleaned {
             dir.clear()?;
@@ -175,8 +171,7 @@ impl TempDir {
     /// Returns `true` if the directory contains any files or subdirectories
     /// besides `install.lock`.
     fn has_artifacts(&self) -> Result<bool> {
-        let entries = std::fs::read_dir(&self.dir)
-            .map_err(|e| Error::InternalFile(self.dir.clone(), e))?;
+        let entries = std::fs::read_dir(&self.dir).map_err(|e| Error::InternalFile(self.dir.clone(), e))?;
         for entry in entries.flatten() {
             if entry.file_name() != LOCK_FILE_NAME {
                 return Ok(true);
@@ -187,19 +182,16 @@ impl TempDir {
 
     /// Removes all files and subdirectories except `install.lock`.
     fn clear(&self) -> Result<()> {
-        let entries = std::fs::read_dir(&self.dir)
-            .map_err(|e| Error::InternalFile(self.dir.clone(), e))?;
+        let entries = std::fs::read_dir(&self.dir).map_err(|e| Error::InternalFile(self.dir.clone(), e))?;
         for entry in entries.flatten() {
             if entry.file_name() == LOCK_FILE_NAME {
                 continue;
             }
             let path = entry.path();
             if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-                    .map_err(|e| Error::InternalFile(path, e))?;
+                std::fs::remove_dir_all(&path).map_err(|e| Error::InternalFile(path, e))?;
             } else {
-                std::fs::remove_file(&path)
-                    .map_err(|e| Error::InternalFile(path, e))?;
+                std::fs::remove_file(&path).map_err(|e| Error::InternalFile(path, e))?;
             }
         }
         Ok(())
@@ -371,10 +363,7 @@ mod tests {
         let store = TempStore::new(dir.path());
 
         // Lock one of them externally.
-        let _lock = file_lock::FileLock::try_exclusive(
-            std::fs::File::open(a.join("install.lock")).unwrap(),
-        )
-        .unwrap();
+        let _lock = file_lock::FileLock::try_exclusive(std::fs::File::open(a.join("install.lock")).unwrap()).unwrap();
 
         let stale = store.stale_dirs().unwrap();
         assert_eq!(stale.len(), 1);

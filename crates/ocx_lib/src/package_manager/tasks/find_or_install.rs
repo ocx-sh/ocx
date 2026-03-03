@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use tokio::task::JoinSet;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 
 use crate::{
     log, oci,
@@ -25,10 +25,7 @@ impl PackageManager {
                 self.install(package, platforms, false, false).await
             }
             Err(PackageErrorKind::NotFound) => {
-                log::error!(
-                    "Package not found and offline mode is enabled: {}",
-                    package
-                );
+                log::error!("Package not found and offline mode is enabled: {}", package);
                 Err(PackageErrorKind::NotFound)
             }
             Err(e) => Err(e),
@@ -51,10 +48,7 @@ impl PackageManager {
                 .instrument(info_span!("Resolving", package = %packages[0]))
                 .await
                 .map_err(|kind| {
-                    package_manager::error::Error::FindFailed(vec![PackageError::new(
-                        packages[0].clone(),
-                        kind,
-                    )])
+                    package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
                 })?;
             return Ok(vec![info]);
         }
@@ -67,15 +61,17 @@ impl PackageManager {
             let plat = platforms.clone();
 
             let span = info_span!("Resolving", package = %pkg);
-            tasks.spawn(async move {
-                let result = mgr.find_or_install(&pkg, plat).await;
-                (pkg, result)
-            }.instrument(span));
+            tasks.spawn(
+                async move {
+                    let result = mgr.find_or_install(&pkg, plat).await;
+                    (pkg, result)
+                }
+                .instrument(span),
+            );
         }
 
         let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
-        let mut results: HashMap<oci::Identifier, InstallInfo> =
-            HashMap::with_capacity(packages.len());
+        let mut results: HashMap<oci::Identifier, InstallInfo> = HashMap::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
         while let Some(join_result) = tasks.join_next().await {
@@ -93,9 +89,10 @@ impl PackageManager {
         }
 
         for id in pending {
-            errors.push(PackageError::new(id, PackageErrorKind::Internal(
-                crate::Error::UndefinedWithMessage("task panicked unexpectedly".into()),
-            )));
+            errors.push(PackageError::new(
+                id,
+                PackageErrorKind::Internal(crate::Error::UndefinedWithMessage("task panicked unexpectedly".into())),
+            ));
         }
 
         let mut infos = Vec::with_capacity(packages.len());

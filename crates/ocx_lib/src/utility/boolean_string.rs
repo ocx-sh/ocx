@@ -49,8 +49,16 @@ impl clap_builder::ValueEnum for BooleanString {
 impl From<BooleanString> for bool {
     fn from(val: BooleanString) -> Self {
         match val {
-            BooleanString::True1 | BooleanString::TrueY | BooleanString::TrueYes | BooleanString::TrueOn | BooleanString::TrueTrue => true,
-            BooleanString::False0 | BooleanString::FalseN | BooleanString::FalseNo | BooleanString::FalseOff | BooleanString::FalseFalse => false,
+            BooleanString::True1
+            | BooleanString::TrueY
+            | BooleanString::TrueYes
+            | BooleanString::TrueOn
+            | BooleanString::TrueTrue => true,
+            BooleanString::False0
+            | BooleanString::FalseN
+            | BooleanString::FalseNo
+            | BooleanString::FalseOff
+            | BooleanString::FalseFalse => false,
         }
     }
 }

@@ -13,14 +13,10 @@ impl CompressionAlgorithm {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Option<Self> {
         let path = path.as_ref();
         match path.extension()?.to_str()? {
-            "xz" => return Some(CompressionAlgorithm::Lzma),
-            "gz" => return Some(CompressionAlgorithm::Gzip),
-            _ => {}
+            "xz" => Some(CompressionAlgorithm::Lzma),
+            "gz" | "tgz" => Some(CompressionAlgorithm::Gzip),
+            _ => None,
         }
-        if path.ends_with(".tgz") {
-            return Some(CompressionAlgorithm::Gzip);
-        }
-        None
     }
 
     /// Infers the compression algorithm from the given media type.

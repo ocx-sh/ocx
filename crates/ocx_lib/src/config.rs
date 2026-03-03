@@ -70,8 +70,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use crate::test;
     use super::*;
+    use crate::test;
 
     #[test]
     fn test_config_from_file_content() {

@@ -34,7 +34,12 @@ impl Install {
         );
         let install_infos = context
             .manager()
-            .install_all(oci_packages.clone(), platforms_or_default(&self.platforms), true, self.select)
+            .install_all(
+                oci_packages.clone(),
+                platforms_or_default(&self.platforms),
+                true,
+                self.select,
+            )
             .await?;
 
         let install_data = api::data::install::Installs::new(

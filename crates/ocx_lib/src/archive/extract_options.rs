@@ -5,4 +5,3 @@ pub struct ExtractOptions {
     pub algorithm: Option<compression::CompressionAlgorithm>,
     pub strip_components: usize,
 }
-

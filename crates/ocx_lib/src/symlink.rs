@@ -47,10 +47,19 @@ pub fn update(target_path: impl AsRef<std::path::Path>, link_path: impl AsRef<st
         let link_resolved =
             std::fs::read_link(link_path).map_err(|error| Error::InternalFile(link_path.to_path_buf(), error))?;
         if link_resolved == target_path {
-            log::debug!("Symlink at '{}' already points to '{}', skipping update.", link_path.display(), target_path.display());
+            log::debug!(
+                "Symlink at '{}' already points to '{}', skipping update.",
+                link_path.display(),
+                target_path.display()
+            );
             return Ok(());
         }
-        log::debug!("Symlink at '{}' points to '{}', updating to point to '{}'.", link_path.display(), link_resolved.display(), target_path.display());
+        log::debug!(
+            "Symlink at '{}' points to '{}', updating to point to '{}'.",
+            link_path.display(),
+            link_resolved.display(),
+            target_path.display()
+        );
         remove(link_path)?;
     }
     create(target_path, link_path)

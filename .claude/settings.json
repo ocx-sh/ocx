@@ -188,6 +188,7 @@
       "Bash(biome:*)",
       "Bash(tsc:*)",
       "Bash(vite:*)",
+      "Bash(cargo:*)",
       "Bash(make:*)",
       "Bash(task:*)",
       "Bash(shellcheck:*)",

@@ -5,7 +5,7 @@ pub use auth_type::AuthType;
 
 #[derive(Clone)]
 pub struct Auth {
-    cache : std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, oci::native::Auth>>>,
+    cache: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, oci::native::Auth>>>,
 }
 
 impl Auth {
@@ -42,9 +42,13 @@ impl Auth {
         match self.get(registry).await {
             Ok(auth) => auth,
             Err(error) => {
-                log::warn!("Failed to retrieve authentication for registry '{}', falling back to anonymous: {}", registry, error);
+                log::warn!(
+                    "Failed to retrieve authentication for registry '{}', falling back to anonymous: {}",
+                    registry,
+                    error
+                );
                 oci::native::Auth::Anonymous
-            },
+            }
         }
     }
 
@@ -81,7 +85,11 @@ fn get_docker_auth(registry: impl AsRef<str>) -> Result<Option<oci::native::Auth
         Err(DockerError::NoCredentialConfigured)
         | Err(DockerError::ConfigNotFound)
         | Err(DockerError::ConfigReadError)
-        | Err(DockerError::HelperFailure { helper: _, stdout: _, stderr: _ }) => {
+        | Err(DockerError::HelperFailure {
+            helper: _,
+            stdout: _,
+            stderr: _,
+        }) => {
             log::debug!("No native Docker credentials found for registry '{}'", registry);
             None
         }

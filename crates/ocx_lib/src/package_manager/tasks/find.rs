@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use tokio::task::JoinSet;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 
 use crate::{
     log, oci,
@@ -30,17 +30,22 @@ impl PackageManager {
 
         log::debug!("Resolved package identifier: {}", &identifier);
 
-        let content = self.file_structure().objects.content(&identifier)
+        let content = self
+            .file_structure()
+            .objects
+            .content(&identifier)
             .map_err(PackageErrorKind::Internal)?;
         if !content.exists() {
             log::debug!("Content directory not found locally for '{}'.", identifier);
             return Err(PackageErrorKind::NotFound);
         }
 
-        let metadata_path = self.file_structure().objects.metadata(&identifier)
+        let metadata_path = self
+            .file_structure()
+            .objects
+            .metadata(&identifier)
             .map_err(PackageErrorKind::Internal)?;
-        let metadata = metadata::Metadata::read_json_from_path(metadata_path)
-            .map_err(PackageErrorKind::Internal)?;
+        let metadata = metadata::Metadata::read_json_from_path(metadata_path).map_err(PackageErrorKind::Internal)?;
 
         Ok(InstallInfo {
             identifier,
@@ -63,10 +68,7 @@ impl PackageManager {
                 .instrument(info_span!("Finding", package = %packages[0]))
                 .await
                 .map_err(|kind| {
-                    package_manager::error::Error::FindFailed(vec![PackageError::new(
-                        packages[0].clone(),
-                        kind,
-                    )])
+                    package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
                 })?;
             return Ok(vec![info]);
         }
@@ -77,15 +79,17 @@ impl PackageManager {
             let package = package.clone();
             let platforms = platforms.clone();
             let span = info_span!("Finding", package = %package);
-            tasks.spawn(async move {
-                let result = mgr.find(&package, platforms).await;
-                (package, result)
-            }.instrument(span));
+            tasks.spawn(
+                async move {
+                    let result = mgr.find(&package, platforms).await;
+                    (package, result)
+                }
+                .instrument(span),
+            );
         }
 
         let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
-        let mut results: HashMap<oci::Identifier, InstallInfo> =
-            HashMap::with_capacity(packages.len());
+        let mut results: HashMap<oci::Identifier, InstallInfo> = HashMap::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
         while let Some(join_result) = tasks.join_next().await {
@@ -103,9 +107,10 @@ impl PackageManager {
         }
 
         for id in pending {
-            errors.push(PackageError::new(id, PackageErrorKind::Internal(
-                crate::Error::UndefinedWithMessage("task panicked unexpectedly".into()),
-            )));
+            errors.push(PackageError::new(
+                id,
+                PackageErrorKind::Internal(crate::Error::UndefinedWithMessage("task panicked unexpectedly".into())),
+            ));
         }
 
         // Preserve input order.

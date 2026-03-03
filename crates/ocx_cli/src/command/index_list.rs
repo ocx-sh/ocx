@@ -3,7 +3,7 @@ use std::{collections::HashMap, process::ExitCode};
 use clap::Parser;
 use ocx_lib::{log, oci};
 
-use crate::{options, api};
+use crate::{api, options};
 
 #[derive(Parser)]
 pub struct IndexList {
@@ -18,25 +18,35 @@ pub struct IndexList {
 
 impl IndexList {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifiers = options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
-        let tags_report = self.packages.iter().zip(identifiers.clone().into_iter()).map(|(package, identifier)| {
-            let context = context.clone();
-            async move {
-                let tags = match context.default_index().list_tags(&identifier).await? {
-                    Some(tags) => tags,
-                    None => {
-                        log::warn!("Package '{}' not found in the index.", identifier);
-                        Vec::new()
-                    }
-                };
-                Ok((package.raw().to_string(), tags.into_iter()))
-            }
-        });
+        let identifiers =
+            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
+        let tags_report = self
+            .packages
+            .iter()
+            .zip(identifiers.clone().into_iter())
+            .map(|(package, identifier)| {
+                let context = context.clone();
+                async move {
+                    let tags = match context.default_index().list_tags(&identifier).await? {
+                        Some(tags) => tags,
+                        None => {
+                            log::warn!("Package '{}' not found in the index.", identifier);
+                            Vec::new()
+                        }
+                    };
+                    Ok((package.raw().to_string(), tags.into_iter()))
+                }
+            });
 
-        if ! self.with_platforms {
-            let tags_report = futures::future::join_all(tags_report).await.into_iter().collect::<anyhow::Result<Vec<_>>>()?;
+        if !self.with_platforms {
+            let tags_report = futures::future::join_all(tags_report)
+                .await
+                .into_iter()
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let tags_report = tags_report.into_iter().collect::<std::collections::HashMap<_, _>>();
-            context.api().report_tags(api::data::tag::Tags::without_platforms(tags_report))?;
+            context
+                .api()
+                .report_tags(api::data::tag::Tags::without_platforms(tags_report))?;
             return Ok(ExitCode::SUCCESS);
         }
 
@@ -55,7 +65,10 @@ impl IndexList {
                     };
                     let platforms = oci::Platform::from_manifest(&manifest)?;
                     for platform in platforms {
-                        platform_tags.entry(platform.to_string()).or_insert_with(Vec::new).push(tag.clone());
+                        platform_tags
+                            .entry(platform.to_string())
+                            .or_insert_with(Vec::new)
+                            .push(tag.clone());
                     }
                 }
                 Ok((package, platform_tags))
@@ -72,8 +85,10 @@ impl IndexList {
                 log::error!("Task panicked while fetching platforms for package: {:?}", e);
             }
         }
-        
-        context.api().report_tags(api::data::tag::Tags::with_platforms(tags_report))?;
+
+        context
+            .api()
+            .report_tags(api::data::tag::Tags::with_platforms(tags_report))?;
         Ok(ExitCode::SUCCESS)
     }
 }

@@ -88,8 +88,14 @@ mod tests {
             .await
             .expect("extraction failed");
 
-        assert!(extract_dir.path().join("bin/tool").exists(), "bin/tool missing after extraction");
-        assert!(extract_dir.path().join("README").exists(), "README missing after extraction");
+        assert!(
+            extract_dir.path().join("bin/tool").exists(),
+            "bin/tool missing after extraction"
+        );
+        assert!(
+            extract_dir.path().join("README").exists(),
+            "README missing after extraction"
+        );
         assert_eq!(
             std::fs::read(extract_dir.path().join("README")).unwrap(),
             b"test package",

@@ -41,9 +41,10 @@ impl Shell {
         if crate::symlink::is_link(path) {
             log::trace!("Shell is a symlink, attempting to resolve it...");
             if let Ok(canonical_path) = std::fs::read_link(path)
-                && let Some(shell) = Self::from_path(canonical_path) {
-                    return Some(shell);
-                }
+                && let Some(shell) = Self::from_path(canonical_path)
+            {
+                return Some(shell);
+            }
         }
 
         // Extracts the filename from the path and matches it against known shell names.
@@ -69,12 +70,13 @@ impl Shell {
 
     /// Tries to resolve the shell by inspecting the current and parent process information.
     pub fn from_process() -> Option<Self> {
-        fn try_process_id(pid: sysinfo::Pid, system : &sysinfo::System) -> Option<Shell> {
+        fn try_process_id(pid: sysinfo::Pid, system: &sysinfo::System) -> Option<Shell> {
             log::trace!("Checking process with PID {} for shell information...", pid);
             if let Some(process) = system.process(pid)
-                && let Some(shell) = Shell::from_path(process.name()) {
-                    return Some(shell);
-                }
+                && let Some(shell) = Shell::from_path(process.name())
+            {
+                return Some(shell);
+            }
             #[cfg(unix)]
             if let Some(shell) = Shell::from_path(format!("/proc/{}/exe", pid)) {
                 return Some(shell);

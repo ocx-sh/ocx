@@ -23,19 +23,14 @@ pub struct Select {
 
 impl Select {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifiers = options::Identifier::transform_all(
-            self.packages.clone().into_iter(),
-            context.default_registry(),
-        )?;
+        let identifiers =
+            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
         let fs = context.file_structure().clone();
         let rm = ReferenceManager::new(fs.clone());
         let platforms = platforms_or_default(&self.platforms);
 
-        let package_infos = context
-            .manager()
-            .find_all(identifiers, platforms)
-            .await?;
+        let package_infos = context.manager().find_all(identifiers, platforms).await?;
 
         let mut packages = HashMap::with_capacity(package_infos.len());
 

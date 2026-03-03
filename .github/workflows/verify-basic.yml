@@ -26,24 +26,44 @@ jobs:
           toolchain: stable
           components: clippy,rustfmt
           matcher: true
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Clippy
-        run: cargo clippy --workspace --locked -- -D warnings
-      - name: Build
-        run: cargo build --release -p ocx_cli --locked
+      - name: Setup Task
+        uses: go-task/setup-task@0ab1b2a65bc55236a3bc64cde78f80e20e8885c2 # v1.0.0
       - name: Install nextest
         uses: taiki-e/install-action@edba51d32f66935a112c0516fec65a13d420cbc6 # v2.68.17
         with:
           tool: cargo-nextest
+      - name: Check formatting
+        id: fmt
+        run: task format:check
+        continue-on-error: true
+      - name: Clippy
+        id: clippy
+        run: task clippy:check
+        continue-on-error: true
+      - name: Build
+        run: task build
       - name: Test
-        run: cargo nextest run --workspace --profile ci --locked
+        run: task test:unit -- --profile ci
+      - name: Upload Binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocx-binary
+          path: target/release/ocx
+          compression-level: 0
+          retention-days: 1
       - name: Publish Unit Test Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
         with:
           files: target/nextest/ci/junit.xml
           check_name: "Unit Test Results"
+      - name: Check lint results
+        if: ${{ !cancelled() }}
+        run: |
+          if [[ "${{ steps.fmt.outcome }}" == "failure" || "${{ steps.clippy.outcome }}" == "failure" ]]; then
+            echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }})"
+            exit 1
+          fi
 
   acceptance-tests:
     name: Acceptance Tests
@@ -59,17 +79,13 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           submodules: true
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@a0b538fa0b742a6aa35d6e2c169b4bd06d225a98 # v1.15.3
+      - name: Download Binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          toolchain: stable
-      - name: Build Binary
-        run: cargo build --release -p ocx_cli --locked
+          name: ocx-binary
+          path: test/bin
       - name: Prepare Binary
-        run: |
-          mkdir -p test/bin
-          cp target/release/ocx test/bin/ocx
-          chmod +x test/bin/ocx
+        run: chmod +x test/bin/ocx
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: Setup Task

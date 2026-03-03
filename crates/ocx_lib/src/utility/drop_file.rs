@@ -8,7 +8,9 @@ pub struct DropFile {
 impl DropFile {
     /// Creates a new DropFile for the given path.
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { path: Some(path.into()) }
+        Self {
+            path: Some(path.into()),
+        }
     }
 
     /// Prevents the file or directory from being deleted when dropped.

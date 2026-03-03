@@ -15,8 +15,7 @@ pub trait StringExt {
     fn to_relaxed_slug(&self) -> String;
 }
 
-static SLUG_TRANSFORM: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9]").expect("Invalid slug regex!"));
+static SLUG_TRANSFORM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9]").expect("Invalid slug regex!"));
 
 static RELAXED_SLUG_TRANSFORM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9._-]").expect("Invalid relaxed slug regex!"));
@@ -27,9 +26,7 @@ impl<T: AsRef<str>> StringExt for T {
     }
 
     fn to_relaxed_slug(&self) -> String {
-        RELAXED_SLUG_TRANSFORM
-            .replace_all(self.as_ref(), "_")
-            .to_string()
+        RELAXED_SLUG_TRANSFORM.replace_all(self.as_ref(), "_").to_string()
     }
 }
 

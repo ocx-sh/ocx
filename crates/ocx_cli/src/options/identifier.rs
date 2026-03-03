@@ -10,7 +10,10 @@ impl Identifier {
         oci::Identifier::from_str_with_registry(&self.raw, domain.as_ref())
     }
 
-    pub fn transform_all(identifiers: impl IntoIterator<Item = Self>, domain: impl AsRef<str>) -> Result<Vec<oci::Identifier>> {
+    pub fn transform_all(
+        identifiers: impl IntoIterator<Item = Self>,
+        domain: impl AsRef<str>,
+    ) -> Result<Vec<oci::Identifier>> {
         let domain = domain.as_ref();
         identifiers.into_iter().map(|id| id.with_domain(domain)).collect()
     }
@@ -38,8 +41,6 @@ impl std::str::FromStr for Identifier {
 
     fn from_str(s: &str) -> Result<Self> {
         oci::Identifier::from_str(s)?;
-        Ok(Self {
-            raw: s.to_string(),
-        })
+        Ok(Self { raw: s.to_string() })
     }
 }

@@ -5,6 +5,8 @@ version: '3'
 includes:
   coverage: ./taskfiles/coverage.taskfile.yml
   recordings: ./taskfiles/recordings.taskfile.yml
+  format: ./taskfiles/format.taskfile.yml
+  clippy: ./taskfiles/clippy.taskfile.yml
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test
@@ -29,5 +31,37 @@ tasks:
       - cmd: git add .
       - cmd: git commit --amend --no-edit --allow-empty
 
-  default:
+  check:
     cmd: cargo check
+
+  default:
+    deps:
+      - task: format:check
+      - task: clippy:check
+      - task: check
+
+  build:
+    desc: Build release binary
+    cmd: cargo build --release -p ocx_cli --locked
+
+  install:nextest:
+    internal: true
+    cmds:
+      - cargo install --locked cargo-nextest
+    status:
+      - cargo nextest --version
+
+  test:unit:
+    desc: Run unit tests
+    deps:
+      - install:nextest
+    cmd: cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
+
+  verify:
+    desc: Run all checks (fmt, clippy, build, unit tests, acceptance tests)
+    cmds:
+      - task: format:check
+      - task: clippy:check
+      - task: build
+      - task: test:unit
+      - task: test:parallel

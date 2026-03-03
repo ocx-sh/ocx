@@ -1,2 +1,1 @@
-pub struct FileStorage {
-}
+pub struct FileStorage {}

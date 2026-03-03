@@ -142,10 +142,7 @@ impl OciTransport for StubTransport {
         }
     }
 
-    async fn fetch_manifest_digest(
-        &self,
-        _image: &oci::native::Reference,
-    ) -> Result<String> {
+    async fn fetch_manifest_digest(&self, _image: &oci::native::Reference) -> Result<String> {
         self.record("fetch_manifest_digest");
         self.data
             .read()
@@ -181,20 +178,14 @@ impl OciTransport for StubTransport {
             let blob = blob.clone();
             drop(inner); // release lock before I/O
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| ClientError::Io(parent.to_path_buf(), e))?;
+                std::fs::create_dir_all(parent).map_err(|e| ClientError::Io(parent.to_path_buf(), e))?;
             }
-            std::fs::write(path, &blob)
-                .map_err(|e| ClientError::Io(path.to_path_buf(), e))?;
+            std::fs::write(path, &blob).map_err(|e| ClientError::Io(path.to_path_buf(), e))?;
         }
         Ok(())
     }
 
-    async fn push_manifest(
-        &self,
-        _image: &oci::native::Reference,
-        _manifest: &oci::Manifest,
-    ) -> Result<String> {
+    async fn push_manifest(&self, _image: &oci::native::Reference, _manifest: &oci::Manifest) -> Result<String> {
         self.record("push_manifest");
         self.next_push_result()
     }
@@ -209,12 +200,7 @@ impl OciTransport for StubTransport {
         self.next_push_result()
     }
 
-    async fn push_blob(
-        &self,
-        _image: &oci::native::Reference,
-        _data: Vec<u8>,
-        digest: &str,
-    ) -> Result<String> {
+    async fn push_blob(&self, _image: &oci::native::Reference, _data: Vec<u8>, digest: &str) -> Result<String> {
         self.record(&format!("push_blob:{}", digest));
         self.next_push_result()
     }

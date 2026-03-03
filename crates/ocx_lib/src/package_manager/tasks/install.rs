@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use tokio::task::JoinSet;
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 
 use crate::{
     log, oci,
@@ -32,19 +32,29 @@ impl PackageManager {
 
         log::debug!("Resolved package identifier: {}", &identifier);
 
-        let storage = self.file_structure().objects.path(&identifier)
+        let storage = self
+            .file_structure()
+            .objects
+            .path(&identifier)
             .map_err(PackageErrorKind::Internal)?;
-        let temp_path = self.file_structure().temp.path(&identifier)
+        let temp_path = self
+            .file_structure()
+            .temp
+            .path(&identifier)
             .map_err(PackageErrorKind::Internal)?;
 
         let client = self.client().map_err(PackageErrorKind::Internal)?;
-        let acquire = match self.file_structure().temp.try_acquire(&temp_path)
+        let acquire = match self
+            .file_structure()
+            .temp
+            .try_acquire(&temp_path)
             .map_err(PackageErrorKind::Internal)?
         {
             Some(r) => r,
             None => {
                 log::debug!("Temp dir locked by another process, waiting: {}", temp_path.display());
-                self.file_structure().temp
+                self.file_structure()
+                    .temp
                     .acquire_with_timeout(&temp_path, client.lock_timeout())
                     .await
                     .map_err(PackageErrorKind::Internal)?
@@ -55,7 +65,8 @@ impl PackageManager {
         }
 
         let install_info = client
-            .pull_package(identifier.clone(), &storage, acquire).await
+            .pull_package(identifier.clone(), &storage, acquire)
+            .await
             .map_err(PackageErrorKind::Internal)?;
 
         log::debug!("Package install succeeded for '{}'.", &identifier);
@@ -64,12 +75,14 @@ impl PackageManager {
         if candidate {
             let link_path = self.file_structure().installs.candidate(package);
             log::debug!("Creating candidate symlink at '{}'.", link_path.display());
-            rm.link(&link_path, &install_info.content).map_err(PackageErrorKind::Internal)?;
+            rm.link(&link_path, &install_info.content)
+                .map_err(PackageErrorKind::Internal)?;
         }
         if select {
             let link_path = self.file_structure().installs.current(package);
             log::debug!("Creating current symlink at '{}'.", link_path.display());
-            rm.link(&link_path, &install_info.content).map_err(PackageErrorKind::Internal)?;
+            rm.link(&link_path, &install_info.content)
+                .map_err(PackageErrorKind::Internal)?;
         }
 
         Ok(install_info)
@@ -91,10 +104,7 @@ impl PackageManager {
                 .instrument(info_span!("Installing", package = %packages[0]))
                 .await
                 .map_err(|kind| {
-                    package_manager::error::Error::InstallFailed(vec![PackageError::new(
-                        packages[0].clone(),
-                        kind,
-                    )])
+                    package_manager::error::Error::InstallFailed(vec![PackageError::new(packages[0].clone(), kind)])
                 })?;
             return Ok(vec![info]);
         }
@@ -105,15 +115,17 @@ impl PackageManager {
             let package = package.clone();
             let platforms = platforms.clone();
             let span = info_span!("Installing", package = %package);
-            tasks.spawn(async move {
-                let result = mgr.install(&package, platforms, candidate, select).await;
-                (package, result)
-            }.instrument(span));
+            tasks.spawn(
+                async move {
+                    let result = mgr.install(&package, platforms, candidate, select).await;
+                    (package, result)
+                }
+                .instrument(span),
+            );
         }
 
         let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
-        let mut results: HashMap<oci::Identifier, InstallInfo> =
-            HashMap::with_capacity(packages.len());
+        let mut results: HashMap<oci::Identifier, InstallInfo> = HashMap::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
         while let Some(join_result) = tasks.join_next().await {
@@ -131,9 +143,10 @@ impl PackageManager {
         }
 
         for id in pending {
-            errors.push(PackageError::new(id, PackageErrorKind::Internal(
-                crate::Error::UndefinedWithMessage("task panicked unexpectedly".into()),
-            )));
+            errors.push(PackageError::new(
+                id,
+                PackageErrorKind::Internal(crate::Error::UndefinedWithMessage("task panicked unexpectedly".into())),
+            ));
         }
 
         let mut infos = Vec::with_capacity(packages.len());

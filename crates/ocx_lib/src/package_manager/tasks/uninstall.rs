@@ -11,12 +11,7 @@ use super::super::PackageManager;
 impl PackageManager {
     /// Removes the candidate symlink for `package` and optionally the current
     /// symlink (`deselect`) and the backing object directory (`purge`).
-    pub fn uninstall(
-        &self,
-        package: &oci::Identifier,
-        deselect: bool,
-        purge: bool,
-    ) -> Result<(), PackageErrorKind> {
+    pub fn uninstall(&self, package: &oci::Identifier, deselect: bool, purge: bool) -> Result<(), PackageErrorKind> {
         let _span = info_span!("Uninstalling", package = %package).entered();
         log::debug!("Uninstalling package '{}'.", package);
 
@@ -65,9 +60,7 @@ impl PackageManager {
                         if let Some(obj_dir) = content.parent() {
                             log::info!("Purging unreferenced object: {}", obj_dir.display());
                             std::fs::remove_dir_all(obj_dir).map_err(|e| {
-                                PackageErrorKind::Internal(
-                                    crate::Error::InternalFile(obj_dir.to_path_buf(), e),
-                                )
+                                PackageErrorKind::Internal(crate::Error::InternalFile(obj_dir.to_path_buf(), e))
                             })?;
                         }
                     } else {
@@ -95,10 +88,7 @@ impl PackageManager {
 
         for package in packages {
             if let Err(kind) = self.uninstall(package, deselect, purge) {
-                errors.push(PackageError::new(
-                    package.clone(),
-                    kind,
-                ));
+                errors.push(PackageError::new(package.clone(), kind));
             }
         }
 

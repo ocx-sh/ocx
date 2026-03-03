@@ -14,7 +14,7 @@ pub struct ContextOptions {
     pub remote: bool,
 
     /// Run in offline mode, which will not attempt to fetch any remote information.
-    /// 
+    ///
     /// If a required package is not already installed, the command will fail.
     #[arg(long, default_value_t = env::flag("OCX_OFFLINE", false))]
     pub offline: bool,

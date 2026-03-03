@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  fix:
+    desc: Fix clippy issues
+    cmd: cargo clippy --fix --workspace --locked
+  check:
+    desc: Run clippy linter
+    cmd: cargo clippy --workspace --locked -- -D warnings

@@ -75,16 +75,15 @@ impl IndexStore {
         if !tags_dir.exists() {
             return Ok(Vec::new());
         }
-        let entries = std::fs::read_dir(&tags_dir)
-            .map_err(|e| crate::error::file_error(&tags_dir, e))?;
+        let entries = std::fs::read_dir(&tags_dir).map_err(|e| crate::error::file_error(&tags_dir, e))?;
         let mut repos = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| crate::error::file_error(&tags_dir, e))?;
             let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    repos.push(stem.to_string());
-                }
+            if path.extension().map(|e| e == "json").unwrap_or(false)
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                repos.push(stem.to_string());
             }
         }
         repos.sort();
@@ -101,10 +100,7 @@ impl IndexStore {
             oci::Digest::Sha384(h) => ("sha384", h.as_str()),
             oci::Digest::Sha512(h) => ("sha512", h.as_str()),
         };
-        Path::new(algorithm)
-            .join(&h[0..8])
-            .join(&h[8..16])
-            .join(&h[16..32])
+        Path::new(algorithm).join(&h[0..8]).join(&h[8..16]).join(&h[16..32])
     }
 }
 

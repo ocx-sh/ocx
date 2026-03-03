@@ -40,7 +40,7 @@ impl PackagePush {
 
         let mut versions_to_push = Vec::new();
         if self.cascade {
-            let version = match Version::from_str(identifier.tag_or_latest()) {
+            let version = match Version::parse(identifier.tag_or_latest()) {
                 Some(version) => version,
                 None => {
                     return Err(anyhow::anyhow!(
@@ -68,7 +68,7 @@ impl PackagePush {
             };
             let other_versions = other_tags
                 .into_iter()
-                .filter_map(|tag| Version::from_str(&tag))
+                .filter_map(|tag| Version::parse(&tag))
                 .collect::<Vec<_>>();
             let (cascaded_versions, is_latest) = version.cascade(other_versions);
             versions_to_push = cascaded_versions

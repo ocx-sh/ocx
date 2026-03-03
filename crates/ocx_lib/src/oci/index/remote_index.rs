@@ -11,7 +11,7 @@ pub use config::Config;
 #[derive(Clone)]
 pub struct Index {
     client: oci::Client,
-    cache : cache::SharedCache,
+    cache: cache::SharedCache,
 }
 
 impl Index {

@@ -21,7 +21,9 @@ impl ShellCompletion {
                 if let Some(shell) = shell::Shell::detect() {
                     match shell.try_into() {
                         Ok(clap_shell) => clap_shell,
-                        Err(err) => anyhow::bail!("The detected shell ({shell}) is not supported for completion generation: {err}"),
+                        Err(err) => anyhow::bail!(
+                            "The detected shell ({shell}) is not supported for completion generation: {err}"
+                        ),
                     }
                 } else {
                     anyhow::bail!("Could not detect the current shell. Please specify it using the --shell option.");

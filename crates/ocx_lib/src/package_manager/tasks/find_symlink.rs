@@ -1,7 +1,8 @@
 use tracing::info_span;
 
 use crate::{
-    file_structure::SymlinkKind, log, oci,
+    file_structure::SymlinkKind,
+    log, oci,
     package::{install_info::InstallInfo, metadata},
     package_manager::{self, error::PackageError, error::PackageErrorKind},
     prelude::SerdeExt,
@@ -28,10 +29,10 @@ impl PackageManager {
             return Err(PackageErrorKind::SymlinkRequiresTag);
         }
 
-        if kind == SymlinkKind::Current {
-            if let Some(tag) = package.tag() {
-                log::warn!("--current ignores the tag '{tag}' of '{package}'");
-            }
+        if kind == SymlinkKind::Current
+            && let Some(tag) = package.tag()
+        {
+            log::warn!("--current ignores the tag '{tag}' of '{package}'");
         }
 
         let symlink_path = self.file_structure().installs.symlink(package, kind);
@@ -45,8 +46,7 @@ impl PackageManager {
             .objects
             .metadata_for_content(&symlink_path)
             .map_err(PackageErrorKind::Internal)?;
-        let metadata = metadata::Metadata::read_json_from_path(&metadata_path)
-            .map_err(PackageErrorKind::Internal)?;
+        let metadata = metadata::Metadata::read_json_from_path(&metadata_path).map_err(PackageErrorKind::Internal)?;
 
         log::debug!(
             "Resolved '{}' via {:?} symlink at '{}'",
@@ -74,10 +74,7 @@ impl PackageManager {
             let _span = info_span!("Resolving", package = %package).entered();
             match self.find_symlink(package, kind).await {
                 Ok(info) => infos.push(info),
-                Err(kind) => errors.push(PackageError::new(
-                    package.clone(),
-                    kind,
-                )),
+                Err(kind) => errors.push(PackageError::new(package.clone(), kind)),
             }
         }
 

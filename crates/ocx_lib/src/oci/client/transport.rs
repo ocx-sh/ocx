@@ -35,10 +35,7 @@ pub trait OciTransport: Send + Sync {
     ) -> Result<Vec<String>>;
 
     /// Fetches only the digest of a manifest without pulling the full content.
-    async fn fetch_manifest_digest(
-        &self,
-        image: &oci::native::Reference,
-    ) -> Result<String>;
+    async fn fetch_manifest_digest(&self, image: &oci::native::Reference) -> Result<String>;
 
     /// Pulls raw manifest bytes and returns them with the digest string.
     async fn pull_manifest_raw(
@@ -48,21 +45,12 @@ pub trait OciTransport: Send + Sync {
     ) -> Result<(Vec<u8>, String)>;
 
     /// Pulls a blob and writes it to the specified file path.
-    async fn pull_blob_to_file(
-        &self,
-        image: &oci::native::Reference,
-        digest: &str,
-        path: &Path,
-    ) -> Result<()>;
+    async fn pull_blob_to_file(&self, image: &oci::native::Reference, digest: &str, path: &Path) -> Result<()>;
 
     // ── Write operations ─────────────────────────────────────────────
 
     /// Pushes a typed OCI manifest and returns the resulting digest string.
-    async fn push_manifest(
-        &self,
-        image: &oci::native::Reference,
-        manifest: &oci::Manifest,
-    ) -> Result<String>;
+    async fn push_manifest(&self, image: &oci::native::Reference, manifest: &oci::Manifest) -> Result<String>;
 
     /// Pushes raw manifest bytes with the given media type string.
     /// Returns the resulting digest string.
@@ -74,12 +62,7 @@ pub trait OciTransport: Send + Sync {
     ) -> Result<String>;
 
     /// Pushes in-memory blob data. Returns the resulting digest string.
-    async fn push_blob(
-        &self,
-        image: &oci::native::Reference,
-        data: Vec<u8>,
-        digest: &str,
-    ) -> Result<String>;
+    async fn push_blob(&self, image: &oci::native::Reference, data: Vec<u8>, digest: &str) -> Result<String>;
 
     // ── Clone support ────────────────────────────────────────────────
 

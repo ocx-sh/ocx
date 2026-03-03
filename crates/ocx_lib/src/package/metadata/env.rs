@@ -7,7 +7,6 @@ pub mod modifier;
 pub mod path;
 pub mod var;
 
-
 #[derive(Debug, Default, Clone)]
 pub struct Env {
     variables: Vec<var::Var>,
