@@ -114,7 +114,6 @@ The command line option [`--offline`](command-line#arg-offline) takes precedence
 ### `OCX_REMOTE` {#ocx-remote}
 
 When set to a [truthy value](#truthy-values), OCX will use the remote index by default instead of the local index.
-The command line option [`--remote`](command-line#remote) takes precedence over this variable.
 
 ## External {#external}
 
