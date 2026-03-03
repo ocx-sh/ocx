@@ -1,0 +1,42 @@
+name: Build Rust Binary
+description: Build an ocx binary for a given target (native builds only)
+
+inputs:
+  target:
+    description: Rust target triple
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust Toolchain
+      uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+      with:
+        toolchain: stable
+        targets: ${{ inputs.target }}
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - name: Build
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: cargo build --release --target="$TARGET" --locked
+    - name: Prepare Binary
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        ext=""
+        [[ "$TARGET" == *windows* ]] && ext=".exe"
+        src="target/${TARGET}/release/ocx${ext}"
+        dst="ocx-${TARGET}${ext}"
+        cp "$src" "$dst"
+    - name: Upload Binary
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ocx-${{ inputs.target }}
+        path: ocx-${{ inputs.target }}${{ contains(inputs.target, 'windows') && '.exe' || '' }}
+        compression-level: 0
+        retention-days: 7
