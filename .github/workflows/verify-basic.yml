@@ -26,6 +26,10 @@ jobs:
           toolchain: stable
           components: clippy,rustfmt
           matcher: true
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Setup Task
         uses: go-task/setup-task@0ab1b2a65bc55236a3bc64cde78f80e20e8885c2 # v1.0.0
       - name: Install nextest
