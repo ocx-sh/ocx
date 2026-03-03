@@ -49,7 +49,7 @@ Use STRIDE analysis systematically:
 - ALWAYS create GitHub issues for critical/high findings
 
 ## Related Skills
-`application-security`, `threat-modeling`, `security-review`, `compliance`
+`application-security`, `threat-modeling`, `security-review`
 
 ## Handoff
 - To Builder: For remediation

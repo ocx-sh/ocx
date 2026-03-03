@@ -51,7 +51,7 @@ Interface design, visual consistency, and accessibility.
 - ALWAYS save to `./artifacts/design_spec_[component].md`
 
 ## Related Skills
-`interface-design`, `accessibility`, `design-systems`
+`designing-systems`
 
 ## Handoff
 - To Builder: After design approval

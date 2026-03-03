@@ -202,5 +202,5 @@ export function sortFindingsBySeverity(findings: Finding[]): Finding[] {
 
 ## Related Skills
 
-- `interface-design` - Use color systems in React components
+- `designing-systems` - Use color systems in React components
 - `refactoring-code` - Consolidate duplicate color/formatting logic

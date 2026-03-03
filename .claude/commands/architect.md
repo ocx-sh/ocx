@@ -42,7 +42,7 @@ Use for complex design decisions:
 Save artifacts to `./artifacts/adr_[topic].md` or `./artifacts/system_design_[component].md`
 
 ## Related Skills
-`designing-systems`, `designing-apis`, `domain-driven-design`, `cloud-native-patterns`
+`designing-systems`
 
 ## Handoff
 - To Builder: After ADR approval

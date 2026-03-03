@@ -107,7 +107,7 @@ If quality gates fail: stash changes, mark task as blocked, add comment with rea
 
 ## Related Skills
 
-`beads-workflow`, `swarm-coordination`, `testing`
+`beads-workflow`, `testing`
 
 ## Handoff
 

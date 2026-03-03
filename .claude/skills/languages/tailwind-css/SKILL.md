@@ -5,7 +5,7 @@ description: Tailwind CSS 4.x utility-first styling patterns. Use when building 
 
 # Tailwind CSS 4.x
 
-> **Platform:** Web (Tailwind CSS 4.x). For mobile styling, see the **nativewind** skill (Tailwind 3.x for React Native).
+> **Platform:** Web (Tailwind CSS 4.x).
 
 ## Overview
 
