@@ -1,0 +1,84 @@
+name: Basic Verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  smoke:
+    name: Smoke (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          submodules: true
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@a0b538fa0b742a6aa35d6e2c169b4bd06d225a98 # v1.15.3
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+          matcher: true
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --locked -- -D warnings
+      - name: Build
+        run: cargo build --release -p ocx_cli --locked
+      - name: Install nextest
+        uses: taiki-e/install-action@edba51d32f66935a112c0516fec65a13d420cbc6 # v2.68.17
+        with:
+          tool: cargo-nextest
+      - name: Test
+        run: cargo nextest run --workspace --profile ci --locked
+      - name: Publish Unit Test Results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: target/nextest/ci/junit.xml
+          check_name: "Unit Test Results"
+
+  acceptance-tests:
+    name: Acceptance Tests
+    needs: smoke
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          submodules: true
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@a0b538fa0b742a6aa35d6e2c169b4bd06d225a98 # v1.15.3
+        with:
+          toolchain: stable
+      - name: Build Binary
+        run: cargo build --release -p ocx_cli --locked
+      - name: Prepare Binary
+        run: |
+          mkdir -p test/bin
+          cp target/release/ocx test/bin/ocx
+          chmod +x test/bin/ocx
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Setup Task
+        uses: go-task/setup-task@0ab1b2a65bc55236a3bc64cde78f80e20e8885c2 # v1.0.0
+      - name: Run Acceptance Tests
+        run: task test -- --junit-xml=results/junit.xml
+      - name: Publish Acceptance Test Results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: test/results/junit.xml
+          check_name: "Acceptance Test Results"

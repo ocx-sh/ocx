@@ -1,4 +1,4 @@
-name: Build Binaries
+name: Deploy Canary
 
 on:
   workflow_dispatch:
