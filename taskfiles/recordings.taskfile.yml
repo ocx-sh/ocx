@@ -3,12 +3,24 @@
 version: '3'
 
 vars:
+  BIN_DIR: "{{.ROOT_DIR}}/test/bin"
+  OCX_BINARY: "{{.BIN_DIR}}/ocx{{exeExt}}"
+  SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
   CASTS_DIR: "{{.ROOT_DIR}}/website/src/public/casts"
   GIFS_DIR: "{{.ROOT_DIR}}/out/recordings"
   FONTS_DIR: "{{.ROOT_DIR}}/.fonts"
   FONT_URL: "https://github.com/ryanoasis/nerd-fonts/releases/latest/download/CascadiaCode.tar.xz"
 
 tasks:
+  ensure-binary:
+    internal: true
+    cmds:
+      - cargo build --release -p ocx_cli
+      - mkdir -p {{.BIN_DIR}}
+      - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
+    status:
+      - '{{eq .SKIP_BUILD "true"}}'
+
   ensure-font:
     desc: Download CaskaydiaCove Nerd Font if not present
     internal: true
@@ -19,9 +31,15 @@ tasks:
       - curl -fsSL "{{.FONT_URL}}" | tar -xJf - -C {{.FONTS_DIR}}/CascadiaCode
 
   build:
-    desc: Generate all .cast recordings (builds binary + starts registry)
+    desc: Generate all .cast recordings
     dir: "{{.ROOT_DIR}}/test"
-    cmd: uv run pytest recordings/ {{ .CLI_ARGS | default "-v" }}
+    cmds:
+      - task: ensure-binary
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - uv run pytest recordings/ {{.CLI_ARGS | default "-v"}}
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
 
   gifs:
     desc: Convert all .cast files to animated GIFs (requires agg)

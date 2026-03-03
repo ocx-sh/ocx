@@ -39,20 +39,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ steps.build.outcome == 'success' }}
-      # - name: Setup Zig
-      #   uses: mlugg/setup-zig@v2
-      #   with:
-      #     version: 0.15.2
-      - name: Install Zigbuild
-        uses: actions-rs/cargo@v1
-        with:
-          command: install
-          args: --locked cargo-zigbuild@0.22.1
       - name: Build
         id: build
         uses: actions-rs/cargo@v1
         with:
-          # command: zigbuild
           command: build
           args: --release --target=${{ matrix.job.target }} --locked
       - name: Install nextest
@@ -76,6 +66,40 @@ jobs:
         with:
           name: test-results-${{ matrix.job.target }}
           path: target/nextest/ci/junit.xml
+
+  acceptance-tests:
+    name: Acceptance Tests
+    needs: build
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+      - name: Download Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ocx-x86_64-unknown-linux-gnu
+          path: test/bin
+      - name: Prepare Binary
+        run: mv test/bin/ocx-x86_64-unknown-linux-gnu test/bin/ocx && chmod +x test/bin/ocx
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Setup Task
+        uses: go-task/setup-task@v1
+      - name: Run Acceptance Tests
+        run: task test -- --junit-xml=results/junit.xml
+      - name: Upload Test Results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-acceptance
+          path: test/results/junit.xml
 
   snapshot-release:
     name: Snapshot Release
@@ -103,7 +127,7 @@ jobs:
 
   test-results:
     name: Publish Test Results
-    needs: build
+    needs: [build, acceptance-tests]
     runs-on: ubuntu-latest
     if: ${{ !cancelled() }}
     steps:

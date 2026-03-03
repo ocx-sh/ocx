@@ -2,15 +2,41 @@
 
 version: '3'
 
+vars:
+  BIN_DIR: "{{.ROOT_DIR}}/test/bin"
+  OCX_BINARY: "{{.BIN_DIR}}/ocx{{exeExt}}"
+  SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
+
 tasks:
+  build:
+    internal: true
+    cmds:
+      - cargo build --release -p ocx_cli
+      - mkdir -p {{.BIN_DIR}}
+      - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
+    status:
+      - '{{eq .SKIP_BUILD "true"}}'
+
   default:
     desc: Run acceptance tests (builds binary + starts registry automatically)
-    cmd: uv run pytest {{ .CLI_ARGS | default "-v" }}
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - uv run pytest {{.CLI_ARGS | default "-v"}}
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
 
   quick:
     desc: Run acceptance tests without rebuilding the binary
-    cmd: uv run pytest --no-build {{ .CLI_ARGS | default "-v" }}
+    cmds:
+      - task: default
+        vars:
+          SKIP_BUILD: "true"
 
   parallel:
     desc: Run acceptance tests in parallel
-    cmd: uv run pytest -n auto {{ .CLI_ARGS | default "-v" }}
+    cmds:
+      - task: default
+        vars:
+          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
