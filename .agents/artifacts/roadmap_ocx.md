@@ -22,6 +22,58 @@ OCX becomes the standard backend tool for distributing pre-built binaries via OC
 
 ## Phases
 
+### Phase 0: Public Release Readiness (Gate)
+
+**Status:** Not Started
+
+Everything required before flipping the repository to public. Grouped into three tiers: hard blockers, should-fix, and nice-to-have.
+
+#### P0 — Hard Blockers
+
+These prevent a credible public launch.
+
+- [ ] Fix compile errors: invalid regex in `accumulator.rs:10`, never-loop in `version.rs:368`
+- [ ] Add LICENSE file (Apache-2.0 recommended given dependency landscape)
+- [ ] Fix submodule URL in `.gitmodules` to absolute HTTPS (`https://github.com/ocx-sh/rust-oci-client`)
+- [ ] Fix landing page: replace 3× lorem ipsum in feature cards, fix CTA button links (`/markdown-examples` → docs), fix `ocx run` → `ocx exec`
+- [ ] Write Installation page (`website/src/docs/installation.md` — currently empty)
+- [ ] Write Getting Started page (`website/src/docs/getting-started.md` — currently empty)
+
+#### P1 — Should Fix
+
+These affect credibility and safety for a public project.
+
+- [ ] Add push/PR triggers to CI workflow (`build-binaries.yml` is `workflow_dispatch` only)
+- [ ] Add clippy + fmt check step to CI
+- [ ] SHA-pin actions in `deploy-website.yml` (has SSH key access) + fix `actions/checkout@v6` → `@v4`
+- [ ] Add NOTICE file for Apache-2.0 attribution (oci-client fork, aws-lc-sys/OpenSSL)
+- [ ] Add `version`, `description`, `license`, `repository` to both `Cargo.toml` files
+- [ ] Run `cargo fmt` across workspace
+- [ ] Fix user guide auth typo: `OXC_AUTH_*` → `OCX_AUTH_*`
+- [ ] Fill or remove empty user guide stub sections (Indices, Mirrors)
+- [ ] Remove VitePress template pages ("MD", "API") from public nav
+- [ ] Add `.beads/interactions.jsonl` to `.gitignore`
+- [ ] Scrub personal username (`mherwig`) from tracked planning files
+
+#### P2 — Nice to Have
+
+Improve first impressions but not strictly blocking.
+
+- [ ] Write a README with: what OCX is, install instructions, basic usage, link to docs
+- [ ] Add CONTRIBUTING.md (build, test, PR workflow)
+- [ ] Add CHANGELOG.md
+- [ ] Fix 11 clippy warnings
+- [ ] Remove unused `lazy_static` dependency if confirmed unused
+- [ ] Upgrade VitePress from `^2.0.0-alpha.16` to current stable
+
+**Dependencies:** None — this phase gates everything else
+
+**Risks:**
+- Submodule repo (`ocx-sh/rust-oci-client`) must also be public before OCX goes public
+- oci-client patches need a plan for crates.io if OCX is ever published there
+
+---
+
 ### Phase 1: Harden Core (Foundation)
 
 **Status:** Not Started
@@ -134,6 +186,8 @@ Integrations, advanced packaging, and the features that make OCX a platform.
 
 | Milestone | Target | Status |
 |-----------|--------|--------|
+| Public release readiness (P0 blockers) | 2026-Q1 | Pending |
+| Public release readiness (P1 should-fix) | 2026-Q1 | Pending |
 | Atomic installs + local catalog | 2026-Q1 | Pending |
 | CI multi-platform matrix green | 2026-Q2 | Pending |
 | Homebrew + install script available | 2026-Q2 | Pending |

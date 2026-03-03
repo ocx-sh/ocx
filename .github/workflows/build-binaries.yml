@@ -10,59 +10,34 @@ permissions:
 
 jobs:
   build:
-    name: Build
+    name: Build & Test
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
       matrix:
         job:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           submodules: true
-      - name: Install `rust` Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: ${{ matrix.job.target }}
-          override: true
-          profile: minimal
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ steps.build.outcome == 'success' }}
       - name: Build
-        id: build
-        uses: actions-rs/cargo@v1
+        uses: ./.github/actions/build-rust
         with:
-          command: build
-          args: --release --target=${{ matrix.job.target }} --locked
+          target: ${{ matrix.job.target }}
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - name: Test
-        run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci
-      - name: Prepare Binary
-        shell: bash
-        run: |
-          src="target/${{ matrix.job.target }}/release/ocx${{ runner.os == 'Windows' && '.exe' || '' }}"
-          dst="ocx-${{ matrix.job.target }}${{ runner.os == 'Windows' && '.exe' || '' }}"
-          cp "$src" "$dst"
-      - name: Upload Binary
-        uses: actions/upload-artifact@v4
+        uses: taiki-e/install-action@edba51d32f66935a112c0516fec65a13d420cbc6 # v2.68.17
         with:
-          name: ocx-${{ matrix.job.target }}
-          path: ocx-${{ matrix.job.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+          tool: cargo-nextest
+      - name: Test
+        run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci --locked
       - name: Upload Test Results
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-results-${{ matrix.job.target }}
           path: target/nextest/ci/junit.xml
@@ -78,43 +53,85 @@ jobs:
           - 5000:5000
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           submodules: true
       - name: Download Binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ocx-x86_64-unknown-linux-gnu
           path: test/bin
       - name: Prepare Binary
         run: mv test/bin/ocx-x86_64-unknown-linux-gnu test/bin/ocx && chmod +x test/bin/ocx
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: Setup Task
-        uses: go-task/setup-task@v1
+        uses: go-task/setup-task@0ab1b2a65bc55236a3bc64cde78f80e20e8885c2 # v1.0.0
       - name: Run Acceptance Tests
         run: task test -- --junit-xml=results/junit.xml
       - name: Upload Test Results
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-results-acceptance
           path: test/results/junit.xml
 
+  build-cross:
+    name: Build (cross)
+    needs: [build, acceptance-tests]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.job.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          submodules: true
+      - name: Build
+        uses: houseabsolute/actions-rust-cross@9ea5352c0f279f0b89ea2eb503337acf4f27c73e # v0.0.17
+        with:
+          target: ${{ matrix.job.target }}
+          args: --release --locked
+      - name: Prepare Binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.job.target }}
+        run: |
+          ext=""
+          [[ "$TARGET" == *windows* ]] && ext=".exe"
+          src="target/${TARGET}/release/ocx${ext}"
+          dst="ocx-${TARGET}${ext}"
+          cp "$src" "$dst"
+      - name: Upload Binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocx-${{ matrix.job.target }}
+          path: ocx-${{ matrix.job.target }}${{ contains(matrix.job.target, 'windows') && '.exe' || '' }}
+          compression-level: 0
+          retention-days: 7
+
   snapshot-release:
     name: Snapshot Release
-    needs: build
+    needs: [build, acceptance-tests, build-cross]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Download Binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: ocx-*
           path: artifacts
           merge-multiple: true
       - name: Create Snapshot Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           tag_name: canary
           name: Canary Snapshot
@@ -132,12 +149,12 @@ jobs:
     if: ${{ !cancelled() }}
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: test-results-*
           path: artifacts
       - name: Publish Test Results
-        uses: EnricoMi/publish-unit-test-result-action@v2
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
         with:
           files: "artifacts/**/junit.xml"
           check_name: "Test Results"
