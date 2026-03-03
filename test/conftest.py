@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -12,29 +11,14 @@ from src.helpers import PROJECT_ROOT, start_registry
 from src.runner import OcxRunner
 
 # ---------------------------------------------------------------------------
-# CLI options & session hooks
+# Session hooks
 # ---------------------------------------------------------------------------
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--no-build",
-        action="store_true",
-        default=False,
-        help="Skip the automatic ``cargo build --release`` step.",
-    )
-
-
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Build ocx and start the registry once before xdist workers spawn."""
+    """Start the registry once before xdist workers spawn."""
     if os.environ.get("PYTEST_XDIST_WORKER") is not None:
         return
-    if not session.config.getoption("--no-build"):
-        subprocess.run(
-            ["cargo", "build", "--release", "-p", "ocx_cli"],
-            cwd=PROJECT_ROOT,
-            check=True,
-        )
     registry = os.environ.get("REGISTRY", "localhost:5000")
     start_registry(registry)
 
@@ -53,10 +37,10 @@ def registry() -> str:
 
 @pytest.fixture(scope="session")
 def ocx_binary() -> Path:
-    if env_path := os.environ.get("OCX"):
+    if env_path := os.environ.get("OCX_COMMAND"):
         p = Path(env_path)
     else:
-        p = PROJECT_ROOT / "target" / "release" / "ocx"
+        p = PROJECT_ROOT / "test" / "bin" / "ocx"
         if sys.platform == "win32" and not p.suffix:
             p = p.with_suffix(".exe")
     assert p.exists(), f"ocx binary not found at {p}"

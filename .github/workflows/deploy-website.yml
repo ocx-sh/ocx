@@ -13,8 +13,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build
+  build-binary:
+    name: Build Binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build ocx binary
+        run: cargo build --release -p ocx_cli
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocx-binary
+          path: target/release/ocx
+
+  recordings:
+    name: Generate Recordings
+    needs: build-binary
     runs-on: ubuntu-latest
     services:
       registry:
@@ -23,39 +45,55 @@ jobs:
           - 5000:5000
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: true
-
-      # --- Recordings (generate .cast files) ---
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build ocx binary
-        run: cargo build --release -p ocx_cli
+      - name: Download Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ocx-binary
+          path: test/bin
+      - name: Make Binary Executable
+        run: chmod +x test/bin/ocx
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v6
       - name: Setup Task
         uses: go-task/setup-task@v1
       - name: Generate recordings
         run: task recordings:build
+      - name: Upload Recordings
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-recordings
+          path: website/src/public/casts/
 
-      # --- Website ---
+  website:
+    name: Build Website
+    needs: recordings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Download Recordings
+        uses: actions/download-artifact@v4
+        with:
+          name: website-recordings
+          path: website/src/public/casts/
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
           node-version: 24
+      - name: Setup Task
+        uses: go-task/setup-task@v1
       - name: Install Dependencies
         run: bun install
         working-directory: website
       - name: Build with VitePress
         run: task build
         working-directory: website
-
       - name: Upload site artifact
         uses: actions/upload-artifact@v4
         with:
@@ -64,7 +102,7 @@ jobs:
 
   deploy:
     name: Deploy
-    needs: build
+    needs: website
     runs-on: ubuntu-latest
     environment:
       name: ocx.sh
