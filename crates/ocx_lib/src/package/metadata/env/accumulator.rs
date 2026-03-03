@@ -1,13 +1,6 @@
-use std::sync::LazyLock;
-
-use regex::Regex;
-
 use crate::{Error, Result, env};
 
 use super::var;
-
-static VARIABLE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\\${[a-zA-Z:_]+}").expect("Invalid variable regex!"));
 
 pub struct Accumulator<'a> {
     install_path: std::path::PathBuf,

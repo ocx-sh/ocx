@@ -2,25 +2,25 @@
 pub mod native {
     pub use oci_client;
 
-    pub use oci_client::client::Client as Client;
-    pub use oci_client::client::ClientConfig as ClientConfig;
-    pub use oci_client::client::ClientProtocol as ClientProtocol;
+    pub use oci_client::client::Client;
+    pub use oci_client::client::ClientConfig;
+    pub use oci_client::client::ClientProtocol;
 
-    pub use oci_client::Reference as Reference;
-    pub use oci_client::manifest::Platform as Platform;
+    pub use oci_client::Reference;
+    pub use oci_client::manifest::Platform;
 
     pub use oci_client::config::Architecture as Arch;
-    pub use oci_client::config::Os as Os;
+    pub use oci_client::config::Os;
 
-    pub use oci_client::manifest::OciManifest as Manifest;
-    pub use oci_client::manifest::OciImageManifest as ImageManifest;
     pub use oci_client::manifest::OciImageIndex as ImageIndex;
+    pub use oci_client::manifest::OciImageManifest as ImageManifest;
+    pub use oci_client::manifest::OciManifest as Manifest;
 
     pub use oci_client::secrets::RegistryAuth as Auth;
 
     pub use docker_credential;
     pub use docker_credential::CredentialRetrievalError as DockerCredentialRetrievalError;
-    pub use docker_credential::DockerCredential as DockerCredential;
+    pub use docker_credential::DockerCredential;
     pub use docker_credential::get_credential as get_docker_credential;
 }
 
@@ -42,8 +42,8 @@ pub mod index;
 pub use index::Index;
 
 mod identifier;
-pub use identifier::Identifier;
 pub use identifier::DEFAULT_REGISTRY;
+pub use identifier::Identifier;
 
 mod platform;
 pub use platform::Platform;

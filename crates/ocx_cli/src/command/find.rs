@@ -34,10 +34,8 @@ pub struct Find {
 
 impl Find {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifiers = options::Identifier::transform_all(
-            self.packages.clone().into_iter(),
-            context.default_registry(),
-        )?;
+        let identifiers =
+            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
         let manager = context.manager();
 
@@ -58,9 +56,7 @@ impl Find {
             })
             .collect();
 
-        context
-            .api()
-            .report_paths(api::data::paths::Paths::new(entries))?;
+        context.api().report_paths(api::data::paths::Paths::new(entries))?;
 
         Ok(ExitCode::SUCCESS)
     }

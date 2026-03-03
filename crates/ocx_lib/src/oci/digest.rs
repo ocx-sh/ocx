@@ -18,7 +18,6 @@ impl Digest {
     pub fn sha256(data: impl AsRef<[u8]>) -> Self {
         Self::Sha256(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(data)))
     }
-
 }
 
 impl std::fmt::Display for Digest {
@@ -35,11 +34,11 @@ impl TryFrom<String> for Digest {
     type Error = Error;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        fn check_digest(value: &String, digest: &str, expected_len: usize) -> Result<(), Error> {
+        fn check_digest(value: &str, digest: &str, expected_len: usize) -> Result<(), Error> {
             if digest.len() == expected_len && digest.chars().all(|c| c.is_ascii_hexdigit()) {
                 Ok(())
             } else {
-                Err(Error::PackageDigestInvalid(value.clone()))
+                Err(Error::PackageDigestInvalid(value.to_owned()))
             }
         }
 
@@ -87,7 +86,8 @@ mod tests {
         let digest = Digest::try_from(digest_str.to_string()).unwrap();
         assert!(matches!(digest, Digest::Sha256(_)));
 
-        let digest_str = "sha384:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9a1b2c3d4e5f678901234567890123456";
+        let digest_str =
+            "sha384:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9a1b2c3d4e5f678901234567890123456";
         let digest = Digest::try_from(digest_str.to_string()).unwrap();
         assert!(matches!(digest, Digest::Sha384(_)));
 

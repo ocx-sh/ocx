@@ -61,9 +61,7 @@ impl Default for Env {
 impl Env {
     pub fn new() -> Self {
         Self {
-            vars: std::env::vars_os()
-                .map(|(k, v)| (EnvKey::new(k), v))
-                .collect(),
+            vars: std::env::vars_os().map(|(k, v)| (EnvKey::new(k), v)).collect(),
         }
     }
 
@@ -167,8 +165,10 @@ pub fn var(key: impl AsRef<str>) -> Option<String> {
 
 pub fn flag(key: impl AsRef<str>, default: bool) -> bool {
     let key = key.as_ref();
-    match var(key).map(|value| utility::boolean_string::BooleanString::try_from(value.as_str()))
-        .transpose() {
+    match var(key)
+        .map(|value| utility::boolean_string::BooleanString::try_from(value.as_str()))
+        .transpose()
+    {
         Ok(Some(boolean)) => boolean.into(),
         Ok(None) => default,
         Err(error) => {
@@ -180,11 +180,7 @@ pub fn flag(key: impl AsRef<str>, default: bool) -> bool {
 
 pub fn string(key: impl AsRef<str>, default: String) -> String {
     if let Some(value) = var(key) {
-        if value.is_empty() {
-            default
-        } else {
-            value
-        }
+        if value.is_empty() { default } else { value }
     } else {
         default
     }

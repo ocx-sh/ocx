@@ -33,10 +33,7 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Client {
-        let transport = NativeTransport::new(
-            oci::native::Client::new(self.config),
-            self.auth,
-        );
+        let transport = NativeTransport::new(oci::native::Client::new(self.config), self.auth);
         Client {
             transport: Box::new(transport),
             lock_timeout: self.lock_timeout.unwrap_or(std::time::Duration::from_secs(30)),

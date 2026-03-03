@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::{file_structure::FileStructure, log, symlink, Error, Result};
+use crate::{Error, Result, file_structure::FileStructure, log, symlink};
 
 /// Manages forward symlinks and their back-references inside the object store.
 ///
@@ -43,7 +43,11 @@ impl ReferenceManager {
     /// Returns the back-reference path inside the object that `content_path`
     /// belongs to, keyed by `forward_path`.
     fn back_ref_path(&self, content_path: &Path, forward_path: &Path) -> Result<PathBuf> {
-        Ok(self.file_structure.objects.refs_dir_for_content(content_path)?.join(Self::ref_name(forward_path)))
+        Ok(self
+            .file_structure
+            .objects
+            .refs_dir_for_content(content_path)?
+            .join(Self::ref_name(forward_path)))
     }
 
     /// Creates or updates a forward symlink from `forward_path` to `content_path`,
@@ -76,19 +80,14 @@ impl ReferenceManager {
                 }
             }
         } else {
-            log::debug!(
-                "Linking '{}' → '{}'.",
-                forward_path.display(),
-                content_path.display(),
-            );
+            log::debug!("Linking '{}' → '{}'.", forward_path.display(), content_path.display(),);
         }
 
         symlink::update(content_path, forward_path)?;
 
         let ref_path = self.back_ref_path(content_path, forward_path)?;
         if let Some(parent) = ref_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::InternalFile(parent.to_path_buf(), e))?;
+            std::fs::create_dir_all(parent).map_err(|e| Error::InternalFile(parent.to_path_buf(), e))?;
         }
         // Idempotent: recreate if a stale back-ref already exists at this path.
         if symlink::is_link(&ref_path) {
@@ -96,7 +95,11 @@ impl ReferenceManager {
             symlink::remove(&ref_path)?;
         }
         symlink::create(forward_path, &ref_path)?;
-        log::trace!("Created back-ref '{}' → '{}'.", ref_path.display(), forward_path.display());
+        log::trace!(
+            "Created back-ref '{}' → '{}'.",
+            ref_path.display(),
+            forward_path.display()
+        );
 
         Ok(())
     }
@@ -155,14 +158,8 @@ impl ReferenceManager {
         Ok(broken)
     }
 
-    fn check_refs_dir(
-        &self,
-        refs_dir: &Path,
-        expected_content: &Path,
-        broken: &mut Vec<PathBuf>,
-    ) -> Result<()> {
-        let entries = std::fs::read_dir(refs_dir)
-            .map_err(|e| Error::InternalFile(refs_dir.to_path_buf(), e))?;
+    fn check_refs_dir(&self, refs_dir: &Path, expected_content: &Path, broken: &mut Vec<PathBuf>) -> Result<()> {
+        let entries = std::fs::read_dir(refs_dir).map_err(|e| Error::InternalFile(refs_dir.to_path_buf(), e))?;
 
         for entry in entries.flatten() {
             let back_ref = entry.path();
@@ -170,7 +167,10 @@ impl ReferenceManager {
                 continue;
             }
             let Ok(forward_path) = std::fs::read_link(&back_ref) else {
-                log::trace!("Broken back-ref '{}': could not read symlink target.", back_ref.display());
+                log::trace!(
+                    "Broken back-ref '{}': could not read symlink target.",
+                    back_ref.display()
+                );
                 broken.push(back_ref);
                 continue;
             };
@@ -321,7 +321,12 @@ mod tests {
         let content_b = make_content(&root, "d_b");
         let forward = fwd(&root, "link1");
 
-        let gone = root.join("objects").join("reg").join("repo").join("gone").join("content");
+        let gone = root
+            .join("objects")
+            .join("reg")
+            .join("repo")
+            .join("gone")
+            .join("content");
         crate::symlink::create(&gone, &forward).unwrap();
 
         rm.link(&forward, &content_b).unwrap();
@@ -375,7 +380,12 @@ mod tests {
         let (_dir, root, rm) = setup();
         let forward = fwd(&root, "link1");
 
-        let gone = root.join("objects").join("reg").join("repo").join("gone").join("content");
+        let gone = root
+            .join("objects")
+            .join("reg")
+            .join("repo")
+            .join("gone")
+            .join("content");
         crate::symlink::create(&gone, &forward).unwrap();
 
         rm.unlink(&forward).unwrap();

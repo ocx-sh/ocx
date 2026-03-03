@@ -127,12 +127,12 @@ impl ObjectStore {
     /// directory that contains it.  Used internally to derive sibling paths such
     /// as `metadata.json` and `refs/`.
     fn object_dir_for_content(content_path: &Path) -> Result<PathBuf> {
-        let canonical = dunce::canonicalize(content_path)
-            .map_err(|e| Error::InternalFile(content_path.to_path_buf(), e))?;
+        let canonical =
+            dunce::canonicalize(content_path).map_err(|e| Error::InternalFile(content_path.to_path_buf(), e))?;
         canonical
             .parent()
             .map(|p| p.to_path_buf())
-            .ok_or_else(|| Error::InternalPathInvalid(canonical))
+            .ok_or(Error::InternalPathInvalid(canonical))
     }
 
     /// Recursively walks `dir` and collects all object directories.
@@ -145,8 +145,7 @@ impl ObjectStore {
             result.push(ObjectDir { dir: dir.to_path_buf() });
             return Ok(());
         }
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| Error::InternalFile(dir.to_path_buf(), e))?;
+        let entries = std::fs::read_dir(dir).map_err(|e| Error::InternalFile(dir.to_path_buf(), e))?;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -167,10 +166,7 @@ impl ObjectStore {
             oci::Digest::Sha384(h) => ("sha384", h.as_str()),
             oci::Digest::Sha512(h) => ("sha512", h.as_str()),
         };
-        Path::new(algorithm)
-            .join(&h[0..8])
-            .join(&h[8..16])
-            .join(&h[16..32])
+        Path::new(algorithm).join(&h[0..8]).join(&h[8..16]).join(&h[16..32])
     }
 }
 
@@ -327,9 +323,17 @@ mod tests {
 
     #[test]
     fn object_dir_accessors() {
-        let obj_dir = ObjectDir { dir: PathBuf::from("/store/reg/cmake/sha256/a/b/c") };
-        assert_eq!(obj_dir.content(), PathBuf::from("/store/reg/cmake/sha256/a/b/c/content"));
-        assert_eq!(obj_dir.metadata(), PathBuf::from("/store/reg/cmake/sha256/a/b/c/metadata.json"));
+        let obj_dir = ObjectDir {
+            dir: PathBuf::from("/store/reg/cmake/sha256/a/b/c"),
+        };
+        assert_eq!(
+            obj_dir.content(),
+            PathBuf::from("/store/reg/cmake/sha256/a/b/c/content")
+        );
+        assert_eq!(
+            obj_dir.metadata(),
+            PathBuf::from("/store/reg/cmake/sha256/a/b/c/metadata.json")
+        );
         assert_eq!(obj_dir.refs_dir(), PathBuf::from("/store/reg/cmake/sha256/a/b/c/refs"));
     }
 }

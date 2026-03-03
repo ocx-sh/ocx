@@ -2,12 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
 
+type PatchRest = (Option<String>, Option<String>);
+type MinorRest = Option<(u32, PatchRest)>;
+
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Version {
     /// major version, always present, consequently there is no representation of a 'latest' version
     major: u32,
     /// tuple of (minor, tuple of (patch, (build, prerelease))), ensuring that minor is only present if patch is present, and patch is only present if prerelease is present
-    rest: Option<(u32, Option<(u32, (Option<String>, Option<String>))>)>,
+    rest: Option<(u32, MinorRest)>,
 }
 
 /// Close to semver version, but with rolling parent versions and no build info.
@@ -106,17 +109,16 @@ impl Version {
         // pre-releases shall never cascade beyond the pre-release level, only the build may cascade.
         if self.has_prerelease() {
             if self.has_build() {
-                if let Some(version) = others.range((Excluded(self), Unbounded)).next() {
-                    if version.major() == self.major()
-                        && version.minor() == self.minor()
-                        && version.patch() == self.patch()
-                        && version.prerelease() == self.prerelease()
-                        && version.build() != self.build()
-                    {
-                        // there is a larger version, that only differs by the build fragment
-                        // we are not the latest pre-release and do not cascade to the parent version.
-                        return (vec![self.clone()], false);
-                    }
+                if let Some(version) = others.range((Excluded(self), Unbounded)).next()
+                    && version.major() == self.major()
+                    && version.minor() == self.minor()
+                    && version.patch() == self.patch()
+                    && version.prerelease() == self.prerelease()
+                    && version.build() != self.build()
+                {
+                    // there is a larger version, that only differs by the build fragment
+                    // we are not the latest pre-release and do not cascade to the parent version.
+                    return (vec![self.clone()], false);
                 }
                 // fallback, we are the latest pre-release and cascade to the parent version without build.
                 return (
@@ -224,7 +226,7 @@ impl Version {
         !matches!(&self.rest, Some((_, Some((_, (Some(_), _))))))
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         use regex::Regex;
         use std::sync::LazyLock;
 
@@ -354,7 +356,7 @@ impl TryFrom<&str> for Version {
     type Error = Error;
 
     fn try_from(value: &str) -> Result<Self> {
-        match Self::from_str(value) {
+        match Self::parse(value) {
             Some(version) => Ok(version),
             None => Err(Error::PackageVersionInvalid(value.into())),
         }
@@ -365,28 +367,17 @@ impl std::fmt::Display for Version {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut version = self.major.to_string();
 
-        loop {
-            let rest = match self.rest.as_ref() {
-                Some((minor, rest)) => {
-                    version.push_str(&format!(".{}", minor));
-                    rest
+        if let Some((minor, rest)) = self.rest.as_ref() {
+            version.push_str(&format!(".{}", minor));
+            if let Some((patch, rest)) = rest {
+                version.push_str(&format!(".{}", patch));
+                if let (_, Some(prerelease)) = rest {
+                    version.push_str(&format!("-{}", prerelease));
                 }
-                None => break,
-            };
-            let rest = match rest {
-                Some((patch, rest)) => {
-                    version.push_str(&format!(".{}", patch));
-                    rest
+                if let (Some(build), _) = rest {
+                    version.push_str(&format!("+{}", build));
                 }
-                None => break,
-            };
-            if let (_, Some(prerelease)) = rest {
-                version.push_str(&format!("-{}", prerelease));
             }
-            if let (Some(build), _) = rest {
-                version.push_str(&format!("+{}", build));
-            }
-            break;
         }
 
         write!(f, "{}", version)
@@ -432,30 +423,30 @@ mod tests {
     fn test_version_parsing() {
         let expected_version = Version::new_prerelease(1, 2, 3, "alpha".to_string());
         assert_eq!("1.2.3-alpha", expected_version.to_string());
-        assert_eq!(Version::from_str("1.2.3-alpha").unwrap(), expected_version);
+        assert_eq!(Version::parse("1.2.3-alpha").unwrap(), expected_version);
         assert_eq!(
-            Version::from_str(expected_version.to_string().as_ref()).unwrap(),
+            Version::parse(expected_version.to_string().as_ref()).unwrap(),
             expected_version
         );
         let expected_version = expected_version.parent().expect("Expected parent version");
         assert_eq!("1.2.3", expected_version.to_string());
-        assert_eq!(Version::from_str("1.2.3").unwrap(), expected_version);
+        assert_eq!(Version::parse("1.2.3").unwrap(), expected_version);
         assert_eq!(
-            Version::from_str(expected_version.to_string().as_ref()).unwrap(),
+            Version::parse(expected_version.to_string().as_ref()).unwrap(),
             expected_version
         );
         let expected_version = expected_version.parent().expect("Expected parent version");
         assert_eq!("1.2", expected_version.to_string());
-        assert_eq!(Version::from_str("1.2").unwrap(), expected_version);
+        assert_eq!(Version::parse("1.2").unwrap(), expected_version);
         assert_eq!(
-            Version::from_str(expected_version.to_string().as_ref()).unwrap(),
+            Version::parse(expected_version.to_string().as_ref()).unwrap(),
             expected_version
         );
         let expected_version = expected_version.parent().expect("Expected parent version");
         assert_eq!("1", expected_version.to_string());
-        assert_eq!(Version::from_str("1").unwrap(), expected_version);
+        assert_eq!(Version::parse("1").unwrap(), expected_version);
         assert_eq!(
-            Version::from_str(expected_version.to_string().as_ref()).unwrap(),
+            Version::parse(expected_version.to_string().as_ref()).unwrap(),
             expected_version
         );
         assert!(expected_version.parent().is_none());
@@ -482,26 +473,26 @@ mod tests {
 
     #[test]
     fn test_version_is_rolling() {
-        let version = Version::from_str("1").unwrap();
+        let version = Version::parse("1").unwrap();
         assert!(version.is_rolling());
-        let version = Version::from_str("1.2").unwrap();
+        let version = Version::parse("1.2").unwrap();
         assert!(version.is_rolling());
-        let version = Version::from_str("1.2.3").unwrap();
+        let version = Version::parse("1.2.3").unwrap();
         assert!(version.is_rolling());
-        let version = Version::from_str("1.2.3-alpha").unwrap();
+        let version = Version::parse("1.2.3-alpha").unwrap();
         assert!(version.is_rolling());
-        let version = Version::from_str("1.2.3+20260216").unwrap();
+        let version = Version::parse("1.2.3+20260216").unwrap();
         assert!(!version.is_rolling());
-        let version = Version::from_str("1.2.3-alpha+20260216").unwrap();
+        let version = Version::parse("1.2.3-alpha+20260216").unwrap();
         assert!(!version.is_rolling());
     }
 
     #[test]
     fn test_version_ordering() {
-        let version_1 = Version::from_str("1").unwrap();
-        let version_1_2 = Version::from_str("1.2").unwrap();
-        let version_1_2_3 = Version::from_str("1.2.3").unwrap();
-        let version_1_2_3_alpha = Version::from_str("1.2.3-alpha").unwrap();
+        let version_1 = Version::parse("1").unwrap();
+        let version_1_2 = Version::parse("1.2").unwrap();
+        let version_1_2_3 = Version::parse("1.2.3").unwrap();
+        let version_1_2_3_alpha = Version::parse("1.2.3-alpha").unwrap();
 
         assert!(version_1_2_3_alpha < version_1_2_3);
         assert!(version_1_2_3 > version_1_2_3_alpha);

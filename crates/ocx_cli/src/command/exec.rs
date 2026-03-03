@@ -37,19 +37,12 @@ impl Exec {
         let identifier =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
-        let info = context
-            .manager()
-            .find_or_install_all(identifier, platforms)
-            .await?;
+        let info = context.manager().find_or_install_all(identifier, platforms).await?;
 
         use std::process::Stdio;
         use tokio::process::Command;
 
-        let mut process_env = if self.clean {
-            env::Env::clean()
-        } else {
-            env::Env::new()
-        };
+        let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
         for info in info {
             log::debug!("Setting environment variables for package: {}", info.identifier);
             if let Some(env) = info.metadata.env() {

@@ -65,11 +65,7 @@ impl std::fmt::Display for Error {
     }
 }
 
-fn write_batch(
-    f: &mut std::fmt::Formatter<'_>,
-    verb: &str,
-    errors: &[PackageError],
-) -> std::fmt::Result {
+fn write_batch(f: &mut std::fmt::Formatter<'_>, verb: &str, errors: &[PackageError]) -> std::fmt::Result {
     if errors.len() == 1 {
         write!(f, "Failed to {verb} package: {}", errors[0])
     } else {

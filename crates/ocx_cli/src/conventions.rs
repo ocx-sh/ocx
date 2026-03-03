@@ -32,10 +32,10 @@ pub fn supported_platforms() -> Vec<oci::Platform> {
     platforms
 }
 
-pub fn platforms_or_default(platforms: &Vec<oci::Platform>) -> Vec<oci::Platform> {
+pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
     if platforms.is_empty() {
         supported_platforms()
     } else {
-        platforms.clone()
+        platforms.to_vec()
     }
 }

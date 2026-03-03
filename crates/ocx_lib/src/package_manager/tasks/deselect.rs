@@ -9,10 +9,7 @@ use crate::{
 use super::super::PackageManager;
 
 impl PackageManager {
-    pub fn deselect(
-        &self,
-        package: &oci::Identifier,
-    ) -> Result<(), PackageErrorKind> {
+    pub fn deselect(&self, package: &oci::Identifier) -> Result<(), PackageErrorKind> {
         let _span = info_span!("Deselecting", package = %package).entered();
         log::debug!("Deselecting package '{}'.", package);
 
@@ -36,10 +33,7 @@ impl PackageManager {
         Ok(())
     }
 
-    pub fn deselect_all(
-        &self,
-        packages: &[oci::Identifier],
-    ) -> Result<(), package_manager::error::Error> {
+    pub fn deselect_all(&self, packages: &[oci::Identifier]) -> Result<(), package_manager::error::Error> {
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in packages {

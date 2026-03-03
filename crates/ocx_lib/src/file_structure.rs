@@ -1,11 +1,11 @@
-mod object_store;
 mod index_store;
 mod install_store;
+mod object_store;
 mod temp_store;
 
-pub use object_store::{ObjectDir, ObjectStore};
 pub use index_store::IndexStore;
 pub use install_store::{InstallStore, SymlinkKind};
+pub use object_store::{ObjectDir, ObjectStore};
 pub use temp_store::{TempAcquireResult, TempDir, TempStore};
 
 /// Root layout of the local OCX data directory.
@@ -59,10 +59,10 @@ impl FileStructure {
 /// 1. `OCX_HOME` environment variable (if set and non-empty)
 /// 2. `~/.ocx` (fallback)
 pub fn default_ocx_root() -> Option<std::path::PathBuf> {
-    if let Ok(home) = std::env::var("OCX_HOME") {
-        if !home.is_empty() {
-            return Some(std::path::PathBuf::from(home));
-        }
+    if let Ok(home) = std::env::var("OCX_HOME")
+        && !home.is_empty()
+    {
+        return Some(std::path::PathBuf::from(home));
     }
     std::env::home_dir().map(|home| home.join(".ocx"))
 }

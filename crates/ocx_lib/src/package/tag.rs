@@ -26,7 +26,7 @@ impl From<String> for Tag {
             Tag::Latest
         } else if value == CANARY_STR {
             Tag::Canary
-        } else if let Some(version) = version::Version::from_str(value.as_ref()) {
+        } else if let Some(version) = version::Version::parse(value.as_ref()) {
             Tag::Version(version)
         } else if CANONICAL_TAG_REGEX.is_match(value.as_ref()) {
             Tag::Canonical(value)

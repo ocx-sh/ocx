@@ -39,11 +39,7 @@ impl NativeTransport {
         self.auth.get_or_fallback(image.registry()).await
     }
 
-    async fn authenticate(
-        &self,
-        image: &oci::native::Reference,
-        operation: oci::RegistryOperation,
-    ) -> Result<()> {
+    async fn authenticate(&self, image: &oci::native::Reference, operation: oci::RegistryOperation) -> Result<()> {
         let auth = self.auth_for(image).await;
         self.client
             .auth(image, &auth, operation)
@@ -91,10 +87,7 @@ impl OciTransport for NativeTransport {
             .map_err(registry_error)
     }
 
-    async fn fetch_manifest_digest(
-        &self,
-        image: &oci::native::Reference,
-    ) -> Result<String> {
+    async fn fetch_manifest_digest(&self, image: &oci::native::Reference) -> Result<String> {
         let auth = self.auth_for(image).await;
         self.client
             .fetch_manifest_digest(image, &auth)
@@ -116,12 +109,7 @@ impl OciTransport for NativeTransport {
         Ok((data.to_vec(), digest))
     }
 
-    async fn pull_blob_to_file(
-        &self,
-        image: &oci::native::Reference,
-        digest: &str,
-        path: &Path,
-    ) -> Result<()> {
+    async fn pull_blob_to_file(&self, image: &oci::native::Reference, digest: &str, path: &Path) -> Result<()> {
         log::debug!("Pulling blob {} for image {} to {}", digest, image, path.display());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
@@ -133,22 +121,12 @@ impl OciTransport for NativeTransport {
             .open(path)
             .await
             .map_err(|e| io_error(path, e))?;
-        self.client
-            .pull_blob(image, digest, file)
-            .await
-            .map_err(registry_error)
+        self.client.pull_blob(image, digest, file).await.map_err(registry_error)
     }
 
-    async fn push_manifest(
-        &self,
-        image: &oci::native::Reference,
-        manifest: &oci::Manifest,
-    ) -> Result<String> {
+    async fn push_manifest(&self, image: &oci::native::Reference, manifest: &oci::Manifest) -> Result<String> {
         self.authenticate(image, oci::RegistryOperation::Push).await?;
-        self.client
-            .push_manifest(image, manifest)
-            .await
-            .map_err(registry_error)
+        self.client.push_manifest(image, manifest).await.map_err(registry_error)
     }
 
     async fn push_manifest_raw(
@@ -166,12 +144,7 @@ impl OciTransport for NativeTransport {
             .map_err(registry_error)
     }
 
-    async fn push_blob(
-        &self,
-        image: &oci::native::Reference,
-        data: Vec<u8>,
-        digest: &str,
-    ) -> Result<String> {
+    async fn push_blob(&self, image: &oci::native::Reference, data: Vec<u8>, digest: &str) -> Result<String> {
         self.do_push_blob(image, data, digest).await
     }
 
@@ -182,12 +155,7 @@ impl OciTransport for NativeTransport {
 
 impl NativeTransport {
     /// Shared push-blob logic: checks existence, then uploads.
-    async fn do_push_blob(
-        &self,
-        image: &oci::native::Reference,
-        data: Vec<u8>,
-        digest: &str,
-    ) -> Result<String> {
+    async fn do_push_blob(&self, image: &oci::native::Reference, data: Vec<u8>, digest: &str) -> Result<String> {
         log::debug!("Checking if blob {} already exists in registry", digest);
         match self.client.blob_exists(image, digest).await {
             Ok(true) => {
@@ -201,9 +169,6 @@ impl NativeTransport {
                 log::warn!("Failed to check blob {} existence, will attempt upload: {}", digest, e);
             }
         }
-        self.client
-            .push_blob(image, data, digest)
-            .await
-            .map_err(registry_error)
+        self.client.push_blob(image, data, digest).await.map_err(registry_error)
     }
 }

@@ -4,7 +4,6 @@ use tokio::sync::RwLock;
 
 use crate::oci;
 
-
 /// Internal cache for index data.
 /// This is shared across all instances of the index, and is used to avoid redundant file reads.
 #[derive(Default)]

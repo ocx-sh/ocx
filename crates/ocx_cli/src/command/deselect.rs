@@ -18,10 +18,8 @@ pub struct Deselect {
 
 impl Deselect {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifiers = options::Identifier::transform_all(
-            self.packages.clone().into_iter(),
-            context.default_registry(),
-        )?;
+        let identifiers =
+            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
         context.manager().deselect_all(&identifiers)?;
 

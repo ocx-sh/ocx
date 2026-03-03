@@ -17,15 +17,12 @@ impl LogSettings {
     }
 
     pub fn init(self) -> anyhow::Result<()> {
-        use tracing_subscriber::{util::SubscriberInitExt, layer::SubscriberExt, prelude::*};
+        use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
-        let indicatif_layer = tracing_indicatif::IndicatifLayer::new()
-            .with_progress_style(
-                indicatif::ProgressStyle::with_template(
-                    "{span_child_prefix}{spinner} {span_name} {span_fields}",
-                )
+        let indicatif_layer = tracing_indicatif::IndicatifLayer::new().with_progress_style(
+            indicatif::ProgressStyle::with_template("{span_child_prefix}{spinner} {span_name} {span_fields}")
                 .expect("valid indicatif template"),
-            );
+        );
         let writer = indicatif_layer.get_stderr_writer();
 
         let fmt_layer = {
@@ -74,7 +71,11 @@ impl LogSettings {
         let builder = {
             if self.filter.is_empty() {
                 let log_level = self.console_level.map(tracing_subscriber::filter::LevelFilter::from);
-                builder.with_default_directive(log_level.unwrap_or(tracing_subscriber::filter::LevelFilter::WARN).into())
+                builder.with_default_directive(
+                    log_level
+                        .unwrap_or(tracing_subscriber::filter::LevelFilter::WARN)
+                        .into(),
+                )
             } else {
                 builder
             }
@@ -82,11 +83,12 @@ impl LogSettings {
 
         let filter = if let Some(console_level) = self.console_level {
             let console_level: tracing_subscriber::filter::LevelFilter = console_level.into();
-            builder.parse(console_level.to_string()).expect("Failed to initialize log filter!")
+            builder
+                .parse(console_level.to_string())
+                .expect("Failed to initialize log filter!")
         } else {
             builder.from_env().expect("Failed to initialize log filter!")
         };
-
 
         self.filter
             .iter()

@@ -4,6 +4,8 @@ use clap::Subcommand;
 
 pub mod clean;
 pub mod deselect;
+pub mod env;
+pub mod exec;
 pub mod find;
 pub mod index;
 pub mod index_catalog;
@@ -14,14 +16,12 @@ pub mod install;
 pub mod package;
 pub mod package_create;
 pub mod package_push;
-pub mod env;
-pub mod exec;
 pub mod select;
+pub mod shell;
+pub mod shell_completion;
+pub mod shell_env;
 pub mod uninstall;
 pub mod version;
-pub mod shell;
-pub mod shell_env;
-pub mod shell_completion;
 
 #[derive(Subcommand)]
 pub enum Command {

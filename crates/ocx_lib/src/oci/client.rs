@@ -1,7 +1,7 @@
 use crate::{
     ACCEPTED_MANIFEST_MEDIA_TYPES, MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST,
-    MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1, Result, archive, compression, log,
-    media_type_file_ext, media_type_from_path, media_type_select, media_type_select_some, oci,
+    MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1, Result, archive, compression, log, media_type_file_ext,
+    media_type_from_path, media_type_select, media_type_select_some, oci,
     package::{self, info::Info, install_info, install_status, metadata},
     prelude::SerdeExt,
     utility,
@@ -69,10 +69,7 @@ impl Client {
     pub async fn list_tags(&self, identifier: Identifier) -> Result<Vec<String>> {
         let image = identifier.reference.clone();
         let chunk_size = self.tag_chunk_size;
-        let tags = paginate(chunk_size, |cs, last| {
-            self.transport.list_tags(&image, cs, last)
-        })
-        .await?;
+        let tags = paginate(chunk_size, |cs, last| self.transport.list_tags(&image, cs, last)).await?;
         log::trace!("Listed tags for {}: {:?}", identifier, tags);
         Ok(tags)
     }
@@ -81,20 +78,14 @@ impl Client {
         let registry = registry.into();
         let image = oci::native::Reference::with_tag(registry.clone(), "n/a".into(), "latest".into());
         let chunk_size = self.repository_chunk_size;
-        let repositories = paginate(chunk_size, |cs, last| {
-            self.transport.catalog(&image, cs, last)
-        })
-        .await?;
+        let repositories = paginate(chunk_size, |cs, last| self.transport.catalog(&image, cs, last)).await?;
         log::trace!("Listed repositories for {}: {:?}", registry, repositories);
         Ok(repositories)
     }
 
     /// Fetches the digest of a manifest from the remote, trying to avoid pulling the entire manifest if possible.
     pub async fn fetch_manifest_digest(&self, identifier: &Identifier) -> Result<oci::Digest> {
-        let digest = self
-            .transport
-            .fetch_manifest_digest(&identifier.reference)
-            .await?;
+        let digest = self.transport.fetch_manifest_digest(&identifier.reference).await?;
         log::trace!("Fetched manifest digest for {}: {}", identifier, digest);
         digest.try_into()
     }
@@ -138,9 +129,10 @@ impl Client {
         let temp_path = &temp.dir.dir;
         log::debug!("Pulling package {} to {}", identifier, output_path.display());
 
-        let identifier_digest = identifier.reference.digest().ok_or_else(|| {
-            ClientError::InvalidManifest("identifier must carry a digest".into())
-        })?;
+        let identifier_digest = identifier
+            .reference
+            .digest()
+            .ok_or_else(|| ClientError::InvalidManifest("identifier must carry a digest".into()))?;
 
         // Check if already installed at the final output path.
         let metadata_path = output_path.join("metadata.json");
@@ -148,8 +140,7 @@ impl Client {
         let install_path = output_path.join("install.json");
         let lock_path = output_path.join("install.lock");
 
-        std::fs::create_dir_all(&output_path)
-            .map_err(|e| ClientError::Io(output_path.clone(), e))?;
+        std::fs::create_dir_all(&output_path).map_err(|e| ClientError::Io(output_path.clone(), e))?;
         if let (true, Some(status)) =
             install_status::check_install_status(&install_path, &lock_path, self.lock_timeout).await
         {
@@ -169,7 +160,8 @@ impl Client {
 
         let download = self.download_to_temp(&identifier, identifier_digest, temp_path).await?;
 
-        self.extract_and_finalize(&identifier, download, temp_path, &output_path).await?;
+        self.extract_and_finalize(&identifier, download, temp_path, &output_path)
+            .await?;
 
         drop(temp);
 
@@ -214,12 +206,9 @@ impl Client {
             )));
         }
         let blob_layer = &manifest.layers[0];
-        let blob_compression = compression::CompressionAlgorithm::from_media_type(&blob_layer.media_type)
-            .ok_or_else(|| {
-                ClientError::InvalidManifest(format!(
-                    "unsupported layer media type: {}",
-                    blob_layer.media_type
-                ))
+        let blob_compression =
+            compression::CompressionAlgorithm::from_media_type(&blob_layer.media_type).ok_or_else(|| {
+                ClientError::InvalidManifest(format!("unsupported layer media type: {}", blob_layer.media_type))
             })?;
         let blob_file_ext = media_type_file_ext(&blob_layer.media_type).unwrap_or("blob");
 
@@ -243,7 +232,12 @@ impl Client {
         let metadata = metadata::Metadata::read_json_from_path(&metadata_path)
             .map_err(|e| ClientError::Serialization(e.to_string()))?;
 
-        Ok(TempDownload { manifest, metadata, blob_compression, blob_file_ext })
+        Ok(TempDownload {
+            manifest,
+            metadata,
+            blob_compression,
+            blob_file_ext,
+        })
     }
 
     /// Extracts the downloaded archive and moves files from temp to the final output path.
@@ -281,8 +275,7 @@ impl Client {
         let final_manifest = output_path.join("manifest.json");
         let final_install = output_path.join("install.json");
 
-        std::fs::create_dir_all(output_path)
-            .map_err(|e| ClientError::Io(output_path.to_path_buf(), e))?;
+        std::fs::create_dir_all(output_path).map_err(|e| ClientError::Io(output_path.to_path_buf(), e))?;
 
         Self::move_path(&temp_path.join("metadata.json"), &final_metadata)?;
         Self::move_path(&temp_content_path, &final_content)?;
@@ -312,10 +305,13 @@ impl Client {
         file: impl AsRef<std::path::Path>,
     ) -> Result<(Digest, oci::Manifest)> {
         let path = file.as_ref();
-        log::debug!("Pushing package {} from file {}", package_info.identifier, path.display());
+        log::debug!(
+            "Pushing package {} from file {}",
+            package_info.identifier,
+            path.display()
+        );
 
-        let (manifest, manifest_data, manifest_sha256) =
-            self.push_image_manifest(&package_info, path).await?;
+        let (manifest, manifest_data, manifest_sha256) = self.push_image_manifest(&package_info, path).await?;
 
         let (index_digest, index) = self
             .update_image_index(&package_info, &manifest_data, &manifest_sha256)
@@ -348,8 +344,8 @@ impl Client {
         log::trace!("Calculated package digest: {}", package_digest);
         self.transport.push_blob(image, package_data, &package_digest).await?;
 
-        let config_data = serde_json::to_vec(&package_info.metadata)
-            .map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let config_data =
+            serde_json::to_vec(&package_info.metadata).map_err(|e| ClientError::Serialization(e.to_string()))?;
         let config_data_len = config_data.len();
         let config_sha256 = Digest::sha256(&config_data).to_string();
         log::trace!("Calculated config digest: {}", config_sha256);
@@ -375,8 +371,7 @@ impl Client {
             ..Default::default()
         };
 
-        let manifest_data = serde_json::to_vec(&manifest)
-            .map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let manifest_data = serde_json::to_vec(&manifest).map_err(|e| ClientError::Serialization(e.to_string()))?;
         let manifest_sha256 = Digest::sha256(&manifest_data).to_string();
         let canonical_image = image.clone_with_digest(manifest_sha256.clone());
 
@@ -403,15 +398,12 @@ impl Client {
         log::info!("Updating image index for {}", image);
         let mut index = match self
             .transport
-            .pull_manifest_raw(
-                image,
-                &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX],
-            )
+            .pull_manifest_raw(image, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX])
             .await
         {
             Ok((blob, _)) => {
-                let existing: oci::Manifest = serde_json::from_slice(&blob)
-                    .map_err(|e| ClientError::Serialization(e.to_string()))?;
+                let existing: oci::Manifest =
+                    serde_json::from_slice(&blob).map_err(|e| ClientError::Serialization(e.to_string()))?;
                 match existing {
                     oci::Manifest::Image(m) => {
                         let entry = oci::ImageIndexEntry {
@@ -433,11 +425,7 @@ impl Client {
                 }
             }
             Err(e) => {
-                log::debug!(
-                    "No existing manifest/index for {}, starting fresh: {}",
-                    image,
-                    e
-                );
+                log::debug!("No existing manifest/index for {}, starting fresh: {}", image, e);
                 oci::ImageIndex {
                     schema_version: oci::INDEX_SCHEMA_VERSION,
                     media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
@@ -457,8 +445,7 @@ impl Client {
             annotations: None,
         });
 
-        let index_data = serde_json::to_vec(&index)
-            .map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let index_data = serde_json::to_vec(&index).map_err(|e| ClientError::Serialization(e.to_string()))?;
         let index_digest = Digest::sha256(&index_data);
         self.transport
             .push_manifest_raw(image, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
@@ -471,25 +458,19 @@ impl Client {
     // ── Internal helpers ─────────────────────────────────────────────
 
     /// Pulls and parses a manifest from the registry.
-    async fn pull_manifest(
-        &self,
-        image: &oci::Reference,
-    ) -> std::result::Result<(oci::Manifest, String), ClientError> {
+    async fn pull_manifest(&self, image: &oci::Reference) -> std::result::Result<(oci::Manifest, String), ClientError> {
         log::debug!("Pulling manifest for image {}", image);
         let (data, digest) = self
             .transport
             .pull_manifest_raw(image, ACCEPTED_MANIFEST_MEDIA_TYPES)
             .await?;
-        let manifest: oci::Manifest = serde_json::from_slice(&data)
-            .map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let manifest: oci::Manifest =
+            serde_json::from_slice(&data).map_err(|e| ClientError::Serialization(e.to_string()))?;
         Ok((manifest, digest))
     }
 
     /// Moves a file or directory from `src` to `dst` (rename on same filesystem).
-    fn move_path(
-        src: &std::path::Path,
-        dst: &std::path::Path,
-    ) -> std::result::Result<(), ClientError> {
+    fn move_path(src: &std::path::Path, dst: &std::path::Path) -> std::result::Result<(), ClientError> {
         if src.exists() {
             std::fs::rename(src, dst).map_err(|e| ClientError::Io(src.to_path_buf(), e))?;
         }
@@ -528,8 +509,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_transport::{StubTransport, StubTransportData};
+    use super::*;
     use crate::oci;
 
     use std::sync::Mutex;
@@ -551,7 +532,9 @@ mod tests {
         let file = std::fs::File::create(&lock_path).unwrap();
         let lock = file_lock::FileLock::try_exclusive(file).unwrap();
         TempAcquireResult {
-            dir: TempDir { dir: path.to_path_buf() },
+            dir: TempDir {
+                dir: path.to_path_buf(),
+            },
             lock,
             was_cleaned: false,
         }
@@ -671,10 +654,9 @@ mod tests {
 
         let id = test_identifier("1.0");
         let data = StubTransportData::new();
-        data.write().manifests.insert(
-            id.reference.to_string(),
-            (manifest_data, digest_str.clone()),
-        );
+        data.write()
+            .manifests
+            .insert(id.reference.to_string(), (manifest_data, digest_str.clone()));
         let client = stub(&data);
 
         let (digest, fetched) = client.fetch_manifest(&id).await.unwrap();
@@ -690,15 +672,12 @@ mod tests {
         let (manifest_data, _real_digest) = serialize_manifest(&manifest);
         let wrong_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-        let id = test_identifier_with_digest(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
+        let id = test_identifier_with_digest("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
         let data = StubTransportData::new();
-        data.write().manifests.insert(
-            id.reference.to_string(),
-            (manifest_data, wrong_digest.to_string()),
-        );
+        data.write()
+            .manifests
+            .insert(id.reference.to_string(), (manifest_data, wrong_digest.to_string()));
         let client = stub(&data);
 
         let dir = tempfile::tempdir().unwrap();
@@ -732,9 +711,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let temp = test_acquire(&dir.path().join("temp"));
-        let result = client
-            .pull_package(id, dir.path().join("out"), temp)
-            .await;
+        let result = client.pull_package(id, dir.path().join("out"), temp).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -752,9 +729,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let temp = test_acquire(&dir.path().join("temp"));
-        let result = client
-            .pull_package(id, dir.path().join("out"), temp)
-            .await;
+        let result = client.pull_package(id, dir.path().join("out"), temp).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("digest"), "got: {}", err_msg);
@@ -764,9 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn pull_package_skips_download_when_already_installed() {
-        let id = test_identifier_with_digest(
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        );
+        let id = test_identifier_with_digest("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         let data = StubTransportData::new();
         let client = stub(&data);
 
@@ -778,7 +751,11 @@ mod tests {
         let info = client.pull_package(id.clone(), &output, temp).await.unwrap();
 
         // Verify no transport calls were made — install was short-circuited.
-        assert!(data.read().calls.is_empty(), "expected no transport calls, got: {:?}", data.read().calls);
+        assert!(
+            data.read().calls.is_empty(),
+            "expected no transport calls, got: {:?}",
+            data.read().calls
+        );
         assert_eq!(info.content, output.join("content"));
         assert_eq!(info.identifier, id);
     }
@@ -789,9 +766,7 @@ mod tests {
         // output path. The first fails (no manifest data configured), but we
         // manually write a completed install status. The second call should
         // detect the completed install and skip the download entirely.
-        let id = test_identifier_with_digest(
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        );
+        let id = test_identifier_with_digest("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
         let data = StubTransportData::new();
         let client = stub(&data);
         let dir = tempfile::tempdir().unwrap();
@@ -817,9 +792,7 @@ mod tests {
 
     #[tokio::test]
     async fn temp_acquire_cleans_leftover_before_download() {
-        let id = test_identifier_with_digest(
-            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-        );
+        let id = test_identifier_with_digest("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
         let data = StubTransportData::new();
         let client = stub(&data);
 
@@ -844,9 +817,7 @@ mod tests {
 
         // The cleaned temp can be passed to pull_package (which will fail
         // because no manifest is configured, but the point is it accepts it).
-        let result = client
-            .pull_package(id, dir.path().join("output"), acquired)
-            .await;
+        let result = client.pull_package(id, dir.path().join("output"), acquired).await;
         assert!(result.is_err());
     }
 

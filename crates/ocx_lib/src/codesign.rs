@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::{log, Result};
+use crate::{Result, log};
 
 /// Applies ad-hoc code signatures to Mach-O binaries and `.app` bundles after extraction.
 ///
@@ -127,7 +127,10 @@ async fn is_macho(path: &Path) -> bool {
     };
 
     let mut magic = [0u8; 4];
-    if tokio::io::AsyncReadExt::read_exact(&mut file, &mut magic).await.is_err() {
+    if tokio::io::AsyncReadExt::read_exact(&mut file, &mut magic)
+        .await
+        .is_err()
+    {
         return false;
     }
 
@@ -177,7 +180,10 @@ async fn remove_quarantine(content_path: &Path) {
     match result {
         Ok(output) if !output.status.success() => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            log::debug!("xattr quarantine removal returned non-zero (attribute may not exist): {}", stderr.trim());
+            log::debug!(
+                "xattr quarantine removal returned non-zero (attribute may not exist): {}",
+                stderr.trim()
+            );
         }
         Err(e) => {
             log::debug!("xattr command failed: {}", e);
@@ -232,10 +238,16 @@ async fn sign_app_bundle(path: &Path) {
 async fn sign_binary(path: &Path) {
     log::debug!("Signing Mach-O binary: {}", path.display());
     run_codesign(
-        &["--sign", "-", "--force", "--preserve-metadata=entitlements,requirements,flags,runtime"],
+        &[
+            "--sign",
+            "-",
+            "--force",
+            "--preserve-metadata=entitlements,requirements,flags,runtime",
+        ],
         path,
         "Mach-O binary",
-    ).await;
+    )
+    .await;
 }
 
 // -- Tests --------------------------------------------------------------------
@@ -247,7 +259,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{SignTarget, MACHO_MAGIC};
+    use super::{MACHO_MAGIC, SignTarget};
 
     fn create_file_with_magic(dir: &std::path::Path, name: &str, magic: &[u8]) -> PathBuf {
         let path = dir.join(name);
@@ -288,7 +300,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         for magic in &[0xCEFA_EDFEu32, 0xCFFA_EDFE, 0xBEBA_FECA] {
             let path = create_file_with_magic(dir.path(), &format!("bin_{:08x}", magic), &magic.to_be_bytes());
-            assert!(super::is_macho(&path).await, "should detect swapped magic {:#010x}", magic);
+            assert!(
+                super::is_macho(&path).await,
+                "should detect swapped magic {:#010x}",
+                magic
+            );
         }
     }
 
@@ -455,8 +471,11 @@ mod tests {
             .arg(&src)
             .output()
             .expect("cc not found — Xcode CLI tools required");
-        assert!(compile.status.success(), "failed to compile test binary: {}",
-            String::from_utf8_lossy(&compile.stderr));
+        assert!(
+            compile.status.success(),
+            "failed to compile test binary: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
         let strip = std::process::Command::new("codesign")
             .args(["--remove-signature"])
             .arg(&dst)
@@ -486,11 +505,17 @@ mod tests {
     async fn sign_binary_signs_macho() {
         let dir = TempDir::new().unwrap();
         let binary = build_unsigned_binary(dir.path(), "my_tool");
-        assert!(!verify_signature(&binary).await, "binary should be unsigned before signing");
+        assert!(
+            !verify_signature(&binary).await,
+            "binary should be unsigned before signing"
+        );
 
         super::sign_binary(&binary).await;
 
-        assert!(verify_signature(&binary).await, "binary should have a valid ad-hoc signature after signing");
+        assert!(
+            verify_signature(&binary).await,
+            "binary should have a valid ad-hoc signature after signing"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -501,11 +526,17 @@ mod tests {
         let macos_dir = app_dir.join("Contents").join("MacOS");
         std::fs::create_dir_all(&macos_dir).unwrap();
         build_unsigned_binary(&macos_dir, "Test");
-        assert!(!verify_signature(&app_dir).await, ".app bundle should be unsigned before signing");
+        assert!(
+            !verify_signature(&app_dir).await,
+            ".app bundle should be unsigned before signing"
+        );
 
         super::sign_app_bundle(&app_dir).await;
 
-        assert!(verify_signature(&app_dir).await, ".app bundle should have a valid ad-hoc signature after signing");
+        assert!(
+            verify_signature(&app_dir).await,
+            ".app bundle should have a valid ad-hoc signature after signing"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -520,11 +551,17 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).unwrap();
 
         let binary = build_unsigned_binary(&bin_dir, "my_tool");
-        assert!(!verify_signature(&binary).await, "binary should be unsigned before signing");
+        assert!(
+            !verify_signature(&binary).await,
+            "binary should be unsigned before signing"
+        );
 
         let result = super::sign_extracted_content(&content).await;
         assert!(result.is_ok(), "sign_extracted_content should succeed");
 
-        assert!(verify_signature(&binary).await, "binary should be signed after sign_extracted_content");
+        assert!(
+            verify_signature(&binary).await,
+            "binary should be signed after sign_extracted_content"
+        );
     }
 }

@@ -56,7 +56,10 @@ impl Index {
     /// Returns `None` when the package is not known to this index.
     pub async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
         log::debug!("Listing tags for '{}'.", identifier);
-        self.inner.list_tags(identifier).await.map(|opt| opt.map(|v| v.sorted()))
+        self.inner
+            .list_tags(identifier)
+            .await
+            .map(|opt| opt.map(|v| v.sorted()))
     }
 
     /// Fetch the manifest for the given identifier.
@@ -87,7 +90,10 @@ impl Index {
         );
 
         match manifest {
-            oci::Manifest::Image(_) => Ok(Some(vec![(identifier.clone_with_digest(digest), oci::Platform::default())])),
+            oci::Manifest::Image(_) => Ok(Some(vec![(
+                identifier.clone_with_digest(digest),
+                oci::Platform::default(),
+            )])),
             oci::Manifest::ImageIndex(index) => {
                 let mut candidates = Vec::with_capacity(index.manifests.len());
                 for manifest in index.manifests {
@@ -109,11 +115,7 @@ impl Index {
         }
     }
 
-    pub async fn select(
-        &self,
-        identifier: &oci::Identifier,
-        platforms: Vec<oci::Platform>,
-    ) -> Result<SelectResult> {
+    pub async fn select(&self, identifier: &oci::Identifier, platforms: Vec<oci::Platform>) -> Result<SelectResult> {
         log::debug!("Selecting package '{}' for platforms {:?}.", identifier, platforms);
 
         let Some(candidates) = self.fetch_candidates(identifier).await? else {
@@ -141,11 +143,9 @@ impl Index {
 
         match &result {
             SelectResult::Found(id) => log::debug!("Selected '{}'.", id),
-            SelectResult::Ambiguous(ids) => log::debug!(
-                "Selection ambiguous for '{}': {} candidates.",
-                identifier,
-                ids.len()
-            ),
+            SelectResult::Ambiguous(ids) => {
+                log::debug!("Selection ambiguous for '{}': {} candidates.", identifier, ids.len())
+            }
             SelectResult::NotFound => log::debug!(
                 "No matching platform for '{}' among {} candidate(s).",
                 identifier,

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
 use super::native;
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Platform {
@@ -55,7 +55,7 @@ impl Platform {
     }
 
     /// Checks if this platform matches the given platform.
-    /// 
+    ///
     /// Currently this checks for equality, but in the future we may want to support more complex matching logic.
     pub fn matches(&self, other: &Platform) -> bool {
         self == other

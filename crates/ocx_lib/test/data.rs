@@ -1,5 +1,7 @@
 pub fn data_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test").join("data")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test")
+        .join("data")
 }
 
 pub fn archive_dir() -> std::path::PathBuf {
