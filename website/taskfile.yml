@@ -15,3 +15,13 @@ tasks:
     deps:
       - install
     cmd: bunx vitepress build
+
+  deploy:
+    desc: Deploy site via rsync
+    deps:
+      - build
+    preconditions:
+      - sh: '[ -n "$DEPLOY_HOST" ]'
+        msg: "DEPLOY_HOST is not set (e.g. ocx-deploy@server)"
+    cmds:
+      - rsync -avz --delete .vitepress/dist/ "$DEPLOY_HOST:"
