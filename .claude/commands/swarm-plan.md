@@ -46,7 +46,7 @@ Decompose features into actionable plans using parallel exploration swarms.
 **Large Feature (2+ weeks)**
 - `pr_faq_[feature].md` — Vision and customer value
 - `prd_[feature].md` — Detailed requirements
-- `adr_[key-decision].md` — Architectural decisions (use ADR template from `skills/architecture/writing-adrs`)
+- `adr_[key-decision].md` — Architectural decisions (use ADR template from `skills/architecture/designing-systems/resources`)
 - `plan_[feature].md` — Implementation steps
 
 ## Parallel Exploration Pattern
@@ -94,7 +94,7 @@ Every planning session MUST produce:
 
 ## Related Skills
 
-`decomposing-tasks`, `beads-workflow`, `swarm-coordination`, `writing-adrs`
+`decomposing-tasks`, `beads-workflow`, `designing-systems`
 
 ## Handoff
 

@@ -134,7 +134,7 @@ Planning artifacts go in `./.agents/artifacts/`. Track work with Beads (`bd` CLI
 **Planning flow**: PR-FAQ → PRD → ADR → Design Spec → Plan → Implementation Beads
 
 **Artifacts**: All planning docs stored in `./.agents/artifacts/`.
-**Templates**: All planning doc templates stored in `./.agents/templates/artifacts/`.
+**Templates**: Templates for markdown files in `./.agents/templates/artifacts/`.
 
 > **Note:** Planning artifacts are an internal process and do not replace proper documentation in the website or code comments.
 

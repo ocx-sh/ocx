@@ -5,7 +5,7 @@ description: Vite 7.x build tool patterns. Use when configuring build setup, dev
 
 # Vite
 
-> **Platform:** Web only. Mobile demos use Expo with Metro bundler. See the **expo-sdk** skill.
+> **Platform:** Web only.
 
 ## Overview
 
