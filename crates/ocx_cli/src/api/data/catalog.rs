@@ -4,6 +4,13 @@ use serde::Serialize;
 
 use crate::api::Reportable;
 
+/// Repository catalog listing, optionally including tags per repository.
+///
+/// Plain format: one-column table (Repository) without tags, or two-column
+/// table (Repository | Tag) when tags are included.
+///
+/// JSON format: array of repository names without tags, or object keyed by
+/// repository name with tag arrays as values.
 #[derive(Serialize)]
 pub struct Catalog {
     pub repositories: CatalogData,
@@ -23,6 +30,8 @@ impl Catalog {
     }
 }
 
+/// Polymorphic catalog payload: either a plain list of repository names or a
+/// map of repository names to their tags.
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum CatalogData {

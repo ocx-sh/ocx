@@ -4,6 +4,13 @@ use serde::Serialize;
 
 use crate::api::Reportable;
 
+/// Tag listing for one or more packages, optionally including platform details.
+///
+/// Plain format: two-column table (Package | Tag) without platforms, or
+/// three-column table (Package | Tag | Platform) when platforms are included.
+///
+/// JSON format: object keyed by package name; values are tag arrays without
+/// platforms, or nested objects (tag → platform arrays) with platforms.
 #[derive(Serialize)]
 pub struct Tags {
     #[serde(flatten)]
@@ -29,6 +36,8 @@ impl Tags {
     }
 }
 
+/// Polymorphic tag payload: either a flat map of tags per package, or a nested
+/// map including platform breakdowns per tag.
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum TagsData {

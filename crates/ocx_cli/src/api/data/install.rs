@@ -5,6 +5,12 @@ use serde::Serialize;
 
 use crate::api::Reportable;
 
+/// Installed packages keyed by the user-supplied identifier string.
+///
+/// Plain format: three-column table (Package | Version | Content).
+///
+/// JSON format: object keyed by package identifier, each value an [`InstallInfo`]
+/// with `identifier`, `metadata`, and `content` fields.
 #[derive(Serialize)]
 pub struct Installs {
     #[serde(flatten)]
