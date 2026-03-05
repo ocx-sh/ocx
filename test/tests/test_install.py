@@ -48,6 +48,19 @@ def test_install_select_creates_current_symlink(
     assert_symlink_exists(current)
 
 
+def test_install_cleans_temp_directory(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """ocx install <pkg> should not leave temp directories behind."""
+    pkg = published_package
+    ocx.json("install", pkg.short)
+
+    temp_dir = Path(ocx.env["OCX_HOME"]) / "temp"
+    if temp_dir.exists():
+        leftover = list(temp_dir.iterdir())
+        assert leftover == [], f"temp directory not cleaned up: {leftover}"
+
+
 def test_install_without_select_preserves_current(
     ocx: OcxRunner, published_two_versions: tuple[PackageInfo, PackageInfo]
 ):
