@@ -70,7 +70,11 @@ export default defineConfig({
     socialLinks: [
       { icon: 'github', link: 'https://github.com/ocx-sh/ocx' },
       { icon: 'discord', link: 'https://discord.gg/BuRhhAYy9r' }
-    ]
+    ],
+
+    search: {
+      provider: 'local'
+    }
   },
 
   markdown: {
