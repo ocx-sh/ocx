@@ -134,8 +134,7 @@ async fn sign_directory(path: &Path, signed_inodes: &Mutex<HashSet<u64>>) {
 
 /// Returns true for directories that are macOS bundles (`.app` or `.framework`).
 fn is_bundle(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext == "app" || ext == "framework")
+    path.extension().is_some_and(|ext| ext == "app" || ext == "framework")
 }
 
 /// Returns the inode number of a regular file, used for hardlink deduplication.
@@ -444,7 +443,11 @@ mod tests {
         let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
         super::sign_directory(dir.path(), &signed_inodes).await;
 
-        assert_eq!(signed_inodes.lock().unwrap().len(), 2, "should sign both Mach-O binaries inside .app");
+        assert_eq!(
+            signed_inodes.lock().unwrap().len(),
+            2,
+            "should sign both Mach-O binaries inside .app"
+        );
     }
 
     #[tokio::test]
@@ -651,12 +654,18 @@ mod tests {
         std::fs::create_dir_all(&macos_dir).unwrap();
 
         let binary = build_unsigned_binary(&macos_dir, "Test");
-        assert!(!verify_signature(&binary).await, "binary should be unsigned before signing");
+        assert!(
+            !verify_signature(&binary).await,
+            "binary should be unsigned before signing"
+        );
 
         let result = super::sign_extracted_content(&content).await;
         assert!(result.is_ok(), "sign_extracted_content should succeed");
 
         assert!(verify_signature(&binary).await, "binary inside .app should be signed");
-        assert!(verify_signature(&app_dir).await, ".app bundle should be signed after its contents");
+        assert!(
+            verify_signature(&app_dir).await,
+            ".app bundle should be signed after its contents"
+        );
     }
 }
