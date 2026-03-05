@@ -16,8 +16,8 @@ pub enum CleanKind {
 impl fmt::Display for CleanKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CleanKind::Object => write!(f, "Object"),
-            CleanKind::Temp => write!(f, "Temp"),
+            CleanKind::Object => write!(f, "object"),
+            CleanKind::Temp => write!(f, "temp"),
         }
     }
 }
@@ -72,9 +72,8 @@ impl Reportable for Clean {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.kind.to_string());
-            rows[1].push(entry.dry_run.to_string());
-            rows[2].push(entry.path.display().to_string());
+            rows[1].push(entry.path.display().to_string());
         }
-        crate::stdout::print_table(&["Type", "Dry Run", "Path"], &rows);
+        crate::stdout::print_table(&["Type", "Path"], &rows);
     }
 }

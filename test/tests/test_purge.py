@@ -9,7 +9,8 @@ def test_purge_removes_object_directory(
     """ocx install <pkg>; ocx uninstall --purge <pkg>"""
     pkg = published_package
     result = ocx.json("install", pkg.short)
-    content = Path(result[pkg.short]["content"])
+    candidate = Path(result[pkg.short]["path"])
+    content = candidate.resolve()
     assert_dir_exists(content)
 
     ocx.plain("uninstall", "--purge", pkg.short)

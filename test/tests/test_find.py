@@ -9,10 +9,12 @@ def test_find_returns_content_path(
     """ocx install <pkg>; ocx find <pkg>"""
     pkg = published_package
     install_result = ocx.json("install", pkg.short)
-    content = install_result[pkg.short]["content"]
+    candidate = Path(install_result[pkg.short]["path"])
 
     find_result = ocx.json("find", pkg.short)
-    assert find_result[pkg.short] == content
+    # find (default) returns the object-store content path;
+    # the candidate symlink from install resolves to the same location.
+    assert Path(find_result[pkg.short]) == candidate.resolve()
 
 
 def test_find_candidate_returns_candidate_symlink(

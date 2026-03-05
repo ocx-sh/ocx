@@ -27,7 +27,7 @@ def test_install_creates_content_directory(
     """ocx install <pkg>"""
     pkg = published_package
     result = ocx.json("install", pkg.short)
-    content = Path(result[pkg.short]["content"])
+    content = Path(result[pkg.short]["path"])
     assert_dir_exists(content)
 
 
@@ -56,7 +56,7 @@ def test_install_without_select_preserves_current(
 
     # Install v1 with select
     result_v1 = ocx.json("install", "-s", v1.short)
-    content_v1 = Path(result_v1[v1.short]["content"])
+    content_v1 = Path(result_v1[v1.short]["path"])
 
     # Install v2 without select
     ocx.json("install", v2.short)

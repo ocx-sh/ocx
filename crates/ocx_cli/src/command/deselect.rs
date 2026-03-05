@@ -27,7 +27,15 @@ impl Deselect {
             .packages
             .iter()
             .zip(results)
-            .map(|(pkg, target_path)| api::data::removed::RemovedEntry::from_result(pkg.raw().to_string(), target_path))
+            .map(|(pkg, symlink_path)| {
+                let name = pkg.raw().to_string();
+                let status = if symlink_path.is_some() {
+                    api::data::removed::RemovedStatus::Removed
+                } else {
+                    api::data::removed::RemovedStatus::Absent
+                };
+                api::data::removed::RemovedEntry::new(name, status, symlink_path)
+            })
             .collect();
 
         context
