@@ -52,8 +52,8 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 
 **CLI layer** (`ocx_cli`):
 - `app/context.rs` — `Context` struct: holds `FileStructure`, `Index`, `PackageManager`, `Api`, OCI client. Created once per command invocation.
-- `command/` — One file per CLI subcommand. Commands call `context.manager()` methods.
-- `api/` — Output formatting (JSON vs plain text) via `context.api().report_*()`.
+- `command/` — One file per CLI subcommand. Commands call `context.manager()` methods and build report data from task return values (never from raw CLI args alone).
+- `api/` — Output formatting (JSON vs plain text) via `context.api().report_*()`. Each `api/data/` type implements `Reportable` with a single `print_table` call. See @.claude/rules/cli-api-patterns.md for the full contract.
 
 **Patterns**:
 - Commands use `context.manager().find_or_install_all(...)` with auto-install on `PackageNotFound` (unless offline).

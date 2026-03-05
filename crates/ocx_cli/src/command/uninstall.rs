@@ -32,13 +32,22 @@ impl Uninstall {
         let identifiers =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
-        context
+        let results = context
             .manager()
             .uninstall_all(&identifiers, self.deselect, self.purge)?;
 
-        context.api().report_removed(api::data::removed::Removed::new(
-            self.packages.iter().map(|p| p.raw().to_string()).collect(),
-        ))?;
+        let entries = self
+            .packages
+            .iter()
+            .zip(results)
+            .map(|(pkg, content_path)| {
+                api::data::removed::RemovedEntry::from_result(pkg.raw().to_string(), content_path)
+            })
+            .collect();
+
+        context
+            .api()
+            .report_removed(api::data::removed::Removed::new(entries))?;
 
         Ok(ExitCode::SUCCESS)
     }

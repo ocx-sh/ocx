@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use tracing::info_span;
 
 use crate::{
@@ -11,7 +13,15 @@ use super::super::PackageManager;
 impl PackageManager {
     /// Removes the candidate symlink for `package` and optionally the current
     /// symlink (`deselect`) and the backing object directory (`purge`).
-    pub fn uninstall(&self, package: &oci::Identifier, deselect: bool, purge: bool) -> Result<(), PackageErrorKind> {
+    ///
+    /// Returns `Some(content_path)` when the candidate symlink existed and was
+    /// removed, or `None` when no candidate was present (no-op).
+    pub fn uninstall(
+        &self,
+        package: &oci::Identifier,
+        deselect: bool,
+        purge: bool,
+    ) -> Result<Option<PathBuf>, PackageErrorKind> {
         let _span = info_span!("Uninstalling", package = %package).entered();
         log::debug!("Uninstalling package '{}'.", package);
 
@@ -50,8 +60,8 @@ impl PackageManager {
         }
 
         if purge {
-            if let Some(content) = content_path {
-                if let Ok(refs_dir) = self.file_structure().objects.refs_dir_for_content(&content) {
+            if let Some(ref content) = content_path {
+                if let Ok(refs_dir) = self.file_structure().objects.refs_dir_for_content(content) {
                     let is_empty = !refs_dir.is_dir()
                         || std::fs::read_dir(&refs_dir)
                             .map(|mut d| d.next().is_none())
@@ -75,7 +85,7 @@ impl PackageManager {
             }
         }
 
-        Ok(())
+        Ok(content_path)
     }
 
     pub fn uninstall_all(
@@ -83,12 +93,14 @@ impl PackageManager {
         packages: &[oci::Identifier],
         deselect: bool,
         purge: bool,
-    ) -> Result<(), package_manager::error::Error> {
+    ) -> Result<Vec<Option<PathBuf>>, package_manager::error::Error> {
+        let mut results: Vec<Option<PathBuf>> = Vec::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in packages {
-            if let Err(kind) = self.uninstall(package, deselect, purge) {
-                errors.push(PackageError::new(package.clone(), kind));
+            match self.uninstall(package, deselect, purge) {
+                Ok(content_path) => results.push(content_path),
+                Err(kind) => errors.push(PackageError::new(package.clone(), kind)),
             }
         }
 
@@ -96,6 +108,6 @@ impl PackageManager {
             return Err(package_manager::error::Error::UninstallFailed(errors));
         }
 
-        Ok(())
+        Ok(results)
     }
 }
