@@ -9,7 +9,8 @@ def test_clean_removes_unreferenced_objects(
     """ocx install <pkg>; ocx uninstall <pkg>; ocx clean"""
     pkg = published_package
     result = ocx.json("install", pkg.short)
-    content = Path(result[pkg.short]["content"])
+    candidate = Path(result[pkg.short]["path"])
+    content = candidate.resolve()
     assert_dir_exists(content)
 
     ocx.plain("uninstall", pkg.short)
@@ -25,7 +26,7 @@ def test_clean_preserves_referenced_objects(
     """ocx install <pkg>; ocx clean"""
     pkg = published_package
     result = ocx.json("install", pkg.short)
-    content = Path(result[pkg.short]["content"])
+    content = Path(result[pkg.short]["path"]).resolve()
 
     ocx.plain("clean")
     assert_dir_exists(content)

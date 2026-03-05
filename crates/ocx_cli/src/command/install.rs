@@ -42,13 +42,25 @@ impl Install {
             )
             .await?;
 
-        let install_data = api::data::install::Installs::new(
-            self.packages
-                .iter()
-                .map(|p| p.raw().to_string())
-                .zip(install_infos.iter().cloned())
-                .collect(),
-        );
+        let fs = context.file_structure();
+        let packages = self
+            .packages
+            .iter()
+            .zip(oci_packages.iter())
+            .zip(install_infos.iter())
+            .map(|((raw, oci_pkg), info)| {
+                let path = fs.installs.candidate(oci_pkg);
+                (
+                    raw.raw().to_string(),
+                    api::data::install::InstallEntry {
+                        identifier: info.identifier.clone(),
+                        metadata: info.metadata.clone(),
+                        path,
+                    },
+                )
+            })
+            .collect();
+        let install_data = api::data::install::Installs::new(packages);
         context.api().report_installs(install_data)?;
 
         Ok(ExitCode::SUCCESS)

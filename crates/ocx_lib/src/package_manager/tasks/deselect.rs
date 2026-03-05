@@ -13,7 +13,7 @@ use super::super::PackageManager;
 impl PackageManager {
     /// Removes the current-version symlink for `package`.
     ///
-    /// Returns `Some(target_path)` when the current symlink existed and was
+    /// Returns `Some(current_path)` when the current symlink existed and was
     /// removed, or `None` when no current symlink was present (no-op).
     pub fn deselect(&self, package: &oci::Identifier) -> Result<Option<PathBuf>, PackageErrorKind> {
         let _span = info_span!("Deselecting", package = %package).entered();
@@ -26,20 +26,17 @@ impl PackageManager {
         let rm = ReferenceManager::new(self.file_structure().clone());
         let current_path = self.file_structure().installs.current(package);
 
-        let target = if crate::symlink::is_link(&current_path) {
-            let path = std::fs::read_link(&current_path).ok();
+        if crate::symlink::is_link(&current_path) {
             rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
-            path
+            Ok(Some(current_path))
         } else {
             log::warn!(
                 "Package '{}' has no current symlink at '{}' — nothing to deselect.",
                 package,
                 current_path.display(),
             );
-            None
-        };
-
-        Ok(target)
+            Ok(None)
+        }
     }
 
     pub fn deselect_all(

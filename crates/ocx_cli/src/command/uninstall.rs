@@ -36,14 +36,33 @@ impl Uninstall {
             .manager()
             .uninstall_all(&identifiers, self.deselect, self.purge)?;
 
-        let entries = self
-            .packages
-            .iter()
-            .zip(results)
-            .map(|(pkg, content_path)| {
-                api::data::removed::RemovedEntry::from_result(pkg.raw().to_string(), content_path)
-            })
-            .collect();
+        let mut entries = Vec::new();
+        for (pkg, result) in self.packages.iter().zip(results) {
+            let name = pkg.raw().to_string();
+            match result {
+                Some(r) => {
+                    entries.push(api::data::removed::RemovedEntry::new(
+                        name.clone(),
+                        api::data::removed::RemovedStatus::Removed,
+                        Some(r.candidate),
+                    ));
+                    if let Some(obj_dir) = r.purged {
+                        entries.push(api::data::removed::RemovedEntry::new(
+                            name,
+                            api::data::removed::RemovedStatus::Purged,
+                            Some(obj_dir),
+                        ));
+                    }
+                }
+                None => {
+                    entries.push(api::data::removed::RemovedEntry::new(
+                        name,
+                        api::data::removed::RemovedStatus::Absent,
+                        None,
+                    ));
+                }
+            }
+        }
 
         context
             .api()

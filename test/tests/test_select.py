@@ -12,7 +12,7 @@ def test_select_switches_current_symlink(
     ocx.json("install", v2.short)
 
     install_v2 = ocx.json("install", v2.short)
-    content_v2 = Path(install_v2[v2.short]["content"])
+    content_v2 = Path(install_v2[v2.short]["path"])
 
     ocx.plain("select", v2.short)
 

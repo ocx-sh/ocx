@@ -61,9 +61,9 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
 
     # --- Install ---
     result = ocx.json("install", short)
-    content = result[short]["content"]
-    assert Path(content).is_dir()
+    candidate = Path(result[short]["path"])
+    assert candidate.is_dir()
 
     # --- Find ---
     find_result = ocx.json("find", short)
-    assert find_result[short] == content
+    assert Path(find_result[short]) == candidate.resolve()

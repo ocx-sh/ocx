@@ -1,7 +1,7 @@
 use std::{collections::HashMap, process::ExitCode};
 
 use clap::Parser;
-use ocx_lib::{oci, package::install_info, reference_manager::ReferenceManager};
+use ocx_lib::{oci, reference_manager::ReferenceManager};
 
 use crate::{api, conventions::platforms_or_default, options};
 
@@ -40,10 +40,10 @@ impl Select {
 
             packages.insert(
                 raw.raw().to_string(),
-                install_info::InstallInfo {
+                api::data::install::InstallEntry {
                     identifier: info.identifier,
                     metadata: info.metadata,
-                    content: current_path,
+                    path: current_path,
                 },
             );
         }
