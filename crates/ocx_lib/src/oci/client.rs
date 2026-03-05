@@ -140,7 +140,6 @@ impl Client {
         let install_path = output_path.join("install.json");
         let lock_path = output_path.join("install.lock");
 
-        std::fs::create_dir_all(&output_path).map_err(|e| ClientError::Io(output_path.clone(), e))?;
         if let (true, Some(status)) =
             install_status::check_install_status(&install_path, &lock_path, self.lock_timeout).await
         {
@@ -158,11 +157,13 @@ impl Client {
             });
         }
 
+        let mut temp_guard = utility::drop_file::DropFile::new(temp_path.to_path_buf());
         let download = self.download_to_temp(&identifier, identifier_digest, temp_path).await?;
-
         self.extract_and_finalize(&identifier, download, temp_path, &output_path)
             .await?;
 
+        // Clean up temp directory — files have been moved to the output path.
+        temp_guard.unlink().ok();
         drop(temp);
 
         let metadata = metadata::Metadata::read_json_from_path(output_path.join("metadata.json"))?;
@@ -270,12 +271,14 @@ impl Client {
         }
 
         // Move temp contents to the final output path.
+        // Wrap in DropFile so partial output is cleaned up on failure.
+        std::fs::create_dir_all(output_path).map_err(|e| ClientError::Io(output_path.to_path_buf(), e))?;
+        let mut output_guard = utility::drop_file::DropFile::new(output_path.to_path_buf());
+
         let final_metadata = output_path.join("metadata.json");
         let final_content = output_path.join("content");
         let final_manifest = output_path.join("manifest.json");
         let final_install = output_path.join("install.json");
-
-        std::fs::create_dir_all(output_path).map_err(|e| ClientError::Io(output_path.to_path_buf(), e))?;
 
         Self::move_path(&temp_path.join("metadata.json"), &final_metadata)?;
         Self::move_path(&temp_content_path, &final_content)?;
@@ -294,6 +297,8 @@ impl Client {
             .write_json_to_path(&final_install)
             .map_err(|e| ClientError::Serialization(e.to_string()))?;
 
+        // All steps succeeded — keep the output directory.
+        output_guard.retain();
         Ok(())
     }
 
