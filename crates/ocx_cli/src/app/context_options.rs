@@ -26,7 +26,9 @@ pub struct ContextOptions {
     #[arg(long, value_enum, value_name = "FORMAT", default_value_t = Default::default())]
     pub format: options::Format,
 
-    /// Alternative path to the local index directory (ignored if --remote is set)
+    /// Alternative path to the local index directory (ignored if --remote is set).
+    ///
+    /// Can also be set via the OCX_INDEX environment variable.
     #[arg(long, value_name = "PATH")]
     pub index: Option<std::path::PathBuf>,
 

@@ -50,10 +50,11 @@ impl Context {
         };
         let file_structure = file_structure::FileStructure::new();
         let local_index = index::LocalIndex::new(index::LocalConfig {
-            root: match &options.index {
-                Some(path) => path.clone(),
-                None => file_structure.index.root().clone(),
-            },
+            root: options
+                .index
+                .clone()
+                .or_else(|| env::var("OCX_INDEX").map(std::path::PathBuf::from))
+                .unwrap_or_else(|| file_structure.index.root().clone()),
         });
 
         let selected_index = if options.remote {
