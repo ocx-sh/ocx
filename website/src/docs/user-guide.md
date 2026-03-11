@@ -342,14 +342,47 @@ The same pattern applies to [Bazel rules][bazel-rules] and [devcontainer feature
 
 ## Indices {#indices}
 
+OCI tags are mutable — `cmake:3` today may point to a different digest after the next patch release. The [versioning section][versioning-tags] covers this in detail. For a tool that installs binaries reproducibly, this is a problem: `ocx install cmake:3` run twice on different days could silently resolve different builds.
+
+ocx solves this by keeping a local snapshot of tag-to-digest mappings. That snapshot only changes when you explicitly refresh it. The same snapshot always resolves `cmake:3` to the same digest — regardless of what the registry serves today.
+
 ### Remote Index {#indices-remote}
+
+The remote index is the live OCI registry. It answers metadata queries — which tags exist for a package, which digest a tag currently points to, which platforms a manifest declares — directly and authoritatively. Use [`ocx index catalog`][cmd-index-catalog] to browse available packages or [`ocx index list`][cmd-index-list] to see the tags for a specific package against the live registry with [`--remote`][arg-remote].
+
+The remote index is the data source for [`ocx index update`][cmd-index-update]. Refreshing the local snapshot means querying the remote index and writing the results to disk.
 
 ### Local Index {#indices-local}
 
-### Selected Index {#indices-selected}
+The local index reads from [`~/.ocx/index/`][fs-index] — a <Tooltip term="snapshot">A point-in-time copy of the remote registry's tag-to-digest mappings. No binaries — only the small JSON metadata files needed to resolve package identifiers.</Tooltip> of OCI tag-to-digest mappings. Resolving `cmake:3` is a file read; no network request is made.
 
-## Mirrors {#mirrors}
+**The local index is never updated automatically.** You decide when your snapshot changes. Until you explicitly refresh it, the same identifier always resolves to the same digest — on your laptop, on CI, and on every team member's machine. Rolling tags like `cmake:3` map to the digest current at last update, not whatever the registry serves today.
 
+The snapshot is small enough — JSON metadata only, no binaries — to ship *inside* a [Bazel rule][bazel-rules] or [GitHub Action][github-actions-docs]. Those tools bundle a frozen snapshot at release time; consumers write `cmake:3` and the bundled snapshot resolves it deterministically.
+
+::: tip Out-of-the-Box Support for Dependabot and Renovate
+A single version bump to the action or rule — proposed automatically by [Dependabot][dependabot] or [Renovate][renovate] — advances the bundled index. Users get the updated binary with no config changes. No [per-platform URL matrix][toolchains-llvm] to hand-edit, no separate PR to bump the tool itself.
+:::
+
+[`ocx index update <package>`][cmd-index-update] syncs the local index for a specific package from the remote registry — downloading the current tag-to-digest mappings and any missing manifests, then writing them to disk. Packages not listed are not touched.
+
+*Commands: [`ocx index update`][cmd-index-update], [`ocx index catalog`][cmd-index-catalog], [`ocx index list`][cmd-index-list]*
+
+### Active Index {#indices-selected}
+
+Every command that resolves a package identifier — [`ocx install`][cmd-install], [`ocx find`][cmd-find], [`ocx exec`][cmd-exec], [`ocx index list`][cmd-index-list] — uses one working index for that invocation. By default, this is the local index. Two global flags override this:
+
+| Mode | Flag | Source | Network? |
+|---|---|---|---|
+| Default | *(none)* | Local snapshot | No (unless fetching a new binary) |
+| Remote | [`--remote`][arg-remote] | OCI registry | Yes |
+| Offline | [`--offline`][arg-offline] | Local snapshot | Never |
+
+**`--remote`** bypasses the local snapshot for a single command and queries the registry directly. The persistent local index is not updated. Use it for a one-off check — seeing current available tags, or resolving the latest digest — without committing the result to the local snapshot.
+
+**`--offline`** prevents all network access for that command. If the local index does not have a requested package, the command fails immediately rather than attempting a registry query. Useful to verify that your current index and object store are self-sufficient before a build in a restricted or air-gapped environment.
+
+The active index controls tag and manifest resolution only. The [object store][fs-objects] is independent — installed binaries are accessible in all three modes regardless of which index is active.
 
 ## Authentication {#authentication}
 
@@ -419,19 +452,25 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 [devcontainer-features]: https://containers.dev/implementors/features/
 [devcontainer-features-list]: https://containers.dev/features
 [toolchains-llvm]: https://github.com/bazel-contrib/toolchains_llvm/blob/master/toolchain/internal/llvm_distributions.bzl
+[dependabot]: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/keeping-your-actions-up-to-date-with-dependabot
+[renovate]: https://docs.renovatebot.com/
+[terraform-lockfile]: https://developer.hashicorp.com/terraform/language/files/dependency-lock
 [docker-credential]: https://github.com/keirlawson/docker_credential
 
 <!-- commands -->
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-deselect]: ./reference/command-line.md#deselect
 [cmd-find]: ./reference/command-line.md#find
+[cmd-exec]: ./reference/command-line.md#exec
 [cmd-install]: ./reference/command-line.md#install
 [cmd-select]: ./reference/command-line.md#select
 [cmd-uninstall]: ./reference/command-line.md#uninstall
 [cmd-index-catalog]: ./reference/command-line.md#index-catalog
+[cmd-index-list]: ./reference/command-line.md#index-list
 [cmd-index-update]: ./reference/command-line.md#index-update
 [cmd-package-push]: ./reference/command-line.md#package-push
 [arg-remote]: ./reference/command-line.md#arg-remote
+[arg-offline]: ./reference/command-line.md#arg-offline
 
 <!-- environment -->
 [env-ocx-home]: ./reference/environment.md#ocx-home
@@ -443,5 +482,6 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 <!-- internal -->
 [fs-index]: #file-structure-index
 [fs-objects]: #file-structure-objects
+[versioning-tags]: #versioning-tags
 [auth-env-vars]: #authentication-environment-variables
 [auth-docker-creds]: #authentication-docker-credentials
