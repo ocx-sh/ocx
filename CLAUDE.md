@@ -37,6 +37,10 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 
 **Coverage**: `task coverage` (cargo-llvm-cov), `task coverage:open` to view HTML report.
 
+**Verification**: `task verify` runs format check, clippy, build, unit tests, and acceptance tests. **Always run `task verify` after completing an implementation** to confirm nothing is broken.
+
+**Before committing**: Always run `cargo fmt` before creating a commit to ensure code is properly formatted.
+
 ## Architecture
 
 **Workspace layout**: Two crates — `crates/ocx_lib` (core library) and `crates/ocx_cli` (thin CLI shell using clap). Rust edition 2024, resolver v3.
