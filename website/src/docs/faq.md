@@ -11,33 +11,30 @@ macOS requires all executable code to carry a valid <Tooltip term="code signatur
 
 When a publisher never signed their binaries before packaging, the extracted files will be unsigned and macOS will refuse to run them. Signatures that were present before packaging survive the tar round-trip — they are part of the binary content, not extended attributes.
 
-ocx handles this automatically: after extracting a package, it recursively walks the content directory, detects <Tooltip term="Mach-O binaries">The native executable format on macOS and iOS. ocx identifies them by reading the first four bytes of each file and checking for known magic numbers (`0xFEEDFACF` for 64-bit, `0xCAFEBABE` for universal, etc.).</Tooltip>, signs each one individually, then seals any `.app` and `.framework` bundles — inside-out, so nested content is always signed before its parent. Quarantine flags are stripped. No configuration required.
+ocx handles this automatically: after extracting a package, it recursively walks the content directory, detects <Tooltip term="Mach-O binaries">The native executable format on macOS and iOS. ocx identifies them by reading the first four bytes of each file and checking for known magic numbers (`0xFEEDFACF` for 64-bit, `0xCAFEBABE` for universal, etc.).</Tooltip>, and signs each one individually with an ad-hoc signature. Quarantine flags are stripped. No configuration required.
 
 ::: info Same approach as Homebrew
-[Homebrew][homebrew] solves the identical problem with the same technique — see [`codesign_patched_binary`][homebrew-codesign] in their source. ocx applies the signatures after extraction rather than after patching, but the `codesign` invocation is equivalent.
+[Homebrew][homebrew] solves the identical problem with the same technique — per-file ad-hoc signing without bundle sealing — see [`codesign_patched_binary`][homebrew-codesign] in their source. ocx applies signatures after extraction rather than after patching, but the `codesign` invocation is equivalent.
 :::
 
 ::: details What ocx runs under the hood
 
-For each Mach-O binary found in the content directory (recursive, inside-out):
-
-```sh
-codesign --sign - --force --preserve-metadata=entitlements,requirements,flags,runtime <binary>
-```
-
-For `.app` and `.framework` bundles (signed after their contents, without `--deep`):
-
-```sh
-codesign --sign - --force <bundle>
-```
-
-Quarantine removal (applied to the entire content directory before signing):
+Quarantine removal (applied to the entire content directory first):
 
 ```sh
 xattr -dr com.apple.quarantine <content_path>
 ```
 
-Hardlinked files (same inode) are signed only once. Symlinks are not followed.
+For each Mach-O binary found in the content directory (recursive walk, symlinks not followed):
+
+```sh
+codesign --sign - --force --preserve-metadata=entitlements,flags,runtime <binary>
+```
+
+`entitlements`, `flags`, and `runtime` are preserved from the original signature.
+`requirements` (the original certificate's Team ID constraint) is intentionally dropped —
+preserving it would cause dyld "different Team IDs" errors when loading third-party frameworks.
+Hardlinked files (same inode) are signed only once.
 :::
 
 ::: tip For package publishers
@@ -58,15 +55,13 @@ If a binary still fails to launch after installation, sign it manually:
 
 ::: code-group
 ```sh [Single binary]
-codesign --sign - --force --preserve-metadata=entitlements,requirements,flags,runtime /path/to/binary
+codesign --sign - --force --preserve-metadata=entitlements,flags,runtime /path/to/binary
 ```
 
 ```sh [Remove quarantine]
 xattr -dr com.apple.quarantine /path/to/content
 ```
 :::
-
-For `.app` bundles, sign each nested Mach-O binary individually (inside-out), then sign the bundle itself without `--deep`.
 
 ::: details Can I disable macOS code signing enforcement entirely?
 macOS enforces code signatures through <Tooltip term="AMFI">Apple Mobile File Integrity — a kernel-level module that validates code signatures independently of Gatekeeper. It cannot be disabled without booting into Recovery Mode, turning off SIP, and setting `amfi_get_out_of_my_way=1`.</Tooltip>, which runs independently of [Gatekeeper][gatekeeper]. Disabling it requires Recovery Mode, disabling [SIP][sip], and setting a boot argument — a configuration Apple does not support that significantly weakens system security.

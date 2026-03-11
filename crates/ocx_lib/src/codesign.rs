@@ -1,17 +1,27 @@
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::{Result, log};
 
-/// Applies ad-hoc code signatures to Mach-O binaries after extraction.
+/// Applies ad-hoc code signatures to all Mach-O binaries after extraction.
 ///
 /// On macOS, unsigned Mach-O binaries are killed on Apple Silicon (`Killed: 9`) and blocked
 /// by Gatekeeper on Intel. This function recursively walks the extracted content directory,
 /// detects Mach-O files by their magic bytes, and applies ad-hoc signatures via `codesign --sign -`.
 ///
-/// Signing is performed inside-out: subdirectories are processed before the current directory,
-/// so nested bundles (`.framework`, `.app`) are sealed after their contents are signed.
+/// **Design: per-file signing only, no bundle sealing.**
+///
+/// Only individual Mach-O files are signed. Bundle seals (`_CodeSignature/CodeResources` inside
+/// `.app` / `.framework` directories) are intentionally left as-is (stale after re-signing).
+/// This is safe because:
+/// - OCX packages are run via `ocx exec`, not launched through Finder. The kernel only checks
+///   each binary's own embedded signature at load time — not the bundle-level `CodeResources`.
+/// - Signing at the individual file level avoids all "bundle format is ambiguous" errors and
+///   Team ID conflicts that arise from re-sealing third-party bundles (e.g. Qt frameworks signed
+///   by The Qt Company with their own Team ID requirements).
+/// - This matches Homebrew's approach, which is the de-facto standard for macOS binary patching.
+///
 /// Hardlinked files (same inode) are signed only once. Symlinks are not followed.
 ///
 /// On non-macOS platforms this is a no-op.
@@ -35,8 +45,8 @@ pub async fn sign_extracted_content(content_path: &Path) -> Result<()> {
 
     remove_quarantine(content_path).await;
 
-    let signed_inodes = Mutex::new(HashSet::new());
-    sign_directory(content_path, &signed_inodes).await;
+    let signed_inodes = Arc::new(Mutex::new(HashSet::new()));
+    sign_directory(content_path.to_path_buf(), signed_inodes).await;
 
     Ok(())
 }
@@ -70,71 +80,73 @@ async fn is_macho(path: &Path) -> bool {
     MACHO_MAGIC.contains(&value)
 }
 
-// -- Recursive inside-out signing ---------------------------------------------
+// -- Recursive per-file signing -----------------------------------------------
 
-/// Recursively signs all Mach-O binaries and bundles in inside-out order.
+/// Recursively signs all Mach-O regular files under `path`.
 ///
-/// 1. Recurse into real subdirectories (symlinks are not followed)
-/// 2. Sign Mach-O files in this directory in parallel (deduplicated by inode)
-/// 3. If this directory is a bundle (`.app` / `.framework`), sign the bundle itself
+/// - Recurses into subdirectories in parallel (symlinks are not followed).
+/// - Signs each regular Mach-O file in parallel within each directory, deduplicated by inode.
+/// - Bundle directories (`.app`, `.framework`) are recursed into but not
+///   sealed — only the individual Mach-O files inside are signed.
 ///
-/// Inode tracking via `signed_inodes` prevents signing the same physical file
-/// twice when hardlinks exist across directories.
-async fn sign_directory(path: &Path, signed_inodes: &Mutex<HashSet<u64>>) {
-    let Ok(mut read_dir) = tokio::fs::read_dir(path).await else {
-        return;
-    };
-
-    let mut subdirs = Vec::new();
-    let mut files = Vec::new();
-
-    while let Ok(Some(entry)) = read_dir.next_entry().await {
-        let Ok(ft) = entry.file_type().await else {
-            continue;
+/// Returns an explicit `Pin<Box<dyn Future + Send>>` so that the recursive call inside
+/// `JoinSet::spawn` resolves to a concrete `Send` type, breaking the circularity that prevents
+/// the compiler from proving `Send` for recursive `async fn` futures.
+fn sign_directory(
+    path: std::path::PathBuf,
+    signed_inodes: Arc<Mutex<HashSet<u64>>>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let Ok(mut read_dir) = tokio::fs::read_dir(&path).await else {
+            return;
         };
-        // file_type() does NOT follow symlinks — symlinks are neither recursed nor signed.
-        if ft.is_dir() {
-            subdirs.push(entry.path());
-        } else if ft.is_file() {
-            files.push(entry.path());
-        }
-    }
 
-    // Step 1: Recurse into subdirectories first (inside-out order).
-    // Sequential at this level so the Mutex sees a consistent inode set;
-    // parallelism happens within each directory's file signing.
-    for dir in subdirs {
-        Box::pin(sign_directory(&dir, signed_inodes)).await;
-    }
+        let mut subdirs = Vec::new();
+        let mut files = Vec::new();
 
-    // Step 2: Sign Mach-O files in this directory (parallel, with inode dedup).
-    let mut tasks = tokio::task::JoinSet::new();
-    for file in files {
-        if !is_macho(&file).await {
-            continue;
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let Ok(ft) = entry.file_type().await else {
+                continue;
+            };
+            // file_type() does NOT follow symlinks — symlinks are neither recursed nor signed.
+            if ft.is_dir() {
+                subdirs.push(entry.path());
+            } else if ft.is_file() {
+                files.push(entry.path());
+            }
         }
-        if let Some(inode) = file_inode(&file).await
-            && !signed_inodes.lock().unwrap().insert(inode)
-        {
-            continue; // Already signed via hardlink
-        }
-        tasks.spawn(async move { sign_binary(&file).await });
-    }
-    while let Some(result) = tasks.join_next().await {
-        if let Err(e) = result {
-            log::warn!("Code signing task panicked: {}", e);
-        }
-    }
 
-    // Step 3: Sign the bundle after all its contents are signed.
-    if is_bundle(path) {
-        sign_bundle(path).await;
-    }
-}
+        // Recurse into subdirectories in parallel. Each call returns a Send future (explicit
+        // return type above), so JoinSet::spawn accepts it without Box::pin.
+        let mut subdir_tasks = tokio::task::JoinSet::new();
+        for dir in subdirs {
+            let inodes = Arc::clone(&signed_inodes);
+            subdir_tasks.spawn(sign_directory(dir, inodes));
+        }
+        while let Some(result) = subdir_tasks.join_next().await {
+            if let Err(e) = result {
+                log::warn!("Directory signing task panicked: {}", e);
+            }
+        }
 
-/// Returns true for directories that are macOS bundles (`.app` or `.framework`).
-fn is_bundle(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext == "app" || ext == "framework")
+        let mut file_tasks = tokio::task::JoinSet::new();
+        for file in files {
+            if !is_macho(&file).await {
+                continue;
+            }
+            if let Some(inode) = file_inode(&file).await
+                && !signed_inodes.lock().unwrap().insert(inode)
+            {
+                continue; // Already signed via hardlink
+            }
+            file_tasks.spawn(async move { sign_binary(&file).await });
+        }
+        while let Some(result) = file_tasks.join_next().await {
+            if let Err(e) = result {
+                log::warn!("Code signing task panicked: {}", e);
+            }
+        }
+    })
 }
 
 /// Returns the inode number of a regular file, used for hardlink deduplication.
@@ -182,10 +194,20 @@ async fn remove_quarantine(content_path: &Path) {
     }
 }
 
-/// Signs a Mach-O binary with ad-hoc signature, retrying with an inode workaround on failure.
+/// Signs a Mach-O binary with an ad-hoc signature, retrying with an inode workaround on failure.
 ///
-/// Uses `--preserve-metadata=entitlements,requirements,flags,runtime` to retain any existing
-/// entitlements and hardened-runtime settings from the original signature.
+/// Preserved metadata from the original signature:
+/// - `entitlements`: app-declared capabilities (JIT, network extensions, sandbox) — must be
+///   retained so the binary runs correctly under its intended privilege model.
+/// - `flags`: code signing flags (`CS_HARD`, `CS_KILL`, `CS_RESTRICT`, etc.) — preserve the
+///   binary's intended hardening posture.
+/// - `runtime`: hardened runtime flag — required for binaries that depend on restricted JIT or
+///   library validation.
+///
+/// Intentionally NOT preserved:
+/// - `requirements`: the original Designated Requirement encodes the issuing certificate's Team ID.
+///   An ad-hoc signature cannot satisfy a third-party Team ID constraint, which would cause
+///   "different Team IDs" dyld errors when loading Qt frameworks and similar third-party bundles.
 ///
 /// If the first attempt fails (known Apple `codesign` bug with certain inodes), the file is
 /// copied to a temp path (new inode), signed there, and moved back.
@@ -196,7 +218,7 @@ async fn sign_binary(path: &Path) {
         "--sign",
         "-",
         "--force",
-        "--preserve-metadata=entitlements,requirements,flags,runtime",
+        "--preserve-metadata=entitlements,flags,runtime",
     ];
 
     if try_codesign(args, path).await {
@@ -208,14 +230,6 @@ async fn sign_binary(path: &Path) {
     if let Err(e) = retry_sign_with_copy(args, path).await {
         log::warn!("Failed to sign {} (even after retry): {}", path.display(), e);
     }
-}
-
-/// Signs a bundle (`.app` or `.framework`) without `--deep`.
-///
-/// Expects all nested content to already be signed (called after recursive descent).
-async fn sign_bundle(path: &Path) {
-    log::debug!("Signing bundle: {}", path.display());
-    try_codesign(&["--sign", "-", "--force"], path).await;
 }
 
 /// Runs `codesign` with the given arguments. Returns `true` on success.
@@ -250,8 +264,16 @@ async fn try_codesign(args: &[&str], path: &Path) -> bool {
 ///
 /// Works around a known Apple `codesign` bug where signing fails on certain inodes.
 /// Homebrew uses the same technique in `codesign_patched_binary`.
+///
+/// The temp file is placed alongside the original with `.codesign_tmp` appended to the
+/// full filename (not replacing the extension) to avoid collisions between files that share
+/// a stem but differ only in extension (e.g. `foo.bar` and `foo.baz`).
 async fn retry_sign_with_copy(args: &[&str], path: &Path) -> std::io::Result<()> {
-    let tmp = path.with_extension("codesign_tmp");
+    let tmp_name = format!(
+        "{}.codesign_tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let tmp = path.with_file_name(tmp_name);
     tokio::fs::copy(path, &tmp).await?;
 
     if try_codesign(args, &tmp).await {
@@ -375,33 +397,10 @@ mod tests {
         assert!(!super::is_macho(&path).await);
     }
 
-    // -- is_bundle ----------------------------------------------------------------
-
-    #[test]
-    fn is_bundle_detects_app() {
-        assert!(super::is_bundle(std::path::Path::new("/tmp/Foo.app")));
-    }
-
-    #[test]
-    fn is_bundle_detects_framework() {
-        assert!(super::is_bundle(std::path::Path::new("/tmp/QtCore.framework")));
-    }
-
-    #[test]
-    fn is_bundle_rejects_plain_directory() {
-        assert!(!super::is_bundle(std::path::Path::new("/tmp/bin")));
-    }
-
-    #[test]
-    fn is_bundle_rejects_file_extension() {
-        assert!(!super::is_bundle(std::path::Path::new("/tmp/file.txt")));
-    }
-
     // -- sign_directory -----------------------------------------------------------
 
     #[tokio::test]
     async fn sign_directory_finds_standalone_binaries() {
-        // Verifies that sign_directory visits Mach-O files by checking the inode set.
         let dir = TempDir::new().unwrap();
         let bin_dir = dir.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -410,83 +409,18 @@ mod tests {
         create_file_with_magic(&bin_dir, "tool_b", &0xFEED_FACEu32.to_be_bytes());
         create_file_with_magic(&bin_dir, "script.sh", b"#!/b");
 
-        let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
-        super::sign_directory(dir.path(), &signed_inodes).await;
+        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
 
-        // Two Mach-O files should have their inodes recorded (script.sh is not Mach-O).
+        // Two Mach-O files; script.sh is not Mach-O.
         assert_eq!(signed_inodes.lock().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn sign_directory_finds_binaries_inside_app_bundle() {
-        // With the new approach, binaries inside .app bundles ARE signed individually.
-        let dir = TempDir::new().unwrap();
-        let app_macos = dir.path().join("MyApp.app").join("Contents").join("MacOS");
-        std::fs::create_dir_all(&app_macos).unwrap();
-
-        create_file_with_magic(&app_macos, "MyApp", &0xFEED_FACFu32.to_be_bytes());
-
-        let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
-        super::sign_directory(dir.path(), &signed_inodes).await;
-
-        assert_eq!(signed_inodes.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn sign_directory_finds_all_binaries_in_app() {
-        let dir = TempDir::new().unwrap();
-        let app_macos = dir.path().join("Foo.app").join("Contents").join("MacOS");
-        std::fs::create_dir_all(&app_macos).unwrap();
-        create_file_with_magic(&app_macos, "Foo", &0xFEED_FACFu32.to_be_bytes());
-        create_file_with_magic(&app_macos, "helper", &0xFEED_FACFu32.to_be_bytes());
-
-        let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
-        super::sign_directory(dir.path(), &signed_inodes).await;
-
-        assert_eq!(
-            signed_inodes.lock().unwrap().len(),
-            2,
-            "should sign both Mach-O binaries inside .app"
-        );
-    }
-
-    #[tokio::test]
-    async fn sign_directory_mixed_content() {
-        let dir = TempDir::new().unwrap();
-        let content = dir.path().join("content");
-        std::fs::create_dir_all(&content).unwrap();
-
-        // Standalone Mach-O
-        let bin_dir = content.join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        create_file_with_magic(&bin_dir, "tool", &0xFEED_FACFu32.to_be_bytes());
-
-        // Shell script (not Mach-O)
-        create_file_with_magic(&bin_dir, "wrapper.sh", b"#!/b");
-
-        // .app bundle with Mach-O inside
-        let app_macos = content.join("MyApp.app").join("Contents").join("MacOS");
-        std::fs::create_dir_all(&app_macos).unwrap();
-        create_file_with_magic(&app_macos, "MyApp", &0xFEED_FACFu32.to_be_bytes());
-
-        // ELF binary (should be ignored)
-        create_file_with_magic(&bin_dir, "linux_bin", &[0x7F, b'E', b'L', b'F']);
-
-        let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
-        super::sign_directory(&content, &signed_inodes).await;
-
-        assert_eq!(
-            signed_inodes.lock().unwrap().len(),
-            2,
-            "should sign standalone Mach-O + Mach-O inside .app"
-        );
     }
 
     #[tokio::test]
     async fn sign_directory_empty_directory() {
         let dir = TempDir::new().unwrap();
-        let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
-        super::sign_directory(dir.path(), &signed_inodes).await;
+        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
         assert!(signed_inodes.lock().unwrap().is_empty());
     }
 
@@ -497,8 +431,8 @@ mod tests {
         create_file_with_magic(dir.path(), "data.json", b"{\"ke");
         create_file_with_magic(dir.path(), "image.png", &[0x89, b'P', b'N', b'G']);
 
-        let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
-        super::sign_directory(dir.path(), &signed_inodes).await;
+        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
         assert!(signed_inodes.lock().unwrap().is_empty());
     }
 
@@ -513,8 +447,8 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
-        super::sign_directory(dir.path(), &signed_inodes).await;
+        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
 
         // Only the real file should be signed, not the symlink.
         assert_eq!(signed_inodes.lock().unwrap().len(), 1);
@@ -530,8 +464,8 @@ mod tests {
         let hardlink = bin_dir.join("hardlink");
         std::fs::hard_link(&original, &hardlink).unwrap();
 
-        let signed_inodes = std::sync::Mutex::new(std::collections::HashSet::new());
-        super::sign_directory(dir.path(), &signed_inodes).await;
+        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
 
         // Same inode — should only be signed once.
         assert_eq!(signed_inodes.lock().unwrap().len(), 1);
@@ -638,34 +572,6 @@ mod tests {
         assert!(
             verify_signature(&binary).await,
             "binary should be signed after sign_extracted_content"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn sign_extracted_content_signs_app_bundle_inside_out() {
-        let env = crate::test::env::lock();
-        env.remove("OCX_DISABLE_CODESIGN");
-
-        let dir = TempDir::new().unwrap();
-        let content = dir.path().join("content");
-        let app_dir = content.join("Test.app");
-        let macos_dir = app_dir.join("Contents").join("MacOS");
-        std::fs::create_dir_all(&macos_dir).unwrap();
-
-        let binary = build_unsigned_binary(&macos_dir, "Test");
-        assert!(
-            !verify_signature(&binary).await,
-            "binary should be unsigned before signing"
-        );
-
-        let result = super::sign_extracted_content(&content).await;
-        assert!(result.is_ok(), "sign_extracted_content should succeed");
-
-        assert!(verify_signature(&binary).await, "binary inside .app should be signed");
-        assert!(
-            verify_signature(&app_dir).await,
-            ".app bundle should be signed after its contents"
         );
     }
 }

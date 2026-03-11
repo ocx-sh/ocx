@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Accepted
+**Status:** Superseded
 **Date:** 2026-03-06
 **Deciders:** mherwig
 **Beads Issue:** N/A
@@ -11,7 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/tech-strategy.md`
 **Domain Tags:** security
 **Supersedes:** N/A
-**Superseded By:** N/A
+**Superseded By:** `adr_codesign_per_file_signing.md`
 
 ## Context
 
