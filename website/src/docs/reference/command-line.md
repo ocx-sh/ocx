@@ -40,6 +40,30 @@ If any command requires information that is not already available locally, it wi
 When set, ocx will use the remote index by default instead of the local index.
 Combining this flag with [`--offline`](#arg-offline) will most likely result in an error.
 
+### `--candidate` / `--current` {#path-resolution}
+
+The `--candidate` and `--current` flags are available on commands that resolve a package's content
+path, for example [`env`](#env), [`find`](#find), or [`shell env`](#shell-env).
+
+By default these commands use the content-addressed path in the
+[object store](../user-guide.md#file-structure-objects) — a hash-derived directory that changes
+whenever the package is reinstalled at a different version. Use `--candidate` or `--current` to
+resolve via a [stable install symlink](../user-guide.md#path-resolution) instead, whose path never changes regardless of the underlying
+object. This is useful for paths embedded in editor configs, Makefiles, or shell profiles that
+should survive package updates.
+
+| Mode | Flag | Path |
+|------|------|------|
+| Object store (default) | _(none)_ | `~/.ocx/objects/…/{digest}/content` |
+| Candidate symlink | `--candidate` | `~/.ocx/installs/…/candidates/{tag}/content` |
+| Current symlink | `--current` | `~/.ocx/installs/…/current/content` |
+
+**Constraints**
+
+- `--candidate`: the package must already be installed. Digest identifiers are rejected — use a tag identifier.
+- `--current`: a version must be selected first (via [`select`](#select) or [`install --select`](#install)). Digest identifiers are rejected. The tag portion of the identifier is ignored — only registry and repository are used to locate the symlink.
+- `--candidate` and `--current` are mutually exclusive.
+
 ## Commands
 
 ### `clean` {#clean}
@@ -87,7 +111,7 @@ Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
 JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
 
 In the default mode, packages are auto-installed if not already available locally.
-With `--candidate` or `--current`, no auto-install is performed — see [path resolution modes](../user-guide.md#path-resolution).
+See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
 
 **Usage**
 
@@ -102,8 +126,7 @@ ocx env [OPTIONS] <PACKAGE>...
 **Options**
 
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
-- `--candidate`: Resolve env paths via the candidate symlink. Mutually exclusive with `--current`.
-- `--current`: Resolve env paths via the current-selected symlink. Mutually exclusive with `--candidate`.
+- `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `-h`, `--help`: Print help information.
 
 ### `exec` {#exec}
@@ -134,7 +157,7 @@ ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
 
 Resolves one or more packages and prints their content directory paths.
 
-By default returns the content-addressed path in the [object store](../user-guide.md#file-structure-objects). Use `--candidate` or `--current` to return a stable install symlink path instead — useful for paths embedded in editor configs, Makefiles, or shell scripts that should not change on every package update.
+Resolves the content directory for each package. See [Path Resolution](#path-resolution) for the difference between the default object-store path and the stable symlink modes.
 
 No downloading is performed — the package must already be installed.
 
@@ -151,8 +174,7 @@ ocx find [OPTIONS] <PACKAGE>...
 **Options**
 
 - `-p`, `--platform`: Platforms to consider when resolving. Defaults to the current platform. Ignored when `--candidate` or `--current` is set.
-- `--candidate`: Return the [candidate symlink](../user-guide.md#path-resolution) path. Mutually exclusive with `--current`.
-- `--current`: Return the [current symlink](../user-guide.md#path-resolution) path. Mutually exclusive with `--candidate`.
+- `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `-h`, `--help`: Print help information.
 
 ::: tip
@@ -277,8 +299,8 @@ Intended to be evaluated by the shell:
 eval "$(ocx shell env mypackage)"
 ```
 
-In the default mode this command does not auto-install packages — if a package is not already available locally it will fail with an error.
-With `--candidate` or `--current`, no auto-install is performed either — see [path resolution modes](../user-guide.md#path-resolution).
+This command does not auto-install packages — if a package is not already available locally it will fail with an error.
+See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
 
 **Usage**
 
@@ -294,8 +316,7 @@ ocx shell env [OPTIONS] <PACKAGE>...
 
 - `-p`, `--platform`: Target platforms to consider. Auto-detected by default.
 - `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
-- `--candidate`: Resolve env paths via the candidate symlink. Mutually exclusive with `--current`.
-- `--current`: Resolve env paths via the current-selected symlink. Mutually exclusive with `--candidate`.
+- `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 
 #### `completion` {#shell-completion}
 
