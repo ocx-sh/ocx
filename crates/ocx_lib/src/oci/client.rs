@@ -124,7 +124,7 @@ impl Client {
         let ref_ = native::Reference::from(&target_identifier);
         let platform = Some(platform.clone().into());
 
-        log::info!("Merging platform entry into index for {}", ref_);
+        log::debug!("Merging platform entry into index for {}", ref_);
         let mut index = match self
             .transport
             .pull_manifest_raw(&ref_, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX])
@@ -180,7 +180,7 @@ impl Client {
         self.transport
             .push_manifest_raw(&ref_, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
             .await?;
-        log::info!("Successfully merged platform entry into index for {}", ref_);
+        log::debug!("Successfully merged platform entry into index for {}", ref_);
 
         Ok((index_digest, index))
     }
@@ -454,7 +454,7 @@ impl Client {
             .transport
             .push_manifest_raw(&canonical_image, manifest_data.clone(), MEDIA_TYPE_OCI_IMAGE_MANIFEST)
             .await?;
-        log::info!("Pushed manifest with digest '{}'", pushed_digest);
+        log::debug!("Pushed manifest with digest '{}'", pushed_digest);
 
         Ok((manifest, manifest_data, manifest_sha256))
     }

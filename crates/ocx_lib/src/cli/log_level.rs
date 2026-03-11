@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use clap::ValueEnum;
-
 /// Log level for controlling the verbosity of logging output.
-#[derive(Clone, Copy, Debug, ValueEnum)]
+///
+/// Implements `clap_builder::ValueEnum` for use as a CLI flag (`--log-level`).
+#[derive(Clone, Copy, Debug)]
 pub enum LogLevel {
     /// Log everything, including very detailed information typically only useful for debugging
     Trace,
@@ -18,6 +18,25 @@ pub enum LogLevel {
     Error,
     /// Disable all logging output
     Off,
+}
+
+impl clap_builder::ValueEnum for LogLevel {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::Trace, Self::Debug, Self::Info, Self::Warn, Self::Error, Self::Off]
+    }
+
+    fn to_possible_value(&self) -> Option<clap_builder::builder::PossibleValue> {
+        use clap_builder::builder::PossibleValue;
+
+        Some(match self {
+            Self::Trace => PossibleValue::new("trace"),
+            Self::Debug => PossibleValue::new("debug"),
+            Self::Info => PossibleValue::new("info"),
+            Self::Warn => PossibleValue::new("warn"),
+            Self::Error => PossibleValue::new("error"),
+            Self::Off => PossibleValue::new("off"),
+        })
+    }
 }
 
 impl From<LogLevel> for tracing_subscriber::filter::LevelFilter {

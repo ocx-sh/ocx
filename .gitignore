@@ -11,6 +11,7 @@ lcov.info
 test/.venv/
 test/.pytest_cache/
 .fonts/
+.ocx-mirror/
 
 # =============================================================================
 # Claude Code Local Files

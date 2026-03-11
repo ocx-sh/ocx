@@ -10,7 +10,7 @@ name = "ocx"
 path = "src/main.rs"
 
 [dependencies]
-ocx_lib = { workspace = true }
+ocx_lib = { workspace = true, features = ["progress"] }
 
 tokio = { workspace = true }
 
@@ -22,7 +22,6 @@ tar = "0.4.44"
 lzma-rust2 = "0.16.0"
 flate2 = "1.1.9"
 futures = "0.3.31"
-indicatif = { version = "0.18.3", features = ["tokio"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = [
     "env-filter",
@@ -31,7 +30,6 @@ tracing-subscriber = { version = "0.3.22", features = [
     "json",
     "registry",
 ] }
-tracing-indicatif = "0.3.14"
 tracing-log = "0.2.0"
 serde = "1.0.228"
 console = "0.16.2"

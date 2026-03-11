@@ -7,7 +7,7 @@ use ocx_lib::{
     package_manager,
 };
 
-use crate::{api, app::LogSettings};
+use crate::{api, app::log_settings};
 
 use super::ContextOptions;
 
@@ -25,24 +25,16 @@ pub struct Context {
 
 impl Context {
     pub async fn try_init(options: &ContextOptions) -> anyhow::Result<Context> {
-        LogSettings::default().with_console_level(options.log_level).init()?;
+        log_settings::init_with_indicatif(ocx_lib::cli::LogSettings::default().with_console_level(options.log_level))?;
 
         log::debug!("Creating context with options: {:?}", options);
 
         let api = api::Api::new(options.format);
 
-        let plain_http_registries: Vec<String> = env::string("OCX_INSECURE_REGISTRIES", String::new())
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
         let (remote_client, remote_index) = if options.offline {
             (None, None)
         } else {
-            let client = oci::ClientBuilder::new()
-                .plain_http_registries(plain_http_registries)
-                .build();
+            let client = oci::ClientBuilder::from_env();
             (
                 Some(client.clone()),
                 Some(index::RemoteIndex::new(index::RemoteConfig { client })),

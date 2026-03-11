@@ -379,6 +379,17 @@
         "file_patterns": ["vite.config.*"]
       },
       "priority": "medium"
+    },
+    {
+      "name": "create-mirror",
+      "path": ".claude/skills/operations/create-mirror/SKILL.md",
+      "description": "Interactive workflow to create a new ocx-mirror configuration by analyzing GitHub Release assets",
+      "triggers": {
+        "keywords": ["mirror", "new mirror", "create mirror", "mirror config", "mirror configuration"],
+        "intent_patterns": ["create.*mirror", "new.*mirror", "add.*mirror", "mirror.*github", "setup.*mirror"],
+        "file_patterns": ["mirrors/mirror-*.yml"]
+      },
+      "priority": "high"
     }
   ]
 }

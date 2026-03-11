@@ -74,6 +74,9 @@ impl From<CompressionLevel> for flate2::Compression {
 pub struct CompressionOptions {
     pub algorithm: Option<CompressionAlgorithm>,
     pub level: CompressionLevel,
+    /// Number of compression threads for LZMA.
+    /// `None` or `Some(1)` = single-threaded. `Some(n)` where n > 1 = multi-threaded via `XzWriterMt`.
+    pub threads: Option<u32>,
 }
 
 impl CompressionOptions {
@@ -81,11 +84,16 @@ impl CompressionOptions {
         Self {
             algorithm: Some(algorithm),
             level: Default::default(),
+            threads: None,
         }
     }
 
     pub fn from_level(level: CompressionLevel) -> Self {
-        Self { algorithm: None, level }
+        Self {
+            algorithm: None,
+            level,
+            threads: None,
+        }
     }
 
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
@@ -93,6 +101,7 @@ impl CompressionOptions {
         Ok(Self {
             algorithm: Some(algorithm),
             level: Default::default(),
+            threads: None,
         })
     }
 
@@ -103,6 +112,11 @@ impl CompressionOptions {
 
     pub fn with_level(mut self, level: CompressionLevel) -> Self {
         self.level = level;
+        self
+    }
+
+    pub fn with_threads(mut self, threads: u32) -> Self {
+        self.threads = Some(threads);
         self
     }
 }
@@ -131,15 +145,39 @@ mod xz {
             }
         }
     }
+
+    /// Wraps [`lzma_rust2::XzWriterMt`] and calls `finish()` on drop.
+    pub struct MtWriterWrapper<W: std::io::Write>(pub Option<lzma_rust2::XzWriterMt<W>>);
+
+    impl<W: std::io::Write> std::io::Write for MtWriterWrapper<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.as_mut().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.as_mut().unwrap().flush()
+        }
+    }
+
+    impl<W: std::io::Write> Drop for MtWriterWrapper<W> {
+        fn drop(&mut self) {
+            if let Some(w) = self.0.take() {
+                let _ = w.finish(); // best-effort; errors cannot be surfaced from Drop
+            }
+        }
+    }
 }
 
 /// Opens a writer for the given file and compression options.
 /// If the algorithm is not specified, it will be tried to infer it from the file extension of the output path.
 /// The file will be created if it does not exist, and truncated if it does exist.
+///
+/// When `threads` is `Some(n)` with n > 1 and the algorithm is LZMA, uses `XzWriterMt` for
+/// multi-threaded compression with a 4 MiB block size. Otherwise uses single-threaded compression.
 pub async fn write_file(
     file: impl AsRef<std::path::Path>,
     algorithm: Option<CompressionAlgorithm>,
     level: Option<CompressionLevel>,
+    threads: Option<u32>,
 ) -> Result<Box<dyn std::io::Write + Send>> {
     let algorithm = match algorithm {
         Some(algorithm) => algorithm,
@@ -153,6 +191,14 @@ pub async fn write_file(
         .open(file)
         .map_to_undefined_error()?;
     let writer: Box<dyn std::io::Write + Send> = match algorithm {
+        CompressionAlgorithm::Lzma if threads.is_some_and(|t| t > 1) => {
+            let num_workers = threads.unwrap();
+            let mut options: lzma_rust2::XzOptions = level.into();
+            // 4 MiB block size — matches pixz and xz --block-size defaults
+            options.set_block_size(Some(std::num::NonZeroU64::new(4 * 1024 * 1024).unwrap()));
+            let writer = lzma_rust2::XzWriterMt::new(output, options, num_workers).map_to_undefined_error()?;
+            Box::new(xz::MtWriterWrapper(Some(writer)))
+        }
         CompressionAlgorithm::Lzma => {
             let writer = lzma_rust2::XzWriter::new(output, level.into()).map_to_undefined_error()?;
             Box::new(xz::WriterWrapper(Some(writer)))

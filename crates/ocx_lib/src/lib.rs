@@ -15,6 +15,7 @@ pub(crate) use media_type::*;
 
 pub mod archive;
 pub mod auth;
+pub mod cli;
 pub mod codesign;
 pub mod compression;
 pub mod env;
@@ -25,6 +26,7 @@ pub mod log;
 pub mod oci;
 pub mod package;
 pub mod package_manager;
+pub mod publisher;
 pub mod reference_manager;
 pub mod shell;
 pub mod symlink;

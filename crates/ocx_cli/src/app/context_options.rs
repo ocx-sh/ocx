@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use clap::Parser;
-use ocx_lib::env;
+use ocx_lib::{cli, env};
 
 use crate::options;
 
@@ -34,5 +34,5 @@ pub struct ContextOptions {
 
     /// The log level to use
     #[arg(short, long, value_enum)]
-    pub log_level: Option<options::LogLevel>,
+    pub log_level: Option<cli::LogLevel>,
 }

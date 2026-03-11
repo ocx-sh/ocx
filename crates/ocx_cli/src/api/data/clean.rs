@@ -77,6 +77,6 @@ impl Reportable for Clean {
             rows[0].push(entry.kind.to_string());
             rows[1].push(entry.path.display().to_string());
         }
-        crate::stdout::print_table(&["Type", "Path"], &rows);
+        ocx_lib::cli::stdout::print_table(&["Type", "Path"], &rows);
     }
 }

@@ -80,6 +80,6 @@ impl Reportable for Removed {
                     .unwrap_or("-".into()),
             );
         }
-        crate::stdout::print_table(&["Package", "Status", "Path"], &rows);
+        ocx_lib::cli::stdout::print_table(&["Package", "Status", "Path"], &rows);
     }
 }

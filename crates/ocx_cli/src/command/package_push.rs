@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::BTreeSet;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{
-    log, oci,
-    package::{self, version::Version},
-    prelude::*,
-};
+use ocx_lib::{log, oci, package, prelude::*, publisher::Publisher};
 
 use crate::options;
 
@@ -48,21 +43,16 @@ impl PackagePush {
             metadata_path.display()
         );
         let metadata = package::metadata::Metadata::read_json_from_path(&metadata_path)?;
-        let package_info = package::info::Info {
+        let info = package::info::Info {
             identifier: identifier.clone(),
             metadata,
             platform: self.platform.clone(),
         };
 
-        if self.cascade {
-            let version = Version::parse(identifier.tag_or_latest()).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Tag is not a valid version, cannot cascade: {}",
-                    identifier.tag_or_latest()
-                )
-            })?;
+        let publisher = Publisher::new(context.remote_client()?.clone());
 
-            let other_tags = match context.remote_client()?.list_tags(identifier.clone()).await {
+        if self.cascade {
+            let existing_tags = match publisher.list_tags(identifier.clone()).await {
                 Ok(tags) => tags,
                 Err(err) => {
                     if self.new {
@@ -77,22 +67,10 @@ impl PackagePush {
                 }
             };
 
-            let other_versions: BTreeSet<Version> = other_tags.iter().filter_map(|t| Version::parse(t)).collect();
-
-            package::cascade::push_with_cascade(
-                context.remote_client()?,
-                package_info,
-                &self.content,
-                other_versions,
-                &version,
-            )
-            .await?;
+            let existing_versions = Publisher::parse_versions(&existing_tags);
+            publisher.push_cascade(info, &self.content, existing_versions).await?;
         } else {
-            log::info!("Pushing package with identifier {}", identifier);
-            context
-                .remote_client()?
-                .push_package(package_info, self.content.clone())
-                .await?;
+            publisher.push(info, &self.content).await?;
         }
 
         Ok(ExitCode::SUCCESS)

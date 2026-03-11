@@ -50,7 +50,7 @@ impl Reportable for Catalog {
                 for repo in repos {
                     rows[0].push(repo.clone());
                 }
-                crate::stdout::print_table(&["Repository"], &rows);
+                ocx_lib::cli::stdout::print_table(&["Repository"], &rows);
             }
             CatalogData::WithTags(tags) => {
                 for (repo, repo_tags) in tags {
@@ -59,7 +59,7 @@ impl Reportable for Catalog {
                         rows[1].push(tag.clone());
                     }
                 }
-                crate::stdout::print_table(&["Repository", "Tag"], &rows);
+                ocx_lib::cli::stdout::print_table(&["Repository", "Tag"], &rows);
             }
         }
     }

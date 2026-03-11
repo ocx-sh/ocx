@@ -13,7 +13,6 @@ mod app;
 mod command;
 mod conventions;
 mod options;
-mod stdout;
 
 #[tokio::main]
 async fn main() -> ExitCode {

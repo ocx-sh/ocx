@@ -59,7 +59,7 @@ impl Reportable for Tags {
                         rows[1].push(tag.clone());
                     }
                 }
-                crate::stdout::print_table(&["Package", "Tag"], &rows);
+                ocx_lib::cli::stdout::print_table(&["Package", "Tag"], &rows);
             }
             TagsData::WithPlatforms(tags) => {
                 for (package, platform_tags) in tags {
@@ -71,7 +71,7 @@ impl Reportable for Tags {
                         }
                     }
                 }
-                crate::stdout::print_table(&["Package", "Tag", "Platform"], &rows);
+                ocx_lib::cli::stdout::print_table(&["Package", "Tag", "Platform"], &rows);
             }
         }
     }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 
 use super::native;
@@ -10,6 +12,12 @@ use crate::{Error, Result};
 pub struct Platform {
     #[serde(flatten)]
     pub(crate) inner: Option<native::Platform>,
+}
+
+impl Hash for Platform {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.to_string().hash(state);
+    }
 }
 
 const ANY_STR: &str = "any";

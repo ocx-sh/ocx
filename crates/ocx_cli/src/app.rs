@@ -14,7 +14,6 @@ mod context_options;
 pub use context_options::ContextOptions;
 
 mod log_settings;
-pub use log_settings::LogSettings;
 
 mod update_check;
 

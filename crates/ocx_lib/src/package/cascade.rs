@@ -196,7 +196,7 @@ pub async fn push_with_cascade(
     )
     .await?;
 
-    log::info!("Pushing package with identifier {}", package_info.identifier);
+    log::debug!("Pushing package with identifier {}", package_info.identifier);
     let (_manifest, manifest_data, manifest_sha256) = client.push_image_manifest(&package_info, file.as_ref()).await?;
     let manifest_size = manifest_data.len() as i64;
 
@@ -212,7 +212,7 @@ pub async fn push_with_cascade(
         .await?;
 
     for tag in &cascade_tags {
-        log::info!("Cascading to {tag}");
+        log::debug!("Cascading to {tag}");
         client
             .merge_platform_into_index(
                 &package_info.identifier,

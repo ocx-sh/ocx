@@ -48,6 +48,6 @@ impl Reportable for Paths {
             rows[0].push(entry.package.clone());
             rows[1].push(entry.path.display().to_string());
         }
-        crate::stdout::print_table(&["Package", "Path"], &rows);
+        ocx_lib::cli::stdout::print_table(&["Package", "Path"], &rows);
     }
 }

@@ -1,0 +1,18 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "PATH",
+      "type": "path",
+      "required": true,
+      "value": "${installPath}/CMake.app/Contents/bin"
+    },
+    {
+      "key": "MANPATH",
+      "type": "path",
+      "required": false,
+      "value": "${installPath}/CMake.app/Contents/man"
+    }
+  ]
+}

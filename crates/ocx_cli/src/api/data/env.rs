@@ -50,6 +50,6 @@ impl Reportable for EnvVars {
             rows[1].push(entry.kind.to_string());
             rows[2].push(entry.value.clone());
         }
-        crate::stdout::print_table(&["Key", "Type", "Value"], &rows);
+        ocx_lib::cli::stdout::print_table(&["Key", "Type", "Value"], &rows);
     }
 }

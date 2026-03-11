@@ -5,15 +5,17 @@ version: '3'
 vars:
   BIN_DIR: "{{.ROOT_DIR}}/test/bin"
   OCX_BINARY: "{{.BIN_DIR}}/ocx{{exeExt}}"
+  OCX_MIRROR_BINARY: "{{.BIN_DIR}}/ocx-mirror{{exeExt}}"
   SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
 
 tasks:
   build:
     internal: true
     cmds:
-      - cargo build --release -p ocx --locked
+      - cargo build --release -p ocx_cli -p ocx_mirror --locked
       - mkdir -p {{.BIN_DIR}}
       - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
+      - cp {{.ROOT_DIR}}/target/release/ocx-mirror{{exeExt}} {{.OCX_MIRROR_BINARY}}
     status:
       - '{{eq .SKIP_BUILD "true"}}'
 
@@ -26,6 +28,7 @@ tasks:
       - uv run pytest {{.CLI_ARGS | default "-v"}}
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
+      OCX_MIRROR_COMMAND: "{{.OCX_MIRROR_BINARY}}"
 
   quick:
     desc: Run acceptance tests without rebuilding the binary

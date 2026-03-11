@@ -197,6 +197,15 @@ pub fn string(key: impl AsRef<str>, default: String) -> String {
     }
 }
 
+/// Parses `OCX_INSECURE_REGISTRIES` into a list of registry hostnames.
+pub fn insecure_registries() -> Vec<String> {
+    string("OCX_INSECURE_REGISTRIES", String::new())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

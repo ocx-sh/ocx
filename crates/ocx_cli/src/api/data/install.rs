@@ -46,6 +46,6 @@ impl Reportable for Installs {
             rows[1].push(entry.identifier.to_string());
             rows[2].push(entry.path.display().to_string());
         }
-        crate::stdout::print_table(&["Package", "Version", "Path"], &rows);
+        ocx_lib::cli::stdout::print_table(&["Package", "Version", "Path"], &rows);
     }
 }

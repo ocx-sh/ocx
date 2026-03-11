@@ -140,7 +140,7 @@ impl Archive {
             None => compression::CompressionAlgorithm::from_file(output)
                 .ok_or_else(|| crate::Error::UnsupportedArchive(output.display().to_string()))?,
         };
-        let writer = compression::write_file(output, Some(algorithm), Some(options.level)).await?;
+        let writer = compression::write_file(output, Some(algorithm), Some(options.level), options.threads).await?;
         Ok(Self {
             inner: Box::new(tar::TarBackend::new(writer)),
         })

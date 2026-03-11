@@ -8,6 +8,7 @@ exclude = ["src/test_data/**"]
 [features]
 default = []
 jsonschema = ["dep:schemars"]
+progress = ["dep:indicatif", "dep:tracing-indicatif"]
 
 [dependencies]
 schemars = { version = "1", optional = true }
@@ -38,9 +39,12 @@ clap_builder = "4.5.60"
 clap_complete = "4.5.66"
 tracing = "0.1.44"
 tracing-log = "0.2.0"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "std", "fmt", "registry"] }
 which = "8"
 # "deflate" unfortunately pulls in zopfli; zip crate doesn't expose flate2-only deflate
 zip = { version = "2", default-features = false, features = ["deflate"] }
+indicatif = { version = "0.18.3", features = ["tokio"], optional = true }
+tracing-indicatif = { version = "0.3.14", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2.0"

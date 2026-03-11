@@ -1,0 +1,55 @@
+name: cmake
+target:
+  registry: dev.ocx.sh
+  repository: cmake
+
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "cmake-.*-linux-x86_64\\.tar\\.gz"      # >= 3.20.0
+    - "cmake-.*-Linux-x86_64\\.tar\\.gz"      # < 3.20.0
+  linux/arm64:
+    - "cmake-.*-linux-aarch64\\.tar\\.gz"     # >= 3.20.0
+    - "cmake-.*-Linux-aarch64\\.tar\\.gz"     # 3.19.4 – 3.19.x
+  darwin/amd64:
+    - "cmake-.*-macos-universal\\.tar\\.gz"   # >= 3.19.2
+    - "cmake-.*-Darwin-x86_64\\.tar\\.gz"     # < 3.19.2
+  darwin/arm64:
+    - "cmake-.*-macos-universal\\.tar\\.gz"   # >= 3.19.2 (universal fat binary)
+  windows/amd64:
+    - "cmake-.*-windows-x86_64\\.zip"         # >= 3.20.0
+    - "cmake-.*-win64-x64\\.zip"              # < 3.20.0
+  windows/arm64:
+    - "cmake-.*-windows-arm64\\.zip"          # >= 3.25.0
+
+metadata:
+  default: metadata/cmake.json
+  platforms:
+    darwin/amd64: metadata/cmake-darwin.json
+    darwin/arm64: metadata/cmake-darwin.json
+    windows/amd64: metadata/cmake-windows.json
+    windows/arm64: metadata/cmake-windows.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "3.31.0"
+  new_per_run: 10
+
+verify:
+  github_asset_digest: true
+
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0

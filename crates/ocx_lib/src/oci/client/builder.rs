@@ -21,6 +21,15 @@ impl ClientBuilder {
         }
     }
 
+    /// Creates a client configured from standard environment variables.
+    ///
+    /// Reads `OCX_INSECURE_REGISTRIES` to configure plain-HTTP registries.
+    pub fn from_env() -> Client {
+        ClientBuilder::new()
+            .plain_http_registries(crate::env::insecure_registries())
+            .build()
+    }
+
     /// Registries that should be contacted over plain HTTP instead of HTTPS.
     pub fn plain_http_registries(mut self, registries: Vec<String>) -> Self {
         if !registries.is_empty() {
