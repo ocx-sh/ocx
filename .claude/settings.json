@@ -193,6 +193,7 @@
       "Bash(task:*)",
       "Bash(shellcheck:*)",
       "Bash(yamllint:*)",
+      "Bash(hawkeye:*)",
       "Bash(bash -n:*)",
       "Bash(test:*)",
       "Bash(echo:*)",

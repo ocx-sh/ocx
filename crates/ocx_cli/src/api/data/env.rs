@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
 use ocx_lib::package::metadata::env::var::ModifierKind;
 use serde::Serialize;
 

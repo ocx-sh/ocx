@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
 use crate::{ErrorExt, MEDIA_TYPE_TAR_GZ, MEDIA_TYPE_TAR_XZ, Result};
 
 /// Enumeration of supported compression algorithms.

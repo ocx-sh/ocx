@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
 use super::{accumulator::Accumulator, modifier::ModifierKind, var::Var};
 
 /// A resolved environment variable entry produced by [`Exporter`].

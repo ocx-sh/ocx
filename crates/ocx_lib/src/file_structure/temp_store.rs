@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
 use std::path::{Path, PathBuf};
 
 use crate::{Error, Result, file_lock, oci};

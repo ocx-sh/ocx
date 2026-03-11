@@ -57,6 +57,41 @@ tasks:
       - install:nextest
     cmd: cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
 
+  install:hawkeye:
+    internal: true
+    cmds:
+      - cargo install --locked hawkeye
+    status:
+      - hawkeye --version
+
+  install:cargo-deny:
+    internal: true
+    cmds:
+      - cargo install --locked cargo-deny
+    status:
+      - cargo deny --version
+
+  license:check:
+    desc: Check license headers on all source files
+    deps:
+      - install:hawkeye
+    cmds:
+      - hawkeye check
+
+  license:format:
+    desc: Add or fix license headers on all source files
+    deps:
+      - install:hawkeye
+    cmds:
+      - hawkeye format
+
+  license:deps:
+    desc: Audit dependency licenses with cargo-deny
+    deps:
+      - install:cargo-deny
+    cmds:
+      - cargo deny check licenses
+
   verify:
     desc: Run all checks (fmt, clippy, build, unit tests, acceptance tests)
     cmds:

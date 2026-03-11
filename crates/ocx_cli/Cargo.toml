@@ -1,6 +1,7 @@
 [package]
 name = "ocx_cli"
 edition = "2024"
+license.workspace = true
 
 [[bin]]
 name = "ocx"

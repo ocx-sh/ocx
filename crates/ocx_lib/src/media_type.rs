@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
 use crate::{Error, Result, oci};
 
 /// The media type for an OCI image index manifest.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
 /// Prints a table of strings to stdout, with columns aligned based on the longest cell in each column.
 pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut max_len = Vec::with_capacity(headers.len());
