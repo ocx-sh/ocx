@@ -368,14 +368,14 @@ The following examples show how to configure authentication for the registry `do
 
 ::: code-group
 ```sh [token]
-export OXC_AUTH_docker_io_TYPE=token
-export OXC_AUTH_docker_io_TOKEN="<token>"
+export OCX_AUTH_docker_io_TYPE=token
+export OCX_AUTH_docker_io_TOKEN="<token>"
 ```
 
 ```sh [bearer]
-export OXC_AUTH_docker_io_TYPE=bearer
-export OXC_AUTH_docker_io_USER="<user>"
-export OXC_AUTH_docker_io_TOKEN="<token>"
+export OCX_AUTH_docker_io_TYPE=bearer
+export OCX_AUTH_docker_io_USER="<user>"
+export OCX_AUTH_docker_io_TOKEN="<token>"
 ```
 :::
 
