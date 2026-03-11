@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
 //! Low-level symlink primitives (create, update, remove).
 //!
 //! These functions operate on a single symlink without any bookkeeping.

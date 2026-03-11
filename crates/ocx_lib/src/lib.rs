@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
 // TODO: Remove this when we have more code in the library
 #![allow(dead_code, deprecated)]
 

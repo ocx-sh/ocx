@@ -2,6 +2,9 @@
 resolver = "3"
 members = ["crates/ocx_cli","crates/ocx_lib"]
 
+[workspace.package]
+license = "Apache-2.0"
+
 [patch.crates-io]
 oci-client = { path = "external/rust-oci-client" }
 

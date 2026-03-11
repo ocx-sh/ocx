@@ -74,6 +74,10 @@ export default defineConfig({
 
     search: {
       provider: 'local'
+    },
+
+    footer: {
+      copyright: 'Copyright © 2026 The OCX Authors · <a href="https://github.com/ocx-sh/ocx/blob/main/LICENSE">Apache 2.0</a>'
     }
   },
 
