@@ -17,10 +17,10 @@ use crate::{Result, log};
 /// This is safe because:
 /// - OCX packages are run via `ocx exec`, not launched through Finder. The kernel only checks
 ///   each binary's own embedded signature at load time — not the bundle-level `CodeResources`.
-/// - Signing at the individual file level avoids all "bundle format is ambiguous" errors and
-///   Team ID conflicts that arise from re-sealing third-party bundles (e.g. Qt frameworks signed
-///   by The Qt Company with their own Team ID requirements).
-/// - This matches Homebrew's approach, which is the de-facto standard for macOS binary patching.
+/// - Signing at the individual file level avoids "bundle format is ambiguous" errors and Team ID
+///   conflicts from re-sealing third-party bundles (e.g. Qt frameworks signed by The Qt Company).
+/// - Only `entitlements` are preserved (`flags` and `requirements` are intentionally dropped —
+///   see `sign_binary` for the full rationale).
 ///
 /// Hardlinked files (same inode) are signed only once. Symlinks are not followed.
 ///
@@ -199,27 +199,28 @@ async fn remove_quarantine(content_path: &Path) {
 /// Preserved metadata from the original signature:
 /// - `entitlements`: app-declared capabilities (JIT, network extensions, sandbox) — must be
 ///   retained so the binary runs correctly under its intended privilege model.
-/// - `flags`: code signing flags (`CS_HARD`, `CS_KILL`, `CS_RESTRICT`, etc.) — preserve the
-///   binary's intended hardening posture.
-/// - `runtime`: hardened runtime flag — required for binaries that depend on restricted JIT or
-///   library validation.
 ///
 /// Intentionally NOT preserved:
+/// - `flags`: code signing flags such as `CS_RUNTIME` (hardened runtime). Preserving `CS_RUNTIME`
+///   from a Developer-ID-signed binary (e.g. Kitware's cmake-gui, Qt Company's Qt frameworks)
+///   enables Library Validation, which requires all loaded libraries to have the same Team ID as
+///   the process. After ad-hoc re-signing, every binary has Team ID = "" (none). Apple treats
+///   "" as "no Team ID" rather than a real Team ID, so Library Validation rejects ad-hoc libraries
+///   even when both the process and library have identical empty Team IDs — causing the
+///   "different Team IDs" dyld error at runtime. Dropping `flags` disables Library Validation,
+///   allowing ad-hoc libraries to load. Note: Homebrew's `--preserve-metadata=flags` works because
+///   Homebrew builds its own binaries from source; those binaries never have `CS_RUNTIME` to begin
+///   with. OCX re-signs third-party pre-built binaries which do.
 /// - `requirements`: the original Designated Requirement encodes the issuing certificate's Team ID.
-///   An ad-hoc signature cannot satisfy a third-party Team ID constraint, which would cause
-///   "different Team IDs" dyld errors when loading Qt frameworks and similar third-party bundles.
+///   An ad-hoc signature cannot satisfy a third-party Team ID constraint.
+/// - `runtime`: SDK version metadata only; no effect on execution behavior.
 ///
 /// If the first attempt fails (known Apple `codesign` bug with certain inodes), the file is
 /// copied to a temp path (new inode), signed there, and moved back.
 async fn sign_binary(path: &Path) {
     log::debug!("Signing Mach-O binary: {}", path.display());
 
-    let args = &[
-        "--sign",
-        "-",
-        "--force",
-        "--preserve-metadata=entitlements,flags,runtime",
-    ];
+    let args = &["--sign", "-", "--force", "--preserve-metadata=entitlements"];
 
     if try_codesign(args, path).await {
         return;

@@ -115,13 +115,34 @@ Check each binary first; only re-sign if not already ad-hoc signed.
 ### Signing command
 
 ```sh
-codesign --sign - --force --preserve-metadata=entitlements,flags,runtime <binary>
+codesign --sign - --force --preserve-metadata=entitlements <binary>
 ```
 
 - `--sign -`: ad-hoc signature (no Team ID)
 - `--force`: replace any existing signature (required for certificate-signed third-party binaries)
-- `--preserve-metadata=entitlements,flags,runtime`: preserve app-declared capabilities, code signing flags (`CS_HARD`, `CS_KILL`, etc.), and hardened runtime — all relevant to correct execution behavior
-- `requirements` is intentionally dropped: the original Designated Requirement encodes the issuing certificate's Team ID, which an ad-hoc signature cannot satisfy, causing dyld "different Team IDs" errors for third-party binaries (Qt, etc.)
+- `--preserve-metadata=entitlements`: preserve app-declared capabilities only (JIT, network extensions, sandbox entitlements)
+
+**Why `flags` and `runtime` are NOT preserved:**
+
+`flags` contains code signing flags including `CS_RUNTIME` (hardened runtime, `0x10000`). When a
+Developer-ID-signed binary (e.g. Kitware's cmake-gui, Qt Company's Qt frameworks) is re-signed
+with `--preserve-metadata=flags`, `CS_RUNTIME` is preserved. This enables Library Validation,
+which requires all loaded libraries to have the same Team ID as the process.
+
+After ad-hoc re-signing, every binary has Team ID = "" (none). Apple treats "" as "no Team ID"
+rather than a valid matchable Team ID — so Library Validation **rejects** ad-hoc libraries even
+when both the process and library have identical empty Team IDs. This produces the
+"different Team IDs" dyld error at runtime.
+
+**Key difference from Homebrew**: Homebrew uses `--preserve-metadata=entitlements,requirements,flags,runtime`
+and it works because Homebrew builds its own binaries from source — those binaries never have
+`CS_RUNTIME` set by a third-party developer. OCX re-signs third-party pre-built binaries (Kitware,
+Qt Company, etc.) which do have `CS_RUNTIME`. Dropping `flags` is required for OCX's use case.
+
+`runtime` is SDK version metadata only; no effect on execution behavior.
+
+`requirements` is intentionally dropped: the original Designated Requirement encodes the issuing
+certificate's Team ID, which an ad-hoc signature cannot satisfy.
 
 ### What changes
 
@@ -155,10 +176,10 @@ No ordering requirement. Parallelism within each directory.
 
 ## Validation
 
-- [ ] All workspace unit tests pass
-- [ ] On macOS ARM64: `ocx exec cmake -- cmake-gui` launches without dyld errors
-- [ ] On macOS ARM64: standalone tool (`ocx exec cmake -- cmake --version`) works
-- [ ] On macOS: `OCX_DISABLE_CODESIGN=1` still disables signing
+- [x] All workspace unit tests pass (17/17 codesign tests)
+- [x] On macOS ARM64: `ocx exec dev.ocx.sh/cmake -- cmake-gui --version` launches without dyld errors
+- [x] On macOS ARM64: standalone tool (`ocx exec dev.ocx.sh/cmake -- cmake --version`) works
+- [x] On macOS: `OCX_DISABLE_CODESIGN=1` still disables signing
 
 ---
 
