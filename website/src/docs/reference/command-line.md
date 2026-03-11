@@ -40,6 +40,25 @@ If any command requires information that is not already available locally, it wi
 When set, ocx will use the remote index by default instead of the local index.
 Combining this flag with [`--offline`](#arg-offline) will most likely result in an error.
 
+### `--index` {#arg-index}
+
+Override the path to the [local index][fs-index] directory for this invocation.
+By default, ocx reads the local index from `$OCX_HOME/index/` (typically `~/.ocx/index/`).
+
+```shell
+ocx --index /path/to/bundled/index install cmake:3.28
+```
+
+This flag is intended for environments where the [local index][fs-index] is bundled alongside a
+tool rather than living inside `OCX_HOME` — for example inside a [GitHub Action][github-actions-docs],
+[Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features] that ships a frozen
+index snapshot as part of its release.
+
+The flag has no effect when [`--remote`](#arg-remote) is set.
+
+The same override can be set persistently via the [`OCX_INDEX`][env-ocx-index] environment
+variable. The `--index` flag takes precedence when both are set.
+
 ### `--candidate` / `--current` {#path-resolution}
 
 The `--candidate` and `--current` flags are available on commands that resolve a package's content
@@ -413,3 +432,14 @@ ocx package push [OPTIONS] <IDENTIFIER> <CONTENT>
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the bundle.
 - `-h`, `--help`: Print help information.
+
+<!-- external -->
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[bazel-rules]: https://bazel.build/extending/rules
+[devcontainer-features]: https://containers.dev/implementors/features/
+
+<!-- environment -->
+[env-ocx-index]: ./environment.md#ocx-index
+
+<!-- internal -->
+[fs-index]: ../user-guide.md#file-structure-index

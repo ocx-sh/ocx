@@ -73,6 +73,22 @@ If not set, defaults to `~/.ocx`.
 export OCX_HOME="/opt/ocx"
 ```
 
+### `OCX_INDEX` {#ocx-index}
+
+Override the path to the [local index][fs-index] directory.
+By default, OCX reads the local index from `$OCX_HOME/index/` (typically `~/.ocx/index/`).
+
+```sh
+export OCX_INDEX="/path/to/bundled/index"
+```
+
+This variable is intended for environments where the index snapshot is bundled alongside a tool
+rather than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub Action][github-actions-docs],
+[Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features].
+
+The command line option [`--index`][arg-index] takes precedence over this variable.
+This variable has no effect when [`--remote`][arg-remote] or [`OCX_REMOTE`][env-ocx-remote] is set.
+
 ### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
 
 A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
@@ -129,6 +145,16 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- external -->
 [mach-o]: https://en.wikipedia.org/wiki/Mach-O
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[bazel-rules]: https://bazel.build/extending/rules
+[devcontainer-features]: https://containers.dev/implementors/features/
+
+<!-- commands -->
+[arg-index]: command-line.md#arg-index
+[arg-remote]: command-line.md#arg-remote
+
+<!-- environment -->
+[env-ocx-remote]: #ocx-remote
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects

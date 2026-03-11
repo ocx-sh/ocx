@@ -324,7 +324,7 @@ The most direct lock is a digest: `cmake@sha256:abc123…` bypasses the [index][
 
 For most use cases, the [local index snapshot][fs-index] already provides the lock. Tags resolve to the digest recorded at last update, and that mapping does not change until you run `ocx index update`. A CI runner that never updates its index gets the same binary on every run.
 
-For tool authors distributing ocx-powered workflows, there is a more ergonomic option. The [local index][fs-index] holds only metadata — small JSON files, no binaries — so it can be shipped inside a [GitHub Action][github-actions-docs], [Bazel rule][bazel-rules], or [devcontainer feature][devcontainer-features]. The result is a two-level lock: the *tool version* locks the *index snapshot*, which locks the *resolved binary*. Users pin the tool and get deterministic builds without managing digests, platform conditionals, or separate lockfiles.
+For tool authors distributing ocx-powered workflows, there is a more ergonomic option. The [local index][fs-index] holds only metadata — small JSON files, no binaries — so it can be shipped inside a [GitHub Action][github-actions-docs], [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features]. The result is a two-level lock: the *tool version* locks the *index snapshot*, which locks the *resolved binary*. Users pin the tool and get deterministic builds without managing digests, platform conditionals, or separate lockfiles.
 
 The contrast with maintaining a [hand-curated URL matrix][toolchains-llvm] — one `filename → checksum` entry per `version × os × arch` — is clear: a version bump means editing one rule version, not a dictionary.
 
@@ -338,7 +338,7 @@ The contrast with maintaining a [hand-curated URL matrix][toolchains-llvm] — o
 `@v2.1.0` locks everything end-to-end. `@v2` follows minor releases — as the maintainer ships updated index snapshots, `cmake:3.28` may resolve to a newer build when the action version changes. No SHA256 lists, no `if: runner.os == 'Linux'` conditionals.
 :::
 
-The same pattern applies to [Bazel rules][bazel-rules] and [devcontainer features][devcontainer-features-list] — index updates travel as part of the tool release, not as a separate step for end users.
+The same pattern applies to [Bazel Rules][bazel-rules] and [DevContainer Features][devcontainer-features-list] — index updates travel as part of the tool release, not as a separate step for end users.
 
 ## Indices {#indices}
 
@@ -358,7 +358,7 @@ The local index reads from [`~/.ocx/index/`][fs-index] — a <Tooltip term="snap
 
 **The local index is never updated automatically.** You decide when your snapshot changes. Until you explicitly refresh it, the same identifier always resolves to the same digest — on your laptop, on CI, and on every team member's machine. Rolling tags like `cmake:3` map to the digest current at last update, not whatever the registry serves today.
 
-The snapshot is small enough — JSON metadata only, no binaries — to ship *inside* a [Bazel rule][bazel-rules] or [GitHub Action][github-actions-docs]. Those tools bundle a frozen snapshot at release time; consumers write `cmake:3` and the bundled snapshot resolves it deterministically.
+The snapshot is small enough — JSON metadata only, no binaries — to ship *inside* a [Bazel Rule][bazel-rules] or [GitHub Action][github-actions-docs]. Those tools bundle a frozen snapshot at release time and set [`OCX_INDEX`][env-ocx-index] (or pass [`--index`][arg-index]) to point `ocx` at it; consumers write `cmake:3` and the bundled snapshot resolves it deterministically, with the [object store][fs-objects] and [install symlinks][fs-installs] remaining in `OCX_HOME` as usual.
 
 ::: tip Out-of-the-Box Support for Dependabot and Renovate
 A single version bump to the action or rule — proposed automatically by [Dependabot][dependabot] or [Renovate][renovate] — advances the bundled index. Users get the updated binary with no config changes. No [per-platform URL matrix][toolchains-llvm] to hand-edit, no separate PR to bump the tool itself.
@@ -370,7 +370,7 @@ A single version bump to the action or rule — proposed automatically by [Depen
 
 ### Active Index {#indices-selected}
 
-Every command that resolves a package identifier — [`ocx install`][cmd-install], [`ocx find`][cmd-find], [`ocx exec`][cmd-exec], [`ocx index list`][cmd-index-list] — uses one working index for that invocation. By default, this is the local index. Two global flags override this:
+Every command that resolves a package identifier — [`ocx install`][cmd-install], [`ocx find`][cmd-find], [`ocx exec`][cmd-exec], [`ocx index list`][cmd-index-list] — uses one working index for that invocation. By default, this is the local index. Two flags change which index is used:
 
 | Mode | Flag | Source | Network? |
 |---|---|---|---|
@@ -381,6 +381,8 @@ Every command that resolves a package identifier — [`ocx install`][cmd-install
 **`--remote`** bypasses the local snapshot for a single command and queries the registry directly. The persistent local index is not updated. Use it for a one-off check — seeing current available tags, or resolving the latest digest — without committing the result to the local snapshot.
 
 **`--offline`** prevents all network access for that command. If the local index does not have a requested package, the command fails immediately rather than attempting a registry query. Useful to verify that your current index and object store are self-sufficient before a build in a restricted or air-gapped environment.
+
+[`--index`][arg-index] / [`OCX_INDEX`][env-ocx-index] do not change the active index mode — the local snapshot remains active. They only change *where* that snapshot is read from. See [Local Index](#indices-local).
 
 The active index controls tag and manifest resolution only. The [object store][fs-objects] is independent — installed binaries are accessible in all three modes regardless of which index is active.
 
@@ -471,9 +473,11 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 [cmd-package-push]: ./reference/command-line.md#package-push
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-offline]: ./reference/command-line.md#arg-offline
+[arg-index]: ./reference/command-line.md#arg-index
 
 <!-- environment -->
 [env-ocx-home]: ./reference/environment.md#ocx-home
+[env-ocx-index]: ./reference/environment.md#ocx-index
 [env-auth-type]: ./reference/environment.md#ocx-auth-registry-type
 [env-auth-user]: ./reference/environment.md#ocx-auth-registry-user
 [env-auth-token]: ./reference/environment.md#ocx-auth-registry-token
@@ -481,6 +485,7 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 
 <!-- internal -->
 [fs-index]: #file-structure-index
+[fs-installs]: #file-structure-installs
 [fs-objects]: #file-structure-objects
 [versioning-tags]: #versioning-tags
 [auth-env-vars]: #authentication-environment-variables
