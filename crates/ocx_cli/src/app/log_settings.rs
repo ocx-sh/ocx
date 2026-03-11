@@ -23,7 +23,7 @@ impl LogSettings {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
         let indicatif_layer = tracing_indicatif::IndicatifLayer::new().with_progress_style(
-            indicatif::ProgressStyle::with_template("{span_child_prefix}{spinner} {span_name} {span_fields}")
+            indicatif::ProgressStyle::with_template("{span_child_prefix}{spinner} {span_name}")
                 .expect("valid indicatif template"),
         );
         let writer = indicatif_layer.get_stderr_writer();

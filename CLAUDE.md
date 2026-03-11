@@ -59,6 +59,8 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 - `command/` — One file per CLI subcommand. Commands call `context.manager()` methods and build report data from task return values (never from raw CLI args alone).
 - `api/` — Output formatting (JSON vs plain text) via `context.api().report_*()`. Each `api/data/` type implements `Reportable` with a single `print_table` call. See @.claude/rules/cli-api-patterns.md for the full contract.
 
+**CLI command reference**: For any task involving CLI commands, user workflows, flags, or command behavior, see @.claude/rules/cli-commands.md.
+
 **Patterns**:
 - Commands use `context.manager().find_or_install_all(...)` with auto-install on `PackageNotFound` (unless offline).
 - Environment resolution: `env::Env::clean()` + `metadata_env.resolve_into_env(content_path, &mut env)`.
