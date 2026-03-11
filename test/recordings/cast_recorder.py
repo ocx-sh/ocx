@@ -24,6 +24,36 @@ _DIGEST_REF_RE = re.compile(r"@sha256:([a-f0-9]{8})[a-f0-9]{56}")
 _SPINNER_CHARS = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 
 
+def _extract_spinner_line(data: str) -> str:
+    """Extract a clean ``{spinner} Label`` string from progress output.
+
+    Multi-bar progress ticks contain cursor movements, line clears, and
+    multiple spinner lines separated by ``\\r\\n``.  Returns just the last
+    visible spinner line (ANSI stripped) for use as a single-line synthetic
+    frame template.
+    """
+    clean = _ANSI_RE.sub("", data)
+    for line in reversed(re.split(r"[\r\n]+", clean)):
+        line = line.strip()
+        if line and _BRAILLE_RE.search(line):
+            return line
+    return clean.strip()
+
+
+def _simplify_clear_event(data: str) -> str:
+    """Reduce a progress-clearing event to ``\\r`` + erase-line + content.
+
+    Multi-bar clear events contain cursor-up/down sequences to erase each
+    bar.  Since stretched progress uses a single line, we only need one
+    erase before the actual output content.
+    """
+    last_clear = data.rfind("\x1b[2K")
+    if last_clear >= 0:
+        content = data[last_clear + 4:]
+        return "\r\x1b[2K" + content
+    return data
+
+
 @dataclass
 class CastEvent:
     timestamp: float
@@ -157,10 +187,18 @@ class CastRecording:
         """Stretch spinner events so progress bars are visible during playback.
 
         Scans for events containing braille spinner characters (U+2800-U+28FF).
-        When the gap from the first spinner event to its clearing event
-        (containing ``\\r\\x1b[2K``) is shorter than *min_duration*, all
-        subsequent events are shifted forward and synthetic rotating spinner
-        frames are injected to fill the gap.
+        When the gap from the first spinner event to its final clearing event
+        is shorter than *min_duration*, synthetic single-line spinner frames are
+        injected to fill the gap.
+
+        The final clearing event is identified as one containing ``[2K`` but
+        **no** braille character — meaning the progress bars are being removed
+        rather than redrawn.  This correctly handles indicatif ``MultiProgress``
+        output where each tick contains ``[2K`` as part of its multi-bar redraw
+        cycle.
+
+        Synthetic frames use a clean single-line template (``\\r{spinner} Label``)
+        regardless of how many bars the original progress had.
         """
         events = list(self.events)
         result: list[CastEvent] = []
@@ -173,17 +211,18 @@ class CastRecording:
             # Detect a spinner event
             if event.event_type == "o" and _BRAILLE_RE.search(event.data):
                 spinner_start = event.timestamp
-                spinner_template = event.data
+                spinner_line = _extract_spinner_line(event.data)
 
-                # Scan forward for the clearing event.
+                # Scan forward for the final clearing event: contains [2K
+                # but no braille (progress removed, not just redrawn).
                 clear_idx = None
                 for j in range(i + 1, len(events)):
                     d = events[j].data
-                    if "[2K" in d:
+                    if "[2K" in d and not _BRAILLE_RE.search(d):
                         clear_idx = j
                         break
                     if _BRAILLE_RE.search(d):
-                        spinner_template = d
+                        spinner_line = _extract_spinner_line(d)
 
                 if clear_idx is None:
                     result.append(CastEvent(
@@ -197,29 +236,31 @@ class CastRecording:
                 if span_duration < min_duration:
                     needed = min_duration - span_duration
 
+                    # Emit a clean single-line first frame
                     result.append(CastEvent(
-                        spinner_start + time_shift, "o", event.data.rstrip(),
+                        spinner_start + time_shift, "o", spinner_line,
                     ))
 
                     # Inject synthetic rotating spinner frames
                     t = spinner_start + time_shift
                     char_idx = 0
-                    template_stripped = spinner_template.rstrip()
                     while t + frame_interval < spinner_start + time_shift + needed:
                         t += frame_interval
                         char = _SPINNER_CHARS[char_idx % len(_SPINNER_CHARS)]
-                        synthetic = _BRAILLE_RE.sub(char, template_stripped, count=1)
+                        synthetic = _BRAILLE_RE.sub(char, spinner_line, count=1)
                         result.append(CastEvent(round(t, 3), "o", "\r" + synthetic))
                         char_idx += 1
 
                     time_shift += needed
 
-                    for k in range(i + 1, clear_idx):
-                        ie = events[k]
-                        result.append(CastEvent(
-                            ie.timestamp + time_shift, ie.event_type, ie.data,
-                        ))
-                    i = clear_idx
+                    # Emit simplified clear event (strip multi-bar cursor
+                    # movements, keep single erase-line + output content)
+                    clear_data = _simplify_clear_event(events[clear_idx].data)
+                    result.append(CastEvent(
+                        events[clear_idx].timestamp + time_shift, "o", clear_data,
+                    ))
+                    # Skip all intermediate spinner events and the clear event
+                    i = clear_idx + 1
                     continue
 
             result.append(CastEvent(

@@ -53,8 +53,29 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
     }
 
 
+def plantuml(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+    """Java runtime + PlantUML — realistic multi-package composition demo."""
+    java_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+        {"key": "JAVA_HOME", "type": "constant", "value": "${installPath}"},
+    ]
+    plantuml_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+        {"key": "PLANTUML_JAR", "type": "constant", "value": "${installPath}/lib/plantuml.jar"},
+    ]
+    return {
+        "java": [
+            make_package(ocx, "java", "21.0.0", tmp_path, size_mb=SIZE_MB, bins=["java", "javac"], env=java_env),
+        ],
+        "plantuml": [
+            make_package(ocx, "plantuml", "1.0.0", tmp_path, size_mb=SIZE_MB, bins=["plantuml"], env=plantuml_env),
+        ],
+    }
+
+
 SETUPS: dict[str, Callable] = {
     "basic": basic,
     "multi-version": multi_version,
     "full-catalog": full_catalog,
+    "plantuml": plantuml,
 }
