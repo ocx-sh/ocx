@@ -386,9 +386,9 @@ mod tests {
 
         assert_eq!(d.levels.len(), 3);
         assert_eq!(d.levels[0].target, Version::new_patch(3, 28, 1));
-        assert!(d.levels[0].blockers.is_empty()); // 3.28.2+b1 is NOT between self and 3.28.1
+        assert!(d.levels[0].blockers.is_empty()); // 3.28.2_b1 is NOT between self and 3.28.1
         assert_eq!(d.levels[1].target, Version::new_minor(3, 28));
-        assert_eq!(d.levels[1].blockers, vec![blocker]); // 3.28.2+b1 IS between 3.28.1 and 3.28
+        assert_eq!(d.levels[1].blockers, vec![blocker]); // 3.28.2_b1 IS between 3.28.1 and 3.28
         assert!(d.levels[2].blockers.is_empty());
         assert!(d.latest_eligible);
         assert!(d.latest_blockers.is_empty());
@@ -511,8 +511,8 @@ mod tests {
 
     #[test]
     fn old_version_blocked_by_newer_at_minor() {
-        // 3.27.0+b1 should cascade to 3.27.0 and 3.27, but be blocked at 3
-        // because 3.28.0+b1 is between 3.27 and 3.
+        // 3.27.0_b1 should cascade to 3.27.0 and 3.27, but be blocked at 3
+        // because 3.28.0_b1 is between 3.27 and 3.
         let v = Version::new_build(3, 27, 0, "b1");
         let others: BTreeSet<_> = [Version::new_build(3, 28, 0, "b1")].into();
         let (versions, is_latest) = cascade(&v, others);
@@ -702,7 +702,7 @@ mod tests {
         #[tokio::test]
         async fn blocker_at_minor_lacks_platform_cascade_continues() {
             let data = StubTransportData::new();
-            // 3.28.1+b1 exists but only for arm64 — should not block amd64 cascade.
+            // 3.28.1_b1 exists but only for arm64 — should not block amd64 cascade.
             let blocker = Version::new_build(3, 28, 1, "b1");
             seed_index(&data, &blocker.to_string(), &["linux/arm64"]);
             let client = test_client(&data);
@@ -755,7 +755,7 @@ mod tests {
         #[tokio::test]
         async fn error_on_blocker_stops_cascade_with_warning() {
             let data = StubTransportData::new();
-            // Blocker 3.28.1+b1 has no manifest seeded — fetch will error.
+            // Blocker 3.28.1_b1 has no manifest seeded — fetch will error.
             let blocker = Version::new_build(3, 28, 1, "b1");
             let client = test_client(&data);
             let v = Version::new_build(3, 28, 0, "b1");
@@ -772,7 +772,7 @@ mod tests {
         #[tokio::test]
         async fn error_on_latest_blocker_skips_latest() {
             let data = StubTransportData::new();
-            // All levels clear, but latest blocker 4.0.0+b1 has no manifest.
+            // All levels clear, but latest blocker 4.0.0_b1 has no manifest.
             let higher = Version::new_build(4, 0, 0, "b1");
             let client = test_client(&data);
             let v = Version::new_build(3, 28, 0, "b1");

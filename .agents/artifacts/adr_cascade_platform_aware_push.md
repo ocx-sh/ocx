@@ -18,7 +18,7 @@
 ## Context
 
 `ocx package push --cascade` automates the OCI "rolling tag" pattern: pushing
-`cmake:3.28.1+build.20260311` for `linux/amd64` should also update `cmake:3.28.1`,
+`cmake:3.28.1_build.20260311` for `linux/amd64` should also update `cmake:3.28.1`,
 `cmake:3.28`, `cmake:3`, and `cmake:latest` if no newer version exists at each level.
 
 Two independent bugs exist in the current implementation. Both stem from the same
@@ -45,9 +45,9 @@ The code collects **all** tags for the repository and feeds them to
 `darwin/arm64`, `3.28.2` is irrelevant — it does not block the cascade for
 `darwin/arm64`.
 
-Current behaviour: the cascade algorithm sees `3.28.2 > 3.28.1+build.1` and
+Current behaviour: the cascade algorithm sees `3.28.2 > 3.28.1_build.1` and
 stops propagating at the patch level, so `cmake:3.28` is **not updated** for
-`darwin/arm64`, even though `3.28.1+build.1` is the newest version available on
+`darwin/arm64`, even though `3.28.1_build.1` is the newest version available on
 that platform.
 
 The bug is actually documented at the library level

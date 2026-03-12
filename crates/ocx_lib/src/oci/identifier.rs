@@ -60,11 +60,12 @@ impl Identifier {
     ///
     /// The digest is dropped because changing the tag semantically creates a
     /// different reference — the old digest no longer applies.
+    /// Any `+` in the tag is normalized to `_` (OCI tags do not allow `+`).
     pub fn clone_with_tag(&self, tag: impl Into<String>) -> Self {
         Self {
             registry: self.registry.clone(),
             repository: self.repository.clone(),
-            tag: Some(tag.into()),
+            tag: Some(normalize_tag(tag.into())),
             digest: None,
         }
     }
@@ -188,7 +189,7 @@ impl TryFrom<native::Reference> for Identifier {
         }
 
         let repository = reference.repository().to_string();
-        let tag = reference.tag().map(|t| t.to_string());
+        let tag = reference.tag().map(|t| normalize_tag(t.to_string()));
         let digest = match reference.digest() {
             Some(d) => {
                 let d_str = d.to_string();
@@ -324,10 +325,18 @@ fn split_tag(name: &str) -> (&str, Option<String>) {
                 None => colon_in_segment,
             };
             let tag = &name[colon_pos + 1..];
-            (&name[..colon_pos], Some(tag.to_string()))
+            (&name[..colon_pos], Some(normalize_tag(tag.to_string())))
         }
         None => (name, None),
     }
+}
+
+/// Normalizes `+` to `_` in a tag string.
+///
+/// OCI tags do not allow `+` (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`).
+/// This is the earliest boundary where user input enters the system.
+fn normalize_tag(tag: String) -> String {
+    tag.replace('+', "_")
 }
 
 /// Splits `full_name` into `(registry, repository)`.
@@ -603,5 +612,42 @@ mod tests {
         assert_eq!(id.repository(), "cmake");
         assert_eq!(id.tag(), None);
         assert_eq!(id.digest(), None);
+    }
+
+    // ── Tag normalization (+  → _) ──────────────────────────────────────
+
+    #[test]
+    fn parse_normalizes_plus_to_underscore_in_tag() {
+        let id: Identifier = "cmake:3.28.1+20260216".parse().unwrap();
+        assert_eq!(id.tag(), Some("3.28.1_20260216"));
+    }
+
+    #[test]
+    fn parse_preserves_underscore_in_tag() {
+        let id: Identifier = "cmake:3.28.1_20260216".parse().unwrap();
+        assert_eq!(id.tag(), Some("3.28.1_20260216"));
+    }
+
+    #[test]
+    fn parse_normalizes_plus_with_registry_port() {
+        let id: Identifier = "test:5000/repo:1.0+build".parse().unwrap();
+        assert_eq!(id.registry(), "test:5000");
+        assert_eq!(id.tag(), Some("1.0_build"));
+    }
+
+    #[test]
+    fn parse_plus_display_roundtrip() {
+        let id1: Identifier = "test.com/repo:3.28.1+b1".parse().unwrap();
+        let displayed = id1.to_string();
+        let id2: Identifier = displayed.parse().unwrap();
+        assert_eq!(id1, id2);
+        assert_eq!(id2.tag(), Some("3.28.1_b1"));
+    }
+
+    #[test]
+    fn clone_with_tag_normalizes_plus() {
+        let base: Identifier = "test.com/repo".parse().unwrap();
+        let tagged = base.clone_with_tag("3.28.1+b1");
+        assert_eq!(tagged.tag(), Some("3.28.1_b1"));
     }
 }
