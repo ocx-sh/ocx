@@ -242,6 +242,11 @@
       "WebFetch(domain:docs.jfrog-applications.jfrog.io)",
       "WebFetch(domain:vitepress.dev)",
       "WebFetch(domain:ocx.sh)",
+      "WebFetch(domain:oras.land)",
+      "WebFetch(domain:opencontainers.org)",
+      "WebFetch(domain:specs.opencontainers.org)",
+      "WebFetch(domain:docker.com)",
+      "WebFetch(domain:docs.docker.com)",
 
       "// === WebFetch: Anthropic/Claude ===",
       "WebFetch(domain:anthropic.com)",
