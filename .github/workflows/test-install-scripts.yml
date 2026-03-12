@@ -1,0 +1,94 @@
+name: Test Install Scripts
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to test (e.g., v0.1.0). Defaults to latest."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  test-install-sh-ubuntu:
+    name: install.sh (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run install.sh
+        run: |
+          version_arg=""
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            version_arg="--version $(echo '${{ inputs.release_tag }}' | sed 's/^v//')"
+          fi
+          OCX_NO_MODIFY_PATH=1 bash website/src/public/install.sh $version_arg
+      - name: Verify installation
+        run: |
+          export PATH="$HOME/.ocx/installs/ocx.sh/ocx/current/bin:$PATH"
+          ocx version
+          test -f "$HOME/.ocx/env"
+
+  test-install-sh-alpine:
+    name: install.sh (Alpine)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run in Alpine container
+        run: |
+          version_arg=""
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            version_arg="--version $(echo '${{ inputs.release_tag }}' | sed 's/^v//')"
+          fi
+          docker run --rm \
+            -v "$PWD/website/src/public/install.sh:/install.sh" \
+            -e OCX_NO_MODIFY_PATH=1 \
+            alpine:latest sh -c "
+              apk add --no-cache curl tar xz &&
+              sh /install.sh $version_arg &&
+              export PATH=\"\$HOME/.ocx/installs/ocx.sh/ocx/current/bin:\$PATH\" &&
+              ocx version &&
+              test -f \"\$HOME/.ocx/env\"
+            "
+
+  test-install-sh-macos:
+    name: install.sh (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run install.sh
+        run: |
+          version_arg=""
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            version_arg="--version $(echo '${{ inputs.release_tag }}' | sed 's/^v//')"
+          fi
+          OCX_NO_MODIFY_PATH=1 bash website/src/public/install.sh $version_arg
+      - name: Verify installation
+        run: |
+          export PATH="$HOME/.ocx/installs/ocx.sh/ocx/current/bin:$PATH"
+          ocx version
+          test -f "$HOME/.ocx/env"
+
+  test-install-ps1-windows:
+    name: install.ps1 (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run install.ps1
+        shell: pwsh
+        run: |
+          $env:OCX_NO_MODIFY_PATH = '1'
+          if ('${{ inputs.release_tag }}') {
+            $Version = '${{ inputs.release_tag }}' -replace '^v', ''
+          }
+          & ./website/src/public/install.ps1
+      - name: Verify installation
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:USERPROFILE\.ocx\installs\ocx.sh\ocx\current\bin;$env:PATH"
+          ocx version
+          Test-Path "$env:USERPROFILE\.ocx\env.ps1"
