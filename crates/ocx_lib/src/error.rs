@@ -31,6 +31,8 @@ pub enum Error {
     PackageManager(crate::package_manager::error::Error),
     /// An OCI client operation failed.
     OciClient(crate::oci::client::error::ClientError),
+    /// An OCI identifier could not be parsed.
+    Identifier(crate::oci::identifier::error::IdentifierError),
 
     Undefined,
     UndefinedWithMessage(String),
@@ -111,6 +113,7 @@ impl std::fmt::Display for Error {
             ),
             Error::PackageManager(error) => write!(f, "{error}"),
             Error::OciClient(error) => write!(f, "{error}"),
+            Error::Identifier(error) => write!(f, "{error}"),
             Error::Undefined => write!(f, "An undefined error occurred"),
             Error::UndefinedWithMessage(message) => write!(f, "An undefined error occurred: {}", message),
         }
@@ -121,9 +124,9 @@ impl std::error::Error for Error {
     /* */
 }
 
-impl From<oci::ParseError> for Error {
-    fn from(_value: oci::ParseError) -> Self {
-        Error::Undefined
+impl From<crate::oci::identifier::error::IdentifierError> for Error {
+    fn from(error: crate::oci::identifier::error::IdentifierError) -> Self {
+        Error::Identifier(error)
     }
 }
 

@@ -10,7 +10,10 @@ pub struct Identifier {
 
 impl Identifier {
     pub fn with_domain(&self, domain: impl AsRef<str>) -> Result<oci::Identifier> {
-        oci::Identifier::from_str_with_registry(&self.raw, domain.as_ref())
+        Ok(oci::Identifier::parse_with_default_registry(
+            &self.raw,
+            domain.as_ref(),
+        )?)
     }
 
     pub fn transform_all(

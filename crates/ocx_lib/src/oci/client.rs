@@ -10,7 +10,7 @@ use crate::{
     utility,
 };
 
-use super::{Digest, Identifier};
+use super::{Digest, Identifier, native};
 
 mod builder;
 pub mod error;
@@ -70,7 +70,7 @@ impl Client {
     /// Lists the tags for the given image reference.
     /// There is no validation that the tags correspond to valid package versions.
     pub async fn list_tags(&self, identifier: Identifier) -> Result<Vec<String>> {
-        let image = identifier.reference.clone();
+        let image = native::Reference::from(&identifier);
         let chunk_size = self.tag_chunk_size;
         let tags = paginate(chunk_size, |cs, last| self.transport.list_tags(&image, cs, last)).await?;
         log::trace!("Listed tags for {}: {:?}", identifier, tags);
@@ -88,14 +88,16 @@ impl Client {
 
     /// Fetches the digest of a manifest from the remote, trying to avoid pulling the entire manifest if possible.
     pub async fn fetch_manifest_digest(&self, identifier: &Identifier) -> Result<oci::Digest> {
-        let digest = self.transport.fetch_manifest_digest(&identifier.reference).await?;
+        let ref_ = native::Reference::from(identifier);
+        let digest = self.transport.fetch_manifest_digest(&ref_).await?;
         log::trace!("Fetched manifest digest for {}: {}", identifier, digest);
         digest.try_into()
     }
 
     /// Fetches the manifest for the given image reference, returning both the manifest and its digest.
     pub async fn fetch_manifest(&self, identifier: &Identifier) -> Result<(Digest, oci::Manifest)> {
-        let (manifest, digest_str) = self.pull_manifest(&identifier.reference).await?;
+        let ref_ = native::Reference::from(identifier);
+        let (manifest, digest_str) = self.pull_manifest(&ref_).await?;
         let digest = digest_str.try_into()?;
         Ok((digest, manifest))
     }
@@ -114,9 +116,8 @@ impl Client {
         target: impl Into<String>,
     ) -> Result<()> {
         let target_identifier = source_identifier.clone_with_tag(target);
-        self.transport
-            .push_manifest(&target_identifier.reference, manifest)
-            .await?;
+        let ref_ = native::Reference::from(&target_identifier);
+        self.transport.push_manifest(&ref_, manifest).await?;
         Ok(())
     }
 
@@ -133,8 +134,8 @@ impl Client {
         log::debug!("Pulling package {} to {}", identifier, output_path.display());
 
         let identifier_digest = identifier
-            .reference
             .digest()
+            .map(|d| d.to_string())
             .ok_or_else(|| ClientError::InvalidManifest("identifier must carry a digest".into()))?;
 
         // Check if already installed at the final output path.
@@ -161,7 +162,9 @@ impl Client {
         }
 
         let mut temp_guard = utility::drop_file::DropFile::new(temp_path.to_path_buf());
-        let download = self.download_to_temp(&identifier, identifier_digest, temp_path).await?;
+        let download = self
+            .download_to_temp(&identifier, &identifier_digest, temp_path)
+            .await?;
         self.extract_and_finalize(&identifier, download, temp_path, &output_path)
             .await?;
 
@@ -184,9 +187,9 @@ impl Client {
         expected_digest: &str,
         temp_path: &std::path::Path,
     ) -> std::result::Result<TempDownload, ClientError> {
-        let image = &identifier.reference;
+        let image = native::Reference::from(identifier);
 
-        let (manifest, digest_str) = self.pull_manifest(image).await?;
+        let (manifest, digest_str) = self.pull_manifest(&image).await?;
         if digest_str != expected_digest {
             return Err(ClientError::DigestMismatch {
                 expected: expected_digest.to_string(),
@@ -227,10 +230,10 @@ impl Client {
             temp_path.display()
         );
         self.transport
-            .pull_blob_to_file(image, &manifest.config.digest, &metadata_path)
+            .pull_blob_to_file(&image, &manifest.config.digest, &metadata_path)
             .await?;
         self.transport
-            .pull_blob_to_file(image, &blob_layer.digest, &blob_path)
+            .pull_blob_to_file(&image, &blob_layer.digest, &blob_path)
             .await?;
 
         let metadata = metadata::Metadata::read_json_from_path(&metadata_path)
@@ -336,7 +339,7 @@ impl Client {
         package_info: &Info,
         path: &std::path::Path,
     ) -> std::result::Result<(oci::ImageManifest, Vec<u8>, String), ClientError> {
-        let image = &package_info.identifier.reference;
+        let image = native::Reference::from(&package_info.identifier);
 
         let package_media_type = media_type_from_path(path)
             .map(|mt| mt.to_string())
@@ -350,14 +353,14 @@ impl Client {
         let package_digest = Digest::sha256(&package_data).to_string();
 
         log::trace!("Calculated package digest: {}", package_digest);
-        self.transport.push_blob(image, package_data, &package_digest).await?;
+        self.transport.push_blob(&image, package_data, &package_digest).await?;
 
         let config_data =
             serde_json::to_vec(&package_info.metadata).map_err(|e| ClientError::Serialization(e.to_string()))?;
         let config_data_len = config_data.len();
         let config_sha256 = Digest::sha256(&config_data).to_string();
         log::trace!("Calculated config digest: {}", config_sha256);
-        self.transport.push_blob(image, config_data, &config_sha256).await?;
+        self.transport.push_blob(&image, config_data, &config_sha256).await?;
 
         let manifest = oci::ImageManifest {
             media_type: Some(MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string()),
@@ -400,13 +403,13 @@ impl Client {
         manifest_data: &[u8],
         manifest_sha256: &str,
     ) -> std::result::Result<(Digest, oci::ImageIndex), ClientError> {
-        let image = &package_info.identifier.reference;
+        let image = native::Reference::from(&package_info.identifier);
         let platform = Some(package_info.platform.clone().into());
 
         log::info!("Updating image index for {}", image);
         let mut index = match self
             .transport
-            .pull_manifest_raw(image, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX])
+            .pull_manifest_raw(&image, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX])
             .await
         {
             Ok((blob, _)) => {
@@ -456,7 +459,7 @@ impl Client {
         let index_data = serde_json::to_vec(&index).map_err(|e| ClientError::Serialization(e.to_string()))?;
         let index_digest = Digest::sha256(&index_data);
         self.transport
-            .push_manifest_raw(image, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
+            .push_manifest_raw(&image, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
             .await?;
         log::info!("Successfully updated index for {}", image);
 
@@ -664,7 +667,7 @@ mod tests {
         let data = StubTransportData::new();
         data.write()
             .manifests
-            .insert(id.reference.to_string(), (manifest_data, digest_str.clone()));
+            .insert(id.to_string(), (manifest_data, digest_str.clone()));
         let client = stub(&data);
 
         let (digest, fetched) = client.fetch_manifest(&id).await.unwrap();
@@ -685,7 +688,7 @@ mod tests {
         let data = StubTransportData::new();
         data.write()
             .manifests
-            .insert(id.reference.to_string(), (manifest_data, wrong_digest.to_string()));
+            .insert(id.to_string(), (manifest_data, wrong_digest.to_string()));
         let client = stub(&data);
 
         let dir = tempfile::tempdir().unwrap();
@@ -714,7 +717,7 @@ mod tests {
         let data = StubTransportData::new();
         data.write()
             .manifests
-            .insert(id.reference.to_string(), (manifest_data, digest_str));
+            .insert(id.to_string(), (manifest_data, digest_str));
         let client = stub(&data);
 
         let dir = tempfile::tempdir().unwrap();
