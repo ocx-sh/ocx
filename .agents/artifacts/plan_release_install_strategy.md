@@ -68,14 +68,14 @@ After completing each increment:
 
 | # | Increment | File | Status |
 |---|-----------|------|--------|
-| 04 | Conventional commit CI enforcement (cocogitto) | [inc_04_cocogitto_ci.md](increments/release_install/inc_04_cocogitto_ci.md) | Not Started |
-| 05 | Dependabot conventional commit prefix + npm ecosystem | [inc_05_dependabot_config.md](increments/release_install/inc_05_dependabot_config.md) | Not Started |
+| 04 | Conventional commit CI enforcement (cocogitto) | [inc_04_cocogitto_ci.md](increments/release_install/inc_04_cocogitto_ci.md) | Done |
+| 05 | Dependabot conventional commit prefix + npm ecosystem | [inc_05_dependabot_config.md](increments/release_install/inc_05_dependabot_config.md) | Done |
 
 ### Stage 4: Website Changelog
 
 | # | Increment | File | Status |
 |---|-----------|------|--------|
-| 06 | Website changelog page + sidebar entry | [inc_06_website_changelog.md](increments/release_install/inc_06_website_changelog.md) | Not Started |
+| 06 | Website changelog page + sidebar entry | [inc_06_website_changelog.md](increments/release_install/inc_06_website_changelog.md) | Done |
 
 ### Stage 5: Install Scripts
 

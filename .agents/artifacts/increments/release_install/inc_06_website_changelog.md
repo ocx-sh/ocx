@@ -1,7 +1,7 @@
 # Increment 06: Website Changelog Page + Sidebar Entry
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-12
 **ADR Phase**: 3 (steps 9-10)
 **Depends on**: Increment 02 (CHANGELOG.md must exist)
 
