@@ -102,23 +102,87 @@ impl Client {
         Ok((digest, manifest))
     }
 
-    // ── Manifest copy ────────────────────────────────────────────────
+    // ── Platform-aware cascade merge ─────────────────────────────────
 
-    /// Copies a manifest to a new tag using a pre-fetched manifest, bypassing the registry fetch.
+    /// Fetches (or creates) the image index at `target_tag`, removes any existing
+    /// entry for `platform`, inserts the new manifest entry, and pushes the
+    /// updated index.
     ///
-    /// This avoids the race condition that can occur on load-balanced / caching registries
-    /// (e.g. Artifactory) where the manifest pushed in a previous step may not yet be visible
-    /// on every node. Pass the manifest returned by [`push_package`] directly.
-    pub async fn copy_manifest_data(
+    /// Used by `package push --cascade` to merge a single-platform manifest into
+    /// each rolling tag without destroying entries for other platforms.
+    ///
+    /// Returns the digest and data of the pushed index.
+    pub(crate) async fn merge_platform_into_index(
         &self,
-        manifest: &oci::Manifest,
         source_identifier: &Identifier,
-        target: impl Into<String>,
-    ) -> Result<()> {
-        let target_identifier = source_identifier.clone_with_tag(target);
+        target_tag: impl Into<String>,
+        platform: &oci::Platform,
+        manifest_sha256: &str,
+        manifest_size: i64,
+    ) -> Result<(Digest, oci::ImageIndex)> {
+        let target_identifier = source_identifier.clone_with_tag(target_tag);
         let ref_ = native::Reference::from(&target_identifier);
-        self.transport.push_manifest(&ref_, manifest).await?;
-        Ok(())
+        let platform = Some(platform.clone().into());
+
+        log::info!("Merging platform entry into index for {}", ref_);
+        let mut index = match self
+            .transport
+            .pull_manifest_raw(&ref_, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX])
+            .await
+        {
+            Ok((blob, digest_str)) => {
+                let existing: oci::Manifest =
+                    serde_json::from_slice(&blob).map_err(|e| ClientError::Serialization(e.to_string()))?;
+                match existing {
+                    oci::Manifest::Image(_) => {
+                        let entry = oci::ImageIndexEntry {
+                            media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
+                            digest: digest_str,
+                            size: blob.len() as i64,
+                            platform: None,
+                            annotations: None,
+                        };
+                        oci::ImageIndex {
+                            schema_version: oci::INDEX_SCHEMA_VERSION,
+                            media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                            artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
+                            manifests: vec![entry],
+                            annotations: None,
+                        }
+                    }
+                    oci::Manifest::ImageIndex(idx) => idx,
+                }
+            }
+            Err(ClientError::ManifestNotFound(_)) => {
+                log::debug!("No existing manifest/index for {}, starting fresh", ref_);
+                oci::ImageIndex {
+                    schema_version: oci::INDEX_SCHEMA_VERSION,
+                    media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                    artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
+                    manifests: vec![],
+                    annotations: None,
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        index.manifests.retain(|entry| entry.platform != platform);
+        index.manifests.push(oci::ImageIndexEntry {
+            media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
+            digest: manifest_sha256.to_string(),
+            size: manifest_size,
+            platform,
+            annotations: None,
+        });
+
+        let index_data = serde_json::to_vec(&index).map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let index_digest = Digest::sha256(&index_data);
+        self.transport
+            .push_manifest_raw(&ref_, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
+            .await?;
+        log::info!("Successfully merged platform entry into index for {}", ref_);
+
+        Ok((index_digest, index))
     }
 
     // ── Package pull ─────────────────────────────────────────────────
@@ -334,7 +398,7 @@ impl Client {
 
     /// Pushes config blob + package blob + image manifest. Returns the manifest,
     /// its serialized bytes, and its SHA-256 digest string.
-    async fn push_image_manifest(
+    pub(crate) async fn push_image_manifest(
         &self,
         package_info: &Info,
         path: &std::path::Path,
@@ -397,73 +461,29 @@ impl Client {
 
     /// Fetches (or creates) the image index, adds the new manifest entry for the
     /// package platform, and pushes the updated index.
+    ///
+    /// Delegates to [`merge_platform_into_index`](Self::merge_platform_into_index).
     async fn update_image_index(
         &self,
         package_info: &Info,
         manifest_data: &[u8],
         manifest_sha256: &str,
     ) -> std::result::Result<(Digest, oci::ImageIndex), ClientError> {
-        let image = native::Reference::from(&package_info.identifier);
-        let platform = Some(package_info.platform.clone().into());
+        let tag = package_info.identifier.tag_or_latest().to_string();
+        let manifest_size = manifest_data.len() as i64;
 
-        log::info!("Updating image index for {}", image);
-        let mut index = match self
-            .transport
-            .pull_manifest_raw(&image, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX])
+        let (digest, index) = self
+            .merge_platform_into_index(
+                &package_info.identifier,
+                &tag,
+                &package_info.platform,
+                manifest_sha256,
+                manifest_size,
+            )
             .await
-        {
-            Ok((blob, _)) => {
-                let existing: oci::Manifest =
-                    serde_json::from_slice(&blob).map_err(|e| ClientError::Serialization(e.to_string()))?;
-                match existing {
-                    oci::Manifest::Image(m) => {
-                        let entry = oci::ImageIndexEntry {
-                            media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
-                            digest: m.config.digest.clone(),
-                            size: m.config.size,
-                            platform: None,
-                            annotations: None,
-                        };
-                        oci::ImageIndex {
-                            schema_version: oci::INDEX_SCHEMA_VERSION,
-                            media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
-                            artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
-                            manifests: vec![entry],
-                            annotations: None,
-                        }
-                    }
-                    oci::Manifest::ImageIndex(idx) => idx,
-                }
-            }
-            Err(e) => {
-                log::debug!("No existing manifest/index for {}, starting fresh: {}", image, e);
-                oci::ImageIndex {
-                    schema_version: oci::INDEX_SCHEMA_VERSION,
-                    media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
-                    artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
-                    manifests: vec![],
-                    annotations: None,
-                }
-            }
-        };
+            .map_err(|e| ClientError::Registry(e.to_string()))?;
 
-        index.manifests.retain(|entry| entry.platform != platform);
-        index.manifests.push(oci::ImageIndexEntry {
-            media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
-            digest: manifest_sha256.to_string(),
-            size: manifest_data.len() as i64,
-            platform,
-            annotations: None,
-        });
-
-        let index_data = serde_json::to_vec(&index).map_err(|e| ClientError::Serialization(e.to_string()))?;
-        let index_digest = Digest::sha256(&index_data);
-        self.transport
-            .push_manifest_raw(&image, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
-            .await?;
-        log::info!("Successfully updated index for {}", image);
-
-        Ok((index_digest, index))
+        Ok((digest, index))
     }
 
     // ── Internal helpers ─────────────────────────────────────────────
@@ -855,5 +875,205 @@ mod tests {
         assert!(result.is_ok());
         let captured = lasts.lock().unwrap();
         assert_eq!(captured[0], Some(String::new()));
+    }
+
+    // ── merge_platform_into_index tests ─────────────────────────────
+
+    mod merge_platform {
+        use super::*;
+
+        fn test_identifier(tag: &str) -> Identifier {
+            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        }
+
+        fn stub_with_capture(data: &StubTransportData) -> Client {
+            data.write().capture_pushes = true;
+            Client::with_transport(Box::new(StubTransport::new(data.clone())))
+        }
+
+        fn platform(s: &str) -> oci::Platform {
+            s.parse().unwrap()
+        }
+
+        /// Read back the pushed index from the stub and parse it.
+        fn read_pushed_index(data: &StubTransportData, tag: &str) -> oci::ImageIndex {
+            let id = test_identifier(tag);
+            let inner = data.read();
+            let (bytes, _) = inner
+                .manifests
+                .get(&native::Reference::from(&id).to_string())
+                .expect("no pushed manifest");
+            let manifest: oci::Manifest = serde_json::from_slice(bytes).unwrap();
+            match manifest {
+                oci::Manifest::ImageIndex(idx) => idx,
+                _ => panic!("expected ImageIndex, got ImageManifest"),
+            }
+        }
+
+        #[tokio::test]
+        async fn fresh_tag_creates_new_index() {
+            let data = StubTransportData::new();
+            let client = stub_with_capture(&data);
+            let id = test_identifier("3.28");
+
+            client
+                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:abc", 100)
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert_eq!(index.manifests.len(), 1);
+            assert_eq!(index.manifests[0].digest, "sha256:abc");
+            assert_eq!(index.manifests[0].size, 100);
+            let entry_plat: oci::Platform = index.manifests[0].platform.clone().unwrap().try_into().unwrap();
+            assert_eq!(entry_plat, platform("linux/amd64"));
+        }
+
+        #[tokio::test]
+        async fn existing_index_adds_platform() {
+            let data = StubTransportData::new();
+
+            // Seed an existing index with arm64.
+            let id = test_identifier("3.28");
+            let existing = oci::ImageIndex {
+                schema_version: 2,
+                media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
+                manifests: vec![oci::ImageIndexEntry {
+                    media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
+                    digest: "sha256:arm64_digest".to_string(),
+                    size: 50,
+                    platform: Some(platform("linux/arm64").into()),
+                    annotations: None,
+                }],
+                annotations: None,
+            };
+            let existing_bytes = serde_json::to_vec(&oci::Manifest::ImageIndex(existing)).unwrap();
+            let existing_digest = oci::Digest::sha256(&existing_bytes).to_string();
+            data.write().manifests.insert(
+                native::Reference::from(&id).to_string(),
+                (existing_bytes, existing_digest),
+            );
+
+            let client = stub_with_capture(&data);
+            client
+                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:amd64_new", 200)
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert_eq!(index.manifests.len(), 2);
+            let digests: Vec<&str> = index.manifests.iter().map(|e| e.digest.as_str()).collect();
+            assert!(digests.contains(&"sha256:arm64_digest"));
+            assert!(digests.contains(&"sha256:amd64_new"));
+        }
+
+        #[tokio::test]
+        async fn existing_index_replaces_same_platform() {
+            let data = StubTransportData::new();
+
+            let id = test_identifier("3.28");
+            let existing = oci::ImageIndex {
+                schema_version: 2,
+                media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
+                manifests: vec![oci::ImageIndexEntry {
+                    media_type: MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string(),
+                    digest: "sha256:old_amd64".to_string(),
+                    size: 50,
+                    platform: Some(platform("linux/amd64").into()),
+                    annotations: None,
+                }],
+                annotations: None,
+            };
+            let existing_bytes = serde_json::to_vec(&oci::Manifest::ImageIndex(existing)).unwrap();
+            let existing_digest = oci::Digest::sha256(&existing_bytes).to_string();
+            data.write().manifests.insert(
+                native::Reference::from(&id).to_string(),
+                (existing_bytes, existing_digest),
+            );
+
+            let client = stub_with_capture(&data);
+            client
+                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:new_amd64", 200)
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert_eq!(index.manifests.len(), 1);
+            assert_eq!(index.manifests[0].digest, "sha256:new_amd64");
+            assert_eq!(index.manifests[0].size, 200);
+        }
+
+        #[tokio::test]
+        async fn existing_image_manifest_upgrades_to_index() {
+            let data = StubTransportData::new();
+
+            // Seed an existing plain ImageManifest (not an index).
+            let id = test_identifier("3.28");
+            let image_manifest = oci::ImageManifest {
+                config: oci::Descriptor {
+                    media_type: "application/vnd.oci.image.config.v1+json".to_string(),
+                    digest: "sha256:old_config".to_string(),
+                    size: 42,
+                    urls: None,
+                    annotations: None,
+                },
+                ..Default::default()
+            };
+            let manifest = oci::Manifest::Image(image_manifest);
+            let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+            let manifest_digest = oci::Digest::sha256(&manifest_bytes).to_string();
+            data.write().manifests.insert(
+                native::Reference::from(&id).to_string(),
+                (manifest_bytes.clone(), manifest_digest.clone()),
+            );
+
+            let client = stub_with_capture(&data);
+            client
+                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:new_manifest", 300)
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            // Should have 2 entries: old manifest (no platform) + new (amd64).
+            assert_eq!(index.manifests.len(), 2);
+            let old_entry = index
+                .manifests
+                .iter()
+                .find(|e| e.platform.is_none())
+                .expect("old entry missing");
+            // Fixed: uses the manifest digest (not config.digest) and manifest size (not config.size).
+            assert_eq!(old_entry.digest, manifest_digest);
+            assert_eq!(old_entry.size, manifest_bytes.len() as i64);
+            let new_entry = index
+                .manifests
+                .iter()
+                .find(|e| e.platform.is_some())
+                .expect("new entry missing");
+            assert_eq!(new_entry.digest, "sha256:new_manifest");
+        }
+
+        #[tokio::test]
+        async fn non_404_error_propagates_instead_of_starting_fresh() {
+            let data = StubTransportData::new();
+            // Inject a registry error (e.g. auth failure, network issue) for missing manifests.
+            data.write().pull_manifest_error_override = Some("connection reset".into());
+            data.write().capture_pushes = true;
+            let client = Client::with_transport(Box::new(StubTransport::new(data.clone())));
+            let id = test_identifier("3.28");
+
+            let result = client
+                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:abc", 100)
+                .await;
+
+            assert!(result.is_err(), "expected error to propagate, got Ok");
+            // Verify no manifest was pushed (no silent overwrite).
+            let inner = data.read();
+            assert!(
+                inner.manifests.is_empty(),
+                "no manifest should have been pushed on error"
+            );
+        }
     }
 }

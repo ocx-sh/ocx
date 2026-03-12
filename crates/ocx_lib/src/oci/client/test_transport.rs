@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use super::error::ClientError;
 use super::transport::{OciTransport, Result};
-use crate::oci;
+use crate::oci::{self, Digest};
 
 /// Test data backing a [`StubTransport`].
 ///
@@ -29,6 +29,12 @@ pub(crate) struct StubTransportInner {
     pub push_results: Vec<Result<String>>,
     /// Log of method calls for assertions.
     pub calls: Vec<String>,
+    /// When true, `push_manifest_raw` stores pushed data back into `manifests`
+    /// so subsequent reads see the updated content.
+    pub capture_pushes: bool,
+    /// When set, `pull_manifest_raw` returns a `Registry` error with this
+    /// message for any image not in `manifests` (instead of `ManifestNotFound`).
+    pub pull_manifest_error_override: Option<String>,
 }
 
 impl Default for StubTransportInner {
@@ -41,6 +47,8 @@ impl Default for StubTransportInner {
             digest: None,
             push_results: vec![],
             calls: vec![],
+            capture_pushes: false,
+            pull_manifest_error_override: None,
         }
     }
 }
@@ -161,12 +169,14 @@ impl OciTransport for StubTransport {
     ) -> Result<(Vec<u8>, String)> {
         self.record("pull_manifest_raw");
         let key = image.to_string();
-        self.data
-            .read()
-            .manifests
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| ClientError::Registry(format!("no manifest for {}", key)))
+        let inner = self.data.read();
+        if let Some(manifest) = inner.manifests.get(&key).cloned() {
+            Ok(manifest)
+        } else if let Some(msg) = &inner.pull_manifest_error_override {
+            Err(ClientError::Registry(msg.clone()))
+        } else {
+            Err(ClientError::ManifestNotFound(key))
+        }
     }
 
     async fn pull_blob_to_file(
@@ -195,12 +205,24 @@ impl OciTransport for StubTransport {
 
     async fn push_manifest_raw(
         &self,
-        _image: &oci::native::Reference,
-        _data: Vec<u8>,
+        image: &oci::native::Reference,
+        data: Vec<u8>,
         _media_type: &str,
     ) -> Result<String> {
         self.record("push_manifest_raw");
-        self.next_push_result()
+        let digest = Digest::sha256(&data).to_string();
+        if self.data.read().capture_pushes {
+            self.data
+                .write()
+                .manifests
+                .insert(image.to_string(), (data, digest.clone()));
+        }
+        let mut inner = self.data.write();
+        if inner.push_results.is_empty() {
+            Ok(digest)
+        } else {
+            inner.push_results.remove(0)
+        }
     }
 
     async fn push_blob(&self, _image: &oci::native::Reference, _data: Vec<u8>, digest: &str) -> Result<String> {

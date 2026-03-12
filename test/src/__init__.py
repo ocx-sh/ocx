@@ -11,6 +11,7 @@ from src.helpers import (
     registry_is_reachable,
     start_registry,
 )
+from src.registry import fetch_manifest_from_registry
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "assert_path_exists",
     "assert_symlink_exists",
     "current_platform",
+    "fetch_manifest_from_registry",
     "make_package",
     "registry_dir",
     "registry_is_reachable",

@@ -8,4 +8,4 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-xdist>=3.5", "pexpect>=4.9"]
+dev = ["pytest>=8.0", "pytest-xdist>=3.5", "pexpect>=4.9", "oras>=0.2.42"]
