@@ -55,6 +55,10 @@ export default defineConfig({
             { text: "Environment", link: "/docs/reference/environment" },
             { text: "Metadata", link: "/docs/reference/metadata" },
           ],
+        },
+        {
+          text: "Changelog",
+          link: "/docs/changelog",
         }
       ],
     },
