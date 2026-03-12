@@ -1,7 +1,7 @@
 # Increment 09: Install Script CI Tests
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-12
 **ADR Phase**: 4 (step 13)
 **Depends on**: Increments 07 + 08 (install scripts must exist), Increment 10 (needs a GitHub Release to test against)
 
