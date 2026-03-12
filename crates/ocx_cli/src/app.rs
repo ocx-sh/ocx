@@ -16,6 +16,9 @@ pub use context_options::ContextOptions;
 mod log_settings;
 pub use log_settings::LogSettings;
 
+mod version;
+pub use version::version;
+
 #[derive(Parser)]
 #[command(name = "ocx", about, long_about = None)]
 #[command(about = "A simple package manager for pre-built binaries.", long_about = None)]

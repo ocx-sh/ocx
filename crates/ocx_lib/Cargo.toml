@@ -1,5 +1,6 @@
 [package]
 name = "ocx_lib"
+version.workspace = true
 edition = "2024"
 license.workspace = true
 exclude = ["src/test_data/**"]
