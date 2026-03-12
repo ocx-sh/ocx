@@ -137,6 +137,8 @@ Planning artifacts go in `./.agents/artifacts/`. Track work with Beads (`bd` CLI
 
 **Branching**: Always branch from `main`. Never commit directly to `main`.
 
+**Commits**: Do not add `Co-Authored-By` trailers to commit messages.
+
 **Planning flow**: PR-FAQ → PRD → ADR → Design Spec → Plan → Implementation Beads
 
 **Artifacts**: All planning docs stored in `./.agents/artifacts/`.

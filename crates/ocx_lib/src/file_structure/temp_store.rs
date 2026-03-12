@@ -142,12 +142,7 @@ impl TempStore {
     /// Hash of the full identifier into a flat 32-char hex directory name.
     fn dir_name(identifier: &oci::Identifier, digest: &oci::Digest) -> String {
         use sha2::{Digest as _, Sha256};
-        let input = format!(
-            "{}\0{}\0{}",
-            identifier.registry(),
-            identifier.reference.repository(),
-            digest,
-        );
+        let input = format!("{}\0{}\0{}", identifier.registry(), identifier.repository(), digest,);
         let hash = hex::encode(Sha256::digest(input.as_bytes()));
         hash[..32].to_string()
     }

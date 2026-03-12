@@ -28,7 +28,7 @@ pub mod native {
 }
 
 pub use oci_client::{
-    ParseError, Reference, RegistryOperation,
+    Reference, RegistryOperation,
     manifest::{
         ImageIndexEntry, OCI_IMAGE_INDEX_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE, OciDescriptor as Descriptor,
         OciImageIndex as ImageIndex, OciImageManifest as ImageManifest, OciManifest as Manifest,
@@ -44,7 +44,7 @@ pub use client::ClientBuilder;
 pub mod index;
 pub use index::Index;
 
-mod identifier;
+pub mod identifier;
 pub use identifier::DEFAULT_REGISTRY;
 pub use identifier::Identifier;
 

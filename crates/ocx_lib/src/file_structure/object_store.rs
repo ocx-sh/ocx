@@ -79,8 +79,8 @@ impl ObjectStore {
         })?;
         Ok(self
             .root
-            .join(super::slugify(identifier.reference.registry()))
-            .join(identifier.reference.repository())
+            .join(super::slugify(identifier.registry()))
+            .join(identifier.repository())
             .join(Self::digest_path(&digest)))
     }
 
