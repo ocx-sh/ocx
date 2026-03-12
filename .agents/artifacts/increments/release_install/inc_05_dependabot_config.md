@@ -1,7 +1,7 @@
 # Increment 05: Dependabot Conventional Commit Prefix + npm Ecosystem
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-12
 **ADR Phase**: 2 (step 8)
 **Depends on**: Increment 04 (cocogitto must be in CI so dependabot PRs pass the check)
 
@@ -15,30 +15,30 @@ Configure Dependabot to produce `chore(deps):` prefixed commit messages (passing
 
 ### 1. Update `.github/dependabot.yml`
 
-Add `commit-message.prefix: "chore(deps)"` to each existing ecosystem entry and add the `npm` ecosystem for `/website`. **Preserve existing groups** (`actions`, `rust-deps`).
+Add `commit-message.prefix` to each existing ecosystem entry and add the `npm` ecosystem for `/website`. **Preserve existing groups** (`actions`, `rust-deps`). Use `ci(deps)` for github-actions (CI infrastructure) and `chore(deps)` for cargo/npm (runtime dependencies).
 
 Final config (from ADR Section 9):
 
 ```yaml
 version: 2
 updates:
-  - package-ecosystem: "cargo"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    groups:
-      rust-deps:
-        patterns:
-          - "*"
-    commit-message:
-      prefix: "chore(deps)"
-
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     groups:
       actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci(deps)"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      rust-deps:
         patterns:
           - "*"
     commit-message:
@@ -60,7 +60,7 @@ updates:
 
 After merging, the next Dependabot PR should have commit messages like:
 - `chore(deps): Bump the rust-deps group with 3 updates`
-- `chore(deps): Bump the actions group with 2 updates`
+- `ci(deps): Bump the actions group with 2 updates`
 
 These will:
 - Pass the cocogitto conventional commit check
@@ -79,6 +79,6 @@ These will:
 
 ## Notes
 
-- The `chore(deps)` prefix (without colon in the config) produces `chore(deps): ...` in the commit message. Dependabot appends the colon automatically.
-- git-cliff's `{ message = "^chore", skip = true }` rule filters these out of the changelog.
+- The prefix (without colon in the config) produces `chore(deps): ...` or `ci(deps): ...` in the commit message. Dependabot appends the colon automatically.
+- git-cliff's `{ message = "^chore", skip = true }` and `{ message = "^ci", skip = true }` rules filter these out of the changelog.
 - The npm ecosystem will catch VitePress, Vue, and other website dependency updates.
