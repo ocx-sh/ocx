@@ -1,7 +1,7 @@
 # Increment 07: install.sh — Unix/macOS Bootstrap
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-12
 **ADR Phase**: 4 (step 11)
 **Depends on**: Nothing strictly, but should be done after Stage 1 (version exists)
 
@@ -91,6 +91,8 @@ end
 ## Files Changed
 
 - `website/src/public/install.sh` (new)
+- `taskfiles/lint.taskfile.yml` (new) — shellcheck lint task
+- `taskfile.yml` — added `lint:shell` to verify pipeline
 
 ## Notes
 

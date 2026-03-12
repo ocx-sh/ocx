@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  install:shellcheck:
+    internal: true
+    cmds:
+      - echo "shellcheck is required but not installed."
+      - echo "Install it via your package manager (e.g., apt install shellcheck, brew install shellcheck)."
+      - exit 1
+    status:
+      - shellcheck --version
+
+  shell:
+    desc: Lint shell scripts with shellcheck
+    deps:
+      - install:shellcheck
+    cmd: shellcheck website/src/public/install.sh
