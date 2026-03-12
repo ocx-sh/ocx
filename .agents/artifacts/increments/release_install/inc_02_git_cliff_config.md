@@ -1,7 +1,7 @@
 # Increment 02: git-cliff Config + Initial CHANGELOG.md
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-12
 **ADR Phase**: 1 (steps 4-5)
 **Depends on**: Increment 01 (version must exist for git-cliff `--bump` to work)
 

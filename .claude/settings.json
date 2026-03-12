@@ -111,6 +111,8 @@
       "Bash(git branch -d:*)",
       "Bash(git branch -D:*)",
       "Bash(git clean -n:*)",
+      "Bash(git cliff:*)",
+      "Bash(git-cliff:*)",
 
       "// === GitHub CLI Read Operations ===",
       "Bash(gh issue list:*)",
