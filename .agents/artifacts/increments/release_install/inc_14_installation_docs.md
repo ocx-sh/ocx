@@ -52,7 +52,7 @@ Ensure the installation page links to:
 - [ ] Download table covers all 8 targets
 - [ ] One-liners match the actual install script URLs
 - [ ] README has install section with link to full docs
-- [ ] VitePress builds: `cd website && pnpm build`
+- [ ] VitePress builds: `cd website && bun run vitepress build`
 - [ ] All internal links resolve (no broken anchors)
 - [ ] Documentation follows `.claude/rules/documentation.md` guidelines
 - [ ] `task verify` still passes

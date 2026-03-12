@@ -20,12 +20,12 @@ Replace the Golden Paths below with your actual tech stack. The framework enforc
 
 | Component | Choice |
 |-----------|--------|
-| Runtime | Node.js LTS (Prod), Bun (Local Scripts) |
+| Runtime | Node.js LTS (Prod), Bun (Local Dev + Scripts) |
 | Build | Vite |
 | Hygiene | Biome |
 | Testing | Vitest |
 | Frameworks | React 19, Nuxt 4, Next.js |
-| Package Manager | pnpm |
+| Package Manager | Bun |
 
 ### Python (AI & Data Standard)
 

@@ -43,7 +43,7 @@ Place it at the end of the sidebar, after the Reference section.
 ### 3. Test locally
 
 ```bash
-cd website && pnpm dev
+cd website && bun run vitepress dev
 ```
 
 Navigate to the changelog page and verify:
@@ -56,7 +56,7 @@ Navigate to the changelog page and verify:
 
 - [ ] `website/src/docs/changelog.md` exists with `@include` directive
 - [ ] Sidebar in `config.mts` has the Changelog entry
-- [ ] VitePress builds successfully: `cd website && pnpm build`
+- [ ] VitePress builds successfully: `cd website && bun run vitepress build`
 - [ ] Changelog content renders in dev server
 - [ ] `task verify` still passes
 
