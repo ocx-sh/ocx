@@ -91,7 +91,7 @@ After completing each increment:
 |---|-----------|------|--------|
 | 10 | cargo-dist initialization + base release workflow | [inc_10_cargo_dist_init.md](increments/release_install/inc_10_cargo_dist_init.md) | Done |
 | 11 | Release notes + version verification in release workflow | [inc_11_release_notes.md](increments/release_install/inc_11_release_notes.md) | Done |
-| 12 | Post-release version bump PR automation | [inc_12_version_bump_pr.md](increments/release_install/inc_12_version_bump_pr.md) | Not Started |
+| 12 | Post-release version bump PR automation | [inc_12_version_bump_pr.md](increments/release_install/inc_12_version_bump_pr.md) | Done |
 
 ### Stage 7: Canary Enrichment
 
