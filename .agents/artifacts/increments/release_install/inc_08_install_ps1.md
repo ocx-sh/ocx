@@ -1,7 +1,7 @@
 # Increment 08: install.ps1 — Windows PowerShell Bootstrap
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-12
 **ADR Phase**: 4 (step 12)
 **Depends on**: Nothing strictly, but should be done after Stage 1
 
