@@ -191,6 +191,7 @@
       "Bash(tsc:*)",
       "Bash(vite:*)",
       "Bash(cargo:*)",
+      "Bash(dist:*)",
       "Bash(make:*)",
       "Bash(task:*)",
       "Bash(shellcheck:*)",

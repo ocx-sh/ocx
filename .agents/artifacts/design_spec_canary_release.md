@@ -76,15 +76,15 @@ Create a temporary lightweight tag (e.g., `v0.0.0-canary.{run_id}`), run the ful
 
 **Verdict:** Too complex and fragile.
 
-## Recommendation: Option 3 -- Custom Build Matrix
+## Recommendation: Option 2 -- dist CLI with Canary Version (Implemented)
 
-The canary workflow should own its build matrix explicitly, using the same runner/target combinations as the current `deploy-canary.yml` but reorganized to build all 8 targets without gating on tests (tests move to `verify-deep.yml`).
+The canary workflow uses `dist plan` and `dist build` directly, with a computed canary prerelease version. The plan job computes a version like `0.6.0-canary.b4a845b` (bumped version + short SHA), sets it in Cargo.toml temporarily, and runs `dist plan --tag=v{version}` to produce the dynamic 8-entry build matrix. Build jobs mirror release.yml's `build-local-artifacts` and `build-global-artifacts` structure exactly, with a simple `sed` to set the canary version before building. A custom `release` job handles changelog generation and the `canary` pre-release tag.
 
 **Rationale:**
-- `release.yml` is cargo-dist's domain. Modifying it creates ongoing maintenance friction with `dist generate`.
-- The canary release needs none of cargo-dist's features (manifest generation, installer creation, announcement body). It needs: compile, archive, checksum, upload to GitHub Release.
-- The build matrix (8 targets across 3 runner OSes) is stable and changes rarely. Maintaining it in the canary workflow is low cost.
-- This approach has zero risk of interfering with the real release pipeline.
+- DRY: the build matrix, runners, cross-compilation strategy, archive creation, and checksums all come from dist via `dist-workspace.toml`. No manual matrix to maintain.
+- The canary workflow does not modify `release.yml` -- it mirrors the structure independently.
+- dist's prerelease detection (`-canary.` suffix) automatically marks `announcement_is_prerelease: true`.
+- The embedded binary version (`ocx version`) shows the canary version, useful for debugging.
 
 ## Workflow Design
 

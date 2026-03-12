@@ -13,6 +13,8 @@ permissions:
 
 jobs:
   version-bump:
+    # Skip version bump for pre-release tags (e.g. v0.6.0-canary.1)
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6

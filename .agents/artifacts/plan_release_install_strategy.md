@@ -98,7 +98,7 @@ After completing each increment:
 | # | Increment | File | Status |
 |---|-----------|------|--------|
 | 13 | Enrich canary release body with git-cliff | [inc_13_canary_enrichment.md](increments/release_install/inc_13_canary_enrichment.md) | Done |
-| 18 | Canary release workflow (dedicated, custom build matrix) | [inc_18_canary_release.md](increments/release_install/inc_18_canary_release.md) | Not Started |
+| 18 | Canary release workflow (dedicated, custom build matrix) | [inc_18_canary_release.md](increments/release_install/inc_18_canary_release.md) | Done |
 | 19 | Verify-deep workflow (cross-platform acceptance tests) | [inc_19_verify_deep.md](increments/release_install/inc_19_verify_deep.md) | Not Started |
 
 ### Stage 8: Documentation
