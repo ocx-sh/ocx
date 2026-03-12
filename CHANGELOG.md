@@ -10,10 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add workspace version (0.1.0) and shared version utility
-
 - Add git-cliff config and initial CHANGELOG.md
-
 - Add Taskfile release commands (changelog, preview, prepare)
 
+### Documentation
 
+- Add changelog page to website with sidebar entry
+
+### Fixed
+
+- Fix changelog template newline formatting
 
