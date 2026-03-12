@@ -81,7 +81,7 @@ After completing each increment:
 
 | # | Increment | File | Status |
 |---|-----------|------|--------|
-| 07 | install.sh — Unix/macOS bootstrap | [inc_07_install_sh.md](increments/release_install/inc_07_install_sh.md) | Not Started |
+| 07 | install.sh — Unix/macOS bootstrap | [inc_07_install_sh.md](increments/release_install/inc_07_install_sh.md) | Done |
 | 08 | install.ps1 — Windows PowerShell bootstrap | [inc_08_install_ps1.md](increments/release_install/inc_08_install_ps1.md) | Not Started |
 | 09 | Install script CI tests | [inc_09_install_script_ci.md](increments/release_install/inc_09_install_script_ci.md) | Not Started |
 

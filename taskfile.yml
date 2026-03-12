@@ -9,6 +9,7 @@ includes:
   format: ./taskfiles/format.taskfile.yml
   clippy: ./taskfiles/clippy.taskfile.yml
   release: ./taskfiles/release.taskfile.yml
+  lint: ./taskfiles/lint.taskfile.yml
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test
@@ -99,6 +100,7 @@ tasks:
     cmds:
       - task: format:check
       - task: clippy:check
+      - task: lint:shell
       - task: license:check
       - task: license:deps
       - task: build
