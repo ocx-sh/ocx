@@ -97,6 +97,8 @@ tasks:
     cmds:
       - task: format:check
       - task: clippy:check
+      - task: license:check
+      - task: license:deps
       - task: build
       - task: test:unit
       - task: test:parallel
