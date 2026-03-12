@@ -1,0 +1,132 @@
+name: Discord Notifications
+
+on:
+  push:
+    branches: [main]
+
+  pull_request:
+    types: [opened, closed]
+
+  release:
+    types: [published]
+
+  workflow_run:
+    workflows: ["Basic Verification", "License Compliance", "Deploy Canary", "Deploy Website"]
+    types: [completed]
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      github.event.workflow_run.id ||
+      github.event.pull_request.number ||
+      github.event.release.id ||
+      github.sha
+    }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Discord
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Deploy Website' && github.event.workflow_run.conclusion == 'success')
+    steps:
+      # --- Push to main ---
+      - name: Push to main
+        if: github.event_name == 'push'
+        uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          status: "success"
+          title: "Push to main"
+          description: |
+            **${{ github.event.head_commit.message }}**
+            by ${{ github.event.head_commit.author.name }}
+          url: ${{ github.event.head_commit.url }}
+          color: 0x58a6ff
+
+      # --- PR opened ---
+      - name: PR opened
+        if: github.event_name == 'pull_request' && github.event.action == 'opened'
+        uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          status: "success"
+          title: "New PR: #${{ github.event.pull_request.number }}"
+          description: |
+            **${{ github.event.pull_request.title }}**
+            by ${{ github.event.pull_request.user.login }}
+          url: ${{ github.event.pull_request.html_url }}
+          color: 0x58a6ff
+          nodetail: true
+
+      # --- PR merged ---
+      - name: PR merged
+        if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged
+        uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          status: "success"
+          title: "PR merged: #${{ github.event.pull_request.number }}"
+          description: |
+            **${{ github.event.pull_request.title }}**
+            by ${{ github.event.pull_request.user.login }}
+          url: ${{ github.event.pull_request.html_url }}
+          color: 0x8957e5
+          nodetail: true
+
+      # --- PR closed without merge (skip) ---
+      # Closing without merge is not interesting — no notification
+
+      # --- Release published ---
+      - name: Release published
+        if: github.event_name == 'release'
+        uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          status: "success"
+          title: "Release: ${{ github.event.release.tag_name }}"
+          description: |
+            **${{ github.event.release.name }}**
+            ${{ github.event.release.body }}
+          url: ${{ github.event.release.html_url }}
+          color: 0x3fb950
+          nodetail: true
+
+      # --- Workflow failure ---
+      - name: Workflow failed
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'
+        uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          status: "failure"
+          title: "${{ github.event.workflow_run.name }} failed"
+          description: |
+            Branch: `${{ github.event.workflow_run.head_branch }}`
+            Commit: ${{ github.event.workflow_run.head_sha }}
+          url: ${{ github.event.workflow_run.html_url }}
+
+      # --- Website deployed ---
+      - name: Website deployed
+        if: >-
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.name == 'Deploy Website' &&
+          github.event.workflow_run.conclusion == 'success'
+        uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          status: "success"
+          title: "Website deployed"
+          description: |
+            The website has been deployed successfully.
+            🔗 **https://ocx.dev**
+          url: https://ocx.dev
+          color: 0x3fb950
+          nodetail: true
