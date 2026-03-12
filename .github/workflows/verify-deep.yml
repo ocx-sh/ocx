@@ -1,0 +1,93 @@
+name: Deploy Canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  checks: write
+  pull-requests: write
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ${{ matrix.job.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Build
+        uses: ./.github/actions/build-rust
+        with:
+          target: ${{ matrix.job.target }}
+      - name: Install nextest
+        uses: taiki-e/install-action@a37010ded18ff788be4440302bd6830b1ae50d8b # v2.68.25
+        with:
+          tool: cargo-nextest
+      - name: Test
+        run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci --locked
+      - name: Upload Test Results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: test-results-${{ matrix.job.target }}
+          path: target/nextest/ci/junit.xml
+
+  acceptance-tests:
+    name: Acceptance Tests
+    needs: build
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+      - name: Download Binary
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: ocx-x86_64-unknown-linux-gnu
+          path: test/bin
+      - name: Prepare Binary
+        run: mv test/bin/ocx-x86_64-unknown-linux-gnu test/bin/ocx && chmod +x test/bin/ocx
+      - name: Install uv
+        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+      - name: Setup Task
+        uses: go-task/setup-task@0ab1b2a65bc55236a3bc64cde78f80e20e8885c2 # v1.0.0
+      - name: Run Acceptance Tests
+        run: task test -- --junit-xml=results/junit.xml
+      - name: Upload Test Results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: test-results-acceptance
+          path: test/results/junit.xml
+
+  test-results:
+    name: Publish Test Results
+    needs: [build, acceptance-tests]
+    runs-on: ubuntu-latest
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: test-results-*
+          path: artifacts
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: "artifacts/**/junit.xml"
+          check_name: "Test Results"
