@@ -93,11 +93,13 @@ After completing each increment:
 | 11 | Release notes + version verification in release workflow | [inc_11_release_notes.md](increments/release_install/inc_11_release_notes.md) | Done |
 | 12 | Post-release version bump PR automation | [inc_12_version_bump_pr.md](increments/release_install/inc_12_version_bump_pr.md) | Done |
 
-### Stage 7: Canary Enrichment
+### Stage 7: Canary & Verification Pipeline
 
 | # | Increment | File | Status |
 |---|-----------|------|--------|
 | 13 | Enrich canary release body with git-cliff | [inc_13_canary_enrichment.md](increments/release_install/inc_13_canary_enrichment.md) | Done |
+| 18 | Canary release workflow (dedicated, custom build matrix) | [inc_18_canary_release.md](increments/release_install/inc_18_canary_release.md) | Not Started |
+| 19 | Verify-deep workflow (cross-platform acceptance tests) | [inc_19_verify_deep.md](increments/release_install/inc_19_verify_deep.md) | Not Started |
 
 ### Stage 8: Documentation
 
@@ -117,7 +119,7 @@ After completing each increment:
 
 | # | Increment | File | Status |
 |---|-----------|------|--------|
-| 18 | Version-ahead-of-release CI check | [inc_18_version_ahead_check.md](increments/release_install/inc_18_version_ahead_check.md) | Not Started |
+| 20 | Version-ahead-of-release CI check | [inc_20_version_ahead_check.md](increments/release_install/inc_20_version_ahead_check.md) | Not Started |
 
 ---
 
@@ -132,7 +134,7 @@ Stage 5 (independent) ──┤
                         │
 Stage 6 ←── Stage 1 + Stage 2
         │
-        ├──→ Stage 7
+        ├──→ Stage 7 (13 → 18 → 19)
         ├──→ Stage 8 ←── Stage 4 + Stage 5
         ├──→ Stage 9 ←── Stage 6
         └──→ Stage 10
@@ -143,7 +145,8 @@ Stage 6 ←── Stage 1 + Stage 2
 **Parallelizable**:
 - Stage 3 (commit standards) can run alongside Stage 4 (website changelog)
 - Stage 5 (install scripts) can start after Stage 1 but before Stage 6
-- Stage 7 (canary) and Stage 8 (docs) can run in parallel after Stage 6
+- Stage 7 (canary/verify), Stage 8 (docs) can run in parallel after Stage 6
+- Within Stage 7: inc 18 (canary release) must complete before inc 19 (verify-deep)
 
 ---
 
