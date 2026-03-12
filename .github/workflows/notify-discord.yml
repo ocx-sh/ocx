@@ -126,7 +126,7 @@ jobs:
           title: "Website deployed"
           description: |
             The website has been deployed successfully.
-            🔗 **https://ocx.dev**
-          url: https://ocx.dev
+            🔗 **https://ocx.sh**
+          url: https://ocx.sh
           color: 0x3fb950
           nodetail: true
