@@ -29,7 +29,8 @@ impl Archive {
                 .truncate(true)
                 .open(output)
                 .map_to_undefined_error()?;
-            let tar = tar::Builder::new(Box::new(file) as Box<dyn std::io::Write>);
+            let mut tar = tar::Builder::new(Box::new(file) as Box<dyn std::io::Write>);
+            tar.follow_symlinks(false);
             Ok(Self { tar })
         }
     }
@@ -42,7 +43,8 @@ impl Archive {
         compression: compression::CompressionOptions,
     ) -> Result<Self> {
         let writer = compression::write_file(output, compression.algorithm, Some(compression.level)).await?;
-        let tar = tar::Builder::new(writer);
+        let mut tar = tar::Builder::new(writer);
+        tar.follow_symlinks(false);
         Ok(Self { tar })
     }
 

@@ -136,4 +136,60 @@ mod tests {
         assert!(extracted.exists(), "file missing after extraction");
         assert_eq!(std::fs::read(&extracted).unwrap(), b"#!/bin/sh\necho hello");
     }
+
+    /// Regression test for https://github.com/ocx-sh/ocx/issues/6
+    ///
+    /// Symlinks inside a directory (e.g. inside a macOS .app bundle) must be
+    /// preserved as symlinks in the archive — not expanded to full file copies.
+    /// Previously `tar::Builder::follow_symlinks` defaulted to `true`, causing
+    /// every symlink target to be stored as a separate copy of its contents,
+    /// bloating the archive by the size of each symlink target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlinks_preserved_not_expanded() {
+        use std::os::unix::fs::symlink;
+
+        let src = tempfile::tempdir().unwrap();
+
+        // Create a real file (simulates a framework binary, e.g. QtCore)
+        let real_file = src.path().join("libfoo.dylib");
+        let content = vec![0u8; 1024]; // 1 KiB of zeros
+        std::fs::write(&real_file, &content).unwrap();
+
+        // Create a symlink pointing to the real file (simulates .app framework symlinks)
+        let link = src.path().join("libfoo_link.dylib");
+        symlink("libfoo.dylib", &link).unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.tar.xz");
+
+        BundleBuilder::from_path(src.path())
+            .create(&archive_path)
+            .await
+            .expect("bundle creation failed");
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&archive_path, extract_dir.path())
+            .await
+            .expect("extraction failed");
+
+        let extracted_link = extract_dir.path().join("libfoo_link.dylib");
+
+        // The symlink must be preserved as a symlink — not a regular file copy.
+        assert!(
+            extracted_link.symlink_metadata().unwrap().file_type().is_symlink(),
+            "expected symlink to be preserved as a symlink after bundling, but it was stored as a regular file"
+        );
+
+        // The symlink target must be correct.
+        let target = std::fs::read_link(&extracted_link).unwrap();
+        assert_eq!(
+            target.to_str().unwrap(),
+            "libfoo.dylib",
+            "symlink target was not preserved"
+        );
+
+        // Both the real file and the symlink exist.
+        assert!(extract_dir.path().join("libfoo.dylib").exists());
+    }
 }
