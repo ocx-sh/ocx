@@ -7,10 +7,14 @@ use serde::{Deserialize, Serialize};
 
 use super::{constant, path};
 
+/// Determines how an environment variable value is resolved at install time.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Modifier {
+    /// A path variable is prepended to any existing value of the environment variable.
     Path(path::Path),
+    /// A constant variable replaces any existing value of the environment variable.
     Constant(constant::Constant),
 }
 
