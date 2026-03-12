@@ -1,7 +1,7 @@
 # Increment 12: Post-Release Version Bump PR Automation
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-13
 **ADR Phase**: 5 (step 18)
 **Depends on**: Increment 10 (release workflow must exist), Increment 02 (cliff.toml must exist)
 

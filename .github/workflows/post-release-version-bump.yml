@@ -1,0 +1,58 @@
+name: Post-Release Version Bump
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install tools
+        shell: bash
+        run: |
+          cargo install cargo-edit --locked
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-installer.sh | sh
+
+      - name: Compute next version
+        id: next
+        shell: bash
+        run: |
+          RELEASED="${GITHUB_REF_NAME#v}"
+          NEXT=$(git-cliff --bumped-version)
+          NEXT="${NEXT#v}"
+          # Edge case: immediately after tagging, zero unreleased commits.
+          # git-cliff may return the same version as just released.
+          if [ "$NEXT" = "$RELEASED" ]; then
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$RELEASED"
+            NEXT="${MAJOR}.$((MINOR + 1)).0"
+          fi
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next development version: $NEXT"
+
+      - name: Bump version in Cargo.toml
+        run: cargo set-version "${{ steps.next.outputs.version }}"
+
+      - name: Create version bump PR
+        uses: peter-evans/create-pull-request@271a8d0340265f705b14b31e2c44c167752c6b04 # v7
+        with:
+          title: "chore: bump version to ${{ steps.next.outputs.version }}"
+          branch: chore/bump-version-${{ steps.next.outputs.version }}
+          commit-message: "chore: bump version to ${{ steps.next.outputs.version }}"
+          body: |
+            Automated version bump after release ${{ github.ref_name }}.
+
+            This PR updates `Cargo.toml` workspace version to `${{ steps.next.outputs.version }}` for the next development cycle.
+          delete-branch: true

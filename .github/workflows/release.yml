@@ -298,3 +298,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-post-release-version-bump:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/post-release-version-bump.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
