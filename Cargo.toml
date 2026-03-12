@@ -9,6 +9,11 @@ license = "Apache-2.0"
 [patch.crates-io]
 oci-client = { path = "external/rust-oci-client" }
 
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [workspace.dependencies]
 ocx_lib = { path = "crates/ocx_lib" }
 tokio = { version = "1", features = ["full"] }

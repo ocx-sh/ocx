@@ -13,7 +13,7 @@ OCX is a Rust-based package manager that uses OCI registries (Docker Hub, GHCR, 
 ```sh
 cargo check                    # fast check (also: `task`)
 cargo build                    # debug build
-cargo build --release -p ocx_cli  # release CLI binary
+cargo build --release -p ocx      # release CLI binary
 cargo fmt                      # format (max_width=120, see rustfmt.toml)
 cargo clippy --workspace       # lint
 ```
@@ -43,7 +43,7 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 
 ## Architecture
 
-**Workspace layout**: Two crates — `crates/ocx_lib` (core library) and `crates/ocx_cli` (thin CLI shell using clap). Rust edition 2024, resolver v3.
+**Workspace layout**: Two crates — `crates/ocx_lib` (core library) and `crates/ocx_cli` (thin CLI shell using clap, package name `ocx`). Rust edition 2024, resolver v3.
 
 **Patched dependency**: `oci-client` is patched to a local git submodule at `external/rust-oci-client`.
 

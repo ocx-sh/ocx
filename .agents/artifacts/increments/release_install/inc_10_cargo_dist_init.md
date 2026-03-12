@@ -1,7 +1,7 @@
 # Increment 10: cargo-dist Initialization + Base Release Workflow
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-12
 **ADR Phase**: 5 (steps 14-15)
 **Depends on**: Increment 01 (workspace version must be set)
 

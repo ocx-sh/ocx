@@ -11,7 +11,7 @@ tasks:
   build:
     internal: true
     cmds:
-      - cargo build --release -p ocx_cli --locked
+      - cargo build --release -p ocx --locked
       - mkdir -p {{.BIN_DIR}}
       - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
     status:
