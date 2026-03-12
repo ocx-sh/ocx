@@ -1,7 +1,7 @@
 # Increment 03: Taskfile Release Commands
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-12
 **ADR Phase**: 1 (step 6)
 **Depends on**: Increment 02 (git-cliff config must exist)
 

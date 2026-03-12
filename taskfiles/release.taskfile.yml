@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  # Install cargo-edit (provides cargo set-version) if not already present.
+  install:cargo-edit:
+    internal: true
+    cmds:
+      - cargo install --locked cargo-edit
+    status:
+      - cargo set-version --version
+
+  # Regenerate CHANGELOG.md from the full git history.
+  changelog:
+    desc: Update CHANGELOG.md from git history
+    cmds:
+      - git-cliff --output CHANGELOG.md
+
+  # Show what would go into the next release's changelog section.
+  changelog:preview:
+    desc: Preview unreleased changes
+    cmds:
+      - git-cliff --unreleased
+
+  # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
+  # After this task succeeds, the human reviews and commits.
+  prepare:
+    desc: Prepare a release (compute version, update changelog, verify)
+    deps:
+      - install:cargo-edit
+    vars:
+      # Compute next version from git history. When tags exist, git-cliff bumps
+      # from the latest tag. When no tags exist yet, it uses initial_tag from
+      # cliff.toml and bumps based on conventional commits.
+      NEXT_VERSION:
+        sh: git-cliff --bumped-version
+    cmds:
+      - echo "Next version:{{.NEXT_VERSION}}"
+      - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
+      - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
+      - task verify
+      - |
+        echo ""
+        echo "Release prepared ({{.NEXT_VERSION}}). Review changes, then:"
+        echo "  git add -A && git commit -m 'release: {{.NEXT_VERSION}}'"
+        echo "  git tag {{.NEXT_VERSION}}"
