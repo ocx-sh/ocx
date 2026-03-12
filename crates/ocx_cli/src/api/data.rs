@@ -4,6 +4,7 @@
 pub mod catalog;
 pub mod clean;
 pub mod env;
+pub mod info;
 pub mod install;
 pub mod paths;
 pub mod removed;
