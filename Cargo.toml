@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_schema"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.0"
 license = "Apache-2.0"
 
 [patch.crates-io]

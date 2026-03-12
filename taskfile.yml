@@ -8,6 +8,7 @@ includes:
   schema: ./taskfiles/schema.taskfile.yml
   format: ./taskfiles/format.taskfile.yml
   clippy: ./taskfiles/clippy.taskfile.yml
+  release: ./taskfiles/release.taskfile.yml
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test

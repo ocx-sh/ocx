@@ -62,7 +62,7 @@ After completing each increment:
 | # | Increment | File | Status |
 |---|-----------|------|--------|
 | 02 | git-cliff config + initial CHANGELOG.md | [inc_02_git_cliff_config.md](increments/release_install/inc_02_git_cliff_config.md) | Done |
-| 03 | Taskfile release commands | [inc_03_taskfile_release.md](increments/release_install/inc_03_taskfile_release.md) | Not Started |
+| 03 | Taskfile release commands | [inc_03_taskfile_release.md](increments/release_install/inc_03_taskfile_release.md) | Done |
 
 ### Stage 3: Commit Standards
 
