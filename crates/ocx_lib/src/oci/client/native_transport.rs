@@ -84,10 +84,12 @@ impl OciTransport for NativeTransport {
         last: Option<String>,
     ) -> Result<Vec<String>> {
         let auth = self.auth_for(image).await;
-        self.client
+        let response = self
+            .client
             .catalog(image, &auth, Some(chunk_size), last.as_deref())
             .await
-            .map_err(registry_error)
+            .map_err(registry_error)?;
+        Ok(response.repositories)
     }
 
     async fn fetch_manifest_digest(&self, image: &oci::native::Reference) -> Result<String> {
