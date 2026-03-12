@@ -8,6 +8,8 @@ updates:
       actions:
         patterns:
           - "*"
+    commit-message:
+      prefix: "ci(deps)"
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -16,3 +18,15 @@ updates:
       rust-deps:
         patterns:
           - "*"
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: npm
+    directory: /website
+    schedule:
+      interval: weekly
+    groups:
+      npm-deps:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(deps)"

@@ -12,6 +12,22 @@ permissions:
   pull-requests: write
 
 jobs:
+  conventional-commits:
+    name: Conventional Commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check conventional commits
+        uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
+        with:
+          command: check
+          args: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
   smoke:
     name: Smoke (Linux)
     runs-on: ubuntu-latest
