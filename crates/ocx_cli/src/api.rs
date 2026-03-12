@@ -67,4 +67,12 @@ impl Api {
     pub fn report_clean(&self, clean: data::clean::Clean) -> anyhow::Result<()> {
         self.report(&clean)
     }
+
+    pub fn report_info(&self, info: data::info::Info) -> anyhow::Result<()> {
+        self.report(&info)
+    }
+
+    pub fn is_json(&self) -> bool {
+        matches!(self.format, options::Format::Json)
+    }
 }

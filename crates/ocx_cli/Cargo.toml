@@ -32,6 +32,7 @@ tracing-subscriber = { version = "0.3.22", features = [
 tracing-indicatif = "0.3.14"
 tracing-log = "0.2.0"
 serde = "1.0.228"
+console = "0.16.2"
 
 [lints]
 workspace = true

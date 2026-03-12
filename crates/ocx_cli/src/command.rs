@@ -65,7 +65,7 @@ impl Command {
             Command::Deselect(deselect) => deselect.execute(context).await,
             Command::Find(find) => find.execute(context).await,
             Command::Index(index) => index.execute(context).await,
-            Command::Info(info) => info.execute().await,
+            Command::Info(info) => info.execute(context).await,
             Command::Install(install) => install.execute(context).await,
             Command::Uninstall(uninstall) => uninstall.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,

@@ -1315,6 +1315,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "console",
  "flate2",
  "futures",
  "indicatif",
