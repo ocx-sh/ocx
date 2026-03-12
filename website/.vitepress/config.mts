@@ -26,15 +26,6 @@ export default defineConfig({
       { text: 'Home', link: '/' },
       { text: 'Docs', link: '/docs/user-guide' },
       { text: 'Team', link: '/team' },
-      {
-        text: 'Help',
-        items: [
-          { text: 'Cast Demos', link: '/help/cast-demos' },
-          { text: 'MD', link: '/help/markdown-examples' },
-          { text: 'API', link: '/help/api-examples' },
-          { text: 'Components', link: '/help/component-examples' }
-        ]
-      }
     ],
 
     sidebar: {
