@@ -18,3 +18,5 @@ unix-archive = ".tar.xz"
 windows-archive = ".zip"
 # Don't run release CI on pull requests — verify-basic.yml handles PR checks
 pr-run-mode = "skip"
+# Version verification runs as a custom job (not hand-edited into the generated workflow)
+plan-jobs = ["./verify-version"]
