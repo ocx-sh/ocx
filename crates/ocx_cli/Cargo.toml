@@ -1,8 +1,9 @@
 [package]
-name = "ocx_cli"
+name = "ocx"
 version.workspace = true
 edition = "2024"
 license.workspace = true
+repository = "https://github.com/ocx-sh/ocx"
 
 [[bin]]
 name = "ocx"

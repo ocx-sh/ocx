@@ -1335,7 +1335,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ocx_cli"
+name = "ocx"
 version = "0.0.0"
 dependencies = [
  "anyhow",

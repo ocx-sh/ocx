@@ -15,7 +15,7 @@ tasks:
   ensure-binary:
     internal: true
     cmds:
-      - cargo build --release -p ocx_cli
+      - cargo build --release -p ocx
       - mkdir -p {{.BIN_DIR}}
       - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
     status:

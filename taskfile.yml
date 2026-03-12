@@ -45,7 +45,7 @@ tasks:
 
   build:
     desc: Build release binary
-    cmd: cargo build --release -p ocx_cli --locked
+    cmd: cargo build --release -p ocx --locked
 
   install:nextest:
     internal: true
