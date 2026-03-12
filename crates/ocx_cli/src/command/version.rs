@@ -10,7 +10,7 @@ pub struct Version;
 
 impl Version {
     pub async fn execute(&self) -> anyhow::Result<ExitCode> {
-        println!("{}", env!("CARGO_PKG_VERSION"));
+        println!("{}", crate::app::version());
         Ok(ExitCode::SUCCESS)
     }
 }

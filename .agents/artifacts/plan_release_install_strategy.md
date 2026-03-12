@@ -55,7 +55,7 @@ After completing each increment:
 
 | # | Increment | File | Status |
 |---|-----------|------|--------|
-| 01 | Workspace version + version guard test + shared version utility | [inc_01_workspace_version.md](increments/release_install/inc_01_workspace_version.md) | Not Started |
+| 01 | Workspace version + version guard test + shared version utility | [inc_01_workspace_version.md](increments/release_install/inc_01_workspace_version.md) | Done |
 
 ### Stage 2: Changelog Infrastructure
 

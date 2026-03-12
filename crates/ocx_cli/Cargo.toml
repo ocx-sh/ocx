@@ -1,5 +1,6 @@
 [package]
 name = "ocx_cli"
+version.workspace = true
 edition = "2024"
 license.workspace = true
 
