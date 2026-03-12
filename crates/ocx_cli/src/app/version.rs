@@ -14,6 +14,13 @@ mod tests {
     fn version_is_set() {
         let v = version();
         assert!(!v.is_empty(), "CARGO_PKG_VERSION must not be empty");
-        assert_ne!(v, "0.0.0", "workspace version must be set in Cargo.toml");
+        let parts: Vec<&str> = v.split('.').collect();
+        assert_eq!(parts.len(), 3, "version must be MAJOR.MINOR.PATCH, got: {v}");
+        for part in &parts {
+            assert!(
+                part.parse::<u32>().is_ok(),
+                "version component must be numeric, got: {v}"
+            );
+        }
     }
 }

@@ -137,7 +137,7 @@ Planning artifacts go in `./.agents/artifacts/`. Track work with Beads (`bd` CLI
 
 **Branching**: Always branch from `main`. Never commit directly to `main`.
 
-**Commits**: Do not add `Co-Authored-By` trailers to commit messages.
+**Commits**: Use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). Scopes are optional. Do not add `Co-Authored-By` trailers to commit messages.
 
 **Planning flow**: PR-FAQ → PRD → ADR → Design Spec → Plan → Implementation Beads
 
