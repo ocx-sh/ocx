@@ -56,6 +56,35 @@ fn registry_error(e: impl std::fmt::Display) -> ClientError {
     ClientError::Registry(e.to_string())
 }
 
+/// Maps OCI distribution errors to [`ClientError::ManifestNotFound`] when the
+/// registry indicates the manifest does not exist (404 / MANIFEST_UNKNOWN),
+/// and falls back to [`ClientError::Registry`] for everything else.
+fn manifest_not_found_or_registry_error(
+    e: oci_client::errors::OciDistributionError,
+    image: &oci::native::Reference,
+) -> ClientError {
+    use oci_client::errors::OciDistributionError::*;
+    use oci_client::errors::OciErrorCode;
+    match &e {
+        ImageManifestNotFoundError(_) => ClientError::ManifestNotFound(image.to_string()),
+        RegistryError { envelope, .. } => {
+            let is_not_found = envelope.errors.iter().any(|err| {
+                matches!(
+                    err.code,
+                    OciErrorCode::ManifestUnknown | OciErrorCode::NotFound | OciErrorCode::NameUnknown
+                )
+            });
+            if is_not_found {
+                ClientError::ManifestNotFound(image.to_string())
+            } else {
+                ClientError::Registry(e.to_string())
+            }
+        }
+        ServerError { code: 404, .. } => ClientError::ManifestNotFound(image.to_string()),
+        _ => ClientError::Registry(e.to_string()),
+    }
+}
+
 fn io_error(path: &Path, e: impl Into<std::io::Error>) -> ClientError {
     ClientError::Io(path.to_path_buf(), e.into())
 }
@@ -110,7 +139,7 @@ impl OciTransport for NativeTransport {
             .client
             .pull_manifest_raw(image, &auth, accepted_media_types)
             .await
-            .map_err(registry_error)?;
+            .map_err(|e| manifest_not_found_or_registry_error(e, image))?;
         Ok((data.to_vec(), digest))
     }
 

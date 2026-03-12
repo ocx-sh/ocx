@@ -44,6 +44,8 @@ pub use client::ClientBuilder;
 pub mod index;
 pub use index::Index;
 
+pub mod manifest;
+
 pub mod identifier;
 pub use identifier::DEFAULT_REGISTRY;
 pub use identifier::Identifier;

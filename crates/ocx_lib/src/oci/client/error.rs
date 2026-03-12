@@ -14,6 +14,8 @@ pub enum ClientError {
     UnexpectedManifestType,
     /// Manifest structure is invalid (e.g. wrong layer count, missing fields).
     InvalidManifest(String),
+    /// The requested manifest does not exist in the registry.
+    ManifestNotFound(String),
     /// A registry operation failed.
     Registry(String),
     /// File I/O error with path context.
@@ -31,6 +33,7 @@ impl std::fmt::Display for ClientError {
             ClientError::DigestMismatch { expected, actual } => {
                 write!(f, "Manifest digest mismatch: expected '{}', got '{}'", expected, actual)
             }
+            ClientError::ManifestNotFound(msg) => write!(f, "Manifest not found: {}", msg),
             ClientError::UnexpectedManifestType => write!(f, "Expected an image manifest, got an image index"),
             ClientError::InvalidManifest(msg) => write!(f, "Invalid manifest: {}", msg),
             ClientError::Registry(msg) => write!(f, "Registry operation failed: {}", msg),
