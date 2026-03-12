@@ -441,7 +441,7 @@ Run the recording test suite to produce `.cast` files from all scripts (existing
 - [ ] **3.1** Write `website/src/docs/getting-started.md` following the content outline above
 - [ ] **3.2** Verify all internal links resolve (anchors in user-guide, command-line, environment)
 - [ ] **3.3** Verify all Terminal `src` paths match actual `.cast` filenames
-- [ ] **3.4** Run VitePress dev server (`cd website && pnpm dev`) and review the rendered page
+- [ ] **3.4** Run VitePress dev server (`cd website && bun run vitepress dev`) and review the rendered page
 
 ### Phase 4: Verification
 
