@@ -138,10 +138,14 @@ Collect all link definitions at the **bottom of the file**, grouped with comment
 
 ## Vue Components Available
 
-- `<Tree>` / `<Node>` / `<Description>` — filesystem trees with hover descriptions
-- `<Tooltip term="label">text</Tooltip>` — inline term with hover popup
-- `<Steps>` / `<Step>` / `<Description>` — numbered step lists
-- VitePress `::: code-group` — tabbed code blocks for showing alternatives side-by-side (good for ocx vs other tool comparisons)
+All components are globally registered — use directly in `.md` files without imports. See the `documentation` skill for full props reference and usage examples.
+
+- `<Tooltip term="label">popup text</Tooltip>` — inline term with hover popup
+- `<Tree>` / `<Node>` / `<Description>` — collapsible filesystem trees with annotations
+- `<Steps>` / `<Step>` / `<Description>` — vertical progress indicator with detail panels
+- `<Terminal>` / `<Frame>` — animated terminal sessions (inline frames or `.cast` files)
+- VitePress `::: code-group` — tabbed code blocks for showing alternatives side-by-side
+- VitePress `::: info | tip | warning | details` — callout boxes
 
 ---
 
