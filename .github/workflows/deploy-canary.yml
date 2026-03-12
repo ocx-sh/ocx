@@ -124,6 +124,18 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Generate unreleased changelog
+        id: cliff
+        uses: orhun/git-cliff-action@c93ef52f3d0ddcdcc9bd5447d98d458a11cd4f72 # v4
+        with:
+          config: cliff.toml
+          args: --unreleased --strip header
+        env:
+          OUTPUT: UNRELEASED_CHANGES.md
       - name: Download Binaries
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
@@ -134,10 +146,21 @@ jobs:
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           tag_name: canary
-          name: Canary Snapshot
+          name: "Canary (main@${{ github.sha }})"
           body: |
-            Automated snapshot build from `main` branch.
-            Commit: ${{ github.sha }}
+            **Canary build from `main`**
+
+            | | |
+            |---|---|
+            | **Commit** | [`${{ github.sha }}`](https://github.com/ocx-sh/ocx/commit/${{ github.sha }}) |
+            | **Date** | ${{ github.event.head_commit.timestamp || github.event.repository.pushed_at }} |
+            | **Triggered by** | @${{ github.actor }} |
+
+            ---
+
+            ## Changes since last release
+
+            ${{ steps.cliff.outputs.content || 'No conventional commits since last release.' }}
           prerelease: true
           make_latest: false
           files: artifacts/ocx-*

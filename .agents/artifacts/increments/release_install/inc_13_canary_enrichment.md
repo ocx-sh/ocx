@@ -1,7 +1,7 @@
 # Increment 13: Enrich Canary Release Body with git-cliff
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-13
 **ADR Phase**: 6 (step 19)
 **Depends on**: Increment 02 (cliff.toml must exist)
 

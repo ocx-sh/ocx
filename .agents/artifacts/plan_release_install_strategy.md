@@ -97,7 +97,7 @@ After completing each increment:
 
 | # | Increment | File | Status |
 |---|-----------|------|--------|
-| 13 | Enrich canary release body with git-cliff | [inc_13_canary_enrichment.md](increments/release_install/inc_13_canary_enrichment.md) | Not Started |
+| 13 | Enrich canary release body with git-cliff | [inc_13_canary_enrichment.md](increments/release_install/inc_13_canary_enrichment.md) | Done |
 
 ### Stage 8: Documentation
 
