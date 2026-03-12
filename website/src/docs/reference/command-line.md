@@ -422,13 +422,13 @@ ocx package push [OPTIONS] <IDENTIFIER> <CONTENT>
 
 **Arguments**
 
-- `<IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1+20260216120000`.
+- `<IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000`.
 - `<CONTENT>`: Path to the package bundle (`.tar.xz`) to publish.
 
 **Options**
 
 - `-p`, `--platform <PLATFORM>`: Target platform of the package (required).
-- `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1+20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
+- `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the bundle.
 - `-h`, `--help`: Print help information.

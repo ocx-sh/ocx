@@ -305,7 +305,7 @@ ocx exec cmake:3.28 -- cmake --version
 ### Publish a new tool
 ```sh
 ocx package create ./dist -m metadata.json -o cmake-3.29.tar.xz -p linux/amd64
-ocx package push myregistry/cmake:3.29+build.1 cmake-3.29.tar.xz -p linux/amd64 --cascade
+ocx package push myregistry/cmake:3.29_build.1 cmake-3.29.tar.xz -p linux/amd64 --cascade
 ```
 
 ### Upgrade a package

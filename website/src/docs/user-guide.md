@@ -226,14 +226,20 @@ Rolling tags are a widespread pattern in container ecosystems — Docker [offici
 ocx follows a semver-inspired tag hierarchy where specificity signals intent:
 
 ```
-{major}[.{minor}[.{patch}[-{prerelease}][+{build}]]]
+{major}[.{minor}[.{patch}[-{prerelease}][_{build}]]]
 ```
 
-The `+build` suffix — typically a UTC timestamp like `+20260216120000` — signals that the publisher considers the tag final and does not intend to re-push it. It is a convention, not a guarantee enforced by the registry.
+The `_build` suffix — typically a UTC timestamp like `_20260216120000` — signals that the publisher considers the tag final and does not intend to re-push it. It is a convention, not a guarantee enforced by the registry.
+
+::: tip Why `_` instead of semver's `+`?
+The OCI Distribution Specification restricts tags to `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}` — the `+` character is not allowed. ocx uses `_` as the build separator so that every version string is a valid OCI tag by construction. This follows the same convention adopted by [Helm][helm-oci] for OCI-stored charts.
+
+If you type `+` out of habit (e.g., `cmake:3.28.1+20260216`), ocx accepts it and normalizes to `_` automatically. See [Build Separator][faq-build-separator] in the FAQ for the full rationale.
+:::
 
 | Tag | Publisher's intent | After index refresh |
 |---|---|---|
-| `cmake:3.28.1+20260216120000` | Do not re-push | Same build (by publisher convention) |
+| `cmake:3.28.1_20260216120000` | Do not re-push | Same build (by publisher convention) |
 | `cmake:3.28.1` | Rolling patch | Latest build of 3.28.1 |
 | `cmake:3.28` | Rolling minor | Latest 3.28.x build |
 | `cmake:3` | Rolling major | Latest stable 3.x build |
@@ -251,7 +257,7 @@ For absolute reproducibility without relying on any index, reference the digest 
 ### Cascades {#versioning-cascade}
 
 Publishers are expected to maintain the full tag hierarchy.
-When `cmake:3.28.1+20260216120000` is released, all rolling ancestors are re-pointed — but only if this is genuinely the latest at each specificity level:
+When `cmake:3.28.1_20260216120000` is released, all rolling ancestors are re-pointed — but only if this is genuinely the latest at each specificity level:
 
 ```
 cmake:latest                  ← rolling — updated
@@ -262,10 +268,10 @@ cmake:3.28                    ← rolling — updated
        ↓
 cmake:3.28.1                  ← rolling — updated
        ↓
-cmake:3.28.1+20260216120000   ← source of truth
+cmake:3.28.1_20260216120000   ← source of truth
 ```
 
-Publishing `cmake:3.27.5+20260217` would update `cmake:3.27` but not `cmake:3` or `cmake:latest` — the `3.28.x` series is still ahead.
+Publishing `cmake:3.27.5_20260217` would update `cmake:3.27` but not `cmake:3` or `cmake:latest` — the `3.28.x` series is still ahead.
 Rolling tags only advance, never regress.
 Note this is a convention, not a guarantee enforced by the registry — publishers must maintain the cascade manually.
 
@@ -273,7 +279,7 @@ Note this is a convention, not a guarantee enforced by the registry — publishe
 [`ocx package push --cascade`][cmd-package-push] handles the full cascade automatically: publish one build and let ocx re-point all rolling ancestors in a single command.
 :::
 ::: details Choosing a tag
-- **Auditable, specific** → `cmake:3.28.1+20260216120000`
+- **Auditable, specific** → `cmake:3.28.1_20260216120000`
 - **Stable with patch fixes** → `cmake:3.28.1` or `cmake:3.28`
 - **Follow active development** → `cmake:3` or `cmake:latest`
 :::
@@ -458,6 +464,7 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 [renovate]: https://docs.renovatebot.com/
 [terraform-lockfile]: https://developer.hashicorp.com/terraform/language/files/dependency-lock
 [docker-credential]: https://github.com/keirlawson/docker_credential
+[helm-oci]: https://helm.sh/docs/topics/registries/
 
 <!-- commands -->
 [cmd-clean]: ./reference/command-line.md#clean
@@ -490,3 +497,4 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 [versioning-tags]: #versioning-tags
 [auth-env-vars]: #authentication-environment-variables
 [auth-docker-creds]: #authentication-docker-credentials
+[faq-build-separator]: ./faq.md#versioning-build-separator

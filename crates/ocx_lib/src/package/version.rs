@@ -157,7 +157,7 @@ impl Version {
 
         static VERSION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(
-                r"^(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)(-([0-9a-zA-Z]+))?(\+([0-9a-zA-Z]+))?)?)?$",
+                r"^(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)(-([0-9a-zA-Z]+))?([_+]([0-9a-zA-Z]+))?)?)?$",
             )
             .expect("Invalid version regex!")
         });
@@ -300,7 +300,7 @@ impl std::fmt::Display for Version {
                     version.push_str(&format!("-{}", prerelease));
                 }
                 if let (Some(build), _) = rest {
-                    version.push_str(&format!("+{}", build));
+                    version.push_str(&format!("_{}", build));
                 }
             }
         }
@@ -406,9 +406,15 @@ mod tests {
         assert!(version.is_rolling());
         let version = Version::parse("1.2.3-alpha").unwrap();
         assert!(version.is_rolling());
+        let version = Version::parse("1.2.3_20260216").unwrap();
+        assert!(!version.is_rolling());
         let version = Version::parse("1.2.3+20260216").unwrap();
         assert!(!version.is_rolling());
+        assert_eq!(version.to_string(), "1.2.3_20260216");
         let version = Version::parse("1.2.3-alpha+20260216").unwrap();
+        assert!(!version.is_rolling());
+        assert_eq!(version.to_string(), "1.2.3-alpha_20260216");
+        let version = Version::parse("1.2.3-alpha_20260216").unwrap();
         assert!(!version.is_rolling());
     }
 
@@ -464,5 +470,39 @@ mod tests {
         assert!(!version.has_patch());
         assert!(!version.has_prerelease());
         assert!(!version.has_build());
+    }
+
+    #[test]
+    fn test_build_separator_normalization() {
+        // Underscore input
+        let v1 = Version::parse("1.2.3_build").unwrap();
+        assert_eq!(v1.to_string(), "1.2.3_build");
+
+        // Plus input normalizes to underscore
+        let v2 = Version::parse("1.2.3+build").unwrap();
+        assert_eq!(v2.to_string(), "1.2.3_build");
+
+        // Both parse to the same value
+        assert_eq!(v1, v2);
+
+        // With prerelease
+        let v3 = Version::parse("1.2.3-alpha_build").unwrap();
+        let v4 = Version::parse("1.2.3-alpha+build").unwrap();
+        assert_eq!(v3, v4);
+        assert_eq!(v3.to_string(), "1.2.3-alpha_build");
+        assert_eq!(v4.to_string(), "1.2.3-alpha_build");
+
+        // Round-trip
+        let v = Version::new_build(1, 2, 3, "b1");
+        assert_eq!(Version::parse(&v.to_string()), Some(v));
+    }
+
+    #[test]
+    fn test_version_display_uses_underscore() {
+        assert_eq!(Version::new_build(1, 2, 3, "b1").to_string(), "1.2.3_b1");
+        assert_eq!(
+            Version::new_prerelease_with_build(1, 2, 3, "alpha", "b1").to_string(),
+            "1.2.3-alpha_b1"
+        );
     }
 }

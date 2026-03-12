@@ -97,12 +97,12 @@ manifests into `data.write().manifests` to control what `fetch_manifest` returns
 
 | # | Test Name | Setup | Expected |
 |---|-----------|-------|----------|
-| 8 | `no_blockers_full_cascade_with_latest` | version `3.28.0+b1`, others = {}, all manifests empty | tags = [`3.28.0`, `3.28`, `3`, `latest`], is_latest = true |
-| 9 | `blocker_at_minor_lacks_platform_cascade_continues` | `3.28.1+b1` in others, manifest has `linux/arm64` only; pushing `linux/amd64` | tags includes `3.28` (cascade past blocker) |
-| 10 | `blocker_at_minor_has_platform_cascade_stops` | `3.28.1+b1` in others, manifest has `linux/amd64`; pushing `linux/amd64` | tags = [`3.28.0`] only |
-| 11 | `latest_blocked_by_higher_version_with_platform` | `4.0.0+b1` in others with `linux/amd64`; pushing `3.28.0+b1` for `linux/amd64` | All level tags but NOT `latest` |
-| 12 | `error_on_blocker_stops_cascade_with_warning` | Blocker `3.28.1+b1` has no manifest in stub | tags stop at `3.28.0`, `Err` triggers `warn!` in resolve |
-| 13 | `error_on_latest_blocker_skips_latest` | All levels clear, but latest blocker `4.0.0+b1` has no manifest | tags = [`3.28.0`, `3.28`, `3`] but NOT `latest` |
+| 8 | `no_blockers_full_cascade_with_latest` | version `3.28.0_b1`, others = {}, all manifests empty | tags = [`3.28.0`, `3.28`, `3`, `latest`], is_latest = true |
+| 9 | `blocker_at_minor_lacks_platform_cascade_continues` | `3.28.1_b1` in others, manifest has `linux/arm64` only; pushing `linux/amd64` | tags includes `3.28` (cascade past blocker) |
+| 10 | `blocker_at_minor_has_platform_cascade_stops` | `3.28.1_b1` in others, manifest has `linux/amd64`; pushing `linux/amd64` | tags = [`3.28.0`] only |
+| 11 | `latest_blocked_by_higher_version_with_platform` | `4.0.0_b1` in others with `linux/amd64`; pushing `3.28.0_b1` for `linux/amd64` | All level tags but NOT `latest` |
+| 12 | `error_on_blocker_stops_cascade_with_warning` | Blocker `3.28.1_b1` has no manifest in stub | tags stop at `3.28.0`, `Err` triggers `warn!` in resolve |
+| 13 | `error_on_latest_blocker_skips_latest` | All levels clear, but latest blocker `4.0.0_b1` has no manifest | tags = [`3.28.0`, `3.28`, `3`] but NOT `latest` |
 
 **Files:** `crates/ocx_lib/src/package/cascade.rs` (add `#[cfg(test)]` async tests)
 
@@ -175,9 +175,9 @@ Ok((blob, digest_str)) => {
 
 | # | Test Name | Scenario |
 |---|-----------|----------|
-| 18 | `rolling_tags_in_others_dont_self_block` | version `3.28.0+b1`, others = {`3.28.0`, `3.28`, `3`} → no blockers |
-| 19 | `old_version_blocked_by_newer_at_minor` | version `3.27.0+b1`, others = {`3.28.0+b1`} → cascade stops at `3` |
-| 20 | `self_in_others_doesnt_self_block` | version `3.28.0+b1`, others = {`3.28.0+b1`} → Excluded bound prevents self-block |
+| 18 | `rolling_tags_in_others_dont_self_block` | version `3.28.0_b1`, others = {`3.28.0`, `3.28`, `3`} → no blockers |
+| 19 | `old_version_blocked_by_newer_at_minor` | version `3.27.0_b1`, others = {`3.28.0_b1`} → cascade stops at `3` |
+| 20 | `self_in_others_doesnt_self_block` | version `3.28.0_b1`, others = {`3.28.0_b1`} → Excluded bound prevents self-block |
 | 21 | `patch_without_build_cascades` | version `3.28.1` (patch) → cascades to `3.28`, `3`, `latest` |
 | 22 | `minor_version_cascades` | version `3.28` (minor) → cascades to `3`, `latest` |
 

@@ -108,10 +108,10 @@ This is optimal:
 In `BTreeSet<Version>`, ordering places rolling versions GREATER than their children:
 
 ```
-3.28 > 3.28.2 > 3.28.2+b1 > 3.28.1 > 3.28.1+b1 > 3.27 > ...
+3.28 > 3.28.2 > 3.28.2_b1 > 3.28.1 > 3.28.1_b1 > 3.27 > ...
 ```
 
-The parent chain walks: `3.28.1+b1 → 3.28.1 → 3.28 → 3 → (top)`.
+The parent chain walks: `3.28.1_b1 → 3.28.1 → 3.28 → 3 → (top)`.
 
 At each level, the blocking range is `(current, parent)` in BTreeSet order. At the top level (no parent), the range is `(current, ∞)` — blockers here affect `is_latest`.
 
