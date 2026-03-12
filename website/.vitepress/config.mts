@@ -53,6 +53,7 @@ export default defineConfig({
           items: [
             { text: "Command Line", link: "/docs/reference/command-line" },
             { text: "Environment", link: "/docs/reference/environment" },
+            { text: "Metadata", link: "/docs/reference/metadata" },
           ],
         }
       ],

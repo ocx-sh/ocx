@@ -9,3 +9,4 @@ yarn-error.log*
 .vitepress/dist
 .task/
 src/public/casts
+src/public/schemas

@@ -6,7 +6,12 @@ use serde::{Deserialize, Serialize};
 pub mod bundle;
 pub mod env;
 
+/// OCX package metadata.
+///
+/// Declares a package's type, version, extraction options, and environment variables.
+/// Currently only the `bundle` type is supported.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Metadata {
     Bundle(bundle::Bundle),

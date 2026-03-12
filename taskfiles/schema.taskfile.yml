@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/metadata"
+
+tasks:
+  generate:
+    desc: Generate JSON Schema for metadata.json
+    cmds:
+      - mkdir -p {{.SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release > {{.SCHEMA_DIR}}/v1.json
+
+  default:
+    desc: Generate all schemas
+    cmds:
+      - task: generate

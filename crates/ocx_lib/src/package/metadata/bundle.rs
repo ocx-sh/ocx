@@ -13,7 +13,27 @@ pub enum Version {
     V1 = 1,
 }
 
+#[cfg(feature = "jsonschema")]
+impl schemars::JsonSchema for Version {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Version")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "description": "Bundle metadata format version. Currently only version 1 is supported.",
+            "enum": [1]
+        })
+    }
+}
+
+/// Bundle package metadata.
+///
+/// Declares the format version, optional extraction options, and environment variables
+/// that OCX should expose when running commands with this package.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct Bundle {
     /// The version of the bundle metadata format.

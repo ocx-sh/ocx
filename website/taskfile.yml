@@ -14,7 +14,10 @@ tasks:
   build:
     deps:
       - install
-    cmd: bunx vitepress build
+    cmds:
+      - task: :schema:generate
+      - task: :recordings:build
+      - bunx vitepress build
 
   deploy:
     desc: Deploy site via rsync

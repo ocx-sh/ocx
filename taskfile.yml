@@ -5,6 +5,7 @@ version: '3'
 includes:
   coverage: ./taskfiles/coverage.taskfile.yml
   recordings: ./taskfiles/recordings.taskfile.yml
+  schema: ./taskfiles/schema.taskfile.yml
   format: ./taskfiles/format.taskfile.yml
   clippy: ./taskfiles/clippy.taskfile.yml
   test:

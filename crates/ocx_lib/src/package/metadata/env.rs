@@ -70,6 +70,18 @@ impl<'de> Deserialize<'de> for Env {
     }
 }
 
+#[cfg(feature = "jsonschema")]
+impl schemars::JsonSchema for Env {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Env")
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Env serializes as a flat array of Var objects
+        <Vec<var::Var>>::json_schema(generator)
+    }
+}
+
 pub struct EnvBuilder {
     variables: Vec<var::Var>,
 }
