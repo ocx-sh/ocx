@@ -22,4 +22,4 @@ pr-run-mode = "skip"
 # Plan jobs to run in CI
 plan-jobs = ["./verify-version"]
 # Post-announce jobs to run in CI
-post-announce-jobs = ["./publish-to-registry"]
+post-announce-jobs = ["./post-release-oci-publish"]
