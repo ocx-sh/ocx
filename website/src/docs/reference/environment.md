@@ -115,8 +115,8 @@ If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) 
 
 ### `OCX_NO_UPDATE_CHECK` {#ocx-no-update-check}
 
-When set to a [truthy value](#truthy-values), OCX will not check the local index for newer versions on CLI startup.
-By default, OCX prints a notice to stderr if a newer version is available in the [local index][fs-index].
+When set to a [truthy value](#truthy-values), OCX will not check the remote registry for newer versions on CLI startup.
+By default, OCX prints a notice to stderr if a newer version is available in the remote registry.
 
 The update check is also automatically suppressed when:
 - `CI` is set to a truthy value

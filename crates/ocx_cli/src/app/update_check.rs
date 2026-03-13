@@ -40,9 +40,6 @@ pub async fn check_for_update(ctx: &Context) {
             log::error!("Update check failed: {err}");
         }
     }
-    if let Err(reason) = try_check_for_update(ctx).await {
-        log::debug!("Update check skipped: {reason}");
-    }
 }
 
 async fn try_check_for_update(ctx: &Context) -> Result<UpdateCheckResult, Error> {

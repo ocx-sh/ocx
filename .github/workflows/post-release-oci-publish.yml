@@ -15,6 +15,7 @@ jobs:
     # Skip registry publish for pre-release tags (e.g. v0.6.0-canary.1)
     if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-22.04
+    environment: ocx.sh
     steps:
       - uses: actions/checkout@v6
         with:
@@ -37,8 +38,8 @@ jobs:
 
       - name: Repackage and publish to registry
         env:
-          OCX_AUTH_OCX_SH_USERNAME: ${{ secrets.OCX_REGISTRY_USERNAME }}
-          OCX_AUTH_OCX_SH_PASSWORD: ${{ secrets.OCX_REGISTRY_PASSWORD }}
+          OCX_AUTH_ocx_sh_USER: ${{ secrets.REGISTRY_USER }}
+          OCX_AUTH_ocx_sh_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
 
