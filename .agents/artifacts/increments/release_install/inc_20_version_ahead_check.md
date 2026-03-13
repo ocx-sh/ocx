@@ -1,7 +1,8 @@
 # Increment 20: Version-Ahead-of-Release CI Check
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Removed
+**Completed**: 2026-03-13
+**Removed**: 2026-03-13
 **ADR Phase**: 9 (step 26)
 **Depends on**: Increment 01 (version in Cargo.toml), Increment 12 (version bump PR exists)
 
@@ -53,7 +54,15 @@ Only runs on `main` branch (not on PRs or feature branches) since the version bu
 
 - `.github/workflows/verify-basic.yml` (add step)
 
-## Notes
+## Removal Rationale
+
+This increment was removed together with Increment 12 (post-release version bump).
+The version-ahead warning only existed to catch "forgot to merge the version bump PR" —
+once the post-release bump is removed (because `release:prepare` handles versioning at
+release time), this warning has no purpose. See Increment 12's removal rationale for
+the full reasoning.
+
+## Original Notes
 
 - Requires `fetch-depth: 0` (or at least enough depth to find the latest tag) in the checkout step.
 - `jq` is available by default on GitHub Actions runners.

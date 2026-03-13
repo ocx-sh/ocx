@@ -2,7 +2,7 @@
 
 **ADR**: `adr_release_install_strategy.md`
 **Created**: 2026-03-12
-**Status**: Not Started
+**Status**: Done
 
 ---
 
@@ -91,7 +91,7 @@ After completing each increment:
 |---|-----------|------|--------|
 | 10 | cargo-dist initialization + base release workflow | [inc_10_cargo_dist_init.md](increments/release_install/inc_10_cargo_dist_init.md) | Done |
 | 11 | Release notes + version verification in release workflow | [inc_11_release_notes.md](increments/release_install/inc_11_release_notes.md) | Done |
-| 12 | Post-release version bump PR automation | [inc_12_version_bump_pr.md](increments/release_install/inc_12_version_bump_pr.md) | Done |
+| 12 | ~~Post-release version bump PR automation~~ | [inc_12_version_bump_pr.md](increments/release_install/inc_12_version_bump_pr.md) | Removed |
 
 ### Stage 7: Canary & Verification Pipeline
 
@@ -119,7 +119,7 @@ After completing each increment:
 
 | # | Increment | File | Status |
 |---|-----------|------|--------|
-| 20 | Version-ahead-of-release CI check | [inc_20_version_ahead_check.md](increments/release_install/inc_20_version_ahead_check.md) | Not Started |
+| 20 | ~~Version-ahead-of-release CI check~~ | [inc_20_version_ahead_check.md](increments/release_install/inc_20_version_ahead_check.md) | Removed |
 
 ---
 
