@@ -106,7 +106,7 @@ After completing each increment:
 | # | Increment | File | Status |
 |---|-----------|------|--------|
 | 14 | Installation page (website) + README update | [inc_14_installation_docs.md](increments/release_install/inc_14_installation_docs.md) | Done |
-| 15 | Website auto-deploy on release trigger | [inc_15_website_auto_deploy.md](increments/release_install/inc_15_website_auto_deploy.md) | Not Started |
+| 15 | Website auto-deploy on release trigger | [inc_15_website_auto_deploy.md](increments/release_install/inc_15_website_auto_deploy.md) | Done |
 
 ### Stage 9: Self-Management
 

@@ -1,7 +1,7 @@
 # Increment 15: Website Auto-Deploy on Release Trigger
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-13
 **ADR Phase**: 7 (step 22)
 **Depends on**: Increment 06 (website changelog page), Increment 10 (release workflow)
 
