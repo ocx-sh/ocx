@@ -239,6 +239,8 @@
       "WebFetch(domain:react.dev)",
       "WebFetch(domain:nextjs.org)",
       "WebFetch(domain:typescriptlang.org)",
+      "WebFetch(domain:reka-ui.com)",
+      "WebFetch(domain:npmjs.com)",
       
       "// === WebFetch: General Tooling ===",
       "WebFetch(domain:nodejs.org)",

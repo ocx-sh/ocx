@@ -8,7 +8,7 @@ import {
   StepperSeparator,
   StepperTitle,
   StepperTrigger,
-} from 'radix-vue'
+} from 'reka-ui'
 
 export interface Step {
   title: string
