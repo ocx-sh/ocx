@@ -22,11 +22,11 @@ Mark items with `[x]` as they are verified. Add notes in the `Notes` column or b
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| P1 | `goat` branch merged to `main` | `[ ]` | |
-| P2 | GitHub secret `OCX_REGISTRY_USERNAME` configured | `[ ]` | |
-| P3 | GitHub secret `OCX_REGISTRY_PASSWORD` configured | `[ ]` | |
-| P4 | `task verify` passes on `main` | `[ ]` | |
-| P5 | `dist generate-ci` regenerates `release.yml` cleanly | `[ ]` | Run `dist generate-ci` and verify no diff (or only expected diff) |
+| P1 | `goat` branch merged to `main` | `[x]` | |
+| P2 | GitHub secret `OCX_REGISTRY_USERNAME` configured | `[x]` | |
+| P3 | GitHub secret `OCX_REGISTRY_PASSWORD` configured | `[x]` | |
+| P4 | `task verify` passes on `main` | `[x]` | |
+| P5 | `dist generate-ci` regenerates `release.yml` cleanly | `[x]` | Run `dist generate-ci` and verify no diff (or only expected diff) |
 
 ---
 
