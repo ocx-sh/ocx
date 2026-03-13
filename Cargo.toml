@@ -5,6 +5,9 @@ members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_mirror", "crates/ocx_
 [workspace.package]
 version = "0.0.0"
 license = "Apache-2.0"
+description = "The simple package manager"
+repository = "https://github.com/ocx-sh/ocx"
+homepage = "https://ocx.sh"
 
 [patch.crates-io]
 oci-client = { path = "external/rust-oci-client" }

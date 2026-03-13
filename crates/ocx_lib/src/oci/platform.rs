@@ -333,6 +333,7 @@ impl From<Platform> for native::Platform {
     }
 }
 
+#[allow(dead_code)]
 fn oci_platform_is_any(platform: &native::Platform) -> bool {
     if let (native::Os::Other(os), native::Arch::Other(arch)) = (&platform.os, &platform.architecture) {
         os == ANY_STR

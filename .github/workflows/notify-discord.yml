@@ -32,11 +32,14 @@ jobs:
     name: Discord
     runs-on: ubuntu-latest
     if: >-
+      secrets.DISCORD_WEBHOOK != '' &&
+      (
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
       github.event_name == 'release' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure') ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Deploy Website' && github.event.workflow_run.conclusion == 'success')
+      )
     steps:
       # --- Push to main ---
       - name: Push to main

@@ -33,6 +33,7 @@ impl Snapshot {
         versions
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_manifest(&mut self, tag: String, digest: oci::Digest, manifest: oci::Manifest) {
         match manifest {
             oci::Manifest::Image(_) => {
@@ -60,10 +61,12 @@ impl Snapshot {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_entry(&mut self, tag: String, entry: SnapshotEntry) {
         self.entries.entry(tag).or_default().push(entry);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_entry_list(&mut self, tag: String, entries: Vec<SnapshotEntry>) {
         self.entries.entry(tag).or_default().extend(entries);
     }

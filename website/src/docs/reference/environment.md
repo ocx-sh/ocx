@@ -37,7 +37,7 @@ The authentication type for the registry.
 Valid values are:
 
 - `basic`
-- `bearer`
+- `token` (or `bearer`)
 - `anonymous`
 
 ### `OCX_AUTH_<REGISTRY>_USER` {#ocx-auth-registry-user}
@@ -60,8 +60,8 @@ The default registry to use when no registry is specified in a package reference
 If not set, OCX will default to `ocx.sh`.
 
 ::: warning
-Thus this variable is mostly intended for testing.
-It is recommended to specify the registry explicitly or use [mirrors](../user-guide.md#mirrors).
+This variable is mostly intended for testing.
+It is recommended to specify the registry explicitly in the package reference.
 :::
 
 ### `OCX_HOME` {#ocx-home}

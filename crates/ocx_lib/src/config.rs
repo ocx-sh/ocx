@@ -4,6 +4,7 @@
 use crate::{ErrorExt, Result};
 use serde::Deserialize;
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Config {
@@ -11,6 +12,7 @@ pub struct Config {
     pub registries: Vec<RegistryConfig>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RegistryConfig {
@@ -26,12 +28,14 @@ pub struct RegistryConfig {
     pub auth: Option<AuthenticationConfig>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthenticationConfig {
     Env(AuthenticationConfigByEnv),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(untagged, rename_all = "snake_case")]
 pub enum AuthenticationConfigByEnv {
@@ -39,6 +43,7 @@ pub enum AuthenticationConfigByEnv {
     Bearer { token: String },
 }
 
+#[allow(dead_code)]
 impl Config {
     pub fn merge(&mut self, other: Config) {
         self.registries.extend(other.registries);

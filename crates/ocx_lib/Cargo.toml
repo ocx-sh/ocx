@@ -3,6 +3,7 @@ name = "ocx_lib"
 version.workspace = true
 edition = "2024"
 license.workspace = true
+publish = false
 exclude = ["src/test_data/**"]
 
 [features]

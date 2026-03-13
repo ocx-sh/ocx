@@ -8,11 +8,6 @@
 #   curl -fsSL https://ocx.sh/install.sh | sh -s -- --no-modify-path
 #   curl -fsSL https://ocx.sh/install.sh | sh -s -- --version 0.5.0
 #
-# Future enhancements (not yet implemented):
-#   - Download retry with backoff
-#   - GPG/cosign signature verification
-#   - --install-dir flag for custom install location
-#   - --force / -y flag for non-interactive mode
 
 set -eu
 

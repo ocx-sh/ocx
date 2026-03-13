@@ -92,6 +92,7 @@ impl Context {
         self.remote_index.as_ref().ok_or(ocx_lib::Error::OfflineMode)
     }
 
+    #[allow(dead_code)]
     pub fn local_index(&self) -> &oci::index::LocalIndex {
         &self.local_index
     }
@@ -121,6 +122,7 @@ impl Context {
     }
 }
 
+#[allow(dead_code)]
 fn default_offline_mode() -> bool {
     ocx_lib::env::flag("OCX_OFFLINE", false)
 }

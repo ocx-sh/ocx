@@ -97,7 +97,7 @@ impl std::fmt::Display for Error {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Error::PlatformUnsupported(detail) => write!(f, "Unsupported platform oci platform: {}", detail),
+            Error::PlatformUnsupported(detail) => write!(f, "Unsupported OCI platform: {}", detail),
 
             Error::PackageVersionInvalid(version) => write!(f, "Invalid package version: {}", version),
             Error::PackageDigestInvalid(digest) => write!(f, "Invalid package digest: {}", digest),
