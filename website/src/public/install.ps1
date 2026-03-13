@@ -187,7 +187,7 @@ if ($env:PATH -notlike "*$_OcxBin*") {
 }
 $_OcxExe = Join-Path $_OcxBin 'ocx.exe'
 if (Test-Path $_OcxExe) {
-    try { & $_OcxExe shell completion --shell powershell 2>$null | Invoke-Expression } catch {}
+    try { & $_OcxExe --offline shell completion --shell powershell 2>$null | Invoke-Expression } catch {}
 }
 Remove-Variable _OcxHome, _OcxBin, _OcxExe -ErrorAction SilentlyContinue
 '@
@@ -373,12 +373,13 @@ function Main {
             Warn 'The new install may be shadowed — check your PATH order.'
         }
 
-        # Install binary into OCX directory structure
-        $installDir = Join-Path $ocxHome 'installs\ocx.sh\ocx\current\bin'
-        if (-not (Test-Path $installDir)) {
-            New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+        # Bootstrap: OCX installs itself into its own package store
+        Say 'Bootstrapping OCX into its own package store...'
+        & $bin install "ocx:$requestedVersion" --select
+        if ($LASTEXITCODE -ne 0) {
+            Err "Bootstrap failed: 'ocx install ocx:$requestedVersion --select'`nEnsure ocx v$requestedVersion is published to the ocx.sh registry."
         }
-        Copy-Item -Path $bin -Destination (Join-Path $installDir 'ocx.exe') -Force
+        $installDir = Join-Path $ocxHome 'installs\ocx.sh\ocx\current\bin'
         Say "Installed to $installDir\ocx.exe"
 
         # Create environment file

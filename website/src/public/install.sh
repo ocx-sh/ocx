@@ -327,7 +327,7 @@ _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 export PATH="${_ocx_home}/installs/ocx.sh/ocx/current/bin:$PATH"
 _ocx_bin="${_ocx_home}/installs/ocx.sh/ocx/current/bin/ocx"
 if [ -x "$_ocx_bin" ]; then
-  eval "$("$_ocx_bin" shell completion 2>/dev/null)" 2>/dev/null || true
+  eval "$("$_ocx_bin" --offline shell completion 2>/dev/null)" 2>/dev/null || true
 fi
 unset _ocx_home _ocx_bin
 ENVEOF
@@ -345,7 +345,7 @@ set -l _ocx_home (set -q OCX_HOME; and echo $OCX_HOME; or echo $HOME/.ocx)
 fish_add_path --path "$_ocx_home/installs/ocx.sh/ocx/current/bin"
 set -l _ocx_bin "$_ocx_home/installs/ocx.sh/ocx/current/bin/ocx"
 if test -x "$_ocx_bin"
-  "$_ocx_bin" shell completion --shell fish 2>/dev/null | source
+  "$_ocx_bin" --offline shell completion --shell fish 2>/dev/null | source
 end
 FISHEOF
 }
@@ -420,17 +420,18 @@ modify_shell_profile() {
     say "Added OCX to $(tildify "$_profile")"
 }
 
-# --- Binary installation ---
+# --- Bootstrap: OCX installs itself ---
 
-install_binary() {
-    local _bin_src="$1" _install_dir _ocx_home
+bootstrap_ocx() {
+    local _bin="$1" _version="$2"
 
-    _ocx_home="${OCX_HOME:-$HOME/.ocx}"
-    _install_dir="${_ocx_home}/installs/ocx.sh/ocx/current/bin"
-
-    ensure mkdir -p "$_install_dir"
-    ensure cp "$_bin_src" "$_install_dir/ocx"
-    ensure chmod +x "$_install_dir/ocx"
+    say "Bootstrapping OCX into its own package store..."
+    if ! "$_bin" install "ocx:$_version" --select; then
+        err "bootstrap failed: 'ocx install ocx:$_version --select'
+  Ensure ocx v${_version} is published to the ocx.sh registry.
+  If this is a first install and the registry is not yet populated,
+  please wait for the release pipeline to complete."
+    fi
 }
 
 # --- Success message ---
@@ -604,8 +605,8 @@ main() {
         esac
     fi
 
-    # Install binary into OCX directory structure
-    install_binary "$_bin"
+    # Bootstrap: OCX installs itself into its own package store
+    bootstrap_ocx "$_bin" "$_version"
     say "Installed to $(tildify "${_ocx_home}/installs/ocx.sh/ocx/current/bin/ocx")"
 
     # Create shell environment files
