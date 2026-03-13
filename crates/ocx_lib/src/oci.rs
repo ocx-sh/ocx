@@ -49,6 +49,7 @@ pub mod manifest;
 pub mod identifier;
 pub use identifier::DEFAULT_REGISTRY;
 pub use identifier::Identifier;
+pub use identifier::OCX_SH_REGISTRY;
 
 mod platform;
 pub use platform::Platform;
