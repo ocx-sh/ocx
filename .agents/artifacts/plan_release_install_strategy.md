@@ -113,7 +113,7 @@ After completing each increment:
 | # | Increment | File | Status |
 |---|-----------|------|--------|
 | 16 | Update check notification + OCX_NO_UPDATE_CHECK | [inc_16_update_check.md](increments/release_install/inc_16_update_check.md) | Done |
-| 17 | Publish OCX to own registry (CI job + metadata) | [inc_17_publish_to_registry.md](increments/release_install/inc_17_publish_to_registry.md) | Not Started |
+| 17 | Publish OCX to own registry (CI job + metadata) | [inc_17_publish_to_registry.md](increments/release_install/inc_17_publish_to_registry.md) | Done |
 
 ### Stage 10: CI Hardening
 
