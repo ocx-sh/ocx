@@ -16,6 +16,8 @@ pub use context_options::ContextOptions;
 mod log_settings;
 pub use log_settings::LogSettings;
 
+mod update_check;
+
 mod version;
 pub use version::version;
 
@@ -40,6 +42,9 @@ impl App {
     pub async fn run(self) -> anyhow::Result<ExitCode> {
         let cli = Cli::parse();
         let context = Context::try_init(&cli.context).await?;
+        if should_check_for_update(&cli.command) {
+            update_check::check_for_update(&context).await;
+        }
         match &cli.command {
             Some(command) => command.execute(context).await,
             None => {
@@ -48,6 +53,18 @@ impl App {
             }
         }
     }
+}
+
+/// Skip the update check for commands that only print static info.
+fn should_check_for_update(command: &Option<command::Command>) -> bool {
+    !matches!(
+        command,
+        Some(
+            command::Command::Version(_)
+                | command::Command::Info(_)
+                | command::Command::Shell(command::shell::Shell::Completion(_))
+        )
+    )
 }
 
 pub async fn run() -> anyhow::Result<ExitCode> {

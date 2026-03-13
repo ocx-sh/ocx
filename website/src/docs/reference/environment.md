@@ -113,6 +113,17 @@ For more information on log levels, see the [command line reference](command-lin
 Similar to [`OCX_LOG`](#ocx-log), but specifically for configuring the log level of messages emitted to the console.
 If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) for console messages.
 
+### `OCX_NO_UPDATE_CHECK` {#ocx-no-update-check}
+
+When set to a [truthy value](#truthy-values), OCX will not check the local index for newer versions on CLI startup.
+By default, OCX prints a notice to stderr if a newer version is available in the [local index][fs-index].
+
+The update check is also automatically suppressed when:
+- `CI` is set to a truthy value
+- [`OCX_OFFLINE`](#ocx-offline) is set to a truthy value (or `--offline` flag)
+- stderr is not a terminal (e.g., piped or redirected)
+- the command is `version`, `info`, or `shell completion`
+
 ### `OCX_NO_MODIFY_PATH` {#ocx-no-modify-path}
 
 When set to a [truthy value](#truthy-values), the install scripts (`install.sh` and `install.ps1`) will skip modifying shell profile files.

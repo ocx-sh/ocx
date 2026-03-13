@@ -77,6 +77,8 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 | `OCX_INSECURE_REGISTRIES` | Comma-separated HTTP-only registries | (empty) |
 | `OCX_OFFLINE` | Offline mode flag | false |
 | `OCX_REMOTE` | Use remote index directly | false |
+| `OCX_NO_UPDATE_CHECK` | Disable update check notification | false |
+| `OCX_NO_MODIFY_PATH` | Disable shell profile modification during install | false |
 
 ## Acceptance Test Structure
 

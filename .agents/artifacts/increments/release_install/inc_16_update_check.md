@@ -1,7 +1,7 @@
 # Increment 16: Update Check Notification + OCX_NO_UPDATE_CHECK
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-13
 **ADR Phase**: 8 (steps 23-24)
 **Depends on**: Increment 01 (shared version utility)
 

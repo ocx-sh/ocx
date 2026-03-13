@@ -181,6 +181,14 @@ pub fn flag(key: impl AsRef<str>, default: bool) -> bool {
     }
 }
 
+/// Returns `true` when running in a CI environment.
+///
+/// Checks the `CI` environment variable, which is set by GitHub Actions, GitLab CI,
+/// CircleCI, Travis CI, Jenkins, and most other CI providers.
+pub fn is_ci() -> bool {
+    flag("CI", false)
+}
+
 pub fn string(key: impl AsRef<str>, default: String) -> String {
     if let Some(value) = var(key) {
         if value.is_empty() { default } else { value }

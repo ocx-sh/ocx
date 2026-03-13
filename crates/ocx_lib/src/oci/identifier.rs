@@ -9,8 +9,7 @@ use error::{IdentifierError, IdentifierErrorKind};
 
 use super::{Digest, native};
 
-const OCX_SH_REGISTRY: &str = "ocx.sh";
-
+pub const OCX_SH_REGISTRY: &str = "ocx.sh";
 pub const DEFAULT_REGISTRY: &str = OCX_SH_REGISTRY;
 
 const MAX_REPOSITORY_LENGTH: usize = 255;
