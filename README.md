@@ -6,9 +6,6 @@
 
 **The Simple Package Manager**
 
-A fast, cross-platform binary package manager built on OCI registries.
-Turn Docker Hub, GHCR, or any OCI-compliant registry into a binary distribution platform — zero extra infrastructure.
-
 [![CI][ci-badge]][ci]
 [![License][license-badge]][license]
 [![Website][website-badge]][website]
