@@ -113,6 +113,13 @@ For more information on log levels, see the [command line reference](command-lin
 Similar to [`OCX_LOG`](#ocx-log), but specifically for configuring the log level of messages emitted to the console.
 If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) for console messages.
 
+### `OCX_NO_MODIFY_PATH` {#ocx-no-modify-path}
+
+When set to a [truthy value](#truthy-values), the install scripts (`install.sh` and `install.ps1`) will skip modifying shell profile files.
+Use this in CI environments or when you manage your `PATH` manually.
+
+The command line option `--no-modify-path` on the install scripts has the same effect.
+
 ### `OCX_DISABLE_CODESIGN` {#ocx-disable-codesign}
 
 When set to a [truthy value](#truthy-values), OCX will skip ad-hoc code signing of macOS binaries after installation.

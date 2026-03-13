@@ -19,6 +19,18 @@
 [license]: LICENSE
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
 
+## Installation
+
+```sh
+# macOS / Linux
+curl -fsSL https://ocx.sh/install.sh | sh
+
+# Windows (PowerShell)
+irm https://ocx.sh/install.ps1 | iex
+```
+
+See the [installation guide](https://ocx.sh/docs/installation) for all options including manual downloads and updating.
+
 ## Development
 
 **Prerequisites** — install these tools before running tasks:

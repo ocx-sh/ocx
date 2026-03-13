@@ -1,7 +1,7 @@
 # Increment 14: Installation Page (Website) + README Update
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-13
 **ADR Phase**: 7 (steps 20-21)
 **Depends on**: Increments 07+08 (install scripts exist), Increment 10 (release pipeline exists)
 
