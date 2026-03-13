@@ -4,20 +4,38 @@
 
 # ocx
 
-**🚀 The Simple Package Manager 🦄**
+**The Simple Package Manager**
 
-[![DevContainer][devcontainer-badge]][devcontainer]
-[![Website][website-badge]][website]
+A fast, cross-platform binary package manager built on OCI registries.
+Turn Docker Hub, GHCR, or any OCI-compliant registry into a binary distribution platform — zero extra infrastructure.
+
+[![CI][ci-badge]][ci]
 [![License][license-badge]][license]
+[![Website][website-badge]][website]
+[![Discord][discord-badge]][discord]
 
 </div>
 
-[devcontainer]: https://code.visualstudio.com/docs/devcontainers/containers
-[devcontainer-badge]: https://img.shields.io/static/v1?label=&message=DevContainer&logo=developmentcontainers&color=565C5E&logoColor=FFFFFF&labelColor=028FC3
-[website]: https://ocx.sh
-[website-badge]: https://img.shields.io/static/v1?label=&message=Website&logo=vitepress&color=565C5E&logoColor=FFFFFF&labelColor=B70032
-[license]: LICENSE
-[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
+Install pre-built tools with a single command, switch versions instantly, and run with clean environments. Designed as a backend for GitHub Actions, Bazel rules, and CI/CD pipelines.
+
+## Quick Start
+
+```sh
+# Install ocx
+curl -fsSL https://ocx.sh/install.sh | sh
+
+# Install a package
+ocx install cmake:3.28
+
+# Run with a clean environment
+ocx exec cmake:3.28 -- cmake --version
+
+# Switch versions
+ocx install cmake:3.29 --select
+ocx select cmake:3.28    # switch back
+```
+
+See the [Getting Started guide][getting-started] for more.
 
 ## Installation
 
@@ -29,37 +47,51 @@ curl -fsSL https://ocx.sh/install.sh | sh
 irm https://ocx.sh/install.ps1 | iex
 ```
 
-See the [installation guide](https://ocx.sh/docs/installation) for all options including manual downloads and updating.
+See the [installation guide][installation] for all options including manual downloads and updating.
+
+## Documentation
+
+- [User Guide][user-guide] — architecture, versioning, locking, authentication
+- [Command Reference][command-line] — all commands, flags, and options
+- [FAQ][faq] — platform-specific behavior, design decisions
 
 ## Development
 
-**Prerequisites** — install these tools before running tasks:
-
-| Tool | Purpose | Install |
-|------|---------|---------|
-| [Rust](https://rustup.rs) | Build toolchain | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| [task](https://taskfile.dev/installation/) | Task runner | `cargo install go-task` or see [docs](https://taskfile.dev/installation/) |
-| [Docker](https://docs.docker.com/get-docker/) | Acceptance test registry | Platform installer |
-| [uv](https://docs.astral.sh/uv/getting-started/installation/) | Python toolchain for tests | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| [Node.js](https://nodejs.org/) + [bun](https://bun.sh) | Website (VitePress) | `nvm install --lts` + `npm install -g bun` or see [bun docs](https://bun.sh/docs/installation) |
-
-The following tools are installed automatically by `task` on first use:
-
-| Tool | Purpose |
-|------|---------|
-| [cargo-nextest](https://nexte.st) | Fast Rust test runner |
-| [hawkeye](https://github.com/korandder/hawkeye) | SPDX license header checks |
-| [cargo-deny](https://embarkstudios.github.io/cargo-deny/) | Dependency license auditing |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. Quick start:
 
 ```sh
-task                    # check: fmt + clippy + cargo check
-task build              # release binary
-task test:unit          # unit tests
-task test               # acceptance tests (requires Docker)
-task license:check      # verify SPDX headers (auto-installs hawkeye)
-task license:deps       # audit dependency licenses (auto-installs cargo-deny)
+git clone --recurse-submodules https://github.com/ocx-sh/ocx.git
+cd ocx
+task              # check: fmt + clippy + cargo check
+task test         # acceptance tests (requires Docker)
+task verify       # full verification suite
 ```
+
+**Prerequisites:** [Rust](https://rustup.rs), [task](https://taskfile.dev), [Docker](https://docs.docker.com/get-docker/), [uv](https://docs.astral.sh/uv/)
+
+## Community
+
+- [Discord][discord]
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security Policy](SECURITY.md)
 
 ## License
 
 OCX is licensed under the [Apache License, Version 2.0][license].
+
+<!-- badges -->
+[ci]: https://github.com/ocx-sh/ocx/actions/workflows/verify-basic.yml
+[ci-badge]: https://github.com/ocx-sh/ocx/actions/workflows/verify-basic.yml/badge.svg
+[license]: LICENSE
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
+[website]: https://ocx.sh
+[website-badge]: https://img.shields.io/badge/docs-ocx.sh-B70032
+[discord]: https://discord.gg/BuRhhAYy9r
+[discord-badge]: https://img.shields.io/badge/chat-discord-5865F2?logo=discord&logoColor=white
+
+<!-- docs -->
+[getting-started]: https://ocx.sh/docs/getting-started
+[installation]: https://ocx.sh/docs/installation
+[user-guide]: https://ocx.sh/docs/user-guide
+[command-line]: https://ocx.sh/docs/reference/command-line
+[faq]: https://ocx.sh/docs/faq
