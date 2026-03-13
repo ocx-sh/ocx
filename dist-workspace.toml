@@ -26,4 +26,4 @@ source-tarball = false
 # Plan jobs to run in CI
 plan-jobs = ["./verify-version"]
 # Post-announce jobs to run in CI
-post-announce-jobs = ["./post-release-oci-publish"]
+post-announce-jobs = ["./post-release-oci-publish", "./deploy-website"]

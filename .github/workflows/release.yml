@@ -307,3 +307,12 @@ jobs:
     with:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
+
+  custom-deploy-website:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/deploy-website.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
