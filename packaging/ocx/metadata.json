@@ -1,4 +1,6 @@
 {
+  "type": "bundle",
+  "version": 1,
   "env": [
     {
       "key": "PATH",
