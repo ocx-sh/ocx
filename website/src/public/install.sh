@@ -421,8 +421,8 @@ bootstrap_ocx() {
     local _bin="$1" _version="$2"
 
     say "Bootstrapping OCX into its own package store..."
-    if ! "$_bin" install --select "ocx.sh/ocx:$_version"; then
-        err "bootstrap failed: 'ocx install --select ocx.sh/ocx:$_version'
+    if ! "$_bin" --remote install --select "ocx.sh/ocx:$_version"; then
+        err "bootstrap failed: 'ocx --remote install --select ocx.sh/ocx:$_version'
   Ensure ocx v${_version} is published to the ocx.sh registry.
   If this is a first install and the registry is not yet populated,
   please wait for the release pipeline to complete."
@@ -447,15 +447,15 @@ print_success() {
 
   To get started, restart your shell or run:
 
-    . "${_env_display}"
+    . "$_ocx_home/env"
 
   Then verify with:
 
-    ocx version
+    ocx info
 
   To uninstall, remove the OCX home directory:
 
-    rm -rf $(tildify "$_ocx_home")
+    rm -rf $_ocx_home
 
 EOF
 }
@@ -463,7 +463,9 @@ EOF
 # --- Temp directory cleanup ---
 
 cleanup() {
-    ignore rm -rf "$_tmpdir"
+    if [ -n "${_tmpdir:-}" ]; then
+        ignore rm -rf "$_tmpdir"
+    fi
 }
 
 # --- Main ---

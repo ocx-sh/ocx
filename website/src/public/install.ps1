@@ -260,7 +260,7 @@ function Print-Success {
 
   Then verify with:
 
-    ocx version
+    ocx info
 
   To uninstall, remove the OCX home directory:
 
@@ -377,9 +377,9 @@ function Main {
 
         # Bootstrap: OCX installs itself into its own package store
         Say 'Bootstrapping OCX into its own package store...'
-        & $bin install --select "ocx.sh/ocx:$requestedVersion"
+        & $bin --remote install --select "ocx.sh/ocx:$requestedVersion"
         if ($LASTEXITCODE -ne 0) {
-            Err "Bootstrap failed: 'ocx install --select ocx.sh/ocx:$requestedVersion'`nEnsure ocx v$requestedVersion is published to the ocx.sh registry."
+            Err "Bootstrap failed: 'ocx --remote install --select ocx.sh/ocx:$requestedVersion'`nEnsure ocx v$requestedVersion is published to the ocx.sh registry."
         }
         $installDir = Join-Path $ocxHome 'installs\ocx.sh\ocx\current\bin'
         Say "Installed to $installDir\ocx.exe"
