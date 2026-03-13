@@ -85,7 +85,12 @@ export default defineConfig({
 
   vite: {
     plugins: [
-      groupIconVitePlugin({})
+      groupIconVitePlugin({
+        customIcon: {
+          shell: 'vscode-icons:file-type-shell',
+          powershell: 'vscode-icons:file-type-powershell',
+        },
+      })
     ]
   }
 })

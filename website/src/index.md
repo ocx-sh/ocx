@@ -10,13 +10,13 @@ hero:
   actions:
     - theme: brand
       text: Install
-      link: /markdown-examples
+      link: /docs/installation
     - theme: alt
       text: Get Started
-      link: /api-examples
+      link: /docs/getting-started
     - theme: alt
       text: Guide
-      link: /api-examples
+      link: /docs/user-guide
 
 features:
   - title: Instant Setup
@@ -41,8 +41,39 @@ features:
       Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
       incididunt ut labore et dolore magna aliqua.
 ---
-## Getting Started
+
+## Quick Start {#quick-start}
+
+Install ocx with a single command:
+
+::: code-group
+```sh [Shell]
+curl -fsSL https://ocx.sh/install.sh | sh
+```
+
+```ps1 [PowerShell]
+irm https://ocx.sh/install.ps1 | iex
+```
+:::
+
+Run any package instantly — no setup, no config:
 
 ```sh
-ocx run python3 -- version
+ocx exec cmake:3.28 -- cmake --version
 ```
+
+Install, pin, and switch between versions:
+
+```sh
+ocx install --select cmake:3.28       # install and activate
+ocx exec cmake:3.28 -- cmake --build  # run with clean environment
+ocx install --select cmake:3.29       # upgrade in one command
+```
+
+Compose multiple tools with isolated environments:
+
+```sh
+ocx exec java:21 plantuml:1 -- plantuml -version
+```
+
+That's it. No formulas, no plugins, no runtime dependencies. [Get started &rarr;](/docs/getting-started)
