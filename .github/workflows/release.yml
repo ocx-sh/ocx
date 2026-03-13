@@ -299,6 +299,15 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+  custom-publish-to-registry:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/publish-to-registry.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+
   custom-post-release-version-bump:
     needs:
       - plan

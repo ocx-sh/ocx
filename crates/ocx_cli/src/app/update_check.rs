@@ -83,13 +83,14 @@ async fn try_check_for_update(ctx: &Context) -> Result<UpdateCheckResult, Error>
 
 /// Finds the highest `major.minor.patch` version among tags.
 ///
-/// Filters out rolling tags (`1`, `1.2`), build-tagged versions (`1.2.3+build`),
+/// Keeps only versions with exactly `major.minor.patch` — filters out
+/// rolling tags (`1`, `1.2`), build-tagged versions (`1.2.3+build`),
 /// and pre-releases (`1.2.3-rc1`) so that the message recommends installing
 /// a clean release version.
 fn find_latest_version(tags: &[String]) -> Option<Version> {
     tags.iter()
         .filter_map(|tag| Version::parse(tag))
-        .filter(|version| !(version.is_rolling() || version.has_prerelease()))
+        .filter(|version| version.has_patch() && !version.has_build() && !version.has_prerelease())
         .max()
 }
 

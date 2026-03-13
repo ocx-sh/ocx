@@ -1,0 +1,9 @@
+{
+  "env": [
+    {
+      "key": "PATH",
+      "value": "${installPath}/bin",
+      "type": "path"
+    }
+  ]
+}

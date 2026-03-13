@@ -1,7 +1,7 @@
 # Increment 17: Publish OCX to Own Registry (CI Job + Metadata)
 
-**Status**: Not Started
-**Completed**: —
+**Status**: Done
+**Completed**: 2026-03-13
 **ADR Phase**: 8 (step 25)
 **Depends on**: Increment 10 (release workflow exists)
 
