@@ -284,10 +284,10 @@ async fn prepare_task(
         }
 
         // Verify (only if configured)
-        if task.verify_config.is_some() {
+        if let Some(verify_config) = &task.verify_config {
             progress::set_stage(span, "Verifying", &task.normalized_version, &task.platform);
             verify::verify(
-                task.verify_config.as_ref().unwrap(),
+                verify_config,
                 http_client,
                 &archive_path,
                 &task.asset_name,

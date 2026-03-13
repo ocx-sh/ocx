@@ -12,7 +12,7 @@ tasks:
   build:
     internal: true
     cmds:
-      - cargo build --release -p ocx_cli -p ocx_mirror --locked
+      - cargo build --release -p ocx -p ocx_mirror --locked
       - mkdir -p {{.BIN_DIR}}
       - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
       - cp {{.ROOT_DIR}}/target/release/ocx-mirror{{exeExt}} {{.OCX_MIRROR_BINARY}}

@@ -254,7 +254,7 @@ def test_sync_mirrors_versions(
     )
 
     result = mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
-    assert "pushed" in result.stderr.lower() or "mirror complete" in result.stderr.lower()
+    assert "pushed" in result.stdout.lower() or "mirror complete" in result.stderr.lower()
 
     # Verify tags exist via ocx
     ocx.plain("index", "update", f"{unique_mirror_repo}:1.0.0")
@@ -395,7 +395,7 @@ def test_sync_new_per_run_cap(
 
     # First run: should mirror only 1 version
     result = mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
-    assert "pushed" in result.stderr.lower()
+    assert "pushed" in result.stdout.lower()
 
     # Second run should still have work to do
     result2 = mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
