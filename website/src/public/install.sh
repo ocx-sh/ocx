@@ -262,9 +262,9 @@ verify_checksum() {
         return 0
     fi
 
-    _expected=$(grep -F "$_file" "$_dir/sha256sum.txt" | awk '{print $1}')
+    _expected=$(grep -F "$_file" "$_dir/sha256.sum" | awk '{print $1}')
     if [ -z "$_expected" ]; then
-        err "checksum for $_file not found in sha256sum.txt"
+        err "checksum for $_file not found in sha256.sum"
     fi
 
     # shellcheck disable=SC2086
@@ -555,7 +555,7 @@ main() {
     _archive="ocx-${_target}.tar.xz"
     _tag="v${_version}"
     _archive_url="${GITHUB_DOWNLOAD_URL}/${_tag}/${_archive}"
-    _checksum_url="${GITHUB_DOWNLOAD_URL}/${_tag}/sha256sum.txt"
+    _checksum_url="${GITHUB_DOWNLOAD_URL}/${_tag}/sha256.sum"
 
     say "Downloading ${_archive}..."
     download_to_file "$_archive_url" "$_tmpdir/$_archive" \
@@ -563,7 +563,7 @@ main() {
   Ensure v${_version} is a valid release with a binary for ${_target}.
   Available releases: https://github.com/${GITHUB_REPO}/releases"
 
-    download_to_file "$_checksum_url" "$_tmpdir/sha256sum.txt" \
+    download_to_file "$_checksum_url" "$_tmpdir/sha256.sum" \
         || err "failed to download checksums from ${_checksum_url}"
 
     # Verify checksum

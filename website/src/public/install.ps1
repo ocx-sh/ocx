@@ -115,7 +115,7 @@ function Verify-Checksum {
         [string]$File
     )
 
-    $checksumFile = Join-Path $Dir 'sha256sum.txt'
+    $checksumFile = Join-Path $Dir 'sha256.sum'
     $checksumContent = Get-Content $checksumFile -Raw
 
     # Find the expected hash for our file
@@ -123,7 +123,9 @@ function Verify-Checksum {
     foreach ($line in $checksumContent.Split("`n")) {
         $line = $line.Trim()
         if ($line -match '^\s*([0-9a-fA-F]{64})\s+(.+)$') {
-            if ($Matches[2].Trim() -eq $File) {
+            # Strip leading '*' (BSD-style binary mode indicator from cargo-dist)
+            $matchedFile = $Matches[2].Trim().TrimStart('*')
+            if ($matchedFile -eq $File) {
                 $expected = $Matches[1].ToLower()
                 break
             }
@@ -131,7 +133,7 @@ function Verify-Checksum {
     }
 
     if (-not $expected) {
-        Err "Checksum for $File not found in sha256sum.txt"
+        Err "Checksum for $File not found in sha256.sum"
     }
 
     $filePath = Join-Path $Dir $File
@@ -316,7 +318,7 @@ function Main {
         $archive = "ocx-$target.zip"
         $tag = "v$requestedVersion"
         $archiveUrl = "$GitHubDownloadUrl/$tag/$archive"
-        $checksumUrl = "$GitHubDownloadUrl/$tag/sha256sum.txt"
+        $checksumUrl = "$GitHubDownloadUrl/$tag/sha256.sum"
 
         Say "Downloading $archive..."
         $downloaded = Download-File -Url $archiveUrl -Destination (Join-Path $tmpDir $archive)
@@ -324,7 +326,7 @@ function Main {
             Err "Failed to download $archiveUrl`nEnsure v$requestedVersion is a valid release with a binary for $target.`nAvailable releases: https://github.com/$GitHubRepo/releases"
         }
 
-        $checksumDownloaded = Download-File -Url $checksumUrl -Destination (Join-Path $tmpDir 'sha256sum.txt')
+        $checksumDownloaded = Download-File -Url $checksumUrl -Destination (Join-Path $tmpDir 'sha256.sum')
         if (-not $checksumDownloaded) {
             Err "Failed to download checksums from $checksumUrl"
         }
