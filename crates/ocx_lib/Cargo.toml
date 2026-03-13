@@ -22,7 +22,7 @@ hex = "0.4.3"
 toml = "1.0.6"
 flate2 = "1.1.9"
 tar = "0.4.44"
-tempfile = "3.25.0"
+tempfile = "3.27.0"
 serde_repr = "0.1.20"
 futures = "0.3.31"
 fs2 = "0.4.3"
@@ -35,12 +35,12 @@ symlink = "0.1.0"
 dunce = "1.0.5"
 sysinfo = "0.38.4"
 clap_builder = "4.5.60"
-clap_complete = "4.5.66"
+clap_complete = "4.6.0"
 tracing = "0.1.44"
 tracing-log = "0.2.0"
 which = "8"
 # "deflate" unfortunately pulls in zopfli; zip crate doesn't expose flate2-only deflate
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2.0"
