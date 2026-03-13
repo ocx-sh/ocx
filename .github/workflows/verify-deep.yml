@@ -62,13 +62,22 @@ jobs:
         run: rustup target add ${{ matrix.job.target }}
       - name: Build
         run: cargo xwin build --release --target=${{ matrix.job.target }} --locked
-      - name: Prepare Binary
-        run: cp target/${{ matrix.job.target }}/release/ocx.exe ocx-${{ matrix.job.target }}.exe
-      - name: Upload Binary
+      - name: Prepare Binaries
+        run: |
+          cp target/${{ matrix.job.target }}/release/ocx.exe ocx-${{ matrix.job.target }}.exe
+          cp target/${{ matrix.job.target }}/release/ocx-mirror.exe ocx-mirror-${{ matrix.job.target }}.exe
+      - name: Upload ocx Binary
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ocx-${{ matrix.job.target }}
           path: ocx-${{ matrix.job.target }}.exe
+          compression-level: 0
+          retention-days: 7
+      - name: Upload ocx-mirror Binary
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: ocx-mirror-${{ matrix.job.target }}
+          path: ocx-mirror-${{ matrix.job.target }}.exe
           compression-level: 0
           retention-days: 7
 
@@ -109,13 +118,17 @@ jobs:
         with:
           name: ocx-${{ matrix.job.target }}
           path: test/bin
-      - name: Prepare Binary
+      - name: Download Mirror Binary
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: ocx-mirror-${{ matrix.job.target }}
+          path: test/bin
+      - name: Prepare Binaries
         shell: bash
         run: |
-          src="test/bin/ocx-${{ matrix.job.target }}${{ matrix.job.ext }}"
-          dst="test/bin/ocx${{ matrix.job.ext }}"
-          mv "$src" "$dst"
-          chmod +x "$dst"
+          mv "test/bin/ocx-${{ matrix.job.target }}${{ matrix.job.ext }}" "test/bin/ocx${{ matrix.job.ext }}"
+          mv "test/bin/ocx-mirror-${{ matrix.job.target }}${{ matrix.job.ext }}" "test/bin/ocx-mirror${{ matrix.job.ext }}"
+          chmod +x test/bin/ocx${{ matrix.job.ext }} test/bin/ocx-mirror${{ matrix.job.ext }}
       - name: Install uv
         uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
       - name: Setup Task
@@ -123,6 +136,8 @@ jobs:
       - name: Run Acceptance Tests
         shell: bash
         run: task test -- --junit-xml=results/junit.xml
+        env:
+          OCX_MIRROR_COMMAND: ${{ github.workspace }}/test/bin/ocx-mirror${{ matrix.job.ext }}
       - name: Stop Registry
         if: ${{ always() }}
         shell: bash

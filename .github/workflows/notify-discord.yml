@@ -32,18 +32,17 @@ jobs:
     name: Discord
     runs-on: ubuntu-latest
     if: >-
-      secrets.DISCORD_WEBHOOK != '' &&
-      (
       github.event_name == 'push' ||
       github.event_name == 'pull_request' ||
       github.event_name == 'release' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure') ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Deploy Website' && github.event.workflow_run.conclusion == 'success')
-      )
+    env:
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
     steps:
       # --- Push to main ---
       - name: Push to main
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && env.DISCORD_WEBHOOK != ''
         uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
@@ -57,7 +56,7 @@ jobs:
 
       # --- PR opened ---
       - name: PR opened
-        if: github.event_name == 'pull_request' && github.event.action == 'opened'
+        if: github.event_name == 'pull_request' && github.event.action == 'opened' && env.DISCORD_WEBHOOK != ''
         uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
@@ -72,7 +71,7 @@ jobs:
 
       # --- PR merged ---
       - name: PR merged
-        if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged
+        if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged && env.DISCORD_WEBHOOK != ''
         uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
@@ -90,7 +89,7 @@ jobs:
 
       # --- Release published ---
       - name: Release published
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' && env.DISCORD_WEBHOOK != ''
         uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
@@ -105,7 +104,7 @@ jobs:
 
       # --- Workflow failure ---
       - name: Workflow failed
-        if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' && env.DISCORD_WEBHOOK != ''
         uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
@@ -121,7 +120,8 @@ jobs:
         if: >-
           github.event_name == 'workflow_run' &&
           github.event.workflow_run.name == 'Deploy Website' &&
-          github.event.workflow_run.conclusion == 'success'
+          github.event.workflow_run.conclusion == 'success' &&
+          env.DISCORD_WEBHOOK != ''
         uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}

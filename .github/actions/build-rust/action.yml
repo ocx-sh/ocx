@@ -23,20 +23,26 @@ runs:
       env:
         TARGET: ${{ inputs.target }}
       run: cargo build --release --target="$TARGET" --locked
-    - name: Prepare Binary
+    - name: Prepare Binaries
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
       run: |
         ext=""
         [[ "$TARGET" == *windows* ]] && ext=".exe"
-        src="target/${TARGET}/release/ocx${ext}"
-        dst="ocx-${TARGET}${ext}"
-        cp "$src" "$dst"
-    - name: Upload Binary
+        cp "target/${TARGET}/release/ocx${ext}" "ocx-${TARGET}${ext}"
+        cp "target/${TARGET}/release/ocx-mirror${ext}" "ocx-mirror-${TARGET}${ext}"
+    - name: Upload ocx Binary
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: ocx-${{ inputs.target }}
         path: ocx-${{ inputs.target }}${{ contains(inputs.target, 'windows') && '.exe' || '' }}
+        compression-level: 0
+        retention-days: 7
+    - name: Upload ocx-mirror Binary
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ocx-mirror-${{ inputs.target }}
+        path: ocx-mirror-${{ inputs.target }}${{ contains(inputs.target, 'windows') && '.exe' || '' }}
         compression-level: 0
         retention-days: 7
