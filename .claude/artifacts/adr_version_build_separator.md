@@ -186,7 +186,7 @@ latest           →  cascaded (if no blocker)
 - [OCI Distribution Spec — Tag Grammar](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
 - [distribution-spec#154 — Add `+` as valid tag character](https://github.com/opencontainers/distribution-spec/issues/154)
 - [Helm `+` → `_` convention](https://github.com/helm/helm/issues/10250)
-- [ADR: Cascade Platform-Aware Push](./.agents/artifacts/adr_cascade_platform_aware_push.md)
+- [ADR: Cascade Platform-Aware Push](./adr_cascade_platform_aware_push.md)
 
 ---
 

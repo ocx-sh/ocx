@@ -129,7 +129,7 @@ Work on a branch, never main. Commit iteratively. **Never push to remote** — t
 
 ### 7. Leave a Trail
 
-Planning artifacts go in `./.agents/artifacts/`. Document architectural decisions in ADRs. Name things so the next person understands.
+Planning artifacts go in `./.claude/artifacts/`. Document architectural decisions in ADRs. Name things so the next person understands.
 
 ## Tech Stack
 
@@ -143,8 +143,8 @@ Planning artifacts go in `./.agents/artifacts/`. Document architectural decision
 
 **Planning flow**: ADR → Design Spec → Plan → Implementation
 
-**Artifacts**: All planning docs stored in `./.agents/artifacts/`.
-**Templates**: Templates for markdown files in `./.agents/templates/artifacts/`.
+**Artifacts**: All planning docs stored in `./.claude/artifacts/`.
+**Templates**: Templates for markdown files in `./.claude/templates/artifacts/`.
 
 > **Note:** Planning artifacts are an internal process and do not replace proper documentation in the website or code comments.
 
