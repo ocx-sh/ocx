@@ -116,6 +116,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_round_trip_zip() {
+        round_trip("zip").await;
+    }
+
+    #[tokio::test]
+    async fn test_single_file_round_trip_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("my-tool");
+        std::fs::write(&file, b"#!/bin/sh\necho hello").unwrap();
+
+        let out = dir.path().join("out.zip");
+        BundleBuilder::from_path(&file)
+            .create(&out)
+            .await
+            .expect("bundle creation failed");
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&out, extract_dir.path())
+            .await
+            .expect("extraction failed");
+
+        let extracted = extract_dir.path().join("my-tool");
+        assert!(extracted.exists(), "file missing after extraction");
+        assert_eq!(std::fs::read(&extracted).unwrap(), b"#!/bin/sh\necho hello");
+    }
+
+    /// Regression test for symlink preservation (inspired by issue #6).
+    ///
+    /// Symlinks inside a directory must be preserved as symlinks in tar archives,
+    /// not expanded to full file copies.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlinks_preserved_tar() {
+        use std::os::unix::fs::symlink;
+
+        let src = tempfile::tempdir().unwrap();
+        let real_file = src.path().join("libfoo.dylib");
+        std::fs::write(&real_file, vec![0u8; 1024]).unwrap();
+        let link = src.path().join("libfoo_link.dylib");
+        symlink("libfoo.dylib", &link).unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.tar.xz");
+
+        BundleBuilder::from_path(src.path())
+            .create(&archive_path)
+            .await
+            .expect("bundle creation failed");
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&archive_path, extract_dir.path())
+            .await
+            .expect("extraction failed");
+
+        let extracted_link = extract_dir.path().join("libfoo_link.dylib");
+        assert!(
+            extracted_link.symlink_metadata().unwrap().file_type().is_symlink(),
+            "expected symlink to be preserved, but it was stored as a regular file"
+        );
+        assert_eq!(
+            std::fs::read_link(&extracted_link).unwrap().to_str().unwrap(),
+            "libfoo.dylib"
+        );
+        assert!(extract_dir.path().join("libfoo.dylib").exists());
+    }
+
+    /// Symlinks must survive a zip round-trip.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlinks_preserved_zip() {
+        use std::os::unix::fs::symlink;
+
+        let src = tempfile::tempdir().unwrap();
+        let real_file = src.path().join("libfoo.dylib");
+        std::fs::write(&real_file, vec![0u8; 1024]).unwrap();
+        let link = src.path().join("libfoo_link.dylib");
+        symlink("libfoo.dylib", &link).unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.zip");
+
+        BundleBuilder::from_path(src.path())
+            .create(&archive_path)
+            .await
+            .expect("bundle creation failed");
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&archive_path, extract_dir.path())
+            .await
+            .expect("extraction failed");
+
+        let extracted_link = extract_dir.path().join("libfoo_link.dylib");
+        assert!(
+            extracted_link.symlink_metadata().unwrap().file_type().is_symlink(),
+            "expected symlink to be preserved, but it was stored as a regular file"
+        );
+        assert_eq!(
+            std::fs::read_link(&extracted_link).unwrap().to_str().unwrap(),
+            "libfoo.dylib"
+        );
+        assert!(extract_dir.path().join("libfoo.dylib").exists());
+    }
+
+    /// Unix file permissions must survive a zip round-trip.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_permissions_preserved_zip() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().unwrap();
+        let bin = src.path().join("tool");
+        std::fs::write(&bin, b"#!/bin/sh\necho hello").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.zip");
+
+        BundleBuilder::from_path(src.path())
+            .create(&archive_path)
+            .await
+            .expect("bundle creation failed");
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&archive_path, extract_dir.path())
+            .await
+            .expect("extraction failed");
+
+        let extracted = extract_dir.path().join("tool");
+        let mode = extracted.metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "executable bits not preserved: {mode:#o}");
+    }
+
+    #[tokio::test]
     async fn test_single_file_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("my-tool");
