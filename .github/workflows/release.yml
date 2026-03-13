@@ -299,11 +299,11 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-  custom-publish-to-registry:
+  custom-post-release-oci-publish:
     needs:
       - plan
       - announce
-    uses: ./.github/workflows/publish-to-registry.yml
+    uses: ./.github/workflows/post-release-oci-publish.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
