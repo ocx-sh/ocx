@@ -17,7 +17,6 @@ jobs:
         job:
           - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu }
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
-          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc }
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -41,9 +40,40 @@ jobs:
           name: deep-unit-${{ matrix.job.name }}
           path: target/nextest/ci/junit.xml
 
+  cross-compile:
+    name: Cross-compile (${{ matrix.job.name }})
+    runs-on: ubuntu-latest
+    container:
+      image: messense/cargo-xwin
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { name: Windows x64, target: x86_64-pc-windows-msvc }
+          - { name: Windows ARM64, target: aarch64-pc-windows-msvc }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.job.target }}
+      - name: Build
+        run: cargo xwin build --release --target=${{ matrix.job.target }} --locked
+      - name: Prepare Binary
+        run: cp target/${{ matrix.job.target }}/release/ocx.exe ocx-${{ matrix.job.target }}.exe
+      - name: Upload Binary
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: ocx-${{ matrix.job.target }}
+          path: ocx-${{ matrix.job.target }}.exe
+          compression-level: 0
+          retention-days: 7
+
   acceptance-tests:
     name: Acceptance (${{ matrix.job.name }})
-    needs: build
+    needs: [build, cross-compile]
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -105,7 +135,7 @@ jobs:
 
   test-results:
     name: Publish Deep Test Results
-    needs: [build, acceptance-tests]
+    needs: [build, cross-compile, acceptance-tests]
     runs-on: ubuntu-latest
     if: ${{ !cancelled() }}
     steps:

@@ -31,6 +31,8 @@ mod tests {
 
     #[tokio::test]
     async fn download_empty_response_error() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         // We can't easily test against a real server in unit tests.
         // This test validates the error path for empty content.
         let dir = TempDir::new().unwrap();
