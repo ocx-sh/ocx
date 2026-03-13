@@ -5,7 +5,8 @@
     {
       "key": "PATH",
       "value": "${installPath}/bin",
-      "type": "path"
+      "type": "path",
+      "required": true
     }
   ]
 }
