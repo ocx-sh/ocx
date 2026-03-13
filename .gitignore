@@ -4,6 +4,8 @@
 .task/
 out/
 target/
+*.cdx.json
+*.cdx.xml
 .user.env
 lcov.info
 test/.venv/

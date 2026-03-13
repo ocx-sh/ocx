@@ -25,3 +25,7 @@ source-tarball = false
 plan-jobs = ["./verify-version"]
 # Post-announce jobs to run in CI
 post-announce-jobs = ["./post-release-oci-publish", "./deploy-website"]
+# SBOM: embed dependency manifest in binary (.dep-v0 section)
+cargo-auditable = true
+# SBOM: generate CycloneDX bom.xml alongside release archives
+cargo-cyclonedx = true

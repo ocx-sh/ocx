@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  install:cyclonedx:
+    internal: true
+    cmds:
+      - cargo install --locked cargo-cyclonedx
+    status:
+      - cargo cyclonedx --version
+
+  generate:json:
+    desc: Generate CycloneDX SBOM JSON
+    deps:
+      - install:cyclonedx
+    cmds:
+      - cargo cyclonedx --format json --manifest-path {{.ROOT_DIR}}/crates/ocx_cli/Cargo.toml
+
+  generate:page:
+    desc: Generate dependencies page for website
+    deps:
+      - generate:json
+    cmds:
+      - uv run {{.ROOT_DIR}}/scripts/sbom-to-markdown.py
+          --input {{.ROOT_DIR}}/crates/ocx_cli/ocx.cdx.json
+          --output {{.ROOT_DIR}}/website/src/docs/reference/dependencies.md
+          --json-output {{.ROOT_DIR}}/website/src/public/data/dependencies.json
+
+  default:
+    desc: Generate SBOM and dependencies page
+    cmds:
+      - task: generate:page

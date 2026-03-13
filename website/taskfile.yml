@@ -17,6 +17,7 @@ tasks:
     cmds:
       - task: :schema:generate
       - task: :recordings:build
+      - task: :sbom:generate:page
       - bunx vitepress build
 
   deploy:
