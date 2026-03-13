@@ -234,6 +234,7 @@
       "WebFetch(domain:npmjs.com)",
       "WebFetch(domain:stackoverflow.com)",
       "WebFetch(domain:crates.io)",
+      "WebFetch(domain:docs.rs)",
       "WebFetch(domain:vuejs.org)",
       "WebFetch(domain:vitepress.dev)",
       "WebFetch(domain:taskfile.dev)",

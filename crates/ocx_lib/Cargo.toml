@@ -38,6 +38,8 @@ clap_complete = "4.5.66"
 tracing = "0.1.44"
 tracing-log = "0.2.0"
 which = "8"
+# "deflate" unfortunately pulls in zopfli; zip crate doesn't expose flate2-only deflate
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2.0"

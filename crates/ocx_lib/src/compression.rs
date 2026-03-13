@@ -32,6 +32,16 @@ impl CompressionAlgorithm {
     }
 }
 
+impl std::fmt::Display for CompressionAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompressionAlgorithm::None => write!(f, "none"),
+            CompressionAlgorithm::Lzma => write!(f, "lzma"),
+            CompressionAlgorithm::Gzip => write!(f, "gzip"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum CompressionLevel {
     Fast,
@@ -68,13 +78,6 @@ pub struct CompressionOptions {
 
 impl CompressionOptions {
     pub fn new(algorithm: CompressionAlgorithm) -> Self {
-        Self {
-            algorithm: Some(algorithm),
-            level: Default::default(),
-        }
-    }
-
-    pub fn from_algorithm(algorithm: CompressionAlgorithm) -> Self {
         Self {
             algorithm: Some(algorithm),
             level: Default::default(),
@@ -137,7 +140,7 @@ pub async fn write_file(
     file: impl AsRef<std::path::Path>,
     algorithm: Option<CompressionAlgorithm>,
     level: Option<CompressionLevel>,
-) -> Result<Box<dyn std::io::Write>> {
+) -> Result<Box<dyn std::io::Write + Send>> {
     let algorithm = match algorithm {
         Some(algorithm) => algorithm,
         None => CompressionAlgorithm::from_file(&file).map_to_undefined_error()?,
@@ -149,7 +152,7 @@ pub async fn write_file(
         .truncate(true)
         .open(file)
         .map_to_undefined_error()?;
-    let writer: Box<dyn std::io::Write> = match algorithm {
+    let writer: Box<dyn std::io::Write + Send> = match algorithm {
         CompressionAlgorithm::Lzma => {
             let writer = lzma_rust2::XzWriter::new(output, level.into()).map_to_undefined_error()?;
             Box::new(xz::WriterWrapper(Some(writer)))
@@ -168,7 +171,7 @@ pub async fn write_file(
 pub async fn read_file(
     file: impl AsRef<std::path::Path>,
     algorithm: Option<CompressionAlgorithm>,
-) -> Result<Box<dyn std::io::Read>> {
+) -> Result<Box<dyn std::io::Read + Send>> {
     let algorithm = match algorithm {
         Some(algorithm) => algorithm,
         None => CompressionAlgorithm::from_file(&file).map_to_undefined_error()?,
