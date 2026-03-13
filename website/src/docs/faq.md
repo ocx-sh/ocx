@@ -113,7 +113,7 @@ In environments with a minimal set of environment variables (containers, CI runn
 [oci-dist-issue]: https://github.com/opencontainers/distribution-spec/issues/154
 [helm-oci]: https://helm.sh/docs/topics/registries/
 [helm-issue]: https://github.com/helm/helm/issues/10250
-[ug-versioning]: ../user-guide.md#versioning-tags
+[ug-versioning]: ./user-guide.md#versioning-tags
 
 <!-- external -->
 [mach-o]: https://en.wikipedia.org/wiki/Mach-O

@@ -6,7 +6,7 @@ import {
   TooltipContent,
   TooltipPortal,
   TooltipArrow,
-} from 'radix-vue'
+} from 'reka-ui'
 
 withDefaults(defineProps<{
   /** The trigger text shown inline with a dashed underline. */
