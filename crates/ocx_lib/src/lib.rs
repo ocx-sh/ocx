@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+// TODO: migrate map_to_undefined_error call sites to typed errors
+#![allow(deprecated)]
+
 mod config;
 mod media_type;
 
