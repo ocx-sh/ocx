@@ -131,7 +131,7 @@ Use this in CI environments or when you manage your `PATH` manually.
 
 The command line option `--no-modify-path` on the install scripts has the same effect.
 
-### `OCX_DISABLE_CODESIGN` {#ocx-disable-codesign}
+### `OCX_NO_CODESIGN` {#ocx-no-codesign}
 
 When set to a [truthy value](#truthy-values), OCX will skip ad-hoc code signing of macOS binaries after installation.
 By default, OCX automatically applies ad-hoc code signatures to extracted [Mach-O][mach-o] binaries on macOS,

@@ -105,7 +105,7 @@ Check each binary first; only re-sign if not already ad-hoc signed.
 
 **Trade-off accepted:** `codesign --verify --deep` on a package's `.app` bundle will fail because the bundle seals are stale (original developer seals, binaries re-signed). This is acceptable because:
 - OCX users run packages via `ocx exec`, not by opening `.app` bundles in Finder
-- For Finder access, the user can set `OCX_DISABLE_CODESIGN=1` and manage signing manually, or the package publisher can ship a properly signed package
+- For Finder access, the user can set `OCX_NO_CODESIGN=1` and manage signing manually, or the package publisher can ship a properly signed package
 - The content-addressed object store is immutable; stale seals are a one-time state, not a security regression
 
 ---
@@ -179,7 +179,7 @@ No ordering requirement. Parallelism within each directory.
 - [x] All workspace unit tests pass (17/17 codesign tests)
 - [x] On macOS ARM64: `ocx exec dev.ocx.sh/cmake -- cmake-gui --version` launches without dyld errors
 - [x] On macOS ARM64: standalone tool (`ocx exec dev.ocx.sh/cmake -- cmake --version`) works
-- [x] On macOS: `OCX_DISABLE_CODESIGN=1` still disables signing
+- [x] On macOS: `OCX_NO_CODESIGN=1` still disables signing
 
 ---
 

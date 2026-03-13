@@ -30,14 +30,14 @@ use crate::{Result, log};
 /// On non-macOS platforms this is a no-op.
 ///
 /// Signing failures are logged as warnings — they do not abort the installation.
-/// Disable with `OCX_DISABLE_CODESIGN=1`.
+/// Disable with `OCX_NO_CODESIGN=1`.
 pub async fn sign_extracted_content(content_path: &Path) -> Result<()> {
     if cfg!(not(target_os = "macos")) {
         return Ok(());
     }
 
-    if crate::env::flag("OCX_DISABLE_CODESIGN", false) {
-        log::debug!("Code signing disabled via OCX_DISABLE_CODESIGN");
+    if crate::env::flag("OCX_NO_CODESIGN", false) {
+        log::debug!("Code signing disabled via OCX_NO_CODESIGN");
         return Ok(());
     }
 
@@ -483,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn sign_extracted_content_noop_when_disabled() {
         let env = crate::test::env::lock();
-        env.set("OCX_DISABLE_CODESIGN", "1");
+        env.set("OCX_NO_CODESIGN", "1");
 
         let dir = TempDir::new().unwrap();
         create_file_with_magic(dir.path(), "binary", &0xFEED_FACFu32.to_be_bytes());
@@ -560,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn sign_extracted_content_signs_real_binaries() {
         let env = crate::test::env::lock();
-        env.remove("OCX_DISABLE_CODESIGN");
+        env.remove("OCX_NO_CODESIGN");
 
         let dir = TempDir::new().unwrap();
         let content = dir.path().join("content");

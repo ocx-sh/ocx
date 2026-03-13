@@ -65,10 +65,10 @@ Signing binaries before packaging is ideal — the signatures survive tar archiv
 
 #### Disabling {#macos-codesign-disable}
 
-Set [`OCX_DISABLE_CODESIGN`][env-disable-codesign] to a truthy value to skip automatic signing:
+Set [`OCX_NO_CODESIGN`][env-no-codesign] to a truthy value to skip automatic signing:
 
 ```sh
-export OCX_DISABLE_CODESIGN=1
+export OCX_NO_CODESIGN=1
 ```
 
 #### Manual Signing {#macos-codesign-manual}
@@ -128,7 +128,7 @@ In environments with a minimal set of environment variables (containers, CI runn
 [cmd-exec]: ./reference/command-line.md#exec
 
 <!-- environment -->
-[env-disable-codesign]: ./reference/environment.md#ocx-disable-codesign
+[env-no-codesign]: ./reference/environment.md#ocx-no-codesign
 
 <!-- apple -->
 [amfi]: https://support.apple.com/guide/security/app-security-overview-sec35dd877d0/web
