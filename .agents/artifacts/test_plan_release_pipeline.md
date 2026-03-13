@@ -59,12 +59,14 @@ Mark items with `[x]` as they are verified. Add notes in the `Notes` column or b
 |---|------|--------|-------|
 | 1.3.1 | Update `dist-workspace.toml` to reference `./post-release-oci-publish` and run `dist generate-ci` | `[ ]` | Aligns cargo-dist config with actual filename |
 | 1.3.2 | Pin unpinned action versions in hand-written workflows | `[ ]` | `verify-version.yml`, `post-release-oci-publish.yml`, `claude.yml` |
-| 1.3.3 | Add `rust-toolchain.toml` pinning Rust 1.93.1 | `[ ]` | CI cross-compilation container had older Rust missing `with_added_extension` |
-| 1.3.4 | Commit fix on `main` | `[ ]` | |
-| 1.3.5 | Delete remote tag: `git push origin :refs/tags/v0.0.0` | `[ ]` | Remove the broken tag |
-| 1.3.6 | Delete local tag: `git tag -d v0.0.0` | `[ ]` | |
-| 1.3.7 | Recreate tag on fix commit: `git tag v0.0.0` | `[ ]` | |
-| 1.3.8 | Push: `git push --tags origin main` | `[ ]` | Triggers release pipeline again |
+| 1.3.3 | Add `rust-toolchain.toml` pinning Rust 1.94.0 | `[ ]` | CI cross-compilation container had older Rust missing `with_added_extension` |
+| 1.3.4 | Disable source tarball (`source-tarball = false` in `dist-workspace.toml`) | `[ ]` | LFS smudge filter fails in CI (persist-credentials: false); GitHub provides source archives anyway |
+| 1.3.5 | **Temporarily** reduce targets to `x86_64-unknown-linux-{gnu,musl}` only | `[ ]` | Faster/cheaper CI test loop. **Must restore all 8 targets before final release.** |
+| 1.3.6 | Commit fixes on `main` | `[ ]` | |
+| 1.3.7 | Delete remote tag: `git push origin :refs/tags/v0.0.0` | `[ ]` | Remove the broken tag |
+| 1.3.8 | Delete local tag: `git tag -d v0.0.0` | `[ ]` | |
+| 1.3.9 | Recreate tag on fix commit: `git tag v0.0.0` | `[ ]` | |
+| 1.3.10 | Push: `git push --tags origin main` | `[ ]` | Triggers release pipeline again |
 
 ---
 

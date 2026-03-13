@@ -10,7 +10,9 @@ ci = "github"
 # The installers to generate for each app
 installers = []
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
+# TEMPORARY: reduced to linux-only for faster CI test loop. Restore all 8 targets before final release:
+# targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
 # Where to host releases
 hosting = "github"
 # The archive format to use for non-windows builds (defaults .tar.xz)
@@ -19,6 +21,8 @@ unix-archive = ".tar.xz"
 windows-archive = ".zip"
 # Which actions to run on pull requests
 pr-run-mode = "skip"
+# Disable source tarball — LFS files can't be resolved in CI (persist-credentials: false)
+source-tarball = false
 # Plan jobs to run in CI
 plan-jobs = ["./verify-version"]
 # Post-announce jobs to run in CI
