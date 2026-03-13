@@ -21,23 +21,23 @@ hero:
 features:
   - title: Zero Infrastructure
     icon: 🗄️
-    details: Uses your existing OCI registry — Docker Hub, GHCR, ECR, or any private instance. No servers to host, no taps to maintain, no Artifactory license required.
+    details: Your OCI registry is the package server. No taps, no Artifactory.
 
   - title: Cross-Platform
     icon: 🖥️
-    details: One identifier, automatic OS/arch detection. Multi-platform OCI manifests resolve the right binary for each machine — linux/amd64, darwin/arm64, Windows, and more.
+    details: One identifier. Auto-detects OS and arch via OCI manifests.
 
   - title: Reproducible
     icon: 🔒
-    details: Content-addressed storage with local index snapshots. The same index always resolves to the same binaries — online or offline. Pin to a digest for absolute reproducibility.
+    details: Content-addressed storage. Same index, same binaries — online or offline.
 
   - title: Built for Automation
     icon: ⚙️
-    details: JSON output, clean isolated environments, composable commands. Designed to be called by CI pipelines, GitHub Actions, Bazel rules, and scripts — not just humans.
+    details: JSON output, clean environments, composable commands. CI-first.
 ---
 
 ::: warning Early Development
-OCX is in early development (v0.0.0). The CLI is functional but APIs may change. Packages shown in examples may not yet be available on the public registry — see the [getting started guide](/docs/getting-started) for what's available today.
+OCX is in early development (v0.0.0). The CLI is functional but APIs may change. Packages shown in examples may not yet be available on the public registry.
 :::
 
 ## Quick Start {#quick-start}
