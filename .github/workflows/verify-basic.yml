@@ -64,11 +64,15 @@ jobs:
         run: task build
       - name: Test
         run: task test:unit -- --profile ci
-      - name: Upload Binary
+      - name: Build Mirror
+        run: cargo build --release -p ocx_mirror --locked
+      - name: Upload Binaries
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ocx-binary
-          path: target/release/ocx
+          path: |
+            target/release/ocx
+            target/release/ocx-mirror
           compression-level: 0
           retention-days: 1
       - name: Publish Unit Test Results
@@ -104,14 +108,16 @@ jobs:
         with:
           name: ocx-binary
           path: test/bin
-      - name: Prepare Binary
-        run: chmod +x test/bin/ocx
+      - name: Prepare Binaries
+        run: chmod +x test/bin/ocx test/bin/ocx-mirror
       - name: Install uv
         uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
       - name: Setup Task
         uses: go-task/setup-task@0ab1b2a65bc55236a3bc64cde78f80e20e8885c2 # v1.0.0
       - name: Run Acceptance Tests
         run: task test -- --junit-xml=results/junit.xml
+        env:
+          OCX_MIRROR_COMMAND: ${{ github.workspace }}/test/bin/ocx-mirror
       - name: Publish Acceptance Test Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
