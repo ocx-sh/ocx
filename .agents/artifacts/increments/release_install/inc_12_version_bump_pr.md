@@ -1,7 +1,8 @@
 # Increment 12: Post-Release Version Bump PR Automation
 
-**Status**: Done
+**Status**: Removed
 **Completed**: 2026-03-13
+**Removed**: 2026-03-13
 **ADR Phase**: 5 (step 18)
 **Depends on**: Increment 10 (release workflow must exist), Increment 02 (cliff.toml must exist)
 
@@ -90,7 +91,30 @@ The ADR calls out a specific edge case:
 
 - `.github/workflows/release.yml` (add post-release job)
 
-## Notes
+## Removal Rationale
+
+This increment was removed because the post-release version bump contradicts the
+`release:prepare` workflow (Taskfile `release:prepare` task):
+
+1. **Speculative vs accurate**: The post-release bump uses `git-cliff --bumped-version`
+   on zero unreleased commits, producing a speculative next version that can be wrong
+   (e.g., guesses `0.6.0` but only `fix:` commits land, making the real next version `0.5.1`).
+
+2. **`release:prepare` is the source of truth**: The Taskfile `release:prepare` task runs
+   `git-cliff --bumped-version` at release time against the actual commit history, then
+   bumps `Cargo.toml` and generates the changelog. This is always correct.
+
+3. **Redundant automation**: The only value of the post-release bump was making dev builds
+   report a future-ish version via `ocx version`. This is cosmetic and can be misleading
+   when the speculative version is wrong.
+
+4. **Cascade effect**: Removing this also eliminates the need for Increment 20
+   (version-ahead warning), which existed solely to catch "forgot to merge the bump PR".
+
+The `verify-version.yml` workflow (Cargo.toml matches tag at release time) remains as a
+safety net for `release:prepare`.
+
+## Original Notes
 
 - `cargo-edit` and `git-cliff` installation in CI adds ~1-2 min. Consider caching or using pre-built binaries.
 - The PR must be reviewed and merged by a human (project convention: never push directly to main).
