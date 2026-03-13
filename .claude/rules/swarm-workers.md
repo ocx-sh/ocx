@@ -60,8 +60,8 @@ worker-builder fixes critical/high issues
 
 ## Coordination Protocol
 
-1. **Orchestrator** decomposes task via Beads
-2. **Workers** claim issues: `bd update <id> --status in_progress`
+1. **Orchestrator** decomposes task into clear assignments
+2. **Workers** pick up assigned tasks and begin execution
 3. **Workers** complete task following AGENTS.md "Landing the Plane" workflow
 4. **Workers** report completion to orchestrator
 5. **Orchestrator** integrates and verifies
@@ -72,10 +72,8 @@ When a worker completes its assigned task, it MUST follow the full completion pr
 
 1. File issues for remaining work
 2. Run quality gates (if code changed)
-3. Update issue status: `bd close <id>`
-4. **Commit all changes** on the feature branch
-5. **Sync beads**: `bd sync`
-6. Report completion to orchestrator
+3. **Commit all changes** on the feature branch
+4. Report completion to orchestrator
 
 **Critical**: NEVER push to remote — the human decides when to push (CI has real cost).
 
@@ -89,7 +87,7 @@ When a worker completes its assigned task, it MUST follow the full completion pr
 ## Anti-Patterns
 
 - NO loading full context into workers
-- NO sharing state between workers (use Beads)
+- NO sharing state between workers
 - NO workers spawning workers (single-level only)
 - NO long-running workers (timeout at 5 min)
 - NO opus for simple tasks (cost optimization)

@@ -1,33 +1,10 @@
 {
   "version": "2.0.0",
   "metadata": {
-    "description": "Skill activation rules for Claude Code with swarm coordination support",
-    "updated": "2026-03-04",
-    "swarm_aware": true
+    "description": "Skill activation rules for Claude Code",
+    "updated": "2026-03-13"
   },
   "skills": [
-    {
-      "name": "writing-pr-faqs",
-      "path": ".claude/skills/product/writing-pr-faqs/SKILL.md",
-      "description": "Write PR-FAQ documents using Amazon's Working Backwards methodology",
-      "triggers": {
-        "keywords": ["pr-faq", "prfaq", "press release", "working backwards", "vision", "new product", "new feature", "customer announcement"],
-        "intent_patterns": ["write.*pr.*faq", "create.*vision", "propose.*feature", "new.*initiative", "start.*planning", "define.*product"],
-        "file_patterns": ["pr_faq_*.md"]
-      },
-      "priority": "high"
-    },
-    {
-      "name": "beads-workflow",
-      "path": ".claude/skills/operations/beads-workflow/SKILL.md",
-      "description": "AI-native issue tracking with Beads for work management and coordination",
-      "triggers": {
-        "keywords": ["beads", "bd", "issue", "task", "ticket", "backlog", "ready", "work item"],
-        "intent_patterns": ["create.*issue", "track.*task", "what.*work", "find.*issue", "close.*task", "sync.*beads"],
-        "file_patterns": [".beads/*", "issues.jsonl"]
-      },
-      "priority": "high"
-    },
     {
       "name": "implementing-code",
       "path": ".claude/skills/core-engineering/implementing-code/SKILL.md",
@@ -35,7 +12,7 @@
       "triggers": {
         "keywords": ["implement", "code", "function", "class", "module", "feature", "write code"],
         "intent_patterns": ["implement.*feature", "write.*function", "create.*class", "add.*functionality"],
-        "file_patterns": ["*.ts", "*.js", "*.py", "*.go", "*.rs"]
+        "file_patterns": ["*.ts", "*.js", "*.py", "*.rs"]
       },
       "priority": "high"
     },
@@ -66,22 +43,11 @@
       "path": ".claude/skills/core-engineering/testing/SKILL.md",
       "description": "Write comprehensive tests for code quality",
       "triggers": {
-        "keywords": ["test", "tests", "testing", "unit test", "integration test", "coverage", "vitest", "jest"],
+        "keywords": ["test", "tests", "testing", "unit test", "integration test", "coverage"],
         "intent_patterns": ["write.*test", "add.*test", "test.*function", "increase.*coverage"],
-        "file_patterns": ["*.test.ts", "*.spec.ts", "*_test.go", "test_*.py", "*.test.js"]
+        "file_patterns": ["*.test.ts", "*.spec.ts", "test_*.py", "*.test.js"]
       },
       "priority": "high"
-    },
-    {
-      "name": "test-driven-development",
-      "path": ".claude/skills/core-engineering/test-driven-development/SKILL.md",
-      "description": "TDD approach - write tests first, then implementation",
-      "triggers": {
-        "keywords": ["tdd", "test first", "test-driven", "red green refactor"],
-        "intent_patterns": ["tdd.*approach", "test.*first", "red.*green.*refactor"],
-        "file_patterns": []
-      },
-      "priority": "medium"
     },
     {
       "name": "optimizing-code",
@@ -99,33 +65,11 @@
       "path": ".claude/skills/core-engineering/dependency-management/SKILL.md",
       "description": "Manage project dependencies and versions",
       "triggers": {
-        "keywords": ["dependency", "dependencies", "package", "npm", "pip", "cargo", "pnpm", "yarn"],
+        "keywords": ["dependency", "dependencies", "package", "npm", "pip", "cargo"],
         "intent_patterns": ["add.*dependency", "update.*package", "install.*library", "upgrade.*version"],
-        "file_patterns": ["package.json", "requirements.txt", "Cargo.toml", "go.mod", "pyproject.toml"]
+        "file_patterns": ["package.json", "Cargo.toml", "pyproject.toml"]
       },
       "priority": "low"
-    },
-    {
-      "name": "data-management",
-      "path": ".claude/skills/core-engineering/data-management/SKILL.md",
-      "description": "Database design and data handling patterns",
-      "triggers": {
-        "keywords": ["database", "data", "schema", "migration", "query", "sql", "postgres", "prisma"],
-        "intent_patterns": ["design.*database", "create.*schema", "write.*query", "migrate.*data"],
-        "file_patterns": ["*.sql", "*.prisma", "schema.prisma"]
-      },
-      "priority": "medium"
-    },
-    {
-      "name": "data-to-ui",
-      "path": ".claude/skills/core-engineering/data-to-ui/SKILL.md",
-      "description": "Data-to-UI pipeline patterns for transforming JSON into React components",
-      "triggers": {
-        "keywords": ["data pipeline", "json to react", "color map", "data transform"],
-        "intent_patterns": ["transform.*data.*ui", "json.*react", "create.*color.*map", "data.*component"],
-        "file_patterns": []
-      },
-      "priority": "high"
     },
     {
       "name": "designing-systems",
@@ -139,39 +83,6 @@
       "priority": "high"
     },
     {
-      "name": "writing-prds",
-      "path": ".claude/skills/product/writing-prds/SKILL.md",
-      "description": "Create Product Requirements Documents",
-      "triggers": {
-        "keywords": ["prd", "requirements", "product requirements", "user story", "acceptance criteria"],
-        "intent_patterns": ["write.*prd", "define.*requirements", "create.*user.*story"],
-        "file_patterns": ["prd_*.md"]
-      },
-      "priority": "high"
-    },
-    {
-      "name": "decomposing-tasks",
-      "path": ".claude/skills/product/decomposing-tasks/SKILL.md",
-      "description": "Break down complex tasks into actionable items",
-      "triggers": {
-        "keywords": ["break down", "decompose", "split", "subtask", "breakdown"],
-        "intent_patterns": ["break.*down.*task", "decompose.*work", "split.*into"],
-        "file_patterns": []
-      },
-      "priority": "medium"
-    },
-    {
-      "name": "requirements-analysis",
-      "path": ".claude/skills/product/requirements-analysis/SKILL.md",
-      "description": "Analyze and clarify requirements",
-      "triggers": {
-        "keywords": ["analyze requirements", "clarify", "scope", "gather requirements"],
-        "intent_patterns": ["analyze.*requirement", "clarify.*scope", "understand.*need"],
-        "file_patterns": []
-      },
-      "priority": "medium"
-    },
-    {
       "name": "documentation",
       "path": ".claude/skills/product/documentation/SKILL.md",
       "description": "Write clear technical documentation",
@@ -183,83 +94,6 @@
       "priority": "low"
     },
     {
-      "name": "execution-roadmaps",
-      "path": ".claude/skills/product/execution-roadmaps/SKILL.md",
-      "description": "Create project roadmaps and execution plans",
-      "triggers": {
-        "keywords": ["roadmap", "plan", "milestone", "execution plan"],
-        "intent_patterns": ["create.*roadmap", "plan.*execution", "define.*milestone"],
-        "file_patterns": ["roadmap_*.md", "plan_*.md"]
-      },
-      "priority": "medium"
-    },
-    {
-      "name": "estimating-work",
-      "path": ".claude/skills/product/estimating-work/SKILL.md",
-      "description": "Estimate effort for development tasks using story points and relative sizing",
-      "triggers": {
-        "keywords": ["estimate", "story points", "effort", "sizing", "velocity", "sprint planning"],
-        "intent_patterns": ["estimate.*task", "how.*long", "story.*points", "size.*work"],
-        "file_patterns": []
-      },
-      "priority": "low"
-    },
-    {
-      "name": "brainstorming",
-      "path": ".claude/skills/product/brainstorming/SKILL.md",
-      "description": "Generate and explore ideas using ideation techniques",
-      "triggers": {
-        "keywords": ["brainstorm", "ideate", "ideas", "creative", "explore options"],
-        "intent_patterns": ["brainstorm.*ideas", "generate.*ideas", "explore.*options", "what.*could"],
-        "file_patterns": []
-      },
-      "priority": "low"
-    },
-    {
-      "name": "agile-methodology",
-      "path": ".claude/skills/product/agile-methodology/SKILL.md",
-      "description": "Apply agile practices including Scrum, Kanban, and ceremonies",
-      "triggers": {
-        "keywords": ["agile", "scrum", "kanban", "sprint", "standup", "retrospective", "backlog"],
-        "intent_patterns": ["agile.*process", "run.*sprint", "scrum.*ceremony", "kanban.*board"],
-        "file_patterns": []
-      },
-      "priority": "low"
-    },
-    {
-      "name": "context-management",
-      "path": ".claude/skills/product/context-management/SKILL.md",
-      "description": "Manage project context for onboarding, handoffs, and knowledge sharing",
-      "triggers": {
-        "keywords": ["onboarding", "context", "handoff", "knowledge transfer", "ramp up"],
-        "intent_patterns": ["share.*context", "handoff.*project", "onboard.*team", "transfer.*knowledge"],
-        "file_patterns": []
-      },
-      "priority": "low"
-    },
-    {
-      "name": "reaching-consensus",
-      "path": ".claude/skills/product/reaching-consensus/SKILL.md",
-      "description": "Facilitate group decision-making and consensus building",
-      "triggers": {
-        "keywords": ["consensus", "decision", "align", "agree", "vote", "disagree"],
-        "intent_patterns": ["reach.*consensus", "make.*decision", "team.*align", "resolve.*disagreement"],
-        "file_patterns": []
-      },
-      "priority": "low"
-    },
-    {
-      "name": "observability",
-      "path": ".claude/skills/operations/observability/SKILL.md",
-      "description": "Logging, metrics, and tracing setup",
-      "triggers": {
-        "keywords": ["observability", "logging", "metrics", "tracing", "monitoring", "otel", "prometheus"],
-        "intent_patterns": ["add.*logging", "setup.*metrics", "implement.*tracing"],
-        "file_patterns": []
-      },
-      "priority": "medium"
-    },
-    {
       "name": "ci-workflows",
       "path": ".claude/skills/operations/ci-workflows/SKILL.md",
       "description": "Design, review, and optimize GitHub Actions CI/CD workflows with cost analysis and quality gates",
@@ -267,50 +101,6 @@
         "keywords": ["ci", "cd", "pipeline", "workflow", "github actions", "ci/cd", "continuous integration", "continuous delivery"],
         "intent_patterns": ["create.*workflow", "optimize.*ci", "add.*pipeline", "review.*workflow", "cost.*ci", "github.*action"],
         "file_patterns": [".github/workflows/*.yml", ".github/actions/*/action.yml"]
-      },
-      "priority": "high"
-    },
-    {
-      "name": "chaos-engineering",
-      "path": ".claude/skills/operations/chaos-engineering/SKILL.md",
-      "description": "Test system resilience through controlled failures and chaos experiments",
-      "triggers": {
-        "keywords": ["chaos", "resilience", "fault tolerance", "failure injection", "disaster recovery"],
-        "intent_patterns": ["test.*resilience", "inject.*failure", "chaos.*experiment", "disaster.*recovery"],
-        "file_patterns": []
-      },
-      "priority": "medium"
-    },
-    {
-      "name": "application-security",
-      "path": ".claude/skills/security/application-security/SKILL.md",
-      "description": "Secure application development practices",
-      "triggers": {
-        "keywords": ["security", "secure", "vulnerability", "owasp", "cve"],
-        "intent_patterns": ["secure.*application", "fix.*vulnerability", "security.*review"],
-        "file_patterns": []
-      },
-      "priority": "critical"
-    },
-    {
-      "name": "threat-modeling",
-      "path": ".claude/skills/security/threat-modeling/SKILL.md",
-      "description": "Identify and analyze security threats",
-      "triggers": {
-        "keywords": ["threat", "attack", "risk", "stride", "threat model"],
-        "intent_patterns": ["threat.*model", "identify.*risk", "analyze.*attack"],
-        "file_patterns": []
-      },
-      "priority": "high"
-    },
-    {
-      "name": "security-review",
-      "path": ".claude/skills/security/security-review/SKILL.md",
-      "description": "Conduct security code reviews",
-      "triggers": {
-        "keywords": ["security review", "audit", "pentest", "security audit"],
-        "intent_patterns": ["security.*review", "audit.*code", "check.*security"],
-        "file_patterns": ["security_audit_*.md"]
       },
       "priority": "high"
     },
@@ -355,17 +145,6 @@
         "keywords": ["bash", "shell", "script"],
         "intent_patterns": ["bash.*script", "shell.*command", "write.*script"],
         "file_patterns": ["*.sh", "*.bash"]
-      },
-      "priority": "medium"
-    },
-    {
-      "name": "tailwind-css",
-      "path": ".claude/skills/languages/tailwind-css/SKILL.md",
-      "description": "Tailwind CSS 4.x web styling patterns and configuration",
-      "triggers": {
-        "keywords": ["tailwind", "tailwindcss", "utility css", "css utility"],
-        "intent_patterns": ["tailwind.*style", "add.*tailwind", "configure.*tailwind"],
-        "file_patterns": ["tailwind.config.*", "*.css"]
       },
       "priority": "medium"
     },

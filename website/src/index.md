@@ -19,28 +19,26 @@ hero:
       link: /docs/user-guide
 
 features:
-  - title: Instant Setup
-    icon: 🚀
-    details: Single binary download, zero dependencies.
+  - title: Zero Infrastructure
+    icon: 🗄️
+    details: Uses your existing OCI registry — Docker Hub, GHCR, ECR, or any private instance. No servers to host, no taps to maintain, no Artifactory license required.
 
-  - title: Cross Platform
+  - title: Cross-Platform
     icon: 🖥️
-    details:
-      Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
-      incididunt ut labore et dolore magna aliqua.
+    details: One identifier, automatic OS/arch detection. Multi-platform OCI manifests resolve the right binary for each machine — linux/amd64, darwin/arm64, Windows, and more.
 
-  - title: Smart Caching
-    icon: 🎯
-    details:
-      Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
-      incididunt ut labore et dolore magna aliqua.
+  - title: Reproducible
+    icon: 🔒
+    details: Content-addressed storage with local index snapshots. The same index always resolves to the same binaries — online or offline. Pin to a digest for absolute reproducibility.
 
-  - title: Blazing Fast
-    icon: ⚡
-    details:
-      Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
-      incididunt ut labore et dolore magna aliqua.
+  - title: Built for Automation
+    icon: ⚙️
+    details: JSON output, clean isolated environments, composable commands. Designed to be called by CI pipelines, GitHub Actions, Bazel rules, and scripts — not just humans.
 ---
+
+::: warning Early Development
+OCX is in early development (v0.0.0). The CLI is functional but APIs may change. Packages shown in examples may not yet be available on the public registry — see the [getting started guide](/docs/getting-started) for what's available today.
+:::
 
 ## Quick Start {#quick-start}
 

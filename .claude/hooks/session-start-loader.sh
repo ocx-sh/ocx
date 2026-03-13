@@ -1,6 +1,6 @@
 #!/bin/bash
 # Session start hook for swarm context loading
-# Loads project context, beads status, and swarm state
+# Loads project context and swarm state
 
 set -eo pipefail
 
@@ -22,21 +22,6 @@ echo "{\"session_id\": \"$SESSION_ID\", \"started\": \"$(date -Iseconds)\", \"so
 # Build context message
 CONTEXT=""
 
-# Load Beads status if available
-if command -v bd &> /dev/null && [ -d "$PROJECT_DIR/.beads" ]; then
-    READY_COUNT=$(bd ready --json 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
-    OPEN_COUNT=$(bd list --status open --json 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
-
-    if [ "$OPEN_COUNT" != "0" ] || [ "$READY_COUNT" != "0" ]; then
-        CONTEXT="$CONTEXT
-[BEADS STATUS]
-- Open issues: $OPEN_COUNT
-- Ready to work: $READY_COUNT
-- Run 'bd ready' to see unblocked issues
-- Run 'bd list --status open' for all open issues"
-    fi
-fi
-
 # Check for active swarm agents
 ACTIVE_AGENTS=$(ls -1 "$STATE_DIR"/session_*.json 2>/dev/null | wc -l | tr -d ' ')
 if [ "$ACTIVE_AGENTS" -gt 1 ]; then
@@ -44,8 +29,6 @@ if [ "$ACTIVE_AGENTS" -gt 1 ]; then
 
 [SWARM STATUS]
 - Active agents in project: $ACTIVE_AGENTS
-- Coordinate via Beads to avoid conflicts
-- Use 'bd create' to track new work items
 - Check file locks before major edits"
 fi
 

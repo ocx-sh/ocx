@@ -130,7 +130,7 @@ Verify findings before deletion (false positives with dynamic imports).
 
 ## Handoff
 
-- To Builder: With Beads for specific fixes and refactoring
+- To Builder: With specific fixes and refactoring items
 - To Architect: For systemic architectural issues
 
 $ARGUMENTS

@@ -1,11 +1,11 @@
 ---
-description: Execute implementation plans with parallel worker swarm and beads tracking
-argument-hint: [plan-artifact-or-bead-id]
+description: Execute implementation plans with parallel worker swarm
+argument-hint: [plan-artifact-or-task-description]
 ---
 
 # Execution Orchestrator
 
-Execute plans using parallel worker swarms with quality gates and Beads tracking.
+Execute plans using parallel worker swarms with quality gates.
 
 ## MCP Tools
 
@@ -22,13 +22,11 @@ Execute plans using parallel worker swarms with quality gates and Beads tracking
 
 ## Execution Workflow
 
-1. **Discover** — Find available work via `bd ready --sort hybrid`
-2. **Claim** — Update status: `bd update <id> --status in_progress`
-3. **Analyze** — Check dependency graph: `bd dep tree <id>`
-4. **Execute** — Launch parallel workers for independent tasks
-5. **Gate** — Run quality gates before closing tasks
-6. **Close** — Mark complete: `bd close <id> --reason "..."`
-7. **Commit** — Commit all changes on the feature branch (NEVER push)
+1. **Discover** — Identify available tasks from the plan artifact
+2. **Analyze** — Check task dependencies and order
+3. **Execute** — Launch parallel workers for independent tasks
+4. **Gate** — Run quality gates before marking tasks complete
+5. **Commit** — Commit all changes on the feature branch (NEVER push)
 
 ## Worker Assignment
 
@@ -54,30 +52,15 @@ No exceptions.
 
 Follow git protocol in `swarm-workers.md`:
 1. Stage and commit with descriptive message
-2. Sync beads: `bd sync`
-3. NEVER push to remote — the human decides when to push (CI has real cost)
+2. NEVER push to remote — the human decides when to push (CI has real cost)
 
 ## Checkpointing
 
-For long-running tasks, add progress updates:
-
-```bash
-bd comments add <id> "Completed step 1: schema migration"
-bd comments add <id> "Completed step 2: API endpoints"
-bd comments add <id> "In progress: integration tests"
-```
+For long-running tasks, report progress milestones back to the orchestrator as each step completes.
 
 ## Error Handling
 
-```bash
-# If worker fails, update bead
-bd update <id> --status blocked
-bd comments add <id> "Blocked: [safe error description without secrets]"
-
-# Create follow-up task if needed
-bd create --title="Fix: [description]" --type=bug --priority=1
-bd dep add <new-id> <blocked-id>
-```
+If a worker fails, report the blocker to the orchestrator with a safe description (no secrets). The orchestrator will determine whether to retry, reassign, or create a follow-up task.
 
 ## Rollback
 
@@ -85,13 +68,12 @@ If quality gates fail: stash changes, mark task as blocked, add comment with rea
 
 ## Constraints
 
-- NO closing tasks without passing quality gates
+- NO completing tasks without passing quality gates
 - NO leaving work uncommitted locally
 - NO exceeding 8 parallel workers
 - NO pushing to remote (human decides when to push)
-- NO exposing secrets in error messages or comments
-- ALWAYS update bead status in real-time
-- ALWAYS add comments for blocked work
+- NO exposing secrets in error messages or reports
+- ALWAYS report blockers immediately to the orchestrator
 - ALWAYS verify `git status` shows up to date
 - ALWAYS validate inputs before executing commands
 
@@ -102,12 +84,11 @@ If quality gates fail: stash changes, mark task as blocked, add comment with rea
 - [ ] Linter passes
 - [ ] Types check
 - [ ] Build succeeds
-- [ ] Bead closed with reason
 - [ ] Changes committed on feature branch (NOT pushed)
 
 ## Related Skills
 
-`beads-workflow`, `testing`
+`testing`
 
 ## Handoff
 

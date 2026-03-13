@@ -24,7 +24,7 @@ Decompose features into actionable plans using parallel exploration swarms.
 2. **Classify** — Determine decision reversibility (Two-Way Door vs One-Way Door)
 3. **Document** — Create appropriate artifacts based on scope
 4. **Decompose** — Break into right-sized tasks (1-2 days each)
-5. **Track** — Create Beads for implementation tracking
+5. **Track** — Document implementation plan
 
 ## Decision Framework
 
@@ -60,20 +60,6 @@ Decompose features into actionable plans using parallel exploration swarms.
 # - Related ADRs and design specs
 ```
 
-## Beads Creation
-
-```bash
-# Create epic
-bd create --title="Implement [feature]" --type=feature --priority=2
-
-# Create implementation tasks
-bd create --title="[Task 1: Foundation]" --type=task
-bd create --title="[Task 2: Core Logic]" --type=task
-
-# Link dependencies (Task 2 depends on Task 1)
-bd dep add <task2-id> <task1-id>
-```
-
 ## Constraints
 
 - NO skipping artifact creation for features > 3 days
@@ -81,24 +67,22 @@ bd dep add <task2-id> <task1-id>
 - NO assuming context — explore codebase first
 - ALWAYS use parallel workers for research phase
 - ALWAYS store artifacts in `./artifacts/`
-- ALWAYS create Beads before declaring planning complete
 - ALWAYS validate arguments before using in commands
 
 ## Output
 
 Every planning session MUST produce:
 1. Artifact(s) in `./artifacts/` following naming conventions
-2. Beads for all implementation tasks
-3. Dependency graph showing task order
-4. Handoff summary for /execute command
+2. Dependency graph showing task order
+3. Handoff summary for /execute command
 
 ## Related Skills
 
-`decomposing-tasks`, `beads-workflow`, `designing-systems`
+`decomposing-tasks`, `designing-systems`
 
 ## Handoff
 
-- To Builder: Plan artifact + Beads ready for `bd ready`
+- To Builder: Plan artifact ready for execution
 - To Architect: Complex decisions requiring ADR review
 
 $ARGUMENTS

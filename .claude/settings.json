@@ -160,19 +160,6 @@
       "Bash(docker run:*)",
       "Bash(docker exec:*)",
 
-      "// === Terraform Operations ===",
-      "Bash(terraform version:*)",
-      "Bash(terraform fmt:*)",
-      "Bash(terraform validate:*)",
-      "Bash(terraform init:*)",
-      "Bash(terraform plan:*)",
-      "Bash(terraform show:*)",
-      "Bash(terraform state list:*)",
-      "Bash(terraform state show:*)",
-      "Bash(terraform output:*)",
-      "Bash(terraform providers:*)",
-      "Bash(terraform graph:*)",
-
       "// === Node.js / Package Managers ===",
       "Bash(node --version:*)",
       "Bash(node -v:*)",
@@ -201,9 +188,6 @@
       "Bash(test:*)",
       "Bash(echo:*)",
       "Bash(#:*)",
-
-      "// === Beads Issue Tracker ===",
-      "Bash(bd:*)",
 
       "// === Claude CLI ===",
       "Bash(claude:*)",
@@ -293,8 +277,6 @@
       "Bash(git clean -fd:*)",
 
       "// === Infrastructure Destructive Operations ===",
-      "Bash(terraform destroy:*)",
-      "Bash(terraform apply -auto-approve:*)",
       "Bash(docker system prune:*)",
       "Bash(docker rm:*)",
       "Bash(docker rmi:*)",
@@ -362,11 +344,6 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-use-tracker.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-use-beads-tracker.sh",
             "timeout": 5
           }
         ]

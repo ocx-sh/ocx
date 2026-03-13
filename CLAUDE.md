@@ -129,7 +129,7 @@ Work on a branch, never main. Commit iteratively. **Never push to remote** — t
 
 ### 7. Leave a Trail
 
-Planning artifacts go in `./.agents/artifacts/`. Track work with Beads (`bd` CLI). Document architectural decisions in ADRs. Name things so the next person understands.
+Planning artifacts go in `./.agents/artifacts/`. Document architectural decisions in ADRs. Name things so the next person understands.
 
 ## Tech Stack
 
@@ -141,7 +141,7 @@ Planning artifacts go in `./.agents/artifacts/`. Track work with Beads (`bd` CLI
 
 **Commits**: Use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). Scopes are optional. Do not add `Co-Authored-By` trailers to commit messages.
 
-**Planning flow**: PR-FAQ → PRD → ADR → Design Spec → Plan → Implementation Beads
+**Planning flow**: ADR → Design Spec → Plan → Implementation
 
 **Artifacts**: All planning docs stored in `./.agents/artifacts/`.
 **Templates**: Templates for markdown files in `./.agents/templates/artifacts/`.
@@ -150,28 +150,11 @@ Planning artifacts go in `./.agents/artifacts/`. Track work with Beads (`bd` CLI
 
 | Type | Pattern | Example |
 |------|---------|---------|
-| Vision | `pr_faq_[feature].md` | `pr_faq_user_auth.md` |
-| Requirements | `prd_[feature].md` | `prd_user_auth.md` |
 | Architecture | `adr_[topic].md` | `adr_database_choice.md` |
 | System Design | `system_design_[component].md` | `system_design_api.md` |
 | Design | `design_spec_[component].md` | `design_spec_login_form.md` |
-| Roadmap | `roadmap_[project].md` | `roadmap_mvp.md` |
 | Plan | `plan_[task].md` | `plan_api_refactor.md` |
 | Security Audit | `security_audit_[date].md` | `security_audit_2025-01.md` |
-| Post-Mortem | `postmortem_[incident-id].md` | `postmortem_inc-2025-001.md` |
-
-**Beads** (issue tracking — CLI saves 98% tokens vs MCP):
-
-```bash
-bd create "Task"                        # Create
-bd ready                                # Find unblocked work
-bd show <id>                            # View details
-bd update <id> --status in_progress     # Claim
-bd close <id>                           # Complete
-bd sync                                 # Sync with git
-```
-
-See `beads-workflow` skill for complete command reference.
 
 ## Personas
 
