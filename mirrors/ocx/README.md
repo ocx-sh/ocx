@@ -10,8 +10,6 @@ OCX is a fast, cross-platform binary package manager that uses OCI registries as
 
 ## What's included
 
-This package provides the OCX command-line tool:
-
 - **ocx** — install, manage, and execute pre-built binaries from OCI registries
 
 ## Links

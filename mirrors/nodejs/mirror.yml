@@ -1,0 +1,42 @@
+name: nodejs
+target:
+  registry: ocx.sh
+  repository: nodejs
+
+source:
+  type: url_index
+  generator:
+    command: ["uv", "run", "generate.py"]
+
+assets:
+  linux/amd64:
+    - "node-.*-linux-x64\\.tar\\.xz"
+  linux/arm64:
+    - "node-.*-linux-arm64\\.tar\\.xz"
+  darwin/amd64:
+    - "node-.*-darwin-x64\\.tar\\.gz"
+  darwin/arm64:
+    - "node-.*-darwin-arm64\\.tar\\.gz"
+  windows/amd64:
+    - "node-.*-win-x64\\.zip"
+  windows/arm64:
+    - "node-.*-win-arm64\\.zip"
+
+strip_components: 1
+cascade: true
+build_timestamp: none
+skip_prereleases: true
+
+metadata:
+  default: metadata.json
+
+versions:
+  min: "20.0.0"
+  new_per_run: 5
+
+concurrency:
+  max_downloads: 4
+  max_bundles: 2
+  max_pushes: 2
+  rate_limit_ms: 200
+  max_retries: 3

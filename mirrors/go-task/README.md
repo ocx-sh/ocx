@@ -10,8 +10,6 @@ Task is a task runner and build tool that aims to be simpler and easier to use t
 
 ## What's included
 
-This package provides the Task command-line tool:
-
 - **task** — run tasks defined in a Taskfile.yml
 
 ## Links

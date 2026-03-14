@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  SDK_DIR: "{{.ROOT_DIR}}/mirror-sdk-py"
+
+tasks:
+  schema:
+    desc: Generate JSON Schema for url_index format
+    cmds:
+      - mkdir -p {{.SDK_DIR}}/schemas
+      - cargo run --release --bin ocx-mirror -- schema url-index > {{.SDK_DIR}}/schemas/url-index.v1.json 2>/dev/null
+
+  codegen:
+    desc: Generate Python types from url_index JSON Schema
+    deps: [schema]
+    dir: "{{.SDK_DIR}}"
+    cmds:
+      - >
+        uv run --with 'datamodel-code-generator>=0.26'
+        datamodel-codegen
+        --input schemas/url-index.v1.json
+        --input-file-type jsonschema
+        --output src/ocx_gen/_schema.py
+        --output-model-type dataclasses.dataclass
+        --target-python-version 3.13
+
+  test:
+    desc: Run mirror SDK tests
+    dir: "{{.SDK_DIR}}"
+    cmds:
+      - uv run --with 'pytest>=8' pytest tests/ -v

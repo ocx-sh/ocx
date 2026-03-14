@@ -29,6 +29,11 @@ includes:
     vars:
       PACKAGE: bun
       REPO: ocx.sh/bun
+  nodejs:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: nodejs
+      REPO: ocx.sh/nodejs
   ocx:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:
@@ -51,8 +56,9 @@ tasks:
     cmds:
       - task: bun:sync
       - task: cmake:sync
-      - task: go-task:sync
       - task: git-cliff:sync
+      - task: go-task:sync
+      - task: nodejs:sync
       - task: shellcheck:sync
       - task: uv:sync
 
@@ -61,8 +67,9 @@ tasks:
     cmds:
       - task: bun:describe
       - task: cmake:describe
-      - task: go-task:describe
       - task: git-cliff:describe
+      - task: go-task:describe
+      - task: nodejs:describe
       - task: ocx:describe
       - task: shellcheck:describe
       - task: uv:describe

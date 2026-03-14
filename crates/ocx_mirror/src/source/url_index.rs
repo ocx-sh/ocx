@@ -2,10 +2,57 @@
 // Copyright 2026 The OCX Authors
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::VersionInfo;
+use crate::spec::GeneratorConfig;
+
+/// Root of the url_index JSON format.
+///
+/// Contains a map of version strings to their release assets.
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct RemoteIndex {
+    /// Map of version string (e.g., "22.15.0") to version entry.
+    pub versions: HashMap<String, RemoteVersionEntry>,
+}
+
+/// A single version's metadata and download assets.
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct RemoteVersionEntry {
+    /// Whether this is a pre-release version.
+    #[serde(default)]
+    pub prerelease: bool,
+    /// Map of asset filename to download URL.
+    pub assets: HashMap<String, String>,
+}
+
+/// Parse a `RemoteIndex` into a list of `VersionInfo` entries.
+fn parse_remote_index(index: RemoteIndex) -> anyhow::Result<Vec<VersionInfo>> {
+    let mut versions = Vec::with_capacity(index.versions.len());
+    for (version, entry) in index.versions {
+        let assets = entry
+            .assets
+            .into_iter()
+            .map(|(name, url_str)| {
+                let url = Url::parse(&url_str)
+                    .map_err(|e| anyhow::anyhow!("invalid URL for asset '{name}' in version '{version}': {e}"))?;
+                Ok((name, url))
+            })
+            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+
+        versions.push(VersionInfo {
+            version,
+            assets,
+            is_prerelease: entry.prerelease,
+        });
+    }
+    Ok(versions)
+}
 
 /// Convert inline versions from the mirror spec into `VersionInfo` entries.
 pub fn from_inline(versions: &HashMap<String, crate::spec::UrlIndexVersion>) -> anyhow::Result<Vec<VersionInfo>> {
@@ -34,40 +81,54 @@ pub fn from_inline(versions: &HashMap<String, crate::spec::UrlIndexVersion>) -> 
 /// `{ "versions": { "<ver>": { "prerelease": bool, "assets": { "<name>": "<url>" } } } }`
 pub async fn from_remote(url: &str) -> anyhow::Result<Vec<VersionInfo>> {
     let response = reqwest::get(url).await?.error_for_status()?;
-    let body: RemoteIndex = response.json().await?;
+    let index: RemoteIndex = response.json().await?;
+    parse_remote_index(index)
+}
 
-    let mut versions = Vec::with_capacity(body.versions.len());
-    for (version, entry) in body.versions {
-        let assets = entry
-            .assets
-            .into_iter()
-            .map(|(name, url_str)| {
-                let url = Url::parse(&url_str)
-                    .map_err(|e| anyhow::anyhow!("invalid URL for asset '{name}' in version '{version}': {e}"))?;
-                Ok((name, url))
-            })
-            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+/// Run a generator command and parse its stdout as url_index JSON.
+pub async fn from_generator(config: &GeneratorConfig, spec_dir: &Path) -> anyhow::Result<Vec<VersionInfo>> {
+    let working_dir = config.resolve_working_directory(spec_dir);
 
-        versions.push(VersionInfo {
-            version,
-            assets,
-            is_prerelease: entry.prerelease,
-        });
+    let timeout = Duration::from_secs(config.timeout_seconds);
+    let result = tokio::time::timeout(timeout, async {
+        let output = tokio::process::Command::new(&config.command[0])
+            .args(&config.command[1..])
+            .current_dir(&working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to run generator '{}': {e}", config.command[0]))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "generator '{}' failed (exit {}): {}",
+                config.command.join(" "),
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        if output.stdout.is_empty() {
+            anyhow::bail!("generator '{}' produced no output", config.command.join(" "));
+        }
+
+        let index: RemoteIndex = serde_json::from_slice(&output.stdout)
+            .map_err(|e| anyhow::anyhow!("generator output is not valid url_index JSON: {e}"))?;
+
+        parse_remote_index(index)
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => anyhow::bail!(
+            "generator '{}' timed out after {}s",
+            config.command.join(" "),
+            config.timeout_seconds
+        ),
     }
-
-    Ok(versions)
-}
-
-#[derive(serde::Deserialize)]
-struct RemoteIndex {
-    versions: HashMap<String, RemoteVersionEntry>,
-}
-
-#[derive(serde::Deserialize)]
-struct RemoteVersionEntry {
-    #[serde(default)]
-    prerelease: bool,
-    assets: HashMap<String, String>,
 }
 
 #[cfg(test)]
@@ -118,5 +179,59 @@ mod tests {
         let versions = HashMap::new();
         let result = from_inline(&versions).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_remote_index_basic() {
+        let mut versions = HashMap::new();
+        versions.insert(
+            "1.0.0".to_string(),
+            RemoteVersionEntry {
+                prerelease: false,
+                assets: HashMap::from([(
+                    "tool-linux.tar.gz".to_string(),
+                    "https://example.com/tool-linux.tar.gz".to_string(),
+                )]),
+            },
+        );
+        versions.insert(
+            "2.0.0-rc1".to_string(),
+            RemoteVersionEntry {
+                prerelease: true,
+                assets: HashMap::from([(
+                    "tool-linux.tar.gz".to_string(),
+                    "https://example.com/tool-2-linux.tar.gz".to_string(),
+                )]),
+            },
+        );
+
+        let index = RemoteIndex { versions };
+        let result = parse_remote_index(index).unwrap();
+        assert_eq!(result.len(), 2);
+
+        let v1 = result.iter().find(|v| v.version == "1.0.0").unwrap();
+        assert!(!v1.is_prerelease);
+        assert_eq!(v1.assets.len(), 1);
+
+        let v2 = result.iter().find(|v| v.version == "2.0.0-rc1").unwrap();
+        assert!(v2.is_prerelease);
+    }
+
+    #[test]
+    fn parse_remote_index_invalid_url() {
+        let mut versions = HashMap::new();
+        versions.insert(
+            "1.0.0".to_string(),
+            RemoteVersionEntry {
+                prerelease: false,
+                assets: HashMap::from([("tool.tar.gz".to_string(), "not-a-url".to_string())]),
+            },
+        );
+
+        let index = RemoteIndex { versions };
+        let result = parse_remote_index(index);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid URL"), "Expected URL error, got: {err}");
     }
 }

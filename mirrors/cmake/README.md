@@ -10,8 +10,6 @@ CMake is an open-source, cross-platform build system generator. It produces nati
 
 ## What's included
 
-This package provides the CMake command-line tools:
-
 - **cmake** — configure and generate build systems
 - **ctest** — run test suites
 - **cpack** — create installers and packages

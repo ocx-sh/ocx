@@ -68,7 +68,7 @@ impl Sync {
         prep_span.pb_set_message(&spec.name);
         let _prep_guard = prep_span.entered();
 
-        let upstream_versions = list_upstream_versions(&spec).await?;
+        let upstream_versions = list_upstream_versions(&spec, spec_dir).await?;
         log::debug!("[{}] Found {} upstream versions", spec.name, upstream_versions.len());
 
         // Compile asset patterns
@@ -277,7 +277,10 @@ fn extract_platforms(manifest: &ocx_lib::oci::Manifest) -> Vec<Platform> {
 }
 
 /// List upstream versions from the configured source.
-async fn list_upstream_versions(spec: &MirrorSpec) -> Result<Vec<source::VersionInfo>, MirrorError> {
+async fn list_upstream_versions(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+) -> Result<Vec<source::VersionInfo>, MirrorError> {
     match &spec.source {
         spec::Source::GithubRelease {
             owner,
@@ -301,21 +304,24 @@ async fn list_upstream_versions(spec: &MirrorSpec) -> Result<Vec<source::Version
                 .await
                 .map_err(|e| MirrorError::SourceError(format!("failed to list GitHub releases: {e}")))
         }
-        spec::Source::UrlIndex { url, versions } => {
-            if let Some(versions) = versions {
-                log::debug!("Loading {} inline versions", versions.len());
-                source::url_index::from_inline(versions)
-                    .map_err(|e| MirrorError::SourceError(format!("invalid url_index versions: {e}")))
-            } else if let Some(url) = url {
+        spec::Source::UrlIndex(url_index_source) => match url_index_source {
+            spec::UrlIndexSource::Remote { url } => {
                 log::debug!("Fetching remote URL index from {}", url);
                 source::url_index::from_remote(url)
                     .await
                     .map_err(|e| MirrorError::SourceError(format!("failed to fetch url_index: {e}")))
-            } else {
-                Err(MirrorError::SpecInvalid(vec![
-                    "source requires url or versions".to_string(),
-                ]))
             }
-        }
+            spec::UrlIndexSource::Inline { versions } => {
+                log::debug!("Loading {} inline versions", versions.len());
+                source::url_index::from_inline(versions)
+                    .map_err(|e| MirrorError::SourceError(format!("invalid url_index versions: {e}")))
+            }
+            spec::UrlIndexSource::Generator { generator } => {
+                log::debug!("Running generator: {}", generator.command.join(" "));
+                source::url_index::from_generator(generator, spec_dir)
+                    .await
+                    .map_err(|e| MirrorError::SourceError(format!("generator failed: {e}")))
+            }
+        },
     }
 }

@@ -3,6 +3,7 @@
 
 mod check;
 mod options;
+mod schema;
 mod sync;
 mod sync_all;
 mod validate;
@@ -22,6 +23,9 @@ pub enum Command {
 
     /// Validate a mirror spec file
     Validate(validate::Validate),
+
+    /// Generate JSON Schema for mirror types
+    Schema(schema::Schema),
 }
 
 impl Command {
@@ -31,6 +35,7 @@ impl Command {
             Self::Check(cmd) => cmd.execute().await,
             Self::SyncAll(cmd) => cmd.execute().await,
             Self::Validate(cmd) => cmd.execute().await,
+            Self::Schema(cmd) => cmd.execute().await,
         }
     }
 }

@@ -13,6 +13,7 @@ test/.venv/
 test/.pytest_cache/
 .fonts/
 .mirror-work/
+mirrors/*/out.json
 
 # =============================================================================
 # Claude Code Local Files

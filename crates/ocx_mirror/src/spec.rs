@@ -13,7 +13,7 @@ mod versions_config;
 pub use assets::AssetPatterns;
 pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 pub use metadata_config::MetadataConfig;
-pub use source::{Source, UrlIndexVersion};
+pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
 pub use verify_config::VerifyConfig;
@@ -172,13 +172,11 @@ skip_prereleases: true
         assert!(!spec.cascade);
         assert!(spec.skip_prereleases);
 
-        if let Source::UrlIndex { versions, url } = &spec.source {
-            assert!(url.is_none());
-            let versions = versions.as_ref().unwrap();
+        if let Source::UrlIndex(UrlIndexSource::Inline { versions }) = &spec.source {
             assert_eq!(versions.len(), 2);
             assert!(versions["1.1.0"].prerelease);
         } else {
-            panic!("Expected UrlIndex source");
+            panic!("Expected UrlIndex Inline source, got: {:?}", spec.source);
         }
     }
 
@@ -198,11 +196,10 @@ assets:
 "#;
 
         let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-        if let Source::UrlIndex { url, versions } = &spec.source {
-            assert_eq!(url.as_deref(), Some("https://example.com/versions.json"));
-            assert!(versions.is_none());
+        if let Source::UrlIndex(UrlIndexSource::Remote { url }) = &spec.source {
+            assert_eq!(url, "https://example.com/versions.json");
         } else {
-            panic!("Expected UrlIndex source");
+            panic!("Expected UrlIndex Remote source, got: {:?}", spec.source);
         }
     }
 
@@ -292,7 +289,7 @@ assets:
     }
 
     #[test]
-    fn validate_url_index_with_both_url_and_versions() {
+    fn reject_url_index_with_neither_url_nor_versions_nor_generator() {
         let yaml = r#"
 name: test
 target:
@@ -300,26 +297,69 @@ target:
   repository: test
 source:
   type: url_index
-  url: "https://example.com/versions.json"
-  versions:
-    "1.0.0":
-      assets:
-        test.tar.gz: "https://example.com/test.tar.gz"
 assets:
   linux/amd64:
     - "test\\.tar\\.gz"
 "#;
 
-        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-        let errors = spec.validate(Path::new("test.yaml"));
-        assert!(
-            errors.iter().any(|e| e.contains("exactly one")),
-            "Expected url/versions exclusivity error, got: {errors:?}"
-        );
+        let result: Result<MirrorSpec, _> = serde_yaml_ng::from_str(yaml);
+        assert!(result.is_err(), "Expected parse error for empty url_index");
     }
 
     #[test]
-    fn validate_url_index_with_neither_url_nor_versions() {
+    fn parse_url_index_generator_spec() {
+        let yaml = r#"
+name: nodejs
+target:
+  registry: ocx.sh
+  repository: nodejs
+source:
+  type: url_index
+  generator:
+    command: ["uv", "run", "generate.py"]
+    working_directory: scripts
+assets:
+  linux/amd64:
+    - "node-.*-linux-x64\\.tar\\.xz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        if let Source::UrlIndex(UrlIndexSource::Generator { generator }) = &spec.source {
+            assert_eq!(generator.command, vec!["uv", "run", "generate.py"]);
+            assert_eq!(generator.working_directory.as_deref(), Some("scripts"));
+        } else {
+            panic!("Expected UrlIndex Generator source, got: {:?}", spec.source);
+        }
+    }
+
+    #[test]
+    fn parse_url_index_generator_default_working_directory() {
+        let yaml = r#"
+name: nodejs
+target:
+  registry: ocx.sh
+  repository: nodejs
+source:
+  type: url_index
+  generator:
+    command: ["uv", "run", "generate.py"]
+assets:
+  linux/amd64:
+    - "node-.*-linux-x64\\.tar\\.xz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        if let Source::UrlIndex(UrlIndexSource::Generator { generator }) = &spec.source {
+            assert!(generator.working_directory.is_none());
+            let resolved = generator.resolve_working_directory(Path::new("/mirrors/nodejs"));
+            assert_eq!(resolved, Path::new("/mirrors/nodejs"));
+        } else {
+            panic!("Expected UrlIndex Generator source, got: {:?}", spec.source);
+        }
+    }
+
+    #[test]
+    fn validate_generator_empty_command() {
         let yaml = r#"
 name: test
 target:
@@ -327,6 +367,8 @@ target:
   repository: test
 source:
   type: url_index
+  generator:
+    command: []
 assets:
   linux/amd64:
     - "test\\.tar\\.gz"
@@ -335,8 +377,8 @@ assets:
         let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
         let errors = spec.validate(Path::new("test.yaml"));
         assert!(
-            errors.iter().any(|e| e.contains("exactly one")),
-            "Expected url/versions exclusivity error, got: {errors:?}"
+            errors.iter().any(|e| e.contains("non-empty")),
+            "Expected empty command error, got: {errors:?}"
         );
     }
 

@@ -40,13 +40,13 @@ const qualifiedName = computed(() => {
 const installCmd = computed(() => {
   if (!info.value) return ''
   const tag = latestTag.value ? `:${latestTag.value}` : ''
-  return `ocx install ${qualifiedName.value}${tag}`
+  return `ocx --remote install ${qualifiedName.value}${tag}`
 })
 
-const installSelectCmd = computed(() => {
+const profileCmd = computed(() => {
   if (!info.value) return ''
   const tag = latestTag.value ? `:${latestTag.value}` : ''
-  return `ocx install --select ${qualifiedName.value}${tag}`
+  return `ocx --remote shell profile add ${qualifiedName.value}${tag}`
 })
 
 function platformOs(platform: string): string {
@@ -58,8 +58,9 @@ const copiedTag = ref('')
 
 async function copyInstallForTag(event: MouseEvent, tag: string) {
   if (!info.value) return
-  const select = event.shiftKey ? ' --select' : ''
-  const cmd = `ocx install${select} ${qualifiedName.value}:${tag}`
+  const cmd = event.shiftKey
+    ? `ocx --remote shell profile add ${qualifiedName.value}:${tag}`
+    : `ocx --remote install ${qualifiedName.value}:${tag}`
   await copy(cmd)
   copiedTag.value = tag
   setTimeout(() => { copiedTag.value = '' }, 1500)
@@ -153,8 +154,8 @@ onMounted(async () => {
             <CopySnippet label="$" :code="installCmd" />
           </div>
           <div class="snippet-row">
-            <span class="snippet-label">Install &amp; Select</span>
-            <CopySnippet label="$" :code="installSelectCmd" />
+            <span class="snippet-label">Profile</span>
+            <CopySnippet label="$" :code="profileCmd" />
           </div>
         </div>
       </div>
@@ -163,7 +164,7 @@ onMounted(async () => {
       <div class="versions-section">
         <div class="versions-header">
           <h3 class="versions-title">Versions ({{ info.tags.length }})</h3>
-          <span v-if="info.tags.length" class="versions-hint">Click to copy install command. Hold Shift to include --select.</span>
+          <span v-if="info.tags.length" class="versions-hint">Click to copy install command. Hold Shift to copy profile add command.</span>
         </div>
         <div v-if="info.tags.length" class="tag-grid">
           <code
@@ -171,7 +172,7 @@ onMounted(async () => {
             :key="tag"
             class="tag-badge"
             :class="{ copied: copiedTag === tag }"
-            :title="`Click to copy: ocx install ${qualifiedName}:${tag}`"
+            :title="`Click: ocx --remote install ${qualifiedName}:${tag} · Shift: ocx --remote shell profile add ${qualifiedName}:${tag}`"
             @click="copyInstallForTag($event, tag)"
           ><span class="tag-text">{{ tag }}</span><svg class="tag-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg></code>
         </div>

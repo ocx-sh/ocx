@@ -45,8 +45,6 @@ tasks:
           elif test -f {{.PACKAGE_DIR}}/logo.png; then echo "--logo {{.PACKAGE_DIR}}/logo.png"
           else echo ""; fi
     preconditions:
-      - sh: test -f {{.PACKAGE_DIR}}/mirror.yml
-        msg: "No mirror.yml found for package '{{.PACKAGE}}'"
       - sh: test -f {{.PACKAGE_DIR}}/README.md
         msg: "No README.md found for package '{{.PACKAGE}}'"
     cmd:

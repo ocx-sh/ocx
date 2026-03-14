@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "RemoteVersionEntry": {
+      "description": "A single version's metadata and download assets.",
+      "properties": {
+        "assets": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map of asset filename to download URL.",
+          "type": "object"
+        },
+        "prerelease": {
+          "default": false,
+          "description": "Whether this is a pre-release version.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "assets"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://ocx.sh/schemas/url-index/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Root of the url_index JSON format.\n\nContains a map of version strings to their release assets.",
+  "properties": {
+    "versions": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RemoteVersionEntry"
+      },
+      "description": "Map of version string (e.g., \"22.15.0\") to version entry.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "versions"
+  ],
+  "title": "RemoteIndex",
+  "type": "object"
+}

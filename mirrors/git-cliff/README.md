@@ -10,8 +10,6 @@ git-cliff is a highly customizable changelog generator that follows Conventional
 
 ## What's included
 
-This package provides the following executables:
-
 - **git-cliff** — the changelog generator CLI
 - **git-cliff-completions** — generates shell completion scripts
 - **git-cliff-mangen** — generates man pages

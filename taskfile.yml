@@ -17,6 +17,7 @@ includes:
   sbom: ./taskfiles/sbom.taskfile.yml
   catalog: ./taskfiles/catalog.taskfile.yml
   mirror: ./taskfiles/mirror.taskfile.yml
+  mirror-sdk: ./taskfiles/mirror-sdk.taskfile.yml
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test

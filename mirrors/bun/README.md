@@ -10,8 +10,6 @@ Bun is an incredibly fast JavaScript runtime, bundler, test runner, and package 
 
 ## What's included
 
-This package provides the Bun command-line tool:
-
 - **bun** — JavaScript/TypeScript runtime, package manager, bundler, and test runner
 
 ## Links

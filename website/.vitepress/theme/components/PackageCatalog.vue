@@ -146,7 +146,7 @@ onMounted(async () => {
           </div>
 
           <div class="card-install" @click.stop>
-            <CopySnippet label="$" :code="`ocx install ${pkg.registry || data?.registry || ''}/${pkg.name}`" />
+            <CopySnippet label="$" :code="`ocx --remote shell profile add ${pkg.registry || data?.registry || ''}/${pkg.name}`" />
           </div>
         </div>
       </div>
