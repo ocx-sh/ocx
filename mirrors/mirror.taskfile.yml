@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Template taskfile for a single mirror package. Included multiple times
+# from the parent taskfile with different PACKAGE / REPO vars.
+
+version: '3'
+
+vars:
+  MIRRORS_DIR: '{{.MIRRORS_DIR | default (printf "%s/mirrors" .ROOT_DIR)}}'
+  PACKAGE_DIR: "{{.MIRRORS_DIR}}/{{.PACKAGE}}"
+
+tasks:
+  run:mirror:
+    internal: true
+    requires:
+      vars:
+        - ARGS
+    cmds:
+      - cargo run --release --bin ocx-mirror -- {{.ARGS}}
+
+  run:ocx:
+    internal: true
+    requires:
+      vars:
+        - ARGS
+    cmds:
+      - cargo run --release --bin ocx -- {{.ARGS}}
+
+  sync:
+    desc: "Mirror {{.PACKAGE}}"
+    preconditions:
+      - sh: test -f {{.PACKAGE_DIR}}/mirror.yml
+        msg: "No mirror.yml found for package '{{.PACKAGE}}'"
+    cmd:
+      task: run:mirror
+      vars:
+        ARGS: sync {{.PACKAGE_DIR}}/mirror.yml --work-dir {{.ROOT_DIR}}/.mirror-work {{.CLI_ARGS}}
+
+  describe:
+    desc: "Push {{.PACKAGE}} README and logo to the registry"
+    vars:
+      LOGO_FLAG:
+        sh: |
+          if test -f {{.PACKAGE_DIR}}/logo.svg; then echo "--logo {{.PACKAGE_DIR}}/logo.svg"
+          elif test -f {{.PACKAGE_DIR}}/logo.png; then echo "--logo {{.PACKAGE_DIR}}/logo.png"
+          else echo ""; fi
+    preconditions:
+      - sh: test -f {{.PACKAGE_DIR}}/mirror.yml
+        msg: "No mirror.yml found for package '{{.PACKAGE}}'"
+      - sh: test -f {{.PACKAGE_DIR}}/README.md
+        msg: "No README.md found for package '{{.PACKAGE}}'"
+    cmd:
+      task: run:ocx
+      vars:
+        ARGS: package describe --readme {{.PACKAGE_DIR}}/README.md {{.LOGO_FLAG}} {{.REPO}}

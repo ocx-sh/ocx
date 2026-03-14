@@ -1,0 +1,46 @@
+name: go-task
+target:
+  registry: ocx.sh
+  repository: go-task
+
+source:
+  type: github_release
+  owner: go-task
+  repo: task
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "task_linux_amd64\\.tar\\.gz"
+  linux/arm64:
+    - "task_linux_arm64\\.tar\\.gz"
+  darwin/amd64:
+    - "task_darwin_amd64\\.tar\\.gz"
+  darwin/arm64:
+    - "task_darwin_arm64\\.tar\\.gz"
+  windows/amd64:
+    - "task_windows_amd64\\.zip"
+  windows/arm64:
+    - "task_windows_arm64\\.zip"
+
+metadata:
+  default: metadata.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "3.49.1"
+  new_per_run: 10
+
+verify:
+  github_asset_digest: true
+
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0

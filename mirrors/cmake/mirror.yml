@@ -30,12 +30,12 @@ assets:
 strip_components: 1
 
 metadata:
-  default: metadata/cmake.json
+  default: metadata.json
   platforms:
-    darwin/amd64: metadata/cmake-darwin.json
-    darwin/arm64: metadata/cmake-darwin.json
-    windows/amd64: metadata/cmake-windows.json
-    windows/arm64: metadata/cmake-windows.json
+    darwin/amd64: metadata-darwin.json
+    darwin/arm64: metadata-darwin.json
+    windows/amd64: metadata-windows.json
+    windows/arm64: metadata-windows.json
 
 skip_prereleases: true
 cascade: true

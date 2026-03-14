@@ -16,7 +16,7 @@ import pytest
 from src.mirror_runner import MirrorRunner
 from src.runner import OcxRunner, current_platform
 
-FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "mirror"
+FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "mirror" / "test-tool"
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ def asset_server(tmp_path: Path):
 
 def test_validate_valid_spec(mirror: MirrorRunner, tmp_path: Path, registry: str, unique_mirror_repo: str):
     """validate command exits 0 for a valid spec."""
-    metadata_path = str(FIXTURES_DIR / "metadata" / "test-tool.json")
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
     spec_path = tmp_path / "mirror-test.yaml"
     _write_spec_yaml(
         spec_path,
@@ -208,7 +208,7 @@ def test_check_shows_would_mirror(
     tarball = _make_tarball(tmp_path, "test-tool", "marker-check")
     shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
 
-    metadata_path = str(FIXTURES_DIR / "metadata" / "test-tool.json")
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
     spec_path = tmp_path / "mirror-test.yaml"
     _write_spec_yaml(
         spec_path,
@@ -239,7 +239,7 @@ def test_sync_mirrors_versions(
     tarball = _make_tarball(tmp_path, "test-tool", "marker-sync")
     shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
 
-    metadata_path = str(FIXTURES_DIR / "metadata" / "test-tool.json")
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
     spec_path = tmp_path / "mirror-test.yaml"
     _write_spec_yaml(
         spec_path,
@@ -272,7 +272,7 @@ def test_sync_idempotent(
     tarball = _make_tarball(tmp_path, "test-tool", "marker-idem")
     shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
 
-    metadata_path = str(FIXTURES_DIR / "metadata" / "test-tool.json")
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
     spec_path = tmp_path / "mirror-test.yaml"
     _write_spec_yaml(
         spec_path,
@@ -306,7 +306,7 @@ def test_sync_cascade_creates_rolling_tags(
     tarball = _make_tarball(tmp_path, "test-tool", "marker-cascade")
     shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
 
-    metadata_path = str(FIXTURES_DIR / "metadata" / "test-tool.json")
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
     spec_path = tmp_path / "mirror-test.yaml"
     _write_spec_yaml(
         spec_path,
@@ -343,7 +343,7 @@ def test_sync_version_min_filter(
     tarball = _make_tarball(tmp_path, "test-tool", "marker-min")
     shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
 
-    metadata_path = str(FIXTURES_DIR / "metadata" / "test-tool.json")
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
     spec_path = tmp_path / "mirror-test.yaml"
     _write_spec_yaml(
         spec_path,
@@ -376,7 +376,7 @@ def test_sync_new_per_run_cap(
     tarball = _make_tarball(tmp_path, "test-tool", "marker-cap")
     shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
 
-    metadata_path = str(FIXTURES_DIR / "metadata" / "test-tool.json")
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
     spec_path = tmp_path / "mirror-test.yaml"
     _write_spec_yaml(
         spec_path,
@@ -411,22 +411,26 @@ def test_sync_all_processes_multiple_specs(
     mirror: MirrorRunner, ocx: OcxRunner, tmp_path: Path,
     registry: str, asset_server,
 ):
-    """sync-all processes all mirror-*.yaml files in a directory."""
+    """sync-all processes all */mirror.yml specs in a directory."""
     tarball_a = _make_tarball(tmp_path, "tool-a", "marker-a")
     tarball_b = _make_tarball(tmp_path, "tool-b", "marker-b")
     shutil.copy(tarball_a, asset_server.dir / "tool-a.tar.gz")
     shutil.copy(tarball_b, asset_server.dir / "tool-b.tar.gz")
 
-    metadata_path = str(FIXTURES_DIR / "metadata" / "test-tool.json")
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
     specs_dir = tmp_path / "specs"
-    specs_dir.mkdir()
+
+    tool_a_dir = specs_dir / "tool-a"
+    tool_a_dir.mkdir(parents=True)
+    tool_b_dir = specs_dir / "tool-b"
+    tool_b_dir.mkdir(parents=True)
 
     short_id = uuid4().hex[:8]
     repo_a = f"m_{short_id}_toola"
     repo_b = f"m_{short_id}_toolb"
 
     _write_spec_yaml(
-        specs_dir / "mirror-tool-a.yaml",
+        tool_a_dir / "mirror.yml",
         name="tool-a",
         registry=registry,
         repo=repo_a,
@@ -435,7 +439,7 @@ def test_sync_all_processes_multiple_specs(
         cascade=False,
     )
     _write_spec_yaml(
-        specs_dir / "mirror-tool-b.yaml",
+        tool_b_dir / "mirror.yml",
         name="tool-b",
         registry=registry,
         repo=repo_b,

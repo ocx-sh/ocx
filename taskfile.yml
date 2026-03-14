@@ -12,6 +12,7 @@ includes:
   lint: ./taskfiles/lint.taskfile.yml
   sbom: ./taskfiles/sbom.taskfile.yml
   catalog: ./taskfiles/catalog.taskfile.yml
+  mirror: ./taskfiles/mirror.taskfile.yml
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test

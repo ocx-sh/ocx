@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, WebFetch, AskUserQuestion
 
 # Create Mirror Configuration
 
-Interactive skill that generates a complete `mirror-{name}.yml`, `metadata/*.json`, and `descriptions/{name}/` (README with frontmatter + logo) for a new package by analyzing its GitHub Releases.
+Interactive skill that generates a complete `mirrors/{name}/` directory containing `mirror.yml`, `metadata.json`, `README.md` (with frontmatter), and `logo.svg` for a new package by analyzing its GitHub Releases.
 
 ## Workflow
 
@@ -85,13 +85,27 @@ unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
 
     **Important:** `strip_components` in the mirror YAML controls rebundling (stripping the wrapper directory before creating the OCX package). This is separate from `strip_components` in metadata JSON, which tells OCX how to extract the package after downloading. Typically, the mirror YAML needs `strip_components` but the metadata does not (since the rebundled archive is already clean).
 
-12. **Check if layouts differ across platforms.** macOS often has `.app` bundles, Windows may have flat layouts. If layouts differ, create platform-specific metadata files. Check strip_components consistency across platforms — if all platforms have a top-level wrapper directory, a single `strip_components` value works. If some don't (e.g. Windows zips are sometimes flat), note this as a potential issue for the user.
+12. **Inspect macOS zip archives carefully.** macOS zips are a common source of pitfalls:
+    - **`__MACOSX/` directory**: macOS's built-in zip utility often embeds a `__MACOSX/` directory with `._` resource fork files. These end up as junk in the package after rebundling.
+    - **`.app` bundles**: macOS assets sometimes contain `.app` application bundles (e.g. `Foo.app/Contents/MacOS/foo`) instead of flat `bin/foo` layouts. The binary path is completely different — `${installPath}/Foo.app/Contents/MacOS` vs `${installPath}/bin`. This requires a **platform-specific metadata file** (e.g. `metadata-darwin.json`) with the correct PATH.
+    - **`.ad` / auxiliary files**: Some macOS archives include ad-hoc signing files, `.dSYM` debug bundles, or other auxiliary files not present in the Linux/Windows archives. These change the effective layout.
 
-13. **For raw binaries:** the metadata just needs a PATH entry pointing to `${installPath}` (the binary lands directly in the content root).
+    **Always inspect at least one macOS archive** alongside a Linux one. If the directory structures differ, you need platform-specific metadata in the mirror config:
+    ```yaml
+    metadata:
+      default: metadata.json
+      platforms:
+        darwin/amd64: metadata-darwin.json
+        darwin/arm64: metadata-darwin.json
+    ```
+
+13. **Check if layouts differ across platforms.** Beyond macOS, Windows may also have flat layouts while Linux uses `bin/`. If layouts differ, create platform-specific metadata files. Check `strip_components` consistency across platforms — if all platforms have a top-level wrapper directory, a single `strip_components` value works. If some don't (e.g. Windows zips are sometimes flat), note this as a potential issue for the user.
+
+14. **For raw binaries:** the metadata just needs a PATH entry pointing to `${installPath}` (the binary lands directly in the content root).
 
 ### Phase 4: Generate Configuration Files
 
-14. **Generate metadata JSON files.** Write to `mirrors/metadata/{name}.json` (and platform variants if needed):
+15. **Generate metadata JSON files.** Write to `mirrors/{name}/metadata.json` (and platform variants like `metadata-darwin.json` if needed):
 
 ```json
 {
@@ -108,7 +122,7 @@ unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
 }
 ```
 
-15. **Generate the mirror YAML.** Write to `mirrors/mirror-{name}.yml`:
+16. **Generate the mirror YAML.** Write to `mirrors/{name}/mirror.yml`:
 
 ```yaml
 name: {name}
@@ -131,7 +145,7 @@ assets:
 # strip_components: 1
 
 metadata:
-  default: metadata/{name}.json
+  default: metadata.json
   # platforms: ... (only if platform-specific metadata needed)
 
 skip_prereleases: true
@@ -154,15 +168,13 @@ concurrency:
   compression_threads: 0
 ```
 
-16. **Validate the generated spec.** If `ocx-mirror` binary is available:
+17. **Validate the generated spec.** If `ocx-mirror` binary is available:
 
 ```bash
-cargo run -p ocx_mirror -- validate mirrors/mirror-{name}.yml
+cargo run -p ocx_mirror -- validate mirrors/{name}/mirror.yml
 ```
 
 ### Phase 5: Generate Description Assets
-
-17. **Create the description directory** at `mirrors/descriptions/{name}/`.
 
 18. **Download a logo.** Look for a logo in these locations (in order):
     - The GitHub repository's social preview / OpenGraph image: `gh api "repos/{owner}/{repo}" --jq '.owner.avatar_url'` (fallback only)
@@ -170,17 +182,17 @@ cargo run -p ocx_mirror -- validate mirrors/mirror-{name}.yml
     - The project's website (look for an SVG or PNG logo in the HTML `<head>` or hero section)
     - **Prefer SVG over PNG** — SVGs are resolution-independent and typically smaller.
     - **Ask the user** if no logo is found automatically, or if multiple candidates exist. They may provide a URL or local path.
-    - Download to `mirrors/descriptions/{name}/logo.svg` (or `.png`).
+    - Download to `mirrors/{name}/logo.svg` (or `.png`).
 
 ```bash
 # Check repo root for logo files
 gh api "repos/{owner}/{repo}/contents/" --jq '[.[] | select(.name | test("^(logo|icon)\\.(svg|png)$"; "i")) | {name, download_url}]'
 
 # Download a logo
-curl -fsSL -o mirrors/descriptions/{name}/logo.svg "{download_url}"
+curl -fsSL -o mirrors/{name}/logo.svg "{download_url}"
 ```
 
-19. **Write the README with frontmatter.** Generate `mirrors/descriptions/{name}/README.md`:
+19. **Write the README with frontmatter.** Generate `mirrors/{name}/README.md`:
 
 ```markdown
 ---
@@ -236,18 +248,41 @@ ocx install {name}:{example_version} --select
     - Whether `strip_components` was set (and why)
     - Metadata layout (shared vs platform-specific)
     - README frontmatter values
+    - Taskfile registration (`task mirror:{name}:sync`, `task mirror:{name}:describe`)
     - Any warnings (missing platforms, ambiguous patterns, missing logo, etc.)
 
-### Phase 6: Cleanup
+### Phase 6: Register in Taskfile
 
-21. **Remove temp downloads** used for inspection.
-22. **Suggest next steps**: run `ocx-mirror check mirrors/mirror-{name}.yml` for a dry-run.
+21. **Add the mirror to `taskfiles/mirror.taskfile.yml`.** This file includes the shared template (`mirrors/mirror.taskfile.yml`) once per package. Add a new `includes` entry and wire it into `sync-all` / `describe-all`:
+
+```yaml
+# In the includes: block, add:
+  {name}:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: {name}
+      REPO: {registry}/{repository}
+
+# In tasks.sync-all.cmds, add:
+      - task: {name}:sync
+
+# In tasks.describe-all.cmds, add:
+      - task: {name}:describe
+```
+
+This gives the user `task mirror:{name}:sync` and `task mirror:{name}:describe` automatically via the shared template.
+
+### Phase 7: Cleanup
+
+22. **Remove temp downloads** used for inspection.
+23. **Suggest next steps**: run `task mirror:{name}:sync -- --dry-run` to preview what would be mirrored.
 
 ## Key Rules
 
 - **Always use `gh api`** for GitHub API access — never raw curl to api.github.com (auth handled by gh).
 - **Sample multiple releases** — asset naming conventions often change between major versions.
 - **Escape regex special characters** in asset patterns: `.` → `\\.`, `+` → `\\+`, etc.
+- **Anchor asset patterns with `$`** — many projects publish sidecar files alongside archives (e.g. `.tar.gz.sha512`, `.tar.gz.sig`, `.tar.gz.asc`). Without a `$` anchor, a pattern like `tool-.*\\.tar\\.gz` will match all three files and trigger an "Ambiguous asset match" warning. Always end archive patterns with `$` (e.g. `tool-.*\\.tar\\.gz$`). Use `^` at the start too if needed to prevent partial prefix matches.
 - **Order patterns newest-first** within each platform's list — the resolver tries them in order.
 - **Strip version segments** in patterns — replace version numbers with `.*` so they match across versions.
 - **Confirm with the user** before writing files — show what will be generated.
@@ -267,7 +302,7 @@ Asset filenames encode platform info in various ways. Common patterns ranked by 
 4. **Go-style**: `tool_Linux_x86_64.tar.gz` — high confidence (note capital L)
 5. **Loose match**: `tool-linux64.tar.gz` — medium confidence, confirm with user
 
-When multiple assets could match the same platform (e.g. both `-gnu` and `-musl` variants for Linux), ask the user which to prefer. Default to `gnu`/`glibc` variants.
+When multiple assets could match the same platform (e.g. both `-gnu` and `-musl` variants for Linux), **always prefer `musl` variants** for Linux platforms. Musl binaries are statically linked and work on both glibc-based distros (Ubuntu, Fedora) and musl-based distros (Alpine), so they are the safe default since OCX does not distinguish between Linux libc variants.
 
 ## Reference: Common Environment Variables by Tool Type
 

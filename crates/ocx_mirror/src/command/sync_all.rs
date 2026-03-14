@@ -10,7 +10,7 @@ use crate::error::MirrorError;
 
 #[derive(clap::Args)]
 pub struct SyncAll {
-    /// Directory containing mirror spec files (mirror-*.yaml)
+    /// Directory containing package subdirectories, each with a mirror.yml spec
     pub dir: PathBuf,
 
     #[clap(flatten)]
@@ -19,13 +19,14 @@ pub struct SyncAll {
 
 impl SyncAll {
     pub async fn execute(&self) -> Result<(), MirrorError> {
-        let pattern = self.dir.join("mirror-*.yaml");
+        let pattern = self.dir.join("*/mirror.yml");
         let pattern_str = pattern.to_string_lossy();
 
-        let specs: Vec<PathBuf> = glob::glob(&pattern_str)
+        let mut specs: Vec<PathBuf> = glob::glob(&pattern_str)
             .map_err(|e| MirrorError::SpecInvalid(vec![format!("invalid glob pattern: {e}")]))?
             .filter_map(|entry| entry.ok())
             .collect();
+        specs.sort();
 
         if specs.is_empty() {
             log::info!("No mirror specs found in {}", self.dir.display());

@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Mirror orchestrator. Includes the template taskfile once per mirror package.
+# Adding a new mirror: add an includes entry with PACKAGE and REPO vars.
+
+version: '3'
+
+vars:
+  MIRRORS_DIR: "{{.ROOT_DIR}}/mirrors"
+
+includes:
+  cmake:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: cmake
+      REPO: ocx.sh/cmake
+  go-task:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: go-task
+      REPO: ocx.sh/go-task
+  git-cliff:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: git-cliff
+      REPO: ocx.sh/git-cliff
+  bun:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: bun
+      REPO: ocx.sh/bun
+  ocx:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: ocx
+      REPO: ocx.sh/ocx
+
+tasks:
+  sync-all:
+    desc: Mirror all packages
+    cmds:
+      - task: bun:sync
+      - task: cmake:sync
+      - task: go-task:sync
+      - task: git-cliff:sync
+
+  describe-all:
+    desc: Push README and logo for all mirrored packages
+    cmds:
+      - task: bun:describe
+      - task: cmake:describe
+      - task: go-task:describe
+      - task: git-cliff:describe
+      - task: ocx:describe

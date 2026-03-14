@@ -1,0 +1,48 @@
+name: git-cliff
+target:
+  registry: ocx.sh
+  repository: git-cliff
+
+source:
+  type: github_release
+  owner: orhun
+  repo: git-cliff
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "git-cliff-.*-x86_64-unknown-linux-musl\\.tar\\.gz$"
+  linux/arm64:
+    - "git-cliff-.*-aarch64-unknown-linux-musl\\.tar\\.gz$"
+  darwin/amd64:
+    - "git-cliff-.*-x86_64-apple-darwin\\.tar\\.gz$"
+  darwin/arm64:
+    - "git-cliff-.*-aarch64-apple-darwin\\.tar\\.gz$"
+  windows/amd64:
+    - "git-cliff-.*-x86_64-pc-windows-msvc\\.zip$"
+  windows/arm64:
+    - "git-cliff-.*-aarch64-pc-windows-msvc\\.zip$"
+
+strip_components: 1
+
+metadata:
+  default: metadata.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "2.12.0"
+  new_per_run: 10
+
+verify:
+  github_asset_digest: true
+
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0
