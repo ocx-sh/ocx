@@ -11,6 +11,7 @@ includes:
   release: ./taskfiles/release.taskfile.yml
   lint: ./taskfiles/lint.taskfile.yml
   sbom: ./taskfiles/sbom.taskfile.yml
+  catalog: ./taskfiles/catalog.taskfile.yml
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test

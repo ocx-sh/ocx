@@ -25,6 +25,7 @@ export default defineConfig({
     nav: [
       { text: 'Home', link: '/' },
       { text: 'Docs', link: '/docs/user-guide' },
+      { text: 'Catalog', link: '/docs/catalog' },
       { text: 'Team', link: '/team' },
     ],
 
@@ -38,6 +39,10 @@ export default defineConfig({
         {
           text: "Getting Started",
           link: "/docs/getting-started",
+        },
+        {
+          text: "Package Catalog",
+          link: "/docs/catalog",
         },
         {
           text: "User Guide",

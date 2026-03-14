@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use crate::log;
+use crate::package::description::INTERNAL_TAG_PREFIX;
 use crate::{oci, prelude::*};
 
 pub mod snapshot;
@@ -56,13 +57,18 @@ impl Index {
 
     /// List all tags available for the given identifier.
     ///
+    /// Internal tags (prefixed with `__ocx.`) are automatically filtered out.
     /// Returns `None` when the package is not known to this index.
     pub async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
         log::debug!("Listing tags for '{}'.", identifier);
-        self.inner
-            .list_tags(identifier)
-            .await
-            .map(|opt| opt.map(|v| v.sorted()))
+        self.inner.list_tags(identifier).await.map(|opt| {
+            opt.map(|tags| {
+                tags.into_iter()
+                    .filter(|t| !t.starts_with(INTERNAL_TAG_PREFIX))
+                    .collect::<Vec<_>>()
+                    .sorted()
+            })
+        })
     }
 
     /// Fetch the manifest for the given identifier.

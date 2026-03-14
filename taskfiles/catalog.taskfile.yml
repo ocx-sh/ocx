@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  generate:
+    desc: Generate package catalog data and pages for the website
+    cmds:
+      - uv run {{.ROOT_DIR}}/scripts/catalog-generate.py
+          --ocx-binary {{.ROOT_DIR}}/target/release/ocx
+          --output-dir {{.ROOT_DIR}}/website/src/public/data/catalog
+          --pages-dir {{.ROOT_DIR}}/website/src/docs/catalog
+          --registry {{.REGISTRY | default "ocx.sh"}}
+          --remote
+
+  default:
+    desc: Generate package catalog
+    cmds:
+      - task: generate

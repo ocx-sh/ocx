@@ -26,27 +26,36 @@ impl IndexList {
         let tags_report = self
             .packages
             .iter()
-            .zip(identifiers.clone().into_iter())
+            .zip(identifiers.into_iter())
             .map(|(package, identifier)| {
                 let context = context.clone();
                 async move {
-                    let tags = match context.default_index().list_tags(&identifier).await? {
+                    let all_tags = match context.default_index().list_tags(&identifier).await? {
                         Some(tags) => tags,
                         None => {
                             log::warn!("Package '{}' not found in the index.", identifier);
                             Vec::new()
                         }
                     };
-                    Ok((package.raw().to_string(), tags.into_iter()))
+                    let mut tags = all_tags;
+                    // If a specific tag was requested, filter to only that tag
+                    if let Some(requested_tag) = identifier.tag() {
+                        tags.retain(|t| t == requested_tag);
+                    }
+                    Ok((package.raw().to_string(), identifier, tags))
                 }
             });
 
+        let resolved = futures::future::join_all(tags_report)
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
         if !self.with_platforms {
-            let tags_report = futures::future::join_all(tags_report)
-                .await
+            let tags_report = resolved
                 .into_iter()
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            let tags_report = tags_report.into_iter().collect::<std::collections::HashMap<_, _>>();
+                .map(|(package, _, tags)| (package, tags.into_iter()))
+                .collect::<HashMap<_, _>>();
             context
                 .api()
                 .report_tags(api::data::tag::Tags::without_platforms(tags_report))?;
@@ -54,15 +63,13 @@ impl IndexList {
         }
 
         let mut join_set = tokio::task::JoinSet::<Result<(String, HashMap<String, Vec<String>>), anyhow::Error>>::new();
-        let tags_report = futures::future::join_all(tags_report).await;
-        for (tags, identifier) in tags_report.into_iter().zip(identifiers.iter()) {
-            let (package, tags) = tags?;
-            let identifier = identifier.clone();
+        for (package, identifier, tags) in resolved {
             let context = context.clone();
             join_set.spawn(async move {
                 let mut platform_tags = HashMap::<_, Vec<_>>::new();
                 for tag in tags {
-                    let Some((_, manifest)) = context.default_index().fetch_manifest(&identifier).await? else {
+                    let tag_identifier = identifier.clone_with_tag(&tag);
+                    let Some((_, manifest)) = context.default_index().fetch_manifest(&tag_identifier).await? else {
                         log::warn!("Manifest not found for tag '{}' of '{}' — skipping.", tag, identifier);
                         continue;
                     };

@@ -1,0 +1,20 @@
+---
+title: "{{ title }}"
+description: "{{ description }}"
+{% if keywords -%}
+head:
+  - - meta
+    - name: keywords
+      content: "{{ keywords | join(', ') }}"
+{% endif -%}
+prev:
+  text: Package Catalog
+  link: /docs/catalog
+next: false
+---
+
+<PackageDetail />
+
+{% if readme -%}
+{{ readme }}
+{% endif -%}

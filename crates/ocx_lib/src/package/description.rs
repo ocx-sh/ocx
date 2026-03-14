@@ -8,6 +8,9 @@ use serde::Deserialize;
 
 use crate::{MEDIA_TYPE_PNG, MEDIA_TYPE_SVG, Result};
 
+/// Prefix for OCX-internal tags that should be hidden from user-facing listings.
+pub const INTERNAL_TAG_PREFIX: &str = "__ocx.";
+
 /// The reserved OCI tag for description artifacts.
 pub const DESCRIPTION_TAG: &str = "__ocx.desc";
 

@@ -14,6 +14,9 @@ import Description from './components/Description.vue'
 import Terminal from './components/Terminal.vue'
 import Frame from './components/Frame.vue'
 import DependencyExplorer from './components/DependencyExplorer.vue'
+import CopySnippet from './components/CopySnippet.vue'
+import PackageCatalog from './components/PackageCatalog.vue'
+import PackageDetail from './components/PackageDetail.vue'
 
 export default {
   extends: DefaultTheme,
@@ -31,5 +34,8 @@ export default {
     app.component('Terminal', Terminal)
     app.component('Frame', Frame)
     app.component('DependencyExplorer', DependencyExplorer)
+    app.component('CopySnippet', CopySnippet)
+    app.component('PackageCatalog', PackageCatalog)
+    app.component('PackageDetail', PackageDetail)
   },
 } satisfies Theme
