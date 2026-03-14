@@ -27,14 +27,14 @@ pub struct ResolvedVersion {
 /// 6. Apply `new_per_run` cap (oldest first for chronological backfill)
 pub fn filter_versions(
     mut versions: Vec<ResolvedVersion>,
-    exact_version: Option<&str>,
+    exact_versions: &[String],
     skip_prereleases: bool,
     versions_config: Option<&VersionsConfig>,
     existing: &VersionPlatformMap,
 ) -> Vec<ResolvedVersion> {
     // 1. Exact version match
-    if let Some(target) = exact_version {
-        versions.retain(|v| v.version == target);
+    if !exact_versions.is_empty() {
+        versions.retain(|v| exact_versions.iter().any(|target| v.version == *target));
     }
 
     // 2. Skip prereleases
@@ -161,7 +161,7 @@ mod tests {
             rv("2.0.0", "2.0.0+ts", false),
         ];
 
-        let result = filter_versions(versions, None, true, None, &empty());
+        let result = filter_versions(versions, &[], true, None, &empty());
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|v| !v.is_prerelease));
     }
@@ -170,7 +170,7 @@ mod tests {
     fn keep_prereleases_when_not_configured() {
         let versions = vec![rv("1.0.0", "1.0.0+ts", false), rv("1.1.0-rc1", "1.1.0-rc1+ts", true)];
 
-        let result = filter_versions(versions, None, false, None, &empty());
+        let result = filter_versions(versions, &[], false, None, &empty());
         assert_eq!(result.len(), 2);
     }
 
@@ -188,7 +188,7 @@ mod tests {
             new_per_run: None,
         };
 
-        let result = filter_versions(versions, None, false, Some(&config), &empty());
+        let result = filter_versions(versions, &[], false, Some(&config), &empty());
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].version, "2.0.0");
         assert_eq!(result[1].version, "3.0.0");
@@ -208,7 +208,7 @@ mod tests {
             new_per_run: None,
         };
 
-        let result = filter_versions(versions, None, false, Some(&config), &empty());
+        let result = filter_versions(versions, &[], false, Some(&config), &empty());
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].version, "1.0.0");
         assert_eq!(result[1].version, "2.0.0");
@@ -225,7 +225,7 @@ mod tests {
         // 1.0.0 and 3.0.0 already pushed for linux/amd64
         let existing = existing(&[("1.0.0", "linux/amd64"), ("3.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, None, false, None, &existing);
+        let result = filter_versions(versions, &[], false, None, &existing);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -240,7 +240,7 @@ mod tests {
         // "1.0.0+build1" normalizes to "1.0.0_build1" — already pushed
         let existing = existing(&[("1.0.0_build1", "linux/amd64")]);
 
-        let result = filter_versions(versions, None, false, None, &existing);
+        let result = filter_versions(versions, &[], false, None, &existing);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -259,7 +259,7 @@ mod tests {
             new_per_run: Some(1),
         };
 
-        let result = filter_versions(versions, None, false, Some(&config), &empty());
+        let result = filter_versions(versions, &[], false, Some(&config), &empty());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "1.0.0");
     }
@@ -282,7 +282,7 @@ mod tests {
 
         let existing = existing(&[("1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, None, true, Some(&config), &existing);
+        let result = filter_versions(versions, &[], true, Some(&config), &existing);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].version, "2.0.0");
         assert_eq!(result[1].version, "3.0.0");
@@ -295,7 +295,7 @@ mod tests {
 
         let versions = vec![no_platforms, rv("2.0.0", "2.0.0+ts", false)];
 
-        let result = filter_versions(versions, None, false, None, &empty());
+        let result = filter_versions(versions, &[], false, None, &empty());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -309,7 +309,7 @@ mod tests {
 
         let existing = existing(&[("1.0.0-rc1", "linux/amd64")]);
 
-        let result = filter_versions(versions, None, false, None, &existing);
+        let result = filter_versions(versions, &[], false, None, &existing);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -322,7 +322,7 @@ mod tests {
             rv("3.0.0", "3.0.0+ts", false),
         ];
 
-        let result = filter_versions(versions, Some("2.0.0"), false, None, &empty());
+        let result = filter_versions(versions, &["2.0.0".to_string()], false, None, &empty());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -331,7 +331,7 @@ mod tests {
     fn exact_version_no_match() {
         let versions = vec![rv("1.0.0", "1.0.0+ts", false), rv("2.0.0", "2.0.0+ts", false)];
 
-        let result = filter_versions(versions, Some("9.9.9"), false, None, &empty());
+        let result = filter_versions(versions, &["9.9.9".to_string()], false, None, &empty());
         assert!(result.is_empty());
     }
 
@@ -340,13 +340,33 @@ mod tests {
         let versions = vec![rv("2.0.0", "2.0.0_20260313150000", false)];
         let existing = existing(&[("2.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, Some("2.0.0"), false, None, &existing);
+        let result = filter_versions(versions, &["2.0.0".to_string()], false, None, &existing);
         assert!(result.is_empty());
     }
 
     #[test]
+    fn multiple_exact_versions() {
+        let versions = vec![
+            rv("1.0.0", "1.0.0+ts", false),
+            rv("2.0.0", "2.0.0+ts", false),
+            rv("3.0.0", "3.0.0+ts", false),
+        ];
+
+        let result = filter_versions(
+            versions,
+            &["1.0.0".to_string(), "3.0.0".to_string()],
+            false,
+            None,
+            &empty(),
+        );
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].version, "1.0.0");
+        assert_eq!(result[1].version, "3.0.0");
+    }
+
+    #[test]
     fn empty_input() {
-        let result = filter_versions(vec![], None, false, None, &empty());
+        let result = filter_versions(vec![], &[], false, None, &empty());
         assert!(result.is_empty());
     }
 
@@ -355,7 +375,7 @@ mod tests {
         let versions = vec![rv("1.0.0", "1.0.0_20260313150000", false)];
         let existing = existing(&[("1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, None, false, None, &existing);
+        let result = filter_versions(versions, &[], false, None, &existing);
         assert!(result.is_empty());
     }
 
@@ -365,7 +385,7 @@ mod tests {
         let versions = vec![rv_multi("1.0.0", "1.0.0_ts", &["linux/amd64", "darwin/arm64"])];
         let existing = existing(&[("1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, None, false, None, &existing);
+        let result = filter_versions(versions, &[], false, None, &existing);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].platforms.len(), 1);
         assert_eq!(result[0].platforms[0].platform, platform("darwin/arm64"));
@@ -376,7 +396,7 @@ mod tests {
         let versions = vec![rv_multi("1.0.0", "1.0.0_ts", &["linux/amd64", "darwin/arm64"])];
         let existing = existing(&[("1.0.0", "linux/amd64"), ("1.0.0", "darwin/arm64")]);
 
-        let result = filter_versions(versions, None, false, None, &existing);
+        let result = filter_versions(versions, &[], false, None, &existing);
         assert!(result.is_empty());
     }
 
@@ -384,7 +404,7 @@ mod tests {
     fn no_platforms_pushed_keeps_all() {
         let versions = vec![rv_multi("1.0.0", "1.0.0_ts", &["linux/amd64", "darwin/arm64"])];
 
-        let result = filter_versions(versions, None, false, None, &empty());
+        let result = filter_versions(versions, &[], false, None, &empty());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].platforms.len(), 2);
     }

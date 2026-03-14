@@ -30,6 +30,17 @@ pub struct MirrorSpec {
     #[serde(default)]
     pub metadata: Option<MetadataConfig>,
 
+    /// Leading path components to strip from downloaded archives before rebundling.
+    ///
+    /// Many GitHub Release archives contain a top-level directory (e.g.,
+    /// `cmake-3.31.0-linux-x86_64/bin/cmake`). Set this to `1` to strip that prefix
+    /// during extraction so the bundle contains `bin/cmake` directly.
+    ///
+    /// This is separate from the metadata `strip_components` field, which tells OCX
+    /// how to extract the package after downloading from the registry.
+    #[serde(default)]
+    pub strip_components: Option<u8>,
+
     #[serde(default = "default_build_timestamp")]
     pub build_timestamp: BuildTimestampFormat,
 
@@ -343,6 +354,7 @@ assets:
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::Datetime);
         assert!(spec.cascade);
         assert!(!spec.skip_prereleases);
+        assert!(spec.strip_components.is_none());
         assert_eq!(spec.concurrency.max_downloads, 8);
         assert_eq!(spec.concurrency.max_pushes, 2);
         assert_eq!(spec.concurrency.rate_limit_ms, 0);
@@ -371,6 +383,28 @@ verify:
         let verify = spec.verify.unwrap();
         assert!(!verify.github_asset_digest);
         assert!(verify.checksums_file.is_none());
+    }
+
+    #[test]
+    fn parse_strip_components() {
+        let yaml = r#"
+name: cmake
+target:
+  registry: ocx.sh
+  repository: cmake
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "cmake-.*\\.tar\\.gz"
+strip_components: 1
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(spec.strip_components, Some(1));
     }
 
     #[test]

@@ -156,7 +156,7 @@ impl Sync {
         // Filter (now platform-aware)
         let filtered = filter::filter_versions(
             resolved_versions,
-            self.options.version.as_deref(),
+            &self.options.version,
             spec.skip_prereleases,
             spec.versions.as_ref(),
             &version_map,
@@ -182,6 +182,7 @@ impl Sync {
                     verify_config: spec.verify.clone(),
                     cascade: spec.cascade,
                     spec_dir: spec_dir.to_path_buf(),
+                    strip_components: spec.strip_components,
                 });
             }
         }

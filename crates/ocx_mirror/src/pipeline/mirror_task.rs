@@ -23,4 +23,5 @@ pub struct MirrorTask {
     pub verify_config: Option<VerifyConfig>,
     pub cascade: bool,
     pub spec_dir: PathBuf,
+    pub strip_components: Option<u8>,
 }

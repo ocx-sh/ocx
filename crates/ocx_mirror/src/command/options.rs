@@ -25,10 +25,10 @@ pub struct SyncOptions {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Only mirror a specific version (e.g., "3.28.0").
+    /// Only mirror specific versions (e.g., --version 3.28.0 --version 3.29.0).
     /// Matches against the extracted version string from the source.
     #[arg(long)]
-    pub version: Option<String>,
+    pub version: Vec<String>,
 
     /// Stop on first failure instead of continuing
     #[arg(long)]

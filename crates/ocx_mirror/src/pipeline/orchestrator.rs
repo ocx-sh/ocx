@@ -303,9 +303,7 @@ async fn prepare_task(
         let _permit = bundle_sem.acquire().await.expect("semaphore closed");
 
         progress::set_stage(span, "Bundling", &task.normalized_version, &task.platform);
-        let strip_components = match &metadata {
-            ocx_lib::package::metadata::Metadata::Bundle(b) => b.strip_components,
-        };
+        let strip_components = task.strip_components;
 
         let threads = if compression_threads > 1 {
             Some(compression_threads)
