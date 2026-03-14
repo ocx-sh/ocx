@@ -83,6 +83,18 @@ impl Api {
         self.report(&desc)
     }
 
+    pub fn report_profile(&self, profile: data::profile::ProfileList) -> anyhow::Result<()> {
+        self.report(&profile)
+    }
+
+    pub fn report_profile_added(&self, added: data::profile_added::ProfileAdded) -> anyhow::Result<()> {
+        self.report(&added)
+    }
+
+    pub fn report_profile_removed(&self, removed: data::profile_removed::ProfileRemoved) -> anyhow::Result<()> {
+        self.report(&removed)
+    }
+
     pub fn is_json(&self) -> bool {
         matches!(self.format, options::Format::Json)
     }

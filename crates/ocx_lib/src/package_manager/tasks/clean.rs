@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::log;
+use crate::{log, profile::ProfileSnapshot};
 
 use super::super::PackageManager;
 
@@ -14,13 +14,17 @@ pub struct CleanResult {
 
 impl PackageManager {
     pub fn clean(&self, dry_run: bool) -> crate::Result<CleanResult> {
-        let objects = self.clean_unreferenced_objects(dry_run)?;
+        let profile = self.profile.snapshot();
+        let objects = self.clean_unreferenced_objects(dry_run, &profile)?;
         let temp = self.clean_stale_temp(dry_run)?;
         Ok(CleanResult { objects, temp })
     }
 
     /// Removes objects whose `refs/` directory is empty or absent.
-    fn clean_unreferenced_objects(&self, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+    ///
+    /// Objects referenced by content-mode profile entries are kept even if
+    /// their `refs/` directory is empty, to avoid breaking shell startup.
+    fn clean_unreferenced_objects(&self, dry_run: bool, profile: &ProfileSnapshot) -> crate::Result<Vec<PathBuf>> {
         let object_dirs = self.file_structure().objects.list_all()?;
 
         log::debug!(
@@ -45,6 +49,14 @@ impl PackageManager {
             );
 
             if is_empty {
+                // Check if a content-mode profile entry references this digest
+                if let Some(partial_digest) = obj.digest_string()
+                    && profile.references_digest(&partial_digest)
+                {
+                    log::info!("Keeping profiled object: {}", obj.dir.display());
+                    continue;
+                }
+
                 log::info!(
                     "{} unreferenced object: {}",
                     if dry_run { "Would remove" } else { "Removing" },

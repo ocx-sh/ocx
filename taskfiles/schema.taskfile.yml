@@ -3,16 +3,24 @@
 version: '3'
 
 vars:
-  SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/metadata"
+  METADATA_SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/metadata"
+  PROFILE_SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/profile"
 
 tasks:
   generate:
     desc: Generate JSON Schema for metadata.json
     cmds:
-      - mkdir -p {{.SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release > {{.SCHEMA_DIR}}/v1.json
+      - mkdir -p {{.METADATA_SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release -- metadata > {{.METADATA_SCHEMA_DIR}}/v1.json
+
+  generate-profile:
+    desc: Generate JSON Schema for profile.json
+    cmds:
+      - mkdir -p {{.PROFILE_SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release -- profile > {{.PROFILE_SCHEMA_DIR}}/v1.json
 
   default:
     desc: Generate all schemas
     cmds:
       - task: generate
+      - task: generate-profile

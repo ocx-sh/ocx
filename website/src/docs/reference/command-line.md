@@ -352,6 +352,82 @@ ocx shell completion [OPTIONS]
 - `--shell <SHELL>`: The shell to generate the completions for (e.g., `bash`, `zsh`, `fish`).
   By default, ocx will attempt to auto-detect the shell and generate the appropriate completions.
 
+#### `profile` {#shell-profile}
+
+Manage the shell profile — packages whose environment variables are loaded into every new shell session.
+
+The profile is stored in `$OCX_HOME/profile.json`. The env file (sourced by your shell profile) calls `ocx --offline shell profile load` at startup to resolve all profiled packages and emit shell exports.
+
+##### `add` {#shell-profile-add}
+
+Add one or more packages to the shell profile.
+
+**Usage**
+
+```shell
+ocx shell profile add [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to add to the profile.
+
+**Options**
+
+- `--candidate`: Resolve via the `candidates/{tag}` symlink (default, pinned). Requires a tag in the identifier.
+- `--current`: Resolve via the `current` symlink (floating pointer set by `ocx select`).
+- `--content`: Resolve via the content-addressed object store path. The path changes whenever the package is reinstalled at a different version.
+
+Packages that are not yet installed will be auto-installed. For `--current` mode, install with `--select` first to create the `current` symlink (`ocx install --select <pkg>`).
+
+##### `remove` {#shell-profile-remove}
+
+Remove one or more packages from the shell profile.
+
+**Usage**
+
+```shell
+ocx shell profile remove <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to remove from the profile.
+
+This does not uninstall the package — it only removes it from the profile manifest.
+
+##### `list` {#shell-profile-list}
+
+List all packages in the shell profile with their status.
+
+**Usage**
+
+```shell
+ocx shell profile list
+```
+
+Shows each profiled package with its resolution mode (`candidate`, `current`, or `content`), status (`active` or `broken`), and resolved path.
+
+##### `load` {#shell-profile-load}
+
+Output shell export statements for all profiled packages.
+
+**Usage**
+
+```shell
+ocx shell profile load [OPTIONS]
+```
+
+**Options**
+
+- `-s`, `--shell <SHELL>`: Shell to generate exports for. Auto-detected if not specified.
+
+Reads `$OCX_HOME/profile.json` and emits shell-specific export lines for each package's declared environment variables. Broken entries are silently skipped. This command is intended to be called from the env file via `eval`:
+
+```shell
+eval "$(ocx --offline shell profile load)"
+```
+
 ### `uninstall` {#uninstall}
 
 Removes the installed candidate for one or more packages.

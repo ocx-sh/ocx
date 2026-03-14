@@ -9,5 +9,8 @@ pub mod info;
 pub mod install;
 pub mod package_description;
 pub mod paths;
+pub mod profile;
+pub mod profile_added;
+pub mod profile_removed;
 pub mod removed;
 pub mod tag;

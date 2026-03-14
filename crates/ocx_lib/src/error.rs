@@ -24,6 +24,9 @@ pub enum Error {
     InternalFile(std::path::PathBuf, std::io::Error),
     InternalPathInvalid(std::path::PathBuf),
 
+    /// A profile manifest operation failed.
+    Profile(crate::profile::ProfileError),
+
     UnsupportedArchive(String),
     UnsupportedClapShell(shell::Shell),
     UnsupportedMediaType(String, &'static [&'static str]),
@@ -107,6 +110,7 @@ impl std::fmt::Display for Error {
 
             Error::InternalFile(path, error) => write!(f, "Internal file error for '{}': {}", path.display(), error),
             Error::InternalPathInvalid(path) => write!(f, "Path '{}' has an unexpected structure", path.display()),
+            Error::Profile(error) => write!(f, "{error}"),
 
             Error::UnsupportedArchive(file) => write!(f, "Unsupported archive format: {}", file),
             Error::UnsupportedClapShell(shell) => write!(f, "Shell '{}' is not supported for clap completions", shell),
@@ -158,6 +162,12 @@ impl From<crate::archive::Error> for Error {
 impl From<crate::ci::error::Error> for Error {
     fn from(error: crate::ci::error::Error) -> Self {
         Error::Ci(error)
+    }
+}
+
+impl From<crate::profile::ProfileError> for Error {
+    fn from(error: crate::profile::ProfileError) -> Self {
+        Error::Profile(error)
     }
 }
 

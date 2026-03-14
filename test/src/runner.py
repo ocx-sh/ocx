@@ -87,11 +87,14 @@ class OcxRunner:
         *args: str,
         format: str | None = "json",
         check: bool = True,
+        log_level: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run ocx with the given arguments."""
         cmd: list[str] = [str(self.binary)]
         if format:
             cmd += ["--format", format]
+        if log_level:
+            cmd += ["--log-level", log_level]
         cmd += list(args)
         result = subprocess.run(
             cmd,

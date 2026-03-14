@@ -31,6 +31,22 @@ impl ObjectDir {
     pub fn refs_dir(&self) -> PathBuf {
         self.dir.join("refs")
     }
+
+    /// Reconstructs a partial digest string from the sharded object store path.
+    ///
+    /// Returns `"{algorithm}:{shard1}{shard2}{shard3}"` (e.g.
+    /// `"sha256:43567c07f1a6b07b5e8dc052108c9d4c"`). This is a prefix of the
+    /// full digest since the sharding scheme only encodes the first 32 hex chars.
+    ///
+    /// Returns `None` if the path structure is unexpected.
+    pub fn digest_string(&self) -> Option<String> {
+        let mut components = self.dir.components().rev();
+        let shard3 = components.next()?.as_os_str().to_str()?;
+        let shard2 = components.next()?.as_os_str().to_str()?;
+        let shard1 = components.next()?.as_os_str().to_str()?;
+        let algorithm = components.next()?.as_os_str().to_str()?;
+        Some(format!("{algorithm}:{shard1}{shard2}{shard3}"))
+    }
 }
 
 /// Manages the content-addressed object store on the local filesystem.

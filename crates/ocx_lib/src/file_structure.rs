@@ -26,6 +26,7 @@ pub use temp_store::{TempAcquireResult, TempDir, TempStore};
 /// Default root: `~/.ocx` (resolved via [`default_ocx_root`]).
 #[derive(Debug, Clone)]
 pub struct FileStructure {
+    root: std::path::PathBuf,
     pub objects: ObjectStore,
     pub index: IndexStore,
     pub installs: InstallStore,
@@ -52,7 +53,13 @@ impl FileStructure {
             index: IndexStore::new(root.join("index")),
             installs: InstallStore::new(root.join("installs")),
             temp: TempStore::new(root.join("temp")),
+            root,
         }
+    }
+
+    /// Returns the path to the profile manifest file (`$OCX_HOME/profile.json`).
+    pub fn profile_manifest(&self) -> std::path::PathBuf {
+        self.root.join("profile.json")
     }
 }
 

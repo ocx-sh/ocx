@@ -8,6 +8,7 @@ use tracing::info_span;
 use crate::{
     log, oci,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
+    profile::ProfileSnapshot,
     reference_manager::ReferenceManager,
 };
 
@@ -18,7 +19,11 @@ impl PackageManager {
     ///
     /// Returns `Some(current_path)` when the current symlink existed and was
     /// removed, or `None` when no current symlink was present (no-op).
-    pub fn deselect(&self, package: &oci::Identifier) -> Result<Option<PathBuf>, PackageErrorKind> {
+    pub fn deselect(
+        &self,
+        package: &oci::Identifier,
+        profile: &ProfileSnapshot,
+    ) -> Result<Option<PathBuf>, PackageErrorKind> {
         let _span = info_span!("Deselecting", package = %package).entered();
         log::debug!("Deselecting package '{}'.", package);
 
@@ -31,6 +36,7 @@ impl PackageManager {
 
         if crate::symlink::is_link(&current_path) {
             rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
+            profile.warn_if_current_referenced(package);
             Ok(Some(current_path))
         } else {
             log::warn!(
@@ -46,11 +52,12 @@ impl PackageManager {
         &self,
         packages: &[oci::Identifier],
     ) -> Result<Vec<Option<PathBuf>>, package_manager::error::Error> {
+        let profile = self.profile.snapshot();
         let mut results: Vec<Option<PathBuf>> = Vec::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in packages {
-            match self.deselect(package) {
+            match self.deselect(package, &profile) {
                 Ok(target) => results.push(target),
                 Err(kind) => errors.push(PackageError::new(package.clone(), kind)),
             }

@@ -8,6 +8,7 @@ use tracing::info_span;
 use crate::{
     log, oci,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
+    profile::ProfileSnapshot,
     reference_manager::ReferenceManager,
 };
 
@@ -34,6 +35,7 @@ impl PackageManager {
         package: &oci::Identifier,
         deselect: bool,
         purge: bool,
+        profile: &ProfileSnapshot,
     ) -> Result<Option<UninstallResult>, PackageErrorKind> {
         let _span = info_span!("Uninstalling", package = %package).entered();
         log::debug!("Uninstalling package '{}'.", package);
@@ -59,10 +61,13 @@ impl PackageManager {
             return Ok(None);
         };
 
+        profile.warn_if_candidate_referenced(package);
+
         if deselect {
             let current_path = self.file_structure().installs.current(package);
             if crate::symlink::is_link(&current_path) {
                 rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
+                profile.warn_if_current_referenced(package);
             } else {
                 log::debug!(
                     "Package '{}' has no current symlink at '{}' — skipping deselect.",
@@ -83,6 +88,8 @@ impl PackageManager {
                     .unwrap_or(true);
             if is_empty {
                 if let Some(obj_dir) = content.parent() {
+                    profile.warn_if_content_referenced(package);
+
                     log::info!("Purging unreferenced object: {}", obj_dir.display());
                     std::fs::remove_dir_all(obj_dir).map_err(|e| {
                         PackageErrorKind::Internal(crate::Error::InternalFile(obj_dir.to_path_buf(), e))
@@ -109,11 +116,12 @@ impl PackageManager {
         deselect: bool,
         purge: bool,
     ) -> Result<Vec<Option<UninstallResult>>, package_manager::error::Error> {
+        let profile = self.profile.snapshot();
         let mut results: Vec<Option<UninstallResult>> = Vec::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in packages {
-            match self.uninstall(package, deselect, purge) {
+            match self.uninstall(package, deselect, purge, &profile) {
                 Ok(result) => results.push(result),
                 Err(kind) => errors.push(PackageError::new(package.clone(), kind)),
             }

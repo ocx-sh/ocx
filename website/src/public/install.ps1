@@ -189,6 +189,7 @@ if ($env:PATH -notlike "*$_OcxBin*") {
 }
 $_OcxExe = Join-Path $_OcxBin 'ocx.exe'
 if (Test-Path $_OcxExe) {
+    try { & $_OcxExe --offline shell profile load --shell powershell 2>$null | Invoke-Expression } catch {}
     try { & $_OcxExe --offline shell completion --shell powershell 2>$null | Invoke-Expression } catch {}
 }
 Remove-Variable _OcxHome, _OcxBin, _OcxExe -ErrorAction SilentlyContinue

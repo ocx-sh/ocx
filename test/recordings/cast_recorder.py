@@ -100,6 +100,7 @@ class CastRecording:
 
     def sanitize(self, replacements: dict[str, str]) -> CastRecording:
         """Replace literal strings in all event data (paths, registry names, etc.)."""
+        self._merge_close_events()
         for event in self.events:
             for old, new in replacements.items():
                 event.data = event.data.replace(old, new)

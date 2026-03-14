@@ -3,9 +3,8 @@
 
 use std::process::ExitCode;
 
-use clap::Parser;
-
 use crate::{api, options};
+use clap::Parser;
 
 /// Remove the installed candidate for one or more packages.
 ///

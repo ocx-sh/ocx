@@ -4,7 +4,7 @@
 pub mod error;
 pub mod tasks;
 
-use crate::{file_structure, oci};
+use crate::{file_structure, oci, profile::ProfileManager};
 
 /// Central facade for package operations (find, install, uninstall, etc.).
 ///
@@ -22,6 +22,7 @@ pub struct PackageManager {
     index: oci::index::Index,
     client: Option<oci::Client>,
     default_registry: String,
+    profile: ProfileManager,
 }
 
 impl PackageManager {
@@ -31,11 +32,14 @@ impl PackageManager {
         client: Option<oci::Client>,
         default_registry: impl Into<String>,
     ) -> Self {
+        let default_registry = default_registry.into();
+        let profile = ProfileManager::new(file_structure.clone(), default_registry.clone());
         Self {
             file_structure,
             index,
             client,
-            default_registry: default_registry.into(),
+            default_registry,
+            profile,
         }
     }
 
@@ -54,6 +58,10 @@ impl PackageManager {
 
     pub fn default_registry(&self) -> &str {
         &self.default_registry
+    }
+
+    pub fn profile(&self) -> &ProfileManager {
+        &self.profile
     }
 
     pub fn is_offline(&self) -> bool {

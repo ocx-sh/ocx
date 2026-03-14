@@ -50,6 +50,9 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
         "node": [
             make_package(ocx, "node", "22.0.0", tmp_path, size_mb=SIZE_MB, bins=["node"]),
         ],
+        "clang": [
+            make_package(ocx, "clang", "18.0.0", tmp_path, size_mb=SIZE_MB, bins=["clang", "clang++"]),
+        ],
     }
 
 

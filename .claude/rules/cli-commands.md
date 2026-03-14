@@ -170,6 +170,55 @@ Generates shell completion scripts.
 
 ---
 
+### `ocx shell profile add PACKAGES...`
+
+Adds packages to the shell profile manifest (`$OCX_HOME/profile.json`).
+
+| Flag | Purpose |
+|------|---------|
+| `--candidate` | Pin to `candidates/{tag}` symlink (requires tag in identifier) |
+| `--current` | Use `current` symlink (default, floating pointer) |
+
+- Validates symlink exists before adding (suggests `ocx install --select` if missing)
+- Duplicate adds update mode in place (idempotent)
+- Saves manifest atomically (temp + rename)
+
+---
+
+### `ocx shell profile remove PACKAGES...`
+
+Removes packages from the shell profile.
+
+- Removes matching entries from `profile.json`
+- Does not uninstall the package
+
+---
+
+### `ocx shell profile list`
+
+Lists all profiled packages with their status.
+
+- Checks each entry's symlink: `Active` (exists) or `Broken` (missing)
+- Report: "Package | Mode | Status | Path"
+- JSON: array of `{ package, mode, status, path }` objects
+
+---
+
+### `ocx shell profile load`
+
+Outputs shell export statements for all profiled packages.
+
+| Flag | Purpose |
+|------|---------|
+| `-s/--shell` | Shell to generate exports for (or auto-detect) |
+
+- Reads `profile.json`, resolves each entry's symlink, reads metadata
+- Emits shell-specific `export` lines via `ProfileBuilder`
+- Silently skips broken entries (no error output)
+- Called from the env file via `eval "$(ocx --offline shell profile load)"`
+
+---
+
 ## Index Commands
 
 ### `ocx index catalog`

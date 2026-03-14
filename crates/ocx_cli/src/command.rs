@@ -28,6 +28,11 @@ pub mod select;
 pub mod shell;
 pub mod shell_completion;
 pub mod shell_env;
+pub mod shell_profile;
+pub mod shell_profile_add;
+pub mod shell_profile_list;
+pub mod shell_profile_load;
+pub mod shell_profile_remove;
 pub mod uninstall;
 pub mod version;
 

@@ -322,6 +322,7 @@ _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 export PATH="${_ocx_home}/installs/ocx.sh/ocx/current/bin:$PATH"
 _ocx_bin="${_ocx_home}/installs/ocx.sh/ocx/current/bin/ocx"
 if [ -x "$_ocx_bin" ]; then
+  eval "$("$_ocx_bin" --offline shell profile load 2>/dev/null)" 2>/dev/null || true
   eval "$("$_ocx_bin" --offline shell completion 2>/dev/null)" 2>/dev/null || true
 fi
 unset _ocx_home _ocx_bin
@@ -340,6 +341,7 @@ set -l _ocx_home (set -q OCX_HOME; and echo $OCX_HOME; or echo $HOME/.ocx)
 fish_add_path --path "$_ocx_home/installs/ocx.sh/ocx/current/bin"
 set -l _ocx_bin "$_ocx_home/installs/ocx.sh/ocx/current/bin/ocx"
 if test -x "$_ocx_bin"
+  "$_ocx_bin" --offline shell profile load --shell fish 2>/dev/null | source
   "$_ocx_bin" --offline shell completion --shell fish 2>/dev/null | source
 end
 FISHEOF

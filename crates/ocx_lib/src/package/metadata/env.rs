@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod accumulator;
+pub mod conflict;
 pub mod constant;
 pub mod exporter;
 pub mod modifier;
