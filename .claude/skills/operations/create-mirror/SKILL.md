@@ -75,14 +75,17 @@ unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
 ```
 
 11. **Analyze directory structure.** Look for:
+    - **Top-level wrapper directory** (e.g. `cmake-3.28.0-linux-x86_64/bin/cmake`) — if ALL entries share a common prefix directory, this needs `strip_components: 1` in the mirror YAML so the rebundling process strips it. Count the depth of the common prefix to determine the correct value (usually 1).
     - `bin/` directory containing executables → `${installPath}/bin` for PATH
     - Root-level executable (no `bin/` dir) → `${installPath}` for PATH
     - Platform-specific layouts (e.g. macOS `.app` bundles → `${installPath}/Foo.app/Contents/bin`)
     - `man/`, `share/man/` directories → MANPATH entry
     - `lib/`, `include/` directories → note for the user but don't auto-add env vars
-    - Top-level wrapper directory (e.g. `cmake-3.28.0-linux-x86_64/bin/cmake`) — the mirror pipeline strips this automatically, so paths should be relative to the content root after stripping.
+    - Paths in metadata should be relative to the content root **after stripping** (e.g. if the archive has `cmake-3.28/bin/cmake` and `strip_components: 1`, the metadata PATH should use `${installPath}/bin`).
 
-12. **Check if layouts differ across platforms.** macOS often has `.app` bundles, Windows may have flat layouts. If layouts differ, create platform-specific metadata files.
+    **Important:** `strip_components` in the mirror YAML controls rebundling (stripping the wrapper directory before creating the OCX package). This is separate from `strip_components` in metadata JSON, which tells OCX how to extract the package after downloading. Typically, the mirror YAML needs `strip_components` but the metadata does not (since the rebundled archive is already clean).
+
+12. **Check if layouts differ across platforms.** macOS often has `.app` bundles, Windows may have flat layouts. If layouts differ, create platform-specific metadata files. Check strip_components consistency across platforms — if all platforms have a top-level wrapper directory, a single `strip_components` value works. If some don't (e.g. Windows zips are sometimes flat), note this as a potential issue for the user.
 
 13. **For raw binaries:** the metadata just needs a PATH entry pointing to `${installPath}` (the binary lands directly in the content root).
 
@@ -124,6 +127,9 @@ assets:
     - "{regex}"
   # ... per detected platform
 
+# Only include if archives have a top-level wrapper directory
+# strip_components: 1
+
 metadata:
   default: metadata/{name}.json
   # platforms: ... (only if platform-specific metadata needed)
@@ -158,6 +164,7 @@ cargo run -p ocx_mirror -- validate mirrors/mirror-{name}.yml
     - Generated files
     - Detected platforms
     - Asset patterns
+    - Whether `strip_components` was set (and why)
     - Metadata layout (shared vs platform-specific)
     - Any warnings (missing platforms, ambiguous patterns, etc.)
 
