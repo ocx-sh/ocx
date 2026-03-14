@@ -41,25 +41,6 @@ jobs:
         run: |
           mkdir -p website/src/public/schemas/metadata
           cargo run -p ocx_schema --release > website/src/public/schemas/metadata/v1.json
-      - name: Install uv
-        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
-      - name: Generate SBOM and dependencies page
-        run: |
-          cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --manifest-path crates/ocx_cli/Cargo.toml
-          mkdir -p website/src/public/data
-          uv run scripts/sbom-to-markdown.py \
-            --input crates/ocx_cli/ocx.cdx.json \
-            --output website/src/docs/reference/dependencies.md \
-            --json-output website/src/public/data/dependencies.json
-      - name: Generate package catalog
-        run: |
-          uv run scripts/catalog-generate.py \
-            --ocx-binary target/release/ocx \
-            --output-dir website/src/public/data/catalog \
-            --pages-dir website/src/docs/catalog \
-            --registry ocx.sh \
-            --remote
       - name: Upload Binary
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -70,26 +51,6 @@ jobs:
         with:
           name: website-schema
           path: website/src/public/schemas/
-      - name: Upload Dependencies Page
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: website-dependencies-page
-          path: website/src/docs/reference/dependencies.md
-      - name: Upload Dependencies Data
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: website-dependencies-data
-          path: website/src/public/data/dependencies.json
-      - name: Upload Catalog Data
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: website-catalog-data
-          path: website/src/public/data/catalog/
-      - name: Upload Catalog Pages
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: website-catalog-pages
-          path: website/src/docs/catalog/
 
   recordings:
     name: Generate Recordings
@@ -125,9 +86,79 @@ jobs:
           name: website-recordings
           path: website/src/public/casts/
 
+  sbom:
+    name: Generate SBOM
+    needs: build-binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+      - name: Install uv
+        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+      - name: Generate SBOM and dependencies page
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --manifest-path crates/ocx_cli/Cargo.toml
+          mkdir -p website/src/public/data
+          uv run scripts/sbom-to-markdown.py \
+            --input crates/ocx_cli/ocx.cdx.json \
+            --output website/src/docs/reference/dependencies.md \
+            --json-output website/src/public/data/dependencies.json
+      - name: Upload Dependencies Page
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: website-dependencies-page
+          path: website/src/docs/reference/dependencies.md
+      - name: Upload Dependencies Data
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: website-dependencies-data
+          path: website/src/public/data/dependencies.json
+
+  catalog:
+    name: Generate Catalog
+    needs: build-binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download Binary
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: ocx-binary
+          path: bin
+      - name: Make Binary Executable
+        run: chmod +x bin/ocx
+      - name: Install uv
+        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+      - name: Generate package catalog
+        run: |
+          uv run scripts/catalog-generate.py \
+            --ocx-binary bin/ocx \
+            --output-dir website/src/public/data/catalog \
+            --pages-dir website/src/docs/catalog \
+            --registry ocx.sh \
+            --remote
+      - name: Upload Catalog Data
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: website-catalog-data
+          path: website/src/public/data/catalog/
+      - name: Upload Catalog Pages
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: website-catalog-pages
+          path: website/src/docs/catalog/
+
   website:
     name: Build Website
-    needs: recordings
+    needs: [build-binary, recordings, sbom, catalog]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
