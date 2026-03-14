@@ -151,6 +151,31 @@ When set to a [truthy value](#truthy-values), OCX will use the remote index by d
 
 ## External {#external}
 
+### `CI` {#external-ci}
+
+When set to a [truthy value](#truthy-values), OCX suppresses the update check on startup.
+Most CI systems (GitHub Actions, GitLab CI, Travis, etc.) set this automatically.
+
+### `GITHUB_ACTIONS` {#external-github-actions}
+
+Set to `true` by [GitHub Actions][github-actions-docs] runners. Used by
+[`ocx ci export`][cmd-ci-export] to auto-detect the CI flavor. When detected,
+the command writes environment variable exports to the files specified by
+[`GITHUB_PATH`](#external-github-path) and [`GITHUB_ENV`](#external-github-env).
+
+### `GITHUB_PATH` {#external-github-path}
+
+Set by [GitHub Actions][github-actions-docs] to a file path.
+[`ocx ci export`][cmd-ci-export] appends `PATH` entries to this file, making
+them available in subsequent workflow steps.
+
+### `GITHUB_ENV` {#external-github-env}
+
+Set by [GitHub Actions][github-actions-docs] to a file path.
+[`ocx ci export`][cmd-ci-export] appends non-`PATH` environment variables to
+this file using `KEY=value` syntax (or [heredoc delimiters][github-multiline-env]
+for multiline values).
+
 ### `DOCKER_CONFIG` {#external-docker-config}
 
 The location of the docker configuration file.
@@ -164,10 +189,12 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- external -->
 [mach-o]: https://en.wikipedia.org/wiki/Mach-O
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[github-multiline-env]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strings
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 
 <!-- commands -->
+[cmd-ci-export]: command-line.md#ci-export
 [arg-index]: command-line.md#arg-index
 [arg-remote]: command-line.md#arg-remote
 

@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 pub mod catalog;
+pub mod ci_export;
 pub mod clean;
 pub mod env;
 pub mod info;

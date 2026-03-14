@@ -34,7 +34,7 @@ pub fn filter_versions(
 ) -> Vec<ResolvedVersion> {
     // 1. Exact version match
     if !exact_versions.is_empty() {
-        versions.retain(|v| exact_versions.iter().any(|target| v.version == *target));
+        versions.retain(|v| exact_versions.contains(&v.version));
     }
 
     // 2. Skip prereleases

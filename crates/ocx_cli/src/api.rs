@@ -40,6 +40,10 @@ impl Api {
         Ok(())
     }
 
+    pub fn report_ci_exported(&self, exported: data::ci_export::CiExported) -> anyhow::Result<()> {
+        self.report(&exported)
+    }
+
     pub fn report_installs(&self, installs: data::install::Installs) -> anyhow::Result<()> {
         self.report(&installs)
     }

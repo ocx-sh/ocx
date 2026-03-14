@@ -1,0 +1,17 @@
+name: 'Setup OCX'
+description: 'Install the OCX package manager'
+inputs:
+  version:
+    description: 'OCX version to install (exact version, not "latest")'
+    required: true
+  github-token:
+    description: 'GitHub token for API requests and release downloads'
+    default: ${{ github.token }}
+outputs:
+  version:
+    description: 'The installed OCX version'
+  ocx-path:
+    description: 'Path to the OCX binary directory'
+runs:
+  using: node24
+  main: dist/setup/index.js

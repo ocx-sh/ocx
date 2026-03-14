@@ -384,6 +384,46 @@ Prints the ocx version number.
 ocx version
 ```
 
+### `ci` {#ci}
+
+#### `export` {#ci-export}
+
+Exports the environment variables declared by one or more packages directly into a CI system's
+runtime files. For [GitHub Actions][github-actions-docs], this appends path entries to
+`$GITHUB_PATH` and other variables to `$GITHUB_ENV`.
+
+The CI flavor is auto-detected from the environment (e.g. `GITHUB_ACTIONS=true`) but can be
+overridden with `--flavor`.
+
+This command does not auto-install packages — if a package is not already available locally it
+will fail with an error. In CI workflows, use [`package pull`](#package-pull) before `ci export`.
+
+**Usage**
+
+```shell
+ocx ci export [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to export the environment for.
+
+**Options**
+
+- `--flavor <FLAVOR>`: CI system to target. Currently supported: `github-actions`. Auto-detected if omitted.
+- `-p`, `--platform`: Target platforms to consider when resolving packages.
+- `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
+- `-h`, `--help`: Print help information.
+
+::: tip
+Pair with [`package pull`](#package-pull) for a minimal CI setup:
+
+```shell
+ocx package pull cmake:3.28
+ocx ci export cmake:3.28
+```
+:::
+
 ### `package` {#package}
 
 #### `create` {#package-create}
@@ -409,6 +449,36 @@ ocx package create [OPTIONS] <PATH>
 - `-m`, `--metadata <PATH>`: Path to a metadata file to bundle with the package. When provided, it is copied as a sidecar file next to the output archive. If omitted, no metadata sidecar is written.
 - `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
 - `-h`, `--help`: Print help information.
+
+#### `pull` {#package-pull}
+
+Downloads packages into the local [object store][fs-objects] without creating
+[install symlinks][fs-installs].
+
+Unlike [`install`](#install), this command only populates the content-addressed object store — no
+candidate or current symlinks are created. This is the recommended primitive for CI environments
+where reproducibility matters and symlink management is unnecessary.
+
+**Usage**
+
+```shell
+ocx package pull [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to pull.
+
+**Options**
+
+- `-p`, `--platform`: Target platforms to consider. Defaults to the current platform.
+- `-h`, `--help`: Print help information.
+
+::: tip
+`package pull` reports the content-addressed object store path for each package — the same
+digest-derived path that [`find`](#find) and [`exec`](#exec) resolve to. Two pulls of the same
+digest are safe to run concurrently.
+:::
 
 #### `push` {#package-push}
 
@@ -442,4 +512,6 @@ ocx package push [OPTIONS] <IDENTIFIER> <CONTENT>
 [env-ocx-index]: ./environment.md#ocx-index
 
 <!-- internal -->
+[fs-objects]: ../user-guide.md#file-structure-objects
+[fs-installs]: ../user-guide.md#file-structure-installs
 [fs-index]: ../user-guide.md#file-structure-index

@@ -448,6 +448,38 @@ docker login "<registry>"
 
 The docker configuration file location can be overridden by setting the [`DOCKER_CONFIG`][env-docker-config] environment variable.
 
+## CI Integration {#ci}
+
+CI environments need tool binaries to be available and their environment variables exported — but
+they don't need version switching, candidate symlinks, or any of the install-store machinery that
+supports interactive use. OCX provides two commands tailored for this:
+
+[`package pull`][cmd-package-pull] downloads packages into the content-addressed
+[object store][fs-objects] without creating any symlinks. [`ci export`][cmd-ci-export] then writes
+the package-declared environment variables directly into the CI system's runtime files.
+
+```shell
+ocx package pull cmake:3.28
+ocx ci export cmake:3.28
+```
+
+On [GitHub Actions][github-actions-docs], `ci export` auto-detects the environment and appends
+`PATH` entries to `$GITHUB_PATH` and other variables to `$GITHUB_ENV`, making them available in
+all subsequent steps.
+
+:::tip
+`package pull` only touches the object store — no symlinks, no install-store mutations. This makes
+it safe to run concurrently in matrix builds that share a cached [`OCX_HOME`][env-ocx-home], since
+content-addressed writes are inherently idempotent.
+:::
+
+:::info Relationship to `install`
+[`install`][cmd-install] is `package pull` plus candidate-symlink creation (and optionally
+`--select` for the current symlink). In CI you typically don't need symlinks — the
+content-addressed object-store path that `package pull` reports is fully reproducible and
+digest-derived.
+:::
+
 <!-- external -->
 [nix]: https://nixos.org/
 [sdkman]: https://sdkman.io/
@@ -477,7 +509,9 @@ The docker configuration file location can be overridden by setting the [`DOCKER
 [cmd-index-catalog]: ./reference/command-line.md#index-catalog
 [cmd-index-list]: ./reference/command-line.md#index-list
 [cmd-index-update]: ./reference/command-line.md#index-update
+[cmd-package-pull]: ./reference/command-line.md#package-pull
 [cmd-package-push]: ./reference/command-line.md#package-push
+[cmd-ci-export]: ./reference/command-line.md#ci-export
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-offline]: ./reference/command-line.md#arg-offline
 [arg-index]: ./reference/command-line.md#arg-index

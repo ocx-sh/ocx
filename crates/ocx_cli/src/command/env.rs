@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{oci, package::metadata::env::exporter::Exporter};
+use ocx_lib::oci;
 
 use crate::{api, conventions::*, options};
 
@@ -49,23 +49,15 @@ impl Env {
             manager.find_or_install_all(identifiers, platforms).await?
         };
 
-        let mut all_entries: Vec<api::data::env::EnvEntry> = Vec::new();
-
-        for package_info in info {
-            let mut exporter = Exporter::new(&package_info.content);
-            if let Some(metadata_env) = package_info.metadata.env() {
-                for v in metadata_env {
-                    exporter.add(v)?;
-                }
-            }
-            for entry in exporter.take() {
-                all_entries.push(api::data::env::EnvEntry {
-                    key: entry.key,
-                    value: entry.value,
-                    kind: entry.kind,
-                });
-            }
-        }
+        let entries = resolve_env_entries(&info)?;
+        let all_entries = entries
+            .into_iter()
+            .map(|e| api::data::env::EnvEntry {
+                key: e.key,
+                value: e.value,
+                kind: e.kind,
+            })
+            .collect();
 
         context.api().report_env(api::data::env::EnvVars::new(all_entries))?;
 

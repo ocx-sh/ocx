@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+pub mod ci;
+pub mod ci_export;
 pub mod clean;
 pub mod deselect;
 pub mod env;
@@ -18,6 +20,7 @@ pub mod info;
 pub mod install;
 pub mod package;
 pub mod package_create;
+pub mod package_pull;
 pub mod package_push;
 pub mod select;
 pub mod shell;
@@ -28,6 +31,9 @@ pub mod version;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// CI-specific commands (e.g. exporting environment variables to CI systems).
+    #[command(subcommand)]
+    Ci(ci::Ci),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
     /// Remove the current-version symlink for one or more packages.
@@ -61,6 +67,7 @@ pub enum Command {
 impl Command {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
+            Command::Ci(ci) => ci.execute(context).await,
             Command::Clean(clean) => clean.execute(context).await,
             Command::Deselect(deselect) => deselect.execute(context).await,
             Command::Find(find) => find.execute(context).await,

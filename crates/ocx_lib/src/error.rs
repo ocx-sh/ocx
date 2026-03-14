@@ -36,6 +36,9 @@ pub enum Error {
     /// An archive operation failed.
     Archive(crate::archive::Error),
 
+    /// A CI export operation failed.
+    Ci(crate::ci::error::Error),
+
     Undefined,
     UndefinedWithMessage(String),
 }
@@ -117,6 +120,7 @@ impl std::fmt::Display for Error {
             Error::OciClient(error) => write!(f, "{error}"),
             Error::Identifier(error) => write!(f, "{error}"),
             Error::Archive(error) => write!(f, "{error}"),
+            Error::Ci(error) => write!(f, "{error}"),
             Error::Undefined => write!(f, "An undefined error occurred"),
             Error::UndefinedWithMessage(message) => write!(f, "An undefined error occurred: {}", message),
         }
@@ -148,6 +152,12 @@ impl From<crate::oci::client::error::ClientError> for Error {
 impl From<crate::archive::Error> for Error {
     fn from(error: crate::archive::Error) -> Self {
         Error::Archive(error)
+    }
+}
+
+impl From<crate::ci::error::Error> for Error {
+    fn from(error: crate::ci::error::Error) -> Self {
+        Error::Ci(error)
     }
 }
 

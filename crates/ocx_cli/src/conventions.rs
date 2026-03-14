@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::oci;
+use ocx_lib::{oci, package::install_info::InstallInfo, package::metadata::env::exporter};
 
 /// Infers a metadata file path based on the archive file path.
 /// For example, if the content path is `/path/to/package.tar.gz`, this function will return `/path/to/package-metadata.json`.
@@ -41,4 +41,19 @@ pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
     } else {
         platforms.to_vec()
     }
+}
+
+/// Resolves package metadata environment variables into flat entries via [`exporter::Exporter`].
+pub fn resolve_env_entries(packages: &[InstallInfo]) -> ocx_lib::Result<Vec<exporter::Entry>> {
+    let mut entries = Vec::new();
+    for info in packages {
+        let mut exp = exporter::Exporter::new(&info.content);
+        if let Some(env) = info.metadata.env() {
+            for v in env {
+                exp.add(v)?;
+            }
+        }
+        entries.extend(exp.take());
+    }
+    Ok(entries)
 }

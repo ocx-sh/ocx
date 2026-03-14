@@ -210,7 +210,23 @@ Syncs the local index from the remote registry.
 
 ---
 
-## Package Publishing Commands
+## Package Commands
+
+### `ocx package pull PACKAGES...`
+
+Downloads packages into the local object store without creating install symlinks.
+
+| Flag | Purpose |
+|------|---------|
+| `-p/--platform` | Comma-separated platforms |
+
+- Calls `manager.install_all(packages, platforms, candidate=false, select=false)`
+- **No symlinks created** — only populates the object store
+- Returns `Vec<InstallInfo>` → reported via `api::data::paths::Paths` (content paths)
+- Report: "Package | Path" (path = object store content directory)
+- Designed for CI environments where reproducibility matters and symlink management is unnecessary
+
+---
 
 ### `ocx package create PATH`
 
@@ -247,6 +263,27 @@ Publishes a package archive to the registry.
 
 ---
 
+## CI Commands
+
+### `ocx ci export PACKAGES...`
+
+Exports package environment variables to a CI system's runtime files.
+
+| Flag | Purpose |
+|------|---------|
+| `-p/--platform` | Comma-separated platforms |
+| `--flavor` | CI system (`github-actions`). Auto-detected if omitted. |
+| `--candidate` | Resolve via candidate symlink |
+| `--current` | Resolve via current symlink |
+
+- Default: calls `manager.find_all()` — **no auto-install**
+- `--candidate`/`--current`: calls `manager.find_symlink_all(kind)` — no auto-install
+- GitHub Actions: appends PATH entries to `$GITHUB_PATH`, other vars to `$GITHUB_ENV`
+- Reads `GITHUB_ACTIONS`, `GITHUB_PATH`, `GITHUB_ENV` from environment
+- No report output — logs exported entries via `tracing`
+
+---
+
 ## Info Commands
 
 ### `ocx version`
@@ -266,7 +303,8 @@ Prints version, supported platforms, and detected shell.
 | `find_all()` | No | No | `find`, `select` |
 | `find_symlink_all(kind)` | No | Yes (candidate/current) | `find --candidate`, `env --candidate` |
 | `find_or_install_all()` | **Yes** | No | `env`, `exec` |
-| `install_all()` | N/A (is install) | Creates candidate | `install` |
+| `install_all(candidate=true)` | N/A (is install) | Creates candidate | `install` |
+| `install_all(candidate=false)` | N/A (is pull) | No | `package pull` |
 | `deselect_all()` | No | Removes current | `deselect` |
 | `uninstall_all()` | No | Removes candidate | `uninstall` |
 | `clean()` | No | — | `clean` |
@@ -295,10 +333,16 @@ ocx install cmake:3.28 --select
 eval "$(ocx shell env cmake:3.28 --current)"
 ```
 
+### CI: pull and export environment (GitHub Actions)
+```sh
+ocx package pull cmake:3.28          # fetch to object store, no symlinks
+ocx ci export cmake:3.28             # write to $GITHUB_PATH / $GITHUB_ENV
+```
+
 ### CI: reproducible build with locked index
 ```sh
-# Offline install from bundled index snapshot
-ocx install cmake:3.28 --offline
+# Offline pull from bundled index snapshot
+ocx package pull --offline cmake:3.28
 ocx exec cmake:3.28 -- cmake --version
 ```
 

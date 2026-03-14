@@ -1,0 +1,23 @@
+name: 'OCX Install'
+description: 'Pull packages and export environment using OCX'
+inputs:
+  packages:
+    description: 'Space-separated list of packages to pull'
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Pull packages
+      shell: bash
+      run: |
+        IFS=' ' read -ra pkgs <<< "$PACKAGES"
+        ocx package pull "${pkgs[@]}"
+      env:
+        PACKAGES: ${{ inputs.packages }}
+    - name: Export environment
+      shell: bash
+      run: |
+        IFS=' ' read -ra pkgs <<< "$PACKAGES"
+        ocx ci export "${pkgs[@]}"
+      env:
+        PACKAGES: ${{ inputs.packages }}
