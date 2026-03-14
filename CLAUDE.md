@@ -137,9 +137,24 @@ Planning artifacts go in `./.claude/artifacts/`. Document architectural decision
 
 ## Workflow
 
-**Branching**: Always branch from `main`. Never commit directly to `main`.
+**Worktrees**: Three git worktrees with fixed branch names:
 
-**Commits**: Use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). Scopes are optional. Do not add `Co-Authored-By` trailers to commit messages.
+| Directory | Branch |
+|-----------|--------|
+| `ocx` | `goat` |
+| `ocx-evelynn` | `evelynn` |
+| `ocx-sion` | `sion` |
+
+**Commits**: Use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). Scopes are optional. Do not add `Co-Authored-By` trailers to commit messages. Use `chore:` for changes to AI settings, skills, CLAUDE.md, and other tooling files that should not appear in the changelog.
+
+**During development**: Use `task checkpoint` to save progress. This amends all changes into a single "Checkpoint" commit on the feature branch.
+
+**Landing a feature**: When a feature is finished:
+1. Amend the checkpoint commit with a proper conventional commit message: `git commit --amend -m "feat: ..."`
+2. Rebase the feature branch onto `main`: `git rebase main`
+3. Switch to `main`: `git checkout main`
+4. Fast-forward merge: `git merge --ff-only <branch>`
+5. Switch back to the worktree branch: `git checkout <branch>`
 
 **Planning flow**: ADR → Design Spec → Plan → Implementation
 
