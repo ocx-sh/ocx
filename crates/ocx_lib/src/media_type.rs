@@ -15,6 +15,16 @@ pub const MEDIA_TYPE_PACKAGE_METADATA_V1: &str = "application/vnd.sh.ocx.package
 pub const MEDIA_TYPE_TAR_GZ: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 /// The media type of a layer containing a tarball of the package contents, compressed with xz.
 pub const MEDIA_TYPE_TAR_XZ: &str = "application/vnd.oci.image.layer.v1.tar+xz";
+/// The artifact type for a description manifest (README + optional logo).
+pub const MEDIA_TYPE_DESCRIPTION_V1: &str = "application/vnd.sh.ocx.description.v1";
+/// The OCI empty config media type, per the OCI image spec.
+pub const MEDIA_TYPE_OCI_EMPTY_CONFIG: &str = "application/vnd.oci.empty.v1+json";
+/// Markdown content media type.
+pub const MEDIA_TYPE_MARKDOWN: &str = "application/markdown";
+/// PNG image media type.
+pub const MEDIA_TYPE_PNG: &str = "image/png";
+/// SVG image media type.
+pub const MEDIA_TYPE_SVG: &str = "image/svg+xml";
 
 pub const ACCEPTED_MANIFEST_MEDIA_TYPES: &[&str; 2] = &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX];
 

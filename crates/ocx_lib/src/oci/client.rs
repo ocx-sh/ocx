@@ -2,10 +2,11 @@
 // Copyright 2026 The OCX Authors
 
 use crate::{
-    ACCEPTED_MANIFEST_MEDIA_TYPES, MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST,
-    MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1, Result, archive, compression, log, media_type_file_ext,
-    media_type_from_path, media_type_select, media_type_select_some, oci,
-    package::{self, info::Info, install_info, install_status, metadata},
+    ACCEPTED_MANIFEST_MEDIA_TYPES, MEDIA_TYPE_DESCRIPTION_V1, MEDIA_TYPE_MARKDOWN, MEDIA_TYPE_OCI_EMPTY_CONFIG,
+    MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1,
+    MEDIA_TYPE_PNG, MEDIA_TYPE_SVG, Result, archive, compression, log, media_type_file_ext, media_type_from_path,
+    media_type_select, media_type_select_some, oci,
+    package::{self, description::DESCRIPTION_TAG, info::Info, install_info, install_status, metadata},
     prelude::SerdeExt,
     utility,
 };
@@ -484,6 +485,186 @@ impl Client {
             .map_err(|e| ClientError::Registry(e.to_string()))?;
 
         Ok((digest, index))
+    }
+
+    // ── Description operations ────────────────────────────────────────
+
+    /// Pushes a description artifact to the `__ocx.desc` tag.
+    ///
+    /// Builds an OCI ImageManifest with `artifact_type` set to the description media type,
+    /// an empty config blob, layers for the README (and optional logo), and manifest-level
+    /// annotations for catalog metadata (title, description, keywords).
+    pub async fn push_description(
+        &self,
+        identifier: &Identifier,
+        description: &package::description::Description,
+    ) -> std::result::Result<(), ClientError> {
+        let desc_identifier = identifier.clone_with_tag(DESCRIPTION_TAG);
+        let image = super::native::Reference::from(&desc_identifier);
+
+        // Push empty config blob.
+        let config_data = b"{}".to_vec();
+        let config_digest = Digest::sha256(&config_data).to_string();
+        self.transport.push_blob(&image, config_data, &config_digest).await?;
+
+        // Push README blob.
+        let readme_bytes = description.readme.as_bytes();
+        let readme_len = readme_bytes.len();
+        let readme_digest = Digest::sha256(readme_bytes).to_string();
+        self.transport
+            .push_blob(&image, readme_bytes.to_vec(), &readme_digest)
+            .await?;
+
+        let mut layers = vec![oci::Descriptor {
+            media_type: MEDIA_TYPE_MARKDOWN.to_string(),
+            digest: readme_digest,
+            size: readme_len as i64,
+            urls: None,
+            annotations: Some([(oci::annotations::TITLE.to_string(), "README.md".to_string())].into()),
+        }];
+
+        // Push logo blob if provided.
+        if let Some(logo) = &description.logo {
+            let logo_len = logo.data.len();
+            let logo_digest = Digest::sha256(&logo.data).to_string();
+            self.transport
+                .push_blob(&image, logo.data.clone(), &logo_digest)
+                .await?;
+
+            let ext = match logo.media_type {
+                MEDIA_TYPE_PNG => "png",
+                MEDIA_TYPE_SVG => "svg",
+                _ => "bin",
+            };
+            layers.push(oci::Descriptor {
+                media_type: logo.media_type.to_string(),
+                digest: logo_digest,
+                size: logo_len as i64,
+                urls: None,
+                annotations: Some([(oci::annotations::TITLE.to_string(), format!("logo.{ext}"))].into()),
+            });
+        }
+
+        let manifest_annotations = if description.annotations.is_empty() {
+            None
+        } else {
+            Some(description.annotations.clone())
+        };
+
+        let manifest = oci::ImageManifest {
+            media_type: Some(MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string()),
+            artifact_type: Some(MEDIA_TYPE_DESCRIPTION_V1.to_string()),
+            config: oci::Descriptor {
+                media_type: MEDIA_TYPE_OCI_EMPTY_CONFIG.to_string(),
+                digest: config_digest,
+                size: 2,
+                urls: None,
+                annotations: None,
+            },
+            layers,
+            annotations: manifest_annotations,
+            ..Default::default()
+        };
+
+        let manifest_data = serde_json::to_vec(&manifest).map_err(|e| ClientError::Serialization(e.to_string()))?;
+
+        // Push to the tag reference directly (not by digest) so the tag is created.
+        self.transport
+            .push_manifest_raw(&image, manifest_data, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
+            .await?;
+
+        log::debug!("Pushed description for {}", identifier);
+        Ok(())
+    }
+
+    /// Pulls the description artifact from the `__ocx.desc` tag.
+    ///
+    /// Returns `Ok(None)` if no description tag exists for the identifier.
+    /// Uses a temporary directory to download blobs before reading them into memory.
+    pub async fn pull_description(
+        &self,
+        identifier: &Identifier,
+        temp_dir: &std::path::Path,
+    ) -> std::result::Result<Option<package::description::Description>, ClientError> {
+        let desc_identifier = identifier.clone_with_tag(DESCRIPTION_TAG);
+        let image = super::native::Reference::from(&desc_identifier);
+
+        let (manifest, _digest) = match self.pull_manifest(&image).await {
+            Ok(result) => result,
+            Err(ClientError::ManifestNotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+
+        let image_manifest = match manifest {
+            oci::Manifest::Image(m) => m,
+            oci::Manifest::ImageIndex(_) => {
+                return Err(ClientError::InvalidManifest(
+                    "expected image manifest for description, got image index".to_string(),
+                ));
+            }
+        };
+
+        // Validate artifact type.
+        match &image_manifest.artifact_type {
+            Some(at) if at == MEDIA_TYPE_DESCRIPTION_V1 => {}
+            other => {
+                return Err(ClientError::InvalidManifest(format!(
+                    "expected artifact_type '{}', got '{}'",
+                    MEDIA_TYPE_DESCRIPTION_V1,
+                    other.as_deref().unwrap_or("<none>")
+                )));
+            }
+        }
+
+        // Pull layers by media type into temp files.
+        let mut readme: Option<String> = None;
+        let mut logo: Option<package::description::Logo> = None;
+
+        for (i, layer) in image_manifest.layers.iter().enumerate() {
+            let blob_path = temp_dir.join(format!("layer_{i}"));
+            self.transport
+                .pull_blob_to_file(&image, &layer.digest, &blob_path)
+                .await?;
+
+            match layer.media_type.as_str() {
+                MEDIA_TYPE_MARKDOWN => {
+                    let data = tokio::fs::read(&blob_path)
+                        .await
+                        .map_err(|e| ClientError::Io(blob_path, e))?;
+                    readme = Some(
+                        String::from_utf8(data)
+                            .map_err(|e| ClientError::Serialization(format!("README is not valid UTF-8: {e}")))?,
+                    );
+                }
+                MEDIA_TYPE_PNG | MEDIA_TYPE_SVG => {
+                    let data = tokio::fs::read(&blob_path)
+                        .await
+                        .map_err(|e| ClientError::Io(blob_path, e))?;
+                    logo = Some(package::description::Logo {
+                        data,
+                        media_type: if layer.media_type == MEDIA_TYPE_PNG {
+                            MEDIA_TYPE_PNG
+                        } else {
+                            MEDIA_TYPE_SVG
+                        },
+                    });
+                }
+                _ => {
+                    log::debug!("Ignoring unknown description layer media type: {}", layer.media_type);
+                }
+            }
+        }
+
+        let readme = readme
+            .ok_or_else(|| ClientError::InvalidManifest("description manifest has no markdown layer".to_string()))?;
+
+        let annotations = image_manifest.annotations.unwrap_or_default();
+
+        Ok(Some(package::description::Description {
+            readme,
+            logo,
+            annotations,
+        }))
     }
 
     // ── Internal helpers ─────────────────────────────────────────────

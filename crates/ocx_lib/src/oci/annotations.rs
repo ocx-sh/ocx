@@ -14,3 +14,6 @@ pub const REVISION: &str = "org.opencontainers.image.revision";
 pub const VENDOR: &str = "org.opencontainers.image.vendor";
 pub const AUTHORS: &str = "org.opencontainers.image.authors";
 pub const LICENSES: &str = "org.opencontainers.image.licenses";
+
+// OCX-specific annotations.
+pub const KEYWORDS: &str = "sh.ocx.keywords";

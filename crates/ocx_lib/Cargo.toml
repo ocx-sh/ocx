@@ -26,6 +26,7 @@ flate2 = "1.1.9"
 tar = "0.4.44"
 tempfile = "3.25.0"
 serde_repr = "0.1.20"
+serde_yaml_ng = { workspace = true }
 futures = "0.3.31"
 fs2 = "0.4.3"
 chrono = "0.4.43"

@@ -76,6 +76,13 @@ impl Api {
         self.report(&info)
     }
 
+    pub fn report_package_description(
+        &self,
+        desc: data::package_description::PackageDescription,
+    ) -> anyhow::Result<()> {
+        self.report(&desc)
+    }
+
     pub fn is_json(&self) -> bool {
         matches!(self.format, options::Format::Json)
     }

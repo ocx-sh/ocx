@@ -1,12 +1,12 @@
 ---
 name: create-mirror
-description: Interactive workflow to create a new ocx-mirror configuration by analyzing GitHub Release assets, detecting platforms, and inspecting archive contents to generate mirror YAML and metadata JSON files.
+description: Interactive workflow to create a new ocx-mirror configuration by analyzing GitHub Release assets, detecting platforms, and inspecting archive contents to generate mirror YAML, metadata JSON, description README with frontmatter, and logo.
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, WebFetch, AskUserQuestion
 ---
 
 # Create Mirror Configuration
 
-Interactive skill that generates a complete `mirror-{name}.yml` and associated `metadata/*.json` files for a new package by analyzing its GitHub Releases.
+Interactive skill that generates a complete `mirror-{name}.yml`, `metadata/*.json`, and `descriptions/{name}/` (README with frontmatter + logo) for a new package by analyzing its GitHub Releases.
 
 ## Workflow
 
@@ -160,18 +160,88 @@ concurrency:
 cargo run -p ocx_mirror -- validate mirrors/mirror-{name}.yml
 ```
 
-17. **Present a summary** to the user showing:
-    - Generated files
+### Phase 5: Generate Description Assets
+
+17. **Create the description directory** at `mirrors/descriptions/{name}/`.
+
+18. **Download a logo.** Look for a logo in these locations (in order):
+    - The GitHub repository's social preview / OpenGraph image: `gh api "repos/{owner}/{repo}" --jq '.owner.avatar_url'` (fallback only)
+    - The repository's root for common logo files: check if `logo.svg`, `logo.png`, `icon.svg`, or `icon.png` exists at the repo root via `gh api "repos/{owner}/{repo}/contents/" --jq '.[].name'`
+    - The project's website (look for an SVG or PNG logo in the HTML `<head>` or hero section)
+    - **Prefer SVG over PNG** — SVGs are resolution-independent and typically smaller.
+    - **Ask the user** if no logo is found automatically, or if multiple candidates exist. They may provide a URL or local path.
+    - Download to `mirrors/descriptions/{name}/logo.svg` (or `.png`).
+
+```bash
+# Check repo root for logo files
+gh api "repos/{owner}/{repo}/contents/" --jq '[.[] | select(.name | test("^(logo|icon)\\.(svg|png)$"; "i")) | {name, download_url}]'
+
+# Download a logo
+curl -fsSL -o mirrors/descriptions/{name}/logo.svg "{download_url}"
+```
+
+19. **Write the README with frontmatter.** Generate `mirrors/descriptions/{name}/README.md`:
+
+```markdown
+---
+title: {display_name}
+description: {one_line_description}
+keywords: {comma_separated_keywords}
+---
+
+# {display_name}
+
+{2-3 sentence description of what the tool is and does. Research the project's
+GitHub description and website to write an accurate summary.}
+
+## What's included
+
+{List the main executables or components included in the package. Derive this
+from the archive inspection in Phase 3.}
+
+## Usage with OCX
+
+\```sh
+# Install a specific version
+ocx install {name}:{example_version}
+
+# Run directly
+ocx exec {name}:{example_version} -- {main_command} --version
+
+# Set as current
+ocx install {name}:{example_version} --select
+\```
+
+## Links
+
+- [{display_name} Documentation]({docs_url})
+- [{display_name} on GitHub](https://github.com/{owner}/{repo})
+```
+
+    **Frontmatter fields:**
+    - `title`: Human-readable display name (e.g. "CMake", "Go Task", "Buf")
+    - `description`: One-line summary suitable for catalog display (max ~100 chars)
+    - `keywords`: Comma-separated search terms — include the tool name, language ecosystem, and category (e.g. `cmake,build,cpp,c,build-system,cross-platform`)
+
+    **Body content:**
+    - Research the project by reading its GitHub description (`gh api "repos/{owner}/{repo}" --jq '.description'`) and website
+    - List executables found during archive inspection
+    - Use the minimum version from Phase 1 as the example version
+    - Include links to docs and GitHub
+
+20. **Present a summary** to the user showing:
+    - Generated files (mirror YAML, metadata JSON, README, logo)
     - Detected platforms
     - Asset patterns
     - Whether `strip_components` was set (and why)
     - Metadata layout (shared vs platform-specific)
-    - Any warnings (missing platforms, ambiguous patterns, etc.)
+    - README frontmatter values
+    - Any warnings (missing platforms, ambiguous patterns, missing logo, etc.)
 
-### Phase 5: Cleanup
+### Phase 6: Cleanup
 
-18. **Remove temp downloads** used for inspection.
-19. **Suggest next steps**: run `ocx-mirror check mirrors/mirror-{name}.yml` for a dry-run.
+21. **Remove temp downloads** used for inspection.
+22. **Suggest next steps**: run `ocx-mirror check mirrors/mirror-{name}.yml` for a dry-run.
 
 ## Key Rules
 
@@ -184,6 +254,8 @@ cargo run -p ocx_mirror -- validate mirrors/mirror-{name}.yml
 - **Do NOT use `verify.checksums_file`** for GitHub releases — it expects a full URL, not an asset filename. The `github_asset_digest: true` setting already verifies integrity via the GitHub API's per-asset digest, which is sufficient. The `checksums_file` option is only for `url_index` sources where you have a direct URL to the checksums file.
 - **Default to `build_timestamp: none`** — most mirrors don't need timestamp-differentiated builds.
 - **Default to `skip_prereleases: true`** — can be changed by the user.
+- **Always generate a README with frontmatter** — the `title`, `description`, and `keywords` in the YAML frontmatter are extracted as OCI annotations by `ocx package describe` and stripped from the pushed README body. This is the primary way to set catalog metadata.
+- **Prefer SVG logos** over PNG — they scale to any resolution and are typically smaller.
 
 ## Reference: Platform Detection Heuristics
 

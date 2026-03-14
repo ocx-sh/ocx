@@ -1,6 +1,6 @@
 name: cmake
 target:
-  registry: dev.ocx.sh
+  registry: ocx.sh
   repository: cmake
 
 source:

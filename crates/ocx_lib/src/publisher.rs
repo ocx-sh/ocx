@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::{
     log, oci,
-    package::{self, info::Info, version::Version},
+    package::{self, description::Description, info::Info, version::Version},
     prelude::*,
 };
 
@@ -56,6 +56,20 @@ impl Publisher {
         })?;
 
         package::cascade::push_with_cascade(&self.client, info, file, existing_versions, &version).await
+    }
+
+    /// Push a complete description artifact to the `__ocx.desc` tag.
+    pub async fn push_description(&self, identifier: &oci::Identifier, description: &Description) -> Result<()> {
+        log::debug!("Pushing description for {}", identifier);
+        self.client.push_description(identifier, description).await?;
+        Ok(())
+    }
+
+    /// Pull the existing description from the `__ocx.desc` tag.
+    ///
+    /// Returns `Ok(None)` if no description exists yet.
+    pub async fn pull_description(&self, identifier: &oci::Identifier, temp_dir: &Path) -> Result<Option<Description>> {
+        Ok(self.client.pull_description(identifier, temp_dir).await?)
     }
 
     /// Lists existing tags for the given identifier from the registry.

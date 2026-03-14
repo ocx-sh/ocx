@@ -20,5 +20,6 @@ lto = "thin"
 [workspace.dependencies]
 ocx_lib = { path = "crates/ocx_lib" }
 tokio = { version = "1", features = ["full"] }
+serde_yaml_ng = "0.10"
 
 [workspace.lints]

@@ -1,6 +1,6 @@
 name: go-task
 target:
-  registry: dev.ocx.sh
+  registry: ocx.sh
   repository: go-task
 
 source:

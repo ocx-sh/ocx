@@ -3,6 +3,7 @@
 
 pub mod bundle;
 pub mod cascade;
+pub mod description;
 pub mod info;
 pub mod install_info;
 pub mod install_status;
