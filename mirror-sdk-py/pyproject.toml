@@ -2,7 +2,7 @@
 name = "ocx-gen"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["httpx>=0.28"]
+dependencies = ["github3.py>=4", "httpx>=0.28"]
 
 [project.optional-dependencies]
 dev = ["datamodel-code-generator>=0.26", "pytest>=8", "ruff>=0.9"]

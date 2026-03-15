@@ -36,6 +36,9 @@ class IndexBuilder:
             prerelease=prerelease,
         )
 
+    def __len__(self) -> int:
+        return len(self._versions)
+
     def build(self) -> RemoteIndex:
         """Return the constructed RemoteIndex."""
         return RemoteIndex(versions=self._versions)
