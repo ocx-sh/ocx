@@ -5,6 +5,7 @@ mod assets;
 mod concurrency_config;
 mod metadata_config;
 mod source;
+mod strip_components_config;
 mod target;
 mod verify_config;
 mod versions_config;
@@ -13,6 +14,7 @@ pub use assets::AssetPatterns;
 pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 pub use metadata_config::MetadataConfig;
 pub use source::{Source, UrlIndexVersion};
+pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
 pub use verify_config::VerifyConfig;
 pub use versions_config::VersionsConfig;
@@ -36,10 +38,14 @@ pub struct MirrorSpec {
     /// `cmake-3.31.0-linux-x86_64/bin/cmake`). Set this to `1` to strip that prefix
     /// during extraction so the bundle contains `bin/cmake` directly.
     ///
+    /// Supports two forms:
+    /// - Simple: `strip_components: 1` (same for all platforms)
+    /// - Per-platform: `strip_components: { default: 1, platforms: { "windows/amd64": 0 } }`
+    ///
     /// This is separate from the metadata `strip_components` field, which tells OCX
     /// how to extract the package after downloading from the registry.
     #[serde(default)]
-    pub strip_components: Option<u8>,
+    pub strip_components: Option<StripComponentsConfig>,
 
     #[serde(default = "default_build_timestamp")]
     pub build_timestamp: BuildTimestampFormat,
@@ -354,7 +360,10 @@ assets:
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::Datetime);
         assert!(spec.cascade);
         assert!(!spec.skip_prereleases);
-        assert!(spec.strip_components.is_none());
+        assert!(
+            spec.strip_components.is_none(),
+            "strip_components should default to None"
+        );
         assert_eq!(spec.concurrency.max_downloads, 8);
         assert_eq!(spec.concurrency.max_pushes, 2);
         assert_eq!(spec.concurrency.rate_limit_ms, 0);
@@ -404,7 +413,38 @@ strip_components: 1
 "#;
 
         let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(spec.strip_components, Some(1));
+        assert_eq!(
+            spec.strip_components.as_ref().and_then(|sc| sc.resolve("linux/amd64")),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn parse_per_platform_strip_components() {
+        let yaml = r#"
+name: shellcheck
+target:
+  registry: ocx.sh
+  repository: shellcheck
+source:
+  type: github_release
+  owner: koalaman
+  repo: shellcheck
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shellcheck-.*\\.tar\\.xz"
+strip_components:
+  default: 1
+  platforms:
+    windows/amd64: 0
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let sc = spec.strip_components.as_ref().unwrap();
+        assert_eq!(sc.resolve("linux/amd64"), Some(1));
+        assert_eq!(sc.resolve("darwin/arm64"), Some(1));
+        assert_eq!(sc.resolve("windows/amd64"), Some(0));
     }
 
     #[test]

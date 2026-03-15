@@ -171,6 +171,9 @@ impl Sync {
         let mut tasks = Vec::new();
         for rv in &filtered {
             for platform_asset in &rv.platforms {
+                let platform_str = platform_asset.platform.to_string();
+                let strip_components = spec.strip_components.as_ref().and_then(|sc| sc.resolve(&platform_str));
+
                 tasks.push(MirrorTask {
                     version: rv.version.clone(),
                     normalized_version: rv.normalized_version.clone(),
@@ -182,7 +185,7 @@ impl Sync {
                     verify_config: spec.verify.clone(),
                     cascade: spec.cascade,
                     spec_dir: spec_dir.to_path_buf(),
-                    strip_components: spec.strip_components,
+                    strip_components,
                 });
             }
         }
