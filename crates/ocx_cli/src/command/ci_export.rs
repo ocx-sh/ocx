@@ -71,7 +71,7 @@ impl CiExport {
             .collect();
         context
             .api()
-            .report_ci_exported(api::data::ci_export::CiExported::new(report_entries))?;
+            .report(&api::data::ci_export::CiExported::new(report_entries))?;
 
         Ok(ExitCode::SUCCESS)
     }

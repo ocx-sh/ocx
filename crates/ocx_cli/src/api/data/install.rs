@@ -39,13 +39,13 @@ impl Installs {
 }
 
 impl Reportable for Installs {
-    fn print_plain(&self) {
+    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (package, entry) in &self.packages {
             rows[0].push(package.clone());
             rows[1].push(entry.identifier.to_string());
             rows[2].push(entry.path.display().to_string());
         }
-        ocx_lib::cli::stdout::print_table(&["Package", "Version", "Path"], &rows);
+        printer.print_table(&["Package", "Version", "Path"], &rows);
     }
 }

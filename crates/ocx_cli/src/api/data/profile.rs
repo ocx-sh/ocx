@@ -72,7 +72,7 @@ impl Serialize for ProfileList {
 }
 
 impl Reportable for ProfileList {
-    fn print_plain(&self) {
+    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.package.clone());
@@ -86,6 +86,6 @@ impl Reportable for ProfileList {
                     .unwrap_or("-".into()),
             );
         }
-        ocx_lib::cli::stdout::print_table(&["Package", "Mode", "Status", "Path"], &rows);
+        printer.print_table(&["Package", "Mode", "Status", "Path"], &rows);
     }
 }

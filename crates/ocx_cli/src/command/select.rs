@@ -51,9 +51,7 @@ impl Select {
             );
         }
 
-        context
-            .api()
-            .report_installs(api::data::install::Installs::new(packages))?;
+        context.api().report(&api::data::install::Installs::new(packages))?;
 
         Ok(ExitCode::SUCCESS)
     }

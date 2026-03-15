@@ -66,9 +66,7 @@ impl Uninstall {
             }
         }
 
-        context
-            .api()
-            .report_removed(api::data::removed::Removed::new(entries))?;
+        context.api().report(&api::data::removed::Removed::new(entries))?;
 
         Ok(ExitCode::SUCCESS)
     }

@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_lib::{
+    cli::{ColorModeConfig, Printer},
     env, file_structure, log,
     oci::{self, index},
     package_manager,
@@ -24,12 +25,16 @@ pub struct Context {
 }
 
 impl Context {
-    pub async fn try_init(options: &ContextOptions) -> anyhow::Result<Context> {
-        log_settings::init_with_indicatif(ocx_lib::cli::LogSettings::default().with_console_level(options.log_level))?;
+    pub async fn try_init(options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<Context> {
+        log_settings::init_with_indicatif(
+            ocx_lib::cli::LogSettings::default()
+                .with_console_level(options.log_level)
+                .with_stderr_color(color_config.stderr),
+        )?;
 
         log::debug!("Creating context with options: {:?}", options);
 
-        let api = api::Api::new(options.format);
+        let api = api::Api::new(options.format, Printer::new(color_config.stdout));
 
         let (remote_client, remote_index) = if options.offline {
             (None, None)

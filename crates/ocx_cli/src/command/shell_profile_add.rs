@@ -103,7 +103,7 @@ impl ShellProfileAdd {
             })
             .collect();
 
-        context.api().report_profile_added(ProfileAdded::new(entries))?;
+        context.api().report(&ProfileAdded::new(entries))?;
         Ok(ExitCode::SUCCESS)
     }
 }

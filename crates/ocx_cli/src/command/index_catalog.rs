@@ -22,7 +22,7 @@ impl IndexCatalog {
         let repositories = context.default_index().list_repositories(&registry).await?;
         if !self.with_tags {
             let catalog = api::data::catalog::Catalog::without_tags(repositories);
-            context.api().report_catalog(catalog)?;
+            context.api().report(&catalog)?;
             return Ok(ExitCode::SUCCESS);
         }
 
@@ -54,7 +54,7 @@ impl IndexCatalog {
         }
 
         let catalog = api::data::catalog::Catalog::with_tags(tags);
-        context.api().report_catalog(catalog)?;
+        context.api().report(&catalog)?;
         Ok(ExitCode::SUCCESS)
     }
 }

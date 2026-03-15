@@ -59,6 +59,19 @@ The flag has no effect when [`--remote`](#arg-remote) is set.
 The same override can be set persistently via the [`OCX_INDEX`][env-ocx-index] environment
 variable. The `--index` flag takes precedence when both are set.
 
+### `--color` {#arg-color}
+
+Controls when to use <Tooltip term="ANSI colors">Escape sequences defined by ECMA-48 / ISO 6429, supported by virtually all modern terminals.</Tooltip> in output.
+
+- `auto` (default): Enable colors when stdout is a terminal and
+  [`NO_COLOR`][env-no-color] is not set.
+- `always`: Always emit color codes, even when piped.
+- `never`: Disable all color output.
+
+The `--color` flag takes the highest precedence over all
+color-related environment variables ([`NO_COLOR`][env-no-color],
+[`CLICOLOR`][env-clicolor], [`CLICOLOR_FORCE`][env-clicolor-force]).
+
 ### `--candidate` / `--current` {#path-resolution}
 
 The `--candidate` and `--current` flags are available on commands that resolve a package's content
@@ -587,6 +600,9 @@ ocx package push [OPTIONS] <IDENTIFIER> <CONTENT>
 [devcontainer-features]: https://containers.dev/implementors/features/
 
 <!-- environment -->
+[env-no-color]: ./environment.md#external-no-color
+[env-clicolor]: ./environment.md#external-clicolor
+[env-clicolor-force]: ./environment.md#external-clicolor-force
 [env-ocx-index]: ./environment.md#ocx-index
 
 <!-- internal -->

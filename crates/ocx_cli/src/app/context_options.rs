@@ -35,4 +35,10 @@ pub struct ContextOptions {
     /// The log level to use
     #[arg(short, long, value_enum)]
     pub log_level: Option<cli::LogLevel>,
+
+    // Parsed early in App::run() via ColorMode::from_args(); this field exists
+    // so clap recognizes --color and shows it in --help.
+    /// When to use ANSI colors in output.
+    #[arg(long, value_enum, value_name = "WHEN", default_value_t = Default::default())]
+    pub color: cli::ColorMode,
 }

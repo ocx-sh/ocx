@@ -58,7 +58,7 @@ impl IndexList {
                 .collect::<HashMap<_, _>>();
             context
                 .api()
-                .report_tags(api::data::tag::Tags::without_platforms(tags_report))?;
+                .report(&api::data::tag::Tags::without_platforms(tags_report))?;
             return Ok(ExitCode::SUCCESS);
         }
 
@@ -98,7 +98,7 @@ impl IndexList {
 
         context
             .api()
-            .report_tags(api::data::tag::Tags::with_platforms(tags_report))?;
+            .report(&api::data::tag::Tags::with_platforms(tags_report))?;
         Ok(ExitCode::SUCCESS)
     }
 }

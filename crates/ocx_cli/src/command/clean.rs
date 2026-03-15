@@ -30,7 +30,7 @@ impl Clean {
 
         context
             .api()
-            .report_clean(api::data::clean::Clean::new(result.objects, result.temp, self.dry_run))?;
+            .report(&api::data::clean::Clean::new(result.objects, result.temp, self.dry_run))?;
 
         Ok(ExitCode::SUCCESS)
     }

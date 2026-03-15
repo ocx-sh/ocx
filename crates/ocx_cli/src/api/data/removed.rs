@@ -67,7 +67,7 @@ impl Serialize for Removed {
 }
 
 impl Reportable for Removed {
-    fn print_plain(&self) {
+    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.package.clone());
@@ -80,6 +80,6 @@ impl Reportable for Removed {
                     .unwrap_or("-".into()),
             );
         }
-        ocx_lib::cli::stdout::print_table(&["Package", "Status", "Path"], &rows);
+        printer.print_table(&["Package", "Status", "Path"], &rows);
     }
 }

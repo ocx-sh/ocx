@@ -57,20 +57,22 @@ impl Info {
 
         let info = crate::api::data::info::Info::new(version, registry, platforms, current_shell, home);
 
+        let printer = context.api().printer();
         if context.api().is_json() {
-            context.api().report_info(info)?;
-        } else if Term::stdout().is_term() {
-            self.print_logo(&info)?;
+            context.api().report(&info)?;
+        // Show the logo in terminals (even with --color never, just unstyled),
+        // and also when color is forced (--color always) even if piped.
+        } else if Term::stdout().is_term() || printer.color() {
+            self.print_logo(&info, printer.color())?;
         } else {
-            info.print_plain();
+            info.print_plain(printer);
         }
 
         Ok(ExitCode::SUCCESS)
     }
 
-    fn print_logo(&self, info: &crate::api::data::info::Info) -> anyhow::Result<()> {
+    fn print_logo(&self, info: &crate::api::data::info::Info, color: bool) -> anyhow::Result<()> {
         let term = Term::stdout();
-        let color = term.features().colors_supported();
 
         let logo_style = if color {
             Style::new().color256(203)

@@ -49,7 +49,7 @@ pub enum TagsData {
 }
 
 impl Reportable for Tags {
-    fn print_plain(&self) {
+    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         match &self.packages {
             TagsData::WithoutPlatforms(tags) => {
@@ -59,7 +59,7 @@ impl Reportable for Tags {
                         rows[1].push(tag.clone());
                     }
                 }
-                ocx_lib::cli::stdout::print_table(&["Package", "Tag"], &rows);
+                printer.print_table(&["Package", "Tag"], &rows);
             }
             TagsData::WithPlatforms(tags) => {
                 for (package, platform_tags) in tags {
@@ -71,7 +71,7 @@ impl Reportable for Tags {
                         }
                     }
                 }
-                ocx_lib::cli::stdout::print_table(&["Package", "Tag", "Platform"], &rows);
+                printer.print_table(&["Package", "Tag", "Platform"], &rows);
             }
         }
     }

@@ -40,7 +40,7 @@ impl ShellProfileRemove {
             })
             .collect();
 
-        context.api().report_profile_removed(ProfileRemoved::new(entries))?;
+        context.api().report(&ProfileRemoved::new(entries))?;
         Ok(ExitCode::SUCCESS)
     }
 }

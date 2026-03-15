@@ -9,6 +9,7 @@ AI-friendly reference for all `ocx` CLI commands, their flags, task methods, and
 
 | Flag | Env Var | Default | Purpose |
 |------|---------|---------|---------|
+| `--color auto\|always\|never` | `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE` | auto | ANSI color output control |
 | `--remote` | `OCX_REMOTE` | false | Use remote index instead of local |
 | `--offline` | `OCX_OFFLINE` | false | Disable all network access |
 | `--format plain\|json` | — | plain | Output format |

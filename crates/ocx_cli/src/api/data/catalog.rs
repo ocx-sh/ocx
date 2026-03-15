@@ -43,14 +43,14 @@ pub enum CatalogData {
 }
 
 impl Reportable for Catalog {
-    fn print_plain(&self) {
+    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         match &self.repositories {
             CatalogData::WithoutTags(repos) => {
                 for repo in repos {
                     rows[0].push(repo.clone());
                 }
-                ocx_lib::cli::stdout::print_table(&["Repository"], &rows);
+                printer.print_table(&["Repository"], &rows);
             }
             CatalogData::WithTags(tags) => {
                 for (repo, repo_tags) in tags {
@@ -59,7 +59,7 @@ impl Reportable for Catalog {
                         rows[1].push(tag.clone());
                     }
                 }
-                ocx_lib::cli::stdout::print_table(&["Repository", "Tag"], &rows);
+                printer.print_table(&["Repository", "Tag"], &rows);
             }
         }
     }

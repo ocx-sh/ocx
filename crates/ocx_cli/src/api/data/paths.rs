@@ -42,12 +42,12 @@ impl Serialize for Paths {
 }
 
 impl Reportable for Paths {
-    fn print_plain(&self) {
+    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.package.clone());
             rows[1].push(entry.path.display().to_string());
         }
-        ocx_lib::cli::stdout::print_table(&["Package", "Path"], &rows);
+        printer.print_table(&["Package", "Path"], &rows);
     }
 }

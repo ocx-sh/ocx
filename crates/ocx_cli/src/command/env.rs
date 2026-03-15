@@ -59,7 +59,7 @@ impl Env {
             })
             .collect();
 
-        context.api().report_env(api::data::env::EnvVars::new(all_entries))?;
+        context.api().report(&api::data::env::EnvVars::new(all_entries))?;
 
         Ok(ExitCode::SUCCESS)
     }

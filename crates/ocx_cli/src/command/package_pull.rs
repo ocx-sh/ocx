@@ -49,7 +49,7 @@ impl PackagePull {
             })
             .collect();
         let paths = api::data::paths::Paths::new(entries);
-        context.api().report_paths(paths)?;
+        context.api().report(&paths)?;
 
         Ok(ExitCode::SUCCESS)
     }

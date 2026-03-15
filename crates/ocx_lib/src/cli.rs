@@ -9,10 +9,15 @@
 
 mod log_level;
 mod log_settings;
-pub mod stdout;
+pub mod options;
+mod printer;
+mod styles;
 
 pub use log_level::LogLevel;
 pub use log_settings::LogSettings;
+pub use options::{ColorMode, ColorModeConfig};
+pub use printer::Printer;
+pub use styles::clap_styles;
 
 #[cfg(feature = "progress")]
 pub use indicatif;

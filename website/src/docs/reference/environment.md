@@ -180,6 +180,22 @@ for multiline values).
 
 The location of the docker configuration file.
 
+### `NO_COLOR` {#external-no-color}
+
+When set to any non-empty value, disables ANSI color output.
+This is a <Tooltip term="cross-tool convention">Defined at <a href="https://no-color.org/">no-color.org</a>. Adopted by hundreds of CLI tools across all ecosystems.</Tooltip> for respecting user color preferences.
+The [`--color`][arg-color] flag takes precedence.
+
+### `CLICOLOR` {#external-clicolor}
+
+When set to `0`, disables color output.
+Part of the <Tooltip term="CLICOLOR convention">Defined at <a href="https://bixense.com/clicolors/">bixense.com/clicolors</a>. Originated in macOS/BSD tooling.</Tooltip>.
+
+### `CLICOLOR_FORCE` {#external-clicolor-force}
+
+When set to a non-zero value, forces color output even when stdout is not a terminal.
+Overrides [`CLICOLOR`](#external-clicolor) but is itself overridden by [`NO_COLOR`](#external-no-color).
+
 ### `RUST_LOG` {#external-rust-log}
 
 A fallback for configuring the log level of OCX and its dependencies.
@@ -195,6 +211,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- commands -->
 [cmd-ci-export]: command-line.md#ci-export
+[arg-color]: command-line.md#arg-color
 [arg-index]: command-line.md#arg-index
 [arg-remote]: command-line.md#arg-remote
 

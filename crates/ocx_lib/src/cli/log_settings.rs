@@ -27,6 +27,7 @@ pub struct LogSettings {
     console_filter: Vec<String>,
     console_events: bool,
     console_level: Option<LogLevel>,
+    stderr_color: Option<bool>,
 }
 
 impl LogSettings {
@@ -50,6 +51,11 @@ impl LogSettings {
         self
     }
 
+    pub fn with_stderr_color(mut self, enabled: bool) -> Self {
+        self.stderr_color = Some(enabled);
+        self
+    }
+
     /// Whether console span events are enabled.
     pub fn console_events(&self) -> bool {
         self.console_events
@@ -62,8 +68,12 @@ impl LogSettings {
     pub fn init(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
+        let ansi = self
+            .stderr_color
+            .unwrap_or_else(|| super::ColorMode::Auto.config().stderr);
         let fmt_layer = tracing_subscriber::fmt::layer()
             .compact()
+            .with_ansi(ansi)
             .with_file(false)
             .with_target(false)
             .with_writer(std::io::stderr)
@@ -87,8 +97,11 @@ impl LogSettings {
         let indicatif_layer = tracing_indicatif::IndicatifLayer::new().with_progress_style(style);
         let writer = indicatif_layer.get_stderr_writer();
 
+        let ansi = self
+            .stderr_color
+            .unwrap_or_else(|| super::ColorMode::Auto.config().stderr);
         let fmt_layer = {
-            let subscriber = tracing_subscriber::fmt::layer().compact();
+            let subscriber = tracing_subscriber::fmt::layer().compact().with_ansi(ansi);
             let subscriber = if self.console_events {
                 subscriber.with_span_events(
                     tracing_subscriber::fmt::format::FmtSpan::NEW | tracing_subscriber::fmt::format::FmtSpan::CLOSE,

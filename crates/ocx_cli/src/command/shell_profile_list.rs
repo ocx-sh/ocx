@@ -41,9 +41,7 @@ impl ShellProfileList {
             })
             .collect();
 
-        context
-            .api()
-            .report_profile(api::data::profile::ProfileList::new(entries))?;
+        context.api().report(&api::data::profile::ProfileList::new(entries))?;
 
         Ok(ExitCode::SUCCESS)
     }

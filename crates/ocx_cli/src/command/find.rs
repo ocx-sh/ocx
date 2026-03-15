@@ -59,7 +59,7 @@ impl Find {
             })
             .collect();
 
-        context.api().report_paths(api::data::paths::Paths::new(entries))?;
+        context.api().report(&api::data::paths::Paths::new(entries))?;
 
         Ok(ExitCode::SUCCESS)
     }

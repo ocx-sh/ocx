@@ -36,7 +36,7 @@ impl Serialize for PackageDescription {
 }
 
 impl Reportable for PackageDescription {
-    fn print_plain(&self) {
+    fn print_plain(&self, _printer: &ocx_lib::cli::Printer) {
         match &self.inner {
             Some(inner) => {
                 if let Some(title) = &inner.title {

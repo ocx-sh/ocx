@@ -28,13 +28,13 @@ impl Serialize for CiExported {
 }
 
 impl Reportable for CiExported {
-    fn print_plain(&self) {
+    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.key.clone());
             rows[1].push(entry.value.clone());
             rows[2].push(entry.kind.to_string());
         }
-        ocx_lib::cli::stdout::print_table(&["Key", "Value", "Type"], &rows);
+        printer.print_table(&["Key", "Value", "Type"], &rows);
     }
 }

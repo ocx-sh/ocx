@@ -64,7 +64,7 @@ impl Install {
             })
             .collect();
         let install_data = api::data::install::Installs::new(packages);
-        context.api().report_installs(install_data)?;
+        context.api().report(&install_data)?;
 
         Ok(ExitCode::SUCCESS)
     }

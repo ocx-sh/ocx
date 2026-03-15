@@ -8,6 +8,8 @@ mod schema;
 mod sync;
 mod validate;
 
+use ocx_lib::cli::Printer;
+
 use crate::error::MirrorError;
 
 #[derive(clap::Subcommand)]
@@ -27,10 +29,10 @@ pub enum Command {
 }
 
 impl Command {
-    pub async fn execute(&self) -> Result<(), MirrorError> {
+    pub async fn execute(&self, printer: &Printer) -> Result<(), MirrorError> {
         match self {
-            Self::Sync(cmd) => cmd.execute().await,
-            Self::Check(cmd) => cmd.execute().await,
+            Self::Sync(cmd) => cmd.execute(printer).await,
+            Self::Check(cmd) => cmd.execute(printer).await,
             Self::Validate(cmd) => cmd.execute().await,
             #[cfg(feature = "jsonschema")]
             Self::Schema(cmd) => cmd.execute().await,

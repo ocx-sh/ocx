@@ -71,12 +71,12 @@ impl Serialize for Clean {
 }
 
 impl Reportable for Clean {
-    fn print_plain(&self) {
-        let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
+        let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.kind.to_string());
             rows[1].push(entry.path.display().to_string());
         }
-        ocx_lib::cli::stdout::print_table(&["Type", "Path"], &rows);
+        printer.print_table(&["Type", "Path"], &rows);
     }
 }

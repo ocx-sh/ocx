@@ -80,7 +80,7 @@ impl PackageInfo {
         };
 
         let report = PackageDescription::new(inner, identifier.to_string());
-        context.api().report_package_description(report)?;
+        context.api().report(&report)?;
 
         Ok(ExitCode::SUCCESS)
     }
