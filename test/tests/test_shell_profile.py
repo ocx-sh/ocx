@@ -718,11 +718,11 @@ def test_profile_load_multiple_packages(
     result = ocx.run(
         "shell", "profile", "load", "--shell", "bash", format=None
     )
-    # Both packages declare PATH and HELLO_HOME
+    # Both packages declare PATH and their own {REPO}_HOME constant
     lines = result.stdout.strip().split("\n")
     path_lines = [l for l in lines if "PATH" in l and "export" in l]
-    home_lines = [l for l in lines if "HELLO_HOME" in l and "export" in l]
-    # Each package emits its own set of exports
+    home_lines = [l for l in lines if "_HOME" in l and "export" in l]
+    # Each package emits PATH + its own constant
     assert len(path_lines) >= 2
     assert len(home_lines) >= 2
 

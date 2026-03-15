@@ -99,12 +99,12 @@ Ad-hoc signing via ocx is the simplest solution — no certificates, no system c
 
 Windows does not treat scripts the same way Unix does. On Unix, any file with a `#!/bin/sh` shebang and the execute bit set can be launched directly. On Windows, the kernel's [CreateProcessW][createprocessw] API only searches for `.exe` files — it ignores `.bat`, `.cmd`, and other script types entirely.
 
-Package metadata often exposes tools as shell scripts (`.bat` on Windows). When [`ocx exec`][cmd-exec] runs a command, it needs to find these scripts by consulting the <Tooltip term="PATHEXT">`PATHEXT` is a semicolon-separated list of file extensions (e.g. `.COM;.EXE;.BAT;.CMD`) that Windows uses to resolve bare command names. When you type `hello` in a terminal, the shell appends each extension in turn — `hello.COM`, `hello.EXE`, `hello.BAT` — and searches `PATH` for the first match.</Tooltip> environment variable, just like a Windows shell would.
+Package metadata often exposes tools as shell scripts (`.bat` on Windows). When [`ocx exec`][cmd-exec] runs a command, it needs to find these scripts by consulting the <Tooltip term="PATHEXT">`PATHEXT` is a semicolon-separated list of file extensions (e.g. `.COM;.EXE;.BAT;.CMD`) that Windows uses to resolve bare command names. When you type `bun` in a terminal, the shell appends each extension in turn — `bun.COM`, `bun.EXE`, `bun.BAT` — and searches `PATH` for the first match.</Tooltip> environment variable, just like a Windows shell would.
 
 ocx resolves this automatically using the [which][which-crate] crate: before spawning the child process, it searches `PATH` with `PATHEXT`-aware extension matching. If resolution fails — for example because `PATHEXT` is not set in a stripped-down CI environment — ocx logs a warning and falls back to the bare command name, letting the OS attempt its own lookup.
 
 ::: warning PATHEXT must be set
-In environments with a minimal set of environment variables (containers, CI runners, custom shells), `PATHEXT` may not be present. Without it, ocx cannot resolve `.bat` or `.cmd` scripts by name. If you see `Could not resolve 'hello' via PATH`, ensure `PATHEXT` is set — the default Windows value is `.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC`.
+In environments with a minimal set of environment variables (containers, CI runners, custom shells), `PATHEXT` may not be present. Without it, ocx cannot resolve `.bat` or `.cmd` scripts by name. If you see `Could not resolve 'bun' via PATH`, ensure `PATHEXT` is set — the default Windows value is `.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC`.
 :::
 
 <!-- versioning -->

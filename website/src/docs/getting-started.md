@@ -12,7 +12,7 @@ Most tools require a separate install step before you can use them for the first
 [`ocx exec`][cmd-exec] collapses that into a single command. If the package is not in the local [object store][fs-objects], it is downloaded automatically. Then the command runs inside an isolated environment containing only the package's declared variables — no ambient `PATH` pollution.
 
 ```sh
-ocx exec hello-world:1 -- hello
+ocx exec uv:0.10 -- uv --version
 ```
 
 <Terminal src="/casts/exec.cast" title="Running a package" collapsed />
@@ -26,10 +26,10 @@ Use [`ocx exec`][cmd-exec] for one-off tasks or in CI where you want a reproduci
 ::: details Running multiple packages in a single invocation
 Pass multiple packages before `--`. Their environments are merged in declaration order so all tools are accessible inside the subprocess.
 
-A real-world example: [PlantUML][plantuml] is a Java application. Bringing the JDK and PlantUML together with a single command means no manual `JAVA_HOME` setup and no risk of picking up the wrong Java from the ambient environment:
+A real-world example: [Bun][bun] is a JavaScript runtime that complements [Node.js][nodejs]. Bringing both runtimes together with a single command means both `node` and `bun` are on `PATH` without any manual setup:
 
 ```sh
-ocx exec java:21 plantuml:1 -- plantuml -version
+ocx exec node:22 bun:1 -- bun --version
 ```
 
 <Terminal src="/casts/exec-multi.cast" title="Running multiple packages together" collapsed />
@@ -42,7 +42,7 @@ Running [`ocx exec`][cmd-exec] re-resolves the package on every invocation. For 
 [`ocx install`][cmd-install] downloads the package into the [content-addressed object store][fs-objects] and creates a [candidate symlink][fs-installs] at `~/.ocx/installs/{registry}/{repo}/candidates/{tag}`. That path never changes after installation. If two tags resolve to the same binary build, only one object lives on disk.
 
 ```sh
-ocx install hello-world:1
+ocx install uv:0.10
 ```
 
 <Terminal src="/casts/install.cast" title="Installing a package" collapsed />
@@ -50,7 +50,7 @@ ocx install hello-world:1
 Once installed, [`ocx find --candidate`][cmd-find] returns the stable candidate path without re-resolving the package — useful for embedding in build scripts, IDE configs, or CI pipelines that need a fixed path pinned to a specific version:
 
 ```sh
-ocx find --candidate hello-world:1
+ocx find --candidate uv:0.10
 ```
 
 <Terminal src="/casts/find-candidate.cast" title="Finding an installed package" collapsed />
@@ -70,8 +70,8 @@ Installing a package creates a candidate path that includes the tag: `candidates
 [`ocx install --select`][cmd-install] combines installation and selection in one step:
 
 ```sh
-ocx install --select hello-world:1
-ocx find --current hello-world
+ocx install --select uv:0.10
+ocx find --current uv
 ```
 
 <Terminal src="/casts/install-select.cast" title="Installing and selecting a version" collapsed />
@@ -85,7 +85,7 @@ To switch between already-installed versions, or to remove the active pointer wi
 :::
 
 ::: tip Use `--current` paths in shell profiles and IDE settings
-Because `current` never changes its own path — only its target — you can reference it once and forget it. When you run `ocx install --select hello-world:2`, `current` is re-pointed. Your IDE and shell pick up the new version automatically, with no config edits.
+Because `current` never changes its own path — only its target — you can reference it once and forget it. When you run `ocx install --select uv:0.11`, `current` is re-pointed. Your IDE and shell pick up the new version automatically, with no config edits.
 
 See [path resolution][path-resolution] in the user guide for the full comparison of object-store, candidate, and current paths.
 :::
@@ -95,8 +95,8 @@ See [path resolution][path-resolution] in the user guide for the full comparison
 [`ocx uninstall`][cmd-uninstall] removes the [candidate symlink][fs-installs] and its back-reference from the object's `refs/` directory. The binary itself is kept unless `--purge` is given and `refs/` is empty after the uninstall.
 
 ```sh
-ocx install hello-world:1
-ocx uninstall hello-world:1
+ocx install uv:0.10
+ocx uninstall uv:0.10
 ```
 
 <Terminal src="/casts/uninstall.cast" title="Uninstalling a package" collapsed />
@@ -116,7 +116,7 @@ Tools are more than binaries. A compiler suite needs `CC`, `CXX`, and `LD_LIBRAR
 ocx packages declare their environment variables in `metadata.json`. [`ocx env`][cmd-env] resolves those declarations relative to the installed path and prints them as a table. [`ocx exec`][cmd-exec] injects them into a clean child process automatically.
 
 ```sh
-ocx env hello-world:1
+ocx env java:21
 ```
 
 <Terminal src="/casts/env.cast" title="Package environment" collapsed />
@@ -124,7 +124,7 @@ ocx env hello-world:1
 For shell profile integration, [`ocx shell env`][cmd-shell-env] emits shell-specific `export` statements designed for `eval`. Pass `--current` to reference the [floating pointer][fs-installs] rather than a pinned version — the shell picks up new versions automatically whenever you run [`ocx select`][cmd-select]:
 
 ```sh
-eval "$(ocx shell env --current hello-world)"
+eval "$(ocx shell env --current cmake)"
 ```
 
 <Terminal src="/casts/shell-env.cast" title="Shell profile integration" collapsed />
@@ -136,10 +136,10 @@ Add `eval "$(ocx shell env --current <package>)"` to your `~/.bashrc` or `~/.zsh
 ::: details Composing environments from multiple packages
 Pass multiple packages to merge their environments in declaration order. Variables of type `path` — like `PATH` — are appended; `constant` variables are set once; `accumulator` variables are merged. The result is a complete, composed environment with no manual merging.
 
-The [PlantUML][plantuml] example again: `java:21` contributes `JAVA_HOME` and its `bin/` to `PATH`; `plantuml:1` contributes `PLANTUML_JAR` and its own `bin/`. Both are available inside the subprocess without any manual export:
+`node:22` contributes its `bin/` to `PATH`; `bun:1` contributes its own `bin/`. Both runtimes are available inside the subprocess without any manual export:
 
 ```sh
-ocx env java:21 plantuml:1
+ocx env node:22 bun:1
 ```
 
 <Terminal src="/casts/env-multi.cast" title="Composing environments from multiple packages" collapsed />
@@ -156,9 +156,9 @@ Adding `eval "$(ocx shell env --current <package>)"` to your shell startup works
 Add packages after installing them:
 
 ```sh
-ocx install cmake:3.28
-ocx install clang:18
-ocx shell profile add cmake:3.28 clang:18
+ocx install cmake:3.31
+ocx install llvm:22.1
+ocx shell profile add cmake:3.31 llvm:22.1
 ```
 
 <Terminal src="/casts/profile.cast" title="Managing shell profile packages" collapsed />
@@ -174,15 +174,15 @@ At shell startup, the ocx env file calls [`ocx shell profile load`][cmd-shell-pr
 To stop loading a package, remove it from the profile. The package itself stays installed:
 
 ```sh
-ocx shell profile remove clang:18
+ocx shell profile remove llvm:22.1
 ```
 
 ::: tip Resolution modes
 By default, profiled packages resolve via the `candidates/{tag}` symlink — pinned to the specific tag you installed. To use the floating `current` symlink instead (follows [`ocx select`][cmd-select]), use `--current`:
 
 ```sh
-ocx install --select cmake:3.28
-ocx shell profile add --current cmake:3.28
+ocx install --select cmake:3.31
+ocx shell profile add --current cmake:3.31
 ```
 
 For the content-addressed object store path instead, use `--content`. This resolves to the digest-based path in `~/.ocx/objects/` — precise and self-verifying, but the path changes whenever the package is reinstalled at a different version.
@@ -203,7 +203,8 @@ The sections above cover the everyday workflow. For deeper topics:
 <!-- external -->
 [sdkman]: https://sdkman.io/
 [nvm]: https://github.com/nvm-sh/nvm
-[plantuml]: https://plantuml.com/
+[bun]: https://bun.sh/
+[nodejs]: https://nodejs.org/
 
 <!-- pages -->
 [installation]: ./installation.md

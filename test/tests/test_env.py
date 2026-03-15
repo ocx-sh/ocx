@@ -13,15 +13,16 @@ def test_env_path_contains_bin(
     assert "/bin" in path_entry["value"] or "\\bin" in path_entry["value"]
 
 
-def test_env_hello_home_contains_content_path(
+def test_env_constant_contains_content_path(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """ocx install <pkg>; ocx env <pkg>"""
+    """ocx install <pkg>; ocx env <pkg> — constant var points to content dir"""
     pkg = published_package
     ocx.plain("install", pkg.short)
 
+    home_key = pkg.repo.upper().replace("-", "_") + "_HOME"
     env_result = ocx.json("env", pkg.short)
-    home_entry = next(e for e in env_result if e["key"] == "HELLO_HOME")
+    home_entry = next(e for e in env_result if e["key"] == home_key)
     assert registry_dir(ocx.registry) in home_entry["value"]
     assert pkg.repo in home_entry["value"]
 
@@ -33,8 +34,9 @@ def test_env_candidate_uses_symlink_path(
     pkg = published_package
     ocx.plain("install", pkg.short)
 
+    home_key = pkg.repo.upper().replace("-", "_") + "_HOME"
     env_result = ocx.json("env", "--candidate", pkg.short)
-    home_entry = next(e for e in env_result if e["key"] == "HELLO_HOME")
+    home_entry = next(e for e in env_result if e["key"] == home_key)
     assert f"candidates/{pkg.tag}" in home_entry["value"] or f"candidates\\{pkg.tag}" in home_entry["value"]
 
 

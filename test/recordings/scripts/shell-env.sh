@@ -1,4 +1,4 @@
 # title: Shell profile integration
-# setup: basic
-ocx install --select hello-world:1
-ocx shell env --current hello-world
+# setup: full-catalog
+ocx install --select cmake:3.31
+ocx shell env --current cmake

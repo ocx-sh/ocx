@@ -103,7 +103,7 @@ separated by the platform path delimiter.
 |---|---|---|---|
 | `key` | string | Yes | Environment variable name. |
 | `type` | string | Yes | Must be `"path"`. |
-| `required` | boolean | Yes | If `true`, the resolved path must exist on disk. |
+| `required` | boolean | No | If `true`, the resolved path must exist on disk. Defaults to `false`. |
 | `value` | string | Yes | Value template with `${installPath}` substitution. |
 
 ```json

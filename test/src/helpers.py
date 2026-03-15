@@ -86,7 +86,8 @@ def make_package(
         List of binary names to create.  Each gets a shell script that
         echoes a unique marker.  Defaults to ``["hello"]``.
     env:
-        Custom metadata env entries.  Defaults to PATH + HELLO_HOME.
+        Custom metadata env entries.  Defaults to PATH + ``{REPO}_HOME``
+        (derived from the repo name, e.g. ``cmake`` → ``CMAKE_HOME``).
     """
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
@@ -115,6 +116,7 @@ def make_package(
 
     # Write metadata
     metadata_path = tmp_path / f"metadata-{repo}-{tag}.json"
+    home_key = repo.upper().replace("-", "_") + "_HOME"
     metadata_env = env or [
         {
             "key": "PATH",
@@ -123,7 +125,7 @@ def make_package(
             "value": "${installPath}/bin",
         },
         {
-            "key": "HELLO_HOME",
+            "key": home_key,
             "type": "constant",
             "value": "${installPath}",
         },

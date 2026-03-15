@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub struct Path {
     /// Whether the resolved path must exist on disk. If `true` and the path is missing, installation fails.
+    /// Defaults to `false`.
+    #[serde(default)]
     pub required: bool,
 
     /// The value template. Use `${installPath}` to reference the package content directory.

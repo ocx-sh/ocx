@@ -22,10 +22,11 @@ def test_ci_export_github_actions(ocx: OcxRunner, published_package: PackageInfo
     path_content = github_path.read_text()
     env_content = github_env.read_text()
 
-    # The test package declares PATH (path type) and HELLO_HOME (constant type).
-    # PATH should be appended to GITHUB_PATH file, HELLO_HOME to GITHUB_ENV file.
+    # The test package declares PATH (path type) and {REPO}_HOME (constant type).
+    # PATH should be appended to GITHUB_PATH file, the constant to GITHUB_ENV file.
+    home_key = published_package.repo.upper().replace("-", "_") + "_HOME"
     assert "bin" in path_content, f"PATH export should contain 'bin': {path_content}"
-    assert "HELLO_HOME=" in env_content, f"HELLO_HOME constant should be exported: {env_content}"
+    assert f"{home_key}=" in env_content, f"{home_key} constant should be exported: {env_content}"
 
 
 def test_ci_export_auto_detect(ocx: OcxRunner, published_package: PackageInfo, tmp_path) -> None:

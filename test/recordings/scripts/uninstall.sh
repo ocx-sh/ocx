@@ -1,4 +1,4 @@
 # title: Uninstalling a package
 # setup: basic
-ocx install hello-world:1
-ocx uninstall hello-world:1
+ocx install uv:0.10
+ocx uninstall uv:0.10

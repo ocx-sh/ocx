@@ -1,3 +1,3 @@
 # title: Running a package
 # setup: basic
-ocx exec hello-world:1 -- hello
+ocx exec uv:0.10 -- uv --version

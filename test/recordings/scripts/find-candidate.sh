@@ -1,4 +1,4 @@
 # title: Finding an installed package
 # setup: basic
-ocx install hello-world:1
-ocx find --candidate hello-world:1
+ocx install uv:0.10
+ocx find --candidate uv:0.10

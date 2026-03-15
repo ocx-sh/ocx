@@ -71,7 +71,7 @@ ocx install --select cmake:3.29       # upgrade in one command
 Compose multiple tools with isolated environments:
 
 ```sh
-ocx exec java:21 plantuml:1 -- plantuml -version
+ocx exec node:22 bun:1 -- bun --version
 ```
 
 That's it. No formulas, no plugins, no runtime dependencies. [Get started &rarr;](/docs/getting-started)
