@@ -253,6 +253,8 @@ Lists available tags for packages.
 
 Syncs the local index from the remote registry.
 
+- **Tagged identifier** (e.g., `cmake:3.28`): fetches only that tag's digest and manifest — no tag listing. Merges into existing `tags/{repo}.json`.
+- **Bare identifier** (e.g., `cmake`): fetches all tags (existing behavior).
 - Calls `local_index_mut().update(&remote_index, &identifier)` per package (parallel)
 - Updates `$OCX_HOME/index/{registry}/tags/{repo}.json` and manifest cache
 - No output except progress spans

@@ -243,9 +243,11 @@ ocx index update <PACKAGE>...
 
 Updates the local index by fetching the latest information from the remote index for the specified packages.
 
+When a tagged identifier is used (e.g., `cmake:3.28`), only that single tag's digest and manifest are fetched — the remote tag listing is skipped entirely. This is ideal for lockfile workflows where the local index should contain only explicitly requested tags. When a bare identifier is used (e.g., `cmake`), all tags are fetched as before.
+
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to update in the local index for.
+- `<PACKAGE>`: Package identifiers to update in the local index for. Include a tag to update only that tag; omit the tag to update all tags.
 
 ### `info` {#info}
 

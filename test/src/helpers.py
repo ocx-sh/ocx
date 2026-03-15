@@ -162,9 +162,12 @@ def make_package(
     push_args += [fq, str(bundle)]
     ocx.plain(*push_args)
 
-    # Update local index so install/find can discover the package
+    # Update local index so install/find can discover the package.
+    # When cascade is enabled, use bare repo name to index all cascaded tags;
+    # when disabled, use tagged identifier for minimal indexing.
     short = f"{repo}:{tag}"
-    ocx.plain("index", "update", short)
+    index_target = repo if cascade else short
+    ocx.plain("index", "update", index_target)
 
     return PackageInfo(
         repo=repo,

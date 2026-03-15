@@ -370,7 +370,7 @@ The snapshot is small enough — JSON metadata only, no binaries — to ship *in
 A single version bump to the action or rule — proposed automatically by [Dependabot][dependabot] or [Renovate][renovate] — advances the bundled index. Users get the updated binary with no config changes. No [per-platform URL matrix][toolchains-llvm] to hand-edit, no separate PR to bump the tool itself.
 :::
 
-[`ocx index update <package>`][cmd-index-update] syncs the local index for a specific package from the remote registry — downloading the current tag-to-digest mappings and any missing manifests, then writing them to disk. Packages not listed are not touched.
+[`ocx index update <package>`][cmd-index-update] syncs the local index for a specific package from the remote registry. A bare identifier (e.g., `cmake`) downloads all tag-to-digest mappings; a tagged identifier (e.g., `cmake:3.28`) fetches only that single tag's digest and manifest, merging it into the existing local tags file. This tag-scoped mode is ideal for lockfile workflows where the index should contain only explicitly requested tags. Packages not listed are not touched.
 
 *Commands: [`ocx index update`][cmd-index-update], [`ocx index catalog`][cmd-index-catalog], [`ocx index list`][cmd-index-list]*
 

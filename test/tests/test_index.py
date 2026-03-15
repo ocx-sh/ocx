@@ -97,6 +97,53 @@ def test_index_flag_takes_precedence_over_ocx_index_env(
         del ocx.env["OCX_INDEX"]
 
 
+def test_index_update_tag_scoped(
+    ocx: OcxRunner, tmp_path: Path
+):
+    """ocx index update repo:tag updates only that tag, not all tags."""
+    from src.helpers import make_package
+
+    short_id = uuid4().hex[:8]
+    repo = f"t_{short_id}_tag_scoped"
+    fq = f"{ocx.registry}/{repo}"
+
+    # Publish two versions but do NOT index them (make_package calls index update,
+    # so we use a separate index to avoid polluting the default one).
+    custom_index = tmp_path / "scoped_index"
+    custom_index.mkdir()
+
+    # Publish v1.0 and v2.0 to the registry.
+    make_package(ocx, repo, "1.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "2.0", tmp_path, new=False, cascade=False)
+
+    # Wipe the index so we start fresh.
+    import shutil
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    index_dir = ocx_home / "index"
+    if index_dir.exists():
+        shutil.rmtree(index_dir)
+
+    # Update only tag 1.0 — should NOT fetch 2.0.
+    ocx.plain("index", "update", f"{fq}:1.0")
+    result = ocx.plain("index", "list", fq)
+    assert "1.0" in result.stdout
+    assert "2.0" not in result.stdout
+
+    # Now update tag 2.0 — should have both.
+    ocx.plain("index", "update", f"{fq}:2.0")
+    result = ocx.plain("index", "list", fq)
+    assert "1.0" in result.stdout
+    assert "2.0" in result.stdout
+
+    # Wipe index again and update bare (no tag) — should get both.
+    if index_dir.exists():
+        shutil.rmtree(index_dir)
+    ocx.plain("index", "update", fq)
+    result = ocx.plain("index", "list", fq)
+    assert "1.0" in result.stdout
+    assert "2.0" in result.stdout
+
+
 def test_index_list_excludes_internal_tags(
     ocx: OcxRunner, tmp_path: Path
 ):

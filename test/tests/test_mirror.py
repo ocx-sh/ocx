@@ -257,7 +257,7 @@ def test_sync_mirrors_versions(
     assert "pushed" in result.stdout.lower() or "mirror complete" in result.stderr.lower()
 
     # Verify tags exist via ocx
-    ocx.plain("index", "update", f"{unique_mirror_repo}:1.0.0")
+    ocx.plain("index", "update", unique_mirror_repo)
     data = ocx.json("index", "list", unique_mirror_repo)
     tags = data[unique_mirror_repo]
     assert "1.0.0" in tags
@@ -323,7 +323,7 @@ def test_sync_cascade_creates_rolling_tags(
     mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
 
     # Verify rolling tags
-    ocx.plain("index", "update", f"{unique_mirror_repo}:1.2.3")
+    ocx.plain("index", "update", unique_mirror_repo)
     data = ocx.json("index", "list", unique_mirror_repo)
     tags = data[unique_mirror_repo]
     for expected in ["1.2.3", "1.2", "1", "latest"]:

@@ -29,53 +29,84 @@ impl LocalIndex {
 
     /// Updates the local index with the tags and manifests from the given index for the specified identifier.
     /// Usually you would want to call this method with a `RemoteIndex` to sync the local index with the remote registry.
+    ///
+    /// When the identifier includes a tag (e.g., `cmake:3.28`), only that single tag is fetched — no tag
+    /// listing is performed. When the identifier has no tag (e.g., `cmake`), all tags are fetched.
     pub async fn update(&mut self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
-        let other_tags = index.list_tags(identifier).await?.unwrap_or_default();
+        if identifier.tag().is_some() {
+            self.update_tag(index, identifier).await
+        } else {
+            self.update_all_tags(index, identifier).await
+        }
+    }
+
+    /// Updates a single tag in the local index without listing all remote tags.
+    async fn update_tag(&mut self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
+        let tag = identifier.tag_or_latest().to_owned();
         let mut this_tags = self.get_tags(identifier).await?.unwrap_or_default();
 
-        for tag in other_tags {
-            log::info!("Updating tag '{}' for identifier '{}'.", tag, identifier);
-            let identifier = identifier.clone_with_tag(&tag);
+        self.sync_tag(index, identifier, &tag, &mut this_tags).await?;
+        self.persist_tags(identifier, this_tags).await
+    }
 
-            if let Some(this_digest) = this_tags.get(&tag) {
-                let Some(other_digest) = index.fetch_manifest_digest(&identifier).await? else {
-                    log::debug!("Remote has no digest for tag '{}' — skipping.", tag);
-                    continue;
-                };
+    /// Updates all tags in the local index by listing remote tags and syncing each one.
+    async fn update_all_tags(&mut self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
+        let remote_tags = index.list_tags(identifier).await?.unwrap_or_default();
+        let mut this_tags = self.get_tags(identifier).await?.unwrap_or_default();
 
-                if this_digest == &other_digest {
-                    log::debug!(
-                        "Tag '{}' for identifier '{}' is up to date with digest '{}'.",
-                        tag,
-                        identifier,
-                        this_digest
-                    );
-                    continue;
-                }
-
-                self.update_manifest(index, &identifier, &other_digest).await?;
-                this_tags.insert(tag, other_digest);
-            } else {
-                let Some(digest) = index.fetch_manifest_digest(&identifier).await? else {
-                    log::debug!("Remote has no digest for tag '{}' — skipping.", tag);
-                    continue;
-                };
-                let path = self.index_store.manifest(&identifier, &digest);
-
-                if !path.exists() {
-                    self.update_manifest(index, &identifier, &digest).await?;
-                }
-                this_tags.insert(tag, digest);
-            }
+        for tag in remote_tags {
+            let tagged = identifier.clone_with_tag(&tag);
+            self.sync_tag(index, &tagged, &tag, &mut this_tags).await?;
         }
 
-        let tags_path = self.index_store.tags(identifier);
-        this_tags.write_json_to_path(tags_path)?;
+        self.persist_tags(identifier, this_tags).await
+    }
 
+    /// Syncs a single tag from the remote index into `local_tags`.
+    ///
+    /// Fetches the digest for the tag, skips if unchanged, and updates the manifest if needed.
+    async fn sync_tag(
+        &mut self,
+        index: &super::Index,
+        identifier: &oci::Identifier,
+        tag: &str,
+        local_tags: &mut HashMap<String, oci::Digest>,
+    ) -> Result<()> {
+        log::info!("Updating tag '{}' for identifier '{}'.", tag, identifier);
+
+        let Some(digest) = index.fetch_manifest_digest(identifier).await? else {
+            log::debug!("Remote has no digest for tag '{}' — skipping.", tag);
+            return Ok(());
+        };
+
+        if let Some(existing_digest) = local_tags.get(tag)
+            && existing_digest == &digest
         {
-            let cache = self.cache.write().await;
-            cache.set_tags(identifier.clone(), this_tags).await;
+            log::debug!(
+                "Tag '{}' for identifier '{}' is up to date with digest '{}'.",
+                tag,
+                identifier,
+                existing_digest
+            );
+            return Ok(());
         }
+
+        let manifest_path = self.index_store.manifest(identifier, &digest);
+        if !manifest_path.exists() {
+            self.update_manifest(index, identifier, &digest).await?;
+        }
+
+        local_tags.insert(tag.to_owned(), digest);
+        Ok(())
+    }
+
+    /// Writes the tags map to disk and updates the in-memory cache.
+    async fn persist_tags(&self, identifier: &oci::Identifier, tags: HashMap<String, oci::Digest>) -> Result<()> {
+        let tags_path = self.index_store.tags(identifier);
+        tags.write_json_to_path(tags_path)?;
+
+        let cache = self.cache.write().await;
+        cache.set_tags(identifier.clone(), tags).await;
 
         Ok(())
     }
