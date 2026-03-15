@@ -159,7 +159,11 @@ impl Sync {
         for rv in &filtered {
             for platform_asset in &rv.platforms {
                 let platform_str = platform_asset.platform.to_string();
-                let strip_components = spec.strip_components.as_ref().and_then(|sc| sc.resolve(&platform_str));
+                let asset_type = spec
+                    .asset_type
+                    .as_ref()
+                    .map(|at| at.resolve(&platform_str))
+                    .unwrap_or(crate::spec::AssetType::Archive { strip_components: None });
 
                 tasks.push(MirrorTask {
                     version: rv.version.clone(),
@@ -172,7 +176,7 @@ impl Sync {
                     verify_config: spec.verify.clone(),
                     cascade: spec.cascade,
                     spec_dir: spec_dir.to_path_buf(),
-                    strip_components,
+                    asset_type,
                 });
             }
         }

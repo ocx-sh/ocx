@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+mod asset_type;
 mod assets;
 mod concurrency_config;
 mod metadata_config;
@@ -10,6 +11,7 @@ mod target;
 mod verify_config;
 mod versions_config;
 
+pub use asset_type::{AssetType, AssetTypeConfig};
 pub use assets::AssetPatterns;
 pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 pub use metadata_config::MetadataConfig;
@@ -36,20 +38,16 @@ pub struct MirrorSpec {
     #[serde(default)]
     pub metadata: Option<MetadataConfig>,
 
-    /// Leading path components to strip from downloaded archives before rebundling.
+    /// How to process downloaded assets before bundling.
     ///
-    /// Many GitHub Release archives contain a top-level directory (e.g.,
-    /// `cmake-3.31.0-linux-x86_64/bin/cmake`). Set this to `1` to strip that prefix
-    /// during extraction so the bundle contains `bin/cmake` directly.
+    /// - `archive`: Extract the asset as a tar/zip archive, optionally stripping
+    ///   leading path components (e.g. `strip_components: 1`).
+    /// - `binary`: The asset is a standalone executable. Place it directly into
+    ///   the content directory under the configured `name`.
     ///
-    /// Supports two forms:
-    /// - Simple: `strip_components: 1` (same for all platforms)
-    /// - Per-platform: `strip_components: { default: 1, platforms: { "windows/amd64": 0 } }`
-    ///
-    /// This is separate from the metadata `strip_components` field, which tells OCX
-    /// how to extract the package after downloading from the registry.
+    /// Defaults to `archive` with no stripping when omitted.
     #[serde(default)]
-    pub strip_components: Option<StripComponentsConfig>,
+    pub asset_type: Option<AssetTypeConfig>,
 
     #[serde(default = "default_build_timestamp")]
     pub build_timestamp: BuildTimestampFormat,
@@ -552,10 +550,7 @@ assets:
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::Datetime);
         assert!(spec.cascade);
         assert!(!spec.skip_prereleases);
-        assert!(
-            spec.strip_components.is_none(),
-            "strip_components should default to None"
-        );
+        assert!(spec.asset_type.is_none(), "asset_type should default to None");
         assert_eq!(spec.concurrency.max_downloads, 8);
         assert_eq!(spec.concurrency.max_pushes, 2);
         assert_eq!(spec.concurrency.rate_limit_ms, 0);
@@ -587,7 +582,7 @@ verify:
     }
 
     #[test]
-    fn parse_strip_components() {
+    fn parse_asset_type_archive() {
         let yaml = r#"
 name: cmake
 target:
@@ -601,18 +596,20 @@ source:
 assets:
   linux/amd64:
     - "cmake-.*\\.tar\\.gz"
-strip_components: 1
+asset_type:
+  type: archive
+  strip_components: 1
 "#;
 
         let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(
-            spec.strip_components.as_ref().and_then(|sc| sc.resolve("linux/amd64")),
-            Some(1)
-        );
+        match spec.asset_type.as_ref().unwrap().resolve("linux/amd64") {
+            asset_type::AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(1)),
+            _ => panic!("expected Archive"),
+        }
     }
 
     #[test]
-    fn parse_per_platform_strip_components() {
+    fn parse_asset_type_archive_per_platform() {
         let yaml = r#"
 name: shellcheck
 target:
@@ -626,17 +623,51 @@ source:
 assets:
   linux/amd64:
     - "shellcheck-.*\\.tar\\.xz"
-strip_components:
-  default: 1
-  platforms:
-    windows/amd64: 0
+asset_type:
+  type: archive
+  strip_components:
+    default: 1
+    platforms:
+      windows/amd64: 0
 "#;
 
         let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-        let sc = spec.strip_components.as_ref().unwrap();
-        assert_eq!(sc.resolve("linux/amd64"), Some(1));
-        assert_eq!(sc.resolve("darwin/arm64"), Some(1));
-        assert_eq!(sc.resolve("windows/amd64"), Some(0));
+        let at = spec.asset_type.as_ref().unwrap();
+        match at.resolve("linux/amd64") {
+            asset_type::AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(1)),
+            _ => panic!("expected Archive"),
+        }
+        match at.resolve("windows/amd64") {
+            asset_type::AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(0)),
+            _ => panic!("expected Archive"),
+        }
+    }
+
+    #[test]
+    fn parse_asset_type_binary() {
+        let yaml = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+asset_type:
+  type: binary
+  name: shfmt
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        match spec.asset_type.as_ref().unwrap().resolve("linux/amd64") {
+            asset_type::AssetType::Binary { name } => assert_eq!(name, "shfmt"),
+            _ => panic!("expected Binary"),
+        }
     }
 
     #[test]

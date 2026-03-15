@@ -59,6 +59,11 @@ includes:
     vars:
       PACKAGE: shellcheck
       REPO: ocx.sh/shellcheck
+  shfmt:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: shfmt
+      REPO: ocx.sh/shfmt
   uv:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:
@@ -77,4 +82,5 @@ tasks:
       - task: nodejs:describe
       - task: ocx:describe
       - task: shellcheck:describe
+      - task: shfmt:describe
       - task: uv:describe

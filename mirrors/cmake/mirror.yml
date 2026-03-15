@@ -27,7 +27,9 @@ assets:
   windows/arm64:
     - "cmake-.*-windows-arm64\\.zip"          # >= 3.25.0
 
-strip_components: 1
+asset_type:
+  type: archive
+  strip_components: 1
 
 metadata:
   default: metadata.json

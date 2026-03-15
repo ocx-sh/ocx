@@ -23,7 +23,9 @@ assets:
   windows/arm64:
     - "bun-windows-aarch64\\.zip$"
 
-strip_components: 1
+asset_type:
+  type: archive
+  strip_components: 1
 
 metadata:
   default: metadata.json

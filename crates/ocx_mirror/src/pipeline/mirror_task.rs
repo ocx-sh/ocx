@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use ocx_lib::oci::Platform;
 use url::Url;
 
-use crate::spec::{MetadataConfig, Target, VerifyConfig};
+use crate::spec::{AssetType, MetadataConfig, Target, VerifyConfig};
 
 /// A single unit of work: download + verify + package + push one platform of one version.
 /// Self-contained with all data needed for execution.
@@ -23,5 +23,5 @@ pub struct MirrorTask {
     pub verify_config: Option<VerifyConfig>,
     pub cascade: bool,
     pub spec_dir: PathBuf,
-    pub strip_components: Option<u8>,
+    pub asset_type: AssetType,
 }

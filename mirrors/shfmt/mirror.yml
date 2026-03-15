@@ -1,31 +1,29 @@
-name: git-cliff
+name: shfmt
 target:
   registry: ocx.sh
-  repository: git-cliff
+  repository: shfmt
 
 source:
   type: github_release
-  owner: orhun
-  repo: git-cliff
+  owner: mvdan
+  repo: sh
   tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
 
 assets:
   linux/amd64:
-    - "git-cliff-.*-x86_64-unknown-linux-musl\\.tar\\.gz$"
+    - "shfmt_v.*_linux_amd64$"
   linux/arm64:
-    - "git-cliff-.*-aarch64-unknown-linux-musl\\.tar\\.gz$"
+    - "shfmt_v.*_linux_arm64$"
   darwin/amd64:
-    - "git-cliff-.*-x86_64-apple-darwin\\.tar\\.gz$"
+    - "shfmt_v.*_darwin_amd64$"
   darwin/arm64:
-    - "git-cliff-.*-aarch64-apple-darwin\\.tar\\.gz$"
+    - "shfmt_v.*_darwin_arm64$"
   windows/amd64:
-    - "git-cliff-.*-x86_64-pc-windows-msvc\\.zip$"
-  windows/arm64:
-    - "git-cliff-.*-aarch64-pc-windows-msvc\\.zip$"
+    - "shfmt_v.*_windows_amd64\\.exe$"
 
 asset_type:
-  type: archive
-  strip_components: 1
+  type: binary
+  name: shfmt
 
 metadata:
   default: metadata.json
@@ -35,7 +33,7 @@ cascade: true
 build_timestamp: none
 
 versions:
-  min: "2.12.0"
+  min: "3.5.0"
   new_per_run: 10
 
 verify:

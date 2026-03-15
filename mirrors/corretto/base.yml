@@ -14,7 +14,9 @@ assets:
   windows/amd64:
     - "amazon-corretto-.*-windows-x64-jdk\\.zip"
 
-strip_components: 1
+asset_type:
+  type: archive
+  strip_components: 1
 cascade: true
 build_timestamp: none
 skip_prereleases: true

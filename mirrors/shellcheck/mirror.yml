@@ -21,10 +21,12 @@ assets:
   windows/amd64:
     - "shellcheck-.*\\.zip$"
 
-strip_components:
-  default: 1
-  platforms:
-    windows/amd64: 0
+asset_type:
+  type: archive
+  strip_components:
+    default: 1
+    platforms:
+      windows/amd64: 0
 
 metadata:
   default: metadata.json
