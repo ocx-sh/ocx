@@ -99,7 +99,15 @@ unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
         darwin/arm64: metadata-darwin.json
     ```
 
-13. **Check if layouts differ across platforms.** Beyond macOS, Windows may also have flat layouts while Linux uses `bin/`. If layouts differ, create platform-specific metadata files. Check `strip_components` consistency across platforms — if all platforms have a top-level wrapper directory, a single `strip_components` value works. If some don't (e.g. Windows zips are sometimes flat), note this as a potential issue for the user.
+13. **Check if layouts differ across platforms.** Beyond macOS, Windows may also have flat layouts while Linux uses `bin/`. If layouts differ, create platform-specific metadata files. Check `strip_components` consistency across platforms — if all platforms have a top-level wrapper directory, a single `strip_components` value works. If some platforms differ (e.g. Windows zips are flat while tarballs have a wrapper), use per-platform `strip_components`:
+    ```yaml
+    # Per-platform strip_components (tarballs have wrapper dir, Windows zip is flat)
+    strip_components:
+      default: 1
+      platforms:
+        windows/amd64: 0
+    ```
+    The simple form `strip_components: 1` still works when all platforms share the same value.
 
 14. **For raw binaries:** the metadata just needs a PATH entry pointing to `${installPath}` (the binary lands directly in the content root).
 
@@ -211,19 +219,6 @@ GitHub description and website to write an accurate summary.}
 {List the main executables or components included in the package. Derive this
 from the archive inspection in Phase 3.}
 
-## Usage with OCX
-
-\```sh
-# Install a specific version
-ocx install {name}:{example_version}
-
-# Run directly
-ocx exec {name}:{example_version} -- {main_command} --version
-
-# Set as current
-ocx install {name}:{example_version} --select
-\```
-
 ## Links
 
 - [{display_name} Documentation]({docs_url})
@@ -238,8 +233,8 @@ ocx install {name}:{example_version} --select
     **Body content:**
     - Research the project by reading its GitHub description (`gh api "repos/{owner}/{repo}" --jq '.description'`) and website
     - List executables found during archive inspection
-    - Use the minimum version from Phase 1 as the example version
     - Include links to docs and GitHub
+    - Do NOT include a "Usage with OCX" section — the website's DetailView already provides install/exec commands
 
 20. **Present a summary** to the user showing:
     - Generated files (mirror YAML, metadata JSON, README, logo)

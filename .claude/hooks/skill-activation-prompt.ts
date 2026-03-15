@@ -68,8 +68,18 @@ async function main(): Promise<void> {
     }
 
     const matchedSkills: MatchedSkill[] = [];
+    const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
     for (const skill of skillRules.skills) {
+      // Verify skill file exists before matching
+      const skillPath = path.join(projectDir, skill.path);
+      try {
+        await fs.access(skillPath);
+      } catch {
+        // Skill file not found, skip
+        continue;
+      }
+
       // Check keyword matches
       for (const keyword of skill.triggers.keywords) {
         if (prompt.includes(keyword.toLowerCase())) {
@@ -148,7 +158,9 @@ async function main(): Promise<void> {
     }
 
     output.push("");
-    output.push("Consider invoking the Skill tool with the suggested skill names.");
+    output.push(
+      "To use a suggested skill, read its SKILL.md file at the provided path with the Read tool, then follow its instructions."
+    );
     output.push("---");
 
     console.log(output.join("\n"));
