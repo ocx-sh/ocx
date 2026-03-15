@@ -3,8 +3,7 @@
 version: '3'
 
 env:
-  OCX_HOME: '{{ .ROOT_DIR }}/.ocx'
-  # OCX_INDEX: '{{ .ROOT_DIR }}/.ocx/index'
+  OCX_INDEX: '{{ .ROOT_DIR }}/.ocx/index'
 
 includes:
   coverage: ./taskfiles/coverage.taskfile.yml
@@ -26,6 +25,17 @@ includes:
     dir: ./website
 
 tasks:
+  ocx:index-update:
+    desc: Updates this repository's index lock.
+    cmds:
+      - rm -rf .ocx/index
+      - ocx index update shellcheck:0.11
+  ocx:dirty-update:
+    desc: Temporary dirty update to solve chicken-and-egg for ocx automation within this repository.
+    cmds:
+      - cargo build --release --bin ocx
+      - cp target/release/ocx ~/.ocx/installs/ocx.sh/ocx/current/bin/ocx
+
   push:
     vars:
       DATE:

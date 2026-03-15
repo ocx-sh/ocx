@@ -8,4 +8,4 @@ tasks:
     cmd: ocx exec ocx.sh/shellcheck:0.11 -- shellcheck {{.CLI_ARGS}} {{.SCRIPTS}}
     vars:
       SCRIPTS:
-        sh: git ls-files '*.sh'
+        sh: git ls-files '*.sh' | tr '\n' ' '
