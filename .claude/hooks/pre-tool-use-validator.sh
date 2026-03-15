@@ -21,7 +21,7 @@ mkdir -p "$LOCK_DIR"
 
 # Get relative path for lock file naming
 if [[ "$FILE_PATH" == "$PROJECT_DIR"* ]]; then
-    REL_PATH="${FILE_PATH#$PROJECT_DIR/}"
+    REL_PATH="${FILE_PATH#"$PROJECT_DIR"/}"
 else
     REL_PATH="$FILE_PATH"
 fi

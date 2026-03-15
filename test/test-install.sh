@@ -50,12 +50,12 @@ run_test() {
     local docker_args=()
 
     if [[ -n "$FILTER" ]] && [[ "$name" != *"$FILTER"* ]]; then
-        printf "${YELLOW}SKIP${NC} %s\n" "$name"
+        printf '%bSKIP%b %s\n' "$YELLOW" "$NC" "$name"
         ((SKIPPED++))
         return
     fi
 
-    printf "${BOLD}TEST${NC} %-40s " "$name"
+    printf '%bTEST%b %-40s ' "$BOLD" "$NC" "$name"
 
     # Mount local install.sh if requested
     if $USE_LOCAL; then
@@ -154,14 +154,14 @@ INNEREOF
         "${docker_args[@]}" \
         "$image" \
         /bin/sh -c "$test_script" 2>&1); then
-        printf "${GREEN}PASS${NC}\n"
+        printf '%bPASS%b\n' "$GREEN" "$NC"
         ((PASSED++))
     else
-        printf "${RED}FAIL${NC}\n"
+        printf '%bFAIL%b\n' "$RED" "$NC"
         FAILURES+=("$name")
         ((FAILED++))
         # Print output indented
-        echo "$output" | sed 's/^/    /'
+        printf '%s\n' "$output" | sed 's/^/    /'
         echo ""
     fi
 }
@@ -246,15 +246,15 @@ echo ""
 echo "============================================"
 echo "  Results"
 echo "============================================"
-printf "  ${GREEN}Passed:${NC}  %d\n" "$PASSED"
-printf "  ${RED}Failed:${NC}  %d\n" "$FAILED"
-printf "  ${YELLOW}Skipped:${NC} %d\n" "$SKIPPED"
+printf '  %bPassed:%b  %d\n' "$GREEN" "$NC" "$PASSED"
+printf '  %bFailed:%b  %d\n' "$RED" "$NC" "$FAILED"
+printf '  %bSkipped:%b %d\n' "$YELLOW" "$NC" "$SKIPPED"
 echo ""
 
 if [ ${#FAILURES[@]} -gt 0 ]; then
     echo "Failed tests:"
     for f in "${FAILURES[@]}"; do
-        printf "  ${RED}✗${NC} %s\n" "$f"
+        printf '  %b✗%b %s\n' "$RED" "$NC" "$f"
     done
     echo ""
     exit 1

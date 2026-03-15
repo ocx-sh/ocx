@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # title: Switching and removing the active version
 # setup: multi-version
 ocx install python:3.12

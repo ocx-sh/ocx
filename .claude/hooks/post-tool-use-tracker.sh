@@ -30,7 +30,7 @@ TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 
 # Determine relative path
 if [[ "$FILE_PATH" == "$PROJECT_DIR"* ]]; then
-    REL_PATH="${FILE_PATH#$PROJECT_DIR/}"
+    REL_PATH="${FILE_PATH#"$PROJECT_DIR"/}"
 else
     REL_PATH="$FILE_PATH"
 fi

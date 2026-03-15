@@ -5,8 +5,8 @@
 
 set -e
 
-# Read JSON input from stdin
-INPUT=$(cat)
+# Read JSON input from stdin — uncomment to use
+# INPUT=$(cat)
 
 # ============================================================
 # COMMON INPUT FIELDS (all events)
@@ -62,14 +62,12 @@ INPUT=$(cat)
 #
 # ============================================================
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-
-# Parse common fields
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-
 # ============================================================
-# HOOK-SPECIFIC LOGIC EXAMPLES
+# COMMON FIELD EXAMPLES
 # ============================================================
+
+# PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+# SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
 # For PreToolUse/PostToolUse:
 # TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
