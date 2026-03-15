@@ -14,19 +14,6 @@ This package provides the Task command-line tool:
 
 - **task** — run tasks defined in a Taskfile.yml
 
-## Usage with OCX
-
-```sh
-# Install a specific version
-ocx install go-task:3.40
-
-# Run directly
-ocx exec go-task:3.40 -- task --version
-
-# Set as current
-ocx install --select go-task:3.40
-```
-
 ## Links
 
 - [Task Documentation](https://taskfile.dev)

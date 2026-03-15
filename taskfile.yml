@@ -2,6 +2,10 @@
 
 version: '3'
 
+env:
+  OCX_HOME: '{{ .ROOT_DIR }}/.ocx'
+  # OCX_INDEX: '{{ .ROOT_DIR }}/.ocx/index'
+
 includes:
   coverage: ./taskfiles/coverage.taskfile.yml
   recordings: ./taskfiles/recordings.taskfile.yml

@@ -1,0 +1,49 @@
+name: shellcheck
+target:
+  registry: ocx.sh
+  repository: shellcheck
+
+source:
+  type: github_release
+  owner: koalaman
+  repo: shellcheck
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shellcheck-.*\\.linux\\.x86_64\\.tar\\.xz$"
+  linux/arm64:
+    - "shellcheck-.*\\.linux\\.aarch64\\.tar\\.xz$"
+  darwin/amd64:
+    - "shellcheck-.*\\.darwin\\.x86_64\\.tar\\.xz$"
+  darwin/arm64:
+    - "shellcheck-.*\\.darwin\\.aarch64\\.tar\\.xz$"
+  windows/amd64:
+    - "shellcheck-.*\\.zip$"
+
+strip_components:
+  default: 1
+  platforms:
+    windows/amd64: 0
+
+metadata:
+  default: metadata.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "0.11.0"
+  new_per_run: 10
+
+verify:
+  github_asset_digest: true
+
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0

@@ -16,19 +16,6 @@ This package provides the CMake command-line tools:
 - **ctest** — run test suites
 - **cpack** — create installers and packages
 
-## Usage with OCX
-
-```sh
-# Install a specific version
-ocx install cmake:3.31
-
-# Run directly
-ocx exec cmake:3.31 -- cmake --version
-
-# Set as current
-ocx install cmake:3.31 --select
-```
-
 ## Links
 
 - [CMake Documentation](https://cmake.org/cmake/help/latest/)

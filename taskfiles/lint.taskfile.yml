@@ -3,17 +3,9 @@
 version: '3'
 
 tasks:
-  install:shellcheck:
-    internal: true
-    cmds:
-      - echo "shellcheck is required but not installed."
-      - echo "Install it via your package manager (e.g., apt install shellcheck, brew install shellcheck)."
-      - exit 1
-    status:
-      - shellcheck --version
-
   shell:
     desc: Lint shell scripts with shellcheck
-    deps:
-      - install:shellcheck
-    cmd: shellcheck website/src/public/install.sh
+    cmd: ocx exec ocx.sh/shellcheck:0.11 -- shellcheck {{.CLI_ARGS}} {{.SCRIPTS}}
+    vars:
+      SCRIPTS:
+        sh: git ls-files '*.sh'

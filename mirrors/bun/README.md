@@ -14,19 +14,6 @@ This package provides the Bun command-line tool:
 
 - **bun** — JavaScript/TypeScript runtime, package manager, bundler, and test runner
 
-## Usage with OCX
-
-```sh
-# Install a specific version
-ocx install bun:1.3.10
-
-# Run directly
-ocx exec bun:1.3.10 -- bun --version
-
-# Set as current
-ocx install --select bun:1.3.10
-```
-
 ## Links
 
 - [Bun Documentation](https://bun.sh/docs)

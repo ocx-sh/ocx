@@ -14,21 +14,6 @@ This package provides the OCX command-line tool:
 
 - **ocx** — install, manage, and execute pre-built binaries from OCI registries
 
-## Usage with OCX
-
-OCX can manage itself — install a specific version alongside your current one:
-
-```sh
-# Install a specific version
-ocx install ocx:0.1
-
-# Run directly
-ocx exec ocx:0.1 -- ocx version
-
-# Set as current
-ocx install --select ocx:0.1
-```
-
 ## Links
 
 - [OCX Documentation](https://ocx.sh/docs/user-guide.html)
