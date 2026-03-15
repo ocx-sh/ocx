@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::{Result, file_structure::IndexStore, log, oci, prelude::*};
+use crate::{Result, file_structure::IndexStore, log, oci, package::description, prelude::*};
 
 use super::index_impl;
 
@@ -190,7 +190,10 @@ impl index_impl::IndexImpl for LocalIndex {
     }
 
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
-        Ok(self.get_tags(identifier).await?.map(|tags| tags.into_keys().collect()))
+        Ok(self
+            .get_tags(identifier)
+            .await?
+            .map(|tags| tags.into_keys().filter(|t| !description::is_internal_tag(t)).collect()))
     }
 
     async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {

@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import uuid4
 
 from src import OcxRunner, PackageInfo
 
@@ -94,3 +95,32 @@ def test_index_flag_takes_precedence_over_ocx_index_env(
         assert pkg.tag in result.stdout
     finally:
         del ocx.env["OCX_INDEX"]
+
+
+def test_index_list_excludes_internal_tags(
+    ocx: OcxRunner, tmp_path: Path
+):
+    """Internal __ocx.* tags must never appear in index list output."""
+    short_id = uuid4().hex[:8]
+    repo = f"t_{short_id}_internal_tag_filter"
+    fq = f"{ocx.registry}/{repo}"
+
+    # Push a real package so the repo has a normal tag.
+    from src.helpers import make_package
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True)
+
+    # Push a description, creating the __ocx.desc tag on the registry.
+    readme = tmp_path / "README.md"
+    readme.write_text("# Test\n")
+    ocx.plain("package", "describe", "--readme", str(readme), fq)
+
+    # Remote index: __ocx.desc must not appear.
+    result = ocx.plain("--remote", "index", "list", fq)
+    assert "__ocx" not in result.stdout
+    assert "1.0.0" in result.stdout
+
+    # Local index after update: __ocx.desc must not appear.
+    ocx.plain("index", "update", fq)
+    result = ocx.plain("index", "list", fq)
+    assert "__ocx" not in result.stdout
+    assert "1.0.0" in result.stdout

@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use crate::log;
-use crate::package::description::INTERNAL_TAG_PREFIX;
+use crate::package::description;
 use crate::{oci, prelude::*};
 
 pub mod snapshot;
@@ -64,7 +64,7 @@ impl Index {
         self.inner.list_tags(identifier).await.map(|opt| {
             opt.map(|tags| {
                 tags.into_iter()
-                    .filter(|t| !t.starts_with(INTERNAL_TAG_PREFIX))
+                    .filter(|t| !description::is_internal_tag(t))
                     .collect::<Vec<_>>()
                     .sorted()
             })

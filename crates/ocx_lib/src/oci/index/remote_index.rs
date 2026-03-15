@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 
 use super::index_impl;
-use crate::{Result, oci};
+use crate::{Result, oci, package::description};
 
 mod cache;
 mod config;
@@ -54,7 +54,13 @@ impl index_impl::IndexImpl for Index {
             }
         }
 
-        let tags = self.client.list_tags(identifier.clone()).await?;
+        let tags: Vec<String> = self
+            .client
+            .list_tags(identifier.clone())
+            .await?
+            .into_iter()
+            .filter(|t| !description::is_internal_tag(t))
+            .collect();
 
         {
             let cache = self.cache.write().await;
