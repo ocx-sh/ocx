@@ -127,7 +127,7 @@ impl LogSettings {
                 builder.with_env_var(name_env)
             } else if std::env::var("OCX_LOG").is_ok() {
                 builder.with_env_var("OCX_LOG")
-            } else if std::env::var("RUST_LOG").map(|v| v.is_empty()).unwrap_or(false) {
+            } else if std::env::var("RUST_LOG").map(|v| !v.is_empty()).unwrap_or(false) {
                 builder.with_env_var("RUST_LOG")
             } else {
                 builder
