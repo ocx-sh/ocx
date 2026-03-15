@@ -3,9 +3,9 @@
 
 mod check;
 mod options;
+#[cfg(feature = "jsonschema")]
 mod schema;
 mod sync;
-mod sync_all;
 mod validate;
 
 use crate::error::MirrorError;
@@ -18,13 +18,11 @@ pub enum Command {
     /// Check what would be mirrored without actually pushing (dry-run)
     Check(check::Check),
 
-    /// Mirror all specs in a directory (mirror-*.yaml)
-    SyncAll(sync_all::SyncAll),
-
     /// Validate a mirror spec file
     Validate(validate::Validate),
 
     /// Generate JSON Schema for mirror types
+    #[cfg(feature = "jsonschema")]
     Schema(schema::Schema),
 }
 
@@ -33,8 +31,8 @@ impl Command {
         match self {
             Self::Sync(cmd) => cmd.execute().await,
             Self::Check(cmd) => cmd.execute().await,
-            Self::SyncAll(cmd) => cmd.execute().await,
             Self::Validate(cmd) => cmd.execute().await,
+            #[cfg(feature = "jsonschema")]
             Self::Schema(cmd) => cmd.execute().await,
         }
     }

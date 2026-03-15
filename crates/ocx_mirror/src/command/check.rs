@@ -17,15 +17,11 @@ pub struct Check {
 
 impl Check {
     pub async fn execute(&self) -> Result<(), MirrorError> {
+        let mut options = self.options.clone();
+        options.dry_run = true;
         let sync = super::sync::Sync {
             spec: self.spec.clone(),
-            options: SyncOptions {
-                work_dir: self.options.work_dir.clone(),
-                version: self.options.version.clone(),
-                dry_run: true,
-                fail_fast: self.options.fail_fast,
-                format: self.options.format,
-            },
+            options,
         };
         sync.execute().await
     }

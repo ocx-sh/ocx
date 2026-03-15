@@ -22,18 +22,43 @@ pub enum Source {
 
 /// The three modes of providing url_index data.
 ///
-/// Exactly one mode must be used. This is enforced structurally via
-/// `#[serde(untagged)]` — serde tries each variant in order and fails
-/// if none match.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+/// Exactly one of `url`, `versions`, or `generator` must be specified.
+/// This is enforced by a custom `Deserialize` impl that rejects
+/// missing fields, multiple fields, and unknown fields.
+#[derive(Debug)]
 pub enum UrlIndexSource {
     /// Fetch url_index JSON from a remote URL.
     Remote { url: String },
-    /// Inline version→assets map directly in the mirror spec.
+    /// Inline version->assets map directly in the mirror spec.
     Inline { versions: HashMap<String, UrlIndexVersion> },
     /// Run an external command that outputs url_index JSON to stdout.
     Generator { generator: GeneratorConfig },
+}
+
+/// Helper for validating exactly one url_index mode is specified.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UrlIndexSourceRaw {
+    url: Option<String>,
+    versions: Option<HashMap<String, UrlIndexVersion>>,
+    generator: Option<GeneratorConfig>,
+}
+
+impl<'de> Deserialize<'de> for UrlIndexSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = UrlIndexSourceRaw::deserialize(deserializer)?;
+        match (raw.url, raw.versions, raw.generator) {
+            (Some(url), None, None) => Ok(UrlIndexSource::Remote { url }),
+            (None, Some(versions), None) => Ok(UrlIndexSource::Inline { versions }),
+            (None, None, Some(generator)) => Ok(UrlIndexSource::Generator { generator }),
+            (None, None, None) => Err(serde::de::Error::custom(
+                "url_index source requires one of: url, versions, generator",
+            )),
+            _ => Err(serde::de::Error::custom(
+                "url_index source must have exactly one of: url, versions, generator",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

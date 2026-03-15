@@ -15,14 +15,16 @@ use crate::spec::GeneratorConfig;
 /// Root of the url_index JSON format.
 ///
 /// Contains a map of version strings to their release assets.
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct RemoteIndex {
     /// Map of version string (e.g., "22.15.0") to version entry.
     pub versions: HashMap<String, RemoteVersionEntry>,
 }
 
 /// A single version's metadata and download assets.
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct RemoteVersionEntry {
     /// Whether this is a pre-release version.
     #[serde(default)]
@@ -96,6 +98,7 @@ pub async fn from_generator(config: &GeneratorConfig, spec_dir: &Path) -> anyhow
             .current_dir(&working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|e| anyhow::anyhow!("failed to run generator '{}': {e}", config.command[0]))?;
@@ -215,6 +218,91 @@ mod tests {
 
         let v2 = result.iter().find(|v| v.version == "2.0.0-rc1").unwrap();
         assert!(v2.is_prerelease);
+    }
+
+    #[tokio::test]
+    async fn from_generator_valid_output() {
+        let config = GeneratorConfig {
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                r#"echo '{"versions":{"1.0.0":{"prerelease":false,"assets":{"tool.tar.gz":"https://example.com/tool.tar.gz"}}}}'"#.to_string(),
+            ],
+            working_directory: None,
+            timeout_seconds: 10,
+        };
+
+        let result = from_generator(&config, Path::new(".")).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].version, "1.0.0");
+        assert!(!result[0].is_prerelease);
+        assert_eq!(result[0].assets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn from_generator_nonzero_exit() {
+        let config = GeneratorConfig {
+            command: vec!["sh".to_string(), "-c".to_string(), "echo err >&2; exit 1".to_string()],
+            working_directory: None,
+            timeout_seconds: 10,
+        };
+
+        let err = from_generator(&config, Path::new(".")).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("failed"), "Expected failure message, got: {msg}");
+        assert!(msg.contains("err"), "Expected stderr in message, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn from_generator_empty_output() {
+        let config = GeneratorConfig {
+            command: vec!["true".to_string()],
+            working_directory: None,
+            timeout_seconds: 10,
+        };
+
+        let err = from_generator(&config, Path::new(".")).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no output"), "Expected 'no output' error, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn from_generator_invalid_json() {
+        let config = GeneratorConfig {
+            command: vec!["echo".to_string(), "not json".to_string()],
+            working_directory: None,
+            timeout_seconds: 10,
+        };
+
+        let err = from_generator(&config, Path::new(".")).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not valid"), "Expected JSON parse error, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn from_generator_timeout() {
+        let config = GeneratorConfig {
+            command: vec!["sleep".to_string(), "10".to_string()],
+            working_directory: None,
+            timeout_seconds: 1,
+        };
+
+        let err = from_generator(&config, Path::new(".")).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"), "Expected timeout error, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn from_generator_command_not_found() {
+        let config = GeneratorConfig {
+            command: vec!["nonexistent-command-xyz-12345".to_string()],
+            working_directory: None,
+            timeout_seconds: 10,
+        };
+
+        let err = from_generator(&config, Path::new(".")).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("failed to run"), "Expected spawn failure, got: {msg}");
     }
 
     #[test]

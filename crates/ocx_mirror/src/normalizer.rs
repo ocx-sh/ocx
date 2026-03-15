@@ -29,14 +29,9 @@ pub fn build_timestamp(format: &BuildTimestampFormat) -> Option<String> {
 /// When build is None:
 /// - `X` → Error
 /// - `X.Y` → Error
-/// - `X.Y.Z` → `X.Y.Z`
-/// - `X.Y.Z-pre` → `X.Y.Z-pre`
+/// - `X.Y.Z` → `X.Y.Z` (pass-through, including existing build metadata)
 pub fn normalize_version(version_str: &str, build: &Option<String>) -> Result<String> {
     let version = Version::parse(version_str).ok_or_else(|| anyhow::anyhow!("cannot parse version '{version_str}'"))?;
-
-    if version.has_build() {
-        bail!("version '{version_str}' already has build metadata");
-    }
 
     if !version.has_patch() {
         bail!("version '{version_str}' needs full X.Y.Z format");
@@ -44,6 +39,9 @@ pub fn normalize_version(version_str: &str, build: &Option<String>) -> Result<St
 
     match build {
         Some(build) => {
+            if version.has_build() {
+                bail!("version '{version_str}' already has build metadata");
+            }
             let with_build = if let Some(pre) = version.prerelease() {
                 Version::new_prerelease_with_build(
                     version.major(),
@@ -98,8 +96,13 @@ mod tests {
     }
 
     #[test]
-    fn reject_existing_build() {
+    fn reject_existing_build_with_timestamp() {
         assert!(normalize_version("3.28.0+existing", &ts()).is_err());
+    }
+
+    #[test]
+    fn passthrough_existing_build_without_timestamp() {
+        assert_eq!(normalize_version("25.0.2_10001", &None).unwrap(), "25.0.2_10001");
     }
 
     #[test]

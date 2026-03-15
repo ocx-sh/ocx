@@ -13,7 +13,7 @@ pub enum OutputFormat {
     Json,
 }
 
-#[derive(clap::Args)]
+#[derive(Clone, clap::Args)]
 pub struct SyncOptions {
     /// Working directory for downloads, bundles, and intermediate artifacts.
     /// Artifacts persist between runs so failed tasks can resume without re-downloading.
@@ -25,10 +25,15 @@ pub struct SyncOptions {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Only mirror specific versions (e.g., --version 3.28.0 --version 3.29.0).
+    /// Only mirror specific versions (e.g., --version 3.28.0,3.29.0 or --version 3.28.0 --version 3.29.0).
     /// Matches against the extracted version string from the source.
-    #[arg(long)]
+    #[arg(long, value_delimiter = ',')]
     pub version: Vec<String>,
+
+    /// Only mirror the latest (highest) version.
+    /// Applied after all other filters (exact versions, min/max bounds, etc.).
+    #[arg(long)]
+    pub latest: bool,
 
     /// Stop on first failure instead of continuing
     #[arg(long)]
