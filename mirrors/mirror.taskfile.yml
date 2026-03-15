@@ -8,6 +8,12 @@ version: '3'
 vars:
   MIRRORS_DIR: '{{.MIRRORS_DIR | default (printf "%s/mirrors" .ROOT_DIR)}}'
   PACKAGE_DIR: "{{.MIRRORS_DIR}}/{{.PACKAGE}}"
+  SPEC_FILE: '{{.SPEC_FILE | default "mirror.yml"}}'
+  GITHUB_TOKEN:
+    sh: |
+      if [ -n "$GITHUB_TOKEN" ]; then echo "$GITHUB_TOKEN"
+      elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then gh auth token
+      else echo ""; fi
 
 tasks:
   run:mirror:
@@ -15,6 +21,8 @@ tasks:
     requires:
       vars:
         - ARGS
+    env:
+      GITHUB_TOKEN: "{{.GITHUB_TOKEN}}"
     cmds:
       - cargo run --release --bin ocx-mirror -- {{.ARGS}}
 
@@ -29,12 +37,22 @@ tasks:
   sync:
     desc: "Mirror {{.PACKAGE}}"
     preconditions:
-      - sh: test -f {{.PACKAGE_DIR}}/mirror.yml
-        msg: "No mirror.yml found for package '{{.PACKAGE}}'"
+      - sh: test -f {{.PACKAGE_DIR}}/{{.SPEC_FILE}}
+        msg: "No {{.SPEC_FILE}} found for package '{{.PACKAGE}}'"
     cmd:
       task: run:mirror
       vars:
-        ARGS: sync {{.PACKAGE_DIR}}/mirror.yml --work-dir {{.ROOT_DIR}}/.mirror-work {{.CLI_ARGS}}
+        ARGS: sync {{.PACKAGE_DIR}}/{{.SPEC_FILE}} --work-dir {{.ROOT_DIR}}/.mirror-work {{.CLI_ARGS}}
+
+  sync-latest:
+    desc: "Mirror {{.PACKAGE}}"
+    preconditions:
+      - sh: test -f {{.PACKAGE_DIR}}/{{.SPEC_FILE}}
+        msg: "No {{.SPEC_FILE}} found for package '{{.PACKAGE}}'"
+    cmd:
+      task: run:mirror
+      vars:
+        ARGS: sync {{.PACKAGE_DIR}}/{{.SPEC_FILE}} --work-dir {{.ROOT_DIR}}/.mirror-work --latest {{.CLI_ARGS}}
 
   describe:
     desc: "Push {{.PACKAGE}} README and logo to the registry"

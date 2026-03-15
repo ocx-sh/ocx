@@ -1,0 +1,10 @@
+extends: base.yml
+name: corretto-8
+source:
+  type: url_index
+  generator:
+    command: ["uv", "run", "generate.py", "--major", "8"]
+    timeout_seconds: 120
+versions:
+  min: "8.0.0"
+  new_per_run: 10

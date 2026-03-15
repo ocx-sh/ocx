@@ -10,7 +10,7 @@ tasks:
     desc: Generate JSON Schema for url_index format
     cmds:
       - mkdir -p {{.SDK_DIR}}/schemas
-      - cargo run --release --bin ocx-mirror -- schema url-index > {{.SDK_DIR}}/schemas/url-index.v1.json 2>/dev/null
+      - cargo run --release -p ocx_mirror --features jsonschema --bin ocx-mirror -- schema url-index > {{.SDK_DIR}}/schemas/url-index.v1.json 2>/dev/null
 
   codegen:
     desc: Generate Python types from url_index JSON Schema

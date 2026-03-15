@@ -14,6 +14,21 @@ includes:
     vars:
       PACKAGE: cmake
       REPO: ocx.sh/cmake
+  corretto-8:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars: { PACKAGE: corretto, REPO: ocx.sh/corretto, SPEC_FILE: mirror-8.yml }
+  corretto-11:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars: { PACKAGE: corretto, REPO: ocx.sh/corretto, SPEC_FILE: mirror-11.yml }
+  corretto-17:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars: { PACKAGE: corretto, REPO: ocx.sh/corretto, SPEC_FILE: mirror-17.yml }
+  corretto-21:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars: { PACKAGE: corretto, REPO: ocx.sh/corretto, SPEC_FILE: mirror-21.yml }
+  corretto-25:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars: { PACKAGE: corretto, REPO: ocx.sh/corretto, SPEC_FILE: mirror-25.yml }
   go-task:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:
@@ -51,21 +66,11 @@ includes:
       REPO: ocx.sh/uv
 
 tasks:
-  sync-all:
-    desc: Mirror all packages
-    cmds:
-      - task: bun:sync
-      - task: cmake:sync
-      - task: git-cliff:sync
-      - task: go-task:sync
-      - task: nodejs:sync
-      - task: shellcheck:sync
-      - task: uv:sync
-
   describe-all:
     desc: Push README and logo for all mirrored packages
     cmds:
       - task: bun:describe
+      - task: corretto-8:describe
       - task: cmake:describe
       - task: git-cliff:describe
       - task: go-task:describe

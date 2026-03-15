@@ -1,0 +1,33 @@
+target:
+  registry: ocx.sh
+  repository: corretto
+
+assets:
+  linux/amd64:
+    - "amazon-corretto-.*-linux-x64\\.tar\\.gz"
+  linux/arm64:
+    - "amazon-corretto-.*-linux-aarch64\\.tar\\.gz"
+  darwin/amd64:
+    - "amazon-corretto-.*-macosx-x64\\.tar\\.gz"
+  darwin/arm64:
+    - "amazon-corretto-.*-macosx-aarch64\\.tar\\.gz"
+  windows/amd64:
+    - "amazon-corretto-.*-windows-x64-jdk\\.zip"
+
+strip_components: 1
+cascade: true
+build_timestamp: none
+skip_prereleases: true
+
+metadata:
+  default: metadata.json
+  platforms:
+    darwin/amd64: metadata-darwin.json
+    darwin/arm64: metadata-darwin.json
+
+concurrency:
+  max_downloads: 4
+  max_bundles: 2
+  max_pushes: 2
+  rate_limit_ms: 200
+  max_retries: 3
