@@ -95,22 +95,22 @@ pub struct ColorModeConfig {
 impl ColorModeConfig {
     /// Applies the env-var priority chain for `Auto` mode, with per-stream TTY fallback.
     fn from_env() -> Self {
-        let enabled = loop {
+        let enabled = 'env: {
             // NO_COLOR: any non-empty value disables color (https://no-color.org/)
             if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) {
-                break false;
+                break 'env false;
             }
             // CLICOLOR_FORCE: non-zero value forces color even without TTY
             if std::env::var("CLICOLOR_FORCE").is_ok_and(|v| v != "0" && !v.is_empty()) {
-                break true;
+                break 'env true;
             }
             // CLICOLOR=0 disables color
             if std::env::var("CLICOLOR").is_ok_and(|v| v == "0") {
-                break false;
+                break 'env false;
             }
             // TERM=dumb: terminal does not support escape sequences
             if std::env::var("TERM").is_ok_and(|v| v == "dumb") {
-                break false;
+                break 'env false;
             }
             // Fall back to per-stream TTY detection
             return Self {

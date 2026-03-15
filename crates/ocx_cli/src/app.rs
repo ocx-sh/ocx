@@ -59,10 +59,7 @@ impl App {
         match &cli.command {
             Some(command) => command.execute(context).await,
             None => {
-                Cli::command()
-                    .color(color_mode.into())
-                    .styles(styles)
-                    .print_help()?;
+                Cli::command().color(color_mode.into()).styles(styles).print_help()?;
                 Ok(ExitCode::SUCCESS)
             }
         }

@@ -4,8 +4,7 @@
 /// Stdout output helper that carries the resolved color setting.
 ///
 /// Used by [`Reportable`] implementations to format plain-text tables.
-/// When color is enabled, headers are bold and separated from data rows
-/// by a dim horizontal rule.
+/// When color is enabled, headers are dimmed so data rows stand out.
 #[derive(Clone, Copy, Debug)]
 pub struct Printer {
     color: bool,
@@ -36,42 +35,35 @@ impl Printer {
     }
 
     fn print_colored(&self, headers: &[&str], rows: &[Vec<String>], widths: &[usize], max_rows: usize) {
-        let header_style = console::Style::new().bold();
-        let dim = console::Style::new().dim();
+        use std::fmt::Write;
+
+        let header_style = console::Style::new().underlined();
+        let even_style = console::Style::new();
+        let odd_style = console::Style::new().reverse();
+        let mut buf = String::new();
 
         // Header row
         for (i, header) in headers.iter().enumerate() {
             if i > 0 {
-                print!("{GAP}");
+                buf.push_str(GAP);
             }
-            print!("{:width$}", header_style.apply_to(header), width = widths[i]);
+            write!(buf, "{:width$}", header, width = widths[i]).unwrap();
         }
-        println!();
+        println!("{}", header_style.apply_to(&buf));
+        buf.clear();
 
-        // Separator
-        for (i, &w) in widths.iter().enumerate() {
-            if i > 0 {
-                print!("{GAP}");
-            }
-            print!("{}", dim.apply_to("─".repeat(w)));
-        }
-        println!();
-
-        // Data rows (alternating dim for readability)
+        // Data rows
         for i in 0..max_rows {
-            let style = if i % 2 == 1 { Some(&dim) } else { None };
             for (j, row) in rows.iter().enumerate() {
                 if j > 0 {
-                    print!("{GAP}");
+                    buf.push_str(GAP);
                 }
                 let cell = row.get(i).map_or("", |c| c.as_str());
-                let formatted = format!("{:width$}", cell, width = widths[j]);
-                match style {
-                    Some(s) => print!("{}", s.apply_to(formatted)),
-                    None => print!("{formatted}"),
-                }
+                write!(buf, "{:width$}", cell, width = widths[j]).unwrap();
             }
-            println!();
+            let style = if i % 2 == 0 { &even_style } else { &odd_style };
+            println!("{}", style.apply_to(&buf));
+            buf.clear();
         }
     }
 

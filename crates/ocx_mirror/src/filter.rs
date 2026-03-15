@@ -94,10 +94,8 @@ pub fn filter_versions(
     // This ensures --latest always targets the true latest, and if it's already
     // mirrored, the result is empty (nothing to do) rather than falling back
     // to the next-highest version.
-    if latest {
-        if let Some(last) = versions.pop() {
-            versions = vec![last];
-        }
+    if latest && let Some(last) = versions.pop() {
+        versions = vec![last];
     }
 
     // 6. Subtract already-mirrored (version, platform) pairs.
@@ -111,18 +109,17 @@ pub fn filter_versions(
     });
 
     // 7. Apply new_per_run cap (not applicable when --latest is set)
-    if !latest {
-        if let Some(config) = versions_config
-            && let Some(cap) = config.new_per_run
-        {
-            match config.backfill {
-                BackfillOrder::OldestFirst => {
-                    versions.truncate(cap);
-                }
-                BackfillOrder::NewestFirst => {
-                    let start = versions.len().saturating_sub(cap);
-                    versions = versions.split_off(start);
-                }
+    if !latest
+        && let Some(config) = versions_config
+        && let Some(cap) = config.new_per_run
+    {
+        match config.backfill {
+            BackfillOrder::OldestFirst => {
+                versions.truncate(cap);
+            }
+            BackfillOrder::NewestFirst => {
+                let start = versions.len().saturating_sub(cap);
+                versions = versions.split_off(start);
             }
         }
     }

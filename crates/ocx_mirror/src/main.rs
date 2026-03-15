@@ -47,10 +47,7 @@ async fn main() -> ExitCode {
     color_config.apply();
 
     let styles = cli::clap_styles(color_config.stdout);
-    let matches = Cli::command()
-        .color(color_mode.into())
-        .styles(styles)
-        .get_matches();
+    let matches = Cli::command().color(color_mode.into()).styles(styles).get_matches();
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(e) => e.exit(),
