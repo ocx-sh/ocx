@@ -28210,7 +28210,7 @@ exports.REPO_OWNER = "ocx-sh";
 exports.REPO_NAME = "ocx";
 /** Maps Node.js process.platform to Rust target OS. */
 const PLATFORM_MAP = {
-    linux: "unknown-linux-gnu",
+    linux: "unknown-linux-musl",
     darwin: "apple-darwin",
     win32: "pc-windows-msvc",
 };

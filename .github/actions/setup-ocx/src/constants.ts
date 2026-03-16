@@ -3,7 +3,7 @@ export const REPO_NAME = "ocx";
 
 /** Maps Node.js process.platform to Rust target OS. */
 const PLATFORM_MAP: Record<string, string> = {
-  linux: "unknown-linux-gnu",
+  linux: "unknown-linux-musl",
   darwin: "apple-darwin",
   win32: "pc-windows-msvc",
 };
