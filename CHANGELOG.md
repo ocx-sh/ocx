@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-16
+
+### Added
+
+- Separate strip_components for rebundling and support multiple --version flags *(mirror)*
+- Add package pull, ci export command, and setup-ocx GitHub Action *(ci)*
+- Add package describe and package info commands
+- Add package catalog with build-time data generation *(website)*
+- Add bun and git-cliff mirrors, restructure mirror layout *(mirror)*
+- Add shell profile management commands *(shell)*
+- Replace hello-world with realistic packages in recordings and docs *(docs)*
+- Add per-platform strip_components config *(mirror)*
+- Add shellcheck and uv mirrors *(mirror)*
+- Add generator-based url_index sources *(mirror)*
+- Support tag-scoped index update *(index)*
+- Add cache, github, and text utility modules *(mirror-sdk)*
+- Add spec extends, --latest flag, and backfill order *(mirror)*
+- Add corretto mirror configuration *(mirror)*
+- Add --color flag with NO_COLOR/CLICOLOR support *(cli)*
+- Add asset_type config with binary support and shfmt mirror *(mirror)*
+- Align recordings with real-world packages *(recordings)*
+
+### Changed
+
+- Rename OCX_DISABLE_CODESIGN to OCX_NO_CODESIGN
+- Rework table printer styling and clean up idioms *(cli)*
+
+### Fixed
+
+- Install scripts use --remote for bootstrap and improve UX
+- Add SBOM generation to website deploy pipeline *(ci)*
+- Add catalog generation to deploy website workflow *(ci)*
+- Pipe PowerShell Invoke-Expression through Out-String *(install)*
+- Filter internal tags at IndexImpl level *(index)*
+- Correct RUST_LOG empty-string check *(log)*
+- Resolve shellcheck warnings in shell scripts *(lint)*
+- Buffer env var writes in ci export to fix path accumulation *(ci)*
+- Handle ANSI escape sequences in table realignment *(recordings)*
+- Use musl target for Linux in setup-ocx *(action)*
+- Correct inaccuracies across docs and CLI help text *(docs)*
+
 ## [0.1.0] - 2026-03-13
 
 ### Added
@@ -107,5 +148,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build ocx-mirror in verify-deep and fix discord webhook *(ci)*
 - Remove push-to-main Discord notifications *(ci)*
 
-<!-- Links -->
+### Release
+
+- V0.1.0
+[0.2.0]: https://github.com/ocx-sh/ocx/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/ocx-sh/ocx/tree/v0.1.0
+
