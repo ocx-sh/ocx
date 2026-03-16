@@ -148,9 +148,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build ocx-mirror in verify-deep and fix discord webhook *(ci)*
 - Remove push-to-main Discord notifications *(ci)*
 
-### Release
-
-- V0.1.0
 [0.2.0]: https://github.com/ocx-sh/ocx/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/ocx-sh/ocx/tree/v0.1.0
-
