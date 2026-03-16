@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 # title: Package environment
-# setup: full-catalog
-ocx env java:21
+# setup: multi-version
+ocx env corretto:21

@@ -37,12 +37,11 @@ def test_record(
         registry + "/": "",
         registry_slug + "/": "",
     }
-    # Map actual repo names to display names and sanitize markers
+    # Map actual repo names to display names
     for display_name, packages in setup_env.items():
         for pkg in packages:
             if pkg.repo != display_name:
                 sanitize_map[pkg.repo] = display_name
-            sanitize_map[pkg.marker] = f"Hello from {display_name}!"
 
     # Binary path for substitution into actual commands
     binary_quoted = shlex.quote(str(ocx_binary))
@@ -60,12 +59,11 @@ def test_record(
         recorder.run_command(display_cmd, actual_cmd, timeout=120)
         recorder.pause(0.5)
 
-    # Build, sanitize, stretch progress bars, truncate digests, and write
+    # Build, sanitize, truncate digests, and write
     cast_name = script["path"].stem
     (
         recorder.build(title=title)
         .sanitize(sanitize_map)
-        .stretch_progress()
         .truncate_digests()
         .realign_tables()
         .auto_height()

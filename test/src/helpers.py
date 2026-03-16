@@ -59,6 +59,31 @@ def start_registry(registry: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _build_trap_script(outputs: dict[str, str], marker: str) -> str:
+    """Build an argument-aware trap shell script.
+
+    ``outputs`` maps argument strings to the exact output the binary should
+    produce (e.g. ``{"--version": "uv 0.10.10"}``).  Multi-line values are
+    emitted via heredocs.
+    """
+    lines = ["#!/bin/sh", 'case "$*" in']
+    for args, output in outputs.items():
+        lines.append(f'  "{args}")')
+        if "\n" in output:
+            lines.append("    cat <<'TRAP_EOF'")
+            lines.append(output)
+            lines.append("TRAP_EOF")
+        else:
+            lines.append(f'    echo "{output}"')
+        lines.append("    ;;")
+    # Fallback: echo marker for acceptance tests
+    lines.append("  *)")
+    lines.append(f'    echo "{marker}"')
+    lines.append("    ;;")
+    lines.append("esac")
+    return "\n".join(lines) + "\n"
+
+
 def make_package(
     ocx: OcxRunner,
     repo: str,
@@ -71,6 +96,7 @@ def make_package(
     platform: str | None = None,
     bins: list[str] | None = None,
     env: list[dict] | None = None,
+    outputs: dict[str, dict[str, str]] | None = None,
 ) -> PackageInfo:
     """Create, bundle, push, and index a test package.
 
@@ -88,6 +114,10 @@ def make_package(
     env:
         Custom metadata env entries.  Defaults to PATH + ``{REPO}_HOME``
         (derived from the repo name, e.g. ``cmake`` → ``CMAKE_HOME``).
+    outputs:
+        Maps binary name to ``{args: output}`` pairs.  When provided, the
+        trap binary uses a ``case`` block to reproduce exact command output
+        for specific argument patterns.  Multi-line output uses heredocs.
     """
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
@@ -100,9 +130,13 @@ def make_package(
 
     for name in bin_names:
         script = bin_dir / name
+        bin_outputs = (outputs or {}).get(name)
         if sys.platform == "win32":
             script = script.with_suffix(".bat")
             script.write_text(f"@echo {marker}\n")
+        elif bin_outputs:
+            script.write_text(_build_trap_script(bin_outputs, marker))
+            script.chmod(script.stat().st_mode | stat.S_IEXEC)
         else:
             script.write_text(f"#!/bin/sh\necho {marker}\n")
             script.chmod(script.stat().st_mode | stat.S_IEXEC)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 # title: Installing and selecting a version
-# setup: basic
-ocx install --select uv:0.10
-ocx find --current uv
+# setup: multi-version
+ocx install --select corretto:21
+ocx find --current corretto

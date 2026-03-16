@@ -12,8 +12,6 @@ from pathlib import Path
 from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 
-SIZE_MB = 5
-
 
 def basic(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
     """Single package, one version."""
@@ -22,21 +20,40 @@ def basic(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
     ]
     return {
         "uv": [
-            make_package(ocx, "uv", "0.10.0", tmp_path, size_mb=SIZE_MB, bins=["uv"], env=uv_env),
+            make_package(
+                ocx, "uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
+                outputs={"uv": {"--version": "uv 0.10.10"}},
+            ),
         ],
     }
 
 
 def multi_version(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
     """One package with multiple versions."""
-    python_env = [
+    corretto_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "PYTHONPATH", "type": "constant", "value": "${installPath}/lib/python3.12"},
+        {"key": "JAVA_HOME", "type": "constant", "value": "${installPath}"},
     ]
     return {
-        "python": [
-            make_package(ocx, "python", "3.12.0", tmp_path, size_mb=SIZE_MB, bins=["python"], env=python_env),
-            make_package(ocx, "python", "3.11.0", tmp_path, size_mb=SIZE_MB, bins=["python"], env=python_env, new=False),
+        "corretto": [
+            make_package(
+                ocx, "corretto", "21.0.0", tmp_path,
+                bins=["java", "javac"], env=corretto_env,
+                outputs={"java": {"--version": (
+                    "openjdk 21.0.10 2026-01-20 LTS\n"
+                    "OpenJDK Runtime Environment Corretto-21.0.10.7.1 (build 21.0.10+7-LTS)\n"
+                    "OpenJDK 64-Bit Server VM Corretto-21.0.10.7.1 (build 21.0.10+7-LTS, mixed mode, sharing)"
+                )}},
+            ),
+            make_package(
+                ocx, "corretto", "25.0.0", tmp_path,
+                bins=["java", "javac"], env=corretto_env, new=False,
+                outputs={"java": {"--version": (
+                    "openjdk 25.0.2 2026-01-20 LTS\n"
+                    "OpenJDK Runtime Environment Corretto-25.0.2.10.1 (build 25.0.2+10-LTS)\n"
+                    "OpenJDK 64-Bit Server VM Corretto-25.0.2.10.1 (build 25.0.2+10-LTS, mixed mode, sharing)"
+                )}},
+            ),
         ],
     }
 
@@ -50,9 +67,9 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         {"key": "MANPATH", "type": "path", "value": "${installPath}/share/man"},
     ]
-    python_env = [
+    corretto_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "PYTHONPATH", "type": "constant", "value": "${installPath}/lib/python3.12"},
+        {"key": "JAVA_HOME", "type": "constant", "value": "${installPath}"},
     ]
     node_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
@@ -60,35 +77,63 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
     bun_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
     ]
-    llvm_env = [
+    ocx_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-    ]
-    java_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "JAVA_HOME", "type": "constant", "value": "${installPath}"},
     ]
     return {
         "uv": [
-            make_package(ocx, "uv", "0.10.0", tmp_path, size_mb=SIZE_MB, bins=["uv"], env=uv_env),
+            make_package(
+                ocx, "uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
+                outputs={"uv": {"--version": "uv 0.10.10"}},
+            ),
         ],
         "cmake": [
-            make_package(ocx, "cmake", "3.31.0", tmp_path, size_mb=SIZE_MB, bins=["cmake"], env=cmake_env),
+            make_package(
+                ocx, "cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
+                outputs={"cmake": {"--version": (
+                    "cmake version 4.2.3\n"
+                    "\n"
+                    "CMake suite maintained and supported by Kitware (kitware.com/cmake)."
+                )}},
+            ),
         ],
-        "python": [
-            make_package(ocx, "python", "3.12.0", tmp_path, size_mb=SIZE_MB, bins=["python"], env=python_env),
-            make_package(ocx, "python", "3.11.0", tmp_path, size_mb=SIZE_MB, bins=["python"], env=python_env, new=False),
+        "corretto": [
+            make_package(
+                ocx, "corretto", "21.0.0", tmp_path,
+                bins=["java", "javac"], env=corretto_env,
+                outputs={"java": {"--version": (
+                    "openjdk 21.0.10 2026-01-20 LTS\n"
+                    "OpenJDK Runtime Environment Corretto-21.0.10.7.1 (build 21.0.10+7-LTS)\n"
+                    "OpenJDK 64-Bit Server VM Corretto-21.0.10.7.1 (build 21.0.10+7-LTS, mixed mode, sharing)"
+                )}},
+            ),
+            make_package(
+                ocx, "corretto", "25.0.0", tmp_path,
+                bins=["java", "javac"], env=corretto_env, new=False,
+                outputs={"java": {"--version": (
+                    "openjdk 25.0.2 2026-01-20 LTS\n"
+                    "OpenJDK Runtime Environment Corretto-25.0.2.10.1 (build 25.0.2+10-LTS)\n"
+                    "OpenJDK 64-Bit Server VM Corretto-25.0.2.10.1 (build 25.0.2+10-LTS, mixed mode, sharing)"
+                )}},
+            ),
+        ],
+        "ocx": [
+            make_package(
+                ocx, "ocx", "0.1.0", tmp_path, bins=["ocx"], env=ocx_env,
+                outputs={"ocx": {"--version": "ocx 0.1.0"}},
+            ),
         ],
         "node": [
-            make_package(ocx, "node", "22.0.0", tmp_path, size_mb=SIZE_MB, bins=["node"], env=node_env),
+            make_package(
+                ocx, "node", "22.0.0", tmp_path, bins=["node"], env=node_env,
+                outputs={"node": {"--version": "v22.0.0"}},
+            ),
         ],
         "bun": [
-            make_package(ocx, "bun", "1.2.0", tmp_path, size_mb=SIZE_MB, bins=["bun"], env=bun_env),
-        ],
-        "llvm": [
-            make_package(ocx, "llvm", "22.1.0", tmp_path, size_mb=SIZE_MB, bins=["clang", "clang++"], env=llvm_env),
-        ],
-        "java": [
-            make_package(ocx, "java", "21.0.0", tmp_path, size_mb=SIZE_MB, bins=["java", "javac"], env=java_env),
+            make_package(
+                ocx, "bun", "1.2.0", tmp_path, bins=["bun"], env=bun_env,
+                outputs={"bun": {"--version": "1.2.0"}},
+            ),
         ],
     }
 

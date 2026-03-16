@@ -29,7 +29,7 @@ Pass multiple packages before `--`. Their environments are merged in declaration
 A real-world example: [Bun][bun] is a JavaScript runtime that complements [Node.js][nodejs]. Bringing both runtimes together with a single command means both `node` and `bun` are on `PATH` without any manual setup:
 
 ```sh
-ocx exec node:22 bun:1 -- bun --version
+ocx exec node:22 bun:1.2 -- bun --version
 ```
 
 <Terminal src="/casts/exec-multi.cast" title="Running multiple packages together" collapsed />
@@ -59,19 +59,28 @@ ocx find --candidate uv:0.10
 `apt install cmake` persists the tool system-wide. A one-shot download script runs it and leaves nothing behind. `ocx install` is the former — persistent, versioned, offline-ready — but without root, without a system-wide footprint, and with multiple versions coexisting side by side.
 :::
 
+::: tip CI workflows: `ocx package pull`
+In CI pipelines, symlink management is unnecessary — you just need the binary at a known path. [`ocx package pull`][cmd-package-pull] downloads directly into the [object store][fs-objects] without creating candidate or current symlinks. Pair it with [`ocx ci export`][cmd-ci-export] to inject environment variables into the runner:
+
+```sh
+ocx package pull uv:0.10
+ocx ci export uv:0.10
+```
+:::
+
 See the [object store][fs-objects] and [install symlinks][fs-installs] sections of the user guide for the full three-store architecture behind this.
 
 ## Switching Versions {#switching-versions}
 
-Installing a package creates a candidate path that includes the tag: `candidates/1`. When you upgrade to version 2, the new candidate lands at `candidates/2`. Any config referencing `candidates/1` keeps working — but also stays pinned forever, requiring a manual edit on every upgrade.
+Installing a package creates a candidate path that includes the tag: `candidates/21`. When you upgrade to version 25, the new candidate lands at `candidates/25`. Any config referencing `candidates/21` keeps working — but also stays pinned forever, requiring a manual edit on every upgrade.
 
 [`ocx select`][cmd-select] introduces a second symlink level: `current`. It is a tag-free, floating pointer to whichever candidate you last declared active. Update it once with `select`, and every path referencing `current` picks up the new version automatically.
 
 [`ocx install --select`][cmd-install] combines installation and selection in one step:
 
 ```sh
-ocx install --select uv:0.10
-ocx find --current uv
+ocx install --select corretto:21
+ocx find --current corretto
 ```
 
 <Terminal src="/casts/install-select.cast" title="Installing and selecting a version" collapsed />
@@ -81,11 +90,11 @@ To switch between already-installed versions, or to remove the active pointer wi
 <Terminal src="/casts/select-deselect.cast" title="Switching and removing the active version" collapsed />
 
 ::: info Same pattern as SDKMAN and nvm
-[SDKMAN][sdkman] manages Java SDKs with `sdk default java 21-tem` — a `current` symlink that re-points to the chosen version without changing `$JAVA_HOME`. [nvm][nvm]'s `nvm alias default 20` is the same idea for Node. ocx applies this pattern to any binary package, with no plugin to install and no tool-specific version manager to learn.
+[SDKMAN][sdkman] manages Java SDKs with `sdk default java 21-tem` — a `current` symlink that re-points to the chosen version without changing `$JAVA_HOME`. [nvm][nvm]'s `nvm alias default 20` is the same idea for Node. ocx applies this same pattern to any binary package — including Java itself, as shown above — with no plugin to install and no tool-specific version manager to learn.
 :::
 
 ::: tip Use `--current` paths in shell profiles and IDE settings
-Because `current` never changes its own path — only its target — you can reference it once and forget it. When you run `ocx install --select uv:0.11`, `current` is re-pointed. Your IDE and shell pick up the new version automatically, with no config edits.
+Because `current` never changes its own path — only its target — you can reference it once and forget it. When you run `ocx install --select corretto:25`, `current` is re-pointed. Your IDE and shell pick up the new version automatically, with no config edits.
 
 See [path resolution][path-resolution] in the user guide for the full comparison of object-store, candidate, and current paths.
 :::
@@ -116,7 +125,7 @@ Tools are more than binaries. A compiler suite needs `CC`, `CXX`, and `LD_LIBRAR
 ocx packages declare their environment variables in `metadata.json`. [`ocx env`][cmd-env] resolves those declarations relative to the installed path and prints them as a table. [`ocx exec`][cmd-exec] injects them into a clean child process automatically.
 
 ```sh
-ocx env java:21
+ocx env corretto:21
 ```
 
 <Terminal src="/casts/env.cast" title="Package environment" collapsed />
@@ -124,7 +133,7 @@ ocx env java:21
 For shell profile integration, [`ocx shell env`][cmd-shell-env] emits shell-specific `export` statements designed for `eval`. Pass `--current` to reference the [floating pointer][fs-installs] rather than a pinned version — the shell picks up new versions automatically whenever you run [`ocx select`][cmd-select]:
 
 ```sh
-eval "$(ocx shell env --current cmake)"
+eval "$(ocx shell env --current corretto)"
 ```
 
 <Terminal src="/casts/shell-env.cast" title="Shell profile integration" collapsed />
@@ -136,10 +145,10 @@ Add `eval "$(ocx shell env --current <package>)"` to your `~/.bashrc` or `~/.zsh
 ::: details Composing environments from multiple packages
 Pass multiple packages to merge their environments in declaration order. Variables of type `path` — like `PATH` — are appended; `constant` variables are set once; `accumulator` variables are merged. The result is a complete, composed environment with no manual merging.
 
-`node:22` contributes its `bin/` to `PATH`; `bun:1` contributes its own `bin/`. Both runtimes are available inside the subprocess without any manual export:
+`node:22` contributes its `bin/` to `PATH`; `bun:1.2` contributes its own `bin/`. Both runtimes are available inside the subprocess without any manual export:
 
 ```sh
-ocx env node:22 bun:1
+ocx env node:22 bun:1.2
 ```
 
 <Terminal src="/casts/env-multi.cast" title="Composing environments from multiple packages" collapsed />
@@ -156,9 +165,9 @@ Adding `eval "$(ocx shell env --current <package>)"` to your shell startup works
 Add packages after installing them:
 
 ```sh
-ocx install cmake:3.31
-ocx install llvm:22.1
-ocx shell profile add cmake:3.31 llvm:22.1
+ocx install --select uv:0.10
+ocx install --select node:22
+ocx shell profile add uv:0.10 node:22
 ```
 
 <Terminal src="/casts/profile.cast" title="Managing shell profile packages" collapsed />
@@ -174,15 +183,15 @@ At shell startup, the ocx env file calls [`ocx shell profile load`][cmd-shell-pr
 To stop loading a package, remove it from the profile. The package itself stays installed:
 
 ```sh
-ocx shell profile remove llvm:22.1
+ocx shell profile remove node:22
 ```
 
 ::: tip Resolution modes
 By default, profiled packages resolve via the `candidates/{tag}` symlink — pinned to the specific tag you installed. To use the floating `current` symlink instead (follows [`ocx select`][cmd-select]), use `--current`:
 
 ```sh
-ocx install --select cmake:3.31
-ocx shell profile add --current cmake:3.31
+ocx install --select uv:0.10
+ocx shell profile add --current uv:0.10
 ```
 
 For the content-addressed object store path instead, use `--content`. This resolves to the digest-based path in `~/.ocx/objects/` — precise and self-verifying, but the path changes whenever the package is reinstalled at a different version.
@@ -227,6 +236,8 @@ The sections above cover the everyday workflow. For deeper topics:
 [cmd-shell-profile-load]: ./reference/command-line.md#shell-profile-load
 [cmd-index-catalog]: ./reference/command-line.md#index-catalog
 [cmd-index-list]: ./reference/command-line.md#index-list
+[cmd-package-pull]: ./reference/command-line.md#package-pull
+[cmd-ci-export]: ./reference/command-line.md#ci-export
 [arg-offline]: ./reference/command-line.md#arg-offline
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-index]: ./reference/command-line.md#arg-index
