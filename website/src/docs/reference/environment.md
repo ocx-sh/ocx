@@ -178,7 +178,7 @@ for multiline values).
 
 ### `DOCKER_CONFIG` {#external-docker-config}
 
-The location of the docker configuration file.
+The location of the Docker configuration directory. Read by the Docker credential helper that ocx delegates to when resolving registry credentials from `~/.docker/config.json`.
 
 ### `NO_COLOR` {#external-no-color}
 

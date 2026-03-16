@@ -124,7 +124,7 @@ Prints the resolved environment variables for one or more packages.
 - Default: calls `manager.find_or_install_all()` — **auto-installs** if missing
 - `--candidate`/`--current`: calls `manager.find_symlink_all()` — no auto-install
 - Uses `package::metadata::env::exporter::Exporter` to resolve vars
-- Report: "Key | Value | Type" (type: `constant` or `path`)
+- Report: "Key | Type | Value" (type: `constant` or `path`)
 - JSON: `{ "entries": [{ "key", "value", "type" }] }`
 
 ---
@@ -333,6 +333,36 @@ Exports package environment variables to a CI system's runtime files.
 - GitHub Actions: appends PATH entries to `$GITHUB_PATH`, other vars to `$GITHUB_ENV`
 - Reads `GITHUB_ACTIONS`, `GITHUB_PATH`, `GITHUB_ENV` from environment
 - No report output — logs exported entries via `tracing`
+
+---
+
+### `ocx package describe IDENTIFIER`
+
+Pushes package description metadata (title, description, keywords, README, logo) to the registry.
+
+| Flag | Purpose |
+|------|---------|
+| `--readme PATH` | Path to a README markdown file |
+| `--logo PATH` | Path to a logo image (PNG or SVG) |
+| `--title TITLE` | Short display title |
+| `--description TEXT` | One-line summary |
+| `--keywords LIST` | Comma-separated search keywords |
+
+- At least one metadata option must be provided
+- Identifier is repository only; tag is ignored
+
+---
+
+### `ocx package info IDENTIFIER`
+
+Displays description metadata for a package from the registry.
+
+| Flag | Purpose |
+|------|---------|
+| `--save-readme PATH` | Save the README to a file or directory |
+| `--save-logo PATH` | Save the logo to a file or directory |
+
+- Identifier is repository only
 
 ---
 

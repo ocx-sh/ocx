@@ -62,7 +62,7 @@ Both must be added to:
 - For Fish: create `~/.config/fish/conf.d/ocx.fish` (not modify a profile)
 - For bash/zsh: append `. "$HOME/.ocx/env"` to profile (with idempotent existence check)
 - Must honor `--no-modify-path` flag and `OCX_NO_MODIFY_PATH=1` env var
-- Must verify SHA256 checksums from `sha256sum.txt`
+- Must verify SHA256 checksums from `sha256.sum`
 - Must print clear success message with next steps
 
 ### Install Script Requirements (install.ps1)

@@ -72,6 +72,14 @@ The `--color` flag takes the highest precedence over all
 color-related environment variables ([`NO_COLOR`][env-no-color],
 [`CLICOLOR`][env-clicolor], [`CLICOLOR_FORCE`][env-clicolor-force]).
 
+### `--config` {#arg-config}
+
+Path to an ocx configuration file.
+
+```shell
+ocx --config /path/to/config.toml install cmake:3.28
+```
+
 ### `--candidate` / `--current` {#path-resolution}
 
 The `--candidate` and `--current` flags are available on commands that resolve a package's content
@@ -210,10 +218,10 @@ ocx find [OPTIONS] <PACKAGE>...
 - `-h`, `--help`: Print help information.
 
 ::: tip
-Use `--json` with `jq` to embed the path in a script:
+Use `--format json` with `jq` to embed the path in a script:
 
 ```shell
-cmake_root=$(ocx find --candidate --json cmake:3.28 | jq -r '.["cmake:3.28"]')
+cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 ```
 :::
 
@@ -592,6 +600,51 @@ ocx package push [OPTIONS] <IDENTIFIER> <CONTENT>
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the bundle.
+- `-h`, `--help`: Print help information.
+
+#### `describe` {#package-describe}
+
+Pushes package description metadata (title, description, keywords, README, logo) to the registry.
+
+**Usage**
+
+```shell
+ocx package describe [OPTIONS] <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier (repository only; tag is ignored).
+
+**Options**
+
+- `--readme <PATH>`: Path to a README markdown file.
+- `--logo <PATH>`: Path to a logo image (PNG or SVG).
+- `--title <TITLE>`: Short display title for the package catalog.
+- `--description <TEXT>`: One-line summary.
+- `--keywords <LIST>`: Comma-separated search keywords.
+- `-h`, `--help`: Print help information.
+
+At least one of the above metadata options must be provided.
+
+#### `info` {#package-info}
+
+Displays description metadata for a package from the registry.
+
+**Usage**
+
+```shell
+ocx package info [OPTIONS] <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier (repository only).
+
+**Options**
+
+- `--save-readme <PATH>`: Save the README to a file or directory.
+- `--save-logo <PATH>`: Save the logo to a file or directory.
 - `-h`, `--help`: Print help information.
 
 <!-- external -->

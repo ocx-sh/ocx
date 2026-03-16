@@ -45,7 +45,7 @@ When ocx installs a package, the actual files land in `objects/`. The critical d
             <Description>package files — binaries, libraries, headers</Description>
           </Node>
           <Node name="metadata.json" icon="📋">
-            <Description>declared env vars, supported platforms</Description>
+            <Description>declared env vars and extraction options</Description>
           </Node>
           <Node name="refs/" icon="🔗">
             <Description>back-references to install symlinks — guards against deletion</Description>
@@ -405,16 +405,16 @@ If one of the methods is successful, the rest will be ignored.
 ### Environment Variables {#authentication-environment-variables}
 
 To configure authentication for a registry you can use environment variables.
-The following examples show how to configure authentication for the registry `docker.io` using a token or a bearer token.
+The following examples show how to configure authentication for the registry `docker.io` using a bearer token or basic authentication.
 
 ::: code-group
-```sh [token]
-export OCX_AUTH_docker_io_TYPE=token
+```sh [bearer]
+export OCX_AUTH_docker_io_TYPE=bearer
 export OCX_AUTH_docker_io_TOKEN="<token>"
 ```
 
-```sh [bearer]
-export OCX_AUTH_docker_io_TYPE=bearer
+```sh [basic]
+export OCX_AUTH_docker_io_TYPE=basic
 export OCX_AUTH_docker_io_USER="<user>"
 export OCX_AUTH_docker_io_TOKEN="<token>"
 ```
@@ -427,8 +427,9 @@ The above examples configures the following environment variables:
 - [`OCX_AUTH_<REGISTRY>_TOKEN`][env-auth-token]: The password to use for authentication.
 
 ::: info
-The registry is normalized by replacing all non-alphanumeric characters with underscores.
-For example, for the registry `docker.io`, ocx will look for the following environment variable `OCX_AUTH_docker_io_TYPE`.
+The registry name in the variable is normalized by replacing all non-alphanumeric characters with underscores.
+For example, for the registry `docker.io`, ocx will look for `OCX_AUTH_docker_io_TYPE`.
+This is stricter than the [path component encoding](#file-structure) used for filesystem paths, which preserves dots and hyphens.
 :::
 
 The user and token are used according to the authentication type specified.

@@ -17,9 +17,9 @@ use crate::{api, conventions::platforms_or_default, options};
 ///
 /// No downloading is performed — the package must already be installed.
 ///
-/// Useful for scripting (use `--json` for machine-readable output):
+/// Useful for scripting (use `--format json` for machine-readable output):
 ///
-///   cmake_root=$(ocx find --candidate --json cmake:3.28 | jq -r '.["cmake:3.28"]')
+///   cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 #[derive(Parser)]
 pub struct Find {
     /// Platforms to consider when resolving the package. Defaults to the current platform.

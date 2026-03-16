@@ -143,7 +143,7 @@ Add `eval "$(ocx shell env --current <package>)"` to your `~/.bashrc` or `~/.zsh
 :::
 
 ::: details Composing environments from multiple packages
-Pass multiple packages to merge their environments in declaration order. Variables of type `path` — like `PATH` — are appended; `constant` variables are set once; `accumulator` variables are merged. The result is a complete, composed environment with no manual merging.
+Pass multiple packages to merge their environments in declaration order. Variables of type `path` — like `PATH` — are prepended to any existing value; `constant` variables replace it entirely. The result is a complete, composed environment with no manual merging.
 
 `node:22` contributes its `bin/` to `PATH`; `bun:1.2` contributes its own `bin/`. Both runtimes are available inside the subprocess without any manual export:
 
