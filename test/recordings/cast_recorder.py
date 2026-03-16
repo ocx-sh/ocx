@@ -14,6 +14,14 @@ _ANSI_RE = re.compile(r"\x1b\[[^a-zA-Z]*[a-zA-Z]|\x1b\][^\x07]*\x07")
 # Braille spinner characters used by indicatif (U+2800-U+28FF)
 _BRAILLE_RE = re.compile(r"[\u2800-\u28ff]")
 
+# Matches ANSI wrapping around a line: leading sequences, content, trailing sequences.
+# Used by realign_tables() to preserve styling after column reformatting.
+_ANSI_WRAP_RE = re.compile(
+    r"^((?:\x1b\[[^a-zA-Z]*[a-zA-Z])*)"     # leading ANSI (e.g. \x1b[4m)
+    r"(.*?)"                                # content
+    r"((?:\x1b\[[^a-zA-Z]*[a-zA-Z])*)$",    # trailing ANSI (e.g. \x1b[0m)
+)
+
 # Digest patterns for path truncation in recordings
 # Object store sharded path: sha256/XXXXXXXX/YYYYYYYY/ZZZZZZZZZZZZZZZZ
 _DIGEST_PATH_RE = re.compile(r"sha256/([a-f0-9]{8})/[a-f0-9]{8}/[a-f0-9]{16}")
@@ -128,6 +136,10 @@ class CastRecording:
         column padding becomes excessive.  For each event whose data contains
         ``\\r\\n``-separated lines that all split into the same number of
         whitespace-delimited columns (>= 2), recalculate column widths.
+
+        ANSI escape sequences (underline for headers, reverse for odd rows)
+        are stripped before column detection and width measurement, then
+        re-applied to the reformatted lines.
         """
         for event in self.events:
             # Separate optional ANSI "erase line" prefix from content
@@ -140,10 +152,23 @@ class CastRecording:
                 content = event.data
 
             lines = content.split("\r\n")
-            parsed = [(i, line.split()) for i, line in enumerate(lines) if line.split()]
+
+            # Strip ANSI wrapping before splitting into columns so that
+            # escape sequences don't pollute column counts or widths.
+            parsed: list[tuple[int, list[str], str, str]] = []
+            for i, line in enumerate(lines):
+                m = _ANSI_WRAP_RE.match(line)
+                if m:
+                    lead, inner, trail = m.group(1), m.group(2), m.group(3)
+                else:
+                    lead, inner, trail = "", line, ""
+                cols = inner.split()
+                if cols:
+                    parsed.append((i, cols, lead, trail))
+
             if len(parsed) < 2:
                 continue
-            col_counts = {len(cols) for _, cols in parsed}
+            col_counts = {len(cols) for _, cols, _, _ in parsed}
             if len(col_counts) != 1:
                 continue
             ncols = col_counts.pop()
@@ -151,15 +176,18 @@ class CastRecording:
                 continue
 
             widths = [0] * ncols
-            for _, cols in parsed:
+            for _, cols, _, _ in parsed:
                 for j, cell in enumerate(cols):
                     widths[j] = max(widths[j], len(cell))
 
             new_lines = list(lines)
-            for line_idx, cols in parsed:
-                parts = [f"{cell:<{widths[j]}}" if j < ncols - 1 else cell
+            for line_idx, cols, lead, trail in parsed:
+                # Pad all columns when ANSI-wrapped (e.g. underlined header)
+                # so the decoration extends to full table width.
+                pad_last = bool(lead or trail)
+                parts = [f"{cell:<{widths[j]}}" if (j < ncols - 1 or pad_last) else cell
                          for j, cell in enumerate(cols)]
-                new_lines[line_idx] = " ".join(parts)
+                new_lines[line_idx] = lead + " ".join(parts) + trail
 
             event.data = prefix + "\r\n".join(new_lines)
         return self
