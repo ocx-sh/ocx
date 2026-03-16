@@ -27,7 +27,7 @@ impl CiFlavor {
 
     /// Writes pre-resolved environment variable entries into the CI system's runtime files.
     pub fn export(self, entries: &[exporter::Entry]) -> crate::Result<()> {
-        let target: Box<dyn Flavor> = match self {
+        let mut target: Box<dyn Flavor> = match self {
             Self::GitHubActions => Box::new(github_flavor::GitHubFlavor::from_env()?),
         };
 
@@ -35,6 +35,7 @@ impl CiFlavor {
             target.write_entry(&entry.key, &entry.value, &entry.kind)?;
         }
 
+        target.flush()?;
         Ok(())
     }
 }

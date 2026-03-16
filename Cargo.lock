@@ -1519,6 +1519,7 @@ dependencies = [
  "fs2",
  "futures",
  "hex",
+ "indexmap",
  "indicatif",
  "junction",
  "lazy_static",

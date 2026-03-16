@@ -18,6 +18,16 @@ pub struct Conflict {
     pub current_value: String,
 }
 
+impl std::fmt::Display for Conflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Env var conflict: `{}` is set by both `{}` ({}) and `{}` ({})",
+            self.key, self.previous_package, self.previous_value, self.current_package, self.current_value
+        )
+    }
+}
+
 /// Tracks constant environment variable assignments across packages to detect conflicts.
 ///
 /// Only constant-type vars are tracked (path-type vars are accumulated, so conflicts

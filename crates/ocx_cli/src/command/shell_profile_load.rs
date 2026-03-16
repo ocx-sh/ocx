@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log, shell};
+use ocx_lib::{log::*, shell};
 
 /// Output shell export statements for all profiled packages.
 ///
@@ -30,7 +30,7 @@ impl ShellProfileLoad {
                     s
                 } else {
                     // Silent failure — this runs from eval in shell init
-                    log::debug!("Could not detect shell for profile load");
+                    debug!("Could not detect shell for profile load");
                     return Ok(ExitCode::SUCCESS);
                 }
             }
@@ -41,14 +41,7 @@ impl ShellProfileLoad {
         let (resolved, conflicts) = context.manager().resolve_profile_env(&manifest.packages).await;
 
         for conflict in &conflicts {
-            log::warn!(
-                "Env var conflict: `{}` is set by both `{}` ({}) and `{}` ({})",
-                conflict.key,
-                conflict.previous_package,
-                conflict.previous_value,
-                conflict.current_package,
-                conflict.current_value
-            );
+            warn!("{}", conflict);
         }
 
         for entry in &resolved {

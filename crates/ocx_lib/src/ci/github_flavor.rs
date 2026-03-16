@@ -5,6 +5,10 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use indexmap::IndexMap;
+
+use crate::log::*;
+use crate::package::metadata::env::conflict::ConstantTracker;
 use crate::package::metadata::env::modifier::ModifierKind;
 
 use super::{error, flavor::Flavor};
@@ -13,9 +17,21 @@ use super::{error, flavor::Flavor};
 ///
 /// Writes environment variable exports to the runtime files specified by
 /// `$GITHUB_PATH` (for `PATH` entries) and `$GITHUB_ENV` (for everything else).
+///
+/// All entries are buffered in memory and written on [`flush`](Flavor::flush),
+/// producing exactly one line per key in each output file. This avoids
+/// last-writer-wins issues when multiple packages contribute to the same var.
 pub(super) struct GitHubFlavor {
     path_file: PathBuf,
     env_file: PathBuf,
+    /// Buffered PATH entries for `$GITHUB_PATH` (one per line, in order).
+    path_entries: Vec<String>,
+    /// Buffered non-PATH path entries: key → [values in prepend order].
+    buffered_paths: IndexMap<String, Vec<String>>,
+    /// Buffered constant entries: key → value (last-writer-wins).
+    buffered_constants: IndexMap<String, String>,
+    /// Tracks constant-type assignments to warn on conflicts.
+    constants: ConstantTracker,
 }
 
 impl GitHubFlavor {
@@ -23,32 +39,76 @@ impl GitHubFlavor {
     pub fn from_env() -> Result<Self, error::Error> {
         let path_file = required_env_path("GITHUB_PATH")?;
         let env_file = required_env_path("GITHUB_ENV")?;
-        Ok(Self { path_file, env_file })
+        Ok(Self {
+            path_file,
+            env_file,
+            path_entries: Vec::new(),
+            buffered_paths: IndexMap::new(),
+            buffered_constants: IndexMap::new(),
+            constants: ConstantTracker::new(),
+        })
+    }
+
+    /// Returns `true` if there are any buffered entries to flush.
+    fn has_buffered(&self) -> bool {
+        !self.path_entries.is_empty() || !self.buffered_paths.is_empty() || !self.buffered_constants.is_empty()
+    }
+
+    /// Flushes all buffered entries to their respective files.
+    fn flush_inner(&mut self) -> crate::Result<()> {
+        for entry in self.path_entries.drain(..) {
+            append_line(&self.path_file, &entry)?;
+        }
+        for (key, values) in self.buffered_paths.drain(..) {
+            let existing = crate::env::var(&key).unwrap_or_default();
+            let mut parts: Vec<&str> = values.iter().map(String::as_str).collect();
+            if !existing.is_empty() {
+                parts.push(&existing);
+            }
+            let full = parts.join(crate::env::PATH_SEPARATOR);
+            append_env_var(&self.env_file, &key, &full)?;
+        }
+        for (key, value) in self.buffered_constants.drain(..) {
+            append_env_var(&self.env_file, &key, &value)?;
+        }
+        Ok(())
     }
 }
 
 impl Flavor for GitHubFlavor {
-    fn write_entry(&self, key: &str, value: &str, kind: &ModifierKind) -> crate::Result<()> {
+    fn write_entry(&mut self, key: &str, value: &str, kind: &ModifierKind) -> crate::Result<()> {
         match kind {
             ModifierKind::Path if key == "PATH" => {
-                append_line(&self.path_file, value)?;
+                self.path_entries.push(value.to_string());
             }
             ModifierKind::Path => {
-                // Prepend to existing value. GITHUB_ENV doesn't do shell expansion,
-                // so we read the current env value and concatenate.
-                let existing = crate::env::var(key).unwrap_or_default();
-                let full = if existing.is_empty() {
-                    value.to_string()
-                } else {
-                    format!("{value}{}{existing}", crate::env::PATH_SEPARATOR)
-                };
-                append_env_var(&self.env_file, key, &full)?;
+                self.buffered_paths
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(value.to_string());
             }
             ModifierKind::Constant => {
-                append_env_var(&self.env_file, key, value)?;
+                if let Some(conflict) = self.constants.track("", key, value) {
+                    warn!("{}", conflict);
+                }
+                self.buffered_constants.insert(key.to_string(), value.to_string());
             }
         }
         Ok(())
+    }
+
+    fn flush(&mut self) -> crate::Result<()> {
+        self.flush_inner()
+    }
+}
+
+impl Drop for GitHubFlavor {
+    fn drop(&mut self) {
+        if self.has_buffered()
+            && let Err(e) = self.flush_inner()
+        {
+            error!("failed to flush CI env vars on drop: {e}");
+        }
     }
 }
 
@@ -135,11 +195,12 @@ mod tests {
     fn path_export() {
         let env = crate::test::env::lock();
         let tmp = tempfile::tempdir().unwrap();
-        let targets = setup_github_env(&env, &tmp);
+        let mut targets = setup_github_env(&env, &tmp);
 
         targets
             .write_entry("PATH", "/home/user/.ocx/objects/foo/bin", &ModifierKind::Path)
             .unwrap();
+        targets.flush().unwrap();
 
         assert_eq!(read(&targets.path_file), "/home/user/.ocx/objects/foo/bin\n");
     }
@@ -148,7 +209,7 @@ mod tests {
     fn non_path_prepend_empty() {
         let env = crate::test::env::lock();
         let tmp = tempfile::tempdir().unwrap();
-        let targets = setup_github_env(&env, &tmp);
+        let mut targets = setup_github_env(&env, &tmp);
         env.remove("LD_LIBRARY_PATH");
 
         targets
@@ -158,6 +219,7 @@ mod tests {
                 &ModifierKind::Path,
             )
             .unwrap();
+        targets.flush().unwrap();
 
         assert_eq!(
             read(&targets.env_file),
@@ -169,7 +231,7 @@ mod tests {
     fn non_path_prepend_existing() {
         let env = crate::test::env::lock();
         let tmp = tempfile::tempdir().unwrap();
-        let targets = setup_github_env(&env, &tmp);
+        let mut targets = setup_github_env(&env, &tmp);
         env.set("LD_LIBRARY_PATH", "/existing/lib");
 
         targets
@@ -179,6 +241,7 @@ mod tests {
                 &ModifierKind::Path,
             )
             .unwrap();
+        targets.flush().unwrap();
 
         assert_eq!(
             read(&targets.env_file),
@@ -190,11 +253,12 @@ mod tests {
     fn constant_export() {
         let env = crate::test::env::lock();
         let tmp = tempfile::tempdir().unwrap();
-        let targets = setup_github_env(&env, &tmp);
+        let mut targets = setup_github_env(&env, &tmp);
 
         targets
             .write_entry("JAVA_HOME", "/home/user/.ocx/objects/foo", &ModifierKind::Constant)
             .unwrap();
+        targets.flush().unwrap();
 
         assert_eq!(read(&targets.env_file), "JAVA_HOME=/home/user/.ocx/objects/foo\n");
     }
@@ -203,11 +267,12 @@ mod tests {
     fn multiline_constant() {
         let env = crate::test::env::lock();
         let tmp = tempfile::tempdir().unwrap();
-        let targets = setup_github_env(&env, &tmp);
+        let mut targets = setup_github_env(&env, &tmp);
 
         targets
             .write_entry("MY_VAR", "line1\nline2", &ModifierKind::Constant)
             .unwrap();
+        targets.flush().unwrap();
 
         assert_eq!(read(&targets.env_file), "MY_VAR<<EOF\nline1\nline2\nEOF\n");
     }
@@ -216,11 +281,12 @@ mod tests {
     fn multiline_with_eof_in_value() {
         let env = crate::test::env::lock();
         let tmp = tempfile::tempdir().unwrap();
-        let targets = setup_github_env(&env, &tmp);
+        let mut targets = setup_github_env(&env, &tmp);
 
         targets
             .write_entry("MY_VAR", "contains\nEOF\ninside", &ModifierKind::Constant)
             .unwrap();
+        targets.flush().unwrap();
 
         let content = read(&targets.env_file);
         assert!(content.contains("EOF_0"));
@@ -250,5 +316,62 @@ mod tests {
 
         let result = super::GitHubFlavor::from_env();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn non_path_accumulates_across_entries() {
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+        env.remove("LD_LIBRARY_PATH");
+
+        targets
+            .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path)
+            .unwrap();
+        targets
+            .write_entry("LD_LIBRARY_PATH", "/pkg2/lib", &ModifierKind::Path)
+            .unwrap();
+        targets.flush().unwrap();
+
+        let content = read(&targets.env_file);
+        assert_eq!(content, "LD_LIBRARY_PATH=/pkg1/lib:/pkg2/lib\n");
+    }
+
+    #[test]
+    fn non_path_accumulates_with_existing_env() {
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+        env.set("LD_LIBRARY_PATH", "/existing/lib");
+
+        targets
+            .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path)
+            .unwrap();
+        targets
+            .write_entry("LD_LIBRARY_PATH", "/pkg2/lib", &ModifierKind::Path)
+            .unwrap();
+        targets.flush().unwrap();
+
+        let content = read(&targets.env_file);
+        assert_eq!(content, "LD_LIBRARY_PATH=/pkg1/lib:/pkg2/lib:/existing/lib\n");
+    }
+
+    #[test]
+    fn constant_conflict_warns() {
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+
+        targets
+            .write_entry("JAVA_HOME", "/pkg1/java", &ModifierKind::Constant)
+            .unwrap();
+        targets
+            .write_entry("JAVA_HOME", "/pkg2/java", &ModifierKind::Constant)
+            .unwrap();
+        targets.flush().unwrap();
+
+        // Only the last value should appear (constants are deduplicated on flush)
+        let content = read(&targets.env_file);
+        assert_eq!(content, "JAVA_HOME=/pkg2/java\n");
     }
 }
