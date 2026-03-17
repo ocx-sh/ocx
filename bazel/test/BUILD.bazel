@@ -126,3 +126,9 @@ test_suite(
         "linux_only_test",
     ],
 )
+
+ocx_launcher(
+    name = "ocx",
+    bin = "bin/ocx",
+    package = "@ocx",
+)

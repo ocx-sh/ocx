@@ -28,4 +28,7 @@ ocx.package(
     name = "task",
     repository = "go-task",
 )
-use_repo(ocx, "cmake", "task", "uv", "uv_0_10", "uv_0_10_10")
+ocx.package(
+    repository = "ocx",
+)
+use_repo(ocx, "cmake", "ocx", "task", "uv", "uv_0_10", "uv_0_10_10")

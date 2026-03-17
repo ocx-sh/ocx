@@ -60,3 +60,5 @@ jobs:
             export BAZEL_TEST_TARGETS="//:common_tests"
           fi
           bazel --windows_enable_symlinks test $BAZEL_TEST_TARGETS --verbose_test_summary --test_output=errors --enable_runfiles
+      - name: Run OCX via Bazel
+        run: bazel --windows_enable_symlinks run //:ocx --enable_runfiles -- version

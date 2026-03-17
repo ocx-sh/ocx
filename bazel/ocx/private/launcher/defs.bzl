@@ -83,6 +83,7 @@ def _ocx_launcher_script_impl(ctx):
 
 _ocx_launcher_script = rule(
     implementation = _ocx_launcher_script_impl,
+    executable = True,
     attrs = {
         "bin": attr.string(mandatory = True),
         "package": attr.label(mandatory = True, allow_files = True, providers = [DefaultInfo, OcxImageInfo]),
