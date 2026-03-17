@@ -1,0 +1,7 @@
+# exclude root MODULE.bazel.lock file
+/MODULE.bazel.lock
+
+bazel-bin
+bazel-out
+bazel-test
+bazel-testlogs

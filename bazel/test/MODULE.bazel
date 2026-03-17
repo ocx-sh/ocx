@@ -1,0 +1,39 @@
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+bazel_dep(name = "platforms", version = "1.0.0")
+
+bazel_dep(name = "rules_ocx")
+local_path_override(
+    module_name = "rules_ocx",
+    path = "../",
+)
+
+
+ocx = use_extension("@rules_ocx//ocx:extension.bzl", "ocx")
+ocx.package(
+    repository = "cmake",
+)
+
+ocx.package(
+    repository = "uv",
+)
+
+ocx.package(
+    name = "uv_0_10",
+    tag = "0.10",
+    repository = "uv",
+)
+
+ocx.package(
+    name = "uv_0_10_10",
+    tag = "0.10.10",
+    repository = "uv",
+)
+
+
+ocx.package(
+    name = "task",
+    repository = "go-task",
+)
+
+use_repo(ocx, "cmake", "uv", "uv_0_10", "uv_0_10_10", "task")

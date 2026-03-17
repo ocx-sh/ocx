@@ -1,0 +1,57 @@
+name: Verify Bazel Module
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bazel/**"
+      - ".github/workflows/verify-bazel.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "bazel/**"
+      - ".github/workflows/verify-bazel.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bazel-tests:
+    name: Bazel Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: bazel/test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@7ff4255e941f2652381d81e4e6e2b4965680091d # v0.18.0-dev
+        with:
+          # Avoid downloading Bazel every time.
+          bazelisk-cache: true
+          # Store build cache per workflow.
+          disk-cache: ${{ github.workflow }}
+          # Share repository cache between workflows.
+          repository-cache: true
+
+      - name: Run Bazel Test Suite
+        run: |
+          OS=$(uname -s)
+          if [[ "$OS" == "Linux" ]]; then
+            export BAZEL_TEST_TARGETS="//:common_tests //:linux_only_tests"
+          else
+            export BAZEL_TEST_TARGETS="//:common_tests"
+          fi
+          bazel --windows_enable_symlinks test $BAZEL_TEST_TARGETS --verbose_test_summary --test_output=errors --enable_runfiles

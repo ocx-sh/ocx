@@ -1,0 +1,3 @@
+load("//ocx/private:platforms.bzl", "generate_platforms")
+
+generate_platforms()
