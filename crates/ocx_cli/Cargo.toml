@@ -33,6 +33,7 @@ tracing-subscriber = { version = "0.3.22", features = [
 tracing-log = "0.2.0"
 serde = "1.0.228"
 console = "0.16.2"
+colored_json = "5"
 
 [lints]
 workspace = true
