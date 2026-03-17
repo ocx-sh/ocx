@@ -2,7 +2,7 @@ name: Verify Bazel Module
 
 on:
   push:
-    branches: [main]
+    #branches: [main]
     paths:
       - "bazel/**"
       - ".github/workflows/verify-bazel.yml"
