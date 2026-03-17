@@ -29,7 +29,7 @@ Pass multiple packages before `--`. Their environments are merged in declaration
 A real-world example: [Bun][bun] is a JavaScript runtime that complements [Node.js][nodejs]. Bringing both runtimes together with a single command means both `node` and `bun` are on `PATH` without any manual setup:
 
 ```sh
-ocx exec node:22 bun:1.2 -- bun --version
+ocx exec nodejs:24 bun:1.3 -- bun --version
 ```
 
 <Terminal src="/casts/exec-multi.cast" title="Running multiple packages together" collapsed />
@@ -145,10 +145,10 @@ Add `eval "$(ocx shell env --current <package>)"` to your `~/.bashrc` or `~/.zsh
 ::: details Composing environments from multiple packages
 Pass multiple packages to merge their environments in declaration order. Variables of type `path` — like `PATH` — are prepended to any existing value; `constant` variables replace it entirely. The result is a complete, composed environment with no manual merging.
 
-`node:22` contributes its `bin/` to `PATH`; `bun:1.2` contributes its own `bin/`. Both runtimes are available inside the subprocess without any manual export:
+`nodejs:24` contributes its `bin/` to `PATH`; `bun:1.3` contributes its own `bin/`. Both runtimes are available inside the subprocess without any manual export:
 
 ```sh
-ocx env node:22 bun:1.2
+ocx env nodejs:24 bun:1.3
 ```
 
 <Terminal src="/casts/env-multi.cast" title="Composing environments from multiple packages" collapsed />
@@ -166,8 +166,8 @@ Add packages after installing them:
 
 ```sh
 ocx install --select uv:0.10
-ocx install --select node:22
-ocx shell profile add uv:0.10 node:22
+ocx install --select nodejs:24
+ocx shell profile add uv:0.10 nodejs:24
 ```
 
 <Terminal src="/casts/profile.cast" title="Managing shell profile packages" collapsed />
@@ -183,7 +183,7 @@ At shell startup, the ocx env file calls [`ocx shell profile load`][cmd-shell-pr
 To stop loading a package, remove it from the profile. The package itself stays installed:
 
 ```sh
-ocx shell profile remove node:22
+ocx shell profile remove nodejs:24
 ```
 
 ::: tip Resolution modes

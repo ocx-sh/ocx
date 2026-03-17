@@ -123,16 +123,16 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
                 outputs={"ocx": {"--version": "ocx 0.1.0"}},
             ),
         ],
-        "node": [
+        "nodejs": [
             make_package(
-                ocx, "node", "22.0.0", tmp_path, bins=["node"], env=node_env,
-                outputs={"node": {"--version": "v22.0.0"}},
+                ocx, "nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
+                outputs={"node": {"--version": "v24.14.0"}},
             ),
         ],
         "bun": [
             make_package(
-                ocx, "bun", "1.2.0", tmp_path, bins=["bun"], env=bun_env,
-                outputs={"bun": {"--version": "1.2.0"}},
+                ocx, "bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
+                outputs={"bun": {"--version": "1.3.10"}},
             ),
         ],
     }

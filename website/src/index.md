@@ -37,7 +37,7 @@ features:
 ---
 
 ::: warning Early Development
-OCX is in early development (v0.0.0). The CLI is functional but APIs may change. Packages shown in examples may not yet be available on the public registry.
+OCX is in early development. The CLI is functional but APIs may change.
 :::
 
 ## Quick Start {#quick-start}
@@ -54,24 +54,25 @@ irm https://ocx.sh/install.ps1 | iex
 ```
 :::
 
-Run any package instantly — no setup, no config:
+Sync the package index and run your first package:
 
 ```sh
-ocx exec cmake:3.28 -- cmake --version
+ocx index update nodejs bun uv corretto
+ocx exec uv:0.10 -- uv --version
 ```
 
 Install, pin, and switch between versions:
 
 ```sh
-ocx install --select cmake:3.28       # install and activate
-ocx exec cmake:3.28 -- cmake --build  # run with clean environment
-ocx install --select cmake:3.29       # upgrade in one command
+ocx install --select corretto:21       # install and activate
+ocx exec corretto:21 -- java -version  # run with clean environment
+ocx install --select corretto:25       # upgrade in one command
 ```
 
 Compose multiple tools with isolated environments:
 
 ```sh
-ocx exec node:22 bun:1 -- bun --version
+ocx exec nodejs:24 bun:1 -- bun --version
 ```
 
 That's it. No formulas, no plugins, no runtime dependencies. [Get started &rarr;](/docs/getting-started)
