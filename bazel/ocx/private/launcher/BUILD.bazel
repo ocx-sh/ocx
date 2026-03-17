@@ -1,1 +1,4 @@
-exports_files(["main.cc"])
+exports_files([
+    "launcher.cc",
+    "launcher.sh",
+])

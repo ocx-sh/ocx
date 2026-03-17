@@ -238,8 +238,8 @@
     },
     "@@rules_ocx+//ocx:extension.bzl%ocx": {
       "general": {
-        "bzlTransitiveDigest": "9vdZtHC7RnVROm3XfZakY1BOa77BNWdN5dbUnF61A4I=",
-        "usagesDigest": "JpF2UTgL6FtLAjmXYPOPVn1Vf+iOvw1cruL1AxqDRHI=",
+        "bzlTransitiveDigest": "djVTb20OpMf8UGvM6awANVdN2GzOozR6W3XS1yJhg5o=",
+        "usagesDigest": "UV1K5fMi0CKwUrxChWZ0PlZDt0rfYOS7nsB5nWTAxeg=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},

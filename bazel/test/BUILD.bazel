@@ -1,5 +1,5 @@
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
-load("@rules_ocx//ocx/private/launcher:defs.bzl", "ocx_launcher")
+load("@rules_ocx//ocx:defs.bzl", "ocx_launcher")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 ocx_launcher(
@@ -119,7 +119,6 @@ test_suite(
         "common_test",
     ],
 )
-
 
 test_suite(
     name = "linux_only_tests",

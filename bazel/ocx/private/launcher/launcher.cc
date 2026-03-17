@@ -1,7 +1,6 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
-#include <vector>
 #include <cstring>
 #include "rules_cc/cc/runfiles/runfiles.h"
 
@@ -96,7 +95,12 @@ int main(int argc, char *argv[], char *envp[])
     std::string path = runfiles->Rlocation(bin_path);
 
     // Resolve the image layer root directory in the runfiles structure
-    auto bin_path_in_layer_length = bin_path.length() - bin_path.find("/layer/") - 7;
+    auto layer_dir_pos =  bin_path.find("/layer/");
+    if (layer_dir_pos == std::string::npos) {
+        fprintf(stderr, "Can't resolve layer root dir");
+        return 1;
+    }
+    auto bin_path_in_layer_length = bin_path.length() - layer_dir_pos - 7;
     std::string layer_dir = path.substr(0, path.length() - bin_path_in_layer_length);
 
     const char** merged_envp = build_merged_envp(envp, layer_dir);

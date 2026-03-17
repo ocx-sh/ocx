@@ -46,6 +46,11 @@ jobs:
           # Share repository cache between workflows.
           repository-cache: true
 
+      - name: Check Bazel formatting (buildifier)
+        if: matrix.os == 'ubuntu-latest'
+        run: bazel run //:buildifier.check
+        working-directory: bazel
+
       - name: Run Bazel Test Suite
         run: |
           OS=$(uname -s)

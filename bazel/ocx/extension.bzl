@@ -1,7 +1,8 @@
 """
 Provides the module extension for loading OCX packages as Bazel repositories.
 """
-load("@rules_oci//oci/private:authn.bzl", "authn")
+
+load("@rules_oci//oci/private:authn.bzl", "authn")  # buildifier: disable=bzl-visibility
 load("//ocx/private:platforms.bzl", "build_platform_name", "platform_from_oci")
 
 _INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
@@ -26,10 +27,8 @@ def _build_image_repo_name(repository, platform_arch, platform_os, digest):
     sha256_short = _extract_sha256_from_digest(digest)[:12]
     return "{}_{}_{}_{}".format(repository, platform_arch, platform_os, sha256_short)
 
-
 def _url_join(*parts):
     return "/".join([part.strip("/") for part in parts])
-
 
 def _resolve_index(module_ctx, auth, registry, repository, tag):
     registry_sanitized = _sanitize(registry)
@@ -150,7 +149,7 @@ external_ocx_image(
             layer_path = _IMAGE_REPO_LAYER_PATH,
             env = json.encode(json.encode(env_config)),
         ),
-    )
+    )  # buildifier: disable=canonical-repository
 
 ocx_package_images_repo = repository_rule(
     implementation = _ocx_package_images_repo_impl,
@@ -168,8 +167,8 @@ def _ocx_package_repo_impl(repository_ctx):
     """Repository rule implementation for the 'hub' of a single OCX package, redirecting to the correct image repository based on the platform."""
     images_select_inner = {}
     for platform, image_repo_name in repository_ctx.attr.images_by_platform.items():
-        full_repo_name = "@@{}+ocx+{}".format(repository_ctx.attr._workspace.repo_name, image_repo_name)
-        platform_config_setting_target = "@@{}//ocx/private:{}".format(repository_ctx.attr._workspace.repo_name, platform)
+        full_repo_name = "@@{}+ocx+{}".format(repository_ctx.attr._workspace.repo_name, image_repo_name)  # buildifier: disable=canonical-repository
+        platform_config_setting_target = "@@{}//ocx/private:{}".format(repository_ctx.attr._workspace.repo_name, platform)  # buildifier: disable=canonical-repository
         images_select_inner[platform_config_setting_target] = full_repo_name + "//:image"
 
     repository_ctx.file("BUILD.bazel", """
@@ -241,6 +240,7 @@ def _ocx_impl(module_ctx):
 
                 if manifest not in all_manifests:
                     all_manifests.append(manifest)
+
                     # create repository for the image of this manifest, if not already created
                     ocx_package_images_repo(
                         name = image_repo_name,

@@ -2,6 +2,7 @@
 Defines the external_ocx_image rule for representing an OCI image layer in Bazel.
 Targets of this rule are instantiated via the ocx_package_images_repo repository_rule
 """
+
 load("//ocx/private:providers.bzl", "OcxImageInfo")
 
 def _external_ocx_image_impl(ctx):
