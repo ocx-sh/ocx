@@ -11,9 +11,9 @@ source:
 
 assets:
   linux/amd64:
-    - "bun-linux-x64-musl\\.zip$"
+    - "bun-linux-x64\\.zip$"
   linux/arm64:
-    - "bun-linux-aarch64-musl\\.zip$"
+    - "bun-linux-aarch64\\.zip$"
   darwin/amd64:
     - "bun-darwin-x64\\.zip$"
   darwin/arm64:

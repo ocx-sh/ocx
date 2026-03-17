@@ -99,7 +99,9 @@ unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
         darwin/arm64: metadata-darwin.json
     ```
 
-13. **Check if layouts differ across platforms.** Beyond macOS, Windows may also have flat layouts while Linux uses `bin/`. If layouts differ, create platform-specific metadata files. Check `strip_components` consistency across platforms — if all platforms have a top-level wrapper directory, a single `strip_components` value works. If some platforms differ (e.g. Windows zips are flat while tarballs have a wrapper), use per-platform `strip_components`:
+13. **Verify Linux musl binaries are statically linked.** If the chosen Linux asset is a musl variant (non-Rust-triple), extract a binary and run `file <binary>`. If it reports `dynamically linked, interpreter /lib/ld-musl-*`, switch to the gnu/glibc asset variant instead. See the Platform Detection Heuristics section for the full decision process.
+
+14. **Check if layouts differ across platforms.** Beyond macOS, Windows may also have flat layouts while Linux uses `bin/`. If layouts differ, create platform-specific metadata files. Check `strip_components` consistency across platforms — if all platforms have a top-level wrapper directory, a single `strip_components` value works. If some platforms differ (e.g. Windows zips are flat while tarballs have a wrapper), use per-platform `strip_components`:
     ```yaml
     # Per-platform strip_components (tarballs have wrapper dir, Windows zip is flat)
     strip_components:
@@ -109,11 +111,11 @@ unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
     ```
     The simple form `strip_components: 1` still works when all platforms share the same value.
 
-14. **For raw binaries:** the metadata just needs a PATH entry pointing to `${installPath}` (the binary lands directly in the content root).
+15. **For raw binaries:** the metadata just needs a PATH entry pointing to `${installPath}` (the binary lands directly in the content root).
 
 ### Phase 4: Generate Configuration Files
 
-15. **Generate metadata JSON files.** Write to `mirrors/{name}/metadata.json` (and platform variants like `metadata-darwin.json` if needed):
+16. **Generate metadata JSON files.** Write to `mirrors/{name}/metadata.json` (and platform variants like `metadata-darwin.json` if needed):
 
 ```json
 {
@@ -130,7 +132,7 @@ unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
 }
 ```
 
-16. **Generate the mirror YAML.** Write to `mirrors/{name}/mirror.yml`:
+17. **Generate the mirror YAML.** Write to `mirrors/{name}/mirror.yml`:
 
 ```yaml
 name: {name}
@@ -176,7 +178,7 @@ concurrency:
   compression_threads: 0
 ```
 
-17. **Validate the generated spec.** If `ocx-mirror` binary is available:
+18. **Validate the generated spec.** If `ocx-mirror` binary is available:
 
 ```bash
 cargo run -p ocx_mirror -- validate mirrors/{name}/mirror.yml
@@ -184,7 +186,7 @@ cargo run -p ocx_mirror -- validate mirrors/{name}/mirror.yml
 
 ### Phase 5: Generate Description Assets
 
-18. **Download a logo.** Look for a logo in these locations (in order):
+19. **Download a logo.** Look for a logo in these locations (in order):
     - The GitHub repository's social preview / OpenGraph image: `gh api "repos/{owner}/{repo}" --jq '.owner.avatar_url'` (fallback only)
     - The repository's root for common logo files: check if `logo.svg`, `logo.png`, `icon.svg`, or `icon.png` exists at the repo root via `gh api "repos/{owner}/{repo}/contents/" --jq '.[].name'`
     - The project's website (look for an SVG or PNG logo in the HTML `<head>` or hero section)
@@ -200,7 +202,7 @@ gh api "repos/{owner}/{repo}/contents/" --jq '[.[] | select(.name | test("^(logo
 curl -fsSL -o mirrors/{name}/logo.svg "{download_url}"
 ```
 
-19. **Write the README with frontmatter.** Generate `mirrors/{name}/README.md`:
+20. **Write the README with frontmatter.** Generate `mirrors/{name}/README.md`:
 
 ```markdown
 ---
@@ -236,7 +238,7 @@ from the archive inspection in Phase 3.}
     - Include links to docs and GitHub
     - Do NOT include a "Usage with OCX" section — the website's DetailView already provides install/exec commands
 
-20. **Present a summary** to the user showing:
+21. **Present a summary** to the user showing:
     - Generated files (mirror YAML, metadata JSON, README, logo)
     - Detected platforms
     - Asset patterns
@@ -248,7 +250,7 @@ from the archive inspection in Phase 3.}
 
 ### Phase 6: Register in Taskfile
 
-21. **Add the mirror to `taskfiles/mirror.taskfile.yml`.** This file includes the shared template (`mirrors/mirror.taskfile.yml`) once per package. Add a new `includes` entry and wire it into `sync-all` / `describe-all`:
+22. **Add the mirror to `taskfiles/mirror.taskfile.yml`.** This file includes the shared template (`mirrors/mirror.taskfile.yml`) once per package. Add a new `includes` entry and wire it into `sync-all` / `describe-all`:
 
 ```yaml
 # In the includes: block, add:
@@ -269,8 +271,8 @@ This gives the user `task mirror:{name}:sync` and `task mirror:{name}:describe` 
 
 ### Phase 7: Cleanup
 
-22. **Remove temp downloads** used for inspection.
-23. **Suggest next steps**: run `task mirror:{name}:sync -- --dry-run` to preview what would be mirrored.
+23. **Remove temp downloads** used for inspection.
+24. **Suggest next steps**: run `task mirror:{name}:sync -- --dry-run` to preview what would be mirrored.
 
 ## Key Rules
 
@@ -297,7 +299,12 @@ Asset filenames encode platform info in various ways. Common patterns ranked by 
 4. **Go-style**: `tool_Linux_x86_64.tar.gz` — high confidence (note capital L)
 5. **Loose match**: `tool-linux64.tar.gz` — medium confidence, confirm with user
 
-When multiple assets could match the same platform (e.g. both `-gnu` and `-musl` variants for Linux), **always prefer `musl` variants** for Linux platforms. Musl binaries are statically linked and work on both glibc-based distros (Ubuntu, Fedora) and musl-based distros (Alpine), so they are the safe default since OCX does not distinguish between Linux libc variants.
+When multiple assets could match the same platform (e.g. both `-gnu` and `-musl` variants for Linux), prefer **statically linked musl** variants — they work on both glibc-based distros (Ubuntu, Fedora) and musl-based distros (Alpine). However, **not all musl binaries are statically linked**. Some tools (e.g. Bun) produce dynamically linked musl binaries that require `/lib/ld-musl-*.so.1` at runtime and fail on glibc systems with a misleading "No such file or directory" error.
+
+**Decision process:**
+1. **Rust triple** (`*-unknown-linux-musl`): safe to prefer musl — Rust's musl target produces statically linked binaries by convention.
+2. **Non-Rust musl variants**: download the musl asset during Phase 3 inspection and verify with `file <binary>`. If it says `statically linked`, use musl. If it says `dynamically linked, interpreter /lib/ld-musl-*`, use the **gnu/glibc variant** instead.
+3. **When in doubt**, prefer gnu/glibc — it works on the vast majority of Linux systems (all major distros, CI runners, WSL, containers except Alpine).
 
 ## Reference: Common Environment Variables by Tool Type
 
