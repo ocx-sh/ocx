@@ -8,15 +8,23 @@ ocx_launcher(
     package = "@cmake",
 )
 
+ocx_launcher(
+    name = "cmake_3",
+    bin = "bin/cmake",
+    package = "@cmake_3",
+)
+
 sh_test(
     name = "test_run_cmake",
     size = "small",
     srcs = [":test_run_cmake.sh"],
     data = [
         ":cmake",
+        ":cmake_3",
     ],
     env = {
-        "CMAKE_BIN": "$(location :cmake)",
+        "CMAKE3_BIN": "$(location :cmake_3)",
+        "CMAKE4_BIN": "$(location :cmake)",
     },
     tags = ["linux_only_test"],
 )

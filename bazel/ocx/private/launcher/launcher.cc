@@ -28,9 +28,6 @@ static std::vector<std::string> build_merged_envp(char *envp[], const std::strin
         }
 
         std::string key = current.substr(0, separator);
-#ifdef _WIN32
-        for (auto& c : key) c = toupper((unsigned char)c);
-#endif
         merged_env[key] = current.substr(separator + 1);
     }
 
@@ -44,9 +41,6 @@ static std::vector<std::string> build_merged_envp(char *envp[], const std::strin
         }
 
         std::string key = current.substr(0, separator);
-#ifdef _WIN32
-        for (auto& c : key) c = toupper((unsigned char)c);
-#endif
         std::string value = current.substr(separator + 1);
 
         // Replace ${installPath} with the actual layer directory path.
@@ -105,12 +99,24 @@ int main(int argc, char *argv[], char *envp[])
     std::vector<std::string> merged_envp = build_merged_envp(envp, layer_dir);
 
 #ifdef _WIN32
-    // Build command line
-    std::string cmdline = "\"" + path + "\"";
+    // Simple Windows argument quoting: quote if contains space/tab/quote, escape embedded quotes
+    auto win_quote_arg = [](const char* arg) -> std::string {
+        std::string s = arg;
+        if (s.find_first_of(" \t\"") == std::string::npos) return s;
+        std::string result = "\"";
+        for (char c : s) {
+            if (c == '"') result += "\\\"";
+            else result += c;
+        }
+        result += '"';
+        return result;
+    };
+
+    // Build command line with proper escaping
+    std::string cmdline = win_quote_arg(path.c_str());
     for (int i = 1; argv[i] != nullptr; ++i) {
-        cmdline += " \"";
-        cmdline += argv[i];
-        cmdline += "\"";
+        cmdline += " ";
+        cmdline += win_quote_arg(argv[i]);
     }
 
     // Build environment block (double-null-terminated)

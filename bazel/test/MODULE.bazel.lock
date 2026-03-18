@@ -238,8 +238,8 @@
     },
     "@@rules_ocx+//ocx:extension.bzl%ocx": {
       "general": {
-        "bzlTransitiveDigest": "djVTb20OpMf8UGvM6awANVdN2GzOozR6W3XS1yJhg5o=",
-        "usagesDigest": "B3oZXEm6N3ZDTtzXoeTJ3H39+pQxE9MdKNUMO5V8rGw=",
+        "bzlTransitiveDigest": "cTkngzadDIxGQ0hvj56tNd6xKfFw+R+8dbYqGt19iaE=",
+        "usagesDigest": "ijfWApy+qjhuKCJ03J6fkRkAOuWYxTp5BebnxW4JMSs=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -314,6 +314,79 @@
                 "platform_aarch64_linux": "cmake_aarch64_linux_d503138a81c1",
                 "platform_aarch64_macos": "cmake_aarch64_macos_02f0f54b8806",
                 "platform_x86_64_linux": "cmake_x86_64_linux_5f8d037baba8"
+              }
+            }
+          },
+          "cmake_x86_64_windows_9393070e443b": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:9393070e443b64956b8399dd603169115116a7d0b9f0286e8b170729a573a2a1",
+              "registry": "https://ocx.sh",
+              "repository": "cmake",
+              "arch": "x86_64",
+              "os": "windows"
+            }
+          },
+          "cmake_aarch64_windows_4e635efb6bcc": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:4e635efb6bcc1bb75aca8e16992b3e188bc7dbbae6ed1012635fa67d0951a1ef",
+              "registry": "https://ocx.sh",
+              "repository": "cmake",
+              "arch": "aarch64",
+              "os": "windows"
+            }
+          },
+          "cmake_x86_64_macos_1612a2260a4c": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:1612a2260a4cfd1e0901bff06059dc7554fd6d86c67efcce54f821977b40cac8",
+              "registry": "https://ocx.sh",
+              "repository": "cmake",
+              "arch": "x86_64",
+              "os": "macos"
+            }
+          },
+          "cmake_aarch64_linux_e01d4e3c094e": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:e01d4e3c094ec6ef6da7be577fbcf5f862117bd0265a70d2990691404071f601",
+              "registry": "https://ocx.sh",
+              "repository": "cmake",
+              "arch": "aarch64",
+              "os": "linux"
+            }
+          },
+          "cmake_aarch64_macos_5bcd2b29e281": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:5bcd2b29e28149582ac11979ca65c0ebaaa7364d02a8268bca56a62fdcbd9e4e",
+              "registry": "https://ocx.sh",
+              "repository": "cmake",
+              "arch": "aarch64",
+              "os": "macos"
+            }
+          },
+          "cmake_x86_64_linux_9d94bab4ae26": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:9d94bab4ae26f8dd82038f011d766c641fc0925c5d10749aa60a100c321ddc07",
+              "registry": "https://ocx.sh",
+              "repository": "cmake",
+              "arch": "x86_64",
+              "os": "linux"
+            }
+          },
+          "cmake_3": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_repo",
+            "attributes": {
+              "images_by_platform": {
+                "platform_x86_64_windows": "cmake_x86_64_windows_9393070e443b",
+                "platform_aarch64_windows": "cmake_aarch64_windows_4e635efb6bcc",
+                "platform_x86_64_macos": "cmake_x86_64_macos_1612a2260a4c",
+                "platform_aarch64_linux": "cmake_aarch64_linux_e01d4e3c094e",
+                "platform_aarch64_macos": "cmake_aarch64_macos_5bcd2b29e281",
+                "platform_x86_64_linux": "cmake_x86_64_linux_9d94bab4ae26"
               }
             }
           },
@@ -599,6 +672,7 @@
   },
   "facts": {
     "@@rules_ocx+//ocx:extension.bzl%ocx": {
+      "https://ocx.sh/cmake:3.31": "[{\"digest\":\"sha256:9393070e443b64956b8399dd603169115116a7d0b9f0286e8b170729a573a2a1\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:4e635efb6bcc1bb75aca8e16992b3e188bc7dbbae6ed1012635fa67d0951a1ef\",\"platform_arch\":\"aarch64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:1612a2260a4cfd1e0901bff06059dc7554fd6d86c67efcce54f821977b40cac8\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:e01d4e3c094ec6ef6da7be577fbcf5f862117bd0265a70d2990691404071f601\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:5bcd2b29e28149582ac11979ca65c0ebaaa7364d02a8268bca56a62fdcbd9e4e\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:9d94bab4ae26f8dd82038f011d766c641fc0925c5d10749aa60a100c321ddc07\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"}]",
       "https://ocx.sh/cmake:latest": "[{\"digest\":\"sha256:0e01904a613f023a63b26409b8789806ebe9c7bf8731268ae517846852f254ac\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:a5845f90ad7860056750ed7b74846347a5f7334564300df77065898dfcea144a\",\"platform_arch\":\"aarch64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:b179d54001990e94376e35672d0080ed8784099a6fa0cedac628080cc45bcc0a\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:d503138a81c1178f0153185f5b2e11e5ba0117ba5d07b58d2b04fc66312c82e6\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:02f0f54b8806715093125bc50983b7c56586c65008d50aec251a5f9a540ed9b2\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"},{\"digest\":\"sha256:5f8d037baba81121d235de92111d834692417f694ac71c4fd381eb7d18a93898\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"cmake\"}]",
       "https://ocx.sh/go-task:latest": "[{\"digest\":\"sha256:f7861554d9d731cc6994ee305864dee1a55f4c8e9ec2a5fca38bd44cb1b12553\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"go-task\"},{\"digest\":\"sha256:fdc14467eb5465cc744f65312dcff861131fa6f34e42bbef43871953e48df604\",\"platform_arch\":\"aarch64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"go-task\"},{\"digest\":\"sha256:ae46c905a51d154c286f7f6ac0dc64397ae1df83d9ab6e93d7bd9e2974fe490f\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"go-task\"},{\"digest\":\"sha256:86dc0d11a4207e93ad2b7bfc6568e4b3d859ef21af13dab65538adf7552038ec\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"go-task\"},{\"digest\":\"sha256:c567ca57f305797c98deaf043c7cc670e458c8689b01b317b55da16c7e2a10c5\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"go-task\"},{\"digest\":\"sha256:cae415f7ba1ec95f78aa8914f8e1b85aefdd48a87c0dddf03a4cbcb52b67b316\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"go-task\"}]",
       "https://ocx.sh/ocx:latest": "[{\"digest\":\"sha256:e433fb36957566b692538d405a1d55dd8343525d02ec8dfc97bc67b3264c7900\",\"platform_arch\":\"aarch64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"ocx\"},{\"digest\":\"sha256:50f6e6fe4cec0394b9f8418834b0703e3eb4210c16e98244e4ea001aa2d9fa22\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"ocx\"},{\"digest\":\"sha256:c3117129753ef3363c4055ceeb936e1601d25155b291eb392bb48a3be17913d2\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"ocx\"},{\"digest\":\"sha256:0f2d5ae61de34fe03e9cf3b5292fffb31bd26ac31498158ce890cafb66bef0d1\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"ocx\"},{\"digest\":\"sha256:51e052b2674a1a4782e1a910c58467bdc19a08ad62daf20815d562f456be6dde\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"ocx\"},{\"digest\":\"sha256:20ec8b548f1d7fc3bae2b7843c8dd50632feb2f194dcbbbf3821b07f49e8d3d8\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"ocx\"}]",

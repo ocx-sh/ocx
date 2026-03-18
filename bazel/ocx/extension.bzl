@@ -136,7 +136,7 @@ def _ocx_package_images_repo_impl(repository_ctx):
     repository_ctx.file(
         "BUILD.bazel",
         """
-load("@@{rules_ocx}//ocx/private:external_image.bzl", "external_ocx_image")
+load("@rules_ocx//ocx/private:external_image.bzl", "external_ocx_image")
 
 external_ocx_image(
     name = "image",
@@ -145,11 +145,10 @@ external_ocx_image(
     visibility = ["//visibility:public"]
 )
 """.format(
-            rules_ocx = repository_ctx.attr._workspace.repo_name,
             layer_path = _IMAGE_REPO_LAYER_PATH,
             env = json.encode(json.encode(env_config)),
         ),
-    )  # buildifier: disable=canonical-repository
+    )
 
 ocx_package_images_repo = repository_rule(
     implementation = _ocx_package_images_repo_impl,
@@ -159,7 +158,6 @@ ocx_package_images_repo = repository_rule(
         "digest": attr.string(mandatory = True),
         "arch": attr.string(mandatory = True),
         "os": attr.string(mandatory = True),
-        "_workspace": attr.label(default = Label("//:don_care.bzl")),
     },
 )
 
@@ -167,9 +165,8 @@ def _ocx_package_repo_impl(repository_ctx):
     """Repository rule implementation for the 'hub' of a single OCX package, redirecting to the correct image repository based on the platform."""
     images_select_inner = {}
     for platform, image_repo_name in repository_ctx.attr.images_by_platform.items():
-        full_repo_name = "@@{}+ocx+{}".format(repository_ctx.attr._workspace.repo_name, image_repo_name)  # buildifier: disable=canonical-repository
-        platform_config_setting_target = "@@{}//ocx/private:{}".format(repository_ctx.attr._workspace.repo_name, platform)  # buildifier: disable=canonical-repository
-        images_select_inner[platform_config_setting_target] = full_repo_name + "//:image"
+        platform_config_setting_target = "@rules_ocx//ocx/private:{}".format(platform)
+        images_select_inner[platform_config_setting_target] = "@" + image_repo_name + "//:image"
 
     repository_ctx.file("BUILD.bazel", """
 alias(
@@ -185,7 +182,6 @@ ocx_package_repo = repository_rule(
     implementation = _ocx_package_repo_impl,
     attrs = {
         "images_by_platform": attr.string_dict(mandatory = True),
-        "_workspace": attr.label(default = Label("//:don_care.bzl")),
     },
 )
 

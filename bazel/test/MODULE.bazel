@@ -12,6 +12,11 @@ ocx.package(
     repository = "cmake",
 )
 ocx.package(
+    name = "cmake_3",
+    repository = "cmake",
+    tag = "3.31",
+)
+ocx.package(
     repository = "uv",
 )
 ocx.package(
@@ -31,4 +36,4 @@ ocx.package(
 ocx.package(
     repository = "ocx",
 )
-use_repo(ocx, "cmake", "ocx", "task", "uv", "uv_0_10", "uv_0_10_10")
+use_repo(ocx, "cmake", "cmake_3", "ocx", "task", "uv", "uv_0_10", "uv_0_10_10")
