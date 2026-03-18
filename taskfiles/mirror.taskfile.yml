@@ -34,6 +34,11 @@ includes:
     vars:
       PACKAGE: go-task
       REPO: ocx.sh/go-task
+  jfrog-cli:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: jfrog-cli
+      REPO: ocx.sh/jfrog-cli
   git-cliff:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:
@@ -79,6 +84,7 @@ tasks:
       - task: cmake:describe
       - task: git-cliff:describe
       - task: go-task:describe
+      - task: jfrog-cli:describe
       - task: nodejs:describe
       - task: ocx:describe
       - task: shellcheck:describe

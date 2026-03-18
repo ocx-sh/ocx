@@ -1,0 +1,44 @@
+name: jfrog-cli
+target:
+  registry: ocx.sh
+  repository: jfrog-cli
+
+source:
+  type: url_index
+  generator:
+    command: ["uv", "run", "generate.py"]
+
+assets:
+  linux/amd64:
+    - "jfrog-cli-linux-amd64-jf$"
+  linux/arm64:
+    - "jfrog-cli-linux-arm64-jf$"
+  darwin/amd64:
+    - "jfrog-cli-mac-386-jf$"
+  darwin/arm64:
+    - "jfrog-cli-mac-arm64-jf$"
+  windows/amd64:
+    - "jfrog-cli-windows-amd64-jf\\.exe$"
+
+asset_type:
+  type: binary
+  name: jf
+
+metadata:
+  default: metadata.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "2.95.0"
+  new_per_run: 10
+
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0
