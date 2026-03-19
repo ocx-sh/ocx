@@ -51,23 +51,15 @@ impl PackageInfo {
                         .map_err(|e| anyhow::anyhow!("failed to write README to {}: {e}", path.display()))?;
                 }
 
-                if let Some(ref save_path) = self.save_logo {
-                    match &desc.logo {
-                        Some(logo) => {
-                            let default_name = logo_default_filename(logo.media_type);
-                            let path = resolve_save_path(save_path, default_name);
-                            if let Some(parent) = path.parent() {
-                                std::fs::create_dir_all(parent).map_err(|e| {
-                                    anyhow::anyhow!("failed to create directory {}: {e}", parent.display())
-                                })?;
-                            }
-                            std::fs::write(&path, &logo.data)
-                                .map_err(|e| anyhow::anyhow!("failed to write logo to {}: {e}", path.display()))?;
-                        }
-                        None => {
-                            return Err(anyhow::anyhow!("no logo found in description for {identifier}"));
-                        }
+                if let (Some(save_path), Some(logo)) = (&self.save_logo, &desc.logo) {
+                    let default_name = logo_default_filename(logo.media_type);
+                    let path = resolve_save_path(save_path, default_name);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| anyhow::anyhow!("failed to create directory {}: {e}", parent.display()))?;
                     }
+                    std::fs::write(&path, &logo.data)
+                        .map_err(|e| anyhow::anyhow!("failed to write logo to {}: {e}", path.display()))?;
                 }
 
                 Some(Inner {
