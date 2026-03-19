@@ -1,0 +1,47 @@
+name: mold
+target:
+  registry: ocx.sh
+  repository: mold
+
+source:
+  type: github_release
+  owner: rui314
+  repo: mold
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "mold-.*-x86_64-linux\\.tar\\.gz$"
+  linux/arm64:
+    - "mold-.*-aarch64-linux\\.tar\\.gz$"
+  windows/amd64:
+    - "mold-.*-x86_64-windows\\.zip$"
+
+asset_type:
+  type: archive
+  strip_components:
+    default: 1
+    platforms:
+      windows/amd64: 0
+
+metadata:
+  default: metadata.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "2.40.0"
+  new_per_run: 10
+
+verify:
+  github_asset_digest: true
+
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0

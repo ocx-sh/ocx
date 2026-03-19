@@ -48,6 +48,11 @@ includes:
     vars:
       PACKAGE: jfrog-cli
       REPO: ocx.sh/jfrog-cli
+  mold:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: mold
+      REPO: ocx.sh/mold
   git-cliff:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:
@@ -95,6 +100,7 @@ tasks:
       - task: git-cliff:describe
       - task: go-task:describe
       - task: jfrog-cli:describe
+      - task: mold:describe
       - task: nodejs:describe
       - task: ocx:describe
       - task: shellcheck:describe
