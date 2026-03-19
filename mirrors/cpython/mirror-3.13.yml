@@ -1,0 +1,11 @@
+extends: base.yml
+name: cpython-3.13
+source:
+  type: url_index
+  generator:
+    command: ["uv", "run", "generate.py", "--minor", "3.13"]
+    timeout_seconds: 180
+versions:
+  min: "3.13.0+0"
+  max: "3.13"
+  new_per_run: 5

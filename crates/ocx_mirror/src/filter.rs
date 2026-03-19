@@ -68,7 +68,7 @@ pub fn filter_versions(
                     return false;
                 }
                 if let Some(max) = &max
-                    && parsed > *max
+                    && parsed >= *max
                 {
                     return false;
                 }
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_max_bound() {
+    fn filter_max_bound_exclusive() {
         let versions = vec![
             rv("1.0.0", "1.0.0+ts", false),
             rv("2.0.0", "2.0.0+ts", false),
@@ -233,10 +233,10 @@ mod tests {
             ..Default::default()
         };
 
+        // max is exclusive: 2.0.0 itself is excluded
         let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "1.0.0");
-        assert_eq!(result[1].version, "2.0.0");
     }
 
     #[test]
@@ -369,6 +369,7 @@ mod tests {
             rv("3.0.0", "3.0.0+ts", false),
         ];
 
+        // max is exclusive, so 3.0.0 is excluded; prerelease 1.1.0-rc1 also skipped
         let config = VersionsConfig {
             min: Some("1.0.0".to_string()),
             max: Some("3.0.0".to_string()),
@@ -379,9 +380,8 @@ mod tests {
         let existing = existing(&[("1.0.0", "linux/amd64")]);
 
         let result = filter_versions(versions, &[], true, Some(&config), &existing, false);
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
-        assert_eq!(result[1].version, "3.0.0");
     }
 
     #[test]

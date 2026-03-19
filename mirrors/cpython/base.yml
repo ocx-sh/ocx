@@ -1,0 +1,34 @@
+target:
+  registry: ocx.sh
+  repository: cpython
+
+assets:
+  linux/amd64:
+    - "cpython-.*-x86_64-unknown-linux-gnu-install_only\\.tar\\.gz"
+  linux/arm64:
+    - "cpython-.*-aarch64-unknown-linux-gnu-install_only\\.tar\\.gz"
+  darwin/amd64:
+    - "cpython-.*-x86_64-apple-darwin-install_only\\.tar\\.gz"
+  darwin/arm64:
+    - "cpython-.*-aarch64-apple-darwin-install_only\\.tar\\.gz"
+  windows/amd64:
+    - "cpython-.*-x86_64-pc-windows-msvc-install_only\\.tar\\.gz"
+
+asset_type:
+  type: archive
+  strip_components: 1
+cascade: true
+build_timestamp: none
+skip_prereleases: true
+
+metadata:
+  default: metadata.json
+  platforms:
+    windows/amd64: metadata-windows.json
+
+concurrency:
+  max_downloads: 4
+  max_bundles: 2
+  max_pushes: 2
+  rate_limit_ms: 200
+  max_retries: 3

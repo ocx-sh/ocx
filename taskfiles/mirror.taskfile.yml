@@ -14,6 +14,15 @@ includes:
     vars:
       PACKAGE: cmake
       REPO: ocx.sh/cmake
+  cpython-3.12:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars: { PACKAGE: cpython, REPO: ocx.sh/cpython, SPEC_FILE: mirror-3.12.yml }
+  cpython-3.13:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars: { PACKAGE: cpython, REPO: ocx.sh/cpython, SPEC_FILE: mirror-3.13.yml }
+  cpython-3.14:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars: { PACKAGE: cpython, REPO: ocx.sh/cpython, SPEC_FILE: mirror-3.14.yml }
   corretto-8:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars: { PACKAGE: corretto, REPO: ocx.sh/corretto, SPEC_FILE: mirror-8.yml }
@@ -82,6 +91,7 @@ tasks:
       - task: bun:describe
       - task: corretto-8:describe
       - task: cmake:describe
+      - task: cpython-3.12:describe
       - task: git-cliff:describe
       - task: go-task:describe
       - task: jfrog-cli:describe
