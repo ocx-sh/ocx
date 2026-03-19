@@ -1,5 +1,6 @@
 public class Main {
     public static void main(String[] args) {
-        System.out.println("Hello, world!");
+        String version = System.getProperty("java.version");
+        System.out.println("Hello world, from java " + version);
     }
 }

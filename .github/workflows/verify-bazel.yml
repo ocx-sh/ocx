@@ -62,3 +62,8 @@ jobs:
           bazel --windows_enable_symlinks test $BAZEL_TEST_TARGETS --verbose_test_summary --test_output=errors --enable_runfiles
       - name: Run OCX via Bazel
         run: bazel --windows_enable_symlinks run //:ocx --enable_runfiles -- version
+      - name: Build "run multijdk" via Bazel
+        if: matrix.os != 'macos-latest'
+        shell: pwsh
+        working-directory: bazel/example
+        run: bazel --windows_enable_symlinks build "//java:multi_hello_world" --enable_runfiles

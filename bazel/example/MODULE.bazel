@@ -1,6 +1,4 @@
 bazel_dep(name = "rules_shell", version = "0.6.1")
-bazel_dep(name = "rules_nodejs", version = "6.7.3")
-bazel_dep(name = "aspect_rules_js", version = "3.0.3")
 bazel_dep(name = "rules_java", version = "9.6.1")
 bazel_dep(name = "rules_ocx")
 local_path_override(
@@ -8,30 +6,33 @@ local_path_override(
     path = "../",
 )
 
+# demo1: tooling for checking shell scripts
 ocx = use_extension("@rules_ocx//ocx:extension.bzl", "ocx")
-ocx.package(
-    repository = "nodejs",
-    tag = "24.14",
-)
 ocx.package(
     repository = "shfmt",
     tag = "3.13.0",
 )
 ocx.package(
-    name = "jdk_corretto",
-    repository = "corretto",
-    tag = "21.0",
+    local_index_path = "//:.ocx/index/ocx.sh/tags/shellcheck.json",
+    repository = "shellcheck",
+    tag = "0.11",
 )
-use_repo(ocx, "nodejs", "shfmt")
+use_repo(ocx, "shellcheck", "shfmt")
 
-register_toolchains("//js:nodejs")
-
+# demo2: java toolchain
 ocx_java = use_extension("//java:toolchain_ext.bzl", "ocx_java")
 ocx_java.package(
-    name = "jdk_corretto",
+    name = "jdk_corretto21",
+    java_version = 21,
     repository = "corretto",
     tag = "21.0",
 )
-use_repo(ocx_java, "jdk_corretto")
+ocx_java.package(
+    name = "jdk_corretto25",
+    java_version = 25,
+    repository = "corretto",
+    tag = "25.0",
+)
+use_repo(ocx_java, "jdk_corretto21", "jdk_corretto25")
 
-register_toolchains("@jdk_corretto//...")
+register_toolchains("@jdk_corretto21//...", "@jdk_corretto25//...")

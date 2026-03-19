@@ -11,15 +11,16 @@ def _ocx_package_images_repo_impl(repository_ctx, layer_path, _config_path):
 load("@rules_java//java/toolchains:java_runtime.bzl", "java_runtime")
 
 java_runtime(
-    name="config",
-    java="{layer_path}/bin/java",
+    name = "config",
+    java = glob(["{layer_path}/bin/java", "{layer_path}/bin/java.exe"], allow_empty = True)[0],
     srcs = glob(["{layer_path}/bin/**", "{layer_path}/conf/**", "{layer_path}/include/**", "{layer_path}/lib/**"], allow_empty = True),
-    version=21,
+    version = {java_version},
     visibility = ["//visibility:public"]
 )
 
 """.format(
             layer_path = layer_path,
+            java_version = repository_ctx.attr.java_version,
         ),
     )
 
@@ -56,4 +57,8 @@ toolchain(
 
     repository_ctx.file("BUILD.bazel", build_file_content)
 
-ocx_java, ocx_java_package_repo, ocx_java_package_images_repo = build_extension(_ocx_package_repo_impl, _ocx_package_images_repo_impl)
+ocx_java, ocx_java_package_repo, ocx_java_package_images_repo = build_extension(
+    _ocx_package_repo_impl,
+    _ocx_package_images_repo_impl,
+    additional_attrs = {"java_version": attr.int(mandatory = True)},
+)

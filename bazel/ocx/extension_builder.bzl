@@ -135,17 +135,18 @@ _REPOSITORY_ATTR = struct(
     },
 )
 
-def build_extension(package_repo_impl, package_image_repo_impl):
+def build_extension(package_repo_impl, package_image_repo_impl, *, additional_attrs = None):
     """Build a new extension for using OCX-based packages.
 
     Args:
             package_repo_impl: Implementation function of the package repo rule
             package_image_repo_impl: Implementation function of the package image repo rule
+            additional_attrs: Additional attributes that should be forwarded from the tag class to the repos
     Returns:
         tuple of the 1. extension, 2. the package image repo rule and 3. the package repo rule
     """
 
-    def _ocx_package_image_repo_impl(repository_ctx):
+    def ocx_package_image_repo_impl(repository_ctx):
         """Repository rule implementation for the repository containing the image of a single OCX package."""
 
         # create a fake repo_context to inject constant attributes
@@ -163,29 +164,35 @@ def build_extension(package_repo_impl, package_image_repo_impl):
         _resolve_package(repository_ctx, auth, repository_ctx.attr.registry, repository_ctx.attr.repository, repository_ctx.attr.digest)
         package_image_repo_impl(repository_ctx, _IMAGE_REPO_LAYER_PATH, _IMAGE_REPO_CONFIG_PATH)
 
+    attrs = {
+        "registry": attr.string(mandatory = True),
+        "repository": attr.string(mandatory = True),
+        "digest": attr.string(mandatory = True),
+        "arch": attr.string(mandatory = True),
+        "os": attr.string(mandatory = True),
+    }
+    if additional_attrs:
+        attrs.update(additional_attrs)
     ocx_package_image_repo = repository_rule(
-        implementation = _ocx_package_image_repo_impl,
-        attrs = {
-            "registry": attr.string(mandatory = True),
-            "repository": attr.string(mandatory = True),
-            "digest": attr.string(mandatory = True),
-            "arch": attr.string(mandatory = True),
-            "os": attr.string(mandatory = True),
-        },
+        implementation = ocx_package_image_repo_impl,
+        attrs = attrs,
     )
 
-    def _ocx_package_repo_impl(repository_ctx):
+    def ocx_package_repo_impl(repository_ctx):
         """Repository rule implementation for the 'hub' of a single OCX package, redirecting to the correct image repository based on the platform."""
         package_repo_impl(repository_ctx, repository_ctx.attr.images_by_platform)
 
+    attrs = {
+        "images_by_platform": attr.string_dict(mandatory = True),
+    }
+    if additional_attrs:
+        attrs.update(additional_attrs)
     ocx_package_repo = repository_rule(
-        implementation = _ocx_package_repo_impl,
-        attrs = {
-            "images_by_platform": attr.string_dict(mandatory = True),
-        },
+        implementation = ocx_package_repo_impl,
+        attrs = attrs,
     )
 
-    def _ocx_impl(module_ctx):
+    def ocx_impl(module_ctx):
         # create a fake repository_context to use the authn library outside of repository rules
         rctx = struct(
             attr = _REPOSITORY_ATTR,
@@ -201,7 +208,7 @@ def build_extension(package_repo_impl, package_image_repo_impl):
         all_manifests = []
         facts = {}
 
-        def handle_package(manifests):
+        def handle_package(manifests, additional_attrs_values):
             image_repos_by_platform = {}
             for manifest in manifests:
                 image_repo_name = _build_image_repo_name(manifest.repository, manifest.platform_arch, manifest.platform_os, manifest.digest)
@@ -218,18 +225,19 @@ def build_extension(package_repo_impl, package_image_repo_impl):
                         repository = manifest.repository,
                         arch = manifest.platform_arch,
                         os = manifest.platform_os,
+                        **additional_attrs_values
                     )
 
             ocx_package_repo(
                 name = package.name or package.repository,
                 images_by_platform = image_repos_by_platform,
+                **additional_attrs_values
             )
 
         for mod in module_ctx.modules:
             for package in mod.tags.package:
                 tag_is_digest = package.tag.startswith("sha256:")
                 if tag_is_digest:
-                    canonical_package_name = None
                     index_sha256 = _extract_sha256_from_digest(package.tag)
                     manifests = _resolve_index(module_ctx, auth, package.registry, package.repository, package.tag, sha256 = index_sha256)
                 elif package.local_index_path:
@@ -240,7 +248,6 @@ def build_extension(package_repo_impl, package_image_repo_impl):
                     index_digest = index_of_indexes.get(package.tag)
                     if not index_digest:
                         fail("tag '{}' not found in index '{}'".format(package.tag, package.local_index_path))
-                    canonical_package_name = None
                     index_sha256 = _extract_sha256_from_digest(index_digest)
                     manifests = _resolve_index(module_ctx, auth, package.registry, package.repository, package.tag, sha256 = index_sha256)
                 else:
@@ -252,22 +259,29 @@ def build_extension(package_repo_impl, package_image_repo_impl):
                     else:
                         manifests = _resolve_index(module_ctx, auth, package.registry, package.repository, package.tag)
                         facts[canonical_package_name] = _encode_manifests_as_facts(manifests)
-                handle_package(manifests)
+                additional_attrs_values = {}
+                if additional_attrs:
+                    for additional_attr_key in additional_attrs.keys():
+                        additional_attrs_values[additional_attr_key] = getattr(package, additional_attr_key)
+                handle_package(manifests, additional_attrs_values)
         return module_ctx.extension_metadata(
             facts = facts,
         )
 
-    _package = tag_class(attrs = {
+    attrs = {
         "name": attr.string(doc = "Name of the Bazel repository to create for this package. If not set, the repository will be named after the OCI repository."),
         "repository": attr.string(mandatory = True, doc = "OCI repository name, e.g. 'uv'"),
         "registry": attr.string(default = "https://ocx.sh", doc = "OCI registry URL, e.g. 'https://ocx.sh'"),
         "tag": attr.string(default = "latest", doc = "OCI tag, e.g. 'latest'"),
         "local_index_path": attr.label(doc = "Path to a local file containing the index for this package.", allow_single_file = [".json"]),
-    })
+    }
+    if additional_attrs:
+        attrs.update(additional_attrs)
+    package = tag_class(attrs = attrs)
 
     extension = module_extension(
-        implementation = _ocx_impl,
-        tag_classes = {"package": _package},
+        implementation = ocx_impl,
+        tag_classes = {"package": package},
         doc = "Module extension for loading a OCX package as Bazel repo.",
     )
 

@@ -23,13 +23,8 @@
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.14.0/MODULE.bazel": "2b31ffcc9bdc8295b2167e07a757dbbc9ac8906e7028e5170a3708cecaac119f",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.19.3/MODULE.bazel": "253d739ba126f62a5767d832765b12b59e9f8d2bc88cc1572f4a73e46eb298ca",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.21.1/MODULE.bazel": "07e3ce3eaaa50dbd0be7fa0094e36890478937adc780ec53e77fd9fe543af8b1",
-    "https://bcr.bazel.build/modules/aspect_bazel_lib/2.22.5/MODULE.bazel": "004ba890363d05372a97248c37205ae64b6fa31047629cd2c0895a9d0c7779e8",
-    "https://bcr.bazel.build/modules/aspect_bazel_lib/2.22.5/source.json": "ac2c3213df8f985785f1d0aeb7f0f73d5324e6e67d593d9b9470fb74a25d4a9b",
+    "https://bcr.bazel.build/modules/aspect_bazel_lib/2.21.1/source.json": "cb7d22ce044efa47c6e251107a35b8a919f5cd35254190d825adff1b7ae21e6e",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.8.1/MODULE.bazel": "812d2dd42f65dca362152101fbec418029cc8fd34cbad1a2fde905383d705838",
-    "https://bcr.bazel.build/modules/aspect_rules_js/3.0.3/MODULE.bazel": "28a30e8fc33bf64a67835d64d124f6e05a7d59648dcb27b110fb3502f761e503",
-    "https://bcr.bazel.build/modules/aspect_rules_js/3.0.3/source.json": "bb8fff9a304452e1042af9522ad1d54d6f1d1fdf71c5127deadb6fd156654193",
-    "https://bcr.bazel.build/modules/aspect_tools_telemetry/0.3.3/MODULE.bazel": "37c764292861c2f70314efa9846bb6dbb44fc0308903b3285da6528305450183",
-    "https://bcr.bazel.build/modules/aspect_tools_telemetry/0.3.3/source.json": "605086bbc197743a0d360f7ddc550a1d4dfa0441bc807236e17170f636153348",
     "https://bcr.bazel.build/modules/bazel_features/1.1.1/MODULE.bazel": "27b8c79ef57efe08efccbd9dd6ef70d61b4798320b8d3c134fd571f78963dbcd",
     "https://bcr.bazel.build/modules/bazel_features/1.10.0/MODULE.bazel": "f75e8807570484a99be90abcd52b5e1f390362c258bcb73106f4544957a48101",
     "https://bcr.bazel.build/modules/bazel_features/1.11.0/MODULE.bazel": "f9382337dd5a474c3b7d334c2f83e50b6eaedc284253334cf823044a26de03e8",
@@ -46,17 +41,13 @@
     "https://bcr.bazel.build/modules/bazel_features/1.33.0/MODULE.bazel": "8b8dc9d2a4c88609409c3191165bccec0e4cb044cd7a72ccbe826583303459f6",
     "https://bcr.bazel.build/modules/bazel_features/1.34.0/MODULE.bazel": "e8475ad7c8965542e0c7aac8af68eb48c4af904be3d614b6aa6274c092c2ea1e",
     "https://bcr.bazel.build/modules/bazel_features/1.36.0/MODULE.bazel": "596cb62090b039caf1cad1d52a8bc35cf188ca9a4e279a828005e7ee49a1bec3",
-    "https://bcr.bazel.build/modules/bazel_features/1.39.0/MODULE.bazel": "28739425c1fc283c91931619749c832b555e60bcd1010b40d8441ce0a5cf726d",
     "https://bcr.bazel.build/modules/bazel_features/1.4.1/MODULE.bazel": "e45b6bb2350aff3e442ae1111c555e27eac1d915e77775f6fdc4b351b758b5d7",
-    "https://bcr.bazel.build/modules/bazel_features/1.41.0/MODULE.bazel": "6e0f87fafed801273c371d41e22a15a6f8abf83fdd7f87d5e44ad317b94433d0",
     "https://bcr.bazel.build/modules/bazel_features/1.42.1/MODULE.bazel": "275a59b5406ff18c01739860aa70ad7ccb3cfb474579411decca11c93b951080",
     "https://bcr.bazel.build/modules/bazel_features/1.42.1/source.json": "fcd4396b2df85f64f2b3bb436ad870793ecf39180f1d796f913cc9276d355309",
     "https://bcr.bazel.build/modules/bazel_features/1.9.0/MODULE.bazel": "885151d58d90d8d9c811eb75e3288c11f850e1d6b481a8c9f766adee4712358b",
     "https://bcr.bazel.build/modules/bazel_features/1.9.1/MODULE.bazel": "8f679097876a9b609ad1f60249c49d68bfab783dd9be012faf9d82547b14815a",
-    "https://bcr.bazel.build/modules/bazel_lib/3.0.0-rc.0/MODULE.bazel": "d6e00979a98ac14ada5e31c8794708b41434d461e7e7ca39b59b765e6d233b18",
     "https://bcr.bazel.build/modules/bazel_lib/3.0.0/MODULE.bazel": "22b70b80ac89ad3f3772526cd9feee2fa412c2b01933fea7ed13238a448d370d",
-    "https://bcr.bazel.build/modules/bazel_lib/3.2.2/MODULE.bazel": "e2c890c8a515d6bca9c66d47718aa9e44b458fde64ec7204b8030bf2d349058c",
-    "https://bcr.bazel.build/modules/bazel_lib/3.2.2/source.json": "9e84e115c20e14652c5c21401ae85ff4daa8702e265b5c0b3bf89353f17aa212",
+    "https://bcr.bazel.build/modules/bazel_lib/3.0.0/source.json": "895f21909c6fba01d7c17914bb6c8e135982275a1b18cdaa4e62272217ef1751",
     "https://bcr.bazel.build/modules/bazel_skylib/1.0.3/MODULE.bazel": "bcb0fd896384802d1ad283b4e4eb4d718eebd8cb820b0a2c3a347fb971afd9d8",
     "https://bcr.bazel.build/modules/bazel_skylib/1.1.1/MODULE.bazel": "1add3e7d93ff2e6998f9e118022c84d163917d912f5afafb3058e3d2f1545b5e",
     "https://bcr.bazel.build/modules/bazel_skylib/1.2.0/MODULE.bazel": "44fe84260e454ed94ad326352a698422dbe372b21a1ac9f3eab76eb531223686",
@@ -84,8 +75,7 @@
     "https://bcr.bazel.build/modules/googletest/1.17.0/MODULE.bazel": "dbec758171594a705933a29fcf69293d2468c49ec1f2ebca65c36f504d72df46",
     "https://bcr.bazel.build/modules/googletest/1.17.0/source.json": "38e4454b25fc30f15439c0378e57909ab1fd0a443158aa35aec685da727cd713",
     "https://bcr.bazel.build/modules/jq.bzl/0.1.0/MODULE.bazel": "2ce69b1af49952cd4121a9c3055faa679e748ce774c7f1fda9657f936cae902f",
-    "https://bcr.bazel.build/modules/jq.bzl/0.4.0/MODULE.bazel": "a7b39b37589f2b0dad53fd6c1ccaabbdb290330caa920d7ef3e6aad068cd4ab2",
-    "https://bcr.bazel.build/modules/jq.bzl/0.4.0/source.json": "52ec7530c4618e03f634b30ff719814a68d7d39c235938b7aa2abbfe1eb1c52c",
+    "https://bcr.bazel.build/modules/jq.bzl/0.1.0/source.json": "746bf13cac0860f091df5e4911d0c593971cd8796b5ad4e809b2f8e133eee3d5",
     "https://bcr.bazel.build/modules/jsoncpp/1.9.5/MODULE.bazel": "31271aedc59e815656f5736f282bb7509a97c7ecb43e927ac1a37966e0578075",
     "https://bcr.bazel.build/modules/jsoncpp/1.9.6/MODULE.bazel": "2f8d20d3b7d54143213c4dfc3d98225c42de7d666011528dc8fe91591e2e17b0",
     "https://bcr.bazel.build/modules/jsoncpp/1.9.6/source.json": "a04756d367a2126c3541682864ecec52f92cdee80a35735a3cb249ce015ca000",
@@ -111,7 +101,6 @@
     "https://bcr.bazel.build/modules/protobuf/29.0-rc3/MODULE.bazel": "33c2dfa286578573afc55a7acaea3cada4122b9631007c594bf0729f41c8de92",
     "https://bcr.bazel.build/modules/protobuf/29.1/MODULE.bazel": "557c3457560ff49e122ed76c0bc3397a64af9574691cb8201b4e46d4ab2ecb95",
     "https://bcr.bazel.build/modules/protobuf/3.19.0/MODULE.bazel": "6b5fbb433f760a99a22b18b6850ed5784ef0e9928a72668b66e4d7ccd47db9b0",
-    "https://bcr.bazel.build/modules/protobuf/3.19.6/MODULE.bazel": "9233edc5e1f2ee276a60de3eaa47ac4132302ef9643238f23128fea53ea12858",
     "https://bcr.bazel.build/modules/protobuf/32.1/MODULE.bazel": "89cd2866a9cb07fee9ff74c41ceace11554f32e0d849de4e23ac55515cfada4d",
     "https://bcr.bazel.build/modules/protobuf/33.4/MODULE.bazel": "114775b816b38b6d0ca620450d6b02550c60ceedfdc8d9a229833b34a223dc42",
     "https://bcr.bazel.build/modules/protobuf/33.4/source.json": "555f8686b4c7d6b5ba731fbea13bf656b4bfd9a7ff629c1d9d3f6e1d6155de79",
@@ -145,7 +134,6 @@
     "https://bcr.bazel.build/modules/rules_cc/0.2.0/MODULE.bazel": "b5c17f90458caae90d2ccd114c81970062946f49f355610ed89bebf954f5783c",
     "https://bcr.bazel.build/modules/rules_cc/0.2.13/MODULE.bazel": "eecdd666eda6be16a8d9dc15e44b5c75133405e820f620a234acc4b1fdc5aa37",
     "https://bcr.bazel.build/modules/rules_cc/0.2.14/MODULE.bazel": "353c99ed148887ee89c54a17d4100ae7e7e436593d104b668476019023b58df8",
-    "https://bcr.bazel.build/modules/rules_cc/0.2.16/MODULE.bazel": "9242fa89f950c6ef7702801ab53922e99c69b02310c39fb6e62b2bd30df2a1d4",
     "https://bcr.bazel.build/modules/rules_cc/0.2.17/MODULE.bazel": "1849602c86cb60da8613d2de887f9566a6d354a6df6d7009f9d04a14402f9a84",
     "https://bcr.bazel.build/modules/rules_cc/0.2.17/source.json": "3832f45d145354049137c0090df04629d9c2b5493dc5c2bf46f1834040133a07",
     "https://bcr.bazel.build/modules/rules_cc/0.2.8/MODULE.bazel": "f1df20f0bf22c28192a794f29b501ee2018fa37a3862a1a2132ae2940a23a642",
@@ -184,8 +172,6 @@
     "https://bcr.bazel.build/modules/rules_license/0.0.7/MODULE.bazel": "088fbeb0b6a419005b89cf93fe62d9517c0a2b8bb56af3244af65ecfe37e7d5d",
     "https://bcr.bazel.build/modules/rules_license/1.0.0/MODULE.bazel": "a7fda60eefdf3d8c827262ba499957e4df06f659330bbe6cdbdb975b768bb65c",
     "https://bcr.bazel.build/modules/rules_license/1.0.0/source.json": "a52c89e54cc311196e478f8382df91c15f7a2bfdf4c6cd0e2675cc2ff0b56efb",
-    "https://bcr.bazel.build/modules/rules_nodejs/6.7.3/MODULE.bazel": "c22a48b2a0dbf05a9dc5f83837bbc24c226c1f6e618de3c3a610044c9f336056",
-    "https://bcr.bazel.build/modules/rules_nodejs/6.7.3/source.json": "a3f966f4415a8a6545e560ee5449eac95cc633f96429d08e87c87775c72f5e09",
     "https://bcr.bazel.build/modules/rules_oci/2.3.0/MODULE.bazel": "49075197960c924c0a4d759b7c765c3d00a41d2fdd4a943b42823c1d016ab4ec",
     "https://bcr.bazel.build/modules/rules_oci/2.3.0/source.json": "47710c28446211b5e61a24015a4669c50c6862d5f91e6bdbc710de8d750cf613",
     "https://bcr.bazel.build/modules/rules_pkg/0.7.0/MODULE.bazel": "df99f03fc7934a4737122518bb87e667e62d780b610910f0447665a7e2be62dc",
@@ -233,15 +219,12 @@
     "https://bcr.bazel.build/modules/swift_argument_parser/1.3.1.2/source.json": "5fba48bbe0ba48761f9e9f75f92876cafb5d07c0ce059cc7a8027416de94a05b",
     "https://bcr.bazel.build/modules/tar.bzl/0.2.1/MODULE.bazel": "52d1c00a80a8cc67acbd01649e83d8dd6a9dc426a6c0b754a04fe8c219c76468",
     "https://bcr.bazel.build/modules/tar.bzl/0.5.1/MODULE.bazel": "7c2eb3dcfc53b0f3d6f9acdfd911ca803eaf92aadf54f8ca6e4c1f3aee288351",
-    "https://bcr.bazel.build/modules/tar.bzl/0.6.0/MODULE.bazel": "a3584b4edcfafcabd9b0ef9819808f05b372957bbdff41601429d5fd0aac2e7c",
     "https://bcr.bazel.build/modules/tar.bzl/0.7.0/MODULE.bazel": "cc1acd85da33c80e430b65219a620d54d114628df24a618c3a5fa0b65e988da9",
     "https://bcr.bazel.build/modules/tar.bzl/0.7.0/source.json": "9becb80306f42d4810bfa16379fb48aad0b01ce5342bc12fe47dcd6af3ac4d7a",
     "https://bcr.bazel.build/modules/upb/0.0.0-20220923-a547704/MODULE.bazel": "7298990c00040a0e2f121f6c32544bab27d4452f80d9ce51349b1a28f3005c43",
     "https://bcr.bazel.build/modules/yq.bzl/0.1.1/MODULE.bazel": "9039681f9bcb8958ee2c87ffc74bdafba9f4369096a2b5634b88abc0eaefa072",
-    "https://bcr.bazel.build/modules/yq.bzl/0.3.2/MODULE.bazel": "0384efa70e8033d842ea73aa4b7199fa099709e236a7264345c03937166670b6",
-    "https://bcr.bazel.build/modules/yq.bzl/0.3.2/source.json": "c4ec3e192477e154f08769e29d69e8fd36e8a4f0f623997f3e1f6f7d328f7d7d",
+    "https://bcr.bazel.build/modules/yq.bzl/0.1.1/source.json": "2d2bad780a9f2b9195a4a370314d2c17ae95eaa745cefc2e12fbc49759b15aa3",
     "https://bcr.bazel.build/modules/zlib/1.2.11/MODULE.bazel": "07b389abc85fdbca459b69e2ec656ae5622873af3f845e1c9d80fe179f3effa0",
-    "https://bcr.bazel.build/modules/zlib/1.2.12/MODULE.bazel": "3b1a8834ada2a883674be8cbd36ede1b6ec481477ada359cd2d3ddc562340b27",
     "https://bcr.bazel.build/modules/zlib/1.3.1.bcr.5/MODULE.bazel": "eec517b5bbe5492629466e11dae908d043364302283de25581e3eb944326c4ca",
     "https://bcr.bazel.build/modules/zlib/1.3.1.bcr.5/source.json": "22bc55c47af97246cfc093d0acf683a7869377de362b5d1c552c2c2e16b7a806",
     "https://bcr.bazel.build/modules/zlib/1.3.1/MODULE.bazel": "751c9940dcfe869f5f7274e1295422a34623555916eb98c174c1e945594bf198"
@@ -250,8 +233,8 @@
   "moduleExtensions": {
     "//java:toolchain_ext.bzl%ocx_java": {
       "general": {
-        "bzlTransitiveDigest": "j8KDscxJshWPoDk2l8zefbVdRVQQWF80+wXslhSBsIs=",
-        "usagesDigest": "EDfG+qR8BE0Df5mdzhJcPGiruvuoq/dBR9y6e+9TGEU=",
+        "bzlTransitiveDigest": "O/vOzKXON+J93ord1SXowh30NLjJ4c0956+UdjwziGo=",
+        "usagesDigest": "2CWUNofeIF9ZHaHMiTNslLjyzMst1HZXSAPNohXpBx8=",
         "recordedInputs": [
           "REPO_MAPPING:,rules_ocx rules_ocx+",
           "REPO_MAPPING:rules_oci+,aspect_bazel_lib aspect_bazel_lib+",
@@ -268,7 +251,8 @@
               "registry": "https://ocx.sh",
               "repository": "corretto",
               "arch": "x86_64",
-              "os": "windows"
+              "os": "windows",
+              "java_version": 21
             }
           },
           "corretto_x86_64_macos_30d0292e5dd2": {
@@ -278,7 +262,8 @@
               "registry": "https://ocx.sh",
               "repository": "corretto",
               "arch": "x86_64",
-              "os": "macos"
+              "os": "macos",
+              "java_version": 21
             }
           },
           "corretto_aarch64_macos_17bc1adaae3e": {
@@ -288,7 +273,8 @@
               "registry": "https://ocx.sh",
               "repository": "corretto",
               "arch": "aarch64",
-              "os": "macos"
+              "os": "macos",
+              "java_version": 21
             }
           },
           "corretto_x86_64_linux_81fd3caa1a1a": {
@@ -298,7 +284,8 @@
               "registry": "https://ocx.sh",
               "repository": "corretto",
               "arch": "x86_64",
-              "os": "linux"
+              "os": "linux",
+              "java_version": 21
             }
           },
           "corretto_aarch64_linux_95b5ec87bf2e": {
@@ -308,10 +295,11 @@
               "registry": "https://ocx.sh",
               "repository": "corretto",
               "arch": "aarch64",
-              "os": "linux"
+              "os": "linux",
+              "java_version": 21
             }
           },
-          "jdk_corretto": {
+          "jdk_corretto21": {
             "repoRuleId": "@@//java:toolchain_ext.bzl%ocx_java_package_repo",
             "attributes": {
               "images_by_platform": {
@@ -320,34 +308,82 @@
                 "platform_aarch64_macos": "corretto_aarch64_macos_17bc1adaae3e",
                 "platform_x86_64_linux": "corretto_x86_64_linux_81fd3caa1a1a",
                 "platform_aarch64_linux": "corretto_aarch64_linux_95b5ec87bf2e"
-              }
+              },
+              "java_version": 21
+            }
+          },
+          "corretto_x86_64_linux_a9abdafc1b8d": {
+            "repoRuleId": "@@//java:toolchain_ext.bzl%ocx_java_package_images_repo",
+            "attributes": {
+              "digest": "sha256:a9abdafc1b8d199bcb9474b99b15eb9c58605806814bc3df0c6c44265aede574",
+              "registry": "https://ocx.sh",
+              "repository": "corretto",
+              "arch": "x86_64",
+              "os": "linux",
+              "java_version": 25
+            }
+          },
+          "corretto_x86_64_windows_9a44b948b279": {
+            "repoRuleId": "@@//java:toolchain_ext.bzl%ocx_java_package_images_repo",
+            "attributes": {
+              "digest": "sha256:9a44b948b2794a069013e6f845f56e10613a56b9bce5e6743f91f438f9561e5b",
+              "registry": "https://ocx.sh",
+              "repository": "corretto",
+              "arch": "x86_64",
+              "os": "windows",
+              "java_version": 25
+            }
+          },
+          "corretto_x86_64_macos_b13e580ad7da": {
+            "repoRuleId": "@@//java:toolchain_ext.bzl%ocx_java_package_images_repo",
+            "attributes": {
+              "digest": "sha256:b13e580ad7dafeffee3aa469ae252e710a2ade486629603a7beff26f710203f2",
+              "registry": "https://ocx.sh",
+              "repository": "corretto",
+              "arch": "x86_64",
+              "os": "macos",
+              "java_version": 25
+            }
+          },
+          "corretto_aarch64_macos_9e2cfe341b0e": {
+            "repoRuleId": "@@//java:toolchain_ext.bzl%ocx_java_package_images_repo",
+            "attributes": {
+              "digest": "sha256:9e2cfe341b0ee9a6659692f777f1e8be3235948e48fc9d7cec22a1fa6db0b066",
+              "registry": "https://ocx.sh",
+              "repository": "corretto",
+              "arch": "aarch64",
+              "os": "macos",
+              "java_version": 25
+            }
+          },
+          "corretto_aarch64_linux_e7d89c3bb862": {
+            "repoRuleId": "@@//java:toolchain_ext.bzl%ocx_java_package_images_repo",
+            "attributes": {
+              "digest": "sha256:e7d89c3bb8628a6c737a104a4c1b763d94f9f0bc6ec0191c816974eaf84b23c5",
+              "registry": "https://ocx.sh",
+              "repository": "corretto",
+              "arch": "aarch64",
+              "os": "linux",
+              "java_version": 25
+            }
+          },
+          "jdk_corretto25": {
+            "repoRuleId": "@@//java:toolchain_ext.bzl%ocx_java_package_repo",
+            "attributes": {
+              "images_by_platform": {
+                "platform_x86_64_linux": "corretto_x86_64_linux_a9abdafc1b8d",
+                "platform_x86_64_windows": "corretto_x86_64_windows_9a44b948b279",
+                "platform_x86_64_macos": "corretto_x86_64_macos_b13e580ad7da",
+                "platform_aarch64_macos": "corretto_aarch64_macos_9e2cfe341b0e",
+                "platform_aarch64_linux": "corretto_aarch64_linux_e7d89c3bb862"
+              },
+              "java_version": 25
             }
           }
         },
         "moduleExtensionMetadata": {
           "useAllRepos": "NO",
           "reproducible": false
-        }
-      }
-    },
-    "@@aspect_tools_telemetry+//:extension.bzl%telemetry": {
-      "general": {
-        "bzlTransitiveDigest": "cl5A2O84vDL6Tt+Qga8FCj1DUDGqn+e7ly5rZ+4xvcc=",
-        "usagesDigest": "eXfDYHWnaR9bNp0tnW6JLN9JL640fkz8B9hfJLw6FHE=",
-        "recordedInputs": [
-          "REPO_MAPPING:aspect_tools_telemetry+,bazel_lib bazel_lib+",
-          "REPO_MAPPING:aspect_tools_telemetry+,bazel_skylib bazel_skylib+"
-        ],
-        "generatedRepoSpecs": {
-          "aspect_tools_telemetry_report": {
-            "repoRuleId": "@@aspect_tools_telemetry+//:extension.bzl%tel_repository",
-            "attributes": {
-              "deps": {
-                "aspect_rules_js": "3.0.3",
-                "aspect_tools_telemetry": "0.3.3"
-              }
-            }
-          }
         }
       }
     },
@@ -408,222 +444,19 @@
         }
       }
     },
-    "@@rules_nodejs+//nodejs:extensions.bzl%node": {
-      "general": {
-        "bzlTransitiveDigest": "4pUxCNc22K4I+6+4Nxu52Hur12tFRfa1JMsN5mdDv60=",
-        "usagesDigest": "RC7eFXZFeRVu+DkFw8oZ2xoo0MF00atghjQkkXxZx1s=",
-        "recordedInputs": [],
-        "generatedRepoSpecs": {
-          "nodejs_linux_amd64": {
-            "repoRuleId": "@@rules_nodejs+//nodejs:repositories.bzl%_nodejs_repositories",
-            "attributes": {
-              "node_download_auth": {},
-              "node_repositories": {},
-              "node_urls": [
-                "https://nodejs.org/dist/v{version}/{filename}"
-              ],
-              "node_version": "22.22.0",
-              "include_headers": false,
-              "platform": "linux_amd64"
-            }
-          },
-          "nodejs_linux_arm64": {
-            "repoRuleId": "@@rules_nodejs+//nodejs:repositories.bzl%_nodejs_repositories",
-            "attributes": {
-              "node_download_auth": {},
-              "node_repositories": {},
-              "node_urls": [
-                "https://nodejs.org/dist/v{version}/{filename}"
-              ],
-              "node_version": "22.22.0",
-              "include_headers": false,
-              "platform": "linux_arm64"
-            }
-          },
-          "nodejs_linux_s390x": {
-            "repoRuleId": "@@rules_nodejs+//nodejs:repositories.bzl%_nodejs_repositories",
-            "attributes": {
-              "node_download_auth": {},
-              "node_repositories": {},
-              "node_urls": [
-                "https://nodejs.org/dist/v{version}/{filename}"
-              ],
-              "node_version": "22.22.0",
-              "include_headers": false,
-              "platform": "linux_s390x"
-            }
-          },
-          "nodejs_linux_ppc64le": {
-            "repoRuleId": "@@rules_nodejs+//nodejs:repositories.bzl%_nodejs_repositories",
-            "attributes": {
-              "node_download_auth": {},
-              "node_repositories": {},
-              "node_urls": [
-                "https://nodejs.org/dist/v{version}/{filename}"
-              ],
-              "node_version": "22.22.0",
-              "include_headers": false,
-              "platform": "linux_ppc64le"
-            }
-          },
-          "nodejs_darwin_amd64": {
-            "repoRuleId": "@@rules_nodejs+//nodejs:repositories.bzl%_nodejs_repositories",
-            "attributes": {
-              "node_download_auth": {},
-              "node_repositories": {},
-              "node_urls": [
-                "https://nodejs.org/dist/v{version}/{filename}"
-              ],
-              "node_version": "22.22.0",
-              "include_headers": false,
-              "platform": "darwin_amd64"
-            }
-          },
-          "nodejs_darwin_arm64": {
-            "repoRuleId": "@@rules_nodejs+//nodejs:repositories.bzl%_nodejs_repositories",
-            "attributes": {
-              "node_download_auth": {},
-              "node_repositories": {},
-              "node_urls": [
-                "https://nodejs.org/dist/v{version}/{filename}"
-              ],
-              "node_version": "22.22.0",
-              "include_headers": false,
-              "platform": "darwin_arm64"
-            }
-          },
-          "nodejs_windows_amd64": {
-            "repoRuleId": "@@rules_nodejs+//nodejs:repositories.bzl%_nodejs_repositories",
-            "attributes": {
-              "node_download_auth": {},
-              "node_repositories": {},
-              "node_urls": [
-                "https://nodejs.org/dist/v{version}/{filename}"
-              ],
-              "node_version": "22.22.0",
-              "include_headers": false,
-              "platform": "windows_amd64"
-            }
-          },
-          "nodejs_windows_arm64": {
-            "repoRuleId": "@@rules_nodejs+//nodejs:repositories.bzl%_nodejs_repositories",
-            "attributes": {
-              "node_download_auth": {},
-              "node_repositories": {},
-              "node_urls": [
-                "https://nodejs.org/dist/v{version}/{filename}"
-              ],
-              "node_version": "22.22.0",
-              "include_headers": false,
-              "platform": "windows_arm64"
-            }
-          },
-          "nodejs": {
-            "repoRuleId": "@@rules_nodejs+//nodejs/private:nodejs_repo_host_os_alias.bzl%nodejs_repo_host_os_alias",
-            "attributes": {
-              "user_node_repository_name": "nodejs"
-            }
-          },
-          "nodejs_host": {
-            "repoRuleId": "@@rules_nodejs+//nodejs/private:nodejs_repo_host_os_alias.bzl%nodejs_repo_host_os_alias",
-            "attributes": {
-              "user_node_repository_name": "nodejs"
-            }
-          },
-          "nodejs_toolchains": {
-            "repoRuleId": "@@rules_nodejs+//nodejs/private:nodejs_toolchains_repo.bzl%nodejs_toolchains_repo",
-            "attributes": {
-              "user_node_repository_name": "nodejs"
-            }
-          }
-        }
-      }
-    },
     "@@rules_ocx+//ocx:extension.bzl%ocx": {
       "general": {
-        "bzlTransitiveDigest": "YnXqQHEg7GBE4vIjGULYvR6cIgUG2z1ILvZ6hEDRyxY=",
-        "usagesDigest": "ApyEZrA4oSSuE4tCmrdpAKLMfzzYtGNn+Ir84Tqs/xM=",
+        "bzlTransitiveDigest": "HXeDh3zR24ZCiG44rXFV9JMowHYodhiAnBXC2Gc9PwI=",
+        "usagesDigest": "qaLGVTfL24SM0x+VDPB5gHwK6Yy1dao8ZlzIjhALwOY=",
         "recordedInputs": [
           "REPO_MAPPING:rules_oci+,aspect_bazel_lib aspect_bazel_lib+",
           "REPO_MAPPING:rules_oci+,bazel_skylib bazel_skylib+",
           "REPO_MAPPING:rules_oci+,platforms platforms",
           "REPO_MAPPING:rules_ocx+,bazel_skylib bazel_skylib+",
-          "REPO_MAPPING:rules_ocx+,rules_oci rules_oci+"
+          "REPO_MAPPING:rules_ocx+,rules_oci rules_oci+",
+          "FILE:@@//.ocx/index/ocx.sh/tags/shellcheck.json 38c5a693e54e5fe1502dc89d90f73f95a931782cdbd1def7ac0937299b51731a"
         ],
         "generatedRepoSpecs": {
-          "nodejs_x86_64_linux_18c6d5d2337d": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:18c6d5d2337d792ea44c478c3fa0ab7231a9e648ca41ea5403a1ecf2bfb5e327",
-              "registry": "https://ocx.sh",
-              "repository": "nodejs",
-              "arch": "x86_64",
-              "os": "linux"
-            }
-          },
-          "nodejs_aarch64_linux_68d483d8b588": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:68d483d8b5884592261a6a8cc0729e7cd3759241dfe605be6abf53b751268888",
-              "registry": "https://ocx.sh",
-              "repository": "nodejs",
-              "arch": "aarch64",
-              "os": "linux"
-            }
-          },
-          "nodejs_x86_64_macos_7f27f9fecc7e": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:7f27f9fecc7ebbbb0db129215ad0a45865abed19ebaa244e0e78b91eb9727b31",
-              "registry": "https://ocx.sh",
-              "repository": "nodejs",
-              "arch": "x86_64",
-              "os": "macos"
-            }
-          },
-          "nodejs_x86_64_windows_b1517cb2aa01": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:b1517cb2aa01fbdf3ccceea3ce2277b656babb0141ca2e2d22ebda5f40e8db34",
-              "registry": "https://ocx.sh",
-              "repository": "nodejs",
-              "arch": "x86_64",
-              "os": "windows"
-            }
-          },
-          "nodejs_aarch64_macos_fd61cc65a392": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:fd61cc65a39232c16660ba087c8596f78620fa675b0d9a709b7f696046cc6b6e",
-              "registry": "https://ocx.sh",
-              "repository": "nodejs",
-              "arch": "aarch64",
-              "os": "macos"
-            }
-          },
-          "nodejs_aarch64_windows_3be56fb62af1": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:3be56fb62af11b99f7c53dd81b50eed21525495802c1e293a0b4c8f9bfd9bde0",
-              "registry": "https://ocx.sh",
-              "repository": "nodejs",
-              "arch": "aarch64",
-              "os": "windows"
-            }
-          },
-          "nodejs": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_repo",
-            "attributes": {
-              "images_by_platform": {
-                "platform_x86_64_linux": "nodejs_x86_64_linux_18c6d5d2337d",
-                "platform_aarch64_linux": "nodejs_aarch64_linux_68d483d8b588",
-                "platform_x86_64_macos": "nodejs_x86_64_macos_7f27f9fecc7e",
-                "platform_x86_64_windows": "nodejs_x86_64_windows_b1517cb2aa01",
-                "platform_aarch64_macos": "nodejs_aarch64_macos_fd61cc65a392",
-                "platform_aarch64_windows": "nodejs_aarch64_windows_3be56fb62af1"
-              }
-            }
-          },
           "shfmt_aarch64_linux_8c974f5bdf12": {
             "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
             "attributes": {
@@ -686,65 +519,65 @@
               }
             }
           },
-          "corretto_x86_64_windows_f7ac97683c36": {
+          "shellcheck_aarch64_macos_ceec765b1917": {
             "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
             "attributes": {
-              "digest": "sha256:f7ac97683c36f9c69f1bc744f9569406bf14067e1a6ee88713e6162b08769097",
+              "digest": "sha256:ceec765b1917a94086f598a4537cffe0e5da91db1be1abc4cf158c345446a10d",
               "registry": "https://ocx.sh",
-              "repository": "corretto",
+              "repository": "shellcheck",
+              "arch": "aarch64",
+              "os": "macos"
+            }
+          },
+          "shellcheck_x86_64_macos_e064e12a29a5": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:e064e12a29a5e1bae52a4019d491ef4e4017c41c0b13eb23d5a0a76683d32b0f",
+              "registry": "https://ocx.sh",
+              "repository": "shellcheck",
+              "arch": "x86_64",
+              "os": "macos"
+            }
+          },
+          "shellcheck_aarch64_linux_a96b66d68125": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:a96b66d68125503c135f7bb22c37130ca5bfb5ea3e4a97fcc4d446ecae1125ac",
+              "registry": "https://ocx.sh",
+              "repository": "shellcheck",
+              "arch": "aarch64",
+              "os": "linux"
+            }
+          },
+          "shellcheck_x86_64_windows_640255c972fb": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:640255c972fb801973311098dcbb21e0f8d5a9ad1194179d9c4210c57f2f4b73",
+              "registry": "https://ocx.sh",
+              "repository": "shellcheck",
               "arch": "x86_64",
               "os": "windows"
             }
           },
-          "corretto_x86_64_macos_30d0292e5dd2": {
+          "shellcheck_x86_64_linux_0a9b75003da9": {
             "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
             "attributes": {
-              "digest": "sha256:30d0292e5dd26c37f0d8d0b7747a4452f86f51e043ec099ec71138626a45e3b1",
+              "digest": "sha256:0a9b75003da91dea867e42555e6b9b5dca5be359ed5d1fde10f0fe44e3eb7bdc",
               "registry": "https://ocx.sh",
-              "repository": "corretto",
-              "arch": "x86_64",
-              "os": "macos"
-            }
-          },
-          "corretto_aarch64_macos_17bc1adaae3e": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:17bc1adaae3ed1ca9dd3473c8be425ab133f0e002f34ab85d176db40711f3c0e",
-              "registry": "https://ocx.sh",
-              "repository": "corretto",
-              "arch": "aarch64",
-              "os": "macos"
-            }
-          },
-          "corretto_x86_64_linux_81fd3caa1a1a": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:81fd3caa1a1ac6b65fde271eda953a7ffa2cbf74123daa5f07f2f4060d9bc2ab",
-              "registry": "https://ocx.sh",
-              "repository": "corretto",
+              "repository": "shellcheck",
               "arch": "x86_64",
               "os": "linux"
             }
           },
-          "corretto_aarch64_linux_95b5ec87bf2e": {
-            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
-            "attributes": {
-              "digest": "sha256:95b5ec87bf2eb9448566a680286184bec964b289ab43b65f52cb441a9049616a",
-              "registry": "https://ocx.sh",
-              "repository": "corretto",
-              "arch": "aarch64",
-              "os": "linux"
-            }
-          },
-          "jdk_corretto": {
+          "shellcheck": {
             "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_repo",
             "attributes": {
               "images_by_platform": {
-                "platform_x86_64_windows": "corretto_x86_64_windows_f7ac97683c36",
-                "platform_x86_64_macos": "corretto_x86_64_macos_30d0292e5dd2",
-                "platform_aarch64_macos": "corretto_aarch64_macos_17bc1adaae3e",
-                "platform_x86_64_linux": "corretto_x86_64_linux_81fd3caa1a1a",
-                "platform_aarch64_linux": "corretto_aarch64_linux_95b5ec87bf2e"
+                "platform_aarch64_macos": "shellcheck_aarch64_macos_ceec765b1917",
+                "platform_x86_64_macos": "shellcheck_x86_64_macos_e064e12a29a5",
+                "platform_aarch64_linux": "shellcheck_aarch64_linux_a96b66d68125",
+                "platform_x86_64_windows": "shellcheck_x86_64_windows_640255c972fb",
+                "platform_x86_64_linux": "shellcheck_x86_64_linux_0a9b75003da9"
               }
             }
           }
@@ -952,86 +785,14 @@
           }
         }
       }
-    },
-    "@@yq.bzl+//yq:extensions.bzl%yq": {
-      "general": {
-        "bzlTransitiveDigest": "61Uz+o5PnlY0jJfPZEUNqsKxnM/UCLeWsn5VVCc8u5Y=",
-        "usagesDigest": "d6LYc0jBWHeivnXQugRBrSwkM83GSDwge0l8buSqero=",
-        "recordedInputs": [],
-        "generatedRepoSpecs": {
-          "yq_darwin_amd64": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:platforms.bzl%yq_platform_repo",
-            "attributes": {
-              "platform": "darwin_amd64",
-              "version": "4.45.1"
-            }
-          },
-          "yq_darwin_arm64": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:platforms.bzl%yq_platform_repo",
-            "attributes": {
-              "platform": "darwin_arm64",
-              "version": "4.45.1"
-            }
-          },
-          "yq_linux_amd64": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:platforms.bzl%yq_platform_repo",
-            "attributes": {
-              "platform": "linux_amd64",
-              "version": "4.45.1"
-            }
-          },
-          "yq_linux_arm64": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:platforms.bzl%yq_platform_repo",
-            "attributes": {
-              "platform": "linux_arm64",
-              "version": "4.45.1"
-            }
-          },
-          "yq_linux_s390x": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:platforms.bzl%yq_platform_repo",
-            "attributes": {
-              "platform": "linux_s390x",
-              "version": "4.45.1"
-            }
-          },
-          "yq_linux_riscv64": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:platforms.bzl%yq_platform_repo",
-            "attributes": {
-              "platform": "linux_riscv64",
-              "version": "4.45.1"
-            }
-          },
-          "yq_linux_ppc64le": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:platforms.bzl%yq_platform_repo",
-            "attributes": {
-              "platform": "linux_ppc64le",
-              "version": "4.45.1"
-            }
-          },
-          "yq_windows_amd64": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:platforms.bzl%yq_platform_repo",
-            "attributes": {
-              "platform": "windows_amd64",
-              "version": "4.45.1"
-            }
-          },
-          "yq_toolchains": {
-            "repoRuleId": "@@yq.bzl+//yq/toolchain:toolchain.bzl%yq_toolchains_repo",
-            "attributes": {
-              "user_repository_name": "yq"
-            }
-          }
-        }
-      }
     }
   },
   "facts": {
     "//java:toolchain_ext.bzl%ocx_java": {
-      "https://ocx.sh/corretto:21.0": "[{\"digest\":\"sha256:f7ac97683c36f9c69f1bc744f9569406bf14067e1a6ee88713e6162b08769097\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:30d0292e5dd26c37f0d8d0b7747a4452f86f51e043ec099ec71138626a45e3b1\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:17bc1adaae3ed1ca9dd3473c8be425ab133f0e002f34ab85d176db40711f3c0e\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:81fd3caa1a1ac6b65fde271eda953a7ffa2cbf74123daa5f07f2f4060d9bc2ab\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:95b5ec87bf2eb9448566a680286184bec964b289ab43b65f52cb441a9049616a\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"}]"
+      "https://ocx.sh/corretto:21.0": "[{\"digest\":\"sha256:f7ac97683c36f9c69f1bc744f9569406bf14067e1a6ee88713e6162b08769097\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:30d0292e5dd26c37f0d8d0b7747a4452f86f51e043ec099ec71138626a45e3b1\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:17bc1adaae3ed1ca9dd3473c8be425ab133f0e002f34ab85d176db40711f3c0e\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:81fd3caa1a1ac6b65fde271eda953a7ffa2cbf74123daa5f07f2f4060d9bc2ab\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:95b5ec87bf2eb9448566a680286184bec964b289ab43b65f52cb441a9049616a\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"}]",
+      "https://ocx.sh/corretto:25.0": "[{\"digest\":\"sha256:a9abdafc1b8d199bcb9474b99b15eb9c58605806814bc3df0c6c44265aede574\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:9a44b948b2794a069013e6f845f56e10613a56b9bce5e6743f91f438f9561e5b\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:b13e580ad7dafeffee3aa469ae252e710a2ade486629603a7beff26f710203f2\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:9e2cfe341b0ee9a6659692f777f1e8be3235948e48fc9d7cec22a1fa6db0b066\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:e7d89c3bb8628a6c737a104a4c1b763d94f9f0bc6ec0191c816974eaf84b23c5\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"}]"
     },
     "@@rules_ocx+//ocx:extension.bzl%ocx": {
-      "https://ocx.sh/corretto:21.0": "[{\"digest\":\"sha256:f7ac97683c36f9c69f1bc744f9569406bf14067e1a6ee88713e6162b08769097\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:30d0292e5dd26c37f0d8d0b7747a4452f86f51e043ec099ec71138626a45e3b1\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:17bc1adaae3ed1ca9dd3473c8be425ab133f0e002f34ab85d176db40711f3c0e\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:81fd3caa1a1ac6b65fde271eda953a7ffa2cbf74123daa5f07f2f4060d9bc2ab\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"},{\"digest\":\"sha256:95b5ec87bf2eb9448566a680286184bec964b289ab43b65f52cb441a9049616a\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"corretto\"}]",
-      "https://ocx.sh/nodejs:24.14": "[{\"digest\":\"sha256:18c6d5d2337d792ea44c478c3fa0ab7231a9e648ca41ea5403a1ecf2bfb5e327\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"nodejs\"},{\"digest\":\"sha256:68d483d8b5884592261a6a8cc0729e7cd3759241dfe605be6abf53b751268888\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"nodejs\"},{\"digest\":\"sha256:7f27f9fecc7ebbbb0db129215ad0a45865abed19ebaa244e0e78b91eb9727b31\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"nodejs\"},{\"digest\":\"sha256:b1517cb2aa01fbdf3ccceea3ce2277b656babb0141ca2e2d22ebda5f40e8db34\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"nodejs\"},{\"digest\":\"sha256:fd61cc65a39232c16660ba087c8596f78620fa675b0d9a709b7f696046cc6b6e\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"nodejs\"},{\"digest\":\"sha256:3be56fb62af11b99f7c53dd81b50eed21525495802c1e293a0b4c8f9bfd9bde0\",\"platform_arch\":\"aarch64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"nodejs\"}]",
       "https://ocx.sh/shfmt:3.13.0": "[{\"digest\":\"sha256:8c974f5bdf12c0bfcd9345975f4cbb778c92b03c6efed3d8f8b94b7c8186bd78\",\"platform_arch\":\"aarch64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"shfmt\"},{\"digest\":\"sha256:9feb663f01d9eddc706a764f6206bc92ea1ebc2324eda4deaf19a4eba6a58f03\",\"platform_arch\":\"x86_64\",\"platform_os\":\"linux\",\"registry\":\"https://ocx.sh\",\"repository\":\"shfmt\"},{\"digest\":\"sha256:a8c9355ae5585d3c7be351d51ae57b1940978de298e2376f5c46e14c82519352\",\"platform_arch\":\"x86_64\",\"platform_os\":\"windows\",\"registry\":\"https://ocx.sh\",\"repository\":\"shfmt\"},{\"digest\":\"sha256:aa62c8888be22bef2ef6ce16db3ca92e8e711064d6a3d89841eba82773d3da8a\",\"platform_arch\":\"aarch64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"shfmt\"},{\"digest\":\"sha256:5fda81b1fd72b961cba71488f908338c392906242007c78f92b99196518f7cef\",\"platform_arch\":\"x86_64\",\"platform_os\":\"macos\",\"registry\":\"https://ocx.sh\",\"repository\":\"shfmt\"}]"
     }
   }

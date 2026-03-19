@@ -1,7 +1,14 @@
 load("@rules_java//java:java_binary.bzl", "java_binary")
+load("//java:run_multijdk.bzl", "run_multijdk")
 
 java_binary(
     name = "hello_world",
     srcs = [":Main.java"],
     main_class = "Main",
+)
+
+run_multijdk(
+    name = "multi_hello_world",
+    out = "multi_hello_world.txt",
+    bin = ":hello_world",
 )
