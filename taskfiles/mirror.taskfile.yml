@@ -73,6 +73,11 @@ includes:
     vars:
       PACKAGE: ocx
       REPO: ocx.sh/ocx
+  oras:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: oras
+      REPO: ocx.sh/oras
   shellcheck:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:
@@ -103,6 +108,7 @@ tasks:
       - task: mold:describe
       - task: nodejs:describe
       - task: ocx:describe
+      - task: oras:describe
       - task: shellcheck:describe
       - task: shfmt:describe
       - task: uv:describe
