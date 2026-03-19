@@ -1,0 +1,15 @@
+load("@rules_ocx//ocx:defs.bzl", "ocx_launcher")
+
+ocx_launcher(
+    name = "shfmt",
+    bin = "shfmt",
+    package = "@shfmt",
+)
+
+genrule(
+    name = "smelly_shfmt_report",
+    srcs = ["smelly.sh"],
+    outs = ["smelly_shfmt_report.txt"],
+    cmd = "(./$(location :shfmt) $< 2> $@) || true",
+    tools = [":shfmt"],
+)

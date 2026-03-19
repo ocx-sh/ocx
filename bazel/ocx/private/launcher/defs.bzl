@@ -119,7 +119,7 @@ def _ocx_launcher_impl(name, bin, package, **kwargs):
     native.alias(
         name = name,
         actual = select({
-            "@platforms//os:windows": ":" + binary_launcher_target,
+            Label("@platforms//os:windows"): ":" + binary_launcher_target,
             "//conditions:default": ":" + script_launcher_target,
         }),
         **kwargs

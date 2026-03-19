@@ -17,6 +17,7 @@ def generate_platforms():
                     "@platforms//cpu:{}".format(arch),
                     "@platforms//os:{}".format(os),
                 ],
+                visibility = ["//visibility:public"],
             )
 
 _OCI_ARCH_MAPPING = {

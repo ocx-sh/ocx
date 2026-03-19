@@ -36,4 +36,9 @@ ocx.package(
 ocx.package(
     repository = "ocx",
 )
-use_repo(ocx, "cmake", "cmake_3", "ocx", "task", "uv", "uv_0_10", "uv_0_10_10")
+ocx.package(
+    local_index_path = "//:.ocx/index/ocx.sh/tags/shellcheck.json",
+    repository = "shellcheck",
+    tag = "0.11",
+)
+use_repo(ocx, "cmake", "cmake_3", "ocx", "shellcheck", "task", "uv", "uv_0_10", "uv_0_10_10")

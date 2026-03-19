@@ -140,3 +140,9 @@ ocx_launcher(
     bin = "bin/ocx",
     package = "@ocx",
 )
+
+ocx_launcher(
+    name = "shellcheck",
+    bin = "shellcheck",
+    package = "@shellcheck",
+)

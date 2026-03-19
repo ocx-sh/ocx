@@ -238,9 +238,11 @@
     },
     "@@rules_ocx+//ocx:extension.bzl%ocx": {
       "general": {
-        "bzlTransitiveDigest": "cTkngzadDIxGQ0hvj56tNd6xKfFw+R+8dbYqGt19iaE=",
-        "usagesDigest": "ijfWApy+qjhuKCJ03J6fkRkAOuWYxTp5BebnxW4JMSs=",
-        "recordedFileInputs": {},
+        "bzlTransitiveDigest": "SVGYS1bfngbEvSFQnItxV/s7wrtpQlqd7w6JxKBbOwg=",
+        "usagesDigest": "jqzdOGwoBxozDG4uuY4gVl3RaaEyOmrUEUaqq+/wdZE=",
+        "recordedFileInputs": {
+          "@@//.ocx/index/ocx.sh/tags/shellcheck.json": "38c5a693e54e5fe1502dc89d90f73f95a931782cdbd1def7ac0937299b51731a"
+        },
         "recordedDirentsInputs": {},
         "envVariables": {},
         "generatedRepoSpecs": {
@@ -632,6 +634,68 @@
                 "platform_aarch64_macos": "ocx_aarch64_macos_0f2d5ae61de3",
                 "platform_aarch64_linux": "ocx_aarch64_linux_51e052b2674a",
                 "platform_x86_64_macos": "ocx_x86_64_macos_20ec8b548f1d"
+              }
+            }
+          },
+          "shellcheck_aarch64_macos_ceec765b1917": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:ceec765b1917a94086f598a4537cffe0e5da91db1be1abc4cf158c345446a10d",
+              "registry": "https://ocx.sh",
+              "repository": "shellcheck",
+              "arch": "aarch64",
+              "os": "macos"
+            }
+          },
+          "shellcheck_x86_64_macos_e064e12a29a5": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:e064e12a29a5e1bae52a4019d491ef4e4017c41c0b13eb23d5a0a76683d32b0f",
+              "registry": "https://ocx.sh",
+              "repository": "shellcheck",
+              "arch": "x86_64",
+              "os": "macos"
+            }
+          },
+          "shellcheck_aarch64_linux_a96b66d68125": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:a96b66d68125503c135f7bb22c37130ca5bfb5ea3e4a97fcc4d446ecae1125ac",
+              "registry": "https://ocx.sh",
+              "repository": "shellcheck",
+              "arch": "aarch64",
+              "os": "linux"
+            }
+          },
+          "shellcheck_x86_64_windows_640255c972fb": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:640255c972fb801973311098dcbb21e0f8d5a9ad1194179d9c4210c57f2f4b73",
+              "registry": "https://ocx.sh",
+              "repository": "shellcheck",
+              "arch": "x86_64",
+              "os": "windows"
+            }
+          },
+          "shellcheck_x86_64_linux_0a9b75003da9": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_images_repo",
+            "attributes": {
+              "digest": "sha256:0a9b75003da91dea867e42555e6b9b5dca5be359ed5d1fde10f0fe44e3eb7bdc",
+              "registry": "https://ocx.sh",
+              "repository": "shellcheck",
+              "arch": "x86_64",
+              "os": "linux"
+            }
+          },
+          "shellcheck": {
+            "repoRuleId": "@@rules_ocx+//ocx:extension.bzl%ocx_package_repo",
+            "attributes": {
+              "images_by_platform": {
+                "platform_aarch64_macos": "shellcheck_aarch64_macos_ceec765b1917",
+                "platform_x86_64_macos": "shellcheck_x86_64_macos_e064e12a29a5",
+                "platform_aarch64_linux": "shellcheck_aarch64_linux_a96b66d68125",
+                "platform_x86_64_windows": "shellcheck_x86_64_windows_640255c972fb",
+                "platform_x86_64_linux": "shellcheck_x86_64_linux_0a9b75003da9"
               }
             }
           }

@@ -1,0 +1,37 @@
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "rules_nodejs", version = "6.7.3")
+bazel_dep(name = "aspect_rules_js", version = "3.0.3")
+bazel_dep(name = "rules_java", version = "9.6.1")
+bazel_dep(name = "rules_ocx")
+local_path_override(
+    module_name = "rules_ocx",
+    path = "../",
+)
+
+ocx = use_extension("@rules_ocx//ocx:extension.bzl", "ocx")
+ocx.package(
+    repository = "nodejs",
+    tag = "24.14",
+)
+ocx.package(
+    repository = "shfmt",
+    tag = "3.13.0",
+)
+ocx.package(
+    name = "jdk_corretto",
+    repository = "corretto",
+    tag = "21.0",
+)
+use_repo(ocx, "nodejs", "shfmt")
+
+register_toolchains("//js:nodejs")
+
+ocx_java = use_extension("//java:toolchain_ext.bzl", "ocx_java")
+ocx_java.package(
+    name = "jdk_corretto",
+    repository = "corretto",
+    tag = "21.0",
+)
+use_repo(ocx_java, "jdk_corretto")
+
+register_toolchains("@jdk_corretto//...")
