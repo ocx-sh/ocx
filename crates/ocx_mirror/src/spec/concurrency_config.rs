@@ -54,12 +54,19 @@ fn default_max_retries() -> u32 {
     3
 }
 
-/// Resolve `compression_threads = 0` to a concrete value based on available parallelism
+/// Resolve `compression_threads = 0` (auto) to a concrete value based on available parallelism
 /// and the number of concurrent bundle tasks.
+///
+/// - `compression_threads > 0`: returns it directly (explicit override).
+/// - `compression_threads == 0` with `max_bundles <= 1`: returns `0` (auto-detect at library level).
+/// - `compression_threads == 0` with `max_bundles > 1`: divides available cores across bundles.
 pub fn resolve_compression_threads(compression_threads: usize, max_bundles: usize) -> u32 {
     if compression_threads > 0 {
         return compression_threads as u32;
     }
-    let cpus = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(4);
-    (cpus / max_bundles.max(1)).max(1) as u32
+    if max_bundles <= 1 {
+        return 0;
+    }
+    let base = ocx_lib::compression::default_threads();
+    (base / max_bundles as u32).max(1)
 }

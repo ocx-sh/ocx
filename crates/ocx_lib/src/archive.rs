@@ -135,12 +135,15 @@ impl Archive {
             });
         }
 
-        let algorithm = match options.algorithm {
-            Some(a) => a,
-            None => compression::CompressionAlgorithm::from_file(output)
-                .ok_or_else(|| crate::Error::UnsupportedArchive(output.display().to_string()))?,
+        let options = match options.algorithm {
+            Some(_) => options,
+            None => {
+                let algorithm = compression::CompressionAlgorithm::from_file(output)
+                    .ok_or_else(|| crate::Error::UnsupportedArchive(output.display().to_string()))?;
+                options.with_algorithm(algorithm)
+            }
         };
-        let writer = compression::write_file(output, Some(algorithm), Some(options.level), options.threads).await?;
+        let writer = compression::write_file(output, &options).await?;
         Ok(Self {
             inner: Box::new(tar::TarBackend::new(writer)),
         })

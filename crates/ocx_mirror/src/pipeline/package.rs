@@ -16,7 +16,8 @@ use crate::spec::{AssetType, MetadataConfig};
 /// - `Archive`: extracted as a tar/zip, with optional `strip_components`.
 /// - `Binary`: placed directly into the content directory under the configured name.
 ///
-/// When `compression_threads` is `Some(n)` with n > 1, multi-threaded LZMA compression is used.
+/// `compression_threads` is passed directly to `CompressionOptions::with_threads()`.
+/// `0` = auto-detect, `1` = single-threaded, `n` = use n threads.
 pub async fn extract_and_bundle(
     asset_path: &Path,
     content_dir: &Path,
@@ -24,7 +25,7 @@ pub async fn extract_and_bundle(
     metadata: &Metadata,
     asset_type: &AssetType,
     asset_name: &str,
-    compression_threads: Option<u32>,
+    compression_threads: u32,
 ) -> Result<()> {
     match asset_type {
         AssetType::Archive { strip_components } => {
@@ -44,13 +45,10 @@ pub async fn extract_and_bundle(
     let metadata_json = serde_json::to_string_pretty(metadata)?;
     tokio::fs::write(&metadata_path, metadata_json).await?;
 
-    // Create bundle with optional multi-threaded compression
-    let mut builder = BundleBuilder::from_path(content_dir);
-    if let Some(threads) = compression_threads {
-        use ocx_lib::compression::CompressionOptions;
-        builder = builder.with_compression(CompressionOptions::default().with_threads(threads));
-    }
-    builder.create(bundle_path).await?;
+    BundleBuilder::from_path(content_dir)
+        .with_compression(ocx_lib::compression::CompressionOptions::default().with_threads(compression_threads))
+        .create(bundle_path)
+        .await?;
 
     Ok(())
 }

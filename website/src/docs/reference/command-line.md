@@ -547,6 +547,7 @@ ocx package create [OPTIONS] <PATH>
 - `-f`, `--force`: Overwrite the output file if it already exists.
 - `-m`, `--metadata <PATH>`: Path to a metadata file to bundle with the package. When provided, it is copied as a sidecar file next to the output archive. If omitted, no metadata sidecar is written.
 - `-l`, `--compression-level <LEVEL>`: Compression level (`fast`, `default`, `best`). Default: `default`. Applies to whichever algorithm is selected.
+- `-j`, `--threads <N>`: Number of compression threads. `0` (default) auto-detects from available CPU cores (capped at 16). `1` forces single-threaded compression. Only affects LZMA (`.tar.xz`) compression.
 - `-h`, `--help`: Print help information.
 
 #### `pull` {#package-pull}

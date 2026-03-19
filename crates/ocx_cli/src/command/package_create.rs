@@ -29,6 +29,9 @@ pub struct PackageCreate {
     /// Compression level to use for the package bundle
     #[arg(short = 'l', long, value_enum, default_value_t = options::CompressionLevel::Default)]
     compression_level: options::CompressionLevel,
+    /// Number of compression threads (0 = auto-detect, 1 = single-threaded)
+    #[arg(short = 'j', long, default_value_t = 0)]
+    threads: u32,
 }
 
 impl PackageCreate {
@@ -56,7 +59,8 @@ impl PackageCreate {
         } else if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let compression_options = compression::CompressionOptions::from_level(self.compression_level.into());
+        let compression_options =
+            compression::CompressionOptions::from_level(self.compression_level.into()).with_threads(self.threads);
         log::info!(
             "Creating package bundle from {} with compression level {:?}",
             self.path.display(),

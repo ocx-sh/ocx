@@ -292,6 +292,7 @@ Bundles a directory into a distributable archive.
 | `--force` | Overwrite if output exists |
 | `-m/--metadata PATH` | Metadata file (inferred if not provided) |
 | `-l/--compression-level` | `fast`, `balanced` (default), `best`, `none`, `xz`, `gz` |
+| `-j/--threads` | Compression threads (0 = auto-detect, 1 = single-threaded). Default: 0 (all cores, capped at 16) |
 
 - Calls `package::bundle::BundleBuilder::from_path(&path)...create(&output)`
 - No task method — calls library directly

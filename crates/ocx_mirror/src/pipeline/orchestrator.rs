@@ -305,12 +305,6 @@ async fn prepare_task(
         progress::set_stage(span, "Bundling", &task.normalized_version, &task.platform);
         let asset_type = task.asset_type.clone();
 
-        let threads = if compression_threads > 1 {
-            Some(compression_threads)
-        } else {
-            None
-        };
-
         let ap = archive_path.clone();
         let cd = content_dir.clone();
         let bp = bundle_path.clone();
@@ -322,7 +316,7 @@ async fn prepare_task(
                     let _ = tokio::fs::remove_dir_all(&cd).await;
                 }
                 tokio::fs::create_dir_all(&cd).await?;
-                package::extract_and_bundle(&ap, &cd, &bp, &md, &asset_type, &an, threads).await?;
+                package::extract_and_bundle(&ap, &cd, &bp, &md, &asset_type, &an, compression_threads).await?;
                 let _ = tokio::fs::remove_dir_all(&cd).await;
                 Ok::<_, anyhow::Error>(())
             })
