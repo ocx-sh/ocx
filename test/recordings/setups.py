@@ -39,7 +39,7 @@ def multi_version(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]
             make_package(
                 ocx, "corretto", "21.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
-                outputs={"java": {"--version": (
+                outputs={"java": {"-version": (
                     "openjdk 21.0.10 2026-01-20 LTS\n"
                     "OpenJDK Runtime Environment Corretto-21.0.10.7.1 (build 21.0.10+7-LTS)\n"
                     "OpenJDK 64-Bit Server VM Corretto-21.0.10.7.1 (build 21.0.10+7-LTS, mixed mode, sharing)"
@@ -48,7 +48,7 @@ def multi_version(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]
             make_package(
                 ocx, "corretto", "25.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env, new=False,
-                outputs={"java": {"--version": (
+                outputs={"java": {"-version": (
                     "openjdk 25.0.2 2026-01-20 LTS\n"
                     "OpenJDK Runtime Environment Corretto-25.0.2.10.1 (build 25.0.2+10-LTS)\n"
                     "OpenJDK 64-Bit Server VM Corretto-25.0.2.10.1 (build 25.0.2+10-LTS, mixed mode, sharing)"
@@ -101,7 +101,7 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
             make_package(
                 ocx, "corretto", "21.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
-                outputs={"java": {"--version": (
+                outputs={"java": {"-version": (
                     "openjdk 21.0.10 2026-01-20 LTS\n"
                     "OpenJDK Runtime Environment Corretto-21.0.10.7.1 (build 21.0.10+7-LTS)\n"
                     "OpenJDK 64-Bit Server VM Corretto-21.0.10.7.1 (build 21.0.10+7-LTS, mixed mode, sharing)"
@@ -110,7 +110,7 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
             make_package(
                 ocx, "corretto", "25.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env, new=False,
-                outputs={"java": {"--version": (
+                outputs={"java": {"-version": (
                     "openjdk 25.0.2 2026-01-20 LTS\n"
                     "OpenJDK Runtime Environment Corretto-25.0.2.10.1 (build 25.0.2+10-LTS)\n"
                     "OpenJDK 64-Bit Server VM Corretto-25.0.2.10.1 (build 25.0.2+10-LTS, mixed mode, sharing)"
