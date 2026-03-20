@@ -3,9 +3,13 @@
 
 use std::fmt::Write;
 
+use serde::Serialize;
+
+use crate::Result;
+
 /// Stdout output helper that carries the resolved color setting.
 ///
-/// Used by [`Reportable`] implementations to format plain-text tables.
+/// Used by [`Printable`] implementations to format plain-text tables.
 /// When color is enabled, headers are underlined and data rows alternate
 /// between normal and reversed styles.
 #[derive(Clone, Copy, Debug)]
@@ -23,6 +27,20 @@ impl Printer {
     /// Whether stdout color is enabled.
     pub fn color(&self) -> bool {
         self.color
+    }
+
+    /// Serializes `value` as pretty-printed JSON, with syntax highlighting when color is enabled.
+    pub fn print_json(&self, value: &impl Serialize) -> Result<()> {
+        if self.color {
+            let json_value = serde_json::to_value(value)?;
+            println!(
+                "{}",
+                colored_json::to_colored_json(&json_value, colored_json::ColorMode::On)?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(value)?);
+        }
+        Ok(())
     }
 
     /// Prints a table of strings to stdout, with columns aligned based on the longest cell in each column.

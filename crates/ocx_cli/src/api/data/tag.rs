@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// Tag listing for one or more packages, optionally including platform details.
 ///
@@ -48,7 +48,7 @@ pub enum TagsData {
     WithPlatforms(HashMap<String, HashMap<String, Vec<String>>>),
 }
 
-impl Reportable for Tags {
+impl Printable for Tags {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         match &self.packages {

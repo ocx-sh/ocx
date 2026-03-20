@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// Whether the package was removed from the profile or was already absent.
 #[derive(Serialize, Clone, Copy)]
@@ -62,7 +62,7 @@ impl Serialize for ProfileRemoved {
     }
 }
 
-impl Reportable for ProfileRemoved {
+impl Printable for ProfileRemoved {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.entries {

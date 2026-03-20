@@ -24,6 +24,8 @@ pub enum Error {
     InternalFile(std::path::PathBuf, std::io::Error),
     InternalPathInvalid(std::path::PathBuf),
 
+    SerializationFailure(serde_json::Error),
+
     /// A profile manifest operation failed.
     Profile(crate::profile::ProfileError),
 
@@ -110,6 +112,7 @@ impl std::fmt::Display for Error {
 
             Error::InternalFile(path, error) => write!(f, "Internal file error for '{}': {}", path.display(), error),
             Error::InternalPathInvalid(path) => write!(f, "Path '{}' has an unexpected structure", path.display()),
+            Error::SerializationFailure(error) => write!(f, "JSON serialization error: {}", error),
             Error::Profile(error) => write!(f, "{error}"),
 
             Error::UnsupportedArchive(file) => write!(f, "Unsupported archive format: {}", file),
@@ -133,6 +136,12 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {
     /* */
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
+        Error::SerializationFailure(error)
+    }
 }
 
 impl From<crate::oci::identifier::error::IdentifierError> for Error {

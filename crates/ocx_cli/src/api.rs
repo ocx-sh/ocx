@@ -13,10 +13,18 @@ pub mod data;
 /// this trait, so each data type owns its own formatting logic rather than
 /// delegating it to a giant match block in the API layer.
 ///
-/// JSON rendering is handled by [`Api`] directly (with optional syntax
-/// highlighting); types only need to implement `print_plain`.
-pub trait Reportable: serde::Serialize {
+/// `print_json` has a default implementation that serializes `self` via
+/// [`Printer::print_json`] (with optional syntax highlighting). Override it
+/// only when the JSON representation needs special handling beyond `Serialize`.
+pub trait Printable: serde::Serialize {
     fn print_plain(&self, printer: &Printer);
+
+    fn print_json(&self, printer: &Printer) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        Ok(printer.print_json(self)?)
+    }
 }
 
 #[derive(Clone)]
@@ -34,23 +42,10 @@ impl Api {
         &self.printer
     }
 
-    pub fn report(&self, item: &impl Reportable) -> anyhow::Result<()> {
+    pub fn report(&self, item: &impl Printable) -> anyhow::Result<()> {
         match self.format {
-            options::Format::Json => self.print_json(item)?,
+            options::Format::Json => item.print_json(&self.printer)?,
             options::Format::Plain => item.print_plain(&self.printer),
-        }
-        Ok(())
-    }
-
-    fn print_json(&self, item: &impl serde::Serialize) -> anyhow::Result<()> {
-        if self.printer.color() {
-            let value = serde_json::to_value(item)?;
-            println!(
-                "{}",
-                colored_json::to_colored_json(&value, colored_json::ColorMode::On)?
-            );
-        } else {
-            println!("{}", serde_json::to_string_pretty(item)?);
         }
         Ok(())
     }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use ocx_lib::{oci, package::metadata::Metadata};
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// A single install or select result entry for CLI output.
 ///
@@ -38,7 +38,7 @@ impl Installs {
     }
 }
 
-impl Reportable for Installs {
+impl Printable for Installs {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (package, entry) in &self.packages {

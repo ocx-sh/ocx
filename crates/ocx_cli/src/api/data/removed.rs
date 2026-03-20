@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// Whether the resource was actually removed, purged, or was already absent.
 #[derive(Serialize, Clone, Copy)]
@@ -66,7 +66,7 @@ impl Serialize for Removed {
     }
 }
 
-impl Reportable for Removed {
+impl Printable for Removed {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {

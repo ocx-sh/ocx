@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// System information about the ocx installation.
 ///
@@ -31,7 +31,7 @@ impl Info {
     }
 }
 
-impl Reportable for Info {
+impl Printable for Info {
     fn print_plain(&self, _printer: &ocx_lib::cli::Printer) {
         // Plain format is handled directly by the command (logo rendering).
         // This is only called as a fallback.

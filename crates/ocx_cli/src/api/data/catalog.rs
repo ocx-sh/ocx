@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// Repository catalog listing, optionally including tags per repository.
 ///
@@ -42,7 +42,7 @@ pub enum CatalogData {
     WithTags(HashMap<String, Vec<String>>),
 }
 
-impl Reportable for Catalog {
+impl Printable for Catalog {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         match &self.repositories {

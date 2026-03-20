@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// A single field in the description.
 #[derive(Serialize)]
@@ -35,7 +35,7 @@ impl Serialize for PackageDescription {
     }
 }
 
-impl Reportable for PackageDescription {
+impl Printable for PackageDescription {
     fn print_plain(&self, _printer: &ocx_lib::cli::Printer) {
         match &self.inner {
             Some(inner) => {

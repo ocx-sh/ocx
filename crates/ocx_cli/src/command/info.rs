@@ -7,7 +7,7 @@ use clap::Parser;
 use console::{Style, Term};
 use ocx_lib::{env, file_structure, oci, shell};
 
-use crate::api::Reportable;
+use crate::api::Printable;
 use crate::app::Context;
 
 #[derive(Parser)]

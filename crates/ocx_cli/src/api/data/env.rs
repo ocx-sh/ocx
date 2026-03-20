@@ -4,7 +4,7 @@
 use ocx_lib::package::metadata::env::var::ModifierKind;
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// A single resolved environment variable entry, tagged with its modifier kind.
 #[derive(Serialize)]
@@ -42,7 +42,7 @@ impl Serialize for EnvVars {
     }
 }
 
-impl Reportable for EnvVars {
+impl Printable for EnvVars {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {

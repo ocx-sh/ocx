@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use super::env::EnvEntry;
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// Environment variables exported to a CI system.
 ///
@@ -27,7 +27,7 @@ impl Serialize for CiExported {
     }
 }
 
-impl Reportable for CiExported {
+impl Printable for CiExported {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {

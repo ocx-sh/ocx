@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use ocx_lib::profile::ProfileMode;
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// Whether the profiled package's symlink is active (resolvable) or broken.
 #[derive(Serialize, Clone, Copy)]
@@ -71,7 +71,7 @@ impl Serialize for ProfileList {
     }
 }
 
-impl Reportable for ProfileList {
+impl Printable for ProfileList {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {

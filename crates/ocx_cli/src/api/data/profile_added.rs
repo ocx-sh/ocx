@@ -6,7 +6,7 @@ use std::fmt;
 use ocx_lib::profile::ProfileMode;
 use serde::Serialize;
 
-use crate::api::Reportable;
+use crate::api::Printable;
 
 /// Whether the package was newly added or an existing entry was updated.
 #[derive(Serialize, Clone, Copy)]
@@ -77,7 +77,7 @@ impl Serialize for ProfileAdded {
     }
 }
 
-impl Reportable for ProfileAdded {
+impl Printable for ProfileAdded {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
