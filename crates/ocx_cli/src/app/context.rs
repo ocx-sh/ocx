@@ -8,7 +8,7 @@ use ocx_lib::{
     package_manager,
 };
 
-use crate::{api, app::log_settings};
+use crate::api;
 
 use super::ContextOptions;
 
@@ -26,11 +26,14 @@ pub struct Context {
 
 impl Context {
     pub async fn try_init(options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<Context> {
-        log_settings::init_with_indicatif(
-            ocx_lib::cli::LogSettings::default()
-                .with_console_level(options.log_level)
-                .with_stderr_color(color_config.stderr),
-        )?;
+        let style = ocx_lib::cli::indicatif::ProgressStyle::with_template("{span_child_prefix}{spinner} {span_name}")
+            .expect("valid indicatif template");
+
+        ocx_lib::cli::LogSettings::default()
+            .with_console_level(options.log_level)
+            .with_stderr_color(color_config.stderr)
+            .init_progress(style)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         log::debug!("Creating context with options: {:?}", options);
 

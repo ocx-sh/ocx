@@ -15,7 +15,7 @@ mod styles;
 
 pub use log_level::LogLevel;
 pub use log_settings::LogSettings;
-pub use options::{ColorMode, ColorModeConfig};
+pub use options::{ColorMode, ColorModeConfig, ProgressMode};
 pub use printer::Printer;
 pub use styles::clap_styles;
 

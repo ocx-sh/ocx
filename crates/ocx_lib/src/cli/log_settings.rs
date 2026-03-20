@@ -10,16 +10,16 @@ use super::LogLevel;
 ///
 /// # Usage
 ///
-/// **Simple (no progress bars)** — used by `ocx-mirror`:
+/// **With progress indicators** (auto-detected via stderr TTY):
 /// ```ignore
-/// LogSettings::default().with_console_level(log_level).init()?;
+/// LogSettings::default()
+///     .with_console_level(log_level)
+///     .init_progress(style)?;
 /// ```
 ///
-/// **With custom layers** — used by `ocx` (adds `tracing-indicatif`):
+/// **Plain** (no progress bars):
 /// ```ignore
-/// let settings = LogSettings::default().with_console_level(log_level);
-/// let filter = settings.build_env_filter();
-/// // compose your own subscriber with the filter
+/// LogSettings::default().with_console_level(log_level).init()?;
 /// ```
 #[derive(Default, Debug, Clone)]
 pub struct LogSettings {
@@ -83,12 +83,32 @@ impl LogSettings {
         Ok(())
     }
 
+    /// Initialize a tracing subscriber with automatic progress indicator support.
+    ///
+    /// When stderr is a TTY, adds a `tracing-indicatif` layer for spinner/progress
+    /// display. When piped or redirected, falls back to the plain fmt subscriber.
+    ///
+    /// The `style` parameter sets the default progress style for spans (only used
+    /// when progress is enabled).
+    #[cfg(feature = "progress")]
+    pub fn init_progress(
+        self,
+        style: indicatif::ProgressStyle,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let progress = super::ProgressMode::detect();
+        if progress.stderr {
+            self.init_with_indicatif(style)
+        } else {
+            self.init()
+        }
+    }
+
     /// Initialize a tracing subscriber with `tracing-indicatif` progress bar support.
     ///
-    /// The `style` parameter sets the default progress style for spans.
-    /// Requires the `progress` feature.
+    /// Unconditionally adds the indicatif layer. Prefer [`init_progress`](Self::init_progress)
+    /// which auto-detects whether stderr is a TTY.
     #[cfg(feature = "progress")]
-    pub fn init_with_indicatif(
+    fn init_with_indicatif(
         self,
         style: indicatif::ProgressStyle,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

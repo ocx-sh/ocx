@@ -58,7 +58,7 @@ async fn main() -> ExitCode {
     if let Err(e) = LogSettings::default()
         .with_console_level(level)
         .with_stderr_color(color_config.stderr)
-        .init_with_indicatif(style)
+        .init_progress(style)
     {
         eprintln!("Failed to initialize logging: {e}");
         return ExitCode::FAILURE;
