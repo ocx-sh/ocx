@@ -50,6 +50,7 @@ impl PackagePush {
         };
 
         let publisher = Publisher::new(context.remote_client()?.clone());
+        publisher.ensure_auth(&identifier).await?;
 
         if self.cascade {
             let existing_tags = match publisher.list_tags(identifier.clone()).await {

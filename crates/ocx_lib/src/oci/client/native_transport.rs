@@ -91,6 +91,10 @@ fn io_error(path: &Path, e: impl Into<std::io::Error>) -> ClientError {
 
 #[async_trait]
 impl OciTransport for NativeTransport {
+    async fn ensure_auth(&self, image: &oci::native::Reference, operation: oci::RegistryOperation) -> Result<()> {
+        self.authenticate(image, operation).await
+    }
+
     async fn list_tags(
         &self,
         image: &oci::native::Reference,
@@ -159,7 +163,6 @@ impl OciTransport for NativeTransport {
     }
 
     async fn push_manifest(&self, image: &oci::native::Reference, manifest: &oci::Manifest) -> Result<String> {
-        self.authenticate(image, oci::RegistryOperation::Push).await?;
         self.client.push_manifest(image, manifest).await.map_err(registry_error)
     }
 

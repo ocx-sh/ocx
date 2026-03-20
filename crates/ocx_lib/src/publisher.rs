@@ -36,6 +36,14 @@ impl Publisher {
         &self.client
     }
 
+    /// Pre-authenticate against the registry for `identifier` with Push scope.
+    ///
+    /// Call at the start of a publishing command to fail fast on credential
+    /// issues before reading files or doing any other preparation.
+    pub async fn ensure_auth(&self, identifier: &oci::Identifier) -> Result<()> {
+        self.client.ensure_auth(identifier, oci::RegistryOperation::Push).await
+    }
+
     /// Push a package to the registry without cascade.
     pub async fn push(&self, info: Info, file: &Path) -> Result<()> {
         log::debug!("Pushing package with identifier {}", info.identifier);

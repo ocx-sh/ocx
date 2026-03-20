@@ -66,12 +66,27 @@ impl Client {
         }
     }
 
+    // ── Authentication ─────────────────────────────────────────────
+
+    /// Pre-authenticate against the registry for `identifier` with the
+    /// given operation scope.
+    ///
+    /// Call at the start of a command or task to fail fast on credential
+    /// issues (expired tokens, GPG agent prompts, missing env vars)
+    /// before beginning any real work.
+    pub async fn ensure_auth(&self, identifier: &Identifier, operation: oci::RegistryOperation) -> Result<()> {
+        let image = native::Reference::from(identifier);
+        self.transport.ensure_auth(&image, operation).await?;
+        Ok(())
+    }
+
     // ── Index operations ─────────────────────────────────────────────
 
     /// Lists the tags for the given image reference.
     /// There is no validation that the tags correspond to valid package versions.
     pub async fn list_tags(&self, identifier: Identifier) -> Result<Vec<String>> {
         let image = native::Reference::from(&identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
         let chunk_size = self.tag_chunk_size;
         let tags = paginate(chunk_size, |cs, last| self.transport.list_tags(&image, cs, last)).await?;
         log::trace!("Listed tags for {}: {:?}", identifier, tags);
@@ -81,6 +96,7 @@ impl Client {
     pub async fn list_repositories(&self, registry: impl Into<String>) -> Result<Vec<String>> {
         let registry = registry.into();
         let image = oci::native::Reference::with_tag(registry.clone(), "n/a".into(), "latest".into());
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
         let chunk_size = self.repository_chunk_size;
         let repositories = paginate(chunk_size, |cs, last| self.transport.catalog(&image, cs, last)).await?;
         log::trace!("Listed repositories for {}: {:?}", registry, repositories);
@@ -90,6 +106,7 @@ impl Client {
     /// Fetches the digest of a manifest from the remote, trying to avoid pulling the entire manifest if possible.
     pub async fn fetch_manifest_digest(&self, identifier: &Identifier) -> Result<oci::Digest> {
         let ref_ = native::Reference::from(identifier);
+        self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
         let digest = self.transport.fetch_manifest_digest(&ref_).await?;
         log::trace!("Fetched manifest digest for {}: {}", identifier, digest);
         digest.try_into()
@@ -98,6 +115,7 @@ impl Client {
     /// Fetches the manifest for the given image reference, returning both the manifest and its digest.
     pub async fn fetch_manifest(&self, identifier: &Identifier) -> Result<(Digest, oci::Manifest)> {
         let ref_ = native::Reference::from(identifier);
+        self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
         let (manifest, digest_str) = self.pull_manifest(&ref_).await?;
         let digest = digest_str.try_into()?;
         Ok((digest, manifest))
@@ -123,6 +141,7 @@ impl Client {
     ) -> Result<(Digest, oci::ImageIndex)> {
         let target_identifier = source_identifier.clone_with_tag(target_tag);
         let ref_ = native::Reference::from(&target_identifier);
+        self.transport.ensure_auth(&ref_, oci::RegistryOperation::Push).await?;
         let platform = Some(platform.clone().into());
 
         log::debug!("Merging platform entry into index for {}", ref_);
@@ -225,6 +244,9 @@ impl Client {
                 content: content_path,
             });
         }
+
+        let image = native::Reference::from(&identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
         let mut temp_guard = utility::drop_file::DropFile::new(temp_path.to_path_buf());
         let download = self
@@ -387,6 +409,9 @@ impl Client {
             path.display()
         );
 
+        let image = native::Reference::from(&package_info.identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
+
         let (manifest, manifest_data, manifest_sha256) = self.push_image_manifest(&package_info, path).await?;
 
         let (index_digest, index) = self
@@ -501,6 +526,7 @@ impl Client {
     ) -> std::result::Result<(), ClientError> {
         let desc_identifier = identifier.clone_with_tag(DESCRIPTION_TAG);
         let image = super::native::Reference::from(&desc_identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
 
         // Push empty config blob.
         let config_data = b"{}".to_vec();
@@ -588,6 +614,7 @@ impl Client {
     ) -> std::result::Result<Option<package::description::Description>, ClientError> {
         let desc_identifier = identifier.clone_with_tag(DESCRIPTION_TAG);
         let image = super::native::Reference::from(&desc_identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
         let (manifest, _digest) = match self.pull_manifest(&image).await {
             Ok(result) => result,
@@ -1254,6 +1281,249 @@ mod tests {
             assert!(
                 inner.manifests.is_empty(),
                 "no manifest should have been pushed on error"
+            );
+        }
+    }
+
+    // ── ensure_auth tests ───────────────────────────────────────────
+
+    mod ensure_auth {
+        use super::*;
+        use oci::RegistryOperation;
+
+        fn test_identifier(tag: &str) -> Identifier {
+            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        }
+
+        fn test_identifier_with_digest(digest_hex: &str) -> Identifier {
+            let digest = oci::Digest::Sha256(digest_hex.to_string());
+            Identifier::new_registry("test/pkg", "example.com").clone_with_digest(digest)
+        }
+
+        fn stub_with_capture(data: &StubTransportData) -> Client {
+            data.write().capture_pushes = true;
+            Client::with_transport(Box::new(StubTransport::new(data.clone())))
+        }
+
+        fn platform(s: &str) -> oci::Platform {
+            s.parse().unwrap()
+        }
+
+        fn auth_calls(data: &StubTransportData) -> Vec<(String, RegistryOperation)> {
+            data.read().auth_calls.clone()
+        }
+
+        #[tokio::test]
+        async fn client_ensure_auth_delegates_to_transport() {
+            let data = StubTransportData::new();
+            let client = stub(&data);
+            let id = test_identifier("1.0");
+
+            client.ensure_auth(&id, RegistryOperation::Pull).await.unwrap();
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, "example.com");
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+
+            client.ensure_auth(&id, RegistryOperation::Push).await.unwrap();
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 2);
+            assert!(matches!(calls[1].1, RegistryOperation::Push));
+        }
+
+        #[tokio::test]
+        async fn list_tags_authenticates_with_pull() {
+            let data = StubTransportData::new();
+            data.write().tags = vec![vec!["1.0".into()]];
+            let client = stub(&data);
+
+            client.list_tags(test_identifier("latest")).await.unwrap();
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        #[tokio::test]
+        async fn list_repositories_authenticates_with_pull() {
+            let data = StubTransportData::new();
+            let client = stub(&data);
+
+            client.list_repositories("example.com").await.unwrap();
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        #[tokio::test]
+        async fn fetch_manifest_digest_authenticates_with_pull() {
+            let data = StubTransportData::new();
+            data.write().digest =
+                Some("sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".into());
+            let client = stub(&data);
+            let id = test_identifier("1.0");
+
+            client.fetch_manifest_digest(&id).await.unwrap();
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        #[tokio::test]
+        async fn fetch_manifest_authenticates_with_pull() {
+            let manifest = oci::Manifest::Image(make_image_manifest("sha256:cfg", "sha256:layer"));
+            let (manifest_data, digest_str) = serialize_manifest(&manifest);
+
+            let id = test_identifier("1.0");
+            let data = StubTransportData::new();
+            data.write()
+                .manifests
+                .insert(id.to_string(), (manifest_data, digest_str));
+            let client = stub(&data);
+
+            client.fetch_manifest(&id).await.unwrap();
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        #[tokio::test]
+        async fn pull_package_authenticates_with_pull() {
+            let id = test_identifier_with_digest("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            let data = StubTransportData::new();
+            let client = stub(&data);
+
+            let dir = tempfile::tempdir().unwrap();
+            // Will fail (no manifest), but auth should have been called first.
+            let _ = client
+                .pull_package(id, dir.path().join("out"), test_acquire(&dir.path().join("temp")))
+                .await;
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        #[tokio::test]
+        async fn pull_package_skips_auth_when_already_installed() {
+            let id = test_identifier_with_digest("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            let data = StubTransportData::new();
+            let client = stub(&data);
+
+            let dir = tempfile::tempdir().unwrap();
+            let output = dir.path().join("output");
+            write_completed_install(&output);
+
+            let temp = test_acquire(&dir.path().join("temp"));
+            client.pull_package(id, &output, temp).await.unwrap();
+
+            // No auth call — early return before network.
+            assert!(auth_calls(&data).is_empty());
+        }
+
+        #[tokio::test]
+        async fn push_package_authenticates_with_push() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            let client = stub_with_capture(&data);
+
+            let id = test_identifier("1.0");
+            let dir = tempfile::tempdir().unwrap();
+            let archive_path = dir.path().join("pkg.tar.gz");
+            std::fs::write(&archive_path, b"fake-archive").unwrap();
+
+            let info = Info {
+                identifier: id,
+                metadata: metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                    version: package::metadata::bundle::Version::V1,
+                    strip_components: None,
+                    env: Default::default(),
+                }),
+                platform: "linux/amd64".parse().unwrap(),
+            };
+
+            let _ = client.push_package(info, &archive_path).await;
+            let calls = auth_calls(&data);
+            // Must authenticate with Push before any blob/manifest operations.
+            assert!(!calls.is_empty(), "push_package must call ensure_auth");
+            assert!(matches!(calls[0].1, RegistryOperation::Push));
+        }
+
+        #[tokio::test]
+        async fn push_description_authenticates_with_push() {
+            let data = StubTransportData::new();
+            let client = stub(&data);
+            let id = test_identifier("1.0");
+
+            let desc = package::description::Description {
+                readme: "# Test".to_string(),
+                logo: None,
+                annotations: Default::default(),
+            };
+
+            let _ = client.push_description(&id, &desc).await;
+            let calls = auth_calls(&data);
+            assert!(!calls.is_empty(), "push_description must call ensure_auth");
+            assert!(matches!(calls[0].1, RegistryOperation::Push));
+        }
+
+        #[tokio::test]
+        async fn pull_description_authenticates_with_pull() {
+            let data = StubTransportData::new();
+            let client = stub(&data);
+            let id = test_identifier("1.0");
+
+            let dir = tempfile::tempdir().unwrap();
+            let _ = client.pull_description(&id, dir.path()).await;
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        #[tokio::test]
+        async fn merge_platform_into_index_authenticates_with_push() {
+            let data = StubTransportData::new();
+            let client = stub_with_capture(&data);
+            let id = test_identifier("3.28");
+
+            let _ = client
+                .merge_platform_into_index(&id, "3.28", &platform("linux/amd64"), "sha256:abc", 100)
+                .await;
+            let calls = auth_calls(&data);
+            assert!(!calls.is_empty(), "merge_platform_into_index must call ensure_auth");
+            assert!(matches!(calls[0].1, RegistryOperation::Push));
+        }
+
+        #[tokio::test]
+        async fn ensure_auth_precedes_transport_calls_for_push() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            let client = stub_with_capture(&data);
+
+            let id = test_identifier("1.0");
+            let dir = tempfile::tempdir().unwrap();
+            let archive_path = dir.path().join("pkg.tar.gz");
+            std::fs::write(&archive_path, b"fake-archive").unwrap();
+
+            let info = Info {
+                identifier: id,
+                metadata: metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                    version: package::metadata::bundle::Version::V1,
+                    strip_components: None,
+                    env: Default::default(),
+                }),
+                platform: "linux/amd64".parse().unwrap(),
+            };
+
+            let _ = client.push_package(info, &archive_path).await;
+
+            // Verify auth happened before any transport method calls.
+            let inner = data.read();
+            assert!(!inner.auth_calls.is_empty(), "ensure_auth must have been called");
+            assert!(matches!(inner.auth_calls[0].1, RegistryOperation::Push));
+            // push_blob should have been called (for the package data).
+            assert!(
+                inner.calls.iter().any(|c| c.starts_with("push_blob:")),
+                "push_blob should follow ensure_auth, calls: {:?}",
+                inner.calls
             );
         }
     }

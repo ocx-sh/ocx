@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use super::error::ClientError;
 use super::transport::{OciTransport, Result};
-use crate::oci::{self, Digest};
+use crate::oci::{self, Digest, RegistryOperation};
 
 /// Test data backing a [`StubTransport`].
 ///
@@ -29,6 +29,8 @@ pub(crate) struct StubTransportInner {
     pub push_results: Vec<Result<String>>,
     /// Log of method calls for assertions.
     pub calls: Vec<String>,
+    /// Log of `ensure_auth` calls: `(registry, operation)`.
+    pub auth_calls: Vec<(String, RegistryOperation)>,
     /// When true, `push_manifest_raw` stores pushed data back into `manifests`
     /// so subsequent reads see the updated content.
     pub capture_pushes: bool,
@@ -47,6 +49,7 @@ impl Default for StubTransportInner {
             digest: None,
             push_results: vec![],
             calls: vec![],
+            auth_calls: vec![],
             capture_pushes: false,
             pull_manifest_error_override: None,
         }
@@ -123,6 +126,14 @@ impl StubTransport {
 
 #[async_trait]
 impl OciTransport for StubTransport {
+    async fn ensure_auth(&self, image: &oci::native::Reference, operation: oci::RegistryOperation) -> Result<()> {
+        self.data
+            .write()
+            .auth_calls
+            .push((image.resolve_registry().to_string(), operation));
+        Ok(())
+    }
+
     async fn list_tags(
         &self,
         _image: &oci::native::Reference,

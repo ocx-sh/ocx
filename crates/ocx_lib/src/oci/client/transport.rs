@@ -17,8 +17,20 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 /// hitting a real registry.
 ///
 /// Implementations are expected to handle authentication internally.
+/// Every method calls [`ensure_auth`](Self::ensure_auth) with the
+/// appropriate operation scope before performing any network I/O, so
+/// callers never need to worry about auth ordering.
 #[async_trait]
 pub trait OciTransport: Send + Sync {
+    // ── Authentication ───────────────────────────────────────────────
+
+    /// Pre-authenticate for the given operation scope.
+    ///
+    /// Ensures credentials are resolved and a token is cached for
+    /// `image`'s registry with the requested operation scope (Pull or Push).
+    /// Repeated calls for the same scope are no-ops (token cache hit).
+    async fn ensure_auth(&self, image: &oci::native::Reference, operation: oci::RegistryOperation) -> Result<()>;
+
     // ── Read operations ──────────────────────────────────────────────
 
     /// Lists tags for the given image, returning one page of results.

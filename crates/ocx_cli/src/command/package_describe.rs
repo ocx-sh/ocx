@@ -57,6 +57,7 @@ impl PackageDescribe {
         }
 
         let publisher = Publisher::new(context.remote_client()?.clone());
+        publisher.ensure_auth(&identifier).await?;
 
         // Pull existing description for merge.
         let temp_dir = std::env::temp_dir().join(format!("ocx-describe-{}", std::process::id()));
