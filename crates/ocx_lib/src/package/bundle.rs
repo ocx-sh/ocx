@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::{Result, archive, compression};
+use crate::{Result, archive, compression, utility};
 
 /// Builds a compressed tar archive from a file or directory tree.
 ///
@@ -49,8 +49,16 @@ impl BundleBuilder {
     /// If the source is a directory, all files and subdirectories are added to
     /// the archive root (no extra top-level directory is inserted).  If the
     /// source is a single file, it is added under its filename.
+    ///
+    /// The archive is first written to a temporary file alongside the output
+    /// path and atomically renamed on success.  If creation fails, the
+    /// temporary file is automatically cleaned up.
     pub async fn create(self, output: impl AsRef<std::path::Path>) -> Result<()> {
-        let mut archive = archive::Archive::create_with_compression(output, self.compression).await?;
+        let output = output.as_ref();
+        let temp_path = temp_path_for(output);
+        let mut temp_guard = utility::drop_file::DropFile::new(&temp_path);
+
+        let mut archive = archive::Archive::create_with_compression(&temp_path, self.compression).await?;
         if self.source.is_dir() {
             archive.add_dir_all("", &self.source).await?;
         } else {
@@ -58,7 +66,23 @@ impl BundleBuilder {
             archive.add_file(name, &self.source).await?;
         }
         archive.finish().await?;
+
+        std::fs::rename(&temp_path, output).map_err(|e| crate::error::file_error(&temp_path, e))?;
+        temp_guard.retain();
         Ok(())
+    }
+}
+
+/// Returns a temporary path in the same directory as `output` with a `._tmp_`
+/// prefix on the filename. This preserves the original file extension so that
+/// archive format detection works unchanged.
+fn temp_path_for(output: &Path) -> PathBuf {
+    let name = output.file_name().unwrap_or_default();
+    let mut tmp_name = std::ffi::OsString::from("._tmp_");
+    tmp_name.push(name);
+    match output.parent() {
+        Some(parent) => parent.join(tmp_name),
+        None => PathBuf::from(tmp_name),
     }
 }
 

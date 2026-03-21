@@ -48,15 +48,13 @@ impl PackageCreate {
             None => self.infer_filename(&identifier).into(),
         };
 
-        if output.exists() {
-            if !self.force {
-                anyhow::bail!(
-                    "Output file {} already exists. Use --force to overwrite.",
-                    output.display()
-                );
-            }
-            std::fs::remove_file(&output)?;
-        } else if let Some(parent) = output.parent() {
+        if output.exists() && !self.force {
+            anyhow::bail!(
+                "Output file {} already exists. Use --force to overwrite.",
+                output.display()
+            );
+        }
+        if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let compression_options =
