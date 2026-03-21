@@ -6,6 +6,12 @@ use crate::{auth, oci};
 use super::Client;
 use super::native_transport::NativeTransport;
 
+/// Default push chunk size for OCX (16 MiB).
+///
+/// Overrides the oci-client default of 4 MiB to reduce HTTP round-trips
+/// when uploading large package archives.
+const DEFAULT_PUSH_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
 pub struct ClientBuilder {
     auth: auth::Auth,
     config: oci::native::ClientConfig,
@@ -16,7 +22,10 @@ impl ClientBuilder {
     pub fn new() -> Self {
         ClientBuilder {
             auth: auth::Auth::default(),
-            config: oci::native::ClientConfig::default(),
+            config: oci::native::ClientConfig {
+                push_chunk_size: DEFAULT_PUSH_CHUNK_SIZE,
+                ..Default::default()
+            },
             lock_timeout: None,
         }
     }
@@ -35,6 +44,12 @@ impl ClientBuilder {
         if !registries.is_empty() {
             self.config.protocol = oci::native::ClientProtocol::HttpsExcept(registries);
         }
+        self
+    }
+
+    /// Maximum chunk size in bytes for chunked blob uploads.
+    pub fn push_chunk_size(mut self, size: usize) -> Self {
+        self.config.push_chunk_size = size;
         self
     }
 
