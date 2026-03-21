@@ -1,162 +1,88 @@
 ---
 name: rust
-description: Write Rust code following best practices. Use when developing Rust applications. Covers ownership, error handling, and async patterns.
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep
+description: Rust best practices for the OCX project. Covers ownership, error handling, async/tokio patterns, and OCX-specific conventions. References rust-quality.md for comprehensive quality rules.
 ---
 
-# Rust Development
+# Rust Development (OCX)
 
-## Project Structure
+## Quality Reference
 
-```
-my-project/
-├── Cargo.toml
-├── src/
-│   ├── main.rs
-│   ├── lib.rs
-│   └── handlers/
-│       └── mod.rs
-└── tests/
-    └── integration.rs
-```
+Read `.claude/rules/rust-quality.md` for the comprehensive quality guide covering: design patterns, anti-patterns (tiered severity), SOLID/DRY/YAGNI in Rust, async patterns, project pattern consistency, reusability assessment, and code review checklist.
 
-## Error Handling
+## OCX Error Handling
 
 ```rust
-use thiserror::Error;
+// Three-layer model: PackageErrorKind → PackageError → Error
 
-#[derive(Error, Debug)]
-pub enum AppError {
-    #[error("User not found: {0}")]
-    NotFound(String),
-
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
-
-    #[error("Validation error: {0}")]
-    Validation(String),
+// Single-item task: return kind directly
+fn find(&self, pkg: &Identifier) -> Result<InstallInfo, PackageErrorKind> {
+    // ...
+    Err(PackageErrorKind::NotFound)
 }
 
-// Using Result
-async fn get_user(id: &str) -> Result<User, AppError> {
-    let user = sqlx::query_as!(User, "SELECT * FROM users WHERE id = $1", id)
-        .fetch_optional(&pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(id.to_string()))?;
-
-    Ok(user)
+// Batch: collect errors into command-level Error
+fn find_all(&self, pkgs: Vec<Identifier>) -> Result<Vec<InstallInfo>, Error> {
+    // Parallel via JoinSet, preserve input order
 }
 
-// Using ? operator
-fn process() -> Result<(), AppError> {
-    let user = get_user("123")?;
-    validate(&user)?;
-    save(&user)?;
-    Ok(())
-}
+// Library errors: use crate::Error with From impls for ? conversion
+// Never unwrap() in library code — always propagate via ?
 ```
 
-## Ownership & Borrowing
+## OCX Async Patterns
 
 ```rust
-// Ownership transfer
-fn take_ownership(s: String) {
-    println!("{}", s);
-} // s is dropped here
-
-// Borrowing (immutable)
-fn borrow(s: &String) {
-    println!("{}", s);
-}
-
-// Mutable borrowing
-fn mutate(s: &mut String) {
-    s.push_str(" world");
-}
-
-// Lifetimes
-fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
-    if x.len() > y.len() { x } else { y }
-}
-```
-
-## Async with Tokio
-
-```rust
-use tokio;
-
-#[tokio::main]
-async fn main() {
-    let result = fetch_data().await;
-}
-
-async fn fetch_all(urls: Vec<String>) -> Vec<Response> {
-    let futures: Vec<_> = urls
-        .into_iter()
-        .map(|url| tokio::spawn(async move { fetch(&url).await }))
-        .collect();
-
-    let results = futures::future::join_all(futures).await;
-    results.into_iter().filter_map(|r| r.ok()).collect()
-}
-```
-
-## Axum Web Handler
-
-```rust
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Json,
-};
-
-async fn get_user(
-    State(pool): State<PgPool>,
-    Path(id): Path<String>,
-) -> Result<Json<User>, (StatusCode, String)> {
-    let user = sqlx::query_as!(User, "SELECT * FROM users WHERE id = $1", id)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
-
-    Ok(Json(user))
-}
-```
-
-## Testing
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validation() {
-        let result = validate("valid@email.com");
-        assert!(result.is_ok());
+// Parallel _all method — preserve input order
+async fn task_all(&self, packages: Vec<Identifier>) -> Result<Vec<Info>, Error> {
+    let mut set = JoinSet::new();
+    for (index, pkg) in packages.iter().enumerate() {
+        let pkg = pkg.clone();
+        set.spawn(async move { (index, self.task(&pkg).await) });
     }
 
-    #[tokio::test]
-    async fn test_async_operation() {
-        let result = fetch_data().await;
-        assert!(result.is_ok());
+    let mut results = Vec::new();
+    while let Some(res) = set.join_next().await {
+        let (index, result) = res?;
+        results.push((index, result));
     }
+    results.sort_by_key(|(i, _)| *i);
+    // ... collect and handle errors
 }
+
+// Progress via tracing (not custom progress bars)
+let span = tracing::info_span!("Installing", package = %pkg);
+set.spawn(async move { task().await }.instrument(span));
+
+// Sequential with entered guard
+for pkg in packages {
+    let _guard = tracing::info_span!("Deselecting", package = %pkg).entered();
+    // ...
+}
+
+// spawn_blocking for CPU-bound work
+let compressed = tokio::task::spawn_blocking(move || {
+    compress_data(&data)
+}).await?;
 ```
 
 ## Tooling
 
 ```bash
-# Format
-cargo fmt
+cargo check                    # Fast check
+cargo fmt                      # Format (max_width=120)
+cargo clippy --workspace       # Lint
+cargo nextest run --workspace  # All tests
 
-# Lint
-cargo clippy -- -D warnings
-
-# Test
-cargo test
-
-# Build release
-cargo build --release
+# Code duplication detection
+duplo crates/ocx_lib/src/ crates/ocx_cli/src/
 ```
+
+## Key Rules
+
+- **No `.unwrap()` in library code** — always `?` or `.expect("documented reason")`
+- **No blocking I/O in async** — use `tokio::fs::*`, `tokio::time::sleep`, `spawn_blocking`
+- **No `MutexGuard` across `.await`** — extract data, drop guard, then await
+- **JoinSet preserves input order** — spawn with index, sort results by index
+- **`ReferenceManager` for symlinks** — never raw `symlink::update/create`
+- **`Printable` trait** — single `print_table()` call, static headers, typed enum statuses
+- **Bounded channels** — never `mpsc::unbounded_channel()` without explicit justification

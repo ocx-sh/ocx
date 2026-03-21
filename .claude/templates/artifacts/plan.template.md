@@ -5,7 +5,7 @@ Implementation Plan
 Filename: artifacts/plan_[task].md
 Owner: Builder (/builder) or Architect (/architect)
 Handoff to: Builder (/builder), QA Engineer (/qa-engineer)
-Related Skills: implementing-code, debugging, testing, test-driven-development
+Related Skills: builder, qa-engineer
 -->
 
 ## Overview
@@ -32,6 +32,12 @@ Related Skills: implementing-code, debugging, testing, test-driven-development
 
 - [Item 1]
 - [Item 2]
+
+## Research
+
+**Research artifact:** [`.claude/artifacts/research_[topic].md`](./research_[topic].md) or N/A
+
+[Summary of technology landscape research. What trending tools, design patterns, or industry signals informed this plan? What alternatives were considered based on current adoption trends?]
 
 ## Technical Approach
 

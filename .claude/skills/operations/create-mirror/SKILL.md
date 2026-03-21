@@ -1,7 +1,6 @@
 ---
 name: create-mirror
 description: Interactive workflow to create a new ocx-mirror configuration by analyzing GitHub Release assets, detecting platforms, and inspecting archive contents to generate mirror YAML, metadata JSON, description README with frontmatter, and logo.
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, WebFetch, AskUserQuestion
 ---
 
 # Create Mirror Configuration

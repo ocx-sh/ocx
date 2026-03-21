@@ -1,270 +1,28 @@
 {
   "permissions": {
     "allow": [
-      "// === Core Claude Tools (Read/Navigation) ===",
       "Read",
       "Glob",
       "Grep",
       "WebSearch",
-
-      "// === Core Claude Tools (Write) ===",
       "Edit",
       "Write",
       "NotebookEdit",
-
-      "// === File System Read Operations ===",
-      "Bash(cat:*)",
-      "Bash(ls:*)",
-      "Bash(head:*)",
-      "Bash(tail:*)",
-      "Bash(wc:*)",
-      "Bash(file:*)",
-      "Bash(stat:*)",
-      "Bash(diff:*)",
-      "Bash(tree:*)",
-      "Bash(find:*)",
-      "Bash(which:*)",
-      "Bash(type:*)",
-      "Bash(pwd:*)",
-      "Bash(xxd:*)",
-      "Bash(realpath:*)",
-      "Bash(dirname:*)",
-      "Bash(basename:*)",
-
-      "// === File System Write Operations ===",
-      "Bash(cp:*)",
-      "Bash(mv:*)",
-      "Bash(touch:*)",
-      "Bash(mkdir:*)",
-      "Bash(chmod:*)",
-
-      "// === Text Processing ===",
-      "Bash(grep:*)",
-      "Bash(sort:*)",
-      "Bash(uniq:*)",
-      "Bash(awk:*)",
-      "Bash(sed:*)",
-      "Bash(tr:*)",
-      "Bash(cut:*)",
-      "Bash(xargs:*)",
-      "Bash(jq:*)",
-      "Bash(yq:*)",
-
-      "// === System Info ===",
-      "Bash(date:*)",
-      "Bash(uname:*)",
-      "Bash(whoami:*)",
-      "Bash(id:*)",
-      "Bash(ps:*)",
-      "Bash(lsof:*)",
-      "Bash(env:*)",
-      "Bash(printenv:*)",
-      "Bash(netstat:*)",
-      "Bash(ss:*)",
-      "Bash(dig:*)",
-      "Bash(whois:*)",
-      "Bash(curl:*)",
-      "Bash(command -v:*)",
-      "Bash(command:*)",
-
-      "// === Git Read Operations ===",
-      "Bash(git status:*)",
-      "Bash(git diff:*)",
-      "Bash(git show:*)",
-      "Bash(git branch:*)",
-      "Bash(git remote:*)",
-      "Bash(git rev-parse:*)",
-      "Bash(git verify-pack:*)",
-      "Bash(git for-each-ref:*)",
-      "Bash(git describe:*)",
-      "Bash(git ls-files:*)",
-      "Bash(git ls-tree:*)",
-      "Bash(git blame:*)",
-      "Bash(git log:*)",
-      "Bash(git grep:*)",
-      "Bash(git check-ignore:*)",
-      "Bash(git config --get:*)",
-      "Bash(git config --list:*)",
-      "Bash(git shortlog:*)",
-      "Bash(git reflog:*)",
-      "Bash(git stash list:*)",
-      "Bash(git tag -l:*)",
-      "Bash(git -C:*)",
-
-      "// === Git Write Operations ===",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git fetch:*)",
-      "Bash(git pull:*)",
-      "Bash(git ls-tree:*)",
-      "Bash(git filter-repo:*)",
-      "Bash(git-filter-repo:*)",
-      "Bash(git checkout:*)",
-      "Bash(git switch:*)",
-      "Bash(git stash:*)",
-      "Bash(git rebase:*)",
-      "Bash(git merge:*)",
-      "Bash(git cherry-pick:*)",
-      "Bash(git tag:*)",
-      "Bash(git restore:*)",
-      "Bash(git mv:*)",
-      "Bash(git branch -d:*)",
-      "Bash(git branch -D:*)",
-      "Bash(git clean -n:*)",
-      "Bash(git cliff:*)",
-      "Bash(git-cliff:*)",
-
-      "// === GitHub CLI Read Operations ===",
-      "Bash(gh issue list:*)",
-      "Bash(gh issue view:*)",
-      "Bash(gh issue status:*)",
-      "Bash(gh pr list:*)",
-      "Bash(gh pr view:*)",
-      "Bash(gh pr diff:*)",
-      "Bash(gh pr checks:*)",
-      "Bash(gh pr status:*)",
-      "Bash(gh workflow view:*)",
-      "Bash(gh workflow list:*)",
-      "Bash(gh run list:*)",
-      "Bash(gh run view:*)",
-      "Bash(gh run watch:*)",
-      "Bash(gh run download:*)",
-      "Bash(gh release list:*)",
-      "Bash(gh release view:*)",
-      "Bash(gh repo view:*)",
-      "Bash(gh repo clone:*)",
-      "Bash(gh secret list:*)",
-      "Bash(gh variable list:*)",
-      "Bash(gh api:*)",
-      "Bash(gh auth status:*)",
-
-      "// === GitHub CLI Write Operations ===",
-      "Bash(gh issue create:*)",
-      "Bash(gh pr create:*)",
-      "Bash(gh pr edit:*)",
-      "Bash(gh pr merge:*)",
-      "Bash(gh release create:*)",
-
-      "// === Docker Operations ===",
-      "Bash(docker ps:*)",
-      "Bash(docker logs:*)",
-      "Bash(docker images:*)",
-      "Bash(docker inspect:*)",
-      "Bash(docker network:*)",
-      "Bash(docker volume:*)",
-      "Bash(docker stats:*)",
-      "Bash(docker top:*)",
-      "Bash(docker history:*)",
-      "Bash(docker compose:*)",
-      "Bash(docker build:*)",
-      "Bash(docker run:*)",
-      "Bash(docker exec:*)",
-
-      "// === Node.js / Package Managers ===",
-      "Bash(node --version:*)",
-      "Bash(node -v:*)",
-      "Bash(node -e:*)",
-      "Bash(npm view:*)",
-      "Bash(npm run:*)",
-      "Bash(npm test:*)",
-      "Bash(pnpm:*)",
-      "Bash(npx:*)",
-      "Bash(bun:*)",
-      "Bash(bunx:*)",
-
-      "// === Build & Quality Tools ===",
-      "Bash(vitest:*)",
-      "Bash(biome:*)",
-      "Bash(tsc:*)",
-      "Bash(vite:*)",
-      "Bash(cargo:*)",
-      "Bash(dist:*)",
-      "Bash(make:*)",
-      "Bash(task:*)",
-      "Bash(shellcheck:*)",
-      "Bash(yamllint:*)",
-      "Bash(hawkeye:*)",
-      "Bash(bash -n:*)",
-      "Bash(test:*)",
-      "Bash(echo:*)",
-      "Bash(#:*)",
-
-      "// === Claude CLI ===",
-      "Bash(claude:*)",
-
-      "// === Scripting ===",
-      "Bash(python3:*)",
-      "Bash(uv:*)",
-      "Bash(bash:*)",
-
-      "// === MCP Tools ===",
       "mcp__context7__resolve-library-id",
       "mcp__context7__query-docs",
       "mcp__sequential-thinking__sequentialthinking",
       "mcp__ide__getDiagnostics",
-      "mcp__ide__executeCode",
-
-      "// === WebFetch: Documentation Sites ===",
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:docs.github.com)",
-      "WebFetch(domain:developer.mozilla.org)",
-      "WebFetch(domain:biomejs.dev)",
-      "WebFetch(domain:zod.dev)",
-      "WebFetch(domain:stackoverflow.com)",
-      "WebFetch(domain:ocx.sh)",
-      
-      "// === WebFetch: WebDev ===",
-      "WebFetch(domain:vitest.dev)",
-      "WebFetch(domain:vitejs.dev)",
-      "WebFetch(domain:tailwindcss.com)",
-      "WebFetch(domain:vuejs.org)",
-      "WebFetch(domain:vitepress.dev)",
-      "WebFetch(domain:react.dev)",
-      "WebFetch(domain:nextjs.org)",
-      "WebFetch(domain:typescriptlang.org)",
-      "WebFetch(domain:reka-ui.com)",
-      "WebFetch(domain:npmjs.com)",
-      
-      "// === WebFetch: General Tooling ===",
-      "WebFetch(domain:nodejs.org)",
-      "WebFetch(domain:npmjs.com)",
-      "WebFetch(domain:taskfile.dev)",
-      "WebFetch(domain:docs.astral.sh)",
-      "WebFetch(domain:jfrog.com)",
-      "WebFetch(domain:docs.jfrog-applications.jfrog.io)",
-
-      "// === WebFetch: General Rust ===",
-      "WebFetch(domain:crates.io)",
-      "WebFetch(domain:docs.rs)",
-      
-      "// === WebFetch: Docker & OCI ===",
-      "WebFetch(domain:oras.land)",
-      "WebFetch(domain:opencontainers.org)",
-      "WebFetch(domain:specs.opencontainers.org)",
-      "WebFetch(domain:docker.com)",
-      "WebFetch(domain:docs.docker.com)",
-      
-      "// === WebFetch: Cargo Dist ===",
-      "WebFetch(domain:axodotdev.github.io)",
-      "WebFetch(domain:opensource.axo.dev)",
-
-      "// === WebFetch: Anthropic/Claude ===",
-      "WebFetch(domain:anthropic.com)",
-      "WebFetch(domain:docs.anthropic.com)",
-      "WebFetch(domain:code.claude.com)",
-      "WebFetch(domain:modelcontextprotocol.io)",
-
-      "// === WebFetch: Cloud Providers ===",
-      "WebFetch(domain:cloudflare.com)",
-      "WebFetch(domain:developers.cloudflare.com)",
-      "WebFetch(domain:docs.aws.amazon.com)"
+      "mcp__ide__executeCode"
     ],
     "deny": [
       "// === Destructive File Operations ===",
       "Bash(rm -rf:*)",
       "Bash(rm -r:*)",
       "Bash(sudo:*)",
+
+      "// === Network: Force WebFetch for web access (prompt injection containment) ===",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
 
       "// === Git Destructive Operations ===",
       "Bash(git push:*)",
@@ -285,6 +43,9 @@
       "Bash(chmod 777:*)"
     ]
   },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
   "enableAllProjectMcpServers": true,
   "hooks": {
     "UserPromptSubmit": [
@@ -292,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-activation-prompt.sh",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill_activation_prompt.py\"",
             "timeout": 5
           }
         ]
@@ -304,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-loader.sh",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_loader.py\"",
             "timeout": 10
           }
         ]
@@ -316,7 +77,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-use-validator.sh",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tool_use_validator.py\"",
             "timeout": 5
           }
         ]
@@ -326,12 +87,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre-commit-verification.sh",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_commit_verification.py\"",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre-push-main-blocker.sh",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_push_main_blocker.py\"",
             "timeout": 5
           }
         ]
@@ -343,7 +104,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-use-tracker.sh",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/post_tool_use_tracker.py\"",
             "timeout": 5
           }
         ]
@@ -354,7 +115,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/stop-validator.sh",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_validator.py\"",
             "timeout": 10
           }
         ]
@@ -365,7 +126,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-stop-validator.sh",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/subagent_stop_validator.py\"",
             "timeout": 5
           }
         ]

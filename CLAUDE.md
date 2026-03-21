@@ -8,65 +8,61 @@ OCX is a Rust-based package manager that uses OCI registries (Docker Hub, GHCR, 
 
 ## Build & Development Commands
 
-**Task runner**: [`task`](https://taskfile.dev) (Taskfile v3) is the primary task runner.
+**Task runner**: [`task`](https://taskfile.dev) (Taskfile v3) is the primary task runner. **Always check available tasks with `task --list` before inventing ad-hoc commands.** Taskfiles exist at root (`taskfile.yml`), `test/taskfile.yml`, `website/taskfile.yml`, and `taskfiles/*.taskfile.yml` (included from root).
 
+**Key workflows:**
 ```sh
-cargo check                    # fast check (also: `task`)
-cargo build                    # debug build
-cargo build --release -p ocx      # release CLI binary
-cargo fmt                      # format (max_width=120, see rustfmt.toml)
-cargo clippy --workspace       # lint
+task                           # fast check (format + clippy + cargo check)
+task verify                    # full quality gate (fmt, clippy, lint, license, build, unit tests, acceptance tests)
+task checkpoint                # save progress (amends into single "Checkpoint" commit)
+task build                     # release binary
+task test                      # build + registry + all acceptance tests
+task test:quick                # skip binary rebuild
+task test:parallel             # pytest-xdist (-n auto)
+task coverage                  # LLVM coverage report
+task coverage:open             # open HTML report in browser
+task website:serve             # VitePress dev server
+task website:build             # full website build (schema + recordings + sbom + catalog + vitepress)
 ```
 
-**Rust tests** (cargo-nextest is used in CI):
+**Cargo commands** (when you need finer control):
 ```sh
-cargo nextest run --workspace                    # all tests
+cargo check                    # fast check
+cargo build --release -p ocx   # release CLI binary
+cargo fmt                      # format (max_width=120, see rustfmt.toml)
+cargo clippy --workspace       # lint
+cargo nextest run --workspace  # all unit tests
 cargo nextest run -p ocx_lib <test_name>         # single test by name
 cargo test -p ocx_lib -- <test_name> --nocapture # with output
 ```
 
-**Acceptance tests** (Python/pytest, requires Docker for registry:2):
+**Single acceptance test:**
 ```sh
-task test              # build binary + start registry + run all pytest tests
-task test:quick        # skip binary rebuild
-task test:parallel     # run with pytest-xdist (-n auto)
-
-# Single test:
 cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v --no-build
 ```
 
-**Coverage**: `task coverage` (cargo-llvm-cov), `task coverage:open` to view HTML report.
-
-**Verification**: `task verify` runs format check, clippy, build, unit tests, and acceptance tests. **Always run `task verify` after completing an implementation** to confirm nothing is broken.
-
-**Before committing**: Always run `cargo fmt` before creating a commit to ensure code is properly formatted.
+**Always run `task verify` after completing an implementation.** Always run `cargo fmt` before committing.
 
 ## Architecture
 
-**Workspace layout**: Two crates — `crates/ocx_lib` (core library) and `crates/ocx_cli` (thin CLI shell using clap, package name `ocx`). Rust edition 2024, resolver v3.
+**Workspace layout**: Four crates — `crates/ocx_lib` (core library), `crates/ocx_cli` (thin CLI shell, package name `ocx`), `crates/ocx_mirror` (mirror tool), `crates/ocx_schema` (JSON schema generation, build-only). Rust edition 2024, resolver v3.
 
 **Patched dependency**: `oci-client` is patched to a local git submodule at `external/rust-oci-client`.
 
-**Key subsystems in `ocx_lib`**:
+**Subsystem context**: Each major subsystem has a detailed context rule in `.claude/rules/subsystem-*.md` that loads automatically when working on matching files:
 
-- **`file_structure`** — Content-addressed local storage layout under `~/.ocx` (configurable via `OCX_HOME`). Composed of `ObjectStore`, `IndexStore`, `InstallStore`, `TempStore`. All OCI identifier components are slugified via `to_relaxed_slug()` before becoming filesystem paths.
-- **`oci`** — OCI registry client, digest types, platform matching, identifiers. `index/` contains `RemoteIndex` (in-memory cached), `LocalIndex` (filesystem-backed), and the public `Index` wrapper with `select()` returning `SelectResult` enum.
-- **`package_manager`** — Facade over `FileStructure` + `Index` + `Client`. Task methods in `package_manager/tasks/` (find, install, uninstall, select, deselect, find_or_install). Three-layer error model: `Error` → `PackageError` → `PackageErrorKind`. All package-specific errors flow through `PackageErrorKind`.
-- **`reference_manager`** — Manages install symlinks + back-references for GC. Always use `ReferenceManager` for install symlinks (not raw `symlink::update`).
+| Subsystem | Rule | Scope |
+|-----------|------|-------|
+| OCI registry/index | `subsystem-oci.md` | `crates/ocx_lib/src/oci/**` |
+| Storage/symlinks | `subsystem-file-structure.md` | `crates/ocx_lib/src/file_structure/**` |
+| Package metadata | `subsystem-package.md` | `crates/ocx_lib/src/package/**` |
+| Package manager | `subsystem-package-manager.md` | `crates/ocx_lib/src/package_manager/**` |
+| CLI commands/API | `subsystem-cli.md` | `crates/ocx_cli/src/**` |
+| Mirror tool | `subsystem-mirror.md` | `crates/ocx_mirror/**` |
+| Acceptance tests | `subsystem-tests.md` | `test/**` |
+| Website/docs | `subsystem-website.md` | `website/**` |
 
-**CLI layer** (`ocx_cli`):
-- `app/context.rs` — `Context` struct: holds `FileStructure`, `Index`, `PackageManager`, `Api`, OCI client. Created once per command invocation.
-- `command/` — One file per CLI subcommand. Commands call `context.manager()` methods and build report data from task return values (never from raw CLI args alone).
-- `api/` — Output formatting (JSON vs plain text) via `context.api().report_*()`. Each `api/data/` type implements `Reportable` with a single `print_table` call. See @.claude/rules/cli-api-patterns.md for the full contract.
-
-**CLI command reference**: For any task involving CLI commands, user workflows, flags, or command behavior, see @.claude/rules/cli-commands.md.
-
-**Patterns**:
-- Commands use `context.manager().find_or_install_all(...)` with auto-install on `PackageNotFound` (unless offline).
-- Environment resolution: `env::Env::clean()` + `metadata_env.resolve_into_env(content_path, &mut env)`.
-- Progress reporting: `tracing` `info_span!` + `tracing-indicatif` `IndicatifLayer`. No custom progress abstraction.
-- Error handling: `ocx_lib::Error` with `Error::InternalFile(path, e)` for file errors.
-- Async runtime: tokio with `#[tokio::main]`, `JoinSet` for parallel tasks.
+**Read the relevant subsystem rule before working on code in that area.**
 
 ## Environment Variables
 
@@ -82,26 +78,18 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 
 ## Acceptance Test Structure
 
-Tests live in `test/` using pytest + Docker Compose (registry:2 on localhost:5000). Test isolation via UUID-prefixed repo names and isolated `OCX_HOME` per test (`tmp_path`). Binary build and registry startup happen in `pytest_sessionstart`. Key fixtures: `ocx` (runner), `published_package`, `published_two_versions`, `unique_repo`.
+Tests live in `test/` using pytest + Docker Compose (registry:2 on localhost:5000). See `subsystem-tests.md` for full fixture reference and patterns.
 
-## Documentation (website/src/docs/)
+## Deep Context
 
-The `website/` directory contains a VitePress docs site. Key pages for understanding the product design:
-
-- **[user-guide.md](website/src/docs/user-guide.md)** — The primary conceptual document. Covers:
-  - **Three-store architecture**: `objects/` (immutable, content-addressed binaries — analogous to Nix store/Git objects), `index/` (local snapshot of registry metadata for offline/reproducibility), `installs/` (stable symlinks: `candidates/{tag}` for pinned versions, `current` as a floating pointer set by `ocx select`).
-  - **Path resolution modes**: default (object store, auto-installs), `--candidate` (symlink, no auto-install), `--current` (symlink, no auto-install).
-  - **Versioning**: semver-inspired tag hierarchy (build-tagged → rolling patch → minor → major → latest), cascading pushes via `--cascade`, OCI multi-platform manifests for cross-arch.
-  - **Locking strategy**: digest references for absolute reproducibility; local index snapshot as implicit lock; bundled index inside GitHub Actions/Bazel rules as a two-level lock.
-  - **Authentication**: layered approach — `OCX_AUTH_<REGISTRY>_*` env vars checked first, then Docker credentials (`~/.docker/config.json`).
-- **[faq.md](website/src/docs/faq.md)** — Platform-specific behavior: macOS ad-hoc code signing (auto-applied to Mach-O binaries after extraction), Windows executable resolution via `PATHEXT`.
-- **[reference/command-line.md](website/src/docs/reference/command-line.md)** — Full CLI command reference with all flags and options.
-- **[reference/environment.md](website/src/docs/reference/environment.md)** — Complete environment variable reference including auth vars and truthy value parsing.
+- `.claude/references/project-identity.md` — Product vision, positioning, competitive analysis, use cases (on-demand)
+- `.claude/rules/architecture-principles.md` — Design principles, glossary, ADR index (auto-loads on Rust files)
+- `website/src/docs/user-guide.md` — Primary conceptual doc: three-store architecture, versioning, locking, auth
 
 
 ## Core Principles
 
-These seven principles distill every rule, skill, and standard in this framework. Follow them and everything else follows.
+These eight principles distill every rule, skill, and standard in this framework. Follow them and everything else follows.
 
 ### 1. Understand First
 
@@ -131,19 +119,24 @@ Work on a branch, never main. Commit iteratively. **Never push to remote** — t
 
 Planning artifacts go in `./.claude/artifacts/`. Document architectural decisions in ADRs. Name things so the next person understands.
 
+### 8. Learn and Adapt
+
+When receiving user feedback or corrections, evaluate whether the insight should also be persisted as an AI config update (rules, skills, agents) — not just a memory. Patterns, conventions, and quality standards belong in the config so they apply systematically.
+
 ## Tech Stack
 
 @.claude/rules/tech-strategy.md
 
 ## Workflow
 
-**Worktrees**: Three git worktrees with fixed branch names:
+**Worktrees**: Four git worktrees with fixed branch names:
 
 | Directory | Branch |
 |-----------|--------|
 | `ocx` | `goat` |
 | `ocx-evelynn` | `evelynn` |
 | `ocx-sion` | `sion` |
+| `ocx-soraka` | `soraka` |
 
 **Commits**: Use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). Scopes are optional. Do not add `Co-Authored-By` trailers to commit messages. Use `chore:` for changes to AI settings, skills, CLAUDE.md, and other tooling files that should not appear in the changelog.
 
@@ -171,16 +164,17 @@ Planning artifacts go in `./.claude/artifacts/`. Document architectural decision
 | Plan | `plan_[task].md` | `plan_api_refactor.md` |
 | Security Audit | `security_audit_[date].md` | `security_audit_2025-01.md` |
 
-## Personas
+## Personas (Skills)
 
-| Command | Role | Use |
-|---------|------|-----|
-| `/architect` | Principal Architect | System design, ADRs |
-| `/builder` | Software Engineer | Implementation, debugging, testing |
-| `/qa-engineer` | QA Engineer | Test strategy, E2E, accessibility |
-| `/security-auditor` | Security Auditor | Threat modeling, audits |
-| `/ui-ux-designer` | UI/UX Designer | Interface design, a11y |
-| `/code-check` | Codebase Auditor | SOLID, DRY, consistency audits |
+Persona skills in `.claude/skills/personas/` provide specialized roles with OCX domain knowledge:
+
+| Skill | Role | Use |
+|-------|------|-----|
+| `/architect` | Principal Architect | System design, ADRs, where features land |
+| `/builder` | Software Engineer | Implementation, debugging, testing, refactoring |
+| `/qa-engineer` | QA Engineer | Test strategy, unit + acceptance tests |
+| `/security-auditor` | Security Auditor | Threat modeling, STRIDE analysis |
+| `/code-check` | Codebase Auditor | SOLID, DRY, OCX pattern compliance |
 | `/swarm-plan` | Planning Orchestrator | Parallel exploration, decomposition |
 | `/swarm-execute` | Execution Orchestrator | Parallel workers, quality gates |
 | `/swarm-review` | Adversarial Reviewer | Multi-perspective code review |
@@ -188,3 +182,7 @@ Planning artifacts go in `./.claude/artifacts/`. Document architectural decision
 ## Skills
 
 Check `.claude/skills/` before ad-hoc generation. Skills are auto-suggested based on context via `.claude/skills/skill-rules.json`.
+
+## Feature Development
+
+See `.claude/rules/feature-workflow.md` for the full workflow: swarm (primary) and agent teams (experimental).

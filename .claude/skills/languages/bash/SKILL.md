@@ -1,10 +1,15 @@
 ---
 name: bash
-description: Write Bash scripts following best practices. Use when creating shell scripts, automation, or CLI tools. Covers safe scripting patterns.
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep
+description: Write Bash scripts following best practices. Use when creating shell scripts, automation, or CLI tools. Covers safe scripting patterns and design principles.
 ---
 
 # Bash Scripting
+
+Universal design principles (SOLID, DRY, YAGNI) from `.claude/rules/code-quality.md` apply to scripts too:
+- **SRP**: One script per task. Split complex scripts into focused functions.
+- **DRY**: Extract repeated logic into functions. Source shared functions from a common library file.
+- **YAGNI**: Don't add flags/options until they're needed. Don't abstract a one-off script into a "framework."
+- **Block anti-patterns**: Unquoted variables, missing `set -euo pipefail`, hardcoded paths/credentials.
 
 ## Script Template
 
@@ -134,4 +139,5 @@ done < <(command)
 3. Use `local` in functions
 4. Use `readonly` for constants
 5. Always use `set -euo pipefail`
-6. Use shellcheck for linting
+6. Use shellcheck for linting, shfmt for formatting (`shfmt -i 4 -ci`)
+7. Run `task lint:shell` and `task lint:shell:format:check` before committing

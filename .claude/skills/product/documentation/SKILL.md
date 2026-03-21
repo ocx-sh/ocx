@@ -1,7 +1,6 @@
 ---
 name: documentation
-description: Write OCX documentation (user guide, reference pages, website content). Applies OCX-specific narrative structure, linking conventions, and VitePress component patterns.
-allowed-tools: Read, Write, Edit, Glob, Grep, WebSearch, WebFetch
+description: Write OCX documentation (user guide, reference pages, website content). Applies OCX-specific narrative structure, linking conventions, and VitePress component patterns. See subsystem-website.md for full VitePress architecture.
 ---
 
 # OCX Documentation
@@ -219,6 +218,14 @@ Animated terminal session using asciinema-player. Two modes: inline `<Frame>` ta
 
 Multiple frames with the same `at` value appear simultaneously (multi-line output).
 
+## Website Build
+
+Use `task` commands for website workflows — run `task --list` to discover all available tasks:
+- `task website:serve` — VitePress dev server (localhost:5173)
+- `task website:build` — full build (generates schema, recordings, SBOM, catalog, then VitePress)
+
+**Never edit generated content** (catalog pages, dependencies.md, .cast files, schema JSON) — they are overwritten by the build pipeline. See `subsystem-website.md` for the generated content pipeline.
+
 ## Before Writing
 
 1. Read the relevant source code — do not document from memory
@@ -226,3 +233,4 @@ Multiple frames with the same `at` value appear simultaneously (multi-line outpu
 3. Identify the problem the feature solves before writing the solution
 4. Verify internal links point to sections that exist and have content
 5. Check that every external tool or project mentioned has a hyperlink
+6. Read `subsystem-website.md` for VitePress config, component APIs, and styling patterns

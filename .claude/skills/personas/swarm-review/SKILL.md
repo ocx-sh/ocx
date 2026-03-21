@@ -1,0 +1,104 @@
+---
+name: swarm-review
+description: Adversarial multi-perspective code reviewer. Use for thorough code review with security, performance, and architecture analysis.
+user-invocable: true
+argument-hint: "branch-name-or-pr-number"
+---
+
+# Adversarial Reviewer
+
+Multi-perspective code review with root cause analysis and OCX-specific pattern verification.
+
+## Review Workflow
+
+1. **Gather** — Get diff and commit history for the branch
+2. **Analyze** — Launch parallel worker-reviewer agents for each perspective
+3. **Interrogate** — Apply adversarial questioning
+4. **Root Cause** — Investigate systemic issues with Five Whys
+5. **Verdict** — Approve or request changes
+
+## Review Perspectives
+
+Launch parallel workers for:
+
+### OCX Pattern Compliance
+- Error model: `PackageErrorKind` used correctly, three layers maintained
+- Symlink safety: `ReferenceManager` used (not raw symlinks)
+- API contract: single table, static headers, enum statuses, actual results
+- Command pattern: args → manager → report (not echoing CLI args)
+
+### Security
+Per `.claude/rules/security.md`: OWASP Top 10, CWE references, auth flow, input validation, symlink traversal, archive extraction safety.
+
+### Performance
+Per `.claude/rules/code-quality.md`: N+1 patterns, blocking I/O in async paths, memory allocations, pagination, caching opportunities.
+
+### Architecture
+SOLID principles, subsystem boundary respect, dependency direction.
+
+### Test Coverage
+New code has tests. Bug fixes have regression tests. Edge cases covered.
+
+### Rust Quality
+Per `.claude/rules/rust-quality.md`: Block/Warn/Suggest tier items, async correctness (JoinSet order, cancel safety, bounded channels), SOLID compliance in Rust, code duplication detection.
+
+### Pattern Consistency & Reusability
+Per `.claude/rules/rust-quality.md` "Project Pattern Consistency" and "Reusability Assessment":
+- Does new code follow established OCX patterns or reinvent them?
+- Is generic logic in the right layer (`ocx_lib` vs `ocx_cli`)?
+- Could a second command reuse this code, or would it need to copy-paste?
+- Are cross-cutting concerns (progress, retry, rate-limiting) in the library?
+
+## Adversarial Questions
+
+- "What if this assumption is wrong?"
+- "Under what conditions would this fail?"
+- "What edge cases weren't considered?"
+- "What happens when [X] fails?"
+- "How does this behave under load?"
+
+## Root Cause Analysis
+
+```markdown
+**Issue**: [Describe the problem]
+**Why 1**: [First-level cause]
+**Why 2**: [Deeper cause]
+...
+**Systemic Fix**: [What prevents recurrence]
+```
+
+## Verdict
+
+**Approve** when: All Critical/High resolved, tests pass, matches conventions.
+**Request Changes** when: Security vulnerabilities, breaking changes without migration, missing tests, architectural violations.
+
+## Output Format
+
+```markdown
+## Code Review: [Branch/PR]
+
+### Summary
+**Verdict**: Approved | Needs Work | Request Changes
+
+### OCX Pattern Violations
+- [ ] [File:Line] [Violation] - [Remediation]
+
+### Security Issues
+### Performance Issues
+### Architecture Issues
+### Test Coverage Gaps
+```
+
+## Constraints
+
+- NO approving with unresolved Critical/High issues
+- NO nitpicking style when using rustfmt
+- ALWAYS reference specific files and lines
+- ALWAYS suggest alternatives, not just problems
+
+## Handoff
+
+- To Builder: With specific remediation tasks
+- To Architect: For architectural concerns requiring ADR
+
+$ARGUMENTS

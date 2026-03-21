@@ -1,17 +1,51 @@
 ---
 name: typescript
-description: Write TypeScript code following best practices. Use when developing TypeScript/JavaScript applications. Covers type safety, patterns, and tooling.
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep
+description: Write TypeScript code following best practices. Use when developing TypeScript/JavaScript applications. Covers design principles, type safety, patterns, and tooling.
 ---
 
 # TypeScript Development
 
+Universal design principles (SOLID, DRY, YAGNI) are defined in `.claude/rules/code-quality.md`. This section covers **TypeScript-specific applications**.
+
+## Design Principles in TypeScript
+
+### SOLID
+- **SRP**: One class/module per concern. Prefer small, focused modules over large barrel files.
+- **OCP**: Use discriminated unions and exhaustive `switch` with `never` default to ensure new variants are handled at compile time.
+- **LSP**: Every interface implementation must honor the contract — no `throw new Error("not implemented")` in methods callers expect to work.
+- **ISP**: Define narrow interfaces. Accept `readonly T[]` not `T[]` when not mutating. Use `Pick<T, K>` to narrow parameter types.
+- **DIP**: Depend on interfaces/type aliases, inject implementations via constructor or factory functions.
+
+### DRY
+- **Generics** (`<T>`): zero-cost DRY — same algorithm over multiple types
+- **Discriminated unions**: encode valid states as types, reducing runtime checks
+- **Utility types** (`Pick`, `Omit`, `Partial`, `Required`): derive types from existing ones instead of duplicating
+- **Don't DRY test code** — explicit assertions are clearer than clever test utilities
+
+### YAGNI
+- Don't create interfaces until a second implementation exists — start with the concrete type
+- Don't add generic type parameters until the function is called with a second type
+- Don't create wrapper classes around native types unless enforcing invariants (use branded types instead)
+- Don't add `any` "for flexibility" — use `unknown` and narrow with type guards
+
+## Anti-Patterns (TypeScript-Specific)
+
+### Block
+- **`any` type** — breaks type safety. Use `unknown` with type narrowing, or specific types.
+- **Non-null assertion (`!`)** without justification — hides potential runtime errors. Use optional chaining or explicit checks.
+- **`eval()` or `Function()` constructor** — injection risk. Always find a typed alternative.
+
+### Warn
+- **`as` type assertions** over type guards — assertions skip runtime checks. Prefer `is` type predicates or discriminated unions.
+- **Index signatures** (`[key: string]: T`) where a `Record<K, T>` or explicit interface would prevent typos
+- **Implicit `any` from untyped imports** — add `@types/*` or declare module types
+
 ## Project Setup
 
 ```bash
-# Initialize with pnpm
-pnpm init
-pnpm add -D typescript @types/node
+# Initialize with bun
+bun init
+bun add -D typescript @types/node
 
 # TypeScript config
 npx tsc --init
@@ -124,10 +158,10 @@ describe('UserService', () => {
 
 ```bash
 # Biome (linting + formatting)
-pnpm add -D @biomejs/biome
-pnpm biome check --apply .
+bun add -D @biomejs/biome
+bun biome check --apply .
 
 # Vitest (testing)
-pnpm add -D vitest
-pnpm vitest
+bun add -D vitest
+bun vitest
 ```

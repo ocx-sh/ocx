@@ -13,9 +13,11 @@ Rules for efficient multi-agent swarm execution.
 
 | Worker | Model | Tools | Use |
 |--------|-------|-------|-----|
+| `worker-architecture-explorer` | sonnet | Read, Glob, Grep | Architecture discovery |
 | `worker-explorer` | haiku | Read, Glob, Grep | Fast codebase search |
-| `worker-builder` | sonnet | Read, Write, Edit, Bash, Glob, Grep | Implementation/testing/refactoring |
-| `worker-reviewer` | sonnet | Read, Glob, Grep, Bash | Code review/security analysis |
+| `worker-builder` | opus | Read, Write, Edit, Bash, Glob, Grep | Implementation/testing/refactoring |
+| `worker-tester` | sonnet | Read, Write, Edit, Bash, Glob, Grep | Test writing and validation |
+| `worker-reviewer` | opus | Read, Glob, Grep, Bash | Code review/security analysis |
 | `worker-researcher` | sonnet | Read, Glob, Grep, WebFetch, WebSearch | External research |
 | `worker-architect` | opus | Read, Write, Edit, Glob, Grep | Complex design decisions |
 
@@ -62,7 +64,7 @@ worker-builder fixes critical/high issues
 
 1. **Orchestrator** decomposes task into clear assignments
 2. **Workers** pick up assigned tasks and begin execution
-3. **Workers** complete task following AGENTS.md "Landing the Plane" workflow
+3. **Workers** complete task following AGENTS.md "Session Completion" workflow
 4. **Workers** report completion to orchestrator
 5. **Orchestrator** integrates and verifies
 
@@ -71,7 +73,7 @@ worker-builder fixes critical/high issues
 When a worker completes its assigned task, it MUST follow the full completion protocol from AGENTS.md:
 
 1. File issues for remaining work
-2. Run quality gates (if code changed)
+2. Run quality gates via `task verify` (if code changed) — run `task --list` to discover available commands
 3. **Commit all changes** on the feature branch
 4. Report completion to orchestrator
 

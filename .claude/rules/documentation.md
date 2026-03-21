@@ -1,3 +1,8 @@
+---
+paths:
+  - website/**
+---
+
 # Documentation Instructions
 
 Guidelines distilled from review feedback on the OCX user guide. Apply these to any new documentation page.
@@ -138,12 +143,14 @@ Collect all link definitions at the **bottom of the file**, grouped with comment
 
 ## Vue Components Available
 
-All components are globally registered — use directly in `.md` files without imports. See the `documentation` skill for full props reference and usage examples.
+All components are globally registered — use directly in `.md` files without imports. See `subsystem-website.md` for full props reference, usage examples, and the VNode introspection pattern.
 
 - `<Tooltip term="label">popup text</Tooltip>` — inline term with hover popup
 - `<Tree>` / `<Node>` / `<Description>` — collapsible filesystem trees with annotations
 - `<Steps>` / `<Step>` / `<Description>` — vertical progress indicator with detail panels
 - `<Terminal>` / `<Frame>` — animated terminal sessions (inline frames or `.cast` files)
+- `<PackageCatalog>` / `<PackageDetail>` — rendered from generated catalog data
+- `<DependencyExplorer>` — SBOM viewer (rendered from generated dependency data)
 - VitePress `::: code-group` — tabbed code blocks for showing alternatives side-by-side
 - VitePress `::: info | tip | warning | details` — callout boxes
 

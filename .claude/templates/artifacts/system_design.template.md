@@ -5,7 +5,7 @@ System Design Document (Technical Architecture)
 Filename: artifacts/system_design_[system].md
 Owner: Architect (/architect)
 Handoff to: Builder (/builder), Security Auditor (/security-auditor)
-Related Skills: designing-systems, designing-apis, cloud-native-patterns, domain-driven-design
+Related Skills: architect
 
 This document covers TECHNICAL architecture. For UI/visual design, use design_spec.template.md
 Uses C4 model for architecture visualization (Context → Container → Component → Code)

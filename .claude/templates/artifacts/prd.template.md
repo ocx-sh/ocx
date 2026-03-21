@@ -4,7 +4,7 @@
 Product Requirements Document
 Filename: artifacts/prd_[feature].md
 Owner: Architect (/architect)
-Handoff to: Architect (/architect), UI/UX Designer (/ui-ux-designer)
+Handoff to: Architect (/architect)
 Related Skills: writing-prds, decomposing-tasks, requirements-analysis
 -->
 
@@ -144,8 +144,8 @@ After PRD approval:
    - Trigger: `/architect`
    - Output: ADR (`artifacts/adr_[topic].md`)
 
-2. [ ] **UI/UX Designer**: Visual design and wireframes
-   - Trigger: `/ui-ux-designer`
+2. [ ] **Design Spec**: Visual design and wireframes
+   - Trigger: `/architect`
    - Output: Design Spec (`artifacts/design_spec_[component].md`)
 
 3. [ ] **Engineering Estimate**: Effort estimation and decomposition

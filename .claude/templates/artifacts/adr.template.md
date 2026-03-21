@@ -5,7 +5,7 @@ Architecture Decision Record
 Filename: artifacts/adr_NNNN_[topic].md (e.g., adr_0001_database_choice.md)
 Owner: Architect (/architect)
 Handoff to: Builder (/builder), Security Auditor (/security-auditor)
-Related Skills: designing-systems, designing-apis, domain-driven-design, cloud-native-patterns, writing-adrs
+Related Skills: architect
 
 Format: Based on MADR (Markdown Any Decision Records) - https://adr.github.io/madr/
 Best Practices:
@@ -39,6 +39,14 @@ Best Practices:
 - [Driver 2: e.g., team expertise]
 - [Driver 3: e.g., time constraints]
 - [Driver 4: e.g., cost considerations]
+
+## Industry Context & Research
+
+[Summary of technology landscape research conducted before this decision. Include trending alternatives, adoption signals, and design patterns considered. Reference research artifacts if available.]
+
+**Research artifact:** [`.claude/artifacts/research_[topic].md`](./research_[topic].md) or N/A
+**Trending approaches:** [What the industry is moving toward]
+**Key insight:** [Most important finding that influenced this decision]
 
 ## Considered Options
 

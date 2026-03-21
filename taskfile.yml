@@ -113,12 +113,18 @@ tasks:
     cmds:
       - cargo deny check licenses
 
+  lint:ai-config:
+    desc: Validate AI configuration structural integrity
+    dir: .claude/tests
+    cmd: uv run pytest test_ai_config.py -v
+
   verify:
-    desc: Run all checks (fmt, clippy, build, unit tests, acceptance tests)
+    desc: Run all checks (fmt, clippy, lint, license, build, unit tests, acceptance tests)
     cmds:
       - task: format:check
       - task: clippy:check
       - task: lint:shell
+      - task: lint:ai-config
       - task: license:check
       - task: license:deps
       - task: build

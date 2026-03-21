@@ -11,24 +11,24 @@ description: Vite 7.x build tool patterns. Use when configuring build setup, dev
 
 Build tool and development server patterns for Vite 7.x. Provides instant server start, lightning-fast HMR, optimized production builds, and extensive plugin ecosystem with first-class TypeScript support.
 
-**Install**: `pnpm add -D vite`
+**Install**: `bun add -D vite`
 
 ## Workflows
 
 **Initial setup:**
 1. [ ] Create `vite.config.ts` with TypeScript types
-2. [ ] Install React plugin: `pnpm add -D @vitejs/plugin-react`
+2. [ ] Install React plugin: `bun add -D @vitejs/plugin-react`
 3. [ ] Configure path aliases for clean imports
 4. [ ] Set up environment variables with `.env` files
-5. [ ] Test dev server: `pnpm vite`
+5. [ ] Test dev server: `bun vite`
 
 **Production optimization:**
 1. [ ] Configure build output directory and asset handling
 2. [ ] Set up code splitting and chunk optimization
 3. [ ] Enable build compression (gzip/brotli)
 4. [ ] Configure minification options
-5. [ ] Run production build: `pnpm vite build`
-6. [ ] Preview build locally: `pnpm vite preview`
+5. [ ] Run production build: `bun vite build`
+6. [ ] Preview build locally: `bun vite preview`
 
 ## Basic Configuration
 
@@ -357,7 +357,7 @@ export default defineConfig({
 import { defineConfig } from 'vite';
 import { compression } from 'vite-plugin-compression2';
 
-// Install: pnpm add -D vite-plugin-compression2
+// Install: bun add -D vite-plugin-compression2
 export default defineConfig({
   plugins: [
     // Gzip compression
@@ -553,13 +553,13 @@ export default defineConfig({
 **Commands:**
 ```bash
 # Build for production
-pnpm vite build
+bun vite build
 
 # Preview production build locally
-pnpm vite preview
+bun vite preview
 
 # Preview on specific port
-pnpm vite preview --port 8080
+bun vite preview --port 8080
 ```
 
 ## Vite 7 Notes
@@ -703,7 +703,7 @@ export default defineConfig(({ mode }) => {
 **Build analysis:**
 ```bash
 # Analyze bundle size
-pnpm vite build --mode production
+bun vite build --mode production
 
 # Output shows chunk sizes
 # dist/js/vendor-react-abc123.js  142.34 kB
@@ -713,7 +713,7 @@ pnpm vite build --mode production
 **Preview testing:**
 ```bash
 # Always preview before deploying
-pnpm vite build && pnpm vite preview
+bun vite build && bun vite preview
 
 # Test:
 # - All routes work

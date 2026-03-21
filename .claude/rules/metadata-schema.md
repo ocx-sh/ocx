@@ -1,3 +1,10 @@
+---
+paths:
+  - crates/ocx_lib/src/package/metadata/**
+  - crates/ocx_schema/**
+  - website/src/docs/reference/metadata.md
+---
+
 # Metadata Schema
 
 The `metadata.json` format is defined by Rust types in `crates/ocx_lib/src/package/metadata/` and documented at `website/src/docs/reference/metadata.md`. A JSON Schema is generated from these types by the `ocx_schema` crate.

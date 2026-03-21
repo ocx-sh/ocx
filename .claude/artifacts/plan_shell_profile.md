@@ -5,7 +5,7 @@ Implementation Plan
 Filename: artifacts/plan_shell_profile.md
 Owner: Architect
 Handoff to: Builder (/builder), QA Engineer (/qa-engineer)
-Related Skills: implementing-code, ci-workflows, typescript, bash
+Related Skills: builder, ci-workflows, typescript, bash
 -->
 
 ## Overview
@@ -195,7 +195,7 @@ The env file is static — no regeneration needed on profile changes. Only `prof
 
 - [ ] **Step 3.1:** Create profile list report type
   - Files: `crates/ocx_cli/src/api/data/profile.rs` (new)
-  - Details: `ProfileStatus` enum (`Active`/`Broken`), `ProfileListEntry` (identifier, mode, status, path), `ProfileList` with `Reportable` impl. Table: "Package | Mode | Status | Path".
+  - Details: `ProfileStatus` enum (`Active`/`Broken`), `ProfileListEntry` (identifier, mode, status, path), `ProfileList` with `Printable` impl. Table: "Package | Mode | Status | Path".
 
 - [ ] **Step 3.2:** Register report type
   - Files: `crates/ocx_cli/src/api/data.rs`, `crates/ocx_cli/src/api.rs`

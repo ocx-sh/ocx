@@ -1,3 +1,9 @@
+---
+paths:
+  - crates/ocx_cli/src/api/**
+  - crates/ocx_cli/src/command/**
+---
+
 # CLI API Data Layer Patterns
 
 Standards for the `ocx_cli` API reporting layer (`api/data/`, `api.rs`). These rules ensure consistent output formatting across all commands.
@@ -15,14 +21,14 @@ Every file in `api/data/` must follow this structure:
    /// JSON format: shape description (array of objects, keyed object, etc.).
    ```
 2. **`new()` constructor** (or named constructors for polymorphic types like `without_tags` / `with_tags`)
-3. **`Reportable` impl** with a single `print_table` call — no conditional empty-checks, no multiple tables
+3. **`Printable` impl** with a single `print_table` call — no conditional empty-checks, no multiple tables
 4. **Static `&str` headers** in `print_table` — never use `format!()` for dynamic headers; add data columns instead
 
 Reference implementations: `api/data/paths.rs`, `api/data/env.rs`.
 
 ## Single-Table Rule
 
-Each `Reportable::print_plain()` implementation must produce exactly one table. If a report has multiple dimensions (e.g., type + path, or status + content), encode them as columns — not as separate tables with dynamic headers.
+Each `Printable::print_plain()` implementation must produce exactly one table. If a report has multiple dimensions (e.g., type + path, or status + content), encode them as columns — not as separate tables with dynamic headers.
 
 **Wrong:**
 ```rust
@@ -69,7 +75,7 @@ pub enum RemovedStatus {
 
 ## Adding a New Report Type
 
-1. Create `api/data/{name}.rs` with struct + doc comments + `Reportable` impl
+1. Create `api/data/{name}.rs` with struct + doc comments + `Printable` impl
 2. Add `pub mod {name};` to `api/data.rs`
 3. Add `report_{name}()` method to `Api` in `api.rs` (delegates to `self.report()`)
 4. Call from `command/{name}.rs` with data built from task results

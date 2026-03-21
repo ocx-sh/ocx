@@ -4,8 +4,37 @@ version: '3'
 
 tasks:
   shell:
+    desc: Lint and format-check shell scripts (shellcheck + shfmt)
+    cmds:
+      - task: shell:lint
+      - task: shell:format:check
+
+  shell:lint:
     desc: Lint shell scripts with shellcheck
+    preconditions:
+      - sh: '[ -n "$(git ls-files "*.sh")" ]'
+        msg: No shell scripts found, skipping shellcheck
     cmd: ocx exec ocx.sh/shellcheck:0.11 -- shellcheck {{.CLI_ARGS}} {{.SCRIPTS}}
+    vars:
+      SCRIPTS:
+        sh: git ls-files '*.sh' | tr '\n' ' '
+
+  shell:format:
+    desc: Format shell scripts with shfmt
+    preconditions:
+      - sh: '[ -n "$(git ls-files "*.sh")" ]'
+        msg: No shell scripts found, skipping shfmt
+    cmd: ocx exec ocx.sh/shfmt:3 -- shfmt -w -i 4 -ci {{.CLI_ARGS}} {{.SCRIPTS}}
+    vars:
+      SCRIPTS:
+        sh: git ls-files '*.sh' | tr '\n' ' '
+
+  shell:format:check:
+    desc: Check shell script formatting with shfmt
+    preconditions:
+      - sh: '[ -n "$(git ls-files "*.sh")" ]'
+        msg: No shell scripts found, skipping shfmt
+    cmd: ocx exec ocx.sh/shfmt:3 -- shfmt -d -i 4 -ci {{.CLI_ARGS}} {{.SCRIPTS}}
     vars:
       SCRIPTS:
         sh: git ls-files '*.sh' | tr '\n' ' '

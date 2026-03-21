@@ -1,10 +1,43 @@
 ---
 name: python
-description: Write Python code following best practices. Use when developing Python applications. Covers type hints, async, and modern tooling.
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep
+description: Write Python code following best practices. Use when developing Python applications. Covers design principles, type hints, async, and modern tooling.
 ---
 
 # Python Development
+
+Universal design principles (SOLID, DRY, YAGNI) are defined in `.claude/rules/code-quality.md`. This section covers **Python-specific applications**.
+
+## Design Principles in Python
+
+### SOLID
+- **SRP**: One class per concern. Split large classes into focused modules — use composition over inheritance.
+- **OCP**: Use `Protocol` (structural subtyping) or ABC to define extension points. Add new behavior via new implementations, not by modifying existing functions.
+- **LSP**: Every `Protocol`/ABC implementation must honor the documented contract — no `NotImplementedError` in methods that callers expect to work.
+- **ISP**: Define narrow `Protocol` classes. Accept `Iterable[T]` not `list[T]` when only iterating. Accept `Sequence[T]` not `MutableSequence[T]` when not mutating.
+- **DIP**: Type-hint against protocols/ABCs, inject implementations via constructor parameters.
+
+### DRY
+- **Protocols**: zero-cost DRY via structural typing — same interface for multiple implementations
+- **Decorators**: eliminate cross-cutting boilerplate (logging, retry, timing)
+- **`dataclasses`/`attrs`**: reduce boilerplate for data types
+- **Don't DRY test code** — explicit assertions are clearer than clever fixtures
+
+### YAGNI
+- Don't create ABCs/Protocols until a second implementation exists
+- Don't add `**kwargs` "for future flexibility" — explicit parameters are safer
+- Don't write custom metaclasses when a decorator suffices
+
+## Anti-Patterns (Python-Specific)
+
+### Block
+- **Bare `except:`** — always catch specific exceptions. `except Exception:` at minimum.
+- **Mutable default arguments** — `def f(items=[])` shares state across calls. Use `None` sentinel.
+- **`assert` for validation** — stripped with `-O`. Use `if`/`raise` for runtime checks.
+
+### Warn
+- **`type: ignore` without code** — use `type: ignore[specific-error]` to avoid masking real issues
+- **Wildcard imports** (`from module import *`) — pollutes namespace, breaks tooling
+- **Stringly-typed dicts** where `TypedDict`, `dataclass`, or `NamedTuple` would provide type safety
 
 ## Project Setup
 

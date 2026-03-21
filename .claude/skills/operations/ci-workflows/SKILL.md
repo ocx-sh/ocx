@@ -1,7 +1,6 @@
 ---
 name: ci-workflows
 description: Design, review, and optimize GitHub Actions CI/CD workflows. Use when creating, modifying, or auditing CI pipelines. Covers workflow structure, cost analysis, security, quality gates, and task runner integration.
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch
 ---
 
 # CI/CD Workflow Engineering

@@ -1,3 +1,14 @@
+---
+paths:
+  - dist-workspace.toml
+  - cliff.toml
+  - CHANGELOG.md
+  - .github/workflows/release.yml
+  - .github/workflows/verify-version.yml
+  - .github/workflows/post-release-oci-publish.yml
+  - .github/workflows/test-install-scripts.yml
+---
+
 # Release Implementation Notes
 
 Implementation guidance for the release and install strategy (ADR: `adr_release_install_strategy.md`). Read this when working on any release infrastructure, install scripts, versioning, or changelog tasks.
@@ -19,9 +30,9 @@ To modify the release workflow:
 
 Key config fields in `dist-workspace.toml`:
 - `plan-jobs` — reusable workflows to run during the plan phase (e.g., `["./verify-version"]`)
-- `post-announce-jobs` — reusable workflows to run after release announcement (e.g., `["./publish-to-registry"]`)
+- `post-announce-jobs` — reusable workflows to run after release announcement (e.g., `["./post-release-oci-publish"]`)
 
-The reusable workflows themselves (e.g., `verify-version.yml`, `publish-to-registry.yml`) are hand-written and can be edited directly — only `release.yml` is generated.
+The reusable workflows themselves (e.g., `verify-version.yml`, `post-release-oci-publish.yml`) are hand-written and can be edited directly — only `release.yml` is generated.
 
 ### Version Source of Truth
 
@@ -86,7 +97,7 @@ Currently `version.rs` calls `env!("CARGO_PKG_VERSION")` directly. The update ch
 ## Cross-References
 
 - **Documentation rules**: See `.claude/rules/documentation.md` for website page writing guidelines (narrative structure, headers, real-world examples, link syntax)
-- **CI workflow patterns**: See `.claude/rules/ci-workflows.md` (if it exists) or follow existing patterns in `.github/workflows/`
+- **CI workflow patterns**: See `.claude/skills/operations/ci-workflows/SKILL.md` or follow existing patterns in `.github/workflows/`
 - **CLI API patterns**: See `.claude/rules/cli-api-patterns.md` for any new report types
 - **CLI commands reference**: See `.claude/rules/cli-commands.md` — update when adding new behavior
 - **Environment variables**: See `website/src/docs/reference/environment.md` for the canonical env var docs
