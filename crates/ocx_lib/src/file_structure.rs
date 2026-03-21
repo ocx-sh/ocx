@@ -99,6 +99,8 @@ pub(crate) fn repository_path(repository: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]

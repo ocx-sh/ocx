@@ -9,7 +9,6 @@ use zip::write::SimpleFileOptions;
 
 use crate::{Result, compression};
 
-#[cfg(feature = "progress")]
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use super::backend::Backend;
@@ -177,7 +176,6 @@ fn add_dir_recursive(
             tracing::debug!("Bundled {} entries", *count);
         }
 
-        #[cfg(feature = "progress")]
         tracing::Span::current().pb_inc(1);
     }
     Ok(())

@@ -14,7 +14,7 @@ default = []
 jsonschema = ["dep:schemars"]
 
 [dependencies]
-ocx_lib = { workspace = true, features = ["progress"] }
+ocx_lib = { workspace = true }
 tokio = { workspace = true }
 
 clap = { version = "4", features = ["derive"] }

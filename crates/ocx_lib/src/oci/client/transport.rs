@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -9,6 +10,14 @@ use super::error::ClientError;
 use crate::oci;
 
 pub type Result<T> = std::result::Result<T, ClientError>;
+
+/// Progress callback for transfer operations.
+pub type ProgressFn = Arc<dyn Fn(u64) + Send + Sync>;
+
+/// Returns a no-op progress callback for callers that don't need progress.
+pub fn no_progress() -> ProgressFn {
+    Arc::new(|_| {})
+}
 
 /// Low-level OCI registry transport operations.
 ///
@@ -60,7 +69,19 @@ pub trait OciTransport: Send + Sync {
     ) -> Result<(Vec<u8>, String)>;
 
     /// Pulls a blob and writes it to the specified file path.
-    async fn pull_blob_to_file(&self, image: &oci::native::Reference, digest: &str, path: &Path) -> Result<()>;
+    ///
+    /// The output file is wrapped in a
+    /// [`ProgressWriter`](super::progress_writer::ProgressWriter) that calls
+    /// `on_progress` after each write. Pass [`no_progress()`] and `total_size = 0`
+    /// when progress reporting is not needed.
+    async fn pull_blob_to_file(
+        &self,
+        image: &oci::native::Reference,
+        digest: &str,
+        path: &Path,
+        total_size: u64,
+        on_progress: ProgressFn,
+    ) -> Result<()>;
 
     // ── Write operations ─────────────────────────────────────────────
 
@@ -77,7 +98,17 @@ pub trait OciTransport: Send + Sync {
     ) -> Result<String>;
 
     /// Pushes in-memory blob data. Returns the resulting digest string.
-    async fn push_blob(&self, image: &oci::native::Reference, data: Vec<u8>, digest: &str) -> Result<String>;
+    ///
+    /// When `on_progress` is provided, the implementation streams data in
+    /// chunks and calls `on_progress` after each chunk is uploaded.
+    /// Pass [`no_progress()`] when progress reporting is not needed.
+    async fn push_blob(
+        &self,
+        image: &oci::native::Reference,
+        data: Vec<u8>,
+        digest: &str,
+        on_progress: ProgressFn,
+    ) -> Result<String>;
 
     // ── Clone support ────────────────────────────────────────────────
 

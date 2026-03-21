@@ -24,7 +24,8 @@ impl PackageManager {
         package: &oci::Identifier,
         profile: &ProfileSnapshot,
     ) -> Result<Option<PathBuf>, PackageErrorKind> {
-        let _span = info_span!("Deselecting", package = %package).entered();
+        let _span =
+            crate::cli::progress::spinner_span(info_span!("Deselecting", package = %package), package).entered();
         log::debug!("Deselecting package '{}'.", package);
 
         if package.digest().is_some() {

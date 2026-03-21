@@ -3,9 +3,6 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "progress")]
-use tracing_indicatif::span_ext::IndicatifSpanExt;
-
 use crate::{Result, archive, compression, utility};
 
 /// Builds a compressed tar archive from a file or directory tree.
@@ -63,17 +60,15 @@ impl BundleBuilder {
 
         let mut archive = archive::Archive::create_with_compression(&temp_path, self.compression).await?;
         if self.source.is_dir() {
-            let bundling_span = tracing::info_span!("Bundling");
-
-            #[cfg(feature = "progress")]
-            {
-                if let Ok(count) = count_entries(&self.source) {
-                    bundling_span.pb_set_length(count);
-                    bundling_span.pb_set_style(&crate::cli::progress::bar_style("files"));
+            let bar = match count_entries(&self.source) {
+                Ok(count) => crate::cli::progress::ProgressBar::files(tracing::info_span!("Bundling"), count),
+                Err(e) => {
+                    tracing::debug!("Could not count entries: {e}");
+                    crate::cli::progress::ProgressBar::from(tracing::info_span!("Bundling"))
                 }
-            }
+            };
 
-            let _guard = bundling_span.entered();
+            let _guard = bar.enter();
             archive.add_dir_all("", &self.source).await?;
         } else {
             let name = self.source.file_name().unwrap_or(self.source.as_os_str());
@@ -91,14 +86,12 @@ impl BundleBuilder {
     }
 }
 
-#[cfg(feature = "progress")]
 fn count_entries(dir: &Path) -> std::io::Result<u64> {
     let mut count = 0u64;
     count_entries_recursive(dir, &mut count)?;
     Ok(count)
 }
 
-#[cfg(feature = "progress")]
 fn count_entries_recursive(dir: &Path, count: &mut u64) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;

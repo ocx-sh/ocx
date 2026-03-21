@@ -104,7 +104,10 @@ impl PackageManager {
         if packages.len() == 1 {
             let info = self
                 .install(&packages[0], platforms, candidate, select)
-                .instrument(info_span!("Installing", package = %packages[0]))
+                .instrument(crate::cli::progress::spinner_span(
+                    info_span!("Installing", package = %packages[0]),
+                    &packages[0],
+                ))
                 .await
                 .map_err(|kind| {
                     package_manager::error::Error::InstallFailed(vec![PackageError::new(packages[0].clone(), kind)])
@@ -117,7 +120,7 @@ impl PackageManager {
             let mgr = self.clone();
             let package = package.clone();
             let platforms = platforms.clone();
-            let span = info_span!("Installing", package = %package);
+            let span = crate::cli::progress::spinner_span(info_span!("Installing", package = %package), &package);
             tasks.spawn(
                 async move {
                     let result = mgr.install(&package, platforms, candidate, select).await;

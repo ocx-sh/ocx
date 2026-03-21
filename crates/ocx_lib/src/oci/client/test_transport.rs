@@ -195,6 +195,8 @@ impl OciTransport for StubTransport {
         _image: &oci::native::Reference,
         digest: &str,
         path: &std::path::Path,
+        total_size: u64,
+        on_progress: super::transport::ProgressFn,
     ) -> Result<()> {
         self.record(&format!("pull_blob_to_file:{}", digest));
         let inner = self.data.read();
@@ -205,6 +207,8 @@ impl OciTransport for StubTransport {
                 std::fs::create_dir_all(parent).map_err(|e| ClientError::Io(parent.to_path_buf(), e))?;
             }
             std::fs::write(path, &blob).map_err(|e| ClientError::Io(path.to_path_buf(), e))?;
+            // Simulate progress: report total_size or blob length.
+            on_progress(if total_size > 0 { total_size } else { blob.len() as u64 });
         }
         Ok(())
     }
@@ -236,8 +240,16 @@ impl OciTransport for StubTransport {
         }
     }
 
-    async fn push_blob(&self, _image: &oci::native::Reference, _data: Vec<u8>, digest: &str) -> Result<String> {
+    async fn push_blob(
+        &self,
+        _image: &oci::native::Reference,
+        data: Vec<u8>,
+        digest: &str,
+        on_progress: super::transport::ProgressFn,
+    ) -> Result<String> {
         self.record(&format!("push_blob:{}", digest));
+        // Simulate progress: report full size in one shot.
+        on_progress(data.len() as u64);
         self.next_push_result()
     }
 

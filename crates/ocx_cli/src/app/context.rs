@@ -26,8 +26,9 @@ pub struct Context {
 
 impl Context {
     pub async fn try_init(options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<Context> {
-        let style = ocx_lib::cli::indicatif::ProgressStyle::with_template("{span_child_prefix}{spinner} {span_name}")
-            .expect("valid indicatif template");
+        let style =
+            ocx_lib::cli::indicatif::ProgressStyle::with_template("{span_child_prefix}{spinner} {span_name}{msg}")
+                .expect("valid indicatif template");
 
         ocx_lib::cli::LogSettings::default()
             .with_console_level(options.log_level)

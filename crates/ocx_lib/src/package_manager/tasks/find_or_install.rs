@@ -48,7 +48,10 @@ impl PackageManager {
         if packages.len() == 1 {
             let info = self
                 .find_or_install(&packages[0], platforms)
-                .instrument(info_span!("Resolving", package = %packages[0]))
+                .instrument(crate::cli::progress::spinner_span(
+                    info_span!("Resolving", package = %packages[0]),
+                    &packages[0],
+                ))
                 .await
                 .map_err(|kind| {
                     package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
@@ -63,7 +66,7 @@ impl PackageManager {
             let pkg = package.clone();
             let plat = platforms.clone();
 
-            let span = info_span!("Resolving", package = %pkg);
+            let span = crate::cli::progress::spinner_span(info_span!("Resolving", package = %pkg), &pkg);
             tasks.spawn(
                 async move {
                     let result = mgr.find_or_install(&pkg, plat).await;

@@ -11,11 +11,14 @@ use crate::{
     utility,
 };
 
+use tracing::Instrument;
+
 use super::{Digest, Identifier, native};
 
 mod builder;
 pub mod error;
 pub(crate) mod native_transport;
+mod progress_writer;
 #[cfg(test)]
 pub(crate) mod test_transport;
 mod transport;
@@ -316,12 +319,32 @@ impl Client {
             expected_digest,
             temp_path.display()
         );
+        // Config blob — tiny (<1kB), no progress needed.
         self.transport
-            .pull_blob_to_file(&image, &manifest.config.digest, &metadata_path)
+            .pull_blob_to_file(
+                &image,
+                &manifest.config.digest,
+                &metadata_path,
+                0,
+                transport::no_progress(),
+            )
             .await?;
-        self.transport
-            .pull_blob_to_file(&image, &blob_layer.digest, &blob_path)
-            .await?;
+
+        // Package blob — potentially large, show progress.
+        let blob_total_size = u64::try_from(blob_layer.size).unwrap_or(0);
+        let bar = crate::cli::progress::ProgressBar::bytes(
+            tracing::info_span!("Downloading", package = %identifier),
+            blob_total_size,
+            identifier,
+        );
+        let on_progress = bar.callback();
+
+        {
+            let _guard = bar.enter();
+            self.transport
+                .pull_blob_to_file(&image, &blob_layer.digest, &blob_path, blob_total_size, on_progress)
+                .await?;
+        }
 
         let metadata = metadata::Metadata::read_json_from_path(&metadata_path)
             .map_err(|e| ClientError::Serialization(e.to_string()))?;
@@ -353,13 +376,23 @@ impl Client {
                     identifier,
                     temp_content_path.display()
                 );
+
+                let extract_span = crate::cli::progress::spinner_span(
+                    tracing::info_span!("Extracting", package = %identifier),
+                    identifier,
+                );
+
                 let extract_options = archive::ExtractOptions {
                     algorithm: Some(download.blob_compression),
                     strip_components: bundle.strip_components.unwrap_or(0).into(),
                 };
-                archive::Archive::extract_with_options(&blob_path, &temp_content_path, Some(extract_options))
-                    .await
-                    .map_err(|e| ClientError::Io(blob_path.clone(), std::io::Error::other(e.to_string())))?;
+                async {
+                    archive::Archive::extract_with_options(&blob_path, &temp_content_path, Some(extract_options))
+                        .await
+                        .map_err(|e| ClientError::Io(blob_path.clone(), std::io::Error::other(e.to_string())))
+                }
+                .instrument(extract_span)
+                .await?;
             }
         }
 
@@ -443,14 +476,31 @@ impl Client {
         let package_digest = Digest::sha256(&package_data).to_string();
 
         log::trace!("Calculated package digest: {}", package_digest);
-        self.transport.push_blob(&image, package_data, &package_digest).await?;
 
+        // Package blob — potentially large, show progress.
+        {
+            let bar = crate::cli::progress::ProgressBar::bytes(
+                tracing::info_span!("Uploading", package = %package_info.identifier),
+                package_data_len as u64,
+                &package_info.identifier,
+            );
+            let on_progress = bar.callback();
+
+            let _guard = bar.enter();
+            self.transport
+                .push_blob(&image, package_data, &package_digest, on_progress)
+                .await?;
+        }
+
+        // Config blob — tiny, no progress needed.
         let config_data =
             serde_json::to_vec(&package_info.metadata).map_err(|e| ClientError::Serialization(e.to_string()))?;
         let config_data_len = config_data.len();
         let config_sha256 = Digest::sha256(&config_data).to_string();
         log::trace!("Calculated config digest: {}", config_sha256);
-        self.transport.push_blob(&image, config_data, &config_sha256).await?;
+        self.transport
+            .push_blob(&image, config_data, &config_sha256, transport::no_progress())
+            .await?;
 
         let manifest = oci::ImageManifest {
             media_type: Some(MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string()),
@@ -531,14 +581,16 @@ impl Client {
         // Push empty config blob.
         let config_data = b"{}".to_vec();
         let config_digest = Digest::sha256(&config_data).to_string();
-        self.transport.push_blob(&image, config_data, &config_digest).await?;
+        self.transport
+            .push_blob(&image, config_data, &config_digest, transport::no_progress())
+            .await?;
 
         // Push README blob.
         let readme_bytes = description.readme.as_bytes();
         let readme_len = readme_bytes.len();
         let readme_digest = Digest::sha256(readme_bytes).to_string();
         self.transport
-            .push_blob(&image, readme_bytes.to_vec(), &readme_digest)
+            .push_blob(&image, readme_bytes.to_vec(), &readme_digest, transport::no_progress())
             .await?;
 
         let mut layers = vec![oci::Descriptor {
@@ -554,7 +606,7 @@ impl Client {
             let logo_len = logo.data.len();
             let logo_digest = Digest::sha256(&logo.data).to_string();
             self.transport
-                .push_blob(&image, logo.data.clone(), &logo_digest)
+                .push_blob(&image, logo.data.clone(), &logo_digest, transport::no_progress())
                 .await?;
 
             let ext = match logo.media_type {
@@ -650,7 +702,7 @@ impl Client {
         for (i, layer) in image_manifest.layers.iter().enumerate() {
             let blob_path = temp_dir.join(format!("layer_{i}"));
             self.transport
-                .pull_blob_to_file(&image, &layer.digest, &blob_path)
+                .pull_blob_to_file(&image, &layer.digest, &blob_path, 0, transport::no_progress())
                 .await?;
 
             match layer.media_type.as_str() {

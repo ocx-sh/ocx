@@ -37,7 +37,8 @@ impl PackageManager {
         purge: bool,
         profile: &ProfileSnapshot,
     ) -> Result<Option<UninstallResult>, PackageErrorKind> {
-        let _span = info_span!("Uninstalling", package = %package).entered();
+        let _span =
+            crate::cli::progress::spinner_span(info_span!("Uninstalling", package = %package), package).entered();
         log::debug!("Uninstalling package '{}'.", package);
 
         if package.digest().is_some() {

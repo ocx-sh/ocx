@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::Result;
 
-#[cfg(feature = "progress")]
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use super::backend::Backend;
@@ -123,7 +122,6 @@ fn add_dir_recursive(
             tracing::debug!("Bundled {} entries", *count);
         }
 
-        #[cfg(feature = "progress")]
         tracing::Span::current().pb_inc(1);
     }
     Ok(())

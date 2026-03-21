@@ -168,10 +168,17 @@ impl Archive {
         let archive = archive.as_ref().to_path_buf();
         let output = output.as_ref().to_path_buf();
 
+        // Capture the current span so it propagates into spawn_blocking,
+        // allowing `pb_inc(1)` inside extract to update the progress bar.
+        let span = tracing::Span::current();
+
         if is_zip(&archive) {
-            return tokio::task::spawn_blocking(move || zip::extract(&archive, &output, options.strip_components))
-                .await
-                .map_err(|e| error::Error::Internal(e.to_string()))?;
+            return tokio::task::spawn_blocking(move || {
+                let _guard = span.entered();
+                zip::extract(&archive, &output, options.strip_components)
+            })
+            .await
+            .map_err(|e| error::Error::Internal(e.to_string()))?;
         }
 
         let algorithm = options
@@ -184,9 +191,12 @@ impl Archive {
             Box::new(std::fs::File::open(&archive).map_err(|e| error::Error::Io(archive.clone(), e))?)
         };
 
-        tokio::task::spawn_blocking(move || tar::extract(reader, &output, options.strip_components))
-            .await
-            .map_err(|e| error::Error::Internal(e.to_string()))?
+        tokio::task::spawn_blocking(move || {
+            let _guard = span.entered();
+            tar::extract(reader, &output, options.strip_components)
+        })
+        .await
+        .map_err(|e| error::Error::Internal(e.to_string()))?
     }
 
     pub async fn add_file(&mut self, archive_path: impl AsRef<Path>, file: impl AsRef<Path>) -> Result<()> {

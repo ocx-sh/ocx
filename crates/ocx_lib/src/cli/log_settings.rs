@@ -90,7 +90,6 @@ impl LogSettings {
     ///
     /// The `style` parameter sets the default progress style for spans (only used
     /// when progress is enabled).
-    #[cfg(feature = "progress")]
     pub fn init_progress(
         self,
         style: indicatif::ProgressStyle,
@@ -107,7 +106,6 @@ impl LogSettings {
     ///
     /// Unconditionally adds the indicatif layer. Prefer [`init_progress`](Self::init_progress)
     /// which auto-detects whether stderr is a TTY.
-    #[cfg(feature = "progress")]
     fn init_with_indicatif(
         self,
         style: indicatif::ProgressStyle,
