@@ -77,10 +77,44 @@ pub fn default_ocx_root() -> Option<std::path::PathBuf> {
     std::env::home_dir().map(|home| home.join(".ocx"))
 }
 
+use std::path::PathBuf;
+
 use crate::prelude::StringExt;
 
 /// Convert an OCI identifier component (registry, repository, tag) into a
 /// filesystem-safe path segment using [`StringExt::to_relaxed_slug`].
 pub(crate) fn slugify(value: &str) -> String {
     value.to_relaxed_slug()
+}
+
+/// Converts an OCI repository name into a relative path with OS-native separators.
+///
+/// Repository names can contain `/` for nested repos (e.g. `org/project/tool`).
+/// Each segment becomes a separate path component, ensuring native separators
+/// on all platforms — `PathBuf::join("a/b")` embeds the literal `/` which
+/// produces mixed separators on Windows.
+pub(crate) fn repository_path(repository: &str) -> PathBuf {
+    repository.split('/').collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repository_path_single_segment() {
+        assert_eq!(repository_path("cmake"), Path::new("cmake"));
+    }
+
+    #[test]
+    fn repository_path_two_segments() {
+        let expected = Path::new("org").join("cmake");
+        assert_eq!(repository_path("org/cmake"), expected);
+    }
+
+    #[test]
+    fn repository_path_three_segments() {
+        let expected = Path::new("a").join("b").join("c");
+        assert_eq!(repository_path("a/b/c"), expected);
+    }
 }

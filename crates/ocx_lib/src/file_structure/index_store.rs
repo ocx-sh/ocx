@@ -40,7 +40,7 @@ impl IndexStore {
         self.root
             .join(super::slugify(identifier.registry()))
             .join("tags")
-            .join(identifier.repository())
+            .join(super::repository_path(identifier.repository()))
             .with_added_extension("json")
     }
 
@@ -78,19 +78,38 @@ impl IndexStore {
         if !tags_dir.exists() {
             return Ok(Vec::new());
         }
-        let entries = std::fs::read_dir(&tags_dir).map_err(|e| crate::error::file_error(&tags_dir, e))?;
         let mut repos = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| crate::error::file_error(&tags_dir, e))?;
-            let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false)
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            {
-                repos.push(stem.to_string());
-            }
-        }
+        Self::walk_tag_files(&tags_dir, &tags_dir, &mut repos)?;
         repos.sort();
         Ok(repos)
+    }
+
+    /// Recursively walks `dir` collecting `.json` tag files and reconstructing
+    /// repository names from their path relative to `tags_root`.
+    ///
+    /// Repository names may contain `/` (e.g. `org/sub/pkg`), which maps to
+    /// nested directories under `tags/`. The original name is reconstructed by
+    /// joining path components with `/`.
+    fn walk_tag_files(tags_root: &Path, dir: &Path, repos: &mut Vec<String>) -> Result<()> {
+        let entries = std::fs::read_dir(dir).map_err(|e| crate::error::file_error(dir, e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| crate::error::file_error(dir, e))?;
+            let path = entry.path();
+            if path.is_dir() {
+                Self::walk_tag_files(tags_root, &path, repos)?;
+            } else if path.extension().map(|e| e == "json").unwrap_or(false) {
+                let stem_path = path.with_extension("");
+                if let Ok(relative) = stem_path.strip_prefix(tags_root) {
+                    let repo_name = relative
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    repos.push(repo_name);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Converts a digest to a sharded path component.
@@ -129,6 +148,20 @@ mod tests {
         let store = IndexStore::new("/index");
         let p = store.tags(&id());
         assert_eq!(p, PathBuf::from("/index/example.com/tags/cmake.json"));
+    }
+
+    #[test]
+    fn tags_path_nested_repo() {
+        let store = IndexStore::new("/index");
+        let id = oci::Identifier::new_registry("org/sub/pkg", "example.com").clone_with_tag("1.0");
+        let p = store.tags(&id);
+        let expected = Path::new("/index")
+            .join("example.com")
+            .join("tags")
+            .join("org")
+            .join("sub")
+            .join("pkg.json");
+        assert_eq!(p, expected);
     }
 
     #[test]
@@ -186,6 +219,37 @@ mod tests {
         let store = IndexStore::new(dir.path());
         let repos = store.list_repositories("example.com").unwrap();
         assert_eq!(repos, vec!["clang", "cmake", "zlib"]);
+    }
+
+    #[test]
+    fn list_repositories_finds_nested_repos() {
+        let dir = tempfile::tempdir().unwrap();
+        let tags_dir = dir.path().join("example.com/tags");
+        // Flat repo
+        std::fs::create_dir_all(&tags_dir).unwrap();
+        std::fs::write(tags_dir.join("cmake.json"), b"{}").unwrap();
+        // Nested repo: org/sub/pkg
+        let nested = tags_dir.join("org").join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("pkg.json"), b"{}").unwrap();
+
+        let store = IndexStore::new(dir.path());
+        let repos = store.list_repositories("example.com").unwrap();
+        assert_eq!(repos, vec!["cmake", "org/sub/pkg"]);
+    }
+
+    #[test]
+    fn list_repositories_ignores_non_json_in_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let tags_dir = dir.path().join("example.com/tags");
+        let nested = tags_dir.join("org");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("tool.json"), b"{}").unwrap();
+        std::fs::write(nested.join("README.txt"), b"ignore").unwrap();
+
+        let store = IndexStore::new(dir.path());
+        let repos = store.list_repositories("example.com").unwrap();
+        assert_eq!(repos, vec!["org/tool"]);
     }
 
     #[test]

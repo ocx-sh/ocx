@@ -45,7 +45,7 @@ impl InstallStore {
     fn base(&self, identifier: &oci::Identifier) -> PathBuf {
         self.root
             .join(super::slugify(identifier.registry()))
-            .join(identifier.repository())
+            .join(super::repository_path(identifier.repository()))
     }
 
     /// Returns the `current` symlink path for the given identifier.
@@ -79,6 +79,10 @@ mod tests {
 
     fn id_with_tag() -> oci::Identifier {
         oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28")
+    }
+
+    fn id_nested_with_tag() -> oci::Identifier {
+        oci::Identifier::new_registry("org/sub/pkg", "example.com").clone_with_tag("1.0")
     }
 
     fn id_no_tag() -> oci::Identifier {
@@ -124,6 +128,35 @@ mod tests {
     }
 
     // ── symlink dispatch ──────────────────────────────────────────────────────
+
+    // ── nested repository ─────────────────────────────────────────────────
+
+    #[test]
+    fn current_path_nested_repo() {
+        let store = InstallStore::new("/installs");
+        let expected = PathBuf::from("/installs")
+            .join("example.com")
+            .join("org")
+            .join("sub")
+            .join("pkg")
+            .join("current");
+        assert_eq!(store.current(&id_nested_with_tag()), expected);
+    }
+
+    #[test]
+    fn candidate_path_nested_repo() {
+        let store = InstallStore::new("/installs");
+        let expected = PathBuf::from("/installs")
+            .join("example.com")
+            .join("org")
+            .join("sub")
+            .join("pkg")
+            .join("candidates")
+            .join("1.0");
+        assert_eq!(store.candidate(&id_nested_with_tag()), expected);
+    }
+
+    // ── symlink dispatch ──────────────────────────────────────────────────
 
     #[test]
     fn symlink_candidate_returns_candidate_path() {

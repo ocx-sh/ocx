@@ -96,7 +96,7 @@ impl ObjectStore {
         Ok(self
             .root
             .join(super::slugify(identifier.registry()))
-            .join(identifier.repository())
+            .join(super::repository_path(identifier.repository()))
             .join(Self::digest_path(&digest)))
     }
 
@@ -205,6 +205,10 @@ mod tests {
         oci::Identifier::new_registry("cmake", "example.com").clone_with_digest(digest())
     }
 
+    fn id_nested_repo_with_digest() -> oci::Identifier {
+        oci::Identifier::new_registry("org/sub/pkg", "example.com").clone_with_digest(digest())
+    }
+
     fn id_tag_only() -> oci::Identifier {
         oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28")
     }
@@ -218,6 +222,22 @@ mod tests {
         let expected = Path::new("/store")
             .join("example.com")
             .join("cmake")
+            .join("sha256")
+            .join("43567c07")
+            .join("f1a6b07b")
+            .join("5e8dc052108c9d4c");
+        assert_eq!(p, expected);
+    }
+
+    #[test]
+    fn path_sharding_nested_repo() {
+        let store = ObjectStore::new("/store");
+        let p = store.path(&id_nested_repo_with_digest()).unwrap();
+        let expected = Path::new("/store")
+            .join("example.com")
+            .join("org")
+            .join("sub")
+            .join("pkg")
             .join("sha256")
             .join("43567c07")
             .join("f1a6b07b")
