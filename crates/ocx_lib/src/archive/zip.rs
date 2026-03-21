@@ -9,8 +9,13 @@ use zip::write::SimpleFileOptions;
 
 use crate::{Result, compression};
 
+#[cfg(feature = "progress")]
+use tracing_indicatif::span_ext::IndicatifSpanExt;
+
 use super::backend::Backend;
 use super::error::Error;
+
+use crate::cli::progress::LOG_INTERVAL;
 
 /// Object-safe trait combining `Write`, `Seek`, and `Send` (required by `ZipWriter`).
 pub(super) trait WriteSeek: Write + Seek + Send {}
@@ -91,8 +96,15 @@ impl Backend for ZipBackend {
 
     async fn add_dir_all(&mut self, archive_path: PathBuf, dir: PathBuf) -> Result<()> {
         let options = self.options;
-        self.run_blocking(move |writer| add_dir_recursive(writer, options, &archive_path, &dir))
-            .await
+        let span = tracing::Span::current();
+        self.run_blocking(move |writer| {
+            let _guard = span.entered();
+            let mut count = 0u64;
+            add_dir_recursive(writer, options, &archive_path, &dir, &mut count)?;
+            tracing::debug!("Bundled {count} entries total");
+            Ok(())
+        })
+        .await
     }
 
     async fn finish(self: Box<Self>) -> Result<()> {
@@ -116,6 +128,7 @@ fn add_dir_recursive(
     options: SimpleFileOptions,
     base_path: &Path,
     dir: &Path,
+    count: &mut u64,
 ) -> Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| Error::Io(dir.to_path_buf(), e))?
@@ -148,7 +161,7 @@ fn add_dir_recursive(
                 format!("{dir_name}/")
             };
             writer.add_directory(dir_name, options).map_err(Error::Zip)?;
-            add_dir_recursive(writer, options, &archive_path, &entry.path())?;
+            add_dir_recursive(writer, options, &archive_path, &entry.path(), count)?;
         } else {
             let file_path = entry.path();
             let file_name = path_to_zip_name(&archive_path);
@@ -157,6 +170,15 @@ fn add_dir_recursive(
             let mut source = std::fs::File::open(&file_path).map_err(|e| Error::Io(file_path.clone(), e))?;
             std::io::copy(&mut source, writer).map_err(|e| Error::Io(file_path, e))?;
         }
+
+        *count += 1;
+        tracing::trace!("Adding {}", archive_path.display());
+        if (*count).is_multiple_of(LOG_INTERVAL) {
+            tracing::debug!("Bundled {} entries", *count);
+        }
+
+        #[cfg(feature = "progress")]
+        tracing::Span::current().pb_inc(1);
     }
     Ok(())
 }

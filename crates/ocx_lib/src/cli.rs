@@ -19,6 +19,7 @@ pub use options::{ColorMode, ColorModeConfig, ProgressMode};
 pub use printer::Printer;
 pub use styles::clap_styles;
 
+pub mod progress;
 #[cfg(feature = "progress")]
 pub use indicatif;
 #[cfg(feature = "progress")]
