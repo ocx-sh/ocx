@@ -4,7 +4,10 @@
 use crate::{env, log, oci, prelude::*};
 
 mod auth_type;
+pub mod error;
+
 pub use auth_type::AuthType;
+pub use error::AuthError;
 
 #[derive(Clone)]
 pub struct Auth {
@@ -98,7 +101,7 @@ fn get_docker_auth(registry: impl AsRef<str>) -> Result<Option<oci::native::Auth
         }
         Err(error) => {
             log::warn!("Failed to retrieve Docker credentials for registry '{}'", registry);
-            return Err(Error::AuthDockerCredentialRetrieval(error));
+            return Err(AuthError::DockerCredentialRetrieval(error).into());
         }
     };
     Ok(auth)
@@ -123,12 +126,12 @@ fn get_env_auth(registry: impl AsRef<str>) -> Result<Option<oci::native::Auth>> 
             let auth = match auth_type {
                 AuthType::Anonymous => oci::native::Auth::Anonymous,
                 AuthType::Basic => {
-                    let user = auth_user.ok_or_else(|| Error::AuthMissingEnv(auth_type, user_env.clone()))?;
-                    let token = auth_token.ok_or_else(|| Error::AuthMissingEnv(auth_type, token_env.clone()))?;
+                    let user = auth_user.ok_or_else(|| AuthError::MissingEnv(auth_type, user_env.clone()))?;
+                    let token = auth_token.ok_or_else(|| AuthError::MissingEnv(auth_type, token_env.clone()))?;
                     oci::native::Auth::Basic(user, token)
                 }
                 AuthType::Token => {
-                    let token = auth_token.ok_or_else(|| Error::AuthMissingEnv(auth_type, token_env.clone()))?;
+                    let token = auth_token.ok_or_else(|| AuthError::MissingEnv(auth_type, token_env.clone()))?;
                     oci::native::Auth::Bearer(token)
                 }
             };

@@ -170,7 +170,7 @@ impl OciTransport for StubTransport {
             .read()
             .digest
             .clone()
-            .ok_or_else(|| ClientError::Registry("no digest configured".into()))
+            .ok_or_else(|| ClientError::Registry("no digest configured".to_string().into()))
     }
 
     async fn pull_manifest_raw(
@@ -184,7 +184,7 @@ impl OciTransport for StubTransport {
         if let Some(manifest) = inner.manifests.get(&key).cloned() {
             Ok(manifest)
         } else if let Some(msg) = &inner.pull_manifest_error_override {
-            Err(ClientError::Registry(msg.clone()))
+            Err(ClientError::Registry(msg.clone().into()))
         } else {
             Err(ClientError::ManifestNotFound(key))
         }
@@ -204,9 +204,15 @@ impl OciTransport for StubTransport {
             let blob = blob.clone();
             drop(inner); // release lock before I/O
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| ClientError::Io(parent.to_path_buf(), e))?;
+                std::fs::create_dir_all(parent).map_err(|e| ClientError::Io {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
             }
-            std::fs::write(path, &blob).map_err(|e| ClientError::Io(path.to_path_buf(), e))?;
+            std::fs::write(path, &blob).map_err(|e| ClientError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
             // Simulate progress: report total_size or blob length.
             on_progress(if total_size > 0 { total_size } else { blob.len() as u64 });
         }

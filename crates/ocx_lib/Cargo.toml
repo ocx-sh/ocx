@@ -49,6 +49,7 @@ which = "8"
 # "deflate" unfortunately pulls in zopfli; zip crate doesn't expose flate2-only deflate
 zip = { version = "8", default-features = false, features = ["deflate"] }
 indicatif = { version = "0.18.3", features = ["tokio"] }
+thiserror = "2"
 tracing-indicatif = { version = "0.3.14" }
 
 [target.'cfg(windows)'.dependencies]

@@ -39,7 +39,7 @@ impl TarBackend {
             f(&mut guard)
         })
         .await
-        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(Error::internal)?
     }
 }
 
@@ -47,7 +47,7 @@ impl TarBackend {
 impl Backend for TarBackend {
     async fn add_file(&mut self, archive_path: PathBuf, file: PathBuf) -> Result<()> {
         self.run_blocking(move |builder| {
-            let mut f = std::fs::File::open(&file).map_err(|e| Error::Io(file, e))?;
+            let mut f = std::fs::File::open(&file).map_err(|e| Error::Io { path: file, source: e })?;
             builder.append_file(&archive_path, &mut f).map_err(Error::Tar)?;
             Ok(())
         })
@@ -82,7 +82,7 @@ impl Backend for TarBackend {
             Ok(())
         })
         .await
-        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(Error::internal)?
     }
 }
 
@@ -93,9 +93,9 @@ fn add_dir_recursive(
     count: &mut u64,
 ) -> Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| Error::Io(dir.to_path_buf(), e))?
+        .map_err(|e| Error::Io { path: dir.to_path_buf(), source: e })?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| Error::Io(dir.to_path_buf(), e))?;
+        .map_err(|e| Error::Io { path: dir.to_path_buf(), source: e })?;
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
@@ -111,7 +111,7 @@ fn add_dir_recursive(
             .append_path_with_name(&path, &archive_name)
             .map_err(Error::Tar)?;
 
-        let ft = entry.file_type().map_err(|e| Error::Io(path.clone(), e))?;
+        let ft = entry.file_type().map_err(|e| Error::Io { path: path.clone(), source: e })?;
         if ft.is_dir() {
             add_dir_recursive(builder, &archive_name, &path, count)?;
         }
@@ -154,7 +154,7 @@ pub(super) fn extract(reader: impl std::io::Read, output: &std::path::Path, stri
         }
 
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io { path: parent.to_path_buf(), source: e })?;
         }
         entry.unpack(&output_path).map_err(Error::Tar)?;
     }

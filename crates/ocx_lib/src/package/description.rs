@@ -38,10 +38,7 @@ pub fn logo_media_type(path: &Path) -> Result<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("png") => Ok(MEDIA_TYPE_PNG),
         Some("svg") => Ok(MEDIA_TYPE_SVG),
-        other => Err(crate::Error::UndefinedWithMessage(format!(
-            "unsupported logo format: {}",
-            other.unwrap_or("<no extension>")
-        ))),
+        other => Err(super::error::Error::UnsupportedLogoFormat(other.unwrap_or("<no extension>").to_string()).into()),
     }
 }
 

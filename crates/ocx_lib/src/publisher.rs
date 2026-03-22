@@ -56,12 +56,8 @@ impl Publisher {
     /// `existing_versions` is the set of versions already in the registry,
     /// used to compute which rolling tags this push should update.
     pub async fn push_cascade(&self, info: Info, file: &Path, existing_versions: BTreeSet<Version>) -> Result<()> {
-        let version = Version::parse(info.identifier.tag_or_latest()).ok_or_else(|| {
-            crate::Error::UndefinedWithMessage(format!(
-                "Tag is not a valid version, cannot cascade: {}",
-                info.identifier.tag_or_latest()
-            ))
-        })?;
+        let version = Version::parse(info.identifier.tag_or_latest())
+            .ok_or_else(|| crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string()))?;
 
         package::cascade::push_with_cascade(&self.client, info, file, existing_versions, &version).await
     }

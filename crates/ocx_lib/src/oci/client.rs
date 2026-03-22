@@ -112,7 +112,7 @@ impl Client {
         self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
         let digest = self.transport.fetch_manifest_digest(&ref_).await?;
         log::trace!("Fetched manifest digest for {}: {}", identifier, digest);
-        digest.try_into()
+        Ok(digest.try_into()?)
     }
 
     /// Fetches the manifest for the given image reference, returning both the manifest and its digest.
@@ -154,8 +154,7 @@ impl Client {
             .await
         {
             Ok((blob, digest_str)) => {
-                let existing: oci::Manifest =
-                    serde_json::from_slice(&blob).map_err(|e| ClientError::Serialization(e.to_string()))?;
+                let existing: oci::Manifest = serde_json::from_slice(&blob).map_err(ClientError::Serialization)?;
                 match existing {
                     oci::Manifest::Image(_) => {
                         let entry = oci::ImageIndexEntry {
@@ -198,7 +197,7 @@ impl Client {
             annotations: None,
         });
 
-        let index_data = serde_json::to_vec(&index).map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let index_data = serde_json::to_vec(&index).map_err(ClientError::Serialization)?;
         let index_digest = Digest::sha256(&index_data);
         self.transport
             .push_manifest_raw(&ref_, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
@@ -346,8 +345,7 @@ impl Client {
                 .await?;
         }
 
-        let metadata = metadata::Metadata::read_json_from_path(&metadata_path)
-            .map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let metadata = metadata::Metadata::read_json_from_path(&metadata_path).map_err(ClientError::internal)?;
 
         Ok(TempDownload {
             manifest,
@@ -389,7 +387,7 @@ impl Client {
                 async {
                     archive::Archive::extract_with_options(&blob_path, &temp_content_path, Some(extract_options))
                         .await
-                        .map_err(|e| ClientError::Io(blob_path.clone(), std::io::Error::other(e.to_string())))
+                        .map_err(ClientError::internal)
                 }
                 .instrument(extract_span)
                 .await?;
@@ -398,7 +396,10 @@ impl Client {
 
         // Move temp contents to the final output path.
         // Wrap in DropFile so partial output is cleaned up on failure.
-        std::fs::create_dir_all(output_path).map_err(|e| ClientError::Io(output_path.to_path_buf(), e))?;
+        std::fs::create_dir_all(output_path).map_err(|e| ClientError::Io {
+            path: output_path.to_path_buf(),
+            source: e,
+        })?;
         let mut output_guard = utility::drop_file::DropFile::new(output_path.to_path_buf());
 
         let final_metadata = output_path.join("metadata.json");
@@ -411,17 +412,17 @@ impl Client {
 
         crate::codesign::sign_extracted_content(&final_content)
             .await
-            .map_err(|e| ClientError::Internal(Box::new(e)))?;
+            .map_err(ClientError::internal)?;
 
         download
             .manifest
             .write_json_to_path(&final_manifest)
-            .map_err(|e| ClientError::Serialization(e.to_string()))?;
+            .map_err(ClientError::internal)?;
 
         let install_status = package::install_status::InstallStatus::new().ok();
         install_status
             .write_json_to_path(&final_install)
-            .map_err(|e| ClientError::Serialization(e.to_string()))?;
+            .map_err(ClientError::internal)?;
 
         // All steps succeeded — keep the output directory.
         output_guard.retain();
@@ -469,9 +470,10 @@ impl Client {
             .ok_or_else(|| ClientError::InvalidManifest(format!("unsupported archive: {}", path.display())))?;
 
         // Read file and calculate digest for content-addressing.
-        let package_data = tokio::fs::read(path)
-            .await
-            .map_err(|e| ClientError::Io(path.to_path_buf(), e))?;
+        let package_data = tokio::fs::read(path).await.map_err(|e| ClientError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
         let package_data_len = package_data.len();
         let package_digest = Digest::sha256(&package_data).to_string();
 
@@ -493,8 +495,7 @@ impl Client {
         }
 
         // Config blob — tiny, no progress needed.
-        let config_data =
-            serde_json::to_vec(&package_info.metadata).map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let config_data = serde_json::to_vec(&package_info.metadata).map_err(ClientError::Serialization)?;
         let config_data_len = config_data.len();
         let config_sha256 = Digest::sha256(&config_data).to_string();
         log::trace!("Calculated config digest: {}", config_sha256);
@@ -522,7 +523,7 @@ impl Client {
             ..Default::default()
         };
 
-        let manifest_data = serde_json::to_vec(&manifest).map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let manifest_data = serde_json::to_vec(&manifest).map_err(ClientError::Serialization)?;
         let manifest_sha256 = Digest::sha256(&manifest_data).to_string();
         let canonical_image = image.clone_with_digest(manifest_sha256.clone());
 
@@ -557,7 +558,7 @@ impl Client {
                 manifest_size,
             )
             .await
-            .map_err(|e| ClientError::Registry(e.to_string()))?;
+            .map_err(ClientError::internal)?;
 
         Ok((digest, index))
     }
@@ -644,7 +645,7 @@ impl Client {
             ..Default::default()
         };
 
-        let manifest_data = serde_json::to_vec(&manifest).map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let manifest_data = serde_json::to_vec(&manifest).map_err(ClientError::Serialization)?;
 
         // Push to the tag reference directly (not by digest) so the tag is created.
         self.transport
@@ -707,18 +708,17 @@ impl Client {
 
             match layer.media_type.as_str() {
                 MEDIA_TYPE_MARKDOWN => {
-                    let data = tokio::fs::read(&blob_path)
-                        .await
-                        .map_err(|e| ClientError::Io(blob_path, e))?;
-                    readme = Some(
-                        String::from_utf8(data)
-                            .map_err(|e| ClientError::Serialization(format!("README is not valid UTF-8: {e}")))?,
-                    );
+                    let data = tokio::fs::read(&blob_path).await.map_err(|e| ClientError::Io {
+                        path: blob_path,
+                        source: e,
+                    })?;
+                    readme = Some(String::from_utf8(data).map_err(ClientError::InvalidEncoding)?);
                 }
                 MEDIA_TYPE_PNG | MEDIA_TYPE_SVG => {
-                    let data = tokio::fs::read(&blob_path)
-                        .await
-                        .map_err(|e| ClientError::Io(blob_path, e))?;
+                    let data = tokio::fs::read(&blob_path).await.map_err(|e| ClientError::Io {
+                        path: blob_path,
+                        source: e,
+                    })?;
                     logo = Some(package::description::Logo {
                         data,
                         media_type: if layer.media_type == MEDIA_TYPE_PNG {
@@ -755,15 +755,17 @@ impl Client {
             .transport
             .pull_manifest_raw(image, ACCEPTED_MANIFEST_MEDIA_TYPES)
             .await?;
-        let manifest: oci::Manifest =
-            serde_json::from_slice(&data).map_err(|e| ClientError::Serialization(e.to_string()))?;
+        let manifest: oci::Manifest = serde_json::from_slice(&data).map_err(ClientError::Serialization)?;
         Ok((manifest, digest))
     }
 
     /// Moves a file or directory from `src` to `dst` (rename on same filesystem).
     fn move_path(src: &std::path::Path, dst: &std::path::Path) -> std::result::Result<(), ClientError> {
         if src.exists() {
-            std::fs::rename(src, dst).map_err(|e| ClientError::Io(src.to_path_buf(), e))?;
+            std::fs::rename(src, dst).map_err(|e| ClientError::Io {
+                path: src.to_path_buf(),
+                source: e,
+            })?;
         }
         Ok(())
     }

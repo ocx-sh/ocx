@@ -99,8 +99,14 @@ impl ProfileManifest {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let contents = std::fs::read_to_string(path).map_err(|e| ProfileError::Io(path.to_path_buf(), e))?;
-        let manifest: Self = serde_json::from_str(&contents).map_err(|e| ProfileError::Json(path.to_path_buf(), e))?;
+        let contents = std::fs::read_to_string(path).map_err(|e| ProfileError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        let manifest: Self = serde_json::from_str(&contents).map_err(|e| ProfileError::Json {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
         if manifest.version != Self::SUPPORTED_VERSION {
             return Err(ProfileError::UnsupportedVersion {
                 path: path.to_path_buf(),
@@ -118,10 +124,16 @@ impl ProfileManifest {
     pub fn load_exclusive(path: &Path) -> Result<(Self, FileLock), ProfileError> {
         let lock_path = path.with_extension("json.lock");
         if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ProfileError::Io(parent.to_path_buf(), e))?;
+            std::fs::create_dir_all(parent).map_err(|e| ProfileError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
         }
-        let lock_file = std::fs::File::create(&lock_path).map_err(|e| ProfileError::Io(lock_path.clone(), e))?;
-        let lock = FileLock::try_exclusive(lock_file).map_err(|_| ProfileError::Locked(lock_path))?;
+        let lock_file = std::fs::File::create(&lock_path).map_err(|e| ProfileError::Io {
+            path: lock_path.clone(),
+            source: e,
+        })?;
+        let lock = FileLock::try_exclusive(lock_file).map_err(|_| ProfileError::Locked { path: lock_path })?;
         let manifest = Self::load(path)?;
         Ok((manifest, lock))
     }
@@ -129,18 +141,32 @@ impl ProfileManifest {
     /// Saves the profile manifest to the given path using atomic write (temp + rename).
     pub fn save(&self, path: &Path) -> Result<(), ProfileError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ProfileError::Io(parent.to_path_buf(), e))?;
+            std::fs::create_dir_all(parent).map_err(|e| ProfileError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
         }
-        let json = serde_json::to_string_pretty(self).map_err(|e| ProfileError::Json(path.to_path_buf(), e))?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| ProfileError::Json {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
 
         // Atomic write: write to temp file in same directory, then rename
         let parent = path
             .parent()
             .expect("profile manifest path must have a parent directory");
-        let tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| ProfileError::Io(parent.to_path_buf(), e))?;
-        std::fs::write(tmp.path(), json.as_bytes()).map_err(|e| ProfileError::Io(tmp.path().to_path_buf(), e))?;
-        tmp.persist(path)
-            .map_err(|e| ProfileError::Io(path.to_path_buf(), e.into()))?;
+        let tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| ProfileError::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+        std::fs::write(tmp.path(), json.as_bytes()).map_err(|e| ProfileError::Io {
+            path: tmp.path().to_path_buf(),
+            source: e,
+        })?;
+        tmp.persist(path).map_err(|e| ProfileError::Io {
+            path: path.to_path_buf(),
+            source: e.into(),
+        })?;
         Ok(())
     }
 

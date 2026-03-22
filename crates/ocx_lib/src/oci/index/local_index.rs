@@ -117,11 +117,10 @@ impl LocalIndex {
         identifier: &oci::Identifier,
         digest: &oci::Digest,
     ) -> Result<()> {
-        let (_, manifest) = index.fetch_manifest(identifier).await?.ok_or_else(|| {
-            crate::Error::UndefinedWithMessage(format!(
-                "Remote manifest not found for '{identifier}' during index update"
-            ))
-        })?;
+        let (_, manifest) = index
+            .fetch_manifest(identifier)
+            .await?
+            .ok_or_else(|| super::error::Error::RemoteManifestNotFound(identifier.to_string()))?;
         let path = self.index_store.manifest(identifier, digest);
         manifest.write_json_to_path(path)?;
 
@@ -129,11 +128,10 @@ impl LocalIndex {
             for manifest in image_index.manifests {
                 let digest = manifest.digest.clone().try_into()?;
                 let identifier = identifier.clone_with_digest(digest);
-                let (digest, manifest) = index.fetch_manifest(&identifier).await?.ok_or_else(|| {
-                    crate::Error::UndefinedWithMessage(format!(
-                        "Remote platform manifest not found for '{identifier}' during index update"
-                    ))
-                })?;
+                let (digest, manifest) = index
+                    .fetch_manifest(&identifier)
+                    .await?
+                    .ok_or_else(|| super::error::Error::RemoteManifestNotFound(identifier.to_string()))?;
                 let path = self.index_store.manifest(&identifier, &digest);
                 manifest.write_json_to_path(path)?;
             }

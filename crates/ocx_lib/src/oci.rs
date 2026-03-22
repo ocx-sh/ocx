@@ -52,10 +52,10 @@ pub use identifier::DEFAULT_REGISTRY;
 pub use identifier::Identifier;
 pub use identifier::OCX_SH_REGISTRY;
 
-mod platform;
+pub mod platform;
 pub use platform::Platform;
 
-mod digest;
+pub mod digest;
 pub use digest::Digest;
 
 mod file_storage;

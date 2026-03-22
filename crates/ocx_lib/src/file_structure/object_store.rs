@@ -87,12 +87,9 @@ impl ObjectStore {
     ///
     /// Requires the identifier to carry a digest; returns an error otherwise.
     pub fn path(&self, identifier: &oci::Identifier) -> Result<PathBuf> {
-        let digest = identifier.digest().ok_or_else(|| {
-            Error::UndefinedWithMessage(format!(
-                "Object store is only well-defined for identifiers with a digest, got: {}",
-                identifier
-            ))
-        })?;
+        let digest = identifier
+            .digest()
+            .ok_or_else(|| super::error::Error::MissingDigest(identifier.to_string()))?;
         Ok(self
             .root
             .join(super::slugify(identifier.registry()))

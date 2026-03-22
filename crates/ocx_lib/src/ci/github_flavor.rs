@@ -141,9 +141,14 @@ fn append_line_raw(file: &Path, content: &str) -> Result<(), error::Error> {
         .create(true)
         .append(true)
         .open(file)
-        .map_err(|e| error::Error::File(file.to_path_buf(), e))?;
-    f.write_all(content.as_bytes())
-        .map_err(|e| error::Error::File(file.to_path_buf(), e))
+        .map_err(|e| error::Error::File {
+            path: file.to_path_buf(),
+            source: e,
+        })?;
+    f.write_all(content.as_bytes()).map_err(|e| error::Error::File {
+        path: file.to_path_buf(),
+        source: e,
+    })
 }
 
 /// Reads a required environment variable that should contain a file path.

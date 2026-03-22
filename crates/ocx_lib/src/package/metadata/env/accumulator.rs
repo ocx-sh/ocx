@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use crate::{Error, Result, env};
+use crate::{Result, env};
 
 use super::var;
 
@@ -49,7 +49,7 @@ impl<'a> Accumulator<'a> {
                 path = self.install_path.join(path);
             }
             if path_modifier.required && !path.exists() {
-                return Err(Error::Undefined);
+                return Err(crate::package::error::Error::RequiredPathMissing(path).into());
             }
             value = path.to_string_lossy().to_string();
         }

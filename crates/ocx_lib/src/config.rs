@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use crate::{ErrorExt, Result};
+pub mod error;
+
+use crate::Result;
 use serde::Deserialize;
 
 #[allow(dead_code)]
@@ -50,12 +52,15 @@ impl Config {
     }
 
     fn from_file_content(config_str: impl AsRef<str>) -> Result<Self> {
-        let config: Config = toml::from_str(config_str.as_ref()).map_to_undefined_error()?;
+        let config: Config = toml::from_str(config_str.as_ref()).map_err(error::Error::Parse)?;
         Ok(config)
     }
 
     pub async fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let config_str = tokio::fs::read_to_string(path).await.map_to_undefined_error()?;
+        let path = path.as_ref();
+        let config_str = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| crate::error::file_error(path, e))?;
         Self::from_file_content(&config_str)
     }
 

@@ -35,7 +35,7 @@ pub fn resolve_assets(assets: &HashMap<String, Url>, patterns: &HashMap<Platform
         match matched.len() {
             0 => {} // Platform absent for this version — skip silently
             1 => {
-                let asset_name = matched.into_iter().next().unwrap();
+                let asset_name = matched.into_iter().next().expect("len checked above");
                 let url = assets[&asset_name].clone();
                 resolved.push(ResolvedPlatformAsset {
                     platform: platform.clone(),

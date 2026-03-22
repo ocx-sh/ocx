@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod error;
+
 use serde::{Deserialize, Serialize};
 
-use crate::Error;
+use error::DigestError;
 
 /// Small wrapper of the OCI digest, with some extra convenience methods.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -34,14 +36,14 @@ impl std::fmt::Display for Digest {
 }
 
 impl TryFrom<String> for Digest {
-    type Error = Error;
+    type Error = DigestError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        fn check_digest(value: &str, digest: &str, expected_len: usize) -> Result<(), Error> {
+        fn check_digest(value: &str, digest: &str, expected_len: usize) -> Result<(), DigestError> {
             if digest.len() == expected_len && digest.chars().all(|c| c.is_ascii_hexdigit()) {
                 Ok(())
             } else {
-                Err(Error::PackageDigestInvalid(value.to_owned()))
+                Err(DigestError::Invalid(value.to_owned()))
             }
         }
 
@@ -55,7 +57,7 @@ impl TryFrom<String> for Digest {
             check_digest(&value, digest, 128)?;
             Ok(Digest::Sha512(digest.to_string()))
         } else {
-            Err(Error::PackageDigestInvalid(value))
+            Err(DigestError::Invalid(value))
         }
     }
 }

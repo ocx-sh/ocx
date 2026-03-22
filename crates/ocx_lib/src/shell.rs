@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod error;
 mod profile_builder;
 pub use profile_builder::ProfileBuilder;
 
@@ -209,7 +210,7 @@ impl TryInto<clap_complete::Shell> for Shell {
             Self::Fish => Ok(clap_complete::Shell::Fish),
             Self::PowerShell => Ok(clap_complete::Shell::PowerShell),
             Self::Zsh => Ok(clap_complete::Shell::Zsh),
-            _ => Err(Error::UnsupportedClapShell(self)),
+            _ => Err(error::Error::UnsupportedClapShell(self).into()),
         }
     }
 }

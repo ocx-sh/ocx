@@ -4,44 +4,48 @@
 use std::path::PathBuf;
 
 /// Errors that can occur during OCI client operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ClientError {
     /// Authentication with the registry failed.
-    Authentication(String),
+    #[error("Registry authentication failed: {0}")]
+    Authentication(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Manifest digest mismatch between expected and actual.
+    #[error("Manifest digest mismatch: expected '{expected}', got '{actual}'")]
     DigestMismatch { expected: String, actual: String },
     /// Expected an image manifest but got an image index or unknown type.
+    #[error("Expected an image manifest, got an image index")]
     UnexpectedManifestType,
     /// Manifest structure is invalid (e.g. wrong layer count, missing fields).
+    #[error("Invalid manifest: {0}")]
     InvalidManifest(String),
     /// The requested manifest does not exist in the registry.
+    #[error("Manifest not found: {0}")]
     ManifestNotFound(String),
     /// A registry operation failed.
-    Registry(String),
+    #[error("Registry operation failed: {0}")]
+    Registry(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// File I/O error with path context.
-    Io(PathBuf, std::io::Error),
+    #[error("I/O error for '{}': {source}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// JSON serialization or deserialization failed.
-    Serialization(String),
+    #[error("Serialization error: {0}")]
+    Serialization(#[source] serde_json::Error),
+    /// Invalid UTF-8 encoding encountered.
+    #[error("Invalid UTF-8 encoding: {0}")]
+    InvalidEncoding(#[source] std::string::FromUtf8Error),
     /// An internal library error (e.g. codesign, archive processing).
-    Internal(Box<crate::Error>),
+    #[error("{0}")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-impl std::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClientError::Authentication(msg) => write!(f, "Registry authentication failed: {}", msg),
-            ClientError::DigestMismatch { expected, actual } => {
-                write!(f, "Manifest digest mismatch: expected '{}', got '{}'", expected, actual)
-            }
-            ClientError::ManifestNotFound(msg) => write!(f, "Manifest not found: {}", msg),
-            ClientError::UnexpectedManifestType => write!(f, "Expected an image manifest, got an image index"),
-            ClientError::InvalidManifest(msg) => write!(f, "Invalid manifest: {}", msg),
-            ClientError::Registry(msg) => write!(f, "Registry operation failed: {}", msg),
-            ClientError::Io(path, err) => write!(f, "I/O error for '{}': {}", path.display(), err),
-            ClientError::Serialization(msg) => write!(f, "Serialization error: {}", msg),
-            ClientError::Internal(err) => write!(f, "{}", err),
-        }
+impl ClientError {
+    /// Wrap any error as a [`ClientError::Internal`].
+    pub fn internal(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Internal(Box::new(error))
     }
 }
-
-impl std::error::Error for ClientError {}

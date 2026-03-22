@@ -32,13 +32,18 @@ Encode valid states as distinct types. State transitions consume `self` and retu
 ## Anti-Patterns (Tiered Severity)
 
 ### Block (must fix before merge)
-- **`.unwrap()` in library code** — `crates/ocx_lib/` and `crates/ocx_mirror/` must return `Result`. `.expect("reason")` acceptable only for invariants proven at compile time. Tests may use `.unwrap()`.
+- **`.unwrap()` in library code** — `crates/ocx_lib/`, `crates/ocx_cli/`, and `crates/ocx_mirror/` must never use `.unwrap()`. Use `.expect("reason")` for invariants proven at compile time or by preceding logic (e.g., regex group guaranteed to capture, length checked before `.next()`, map key iterated from same map). For fallible operations, return `Result`. Tests may use `.unwrap()`.
+- **`.to_string()` in `map_err()` erasing source errors** — never `map_err(|e| SomeError(e.to_string()))`. Carry the source error structurally via `#[source]` or `Box<dyn Error + Send + Sync>`.
+- **`String` wrapping a structured error's Display output** — if a field holds `error.to_string()`, it should hold the error itself instead.
 - **`MutexGuard` across `.await`** — extract data, drop guard, then await. Use `tokio::sync::Mutex` only when lock genuinely spans an await.
 - **`unsafe` without safety comment** — every `unsafe` block must document the invariant it relies on.
 - **Blocking I/O in async** — never `std::fs::*`, `std::thread::sleep`, or any blocking stdlib call in async context. Use `tokio::fs::*`, `tokio::time::sleep`, or `spawn_blocking`.
 - **`From` impl hiding `.unwrap()`** — `From` must be infallible. Use `TryFrom` for fallible conversions.
 
 ### Warn (should fix)
+- **Error types without `#[derive(thiserror::Error)]`** — all error types must use thiserror for `Display`/`source()` generation (manual `Display` acceptable when format logic is too complex for `#[error]`).
+- **Public error enums without `#[non_exhaustive]`** — adding a variant is a semver-breaking change without it.
+- **Missing `#[source]` on inner error fields** — every wrapping variant must return its inner error from `source()`. Without it, error chain walking breaks for logging and diagnostics.
 - **Unnecessary `.clone()`** — cloning to silence the borrow checker masks a design problem. Restructure ownership, pass references, or use indices instead.
 - **`Box<dyn Trait>` where `impl Trait` suffices** — vtable + heap allocation overhead. If only one implementation exists or the set is known at compile time, use generics.
 - **Stringly-typed APIs** — `String` where an enum would prevent typos at compile time. Applies to error types too: `String` errors prevent programmatic matching.
@@ -49,7 +54,6 @@ Encode valid states as distinct types. State transitions consume `self` and retu
 ### Suggest (improvement)
 - **`Cow<str>`** for functions that usually return borrowed data but sometimes need to allocate.
 - **`#[must_use]`** on return types callers might accidentally discard.
-- **`#[non_exhaustive]`** on public enums whose variant set may grow.
 - **Iterator chains** over materializing intermediate `Vec` — `.iter().map().filter().collect()` instead of building a `Vec` then iterating it.
 - **`impl Into<T>` parameters** — `fn process(name: impl Into<String>)` accepts both `&str` and `String` without forcing callers to allocate.
 
@@ -131,7 +135,7 @@ New code must follow established OCX patterns. The reviewer enforces this:
 
 | Pattern | Convention | Deviation = Bug |
 |---------|-----------|----------------|
-| Error model | `PackageErrorKind` → `PackageError` → `Error` | Ad-hoc error types |
+| Error model | `thiserror::Error` derive, `#[source]`/`#[from]`, `#[non_exhaustive]`, subsystem error types | Manual `Display`/`Error` impls, `.to_string()` in error construction, `String` wrapping source errors, catch-all error variants |
 | Progress | `tracing::info_span!` + `tracing-indicatif` | Custom progress bars, `println!` |
 | Symlinks | `ReferenceManager::link(forward, content)` | Raw `symlink::update/create` |
 | CLI flow | args → `transform_all()` → `manager.task_all()` → report from results → `api.report()` | Report from CLI args |

@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-// TODO: migrate map_to_undefined_error call sites to typed errors
-#![allow(deprecated)]
-
-mod config;
+pub(crate) mod config;
 mod media_type;
 
 #[cfg(test)]
@@ -35,12 +32,10 @@ pub mod symlink;
 pub mod utility;
 
 pub use error::Error;
-pub use error::ErrorExt;
 pub use error::Result;
 
 pub mod prelude {
     pub use crate::error::Error;
-    pub use crate::error::ErrorExt;
     pub use crate::error::Result;
 
     pub use crate::utility::result_ext::ResultExt;

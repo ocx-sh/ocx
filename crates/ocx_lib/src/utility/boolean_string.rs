@@ -81,7 +81,23 @@ impl TryFrom<&str> for BooleanString {
             "no" => Ok(Self::FalseNo),
             "off" => Ok(Self::FalseOff),
             "false" => Ok(Self::FalseFalse),
-            _ => Err(Error::ConfigInvalidBooleanString(value.to_string())),
+            _ => {
+                let possible = <BooleanString as clap_builder::ValueEnum>::value_variants()
+                    .iter()
+                    .map(|v| {
+                        clap_builder::ValueEnum::to_possible_value(&v.clone())
+                            .expect("all BooleanString variants have possible values")
+                            .get_name()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(crate::config::error::Error::InvalidBooleanString {
+                    value: value.to_string(),
+                    possible,
+                }
+                .into())
+            }
         }
     }
 }

@@ -77,11 +77,11 @@ fn validate_symlink_target(root: &Path, link_path: &Path, target: &Path) -> Resu
 
 /// Recursively validates that all symlinks under `dir` resolve within `root`.
 fn validate_symlinks_in_dir(root: &Path, dir: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(dir).map_err(|e| error::Error::Io(dir.to_path_buf(), e))? {
-        let entry = entry.map_err(|e| error::Error::Io(dir.to_path_buf(), e))?;
-        let ft = entry.file_type().map_err(|e| error::Error::Io(entry.path(), e))?;
+    for entry in std::fs::read_dir(dir).map_err(|e| error::Error::Io { path: dir.to_path_buf(), source: e })? {
+        let entry = entry.map_err(|e| error::Error::Io { path: dir.to_path_buf(), source: e })?;
+        let ft = entry.file_type().map_err(|e| error::Error::Io { path: entry.path(), source: e })?;
         if ft.is_symlink() {
-            let target = std::fs::read_link(entry.path()).map_err(|e| error::Error::Io(entry.path(), e))?;
+            let target = std::fs::read_link(entry.path()).map_err(|e| error::Error::Io { path: entry.path(), source: e })?;
             validate_symlink_target(root, &entry.path(), &target)?;
         } else if ft.is_dir() {
             validate_symlinks_in_dir(root, &entry.path())?;
@@ -111,7 +111,7 @@ impl Archive {
                 .create(true)
                 .truncate(true)
                 .open(output)
-                .map_err(|e| error::Error::Io(output.to_path_buf(), e))?;
+                .map_err(|e| error::Error::Io { path: output.to_path_buf(), source: e })?;
             Ok(Self {
                 inner: Box::new(tar::TarBackend::new(Box::new(file))),
             })
@@ -139,7 +139,7 @@ impl Archive {
             Some(_) => options,
             None => {
                 let algorithm = compression::CompressionAlgorithm::from_file(output)
-                    .ok_or_else(|| crate::Error::UnsupportedArchive(output.display().to_string()))?;
+                    .ok_or_else(|| error::Error::UnsupportedFormat(output.display().to_string()))?;
                 options.with_algorithm(algorithm)
             }
         };
@@ -178,7 +178,7 @@ impl Archive {
                 zip::extract(&archive, &output, options.strip_components)
             })
             .await
-            .map_err(|e| error::Error::Internal(e.to_string()))?;
+            .map_err(error::Error::internal)?;
         }
 
         let algorithm = options
@@ -188,7 +188,7 @@ impl Archive {
         let reader: Box<dyn std::io::Read + Send> = if let Some(algorithm) = algorithm {
             compression::read_file(&archive, Some(algorithm)).await?
         } else {
-            Box::new(std::fs::File::open(&archive).map_err(|e| error::Error::Io(archive.clone(), e))?)
+            Box::new(std::fs::File::open(&archive).map_err(|e| error::Error::Io { path: archive.clone(), source: e })?)
         };
 
         tokio::task::spawn_blocking(move || {
@@ -196,7 +196,7 @@ impl Archive {
             tar::extract(reader, &output, options.strip_components)
         })
         .await
-        .map_err(|e| error::Error::Internal(e.to_string()))?
+        .map_err(error::Error::internal)?
     }
 
     pub async fn add_file(&mut self, archive_path: impl AsRef<Path>, file: impl AsRef<Path>) -> Result<()> {

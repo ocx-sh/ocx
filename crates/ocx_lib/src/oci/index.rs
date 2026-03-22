@@ -5,6 +5,7 @@ use crate::log;
 use crate::package::description;
 use crate::{oci, prelude::*};
 
+pub mod error;
 pub mod snapshot;
 
 pub use local_index::Config as LocalConfig;
@@ -146,7 +147,7 @@ impl Index {
 
         let result = match matching_candidates.len() {
             0 => SelectResult::NotFound,
-            1 => SelectResult::Found(matching_candidates.into_iter().next().unwrap()),
+            1 => SelectResult::Found(matching_candidates.into_iter().next().expect("len checked above")),
             _ => SelectResult::Ambiguous(matching_candidates),
         };
 

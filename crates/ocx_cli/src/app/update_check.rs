@@ -57,18 +57,21 @@ async fn try_check_for_update(ctx: &Context) -> Result<UpdateCheckResult, Error>
     }
 
     let current_version_str = super::version();
-    let current_version =
-        Version::parse(current_version_str).ok_or(Error::PackageVersionInvalid(current_version_str.into()))?;
+    let current_version = Version::parse(current_version_str)
+        .ok_or_else(|| ocx_lib::package::error::Error::VersionInvalid(current_version_str.into()))?;
     let ocx_identifier = oci::Identifier::new_registry("ocx", oci::OCX_SH_REGISTRY);
 
     let remote_index = ctx.remote_index()?;
     let remote_index = oci::index::Index::from_remote(remote_index.clone());
 
     let ocx_tags = remote_index.list_tags(&ocx_identifier).await?;
-    let ocx_tags = ocx_tags.ok_or(Error::UndefinedWithMessage("Package not found.".into()))?;
+    let Some(ocx_tags) = ocx_tags else {
+        return Ok(UpdateCheckResult::Skipped("ocx package not found in registry"));
+    };
 
-    let latest_version =
-        find_latest_version(&ocx_tags).ok_or(Error::UndefinedWithMessage("No version available.".into()))?;
+    let Some(latest_version) = find_latest_version(&ocx_tags) else {
+        return Ok(UpdateCheckResult::Skipped("no release version available"));
+    };
     if latest_version > current_version {
         Ok(UpdateCheckResult::UpdateAvailable(
             ocx_identifier.clone_with_tag(latest_version.to_string()),

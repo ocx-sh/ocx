@@ -164,7 +164,12 @@ impl Version {
 
         let captures = VERSION_REGEX.captures(value)?;
 
-        let major = captures.get(1).unwrap().as_str().parse::<u32>().ok()?;
+        let major = captures
+            .get(1)
+            .expect("group 1 always captures")
+            .as_str()
+            .parse::<u32>()
+            .ok()?;
         let minor = match captures.get(3).map(|m| m.as_str()) {
             Some("") | None => return Some(Version { major, rest: None }),
             Some(minor) => match minor.parse::<u32>().ok() {
@@ -283,7 +288,7 @@ impl TryFrom<&str> for Version {
     fn try_from(value: &str) -> Result<Self> {
         match Self::parse(value) {
             Some(version) => Ok(version),
-            None => Err(Error::PackageVersionInvalid(value.into())),
+            None => Err(super::error::Error::VersionInvalid(value.into()).into()),
         }
     }
 }

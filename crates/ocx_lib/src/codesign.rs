@@ -138,7 +138,7 @@ fn sign_directory(
                 continue;
             }
             if let Some(inode) = file_inode(&file).await
-                && !signed_inodes.lock().unwrap().insert(inode)
+                && !signed_inodes.lock().expect("signed_inodes mutex poisoned").insert(inode)
             {
                 continue; // Already signed via hardlink
             }

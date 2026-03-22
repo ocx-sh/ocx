@@ -45,16 +45,16 @@ pub fn normalize_version(version_str: &str, build: &Option<String>) -> Result<St
             let with_build = if let Some(pre) = version.prerelease() {
                 Version::new_prerelease_with_build(
                     version.major(),
-                    version.minor().unwrap(),
-                    version.patch().unwrap(),
+                    version.minor().expect("has_patch guarantees minor"),
+                    version.patch().expect("has_patch guarantees patch"),
                     pre,
                     build,
                 )
             } else {
                 Version::new_build(
                     version.major(),
-                    version.minor().unwrap(),
-                    version.patch().unwrap(),
+                    version.minor().expect("has_patch guarantees minor"),
+                    version.patch().expect("has_patch guarantees patch"),
                     build,
                 )
             };

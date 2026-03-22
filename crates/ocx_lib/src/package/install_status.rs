@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ErrorExt, file_lock, log, prelude::SerdeExt};
+use crate::{file_lock, log, prelude::SerdeExt};
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct InstallStatus {
@@ -55,10 +55,7 @@ pub async fn check_install_status(
             return (false, None);
         }
     };
-    let shared_lock = match file_lock::FileLock::lock_shared_with_timeout(lock_file_handle, timeout)
-        .await
-        .map_to_undefined_error()
-    {
+    let shared_lock = match file_lock::FileLock::lock_shared_with_timeout(lock_file_handle, timeout).await {
         Ok(shared_lock) => shared_lock,
         Err(error) => {
             log::debug!("Failed to acquire shared lock: {}", error);

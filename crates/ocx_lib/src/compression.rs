@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use crate::{ErrorExt, MEDIA_TYPE_TAR_GZ, MEDIA_TYPE_TAR_XZ, Result};
+pub mod error;
+
+use crate::{MEDIA_TYPE_TAR_GZ, MEDIA_TYPE_TAR_XZ, Result};
 
 /// Enumeration of supported compression algorithms.
 #[derive(Debug, Clone, Copy)]
@@ -108,7 +110,9 @@ impl CompressionOptions {
     }
 
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let algorithm = CompressionAlgorithm::from_file(path).map_to_undefined_error()?;
+        let path = path.as_ref();
+        let algorithm =
+            CompressionAlgorithm::from_file(path).ok_or_else(|| error::Error::UnknownFormat(path.to_path_buf()))?;
         Ok(Self {
             algorithm: Some(algorithm),
             ..Default::default()
@@ -151,10 +155,10 @@ mod xz {
 
     impl<W: std::io::Write> std::io::Write for WriterWrapper<W> {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.as_mut().unwrap().write(buf)
+            self.0.as_mut().expect("writer used after drop").write(buf)
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            self.0.as_mut().unwrap().flush()
+            self.0.as_mut().expect("writer used after drop").flush()
         }
     }
 
@@ -171,10 +175,10 @@ mod xz {
 
     impl<W: std::io::Write> std::io::Write for MtWriterWrapper<W> {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.as_mut().unwrap().write(buf)
+            self.0.as_mut().expect("writer used after drop").write(buf)
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            self.0.as_mut().unwrap().flush()
+            self.0.as_mut().expect("writer used after drop").flush()
         }
     }
 
@@ -197,9 +201,10 @@ pub async fn write_file(
     file: impl AsRef<std::path::Path>,
     options: &CompressionOptions,
 ) -> Result<Box<dyn std::io::Write + Send>> {
+    let file = file.as_ref();
     let algorithm = match options.algorithm {
         Some(algorithm) => algorithm,
-        None => CompressionAlgorithm::from_file(&file).map_to_undefined_error()?,
+        None => CompressionAlgorithm::from_file(file).ok_or_else(|| error::Error::UnknownFormat(file.to_path_buf()))?,
     };
     let level = options.level;
     let threads = options.threads_or_default();
@@ -208,17 +213,24 @@ pub async fn write_file(
         .create(true)
         .truncate(true)
         .open(file)
-        .map_to_undefined_error()?;
+        .map_err(|e| error::Error::Create {
+            path: file.to_path_buf(),
+            source: e,
+        })?;
     let writer: Box<dyn std::io::Write + Send> = match algorithm {
         CompressionAlgorithm::Lzma if threads > 1 => {
             let mut xz_options: lzma_rust2::XzOptions = level.into();
             // 4 MiB block size — matches pixz and xz --block-size defaults
-            xz_options.set_block_size(Some(std::num::NonZeroU64::new(4 * 1024 * 1024).unwrap()));
-            let writer = lzma_rust2::XzWriterMt::new(output, xz_options, threads).map_to_undefined_error()?;
+            xz_options.set_block_size(Some(
+                std::num::NonZeroU64::new(4 * 1024 * 1024).expect("non-zero literal"),
+            ));
+            let writer = lzma_rust2::XzWriterMt::new(output, xz_options, threads)
+                .map_err(|e| error::Error::EngineInit(Box::new(e)))?;
             Box::new(xz::MtWriterWrapper(Some(writer)))
         }
         CompressionAlgorithm::Lzma => {
-            let writer = lzma_rust2::XzWriter::new(output, level.into()).map_to_undefined_error()?;
+            let writer =
+                lzma_rust2::XzWriter::new(output, level.into()).map_err(|e| error::Error::EngineInit(Box::new(e)))?;
             Box::new(xz::WriterWrapper(Some(writer)))
         }
         CompressionAlgorithm::Gzip => {
@@ -236,22 +248,32 @@ pub async fn read_file(
     file: impl AsRef<std::path::Path>,
     algorithm: Option<CompressionAlgorithm>,
 ) -> Result<Box<dyn std::io::Read + Send>> {
+    let file = file.as_ref();
     let algorithm = match algorithm {
         Some(algorithm) => algorithm,
-        None => CompressionAlgorithm::from_file(&file).map_to_undefined_error()?,
+        None => CompressionAlgorithm::from_file(file).ok_or_else(|| error::Error::UnknownFormat(file.to_path_buf()))?,
     };
     match algorithm {
         CompressionAlgorithm::Lzma => {
-            let file = std::fs::File::open(file).map_to_undefined_error()?;
-            Ok(Box::new(lzma_rust2::XzReader::new(file, false)))
+            let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
+                path: file.to_path_buf(),
+                source: e,
+            })?;
+            Ok(Box::new(lzma_rust2::XzReader::new(handle, false)))
         }
         CompressionAlgorithm::Gzip => {
-            let file = std::fs::File::open(file).map_to_undefined_error()?;
-            Ok(Box::new(flate2::read::GzDecoder::new(file)))
+            let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
+                path: file.to_path_buf(),
+                source: e,
+            })?;
+            Ok(Box::new(flate2::read::GzDecoder::new(handle)))
         }
         CompressionAlgorithm::None => {
-            let file = std::fs::File::open(file).map_to_undefined_error()?;
-            Ok(Box::new(file))
+            let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
+                path: file.to_path_buf(),
+                source: e,
+            })?;
+            Ok(Box::new(handle))
         }
     }
 }

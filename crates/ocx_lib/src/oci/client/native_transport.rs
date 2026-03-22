@@ -56,13 +56,13 @@ impl NativeTransport {
         self.client
             .auth(image, &auth, operation)
             .await
-            .map_err(|e| ClientError::Authentication(e.to_string()))?;
+            .map_err(|e| ClientError::Authentication(Box::new(e)))?;
         Ok(())
     }
 }
 
-fn registry_error(e: impl std::fmt::Display) -> ClientError {
-    ClientError::Registry(e.to_string())
+fn registry_error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> ClientError {
+    ClientError::Registry(e.into())
 }
 
 /// Maps OCI distribution errors to [`ClientError::ManifestNotFound`] when the
@@ -86,16 +86,19 @@ fn manifest_not_found_or_registry_error(
             if is_not_found {
                 ClientError::ManifestNotFound(image.to_string())
             } else {
-                ClientError::Registry(e.to_string())
+                ClientError::Registry(Box::new(e))
             }
         }
         ServerError { code: 404, .. } => ClientError::ManifestNotFound(image.to_string()),
-        _ => ClientError::Registry(e.to_string()),
+        _ => ClientError::Registry(Box::new(e)),
     }
 }
 
 fn io_error(path: &Path, e: impl Into<std::io::Error>) -> ClientError {
-    ClientError::Io(path.to_path_buf(), e.into())
+    ClientError::Io {
+        path: path.to_path_buf(),
+        source: e.into(),
+    }
 }
 
 #[async_trait]

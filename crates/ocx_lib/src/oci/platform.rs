@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod error;
+
 use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
@@ -167,6 +169,22 @@ impl Platform {
             // Arch::Wasm,
         ]
     }
+
+    fn os_variants_display() -> String {
+        Self::os_variants()
+            .into_iter()
+            .map(|os| os.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn arch_variants_display() -> String {
+        Self::arch_variants()
+            .into_iter()
+            .map(|arch| arch.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 impl Default for Platform {
@@ -210,7 +228,7 @@ impl std::str::FromStr for Platform {
 
         let parts: Vec<&str> = value.split('/').collect();
         if parts.len() < 2 || parts.len() > 4 {
-            return Err(crate::Error::PlatformInvalid(value.to_string()));
+            return Err(error::PlatformError::Invalid(value.to_string()).into());
         }
 
         let os_str = parts[0];
@@ -221,12 +239,20 @@ impl std::str::FromStr for Platform {
 
         let os = os_str.into();
         if !Platform::os_variants().contains(&os) {
-            return Err(crate::Error::PlatformInvalidOs(os.to_string()));
+            return Err(error::PlatformError::InvalidOs {
+                os: os.to_string(),
+                valid: Self::os_variants_display(),
+            }
+            .into());
         }
 
         let architecture = arch_str.into();
         if !Platform::arch_variants().contains(&architecture) {
-            return Err(crate::Error::PlatformInvalidArch(architecture.to_string()));
+            return Err(error::PlatformError::InvalidArch {
+                arch: architecture.to_string(),
+                valid: Self::arch_variants_display(),
+            }
+            .into());
         }
 
         let variant = if parts.len() > 2 {
@@ -259,7 +285,7 @@ impl TryFrom<native::Platform> for Platform {
 
     fn try_from(platform: native::Platform) -> Result<Self> {
         if platform.features.is_some() || platform.os_features.is_some() {
-            return Err(crate::Error::PlatformUnsupported(platform.to_string()));
+            return Err(error::PlatformError::Unsupported(platform.to_string()).into());
         }
 
         if let (native::Os::Other(os), native::Arch::Other(arch)) = (&platform.os, &platform.architecture) {
@@ -272,14 +298,14 @@ impl TryFrom<native::Platform> for Platform {
             {
                 return Ok(Platform::any());
             }
-            return Err(crate::Error::PlatformUnsupported(platform.to_string()));
+            return Err(error::PlatformError::Unsupported(platform.to_string()).into());
         }
 
         if !Platform::os_variants().contains(&platform.os) {
-            return Err(crate::Error::PlatformUnsupported(platform.to_string()));
+            return Err(error::PlatformError::Unsupported(platform.to_string()).into());
         }
         if !Platform::arch_variants().contains(&platform.architecture) {
-            return Err(crate::Error::PlatformUnsupported(platform.to_string()));
+            return Err(error::PlatformError::Unsupported(platform.to_string()).into());
         }
 
         Ok(Self { inner: Some(platform) })

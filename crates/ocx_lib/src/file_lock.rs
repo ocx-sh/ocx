@@ -21,7 +21,7 @@ impl FileLock {
             fs2::FileExt::lock_exclusive(&file)?;
             Ok::<_, std::io::Error>(file)
         });
-        let file = handle.await.map_err(|e| std::io::Error::other(e.to_string()))??;
+        let file = handle.await.map_err(std::io::Error::other)??;
         Ok(FileLock { _lock_file: file })
     }
 
@@ -36,7 +36,7 @@ impl FileLock {
 
         match tokio::time::timeout(duration, blocking).await {
             Ok(join_result) => {
-                let file = join_result.map_err(|e| std::io::Error::other(format!("thread failed: {e}")))??;
+                let file = join_result.map_err(std::io::Error::other)??;
                 Ok(FileLock { _lock_file: file })
             }
             Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "lock timed out")),
@@ -48,7 +48,7 @@ impl FileLock {
             fs2::FileExt::lock_shared(&file)?;
             Ok::<_, std::io::Error>(file)
         });
-        let file = handle.await.map_err(|e| std::io::Error::other(e.to_string()))??;
+        let file = handle.await.map_err(std::io::Error::other)??;
         Ok(FileLock { _lock_file: file })
     }
 
@@ -63,7 +63,7 @@ impl FileLock {
 
         match tokio::time::timeout(duration, blocking).await {
             Ok(join_result) => {
-                let file = join_result.map_err(|e| std::io::Error::other(format!("thread failed: {e}")))??;
+                let file = join_result.map_err(std::io::Error::other)??;
                 Ok(FileLock { _lock_file: file })
             }
             Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "lock timed out")),

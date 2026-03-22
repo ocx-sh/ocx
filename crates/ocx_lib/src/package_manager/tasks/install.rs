@@ -149,10 +149,7 @@ impl PackageManager {
         }
 
         for id in pending {
-            errors.push(PackageError::new(
-                id,
-                PackageErrorKind::Internal(crate::Error::UndefinedWithMessage("task panicked unexpectedly".into())),
-            ));
+            errors.push(PackageError::new(id, PackageErrorKind::TaskPanicked));
         }
 
         let mut infos = Vec::with_capacity(packages.len());

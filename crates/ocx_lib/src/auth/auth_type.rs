@@ -34,7 +34,7 @@ impl TryFrom<String> for AuthType {
             "anonymous" => Ok(AuthType::Anonymous),
             "basic" => Ok(AuthType::Basic),
             "token" | "bearer" => Ok(AuthType::Token),
-            other => Err(Error::AuthInvalidType(other.to_string())),
+            other => Err(super::AuthError::InvalidType(other.to_string()).into()),
         }
     }
 }

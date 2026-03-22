@@ -93,7 +93,7 @@ pub async fn execute_mirror(
 
     for version_key in &version_keys {
         let start = entries.len();
-        for task in by_version.remove(version_key).unwrap() {
+        for task in by_version.remove(version_key).expect("key from version_keys") {
             let task_dir = task_dir(work_dir, &task.normalized_version, &task.platform);
             entries.push((task, task_dir));
         }

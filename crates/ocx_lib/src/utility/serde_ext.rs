@@ -15,7 +15,7 @@ where
     fn read_json_from_path(path: impl AsRef<std::path::Path>) -> crate::Result<Self> {
         let file = std::fs::File::open(&path).map_err(|error| crate::error::file_error(&path, error))?;
         let reader = std::io::BufReader::new(file);
-        let value = serde_json::from_reader(reader).map_to_undefined_error()?;
+        let value = serde_json::from_reader(reader)?;
         Ok(value)
     }
 
@@ -25,7 +25,7 @@ where
         }
         let file = std::fs::File::create(&path).map_err(|error| crate::error::file_error(&path, error))?;
         let writer = std::io::BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, self).map_to_undefined_error()?;
+        serde_json::to_writer_pretty(writer, self)?;
         Ok(())
     }
 }
