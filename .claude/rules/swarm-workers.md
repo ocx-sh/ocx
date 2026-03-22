@@ -66,16 +66,20 @@ Results aggregated for next phase
 3. worker-reviewer (spec-compliance, post-stub) validates stubs ↔ design
 4. worker-tester (specification) writes tests from design
 5. worker-builder (implementation) fills in stubs in parallel
-6. worker-reviewer (spec-compliance, post-implementation) validates
-7. worker-reviewer (quality) validates code quality
-8. Orchestrator integrates
+6. Review-Fix Loop (max 3 rounds, diff-scoped):
+   a. All reviewers run in parallel (round 1) or only those with prior findings (round 2+)
+   b. worker-builder fixes actionable findings
+   c. Repeat until no actionable findings or max rounds
+   d. Report deferred findings to human
+7. Orchestrator commits
 ```
 
 ### Security Sweep
 ```
 worker-reviewer (focus: security) scans all components in parallel
-Findings aggregated and prioritized
-worker-builder fixes critical/high issues
+Findings classified as actionable or deferred
+worker-builder fixes actionable findings
+Deferred findings reported to human
 ```
 
 ## Coordination Protocol

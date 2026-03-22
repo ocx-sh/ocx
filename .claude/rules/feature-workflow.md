@@ -17,8 +17,8 @@ The proven approach using subagent orchestration with **contract-first TDD**.
 6. **Verify Architecture** — `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) validates stubs match the design record. Gate: reviewer passes. *Optional for features touching ≤3 files.*
 7. **Specify** — `worker-tester` (focus: `specification`) writes unit + acceptance tests from the design record. Tests fail against stubs. Gate: tests compile and fail with `unimplemented`.
 8. **Implement** — `worker-builder` (focus: `implementation`) fills in stub bodies until all tests pass. Gate: `task verify` succeeds.
-9. **Review** — `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) verifies design↔tests↔code consistency, then (focus: `quality`) for code quality. *Spec-compliance review optional for features touching ≤3 files.*
-10. **Commit** — All changes committed on feature branch with conventional commit message.
+9. **Review-Fix Loop** — Diff-scoped, bounded iterative review (max 3 rounds). Round 1 runs all perspectives; subsequent rounds only re-run perspectives that had actionable findings. Findings classified as actionable (fix automatically) or deferred (needs human). Loop exits when no actionable findings remain. See swarm-execute for full protocol.
+10. **Commit** — All changes committed on feature branch with conventional commit message. Deferred findings printed as summary.
 11. **Push** — Human decides when to push (CI has real cost).
 
 ## Agent Team Workflow (Experimental)
@@ -31,9 +31,9 @@ Enables `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Multiple Claude sessions coord
 4. **Reviewer verifies** — Validates stubs against design record (spec-compliance, post-stub). Reports issues or approves.
 5. **Tester specifies** — Writes tests from the design record (not from stubs). Tests must fail against stubs. Marks for builder.
 6. **Builder implements** — Fills in stub bodies until all tests pass. Marks for reviewer.
-7. **Reviewer checks** — Verifies spec-compliance (post-implementation), then quality, security. Reports issues back.
-8. **Iterate** — Teammates communicate via mailbox to resolve issues.
-9. **Complete** — All teammates commit on feature branch. Human reviews, decides to push.
+7. **Reviewer checks** — Diff-scoped review: spec-compliance, quality, security. Classifies findings as actionable or deferred. Reports actionable findings back to builder.
+8. **Iterate** — Builder fixes actionable findings, reviewer re-checks only perspectives that had findings. Loop until no actionable findings remain (max 3 rounds). Deferred findings reported to human.
+9. **Complete** — All teammates commit on feature branch. Human reviews deferred findings, decides to push.
 
 ### Team Sizing
 

@@ -69,21 +69,34 @@ Focused review agent for swarm execution. Supports focus modes: quality (default
 - Structural duplication (same logic in multiple places)
 - Interpret Rust-aware: derive expansions and similar error handling are NOT duplication
 
+## Diff Scoping
+
+When the orchestrator provides a file list (from `git diff main...HEAD --name-only`), restrict findings to those files only. Do NOT flag pre-existing issues in unchanged code. Exception: if a change introduces a regression in an unchanged file (e.g., breaks an import), that is in scope.
+
+## Finding Classification
+
+Every finding must be classified:
+- **Actionable** — can be fixed without human input (code quality, missing tests, naming, patterns, security fixes with clear remediation)
+- **Deferred** — requires human decision (design questions, scope changes, architectural trade-offs, external dependency choices)
+
+This classification drives the review-fix loop in `/swarm-execute` — only perspectives with actionable findings trigger re-review.
+
 ## Output Format
 ```
 Summary: [Pass/Fail/Needs Work]
 Focus: [quality/security/performance/spec-compliance]
 Phase: [post-stub/post-specification/post-implementation] (spec-compliance only)
 Coverage: [X/Y design requirements covered] (spec-compliance only)
-OCX Pattern Violations: [list or "None"]
-Critical: [list or "None"]
-Suggestions: [list]
+Actionable: [list with file:line, description, remediation]
+Deferred: [list with file:line, description, why it needs human input]
 ```
 
 ## Constraints
 - Never expose actual secrets in output
 - Provide specific file:line references
-- Include remediation steps for critical findings
+- Include remediation steps for actionable findings
+- Classify every finding as actionable or deferred — no unclassified findings
+- Stay within the diff scope when a file list is provided
 
 ## On Completion
-Report: verdict, focus area, critical count, suggestion count.
+Report: verdict, focus area, actionable count, deferred count.

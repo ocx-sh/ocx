@@ -11,11 +11,12 @@ Multi-perspective code review with root cause analysis and OCX-specific pattern 
 
 ## Review Workflow
 
-1. **Gather** — Get diff and commit history for the branch
-2. **Analyze** — Launch parallel worker-reviewer agents for each perspective
-3. **Interrogate** — Apply adversarial questioning
-4. **Root Cause** — Investigate systemic issues with Five Whys
-5. **Verdict** — Approve or request changes
+1. **Gather** — Get diff and commit history for the branch. Compute changed file list via `git diff main...HEAD --name-only`.
+2. **Analyze** — Launch parallel worker-reviewer agents for each perspective, scoped to changed files only.
+3. **Classify** — Each reviewer classifies findings as **actionable** (can fix without human input) or **deferred** (needs human decision).
+4. **Interrogate** — Apply adversarial questioning
+5. **Root Cause** — Investigate systemic issues with Five Whys
+6. **Verdict** — Approve or request changes
 
 ## Review Perspectives
 
