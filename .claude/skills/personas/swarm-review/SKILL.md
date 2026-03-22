@@ -49,6 +49,16 @@ Per `.claude/rules/rust-quality.md` "Project Pattern Consistency" and "Reusabili
 - Could a second command reuse this code, or would it need to copy-paste?
 - Are cross-cutting concerns (progress, retry, rate-limiting) in the library?
 
+### Documentation Consistency
+Launch `worker-doc-reviewer` to check code-documentation drift:
+- Cross-reference changed files against the documentation trigger matrix
+- New CLI commands/flags → `reference/command-line.md`
+- New env vars → `reference/environment.md`
+- New schema fields → `reference/metadata.md`
+- Changed behavior → `user-guide.md` accuracy
+- New platforms → `installation.md` + `user-guide.md`
+- Breaking changes → `changelog.md`
+
 ## Adversarial Questions
 
 - "What if this assumption is wrong?"
@@ -99,6 +109,7 @@ Per `.claude/rules/rust-quality.md` "Project Pattern Consistency" and "Reusabili
 ## Handoff
 
 - To Builder: With specific remediation tasks
+- To Doc Writer: With gap report from documentation reviewer
 - To Architect: For architectural concerns requiring ADR
 
 $ARGUMENTS

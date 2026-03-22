@@ -135,6 +135,8 @@ New code must follow established OCX patterns. The reviewer enforces this:
 
 | Pattern | Convention | Deviation = Bug |
 |---------|-----------|----------------|
+| Type names | Full descriptive names (`OperatingSystem`, `Architecture`), not abbreviations (`Os`, `Arch`) | Abbreviated type names |
+| Module structure | One concept per file, deep nested modules (`platform/operating_system.rs`) | Monolithic files, `mod.rs` |
 | Error model | `thiserror::Error` derive, `#[source]`/`#[from]`, `#[non_exhaustive]`, subsystem error types | Manual `Display`/`Error` impls, `.to_string()` in error construction, `String` wrapping source errors, catch-all error variants |
 | Progress | `tracing::info_span!` + `tracing-indicatif` | Custom progress bars, `println!` |
 | Symlinks | `ReferenceManager::link(forward, content)` | Raw `symlink::update/create` |

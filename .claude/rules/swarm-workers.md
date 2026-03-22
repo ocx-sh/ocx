@@ -20,6 +20,8 @@ Rules for efficient multi-agent swarm execution.
 | `worker-reviewer` | opus | Read, Glob, Grep, Bash | Code review/security analysis |
 | `worker-researcher` | sonnet | Read, Glob, Grep, WebFetch, WebSearch | External research |
 | `worker-architect` | opus | Read, Write, Edit, Glob, Grep | Complex design decisions |
+| `worker-doc-reviewer` | sonnet | Read, Glob, Grep, Bash | Documentation consistency review |
+| `worker-doc-writer` | sonnet | Read, Write, Edit, Bash, Glob, Grep | Documentation writing |
 
 ## Worker Focus Modes
 
@@ -34,6 +36,13 @@ Orchestrators specialize workers by specifying a focus mode in the prompt.
 - `quality` (default): Code review checklist — naming, style, tests, patterns
 - `security`: OWASP Top 10 scan, hardcoded secrets, auth/authz flows, input validation. Reference CWE IDs. See security.md
 - `performance`: N+1 queries, blocking I/O, allocations, pagination, caching. See code-quality.md
+
+**worker-doc-reviewer**: No focus modes — always runs the full trigger matrix audit (CLI, env vars, metadata, user guide, installation, changelog).
+
+**worker-doc-writer focus modes:**
+- `reference`: Flag tables, env var entries, schema fields — facts only, no narrative
+- `narrative`: User guide sections, getting started — idea→problem→solution structure
+- `changelog`: Version entries with Added/Changed/Fixed/Removed sections
 
 ## Swarm Patterns
 
