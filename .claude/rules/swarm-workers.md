@@ -52,35 +52,7 @@ Orchestrators specialize workers by specifying a focus mode in the prompt.
 
 ## Swarm Patterns
 
-### Parallel Exploration
-```
-Orchestrator spawns 4-8 worker-explorer agents simultaneously
-Each searches different parts of codebase
-Results aggregated for next phase
-```
-
-### Contract-First TDD (Primary)
-```
-1. worker-architect designs solution with testable contracts
-2. worker-builder (stubbing) creates API surface
-3. worker-reviewer (spec-compliance, post-stub) validates stubs ↔ design
-4. worker-tester (specification) writes tests from design
-5. worker-builder (implementation) fills in stubs in parallel
-6. Review-Fix Loop (max 3 rounds, diff-scoped):
-   a. All reviewers run in parallel (round 1) or only those with prior findings (round 2+)
-   b. worker-builder fixes actionable findings
-   c. Repeat until no actionable findings or max rounds
-   d. Report deferred findings to human
-7. Orchestrator commits
-```
-
-### Security Sweep
-```
-worker-reviewer (focus: security) scans all components in parallel
-Findings classified as actionable or deferred
-worker-builder fixes actionable findings
-Deferred findings reported to human
-```
+See `.claude/rules/feature-workflow.md` for the canonical contract-first TDD protocol (Stub → Verify → Specify → Implement → Review-Fix Loop). The `/swarm-execute` skill has the full detailed protocol including the review-fix loop specification.
 
 ## Coordination Protocol
 

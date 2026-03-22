@@ -1,11 +1,11 @@
 # /// script
 # requires-python = ">=3.10"
 # ///
-"""PreToolUse hook (Bash): inject pre-commit verification instructions.
+"""PreToolUse hook (Bash): enforce pre-commit verification gate.
 
 Fires only when a Bash tool call contains a git commit command.
-Checks if verification was done recently (5-minute TTL) and, if not,
-outputs additionalContext with instructions listing detected project tools.
+Blocks the commit unless `task verify` was run recently (5-minute TTL).
+Uses deny (hard block), not additionalContext (ignorable hint).
 """
 
 import sys
@@ -96,41 +96,19 @@ def detect_project_tools(project_dir: str) -> list[str]:
     return tools
 
 
-def build_context_message(detected_tools: list[str], state_dir: str) -> str:
-    """Return the additionalContext text for the commit verification reminder."""
+def build_deny_reason(detected_tools: list[str], state_dir: str) -> str:
+    """Return the deny reason explaining how to pass the verification gate."""
     tools_str = (
         " ".join(detected_tools) if detected_tools else "none detected - check manually"
     )
-    return f"""
----
-[PRE-COMMIT VERIFICATION REQUIRED]
-
-Before committing, you MUST complete these steps:
-
-1. RUN ALL TESTS AND LINTING:
-   - Run the project's test suite and ensure all tests pass
-   - Run linting/formatting checks and fix any issues
-   - Run type checking if available
-
-   Detected tools in this project: {tools_str}
-
-2. FIX ALL FAILURES:
-   - If tests fail, fix the code until they pass
-   - If linting fails, fix the issues
-   - Do NOT skip or disable failing checks
-
-3. CRITICAL: NEVER REMOVE OR SKIP TESTS
-   - Do NOT delete test files or test cases to make tests pass
-   - Do NOT comment out failing tests
-   - Do NOT add skip decorators to avoid failures
-   - Fix the actual code issues instead
-
-4. AFTER VERIFICATION SUCCEEDS:
-   - Mark verification complete: echo $(date +%s) > {state_dir}/commit-verified
-   - Then proceed with the git commit
-
-If you cannot fix a test legitimately, STOP and ask the user for guidance.
----"""
+    return (
+        "BLOCKED: Cannot commit without passing verification.\n\n"
+        "Run `task verify` first (format, clippy, lint, license, build, tests).\n"
+        f"Detected tools: {tools_str}\n\n"
+        "After verification passes, mark it complete:\n"
+        f"  echo $(date +%s) > {state_dir}/commit-verified\n\n"
+        "Then retry the commit."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +137,9 @@ def main() -> None:
 
     tools = detect_project_tools(project_dir)
     state_dir_str = str(state.state_dir)
-    context_text = build_context_message(tools, state_dir_str)
+    reason = build_deny_reason(tools, state_dir_str)
 
-    hook_utils.output_json(hook_utils.additional_context(context_text))
+    hook_utils.output_json(hook_utils.deny(reason))
     sys.exit(0)
 
 

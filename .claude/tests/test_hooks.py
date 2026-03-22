@@ -24,6 +24,7 @@ from hook_utils import StateManager
 import skill_activation_prompt
 import pre_tool_use_validator
 import pre_commit_verification
+import conventional_commit_validator
 import pre_push_main_blocker
 import post_tool_use_tracker
 import stop_validator
@@ -390,6 +391,118 @@ class TestPreCommitVerification:
         verify_file = sm.state_dir / "commit-verified"
         verify_file.write_text(str(int(time.time())))
         assert sm.is_recently_verified(ttl_seconds=300) is True
+
+    def test_build_deny_reason_contains_tools(self) -> None:
+        """build_deny_reason includes detected tools in the deny message."""
+        reason = pre_commit_verification.build_deny_reason(
+            ["cargo-test", "cargo-clippy"], "/tmp/.state"
+        )
+        assert "BLOCKED" in reason
+        assert "cargo-test" in reason
+        assert "task verify" in reason
+
+    def test_build_deny_reason_no_tools(self) -> None:
+        """build_deny_reason handles empty tool list gracefully."""
+        reason = pre_commit_verification.build_deny_reason([], "/tmp/.state")
+        assert "none detected" in reason
+
+
+# ---------------------------------------------------------------------------
+# TestConventionalCommitValidator
+# ---------------------------------------------------------------------------
+
+
+class TestConventionalCommitValidator:
+    def test_valid_feat_commit(self) -> None:
+        """A feat: message is accepted."""
+        assert conventional_commit_validator.is_conventional_commit("feat: add search command") is True
+
+    def test_valid_fix_with_scope(self) -> None:
+        """A fix(scope): message is accepted."""
+        assert conventional_commit_validator.is_conventional_commit("fix(oci): handle missing manifest") is True
+
+    def test_valid_chore_commit(self) -> None:
+        """A chore: message is accepted."""
+        assert conventional_commit_validator.is_conventional_commit("chore: update AI configuration") is True
+
+    def test_valid_breaking_change(self) -> None:
+        """A feat!: breaking change message is accepted."""
+        assert conventional_commit_validator.is_conventional_commit("feat!: remove deprecated API") is True
+
+    def test_valid_breaking_with_scope(self) -> None:
+        """A refactor(cli)!: breaking change with scope is accepted."""
+        assert conventional_commit_validator.is_conventional_commit("refactor(cli)!: rename commands") is True
+
+    def test_all_valid_types(self) -> None:
+        """All conventional commit types are accepted."""
+        for commit_type in ("feat", "fix", "refactor", "ci", "chore", "docs", "test", "perf", "build", "style"):
+            assert conventional_commit_validator.is_conventional_commit(f"{commit_type}: description") is True
+
+    def test_invalid_no_type(self) -> None:
+        """A message without a type prefix is rejected."""
+        assert conventional_commit_validator.is_conventional_commit("add new feature") is False
+
+    def test_invalid_unknown_type(self) -> None:
+        """An unknown type prefix is rejected."""
+        assert conventional_commit_validator.is_conventional_commit("feature: add search") is False
+
+    def test_invalid_missing_space_after_colon(self) -> None:
+        """A message missing the space after colon is rejected."""
+        assert conventional_commit_validator.is_conventional_commit("feat:no space") is False
+
+    def test_invalid_checkpoint(self) -> None:
+        """A 'Checkpoint' message is rejected."""
+        assert conventional_commit_validator.is_conventional_commit("Checkpoint") is False
+
+    def test_extract_double_quoted_message(self) -> None:
+        """extract_commit_message parses double-quoted -m."""
+        msg = conventional_commit_validator.extract_commit_message('git commit -m "feat: add feature"')
+        assert msg == "feat: add feature"
+
+    def test_extract_single_quoted_message(self) -> None:
+        """extract_commit_message parses single-quoted -m."""
+        msg = conventional_commit_validator.extract_commit_message("git commit -m 'fix: bug'")
+        assert msg == "fix: bug"
+
+    def test_extract_heredoc_message(self) -> None:
+        """extract_commit_message parses heredoc-style -m."""
+        cmd = 'git commit -m "$(cat <<\'EOF\'\nchore: update config\n\nCo-Authored-By: test\nEOF\n)"'
+        msg = conventional_commit_validator.extract_commit_message(cmd)
+        assert msg == "chore: update config"
+
+    def test_extract_no_message_flag(self) -> None:
+        """extract_commit_message returns None when no -m flag is present."""
+        msg = conventional_commit_validator.extract_commit_message("git commit --amend")
+        assert msg is None
+
+    def test_non_commit_command(self) -> None:
+        """is_git_commit returns False for non-commit commands."""
+        assert conventional_commit_validator.is_git_commit("git push origin main") is False
+
+    def test_git_commit_detected(self) -> None:
+        """is_git_commit returns True for commit commands."""
+        assert conventional_commit_validator.is_git_commit('git commit -m "test: ok"') is True
+
+
+# ---------------------------------------------------------------------------
+# TestPreToolUseValidatorGenerated
+# ---------------------------------------------------------------------------
+
+
+class TestPreToolUseValidatorGenerated:
+    def test_generated_file_detected(self) -> None:
+        """is_generated returns guidance for known generated files."""
+        result = pre_tool_use_validator.is_generated(".github/workflows/release.yml")
+        assert result is not None
+        assert "cargo-dist" in result
+
+    def test_non_generated_file_returns_none(self) -> None:
+        """is_generated returns None for non-generated files."""
+        assert pre_tool_use_validator.is_generated(".github/workflows/verify-basic.yml") is None
+
+    def test_regular_source_file_not_generated(self) -> None:
+        """is_generated returns None for regular source files."""
+        assert pre_tool_use_validator.is_generated("src/main.rs") is None
 
 
 # ---------------------------------------------------------------------------

@@ -24,8 +24,7 @@
       "Bash(curl:*)",
       "Bash(wget:*)",
 
-      "// === Git Destructive Operations ===",
-      "Bash(git push:*)",
+      "// === Git Destructive Operations (git push handled by pre_push_main_blocker hook) ===",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "Bash(git push origin --force:*)",
@@ -92,6 +91,11 @@
           },
           {
             "type": "command",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/conventional_commit_validator.py\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_push_main_blocker.py\"",
             "timeout": 5
           }
@@ -126,7 +130,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/subagent_stop_validator.py\"",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/subagent_stop_logger.py\"",
             "timeout": 5
           }
         ]
