@@ -8,7 +8,7 @@ pub fn has_platform(manifest: &Manifest, platform: &Platform) -> bool {
     let Manifest::ImageIndex(index) = manifest else {
         return false;
     };
-    let native: super::native::Platform = platform.clone().into();
+    let native = super::native::Platform::from(platform);
     let target = Some(native);
     index.manifests.iter().any(|e| e.platform == target)
 }

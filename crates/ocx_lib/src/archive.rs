@@ -77,11 +77,23 @@ fn validate_symlink_target(root: &Path, link_path: &Path, target: &Path) -> Resu
 
 /// Recursively validates that all symlinks under `dir` resolve within `root`.
 fn validate_symlinks_in_dir(root: &Path, dir: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(dir).map_err(|e| error::Error::Io { path: dir.to_path_buf(), source: e })? {
-        let entry = entry.map_err(|e| error::Error::Io { path: dir.to_path_buf(), source: e })?;
-        let ft = entry.file_type().map_err(|e| error::Error::Io { path: entry.path(), source: e })?;
+    for entry in std::fs::read_dir(dir).map_err(|e| error::Error::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    })? {
+        let entry = entry.map_err(|e| error::Error::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
+        let ft = entry.file_type().map_err(|e| error::Error::Io {
+            path: entry.path(),
+            source: e,
+        })?;
         if ft.is_symlink() {
-            let target = std::fs::read_link(entry.path()).map_err(|e| error::Error::Io { path: entry.path(), source: e })?;
+            let target = std::fs::read_link(entry.path()).map_err(|e| error::Error::Io {
+                path: entry.path(),
+                source: e,
+            })?;
             validate_symlink_target(root, &entry.path(), &target)?;
         } else if ft.is_dir() {
             validate_symlinks_in_dir(root, &entry.path())?;
@@ -111,7 +123,10 @@ impl Archive {
                 .create(true)
                 .truncate(true)
                 .open(output)
-                .map_err(|e| error::Error::Io { path: output.to_path_buf(), source: e })?;
+                .map_err(|e| error::Error::Io {
+                    path: output.to_path_buf(),
+                    source: e,
+                })?;
             Ok(Self {
                 inner: Box::new(tar::TarBackend::new(Box::new(file))),
             })
@@ -188,7 +203,10 @@ impl Archive {
         let reader: Box<dyn std::io::Read + Send> = if let Some(algorithm) = algorithm {
             compression::read_file(&archive, Some(algorithm)).await?
         } else {
-            Box::new(std::fs::File::open(&archive).map_err(|e| error::Error::Io { path: archive.clone(), source: e })?)
+            Box::new(std::fs::File::open(&archive).map_err(|e| error::Error::Io {
+                path: archive.clone(),
+                source: e,
+            })?)
         };
 
         tokio::task::spawn_blocking(move || {

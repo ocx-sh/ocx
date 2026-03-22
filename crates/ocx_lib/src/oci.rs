@@ -15,6 +15,8 @@ pub mod native {
     pub use oci_client::config::Architecture as Arch;
     pub use oci_client::config::Os;
 
+    pub use oci_client::manifest::ImageIndexEntry;
+    pub use oci_client::manifest::OciDescriptor;
     pub use oci_client::manifest::OciImageIndex as ImageIndex;
     pub use oci_client::manifest::OciImageManifest as ImageManifest;
     pub use oci_client::manifest::OciManifest as Manifest;
@@ -53,6 +55,8 @@ pub use identifier::Identifier;
 pub use identifier::OCX_SH_REGISTRY;
 
 pub mod platform;
+pub use platform::Architecture;
+pub use platform::OperatingSystem;
 pub use platform::Platform;
 
 pub mod digest;

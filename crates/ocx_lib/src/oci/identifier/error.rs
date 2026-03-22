@@ -14,7 +14,10 @@ pub struct IdentifierError {
 
 impl IdentifierError {
     pub fn new(input: impl Into<String>, kind: IdentifierErrorKind) -> Self {
-        Self { input: input.into(), kind }
+        Self {
+            input: input.into(),
+            kind,
+        }
     }
 }
 

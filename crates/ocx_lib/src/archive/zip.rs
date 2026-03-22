@@ -33,7 +33,10 @@ impl ZipBackend {
             .create(true)
             .truncate(true)
             .open(output)
-            .map_err(|e| Error::Io { path: output.to_path_buf(), source: e })?;
+            .map_err(|e| Error::Io {
+                path: output.to_path_buf(),
+                source: e,
+            })?;
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .compression_level(Some(match level {
@@ -74,7 +77,10 @@ impl Backend for ZipBackend {
             let mut source = std::fs::File::open(&file).map_err(|e| Error::Io { path: file, source: e })?;
             let name = path_to_zip_name(&archive_path);
             writer.start_file(name, opts).map_err(Error::Zip)?;
-            std::io::copy(&mut source, writer).map_err(|e| Error::Io { path: archive_path, source: e })?;
+            std::io::copy(&mut source, writer).map_err(|e| Error::Io {
+                path: archive_path,
+                source: e,
+            })?;
             Ok(())
         })
         .await
@@ -114,7 +120,10 @@ impl Backend for ZipBackend {
         let output_path = self.output_path;
         tokio::task::spawn_blocking(move || {
             let mut inner = writer.finish().map_err(Error::Zip)?;
-            inner.flush().map_err(|e| Error::Io { path: output_path, source: e })?;
+            inner.flush().map_err(|e| Error::Io {
+                path: output_path,
+                source: e,
+            })?;
             Ok(())
         })
         .await
@@ -130,13 +139,22 @@ fn add_dir_recursive(
     count: &mut u64,
 ) -> Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| Error::Io { path: dir.to_path_buf(), source: e })?
+        .map_err(|e| Error::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| Error::Io { path: dir.to_path_buf(), source: e })?;
+        .map_err(|e| Error::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
-        let file_type = entry.file_type().map_err(|e| Error::Io { path: entry.path(), source: e })?;
+        let file_type = entry.file_type().map_err(|e| Error::Io {
+            path: entry.path(),
+            source: e,
+        })?;
         let name = entry.file_name();
         let archive_path = if base_path.as_os_str().is_empty() {
             PathBuf::from(&name)
@@ -146,7 +164,10 @@ fn add_dir_recursive(
 
         if file_type.is_symlink() {
             let entry_path = entry.path();
-            let target = std::fs::read_link(&entry_path).map_err(|e| Error::Io { path: entry_path, source: e })?;
+            let target = std::fs::read_link(&entry_path).map_err(|e| Error::Io {
+                path: entry_path,
+                source: e,
+            })?;
             let link_name = path_to_zip_name(&archive_path);
             let target_name = target.to_string_lossy();
             writer
@@ -166,8 +187,14 @@ fn add_dir_recursive(
             let file_name = path_to_zip_name(&archive_path);
             let opts = file_options_with_permissions(options, &file_path);
             writer.start_file(file_name, opts).map_err(Error::Zip)?;
-            let mut source = std::fs::File::open(&file_path).map_err(|e| Error::Io { path: file_path.clone(), source: e })?;
-            std::io::copy(&mut source, writer).map_err(|e| Error::Io { path: file_path, source: e })?;
+            let mut source = std::fs::File::open(&file_path).map_err(|e| Error::Io {
+                path: file_path.clone(),
+                source: e,
+            })?;
+            std::io::copy(&mut source, writer).map_err(|e| Error::Io {
+                path: file_path,
+                source: e,
+            })?;
         }
 
         *count += 1;
@@ -203,7 +230,10 @@ fn file_options_with_permissions(options: SimpleFileOptions, _file: &Path) -> Si
 }
 
 pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize) -> Result<()> {
-    let file = std::fs::File::open(archive).map_err(|e| Error::Io { path: archive.to_path_buf(), source: e })?;
+    let file = std::fs::File::open(archive).map_err(|e| Error::Io {
+        path: archive.to_path_buf(),
+        source: e,
+    })?;
     let mut zip = zip::ZipArchive::new(file).map_err(Error::Zip)?;
 
     for i in 0..zip.len() {
@@ -220,43 +250,72 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize) ->
         let output_path = output.join(&stripped);
 
         if entry.is_dir() {
-            std::fs::create_dir_all(&output_path).map_err(|e| Error::Io { path: output_path.clone(), source: e })?;
+            std::fs::create_dir_all(&output_path).map_err(|e| Error::Io {
+                path: output_path.clone(),
+                source: e,
+            })?;
         } else if entry.is_symlink() {
             if let Some(parent) = output_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| Error::Io { path: parent.to_path_buf(), source: e })?;
+                std::fs::create_dir_all(parent).map_err(|e| Error::Io {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
             }
             let mut target = String::new();
-            std::io::Read::read_to_string(&mut entry, &mut target).map_err(|e| Error::Io { path: output_path.clone(), source: e })?;
+            std::io::Read::read_to_string(&mut entry, &mut target).map_err(|e| Error::Io {
+                path: output_path.clone(),
+                source: e,
+            })?;
             super::validate_symlink_target(output, &output_path, Path::new(&target))?;
             #[cfg(unix)]
             {
-                std::os::unix::fs::symlink(&target, &output_path).map_err(|e| Error::Io { path: output_path.clone(), source: e })?;
+                std::os::unix::fs::symlink(&target, &output_path).map_err(|e| Error::Io {
+                    path: output_path.clone(),
+                    source: e,
+                })?;
             }
             #[cfg(windows)]
             {
                 // On Windows, try directory symlink first since we can't easily distinguish
                 let target_path = output_path.parent().unwrap_or(Path::new(".")).join(&target);
                 if target_path.is_dir() {
-                    std::os::windows::fs::symlink_dir(&target, &output_path)
-                        .map_err(|e| Error::Io { path: output_path.clone(), source: e })?;
+                    std::os::windows::fs::symlink_dir(&target, &output_path).map_err(|e| Error::Io {
+                        path: output_path.clone(),
+                        source: e,
+                    })?;
                 } else {
-                    std::os::windows::fs::symlink_file(&target, &output_path)
-                        .map_err(|e| Error::Io { path: output_path.clone(), source: e })?;
+                    std::os::windows::fs::symlink_file(&target, &output_path).map_err(|e| Error::Io {
+                        path: output_path.clone(),
+                        source: e,
+                    })?;
                 }
             }
         } else {
             if let Some(parent) = output_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| Error::Io { path: parent.to_path_buf(), source: e })?;
+                std::fs::create_dir_all(parent).map_err(|e| Error::Io {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
             }
-            let mut outfile = std::fs::File::create(&output_path).map_err(|e| Error::Io { path: output_path.clone(), source: e })?;
-            std::io::copy(&mut entry, &mut outfile).map_err(|e| Error::Io { path: output_path.clone(), source: e })?;
+            let mut outfile = std::fs::File::create(&output_path).map_err(|e| Error::Io {
+                path: output_path.clone(),
+                source: e,
+            })?;
+            std::io::copy(&mut entry, &mut outfile).map_err(|e| Error::Io {
+                path: output_path.clone(),
+                source: e,
+            })?;
 
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = entry.unix_mode() {
-                    std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(mode))
-                        .map_err(|e| Error::Io { path: output_path.clone(), source: e })?;
+                    std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(mode)).map_err(|e| {
+                        Error::Io {
+                            path: output_path.clone(),
+                            source: e,
+                        }
+                    })?;
                 }
             }
         }
