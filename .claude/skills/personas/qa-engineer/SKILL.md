@@ -11,6 +11,17 @@ Test strategy, test writing, and quality verification for the OCX project.
 
 ## Testing Workflow
 
+### Contract-First (during feature execution)
+
+In the swarm workflow, tests are written **before implementation** from the design record:
+
+1. **Read Design** — Read the plan artifact's component contracts, user experience scenarios, and error taxonomy
+2. **Write Specification Tests** — Encode each requirement as a test. Tests describe WHAT, not HOW. Assert on observable behavior.
+3. **Verify** — Tests must compile/parse and fail with `unimplemented!()` / `NotImplementedError` against stubs
+4. **Validate** — After implementation, verify all specification tests pass. Flag any behavior that exists in code but has no test.
+
+### Post-Implementation (coverage improvement)
+
 1. **Analyze** — Read subsystem context rule for the area being tested. Use Glob to find untested code.
 2. **Plan** — Design test strategy covering unit + acceptance layers
 3. **Write** — Implement tests following existing patterns

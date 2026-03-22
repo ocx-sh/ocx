@@ -56,36 +56,65 @@ Related Skills: builder, qa-engineer
 
 ## Implementation Steps
 
-### Phase 1: [Setup/Preparation]
+> **Contract-First TDD**: Every feature follows Stub → Verify → Specify → Implement → Review.
+> Tests are written from the design record *before* implementation, ensuring they validate the
+> contract — not the implementation details.
 
-- [ ] **Step 1.1:** [Description]
-  - Files: `path/to/file.ts`
+### Phase 1: Stubs
+
+Create type signatures, trait definitions, and function shells. All bodies use `unimplemented!()` (Rust) or `raise NotImplementedError` (Python). The goal is to establish the public API surface and architectural shape without any business logic.
+
+- [ ] **Step 1.1:** [Stub description — types, traits, function signatures]
+  - Files: `path/to/file.rs`
+  - Public API: [Signatures and types this introduces]
+
+- [ ] **Step 1.2:** [Stub description]
+  - Files: `path/to/file.rs`
+  - Public API: [Signatures and types this introduces]
+
+### Phase 2: Architecture Review
+
+Review stubs against this design record (`worker-reviewer`, focus: `spec-compliance`, phase: `post-stub`). Verify:
+- Type signatures match the documented API contract
+- Module boundaries align with the architecture section above
+- Error types cover all documented failure modes
+- No missing public surface area compared to the design
+
+Gate: Architecture review passes before proceeding. *Optional for features touching ≤3 files.*
+
+### Phase 3: Specification Tests
+
+Write tests from the design record, NOT from the stubs. Tests encode the expected behavior, edge cases, and acceptance criteria documented above. Tests should fail against the stubs (since bodies are `unimplemented!()`).
+
+- [ ] **Step 3.1:** Unit tests (from design record's component contracts)
+  - Files: `path/to/file.rs` (inline `#[cfg(test)]` modules)
+  - Cases: [Happy path, error cases, edge cases from design]
+
+- [ ] **Step 3.2:** Acceptance tests (from design record's user experience)
+  - Files: `test/tests/test_*.py`
+  - Scenarios: [User-facing behaviors from design]
+
+Gate: Tests compile (or parse) and fail with `unimplemented`/`NotImplementedError`.
+
+### Phase 4: Implementation
+
+Fill in the stub bodies so all specification tests pass. No new tests should be needed — if they are, the design record was incomplete (update it).
+
+- [ ] **Step 4.1:** [Implementation description]
+  - Files: `path/to/file.rs`
   - Details: [Additional context]
 
-- [ ] **Step 1.2:** [Description]
-  - Files: `path/to/file.ts`
+- [ ] **Step 4.2:** [Implementation description]
+  - Files: `path/to/file.rs`
   - Details: [Additional context]
 
-### Phase 2: [Core Implementation]
+Gate: All unit tests and acceptance tests pass. `task verify` succeeds.
 
-- [ ] **Step 2.1:** [Description]
-  - Files: `path/to/file.ts`
-  - Details: [Additional context]
+### Phase 5: Review & Documentation
 
-- [ ] **Step 2.2:** [Description]
-  - Files: `path/to/file.ts`
-  - Details: [Additional context]
-
-### Phase 3: [Testing & Cleanup]
-
-- [ ] **Step 3.1:** Write unit tests
-  - Files: `path/to/file.test.ts`
-  - Coverage: [Target %]
-
-- [ ] **Step 3.2:** Integration testing
-  - Scenarios: [List]
-
-- [ ] **Step 3.3:** Documentation
+- [ ] **Step 5.1:** Spec compliance review (design record ↔ tests ↔ implementation)
+- [ ] **Step 5.2:** Code quality review
+- [ ] **Step 5.3:** Documentation updates
   - Update: [Files/sections]
 
 ## Files to Modify
@@ -112,19 +141,22 @@ Related Skills: builder, qa-engineer
 
 ## Testing Strategy
 
-### Unit Tests
+> Tests are the executable specification. They are written from this design record in Phase 3,
+> before implementation begins in Phase 4. Each test case must trace back to a requirement here.
 
-| Component | Test Cases | Status |
-|-----------|------------|--------|
-| [Component 1] | [Cases] | Pending |
-| [Component 2] | [Cases] | Pending |
+### Unit Tests (from component contracts)
 
-### Integration Tests
+| Component | Behavior | Expected | Edge Cases |
+|-----------|----------|----------|------------|
+| [Component 1] | [What it should do] | [Expected result] | [Boundary conditions] |
+| [Component 2] | [What it should do] | [Expected result] | [Boundary conditions] |
 
-| Scenario | Expected Outcome | Status |
-|----------|------------------|--------|
-| [Scenario 1] | [Outcome] | Pending |
-| [Scenario 2] | [Outcome] | Pending |
+### Acceptance Tests (from user experience)
+
+| User Action | Expected Outcome | Error Cases |
+|-------------|------------------|-------------|
+| [Action 1] | [What user sees] | [Error scenarios] |
+| [Action 2] | [What user sees] | [Error scenarios] |
 
 ### Manual Testing
 

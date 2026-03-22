@@ -64,12 +64,26 @@ Every planning session produces:
 2. Dependency graph showing task order
 3. Handoff summary for `/swarm-execute`
 
+## Contract-First Planning
+
+Every plan must support the contract-first TDD execution model (Stub → Verify → Specify → Implement → Review):
+
+- **Component contracts**: Each component/module in the plan must define its public API surface (types, traits, function signatures) and expected behavior clearly enough that tests can be written *before* implementation.
+- **User experience**: Each user-facing behavior must be specified as an acceptance scenario (action → expected outcome → error cases) so acceptance tests can be written from the design record.
+- **Error taxonomy**: All failure modes must be documented so error-path tests can be written in the specification phase.
+- **Edge cases**: Boundary conditions and corner cases must be enumerated in the design, not discovered during implementation.
+
+The Testing Strategy section of the plan IS the test specification. Implementation workers write tests from it, not from the code.
+
 ## Constraints
 
-- NO creating tasks without clear acceptance criteria
+- NO creating tasks without testable acceptance criteria
 - NO assuming context — explore codebase first
+- NO vague behavior descriptions — each must be testable
 - ALWAYS use parallel workers for research phase
 - ALWAYS store artifacts in `.claude/artifacts/`
+- ALWAYS include component contracts with expected behavior and edge cases
+- ALWAYS include user experience scenarios with error cases
 
 ## Handoff
 

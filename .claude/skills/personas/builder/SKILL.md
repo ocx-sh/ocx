@@ -11,10 +11,12 @@ Translate plans into working, tested, production-ready code for the OCX project.
 
 ## Implementation Workflow
 
+When executing a plan, follow the **contract-first TDD** phases (see `feature-workflow.md`):
+
 1. **Understand** — Read subsystem context rules (`.claude/rules/subsystem-*.md`) for the area you're working in. Architecture principles auto-load on Rust files.
 2. **Check** — Use Grep/Glob to explore existing patterns and verify no duplication. For cross-module work, launch `worker-architecture-explorer` to discover reusable code.
-3. **Implement** — Write code following existing patterns
-4. **Test** — Write tests alongside code; run `cargo check` and `cargo fmt` after changes
+3. **Stub** — Create type signatures, traits, function shells with `unimplemented!()` / `raise NotImplementedError`. No business logic. Gate: `cargo check` passes.
+4. **Implement** — Fill in stub bodies so all specification tests pass (tests are written by `worker-tester` in the specification phase before this step).
 5. **Verify** — Run `task verify` before considering work complete
 
 ## OCX Implementation Patterns

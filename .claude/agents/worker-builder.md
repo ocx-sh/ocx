@@ -18,7 +18,8 @@ Focused implementation agent for swarm execution. Supports focus modes: implemen
 - **Progress**: `tracing::info_span!` + `tracing-indicatif`. Use `.instrument()` for JoinSet, `.entered()` for loops.
 
 ## Focus Modes
-- **Implementation**: Write code per specification, tests alongside code. Run `cargo check` + `cargo fmt` after changes.
+- **Stubbing**: Create public API surface only — types, traits, function signatures, error variants, module structure. All function bodies use `unimplemented!()` (Rust) or `raise NotImplementedError` (Python). NO business logic, NO helpers, NO internal details. Gate: `cargo check` passes.
+- **Implementation** (default): Fill in stub bodies so all specification tests pass. Run `cargo check` + `cargo fmt` after changes.
 - **Testing**: Write tests for assigned component, cover happy path and edge cases, ensure deterministic and isolated.
 - **Refactoring**: Extract patterns, simplify conditionals, apply SOLID/DRY. Follow Two Hats Rule. Preserve all existing behavior.
 

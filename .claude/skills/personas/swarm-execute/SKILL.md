@@ -10,13 +10,17 @@ disable-model-invocation: true
 
 Execute plans using parallel worker swarms with quality gates.
 
-## Execution Workflow
+## Execution Workflow — Contract-First TDD
+
+Each phase has a gate that must pass before proceeding.
 
 1. **Discover** — Read plan artifact from `.claude/artifacts/`
-2. **Analyze** — Check task dependencies and order
-3. **Execute** — Launch parallel workers for independent tasks
-4. **Gate** — Run quality gates before marking tasks complete
-5. **Commit** — Commit all changes on the feature branch (NEVER push)
+2. **Stub** — Launch `worker-builder` (focus: `stubbing`) to create type signatures, trait impls, and function shells with `unimplemented!()` (Rust) or `raise NotImplementedError` (Python). No business logic. Gate: `cargo check` passes (types compile).
+3. **Verify Architecture** — Launch `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) to validate stubs against the design record: API surface matches, module boundaries align, error types cover all failure modes. Gate: reviewer reports pass. *Optional for features touching ≤3 files.*
+4. **Specify** — Launch `worker-tester` (focus: `specification`) to write unit tests and acceptance tests from the design record's contracts and user experience sections — NOT from the stubs. Tests should fail against the stubs. Gate: tests compile/parse and fail with `unimplemented`/`NotImplementedError`.
+5. **Implement** — Launch `worker-builder` (focus: `implementation`) to fill in stub bodies. All specification tests must pass. Gate: `task verify` succeeds.
+6. **Review** — Launch `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) to verify design↔tests↔implementation consistency, then `worker-reviewer` (focus: `quality`) for code quality. *Spec-compliance review optional for features touching ≤3 files.*
+7. **Commit** — Commit all changes on the feature branch (NEVER push)
 
 ## Worker Assignment
 
@@ -39,14 +43,25 @@ Run `task verify` before marking work complete. See `.claude/rules/code-quality.
 2. NEVER push to remote — the human decides when to push (CI has real cost)
 3. Use `task checkpoint` for work-in-progress saves
 
+## Living Design Records
+
+Plan artifacts are living documents, not frozen specs. When implementation reveals a behavior or edge case not captured in the design record:
+1. Update the plan artifact first
+2. Write the corresponding test
+3. Then implement
+
+This prevents spec drift — the plan always reflects what was actually built and why.
+
 ## Constraints
 
 - NO completing tasks without passing quality gates
 - NO leaving work uncommitted locally
 - NO exceeding 8 parallel workers
 - NO pushing to remote
+- NO running stub and test phases concurrently (sequential only — prevents context contamination)
 - ALWAYS report blockers immediately
 - ALWAYS validate `git status` shows clean
+- ALWAYS update design record before adding tests for unspecified behaviors
 
 ## Handoff
 

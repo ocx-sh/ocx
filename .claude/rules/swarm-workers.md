@@ -15,9 +15,9 @@ Rules for efficient multi-agent swarm execution.
 |--------|-------|-------|-----|
 | `worker-architecture-explorer` | sonnet | Read, Glob, Grep | Architecture discovery |
 | `worker-explorer` | haiku | Read, Glob, Grep | Fast codebase search |
-| `worker-builder` | opus | Read, Write, Edit, Bash, Glob, Grep | Implementation/testing/refactoring |
-| `worker-tester` | sonnet | Read, Write, Edit, Bash, Glob, Grep | Test writing and validation |
-| `worker-reviewer` | opus | Read, Glob, Grep, Bash | Code review/security analysis |
+| `worker-builder` | opus | Read, Write, Edit, Bash, Glob, Grep | Stubbing/implementation/refactoring |
+| `worker-tester` | sonnet | Read, Write, Edit, Bash, Glob, Grep | Specification tests and validation |
+| `worker-reviewer` | opus | Read, Glob, Grep, Bash | Code review/security/spec-compliance |
 | `worker-researcher` | sonnet | Read, Glob, Grep, WebFetch, WebSearch | External research |
 | `worker-architect` | opus | Read, Write, Edit, Glob, Grep | Complex design decisions |
 | `worker-doc-reviewer` | sonnet | Read, Glob, Grep, Bash | Documentation consistency review |
@@ -28,14 +28,20 @@ Rules for efficient multi-agent swarm execution.
 Orchestrators specialize workers by specifying a focus mode in the prompt.
 
 **worker-builder focus modes:**
-- `implementation` (default): Write code per specification
+- `stubbing`: Create public API surface only — types, traits, signatures with `unimplemented!()`/`NotImplementedError`. Gate: `cargo check` passes
+- `implementation` (default): Fill in stub bodies so specification tests pass
 - `testing`: Write tests, cover happy path and edge cases, ensure deterministic
 - `refactoring`: Extract patterns, simplify conditionals, apply SOLID/DRY. Follow Two Hats Rule (see code-quality.md)
+
+**worker-tester focus modes:**
+- `specification`: Write tests from design record BEFORE implementation. Tests encode expected behavior as executable spec. Must fail against stubs.
+- `validation` (default): Write tests to validate existing implementation and improve coverage
 
 **worker-reviewer focus modes:**
 - `quality` (default): Code review checklist — naming, style, tests, patterns
 - `security`: OWASP Top 10 scan, hardcoded secrets, auth/authz flows, input validation. Reference CWE IDs. See security.md
 - `performance`: N+1 queries, blocking I/O, allocations, pagination, caching. See code-quality.md
+- `spec-compliance`: Phase-aware design record consistency review. Orchestrator specifies phase: `post-stub` (stubs ↔ design), `post-specification` (tests ↔ design), or `post-implementation` (full traceability). Knows that in early phases no implementation exists yet.
 
 **worker-doc-reviewer**: No focus modes — always runs the full trigger matrix audit (CLI, env vars, metadata, user guide, installation, changelog).
 
@@ -53,13 +59,16 @@ Each searches different parts of codebase
 Results aggregated for next phase
 ```
 
-### Divide and Conquer
+### Contract-First TDD (Primary)
 ```
-1. worker-architect designs solution
-2. Orchestrator decomposes into N tasks
-3. N worker-builder agents execute in parallel
-4. worker-reviewer validates each output
-5. Orchestrator integrates
+1. worker-architect designs solution with testable contracts
+2. worker-builder (stubbing) creates API surface
+3. worker-reviewer (spec-compliance, post-stub) validates stubs ↔ design
+4. worker-tester (specification) writes tests from design
+5. worker-builder (implementation) fills in stubs in parallel
+6. worker-reviewer (spec-compliance, post-implementation) validates
+7. worker-reviewer (quality) validates code quality
+8. Orchestrator integrates
 ```
 
 ### Security Sweep
