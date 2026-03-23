@@ -7,13 +7,12 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// Tag listing for one or more packages, optionally including platform details.
+/// Tag listing for one or more packages, optionally including platform or variant details.
 ///
-/// Plain format: two-column table (Package | Tag) without platforms, or
-/// three-column table (Package | Tag | Platform) when platforms are included.
+/// Plain format: two-column table (Package | Tag) by default, or
+/// (Package | Platform) with `--platforms`, or (Package | Variant) with `--variants`.
 ///
-/// JSON format: object keyed by package name; values are tag arrays without
-/// platforms, or nested objects (tag → platform arrays) with platforms.
+/// JSON format: object keyed by package name; values are arrays of tags, platforms, or variants.
 #[derive(Serialize)]
 pub struct Tags {
     #[serde(flatten)]
@@ -21,9 +20,9 @@ pub struct Tags {
 }
 
 impl Tags {
-    pub fn without_platforms(packages: HashMap<String, impl IntoIterator<Item = String>>) -> Self {
+    pub fn from_tags(packages: HashMap<String, impl IntoIterator<Item = String>>) -> Self {
         Self {
-            packages: TagsData::WithoutPlatforms(
+            packages: TagsData::Tags(
                 packages
                     .into_iter()
                     .map(|(k, v)| (k, v.into_iter().collect()))
@@ -32,47 +31,60 @@ impl Tags {
         }
     }
 
-    pub fn with_platforms(packages: HashMap<String, HashMap<String, Vec<String>>>) -> Self {
+    pub fn from_platforms(packages: HashMap<String, Vec<String>>) -> Self {
         Self {
-            packages: TagsData::WithPlatforms(packages),
+            packages: TagsData::Platforms(packages),
+        }
+    }
+
+    pub fn from_variants(packages: HashMap<String, Vec<String>>) -> Self {
+        Self {
+            packages: TagsData::Variants(packages),
         }
     }
 }
 
-/// Polymorphic tag payload: either a flat map of tags per package, or a nested
-/// map including platform breakdowns per tag.
+/// Polymorphic tag payload.
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum TagsData {
-    WithoutPlatforms(HashMap<String, Vec<String>>),
-    WithPlatforms(HashMap<String, HashMap<String, Vec<String>>>),
+    Tags(HashMap<String, Vec<String>>),
+    Platforms(HashMap<String, Vec<String>>),
+    Variants(HashMap<String, Vec<String>>),
 }
 
 impl Printable for Tags {
     fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
-        let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        match &self.packages {
-            TagsData::WithoutPlatforms(tags) => {
+        let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+        let (header, data) = match &self.packages {
+            TagsData::Tags(tags) => {
                 for (package, package_tags) in tags {
                     for tag in package_tags {
                         rows[0].push(package.clone());
                         rows[1].push(tag.clone());
                     }
                 }
-                printer.print_table(&["Package", "Tag"], &rows);
+                ("Tag", &rows)
             }
-            TagsData::WithPlatforms(tags) => {
-                for (package, platform_tags) in tags {
-                    for (platform, platform_tags) in platform_tags {
-                        for tag in platform_tags {
-                            rows[0].push(package.clone());
-                            rows[1].push(tag.clone());
-                            rows[2].push(platform.clone());
-                        }
+            TagsData::Platforms(platforms) => {
+                for (package, platform_list) in platforms {
+                    for platform in platform_list {
+                        rows[0].push(package.clone());
+                        rows[1].push(platform.clone());
                     }
                 }
-                printer.print_table(&["Package", "Tag", "Platform"], &rows);
+                ("Platform", &rows)
             }
-        }
+            TagsData::Variants(variants) => {
+                for (package, variant_names) in variants {
+                    for variant in variant_names {
+                        rows[0].push(package.clone());
+                        rows[1].push(variant.clone());
+                    }
+                }
+                ("Variant", &rows)
+            }
+        };
+        printer.print_table(&["Package", header], data);
     }
 }

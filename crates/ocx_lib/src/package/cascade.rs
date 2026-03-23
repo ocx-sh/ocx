@@ -65,7 +65,8 @@ pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomp
         let blockers: Vec<Version> = others
             .range((Excluded(version), Unbounded))
             .take_while(|v| {
-                v.major() == version.major()
+                v.variant() == version.variant()
+                    && v.major() == version.major()
                     && v.minor() == version.minor()
                     && v.patch() == version.patch()
                     && v.prerelease() == version.prerelease()
@@ -97,7 +98,13 @@ pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomp
                 current = parent;
             }
             None => {
-                let latest_blockers: Vec<Version> = others.range((Excluded(&current), Unbounded)).cloned().collect();
+                // Filter to same variant track: take_while works because Ord
+                // clusters all same-variant versions together.
+                let latest_blockers: Vec<Version> = others
+                    .range((Excluded(&current), Unbounded))
+                    .take_while(|v| v.variant() == version.variant())
+                    .cloned()
+                    .collect();
                 return CascadeDecomposition {
                     levels,
                     latest_eligible: true,
@@ -172,7 +179,10 @@ pub async fn resolve_cascade_tags(
         false
     };
     if is_latest {
-        tags.push("latest".to_string());
+        match version.variant() {
+            Some(variant) => tags.push(variant.to_string()),
+            None => tags.push("latest".to_string()),
+        }
     }
     Ok((tags, is_latest))
 }
@@ -784,5 +794,332 @@ mod tests {
             assert_eq!(tags, vec!["3.28.0", "3.28", "3"]);
             assert!(!is_latest);
         }
+
+        // ── Variant-aware resolve_cascade_tags ────────────────────
+
+        #[tokio::test]
+        async fn variant_no_blockers_full_cascade_with_variant_terminal() {
+            let data = StubTransportData::new();
+            let client = test_client(&data);
+            let v = Version::parse("debug-3.28.0_b1").unwrap();
+            let others = BTreeSet::new();
+            let (tags, is_latest) =
+                resolve_cascade_tags(&client, &test_identifier(), &v, &others, &platform("linux/amd64"))
+                    .await
+                    .unwrap();
+            assert_eq!(tags, vec!["debug-3.28.0", "debug-3.28", "debug-3", "debug"]);
+            assert!(is_latest);
+        }
+
+        #[tokio::test]
+        async fn variant_cross_variant_blocker_does_not_block() {
+            let data = StubTransportData::new();
+            let cross_variant = Version::parse("pgo-3.29.0_b1").unwrap();
+            seed_index(&data, &cross_variant.to_string(), &["linux/amd64"]);
+            let client = test_client(&data);
+            let v = Version::parse("debug-3.28.0_b1").unwrap();
+            let others: BTreeSet<_> = [cross_variant].into();
+            let (tags, is_latest) =
+                resolve_cascade_tags(&client, &test_identifier(), &v, &others, &platform("linux/amd64"))
+                    .await
+                    .unwrap();
+            assert_eq!(tags, vec!["debug-3.28.0", "debug-3.28", "debug-3", "debug"]);
+            assert!(is_latest);
+        }
+
+        #[tokio::test]
+        async fn variant_same_variant_blocker_blocks() {
+            let data = StubTransportData::new();
+            let blocker = Version::parse("debug-3.28.1_b1").unwrap();
+            seed_index(&data, &blocker.to_string(), &["linux/amd64"]);
+            let client = test_client(&data);
+            let v = Version::parse("debug-3.28.0_b1").unwrap();
+            let others: BTreeSet<_> = [blocker].into();
+            let (tags, is_latest) =
+                resolve_cascade_tags(&client, &test_identifier(), &v, &others, &platform("linux/amd64"))
+                    .await
+                    .unwrap();
+            assert_eq!(tags, vec!["debug-3.28.0"]);
+            assert!(!is_latest);
+        }
+
+        #[tokio::test]
+        async fn variant_same_variant_blocker_different_platform_passes() {
+            let data = StubTransportData::new();
+            let blocker = Version::parse("debug-3.28.1_b1").unwrap();
+            seed_index(&data, &blocker.to_string(), &["linux/arm64"]);
+            let client = test_client(&data);
+            let v = Version::parse("debug-3.28.0_b1").unwrap();
+            let others: BTreeSet<_> = [blocker].into();
+            let (tags, is_latest) =
+                resolve_cascade_tags(&client, &test_identifier(), &v, &others, &platform("linux/amd64"))
+                    .await
+                    .unwrap();
+            assert!(tags.contains(&"debug-3.28".to_string()));
+            assert!(tags.contains(&"debug-3".to_string()));
+            assert!(tags.contains(&"debug".to_string()));
+            assert!(is_latest);
+        }
+
+        #[tokio::test]
+        async fn non_variant_terminal_unchanged() {
+            let data = StubTransportData::new();
+            let client = test_client(&data);
+            let v = Version::new_build(3, 28, 0, "b1");
+            let others = BTreeSet::new();
+            let (tags, is_latest) =
+                resolve_cascade_tags(&client, &test_identifier(), &v, &others, &platform("linux/amd64"))
+                    .await
+                    .unwrap();
+            assert!(tags.contains(&"latest".to_string()));
+            assert!(!tags.contains(&"debug".to_string()));
+            assert!(is_latest);
+        }
+
+        #[tokio::test]
+        async fn dotted_variant_terminal() {
+            let data = StubTransportData::new();
+            let client = test_client(&data);
+            let v = Version::parse("pgo.lto-3.28.0_b1").unwrap();
+            let others = BTreeSet::new();
+            let (tags, is_latest) =
+                resolve_cascade_tags(&client, &test_identifier(), &v, &others, &platform("linux/amd64"))
+                    .await
+                    .unwrap();
+            assert_eq!(tags, vec!["pgo.lto-3.28.0", "pgo.lto-3.28", "pgo.lto-3", "pgo.lto"]);
+            assert!(is_latest);
+        }
+    }
+
+    // ── Variant cascade algebra tests ─────────────────────────────
+
+    /// Helper to parse a variant version string.
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap_or_else(|| panic!("Failed to parse version: {s}"))
+    }
+
+    // ── cascade() with variant versions, no blockers ──────────────
+
+    #[test]
+    fn variant_cascade_no_blockers_build_tagged() {
+        let version = v("debug-3.28.1_b1");
+        let (versions, is_latest) = cascade(&version, vec![]);
+        assert_eq!(
+            versions,
+            vec![v("debug-3.28.1_b1"), v("debug-3.28.1"), v("debug-3.28"), v("debug-3")]
+        );
+        assert!(is_latest);
+    }
+
+    #[test]
+    fn variant_cascade_no_blockers_patch() {
+        let version = v("debug-3.28.1");
+        let (versions, is_latest) = cascade(&version, vec![]);
+        assert_eq!(versions, vec![v("debug-3.28.1"), v("debug-3.28"), v("debug-3")]);
+        assert!(is_latest);
+    }
+
+    #[test]
+    fn variant_cascade_no_blockers_minor() {
+        let version = v("debug-3.28");
+        let (versions, is_latest) = cascade(&version, vec![]);
+        assert_eq!(versions, vec![v("debug-3.28"), v("debug-3")]);
+        assert!(is_latest);
+    }
+
+    #[test]
+    fn variant_cascade_dotted_name() {
+        let version = v("pgo.lto-1.0.0_b1");
+        let (versions, is_latest) = cascade(&version, vec![]);
+        assert_eq!(
+            versions,
+            vec![
+                v("pgo.lto-1.0.0_b1"),
+                v("pgo.lto-1.0.0"),
+                v("pgo.lto-1.0"),
+                v("pgo.lto-1")
+            ]
+        );
+        assert!(is_latest);
+    }
+
+    // ── Same-variant blocking ─────────────────────────────────────
+
+    #[test]
+    fn variant_cascade_blocked_at_build() {
+        let version = v("debug-3.28.1_b1");
+        let (versions, is_latest) = cascade(&version, vec![v("debug-3.28.1_b2")]);
+        assert_eq!(versions, vec![v("debug-3.28.1_b1")]);
+        assert!(!is_latest);
+    }
+
+    #[test]
+    fn variant_cascade_blocked_at_minor() {
+        let version = v("debug-3.28.1_b1");
+        let (versions, is_latest) = cascade(&version, vec![v("debug-3.28.2_b1")]);
+        assert_eq!(versions, vec![v("debug-3.28.1_b1"), v("debug-3.28.1")]);
+        assert!(!is_latest);
+    }
+
+    #[test]
+    fn variant_cascade_blocked_at_major() {
+        let version = v("debug-3.28.1_b1");
+        let (versions, is_latest) = cascade(&version, vec![v("debug-3.29.0_b1")]);
+        assert_eq!(versions, vec![v("debug-3.28.1_b1"), v("debug-3.28.1"), v("debug-3.28")]);
+        assert!(!is_latest);
+    }
+
+    #[test]
+    fn variant_cascade_blocked_at_latest() {
+        let version = v("debug-3.28.1_b1");
+        let (versions, is_latest) = cascade(&version, vec![v("debug-4.0.0_b1")]);
+        assert_eq!(
+            versions,
+            vec![v("debug-3.28.1_b1"), v("debug-3.28.1"), v("debug-3.28"), v("debug-3")]
+        );
+        assert!(!is_latest);
+    }
+
+    // ── Cross-variant non-blocking ────────────────────────────────
+
+    #[test]
+    fn variant_not_blocked_by_different_variant() {
+        let version = v("debug-3.28.1_b1");
+        let (_, is_latest) = cascade(&version, vec![v("pgo-3.29.0_b1")]);
+        assert!(is_latest, "pgo variant should not block debug cascade");
+    }
+
+    #[test]
+    fn variant_not_blocked_by_default_variant() {
+        let version = v("debug-3.28.1_b1");
+        let (_, is_latest) = cascade(&version, vec![Version::new_build(3, 29, 0, "b1")]);
+        assert!(is_latest, "default (None) variant should not block debug cascade");
+    }
+
+    #[test]
+    fn default_not_blocked_by_variant() {
+        let version = Version::new_build(3, 28, 1, "b1");
+        let (_, is_latest) = cascade(&version, vec![v("debug-3.29.0_b1")]);
+        assert!(is_latest, "debug variant should not block default cascade");
+    }
+
+    #[test]
+    fn default_not_blocked_by_multiple_variants() {
+        let version = Version::new_build(3, 28, 1, "b1");
+        let (_, is_latest) = cascade(&version, vec![v("debug-4.0.0_b1"), v("pgo-5.0.0_b1")]);
+        assert!(is_latest, "multiple variant versions should not block default");
+    }
+
+    #[test]
+    fn variant_same_variant_blocks_cross_variant_doesnt() {
+        let version = v("debug-3.28.1_b1");
+        let (versions, is_latest) = cascade(&version, vec![v("debug-3.28.2_b1"), v("pgo-3.29.0_b1")]);
+        // Blocked by debug-3.28.2_b1 at minor level; pgo-3.29.0_b1 is irrelevant
+        assert_eq!(versions, vec![v("debug-3.28.1_b1"), v("debug-3.28.1")]);
+        assert!(!is_latest);
+    }
+
+    // ── Mixed variant sets ────────────────────────────────────────
+
+    #[test]
+    fn variant_mixed_set_older_same_variant_doesnt_block() {
+        let version = v("debug-3.28.1_b1");
+        let (_, is_latest) = cascade(
+            &version,
+            vec![
+                v("debug-3.27.0_b1"),
+                v("pgo-3.29.0_b1"),
+                Version::new_build(3, 30, 0, "b1"),
+            ],
+        );
+        assert!(is_latest, "older debug + cross-variant versions should not block");
+    }
+
+    #[test]
+    fn variant_mixed_set_newer_same_variant_blocks() {
+        let version = v("debug-3.28.1_b1");
+        let (versions, _) = cascade(
+            &version,
+            vec![v("debug-3.28.2_b1"), v("debug-3.27.0_b1"), v("pgo-3.28.0_b1")],
+        );
+        // Blocked by debug-3.28.2_b1 at minor level
+        assert_eq!(versions, vec![v("debug-3.28.1_b1"), v("debug-3.28.1")]);
+    }
+
+    // ── Prerelease variant isolation ──────────────────────────────
+
+    #[test]
+    fn variant_prerelease_not_blocked_by_different_variant() {
+        let version = v("debug-1.0.0-beta_b1");
+        let parent = v("debug-1.0.0-beta");
+        let (versions, _) = cascade(&version, vec![v("pgo-1.0.0-beta_b2")]);
+        assert_eq!(versions, vec![version, parent], "pgo prerelease should not block debug");
+    }
+
+    #[test]
+    fn variant_prerelease_blocked_by_same_variant() {
+        let version = v("debug-1.0.0-beta_b1");
+        let (versions, _) = cascade(&version, vec![v("debug-1.0.0-beta_b2")]);
+        assert_eq!(versions, vec![version], "same variant prerelease should block");
+    }
+
+    #[test]
+    fn variant_prerelease_without_build_no_cascade() {
+        let version = v("debug-1.0.0-beta");
+        let (versions, is_latest) = cascade(&version, vec![v("pgo-1.0.0-gamma")]);
+        assert_eq!(versions, vec![version]);
+        assert!(!is_latest);
+    }
+
+    // ── decompose() variant-specific assertions ───────────────────
+
+    #[test]
+    fn decompose_variant_latest_blockers_only_same_variant() {
+        let version = v("debug-3.28.1_b1");
+        let others: BTreeSet<_> = [
+            v("debug-4.0.0_b1"),
+            v("pgo-5.0.0_b1"),
+            Version::new_build(6, 0, 0, "b1"),
+        ]
+        .into();
+        let d = decompose(&version, &others);
+
+        assert!(d.latest_eligible);
+        // Only debug-4.0.0_b1 should be a latest_blocker; pgo and default are different tracks
+        assert_eq!(d.latest_blockers, vec![v("debug-4.0.0_b1")]);
+    }
+
+    #[test]
+    fn decompose_variant_level_blockers_only_same_variant() {
+        let version = v("debug-3.28.1_b1");
+        let others: BTreeSet<_> = [
+            v("debug-3.28.2_b1"),
+            v("pgo-3.28.3_b1"),
+            Version::new_build(3, 28, 4, "b1"),
+        ]
+        .into();
+        let d = decompose(&version, &others);
+
+        // Only debug-3.28.2_b1 should appear as a blocker at the minor level
+        assert!(d.levels[0].blockers.is_empty()); // patch level: nothing between debug-3.28.1_b1 and debug-3.28.1
+        assert_eq!(d.levels[1].blockers, vec![v("debug-3.28.2_b1")]); // minor level
+        assert!(d.levels[2].blockers.is_empty()); // major level
+    }
+
+    #[test]
+    fn decompose_default_variant_not_affected_by_named_variants() {
+        let version = Version::new_build(3, 28, 1, "b1");
+        let others: BTreeSet<_> = [v("debug-3.29.0_b1"), v("pgo-4.0.0_b1")].into();
+        let d = decompose(&version, &others);
+
+        assert!(d.latest_eligible);
+        assert!(
+            d.latest_blockers.is_empty(),
+            "Named variants should not be latest blockers for default"
+        );
+        assert!(
+            d.levels.iter().all(|l| l.blockers.is_empty()),
+            "Named variants should not appear as level blockers for default"
+        );
     }
 }

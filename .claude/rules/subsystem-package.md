@@ -27,7 +27,7 @@ Tagged enum metadata (`Metadata::Bundle`) supports future format versions withou
 | `metadata/env/accumulator.rs` | Resolves vars into runtime `crate::env::Env` object |
 | `bundle.rs` | `BundleBuilder`: tar archive creation with configurable compression |
 | `cascade.rs` | Cascade algebra: `decompose()`, `cascade()`, `resolve_cascade_tags()`, `push_with_cascade()` |
-| `tag.rs` | `Tag` enum: Latest, Canary, Version, Canonical, Other |
+| `tag.rs` | `Tag` enum: Latest, Internal(InternalTag), Version, Canonical, Other |
 | `version.rs` | `Version` struct: semver-inspired with build + prerelease, rolling tag support |
 | `install_info.rs` | `InstallInfo`: identifier + metadata + content path |
 | `description.rs` | Package description metadata (title, description, keywords, README, logo) |
@@ -88,4 +88,4 @@ Cascade is a **publisher convention** (not registry-enforced). `--cascade` autom
 - Ordering: major.minor.patch by component; prerelease < release; build sorts lexicographically
 - Build separator: `+` parses but normalizes to `_` in output (OCI forbids `+`)
 
-`Tag` enum: `Latest`, `Canary`, `Version(Version)`, `Canonical(Digest)`, `Other(String)`.
+`Tag` enum: `Latest`, `Internal(InternalTag)`, `Version(Version)`, `Canonical(String)`, `Other(String)`.

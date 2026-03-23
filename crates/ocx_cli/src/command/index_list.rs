@@ -1,29 +1,54 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::{collections::HashMap, process::ExitCode};
+use std::{
+    collections::{BTreeSet, HashMap},
+    process::ExitCode,
+};
 
 use clap::Parser;
-use ocx_lib::{log, oci};
+use ocx_lib::{log, oci, package::version::Version};
 
 use crate::{api, options};
 
 #[derive(Parser)]
 pub struct IndexList {
-    /// Includes platforms available for each tag in the report.
-    #[arg(long)]
-    with_platforms: bool,
+    /// Shows which platforms are available for each package.
+    /// Uses the tag from the identifier, or `latest` if none specified.
+    #[arg(long, conflicts_with = "variants")]
+    platforms: bool,
+
+    /// Lists unique variant names found in the tags.
+    #[arg(long, conflicts_with = "platforms")]
+    variants: bool,
 
     /// Package identifiers to list the available versions for.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
     packages: Vec<options::Identifier>,
 }
 
+type ResolvedTags = Vec<(String, oci::Identifier, Vec<String>)>;
+
 impl IndexList {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        let resolved = self.resolve_tags(&context).await?;
+
+        if self.variants {
+            Self::report_variants(&context, resolved)?;
+        } else if self.platforms {
+            Self::report_platforms(&context, resolved).await?;
+        } else {
+            Self::report_tags(&context, resolved)?;
+        }
+
+        Ok(ExitCode::SUCCESS)
+    }
+
+    async fn resolve_tags(&self, context: &crate::app::Context) -> anyhow::Result<ResolvedTags> {
         let identifiers =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
-        let tags_report = self
+
+        let futures = self
             .packages
             .iter()
             .zip(identifiers.into_iter())
@@ -38,7 +63,6 @@ impl IndexList {
                         }
                     };
                     let mut tags = all_tags;
-                    // If a specific tag was requested, filter to only that tag
                     if let Some(requested_tag) = identifier.tag() {
                         tags.retain(|t| t == requested_tag);
                     }
@@ -46,59 +70,73 @@ impl IndexList {
                 }
             });
 
-        let resolved = futures::future::join_all(tags_report)
+        futures::future::join_all(futures)
             .await
             .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()
+    }
 
-        if !self.with_platforms {
-            let tags_report = resolved
-                .into_iter()
-                .map(|(package, _, tags)| (package, tags.into_iter()))
-                .collect::<HashMap<_, _>>();
-            context
-                .api()
-                .report(&api::data::tag::Tags::without_platforms(tags_report))?;
-            return Ok(ExitCode::SUCCESS);
-        }
+    fn report_tags(context: &crate::app::Context, resolved: ResolvedTags) -> anyhow::Result<()> {
+        let tags_report = resolved
+            .into_iter()
+            .map(|(package, _, tags)| (package, tags.into_iter()))
+            .collect::<HashMap<_, _>>();
+        context.api().report(&api::data::tag::Tags::from_tags(tags_report))
+    }
 
-        let mut join_set = tokio::task::JoinSet::<Result<(String, HashMap<String, Vec<String>>), anyhow::Error>>::new();
-        for (package, identifier, tags) in resolved {
-            let context = context.clone();
-            join_set.spawn(async move {
-                let mut platform_tags = HashMap::<_, Vec<_>>::new();
-                for tag in tags {
-                    let tag_identifier = identifier.clone_with_tag(&tag);
-                    let Some((_, manifest)) = context.default_index().fetch_manifest(&tag_identifier).await? else {
-                        log::warn!("Manifest not found for tag '{}' of '{}' — skipping.", tag, identifier);
-                        continue;
-                    };
-                    let platforms = oci::Platform::from_manifest(&manifest)?;
-                    for platform in platforms {
-                        platform_tags
-                            .entry(platform.to_string())
-                            .or_insert_with(Vec::new)
-                            .push(tag.clone());
-                    }
+    fn report_variants(context: &crate::app::Context, resolved: ResolvedTags) -> anyhow::Result<()> {
+        let variants_report = resolved
+            .into_iter()
+            .map(|(package, _, tags)| {
+                let versions: Vec<Version> = tags.iter().filter_map(|t| Version::parse(t)).collect();
+                let has_default = versions.iter().any(|v| v.variant().is_none());
+                let mut variant_names: Vec<String> = versions
+                    .iter()
+                    .filter_map(|v| v.variant().map(|s| s.to_string()))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                if has_default {
+                    variant_names.insert(0, String::new());
                 }
-                Ok((package, platform_tags))
-            });
-        }
-
-        let mut tags_report = HashMap::new();
-        while let Some(result) = join_set.join_next().await {
-            if let Ok(Ok((package, platform_tags))) = result {
-                tags_report.insert(package, platform_tags);
-            } else if let Ok(Err(e)) = result {
-                log::error!("Error fetching platforms for package: {:?}", e);
-            } else if let Err(e) = result {
-                log::error!("Task panicked while fetching platforms for package: {:?}", e);
-            }
-        }
-
+                (package, variant_names)
+            })
+            .collect::<HashMap<_, _>>();
         context
             .api()
-            .report(&api::data::tag::Tags::with_platforms(tags_report))?;
-        Ok(ExitCode::SUCCESS)
+            .report(&api::data::tag::Tags::from_variants(variants_report))
+    }
+
+    /// Fetch platforms for a single tag per package (the requested tag, or `latest`).
+    async fn report_platforms(context: &crate::app::Context, resolved: ResolvedTags) -> anyhow::Result<()> {
+        let mut platforms_report = HashMap::new();
+        for (package, identifier, tags) in resolved {
+            let tag = identifier
+                .tag()
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "latest".to_string());
+
+            if !tags.contains(&tag) {
+                log::warn!("Tag '{}' not found for '{}' — skipping.", tag, package);
+                platforms_report.insert(package, Vec::new());
+                continue;
+            }
+
+            let tag_identifier = identifier.clone_with_tag(&tag);
+            let platforms = match context.default_index().fetch_manifest(&tag_identifier).await? {
+                Some((_, manifest)) => oci::Platform::from_manifest(&manifest)?
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect(),
+                None => {
+                    log::warn!("Manifest not found for '{}:{}' — skipping.", package, tag);
+                    Vec::new()
+                }
+            };
+            platforms_report.insert(package, platforms);
+        }
+        context
+            .api()
+            .report(&api::data::tag::Tags::from_platforms(platforms_report))
     }
 }

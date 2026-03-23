@@ -105,8 +105,11 @@ class CastRecording:
         re-applied to the reformatted lines.
         """
         for event in self.events:
-            # Separate optional ANSI "erase line" prefix from content
-            erase_idx = event.data.find("\x1b[2K")
+            # Separate optional ANSI "erase line" prefix from content.
+            # Use the *last* occurrence so progress-bar sequences (which
+            # contain many \x1b[2K) are fully consumed into the prefix,
+            # leaving only the final table output in `content`.
+            erase_idx = event.data.rfind("\x1b[2K")
             if erase_idx >= 0:
                 prefix = event.data[: erase_idx + 4]
                 content = event.data[erase_idx + 4 :]

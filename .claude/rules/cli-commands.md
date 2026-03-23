@@ -41,7 +41,7 @@ Concise index of all `ocx` CLI commands. For detailed per-command docs, flags, a
 | `shell profile list` | List profiled packages | No | — |
 | `shell profile load` | Output profile export lines | No | `-s/--shell` |
 | `index catalog` | List known repositories | No | `--with-tags` |
-| `index list PKGS...` | List tags for packages | No | `--with-platforms` |
+| `index list PKGS...` | List tags for packages | No | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote | No | — |
 | `package pull PKGS...` | Download to object store only | N/A (is pull) | `-p` |
 | `package create PATH` | Bundle directory into archive | No | `-o`, `-m`, `-l`, `-j`, `--force` |

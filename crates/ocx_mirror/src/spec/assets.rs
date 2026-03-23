@@ -11,7 +11,7 @@ use serde::de::{self, Deserializer};
 ///
 /// Platform keys are `os/arch` format (e.g. `linux/amd64`). Each platform maps to
 /// one or more regex patterns that match asset filenames for that platform.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AssetPatterns {
     pub patterns: HashMap<Platform, Vec<String>>,
 }

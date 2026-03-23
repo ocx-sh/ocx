@@ -16,6 +16,7 @@ interface PackageSummary {
   tagCount: number
   platforms: string[]
   latestTag: string
+  latestVersion: string
 }
 
 interface CatalogData {
@@ -126,7 +127,7 @@ onMounted(async () => {
             </div>
             <div class="card-title-group">
               <h3 class="card-title">{{ pkg.title }}</h3>
-              <span v-if="pkg.latestTag" class="card-version">{{ pkg.latestTag }}</span>
+              <span v-if="pkg.latestVersion" class="card-version">{{ pkg.latestVersion }}</span>
             </div>
           </div>
 

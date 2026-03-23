@@ -138,8 +138,36 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
     }
 
 
+def variants(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+    """Python with multiple variant builds for variant discovery demos."""
+    python_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+        {"key": "PYTHON_HOME", "type": "constant", "value": "${installPath}"},
+    ]
+    return {
+        "python": [
+            make_package(
+                ocx, "python", "pgo.lto-3.13.0", tmp_path / "pgo-lto",
+                bins=["python3"], env=python_env,
+                outputs={"python3": {"--version": "Python 3.13.4"}},
+            ),
+            make_package(
+                ocx, "python", "debug-3.13.0", tmp_path / "debug",
+                bins=["python3"], env=python_env, new=False,
+                outputs={"python3": {"--version": "Python 3.13.4 (debug)"}},
+            ),
+            make_package(
+                ocx, "python", "freethreaded-3.13.0", tmp_path / "freethreaded",
+                bins=["python3"], env=python_env, new=False,
+                outputs={"python3": {"--version": "Python 3.13.4 (freethreaded)"}},
+            ),
+        ],
+    }
+
+
 SETUPS: dict[str, Callable] = {
     "basic": basic,
     "multi-version": multi_version,
     "full-catalog": full_catalog,
+    "variants": variants,
 }

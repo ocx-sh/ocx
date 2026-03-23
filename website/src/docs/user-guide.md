@@ -254,6 +254,40 @@ Any tag — including build-tagged ones — can be overwritten by the publisher.
 For absolute reproducibility without relying on any index, reference the digest directly: `cmake@sha256:abc123…`
 :::
 
+### Variants {#versioning-variants}
+
+A binary tool can be built multiple ways — with different optimization profiles (`pgo`, `pgo.lto`), feature toggles (`freethreaded`), or size trade-offs (`slim`). Variants describe *how* a binary was built, not *where* it runs. All variants for a given platform execute on the same host; the user chooses the variant, it is not auto-detected.
+
+Without variant support, publishers create separate packages (`python-pgo`, `python-debug`) to represent these build differences, which loses the semantic connection between builds of the same tool.
+
+::: details Why not Docker's tag-suffix convention?
+[Docker Hub][docker-images] encodes variants as tag suffixes (`python:3.12-slim`), but this creates a parsing ambiguity with [semver][semver] prereleases — `3.12-alpha` and `3.12-slim` are syntactically indistinguishable. [Concourse CI][concourse-registry]'s registry image resource documents this explicitly, resorting to a heuristic: only `alpha`, `beta`, and `rc` are treated as prereleases, everything else is a variant suffix. ocx avoids this ambiguity entirely with a variant-*prefix* format.
+:::
+
+ocx uses a <Tooltip term="variant-prefix format">The variant name comes before the version, separated by a hyphen: `debug-3.12.5`. Because variants start with a letter and versions start with a digit, the boundary is always unambiguous. Variant names match `[a-z][a-z0-9.]*` — lowercase letters, digits, and dots only.</Tooltip> convention instead. The default variant's tags carry no prefix — `python:3.12` resolves the same build as `python:pgo.lto-3.12` when `pgo.lto` is the default.
+
+| Tag | Meaning |
+|---|---|
+| `python:3.12` | Default variant at version 3.12 |
+| `python:debug-3.12` | Debug variant at version 3.12 |
+| `python:debug-3` | Latest version of the debug variant in the 3.x series |
+| `python:debug` | Latest version of the debug variant |
+| `python:latest` | Latest version of the default variant |
+
+Rolling tags cascade within their variant track: `debug-3.12.5` cascades to `debug-3.12` → `debug-3` → `debug`. Variants never cross — publishing a new `debug` build never updates `pgo.lto` or the default variant's tags. See [Cascades][versioning-cascade] for the full cascade model.
+
+For the default variant, cascading also produces unadorned alias tags: publishing a new default-variant build cascades both the prefixed track (if any) and the bare `3.12.5` → `3.12` → `3` → `latest` track.
+
+:::tip Discovery
+`ocx index list python --variants` lists the available variant names for a package without downloading any binaries.
+:::
+
+<Terminal src="/casts/variants.cast" title="Working with variants" collapsed />
+
+:::warning Platform vs. variant
+[OCI `platform.variant`][oci-image-index] is a CPU sub-architecture field (ARM `v6`, `v7`, `v8`) — it determines *where* a binary can run and is selected automatically. OCX software variants determine *how* a binary was built and are selected by the user. The two concepts are orthogonal.
+:::
+
 ### Cascades {#versioning-cascade}
 
 Publishers are expected to maintain the full tag hierarchy.
@@ -274,6 +308,8 @@ cmake:3.28.1_20260216120000   ← source of truth
 Publishing `cmake:3.27.5_20260217` would update `cmake:3.27` but not `cmake:3` or `cmake:latest` — the `3.28.x` series is still ahead.
 Rolling tags only advance, never regress.
 Note this is a convention, not a guarantee enforced by the registry — publishers must maintain the cascade manually.
+
+Cascades operate within a single variant track. Publishing `debug-3.28.1` updates `debug-3.28`, `debug-3`, and `debug` — but never touches the default variant's tags (`3.28`, `3`, `latest`) or any other variant's tags. For the default variant, cascading also produces unadorned alias tags that mirror the variant-prefixed chain. See [Variants][versioning-variants] for details.
 
 ::: tip Cascading a new release
 [`ocx package push --cascade`][cmd-package-push] handles the full cascade automatically: publish one build and let ocx re-point all rolling ancestors in a single command.
@@ -322,6 +358,8 @@ The OCI platform model supports finer-grained descriptors that publishers can us
 - **`features`** — Reserved for future platform extensions in the OCI spec.
 
 ocx matches all declared fields when selecting among manifest entries. See the [OCI Image Index specification][oci-image-index] for the complete field reference.
+
+Note: OCI `platform.variant` is a CPU sub-architecture field, distinct from OCX [software variants][versioning-variants] which describe build-time characteristics like optimization profiles or feature sets.
 :::
 
 ### Locking {#versioning-locking}
@@ -482,6 +520,7 @@ digest-derived.
 :::
 
 <!-- external -->
+[concourse-registry]: https://github.com/concourse/registry-image-resource
 [nix]: https://nixos.org/
 [sdkman]: https://sdkman.io/
 [homebrew]: https://brew.sh/
@@ -526,6 +565,8 @@ digest-derived.
 [env-docker-config]: ./reference/environment.md#external-docker-config
 
 <!-- internal -->
+[versioning-variants]: #versioning-variants
+[versioning-cascade]: #versioning-cascade
 [fs-index]: #file-structure-index
 [fs-installs]: #file-structure-installs
 [fs-objects]: #file-structure-objects

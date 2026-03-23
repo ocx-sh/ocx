@@ -28,6 +28,7 @@ platform information from a registry, then writes:
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -136,14 +137,14 @@ def get_package_platforms(
     try:
         output = run_ocx(
             binary,
-            ["index", "list", "--with-platforms", f"{repo}:{latest_tag}"],
+            ["index", "list", "--platforms", f"{repo}:{latest_tag}"],
             remote=remote,
         )
         data = json.loads(output)
-        # Output is keyed by package name, value is platform -> tags
+        # Output is keyed by "repo:tag", value is a list of platform strings
         key = f"{repo}:{latest_tag}"
-        platforms = data.get(key) or data.get(repo) or next(iter(data.values()), {})
-        return sorted(platforms.keys()) if platforms else []
+        platforms = data.get(key) or data.get(repo) or next(iter(data.values()), [])
+        return sorted(platforms) if platforms else []
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
         print(f"  Warning: failed to get platforms for {repo}: {e}", file=sys.stderr)
         return []
@@ -189,6 +190,9 @@ def build_package_data(
     # Check if README was saved
     has_readme = (pkg_dir / "README.md").exists()
 
+    # Find the highest version tag (default variant) for display
+    latest_version = find_latest_version(tags) or latest_tag
+
     # Build summary for catalog.json
     summary = {
         "name": name,
@@ -203,6 +207,7 @@ def build_package_data(
         "tagCount": len(tags),
         "platforms": platforms,
         "latestTag": latest_tag,
+        "latestVersion": latest_version,
     }
 
     # Build detail info.json
@@ -243,6 +248,37 @@ def parse_keywords(keywords_str: str | None) -> list[str]:
     if not keywords_str:
         return []
     return [k.strip() for k in keywords_str.split(",") if k.strip()]
+
+
+_VERSION_RE = re.compile(
+    r"^(?:([a-z][a-z0-9.]*)-)?((0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?)?)$"
+)
+
+
+def find_latest_version(tags: list[str]) -> str | None:
+    """Find the highest version tag from a list of tags (default variant only).
+
+    Returns the full tag string of the highest version, or None if no
+    parseable version tags exist in the default variant.
+    """
+    best_tag: str | None = None
+    best_parts: tuple[int, ...] = ()
+
+    for tag in tags:
+        if tag == "latest":
+            continue
+        m = _VERSION_RE.match(tag)
+        if not m:
+            continue
+        # Skip variant-prefixed tags — only consider default variant
+        if m.group(1) is not None:
+            continue
+        parts = tuple(int(x) for x in m.group(2).split(".") if x)
+        if parts > best_parts:
+            best_parts = parts
+            best_tag = tag
+
+    return best_tag
 
 
 def main() -> None:

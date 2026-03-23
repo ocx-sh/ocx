@@ -253,7 +253,8 @@ Lists available tags for one or more packages.
 
 **Options**
 
-- `--with-platforms`: Include platform availability for each tag. Slower — requires fetching each manifest individually.
+- `--platforms`: Shows which platforms are available for the package. Uses the tag from the identifier, or `latest` if none specified.
+- `--variants`: Lists unique variant names found in the tags.
 - `-h`, `--help`: Print help information.
 
 #### `update` {#index-update}

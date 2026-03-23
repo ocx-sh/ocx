@@ -14,7 +14,7 @@ use crate::error::MirrorError;
 use crate::filter;
 use crate::normalizer;
 use crate::pipeline::mirror_result::MirrorResult;
-use crate::pipeline::mirror_task::MirrorTask;
+use crate::pipeline::mirror_task::{MirrorTask, VariantContext};
 use crate::pipeline::orchestrator;
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
@@ -57,58 +57,78 @@ impl Sync {
         let upstream_versions = list_upstream_versions(&spec, spec_dir).await?;
         log::debug!("[{}] Found {} upstream versions", spec.name, upstream_versions.len());
 
-        // Compile asset patterns
-        let patterns = spec.assets.compiled().map_err(|e| MirrorError::SpecInvalid(vec![e]))?;
-
         // Generate build timestamp
         let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
         log::debug!("[{}] Build timestamp: {:?}", spec.name, build_ts);
 
-        // Resolve assets + normalize versions
+        // Resolve assets per variant + normalize versions
+        let effective_variants = spec.effective_variants();
         let mut resolved_versions = Vec::new();
-        for version_info in &upstream_versions {
-            match resolver::resolve_assets(&version_info.assets, &patterns) {
-                AssetResolution::Resolved(platforms) => {
-                    match normalizer::normalize_version(&version_info.version, &build_ts) {
-                        Ok(normalized) => {
-                            log::debug!(
-                                "[{}] Resolved version {} -> {} ({} platforms)",
-                                spec.name,
-                                version_info.version,
-                                normalized,
-                                platforms.len()
-                            );
-                            resolved_versions.push(filter::ResolvedVersion {
-                                version: version_info.version.clone(),
-                                normalized_version: normalized,
-                                platforms,
-                                is_prerelease: version_info.is_prerelease,
-                            });
-                        }
-                        Err(e) => {
-                            log::warn!("[{}] Skipping version {}: {e}", spec.name, version_info.version);
+
+        for variant in &effective_variants {
+            let patterns = variant
+                .assets
+                .compiled()
+                .map_err(|e| MirrorError::SpecInvalid(vec![e]))?;
+
+            for version_info in &upstream_versions {
+                match resolver::resolve_assets(&version_info.assets, &patterns) {
+                    AssetResolution::Resolved(platforms) => {
+                        match normalizer::normalize_version(&version_info.version, &build_ts) {
+                            Ok(normalized) => {
+                                // Prepend variant prefix to the normalized version tag
+                                let tagged = match &variant.name {
+                                    Some(name) => format!("{name}-{normalized}"),
+                                    None => normalized,
+                                };
+                                log::debug!(
+                                    "[{}] Resolved version {} -> {} ({} platforms)",
+                                    spec.name,
+                                    version_info.version,
+                                    tagged,
+                                    platforms.len()
+                                );
+                                resolved_versions.push(filter::ResolvedVersion {
+                                    version: version_info.version.clone(),
+                                    normalized_version: tagged,
+                                    variant: variant.name.clone(),
+                                    platforms,
+                                    is_prerelease: version_info.is_prerelease,
+                                });
+                            }
+                            Err(e) => {
+                                log::warn!("[{}] Skipping version {}: {e}", spec.name, version_info.version);
+                            }
                         }
                     }
-                }
-                AssetResolution::Ambiguous(amb) => {
-                    for a in &amb {
-                        log::warn!(
-                            "[{}] Ambiguous asset match for version {} on {}: {:?}",
-                            spec.name,
-                            version_info.version,
-                            a.platform,
-                            a.matched_assets
-                        );
+                    AssetResolution::Ambiguous(amb) => {
+                        for a in &amb {
+                            log::warn!(
+                                "[{}] Ambiguous asset match for version {} on {}: {:?}",
+                                spec.name,
+                                version_info.version,
+                                a.platform,
+                                a.matched_assets
+                            );
+                        }
                     }
                 }
             }
         }
 
         // Identify source versions that already have tags on the registry.
-        // Only these need manifest fetches to check platform completeness.
+        // Include variant-prefixed forms so we detect already-mirrored variant tags.
         let source_version_tags: HashSet<String> = resolved_versions
             .iter()
-            .filter_map(|rv| Version::parse(&rv.version).map(|v| v.to_string()))
+            .filter_map(|rv| {
+                let v = Version::parse(&rv.version)?;
+                Some(v.to_string())
+            })
+            .chain(resolved_versions.iter().filter_map(|rv| {
+                let name = rv.variant.as_ref()?;
+                let v = Version::parse(&format!("{name}-{}", rv.version))?;
+                Some(v.to_string())
+            }))
             .collect();
 
         let tags_needing_platform_check: Vec<&str> = all_tags
@@ -139,7 +159,7 @@ impl Sync {
 
         let version_map = VersionPlatformMap::from_tags_and_platforms(&all_tags, platform_info);
 
-        // Filter (now platform-aware)
+        // Filter (now platform-aware and variant-aware)
         let filtered = filter::filter_versions(
             resolved_versions,
             &self.options.version,
@@ -154,12 +174,18 @@ impl Sync {
             return Ok(());
         }
 
-        // Build mirror tasks
+        // Build mirror tasks — find variant context for each resolved version
         let mut tasks = Vec::new();
         for rv in &filtered {
+            // Find matching effective variant for metadata/asset_type inheritance
+            let eff_variant = effective_variants
+                .iter()
+                .find(|ev| ev.name == rv.variant)
+                .expect("resolved version must have matching variant");
+
             for platform_asset in &rv.platforms {
                 let platform_str = platform_asset.platform.to_string();
-                let asset_type = spec
+                let asset_type = eff_variant
                     .asset_type
                     .as_ref()
                     .map(|at| at.resolve(&platform_str))
@@ -172,11 +198,15 @@ impl Sync {
                     download_url: platform_asset.url.clone(),
                     asset_name: platform_asset.asset_name.clone(),
                     target: spec.target.clone(),
-                    metadata_config: spec.metadata.clone(),
+                    metadata_config: eff_variant.metadata.clone(),
                     verify_config: spec.verify.clone(),
                     cascade: spec.cascade,
                     spec_dir: spec_dir.to_path_buf(),
                     asset_type,
+                    variant: rv.variant.as_ref().map(|name| VariantContext {
+                        name: name.clone(),
+                        is_default: eff_variant.is_default,
+                    }),
                 });
             }
         }

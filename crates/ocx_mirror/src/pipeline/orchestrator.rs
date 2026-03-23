@@ -202,6 +202,13 @@ pub async fn execute_mirror(
                                 // Register this (version, platform) immediately so
                                 // the next platform's cascade sees it.
                                 if let Some(v) = Version::parse(&version_keys[range_idx]) {
+                                    // Register bare alias for default variants so subsequent
+                                    // bare cascades in this run see correct blockers.
+                                    if prep.task.variant.as_ref().is_some_and(|ctx| ctx.is_default)
+                                        && v.variant().is_some()
+                                    {
+                                        version_map.add(v.without_variant(), prep.task.platform.clone());
+                                    }
                                     version_map.add(v, prep.task.platform.clone());
                                 }
                                 clean_task_dir(&prep.task_dir).await;
@@ -344,7 +351,15 @@ async fn push_task(
         platform: task.platform.clone(),
     };
 
-    push::push_and_cascade(publisher, info, bundle_path, task.cascade, cascade_versions).await
+    push::push_and_cascade(
+        publisher,
+        info,
+        bundle_path,
+        task.cascade,
+        cascade_versions,
+        task.variant.as_ref(),
+    )
+    .await
 }
 
 /// Remove the task directory after successful push.
