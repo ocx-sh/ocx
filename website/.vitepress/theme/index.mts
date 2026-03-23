@@ -17,6 +17,8 @@ import DependencyExplorer from './components/DependencyExplorer.vue'
 import CopySnippet from './components/CopySnippet.vue'
 import PackageCatalog from './components/PackageCatalog.vue'
 import PackageDetail from './components/PackageDetail.vue'
+import TagBadge from './components/TagBadge.vue'
+import VersionTree from './components/VersionTree.vue'
 
 export default {
   extends: DefaultTheme,
@@ -37,5 +39,7 @@ export default {
     app.component('CopySnippet', CopySnippet)
     app.component('PackageCatalog', PackageCatalog)
     app.component('PackageDetail', PackageDetail)
+    app.component('TagBadge', TagBadge)
+    app.component('VersionTree', VersionTree)
   },
 } satisfies Theme

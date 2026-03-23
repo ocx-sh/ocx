@@ -8,17 +8,6 @@ use serde::Deserialize;
 
 use crate::{MEDIA_TYPE_PNG, MEDIA_TYPE_SVG, Result};
 
-/// Prefix for OCX-internal tags that should be hidden from user-facing listings.
-pub const INTERNAL_TAG_PREFIX: &str = "__ocx.";
-
-/// The reserved OCI tag for description artifacts.
-pub const DESCRIPTION_TAG: &str = "__ocx.desc";
-
-/// Returns `true` if the tag is an internal OCX tag (prefixed with `__ocx.`).
-pub fn is_internal_tag(tag: &str) -> bool {
-    tag.starts_with(INTERNAL_TAG_PREFIX)
-}
-
 /// Repository-level description containing a README, optional logo,
 /// and manifest-level annotations (title, summary, keywords, etc.).
 pub struct Description {

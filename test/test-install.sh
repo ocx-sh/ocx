@@ -33,7 +33,7 @@ FILTER=""
 for arg in "$@"; do
     case "$arg" in
         --local) USE_LOCAL=true ;;
-        --help|-h)
+        --help | -h)
             echo "Usage: $0 [--local] [image-filter]"
             echo "  --local    Mount local website/src/public/install.sh instead of fetching from ocx.sh"
             echo "  <filter>   Only run images whose name contains this string"
@@ -64,7 +64,8 @@ run_test() {
 
     # Build the test script to run inside the container
     local test_script
-    test_script=$(cat <<INNEREOF
+    test_script=$(
+        cat <<INNEREOF
 set -e
 
 # Setup phase (install deps)
@@ -145,7 +146,7 @@ fi
 
 echo "=== All checks passed ==="
 INNEREOF
-)
+    )
 
     # Run in Docker
     local output

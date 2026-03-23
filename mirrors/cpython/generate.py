@@ -20,11 +20,11 @@ from ocx_gen.github_graphql import list_releases
 
 log = logging.getLogger("cpython")
 
-# Filename regex: cpython-{version}+{date}-{triple}-install_only.tar.gz
+# Filename regex: cpython-{version}+{date}-{triple}-install_only[_stripped].tar.gz
 # Only matches stable releases (no alpha/beta/rc).
 # Group 1: X.Y.Z, Group 2: date, Group 3: triple
 FILENAME_RE = re.compile(
-    r"cpython-(\d+\.\d+\.\d+)\+(\d+)-(.+)-install_only\.tar\.gz$"
+    r"cpython-(\d+\.\d+\.\d+)\+(\d+)-(.+)-install_only(?:_stripped)?\.tar\.gz$"
 )
 
 PLATFORMS = {

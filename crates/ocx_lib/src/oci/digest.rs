@@ -35,10 +35,10 @@ impl std::fmt::Display for Digest {
     }
 }
 
-impl TryFrom<String> for Digest {
+impl TryFrom<&str> for Digest {
     type Error = DigestError;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         fn check_digest(value: &str, digest: &str, expected_len: usize) -> Result<(), DigestError> {
             if digest.len() == expected_len && digest.chars().all(|c| c.is_ascii_hexdigit()) {
                 Ok(())
@@ -48,17 +48,33 @@ impl TryFrom<String> for Digest {
         }
 
         if let Some(digest) = value.strip_prefix("sha256:") {
-            check_digest(&value, digest, 64)?;
+            check_digest(value, digest, 64)?;
             Ok(Digest::Sha256(digest.to_string()))
         } else if let Some(digest) = value.strip_prefix("sha384:") {
-            check_digest(&value, digest, 96)?;
+            check_digest(value, digest, 96)?;
             Ok(Digest::Sha384(digest.to_string()))
         } else if let Some(digest) = value.strip_prefix("sha512:") {
-            check_digest(&value, digest, 128)?;
+            check_digest(value, digest, 128)?;
             Ok(Digest::Sha512(digest.to_string()))
         } else {
-            Err(DigestError::Invalid(value))
+            Err(DigestError::Invalid(value.to_owned()))
         }
+    }
+}
+
+impl TryFrom<String> for Digest {
+    type Error = DigestError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl TryFrom<&String> for Digest {
+    type Error = DigestError;
+
+    fn try_from(value: &String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 
@@ -88,16 +104,16 @@ mod tests {
     #[test]
     fn test_digest_parsing() {
         let digest_str = "sha256:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
-        let digest = Digest::try_from(digest_str.to_string()).unwrap();
+        let digest = Digest::try_from(digest_str).unwrap();
         assert!(matches!(digest, Digest::Sha256(_)));
 
         let digest_str =
             "sha384:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9a1b2c3d4e5f678901234567890123456";
-        let digest = Digest::try_from(digest_str.to_string()).unwrap();
+        let digest = Digest::try_from(digest_str).unwrap();
         assert!(matches!(digest, Digest::Sha384(_)));
 
         let digest_str = "sha512:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d943567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
-        let digest = Digest::try_from(digest_str.to_string()).unwrap();
+        let digest = Digest::try_from(digest_str).unwrap();
         assert!(matches!(digest, Digest::Sha512(_)));
     }
 }

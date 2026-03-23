@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 
 use super::index_impl;
-use crate::{Result, oci, package::description};
+use crate::{Result, oci, package::tag::Tag};
 
 mod cache;
 mod config;
@@ -59,7 +59,7 @@ impl index_impl::IndexImpl for Index {
             .list_tags(identifier.clone())
             .await?
             .into_iter()
-            .filter(|t| !description::is_internal_tag(t))
+            .filter(|t| !Tag::is_internal_str(t))
             .collect();
 
         {

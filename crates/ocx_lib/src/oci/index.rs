@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use crate::log;
-use crate::package::description;
+use crate::package::tag::Tag;
 use crate::{oci, prelude::*};
 
 pub mod error;
@@ -65,7 +65,7 @@ impl Index {
         self.inner.list_tags(identifier).await.map(|opt| {
             opt.map(|tags| {
                 tags.into_iter()
-                    .filter(|t| !description::is_internal_tag(t))
+                    .filter(|t| !Tag::is_internal_str(t))
                     .collect::<Vec<_>>()
                     .sorted()
             })

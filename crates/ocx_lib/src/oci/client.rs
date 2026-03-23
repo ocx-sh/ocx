@@ -6,7 +6,7 @@ use crate::{
     MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1,
     MEDIA_TYPE_PNG, MEDIA_TYPE_SVG, Result, archive, compression, log, media_type_file_ext, media_type_from_path,
     media_type_select, media_type_select_some, oci,
-    package::{self, description::DESCRIPTION_TAG, info::Info, install_info, install_status, metadata},
+    package::{self, info::Info, install_info, install_status, metadata, tag::InternalTag},
     prelude::SerdeExt,
     utility,
 };
@@ -520,6 +520,7 @@ impl Client {
                 urls: None,
                 annotations: None,
             }],
+            annotations: None,
             ..Default::default()
         };
 
@@ -575,7 +576,7 @@ impl Client {
         identifier: &Identifier,
         description: &package::description::Description,
     ) -> std::result::Result<(), ClientError> {
-        let desc_identifier = identifier.clone_with_tag(DESCRIPTION_TAG);
+        let desc_identifier = identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
         let image = super::native::Reference::from(&desc_identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
 
@@ -665,7 +666,7 @@ impl Client {
         identifier: &Identifier,
         temp_dir: &std::path::Path,
     ) -> std::result::Result<Option<package::description::Description>, ClientError> {
-        let desc_identifier = identifier.clone_with_tag(DESCRIPTION_TAG);
+        let desc_identifier = identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
         let image = super::native::Reference::from(&desc_identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 

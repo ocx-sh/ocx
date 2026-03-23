@@ -8,6 +8,7 @@ mod metadata_config;
 mod source;
 mod strip_components_config;
 mod target;
+mod variant;
 mod verify_config;
 mod versions_config;
 
@@ -18,6 +19,7 @@ pub use metadata_config::MetadataConfig;
 pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
+pub use variant::{EffectiveVariant, VariantSpec};
 pub use verify_config::VerifyConfig;
 pub(crate) use versions_config::BackfillOrder;
 pub use versions_config::VersionsConfig;
@@ -33,7 +35,16 @@ pub struct MirrorSpec {
     pub name: String,
     pub target: Target,
     pub source: Source,
-    pub assets: AssetPatterns,
+
+    /// Asset patterns for non-variant specs. Mutually exclusive with `variants`.
+    #[serde(default)]
+    pub assets: Option<AssetPatterns>,
+
+    /// Variant declarations. Mutually exclusive with top-level `assets`.
+    /// Each variant has its own asset patterns and can override `metadata`
+    /// and `asset_type` from the top-level spec.
+    #[serde(default)]
+    pub variants: Option<Vec<VariantSpec>>,
 
     #[serde(default)]
     pub metadata: Option<MetadataConfig>,
@@ -84,13 +95,33 @@ fn default_true() -> bool {
     true
 }
 
+/// Regex for valid variant names: starts with lowercase letter, then lowercase
+/// letters, digits, or dots.
+static VARIANT_NAME_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z][a-z0-9.]*$").unwrap());
+
 impl MirrorSpec {
     pub fn validate(&self, spec_path: &Path) -> Vec<String> {
         let mut errors = Vec::new();
         let spec_dir = spec_path.parent().unwrap_or(Path::new("."));
 
         self.source.validate(&mut errors);
-        self.assets.validate(&mut errors);
+
+        // Validate assets/variants mutual exclusivity
+        match (&self.assets, &self.variants) {
+            (Some(_), Some(_)) => {
+                errors.push("cannot specify both top-level 'assets' and 'variants'".to_string());
+            }
+            (None, None) => {
+                errors.push("must specify either 'assets' or 'variants'".to_string());
+            }
+            (Some(assets), None) => {
+                assets.validate(&mut errors);
+            }
+            (None, Some(variants)) => {
+                self.validate_variants(variants, spec_dir, &mut errors);
+            }
+        }
 
         if let Some(metadata) = &self.metadata {
             metadata.validate(spec_dir, &mut errors);
@@ -101,6 +132,89 @@ impl MirrorSpec {
         }
 
         errors
+    }
+
+    fn validate_variants(&self, variants: &[VariantSpec], spec_dir: &Path, errors: &mut Vec<String>) {
+        if variants.is_empty() {
+            errors.push("variants: must declare at least one variant".to_string());
+            return;
+        }
+
+        let default_count = variants.iter().filter(|v| v.default).count();
+        if default_count != 1 {
+            errors.push(format!(
+                "variants: exactly one variant must be default, found {default_count}"
+            ));
+        }
+
+        let mut seen_names: HashSet<Option<&String>> = HashSet::new();
+        for v in variants {
+            match &v.name {
+                Some(name) => {
+                    // Name format
+                    if !VARIANT_NAME_RE.is_match(name) {
+                        errors.push(format!("variants: invalid name '{name}' (must match [a-z][a-z0-9.]*)",));
+                    }
+
+                    // Reserved name
+                    if name == "latest" {
+                        errors.push("variants: 'latest' is reserved and cannot be used as a variant name".to_string());
+                    }
+                }
+                None => {
+                    // Unnamed variant must be the default
+                    if !v.default {
+                        errors.push("variants: unnamed variant must be the default".to_string());
+                    }
+                }
+            }
+
+            // Duplicate check (None counts as a unique entry)
+            if !seen_names.insert(v.name.as_ref()) {
+                match &v.name {
+                    Some(name) => errors.push(format!("variants: duplicate name '{name}'")),
+                    None => errors.push("variants: duplicate unnamed variant".to_string()),
+                }
+            }
+
+            // Per-variant asset validation
+            v.assets.validate(errors);
+
+            // Per-variant metadata validation
+            if let Some(metadata) = &v.metadata {
+                metadata.validate(spec_dir, errors);
+            }
+        }
+    }
+
+    /// Returns the effective variant list, handling backward compatibility.
+    ///
+    /// - No `variants` key: single synthetic variant using top-level fields.
+    /// - With `variants` key: one [`EffectiveVariant`] per declared variant,
+    ///   inheriting top-level `metadata` and `asset_type` as defaults.
+    pub fn effective_variants(&self) -> Vec<EffectiveVariant> {
+        match &self.variants {
+            Some(variants) => variants
+                .iter()
+                .map(|v| EffectiveVariant {
+                    name: v.name.clone(),
+                    is_default: v.default,
+                    assets: v.assets.clone(),
+                    metadata: v.metadata.clone().or_else(|| self.metadata.clone()),
+                    asset_type: v.asset_type.clone().or_else(|| self.asset_type.clone()),
+                })
+                .collect(),
+            None => vec![EffectiveVariant {
+                name: None,
+                is_default: true,
+                assets: self
+                    .assets
+                    .clone()
+                    .expect("validated: assets or variants must be present"),
+                metadata: self.metadata.clone(),
+                asset_type: self.asset_type.clone(),
+            }],
+        }
     }
 }
 
@@ -1004,5 +1118,453 @@ source:
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::Date);
         // skip_prereleases: parent=true → true
         assert!(spec.skip_prereleases);
+    }
+
+    // -- variant tests --
+
+    #[test]
+    fn parse_spec_with_variants() {
+        let yaml = r#"
+name: python
+target:
+  registry: ocx.sh
+  repository: python
+source:
+  type: github_release
+  owner: astral-sh
+  repo: python-build-standalone
+  tag_pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)\\+\\d+$"
+variants:
+  - name: pgo.lto
+    default: true
+    assets:
+      linux/amd64:
+        - "cpython-.*-x86_64-.*-pgo\\+lto-.*\\.tar\\.zst"
+      darwin/arm64:
+        - "cpython-.*-aarch64-apple-darwin-pgo\\+lto-.*\\.tar\\.zst"
+  - name: debug
+    assets:
+      linux/amd64:
+        - "cpython-.*-x86_64-.*-debug-.*\\.tar\\.zst"
+metadata:
+  default: metadata/python.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(spec.name, "python");
+        assert!(spec.assets.is_none(), "top-level assets should be None");
+        let variants = spec.variants.as_ref().unwrap();
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0].name.as_deref(), Some("pgo.lto"));
+        assert!(variants[0].default);
+        assert_eq!(variants[1].name.as_deref(), Some("debug"));
+        assert!(!variants[1].default);
+    }
+
+    #[test]
+    fn parse_spec_without_variants_backward_compat() {
+        let yaml = r#"
+name: cmake
+target:
+  registry: ocx.sh
+  repository: cmake
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "cmake-.*-linux-x86_64\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(spec.assets.is_some());
+        assert!(spec.variants.is_none());
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(errors.is_empty(), "backward-compat spec should validate: {errors:?}");
+    }
+
+    #[test]
+    fn validate_reject_both_assets_and_variants() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+variants:
+  - name: debug
+    default: true
+    assets:
+      linux/amd64:
+        - "test-debug\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("cannot specify both")),
+            "Expected mutual exclusivity error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_neither_assets_nor_variants() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("must specify either")),
+            "Expected missing assets/variants error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_variant_exactly_one_default() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    assets:
+      linux/amd64:
+        - "test-debug\\.tar\\.gz"
+  - name: release
+    assets:
+      linux/amd64:
+        - "test-release\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("exactly one variant must be default")),
+            "Expected default count error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_variant_two_defaults() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    default: true
+    assets:
+      linux/amd64:
+        - "test-debug\\.tar\\.gz"
+  - name: release
+    default: true
+    assets:
+      linux/amd64:
+        - "test-release\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("exactly one variant must be default, found 2")),
+            "Expected two-default error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_variant_invalid_name() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: Debug-Build
+    default: true
+    assets:
+      linux/amd64:
+        - "test\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("invalid name")),
+            "Expected invalid name error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_variant_latest_reserved() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: latest
+    default: true
+    assets:
+      linux/amd64:
+        - "test\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("reserved")),
+            "Expected reserved name error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_variant_duplicate_names() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    default: true
+    assets:
+      linux/amd64:
+        - "test\\.tar\\.gz"
+  - name: debug
+    assets:
+      linux/amd64:
+        - "test2\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("duplicate")),
+            "Expected duplicate name error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn effective_variants_without_variants_key() {
+        let yaml = r#"
+name: cmake
+target:
+  registry: ocx.sh
+  repository: cmake
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "cmake-.*\\.tar\\.gz"
+metadata:
+  default: metadata/cmake.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let variants = spec.effective_variants();
+        assert_eq!(variants.len(), 1);
+        assert!(variants[0].name.is_none());
+        assert!(variants[0].is_default);
+        assert!(variants[0].metadata.is_some());
+    }
+
+    #[test]
+    fn effective_variants_unnamed_default_with_named_variant() {
+        let yaml = r#"
+name: cpython
+target:
+  registry: ocx.sh
+  repository: cpython
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - default: true
+    assets:
+      linux/amd64:
+        - "install_only\\.tar\\.gz"
+  - name: slim
+    assets:
+      linux/amd64:
+        - "install_only_stripped\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
+
+        let variants = spec.effective_variants();
+        assert_eq!(variants.len(), 2);
+
+        assert!(variants[0].name.is_none());
+        assert!(variants[0].is_default);
+
+        assert_eq!(variants[1].name.as_deref(), Some("slim"));
+        assert!(!variants[1].is_default);
+    }
+
+    #[test]
+    fn validate_variant_unnamed_non_default_rejected() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: release
+    default: true
+    assets:
+      linux/amd64:
+        - "release\\.tar\\.gz"
+  - assets:
+      linux/amd64:
+        - "other\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("unnamed variant must be the default")),
+            "Expected unnamed-must-be-default error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn effective_variants_with_variants_key() {
+        let yaml = r#"
+name: python
+target:
+  registry: ocx.sh
+  repository: python
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: pgo.lto
+    default: true
+    assets:
+      linux/amd64:
+        - "pgo-lto-.*\\.tar\\.gz"
+  - name: debug
+    assets:
+      linux/amd64:
+        - "debug-.*\\.tar\\.gz"
+metadata:
+  default: metadata/python.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let variants = spec.effective_variants();
+        assert_eq!(variants.len(), 2);
+
+        assert_eq!(variants[0].name.as_deref(), Some("pgo.lto"));
+        assert!(variants[0].is_default);
+        // Inherits top-level metadata
+        assert!(variants[0].metadata.is_some());
+
+        assert_eq!(variants[1].name.as_deref(), Some("debug"));
+        assert!(!variants[1].is_default);
+        // Also inherits top-level metadata
+        assert!(variants[1].metadata.is_some());
+    }
+
+    #[test]
+    fn effective_variants_variant_overrides_metadata() {
+        let yaml = r#"
+name: python
+target:
+  registry: ocx.sh
+  repository: python
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: pgo.lto
+    default: true
+    assets:
+      linux/amd64:
+        - "pgo-lto-.*\\.tar\\.gz"
+    metadata:
+      default: metadata/python-pgo.json
+  - name: debug
+    assets:
+      linux/amd64:
+        - "debug-.*\\.tar\\.gz"
+metadata:
+  default: metadata/python.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let variants = spec.effective_variants();
+
+        // pgo.lto overrides metadata
+        let pgo = &variants[0];
+        assert!(pgo.metadata.is_some());
+
+        // debug inherits top-level metadata
+        let debug = &variants[1];
+        assert!(debug.metadata.is_some());
     }
 }

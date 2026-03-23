@@ -229,11 +229,12 @@ Lists available tags for packages.
 
 | Flag | Purpose |
 |------|---------|
-| `--with-platforms` | Include platform info per tag (fetches manifests) |
+| `--platforms` | Show platforms for the specified tag (or `latest`) |
+| `--variants` | List unique variant names from tags |
 
 - Calls `default_index.list_tags(&identifier)`
-- `--with-platforms` also calls `default_index.fetch_manifest()` per tag (parallel)
-- Report: "Package | Tags" or "Package | Platform | Tags"
+- `--platforms` fetches manifest for the specified tag (or `latest`), not all tags
+- Report: "Package | Tag", "Package | Platform", or "Package | Variant"
 
 ---
 

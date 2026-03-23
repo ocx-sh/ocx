@@ -29,7 +29,7 @@ tasks:
     desc: Updates this repository's index lock.
     cmds:
       - rm -rf .ocx/index
-      - ocx index update shellcheck:0.11
+      - ocx index update shellcheck:0.11 shfmt:3
   ocx:dirty-update:
     desc: Temporary dirty update to solve chicken-and-egg for ocx automation within this repository.
     cmds:
