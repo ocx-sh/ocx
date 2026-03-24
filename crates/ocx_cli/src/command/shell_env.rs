@@ -63,6 +63,7 @@ impl ShellEnv {
             manager.find_all(identifiers, platforms).await?
         };
 
+        println!("{}", shell.comment("ocx env"));
         for package_info in package_infos {
             let mut profile_builder = shell.profile_builder(package_info.content);
             if let Some(env) = package_info.metadata.env() {

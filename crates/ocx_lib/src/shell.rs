@@ -108,6 +108,15 @@ impl Shell {
         ProfileBuilder::new(content.into(), *self)
     }
 
+    /// Returns a shell comment line.
+    pub fn comment(self, text: impl AsRef<str>) -> String {
+        let text = text.as_ref();
+        match self {
+            Self::Batch => format!("REM {text}"),
+            _ => format!("# {text}"),
+        }
+    }
+
     pub fn export_path(self, key: impl AsRef<str>, value: impl AsRef<str>) -> String {
         let (key, value) = (key.as_ref(), self.escape_value(value));
         let separator = env::PATH_SEPARATOR;

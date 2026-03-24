@@ -620,12 +620,15 @@ def test_profile_load_skips_broken(
     # Break the symlink by uninstalling (removes candidate)
     ocx.json("uninstall", pkg.short)
 
-    result = ocx.run(
-        "shell", "profile", "load", "--shell", "bash", format=None
-    )
-    # Should succeed with no output (broken entry skipped)
-    assert result.returncode == 0
-    assert result.stdout.strip() == ""
+    for shell in ("bash", "zsh", "fish", "powershell"):
+        result = ocx.run(
+            "shell", "profile", "load", "--shell", shell, format=None
+        )
+        # Should succeed with comment-only output (broken entry skipped)
+        assert result.returncode == 0
+        assert result.stdout.strip().startswith("#"), f"{shell}: expected comment header"
+        exports = [l for l in result.stdout.strip().split("\n") if l.strip() and not l.strip().startswith("#")]
+        assert exports == [], f"{shell}: expected no exports, got {exports}"
 
 
 def test_profile_load_skips_broken_candidate(
@@ -643,7 +646,9 @@ def test_profile_load_skips_broken_candidate(
         "shell", "profile", "load", "--shell", "bash", format=None
     )
     assert result.returncode == 0
-    assert result.stdout.strip() == ""
+    assert result.stdout.strip().startswith("#")
+    exports = [l for l in result.stdout.strip().split("\n") if l.strip() and not l.strip().startswith("#")]
+    assert exports == []
 
 
 def test_profile_load_skips_broken_content(
@@ -661,7 +666,9 @@ def test_profile_load_skips_broken_content(
         "shell", "profile", "load", "--shell", "bash", format=None
     )
     assert result.returncode == 0
-    assert result.stdout.strip() == ""
+    assert result.stdout.strip().startswith("#")
+    exports = [l for l in result.stdout.strip().split("\n") if l.strip() and not l.strip().startswith("#")]
+    assert exports == []
 
 
 def test_profile_load_warns_broken(
@@ -768,57 +775,55 @@ def test_profile_load_follows_select(
 
 
 def test_profile_load_empty_profile(ocx: OcxRunner):
-    """No entries → no output, exit 0"""
-    result = ocx.run(
-        "shell", "profile", "load", "--shell", "bash", format=None
-    )
-    assert result.returncode == 0
-    assert result.stdout.strip() == ""
+    """No entries → comment-only output for all shells, exit 0"""
+    for shell in ("bash", "zsh", "fish", "powershell"):
+        result = ocx.run(
+            "shell", "profile", "load", "--shell", shell, format=None
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip().startswith("#"), f"{shell}: expected comment header"
+        exports = [l for l in result.stdout.strip().split("\n") if l.strip() and not l.strip().startswith("#")]
+        assert exports == [], f"{shell}: expected no exports, got {exports}"
 
 
 def test_profile_load_no_profile_file(ocx: OcxRunner):
-    """Missing profile.json → no output, exit 0"""
-    # Verify profile.json doesn't exist yet
+    """Missing profile.json → comment-only output for all shells, exit 0"""
     profile_path = Path(ocx.env["OCX_HOME"]) / "profile.json"
     assert not profile_path.exists()
 
-    result = ocx.run(
-        "shell", "profile", "load", "--shell", "bash", format=None
-    )
-    assert result.returncode == 0
-    assert result.stdout.strip() == ""
+    for shell in ("bash", "zsh", "fish", "powershell"):
+        result = ocx.run(
+            "shell", "profile", "load", "--shell", shell, format=None
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip().startswith("#"), f"{shell}: expected comment header"
+        exports = [l for l in result.stdout.strip().split("\n") if l.strip() and not l.strip().startswith("#")]
+        assert exports == [], f"{shell}: expected no exports, got {exports}"
 
 
-def test_profile_load_bash_format(
+def test_profile_load_shell_format(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """--shell bash emits 'export KEY=value' syntax"""
+    """Each shell emits its native export syntax with a comment header"""
     pkg = published_package
     ocx.json("install", pkg.short)
     ocx.json("shell", "profile", "add", pkg.short)
 
-    result = ocx.run(
-        "shell", "profile", "load", "--shell", "bash", format=None
-    )
-    for line in result.stdout.strip().split("\n"):
-        if line.strip():
-            assert line.strip().startswith("export "), f"unexpected line: {line}"
-
-
-def test_profile_load_fish_format(
-    ocx: OcxRunner, published_package: PackageInfo
-):
-    """--shell fish emits fish-style 'set -x' export syntax"""
-    pkg = published_package
-    ocx.json("install", pkg.short)
-    ocx.json("shell", "profile", "add", pkg.short)
-
-    result = ocx.run(
-        "shell", "profile", "load", "--shell", "fish", format=None
-    )
-    for line in result.stdout.strip().split("\n"):
-        if line.strip():
-            assert line.strip().startswith("set "), f"unexpected line: {line}"
+    shells = {
+        "bash": "export ",
+        "zsh": "export ",
+        "fish": "set ",
+        "powershell": "$env:",
+    }
+    for shell, export_prefix in shells.items():
+        result = ocx.run(
+            "shell", "profile", "load", "--shell", shell, format=None
+        )
+        assert result.stdout.strip().startswith("#"), f"{shell}: expected comment header"
+        exports = [l for l in result.stdout.strip().split("\n") if l.strip() and not l.strip().startswith("#")]
+        assert len(exports) > 0, f"{shell}: expected at least one export"
+        for line in exports:
+            assert line.strip().startswith(export_prefix), f"{shell}: unexpected line: {line}"
 
 
 def test_profile_load_offline(
