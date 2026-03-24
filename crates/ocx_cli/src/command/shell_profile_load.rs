@@ -44,6 +44,7 @@ impl ShellProfileLoad {
             warn!("{}", conflict);
         }
 
+        println!("{}", detected_shell.comment("ocx profile"));
         for entry in &resolved {
             if let Some(env) = entry.metadata.env() {
                 let mut profile_builder = detected_shell.profile_builder(&entry.content_path);
