@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "ocx"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_lib"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_schema"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ocx_lib",
  "schemars",

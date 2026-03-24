@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-03-24
+
+### Added
+
+- Colorize JSON output and deduplicate table rendering *(cli)*
+- Enable parallel XZ compression by default *(compression)*
+- Auto-detect progress indicators based on stderr TTY *(cli)*
+- Add progress bar to package create *(bundle)*
+- Add transfer progress bars to push and pull operations *(oci)*
+- Replace upstream Platform with owned OperatingSystem and Architecture enums *(oci)*
+- Add package variant support
+
+### Changed
+
+- Rename Reportable to Printable and move JSON printing to Printer *(cli)*
+- Increase default push chunk size to 16 MiB *(oci)*
+- Migrate to thiserror with typed subsystem errors *(error)*
+
+### Fixed
+
+- Use glibc bun builds and update musl guidance *(mirror)*
+- Skip missing logo gracefully in package info *(cli)*
+- Stub of java -version *(docs)*
+- Ensure authentication before all transport operations *(oci)*
+- Split repository path segments for correct Windows paths *(fs)*
+- Clean up partial output file on failed package create *(bundle)*
+- Resolve context menu shadow and sidebar shift on catalog detail page
+
 ## [0.2.0] - 2026-03-16
 
 ### Added
@@ -148,5 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build ocx-mirror in verify-deep and fix discord webhook *(ci)*
 - Remove push-to-main Discord notifications *(ci)*
 
+<!-- Links -->
+[0.2.1]: https://github.com/ocx-sh/ocx/compare/v0.2.0..v0.2.1
 [0.2.0]: https://github.com/ocx-sh/ocx/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/ocx-sh/ocx/tree/v0.1.0

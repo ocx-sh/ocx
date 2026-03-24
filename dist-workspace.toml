@@ -19,13 +19,13 @@ unix-archive = ".tar.xz"
 windows-archive = ".zip"
 # Which actions to run on pull requests
 pr-run-mode = "skip"
-# Disable source tarball — LFS files can't be resolved in CI (persist-credentials: false)
+# Generate and dist a source tarball
 source-tarball = false
 # Plan jobs to run in CI
 plan-jobs = ["./verify-version"]
 # Post-announce jobs to run in CI
 post-announce-jobs = ["./post-release-oci-publish", "./deploy-website"]
-# SBOM: embed dependency manifest in binary (.dep-v0 section)
+# Whether to embed dependency information using cargo-auditable
 cargo-auditable = true
-# SBOM: generate CycloneDX bom.xml alongside release archives
+# Whether to use cargo-cyclonedx to generate an SBOM
 cargo-cyclonedx = true
