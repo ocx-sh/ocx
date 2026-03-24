@@ -4,7 +4,6 @@ import { useClipboard } from '@vueuse/core'
 import {
   ContextMenuRoot,
   ContextMenuTrigger,
-  ContextMenuPortal,
   ContextMenuContent,
   ContextMenuItem,
 } from 'reka-ui'
@@ -48,7 +47,7 @@ async function handleClick() {
 </script>
 
 <template>
-  <ContextMenuRoot>
+  <ContextMenuRoot :modal="false">
     <ContextMenuTrigger as-child>
       <code
         class="tag-badge"
@@ -71,8 +70,7 @@ async function handleClick() {
       </code>
     </ContextMenuTrigger>
 
-    <ContextMenuPortal>
-      <ContextMenuContent class="ctx-menu">
+    <ContextMenuContent class="ctx-menu">
         <ContextMenuItem class="ctx-item" @select="copyText(identifier())">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
@@ -102,8 +100,7 @@ async function handleClick() {
           </svg>
           <span>Profile command</span>
         </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenuPortal>
+    </ContextMenuContent>
   </ContextMenuRoot>
 </template>
 
@@ -175,7 +172,7 @@ async function handleClick() {
   background: var(--vp-c-bg);
   border: 1px solid var(--vp-c-divider);
   border-radius: 8px;
-  box-shadow: 0 8px 30px var(--vp-c-gray-soft);
+  box-shadow: var(--vp-shadow-3);
   z-index: 100;
   animation: ctx-fade-in 0.12s ease-out;
 }

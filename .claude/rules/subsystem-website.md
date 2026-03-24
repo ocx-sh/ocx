@@ -124,6 +124,7 @@ All globally registered in `theme/index.mts` — use directly in `.md` files wit
 - **Scoped styles**: Use `<style scoped>` in components (except Tooltip which uses portal)
 - **Terminal colors**: `--term-color-0` through `--term-color-15` map ANSI colors to VitePress semantic colors
 - **Responsive**: Components handle mobile via CSS media queries
+- **Transitions**: Every element that pops, expands, collapses, or moves must animate both entry and exit. Use CSS animations or transitions with matching open/closed states — never show without a fade-in or hide without a fade-out
 
 ## VitePress Markdown Features
 
