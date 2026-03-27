@@ -236,6 +236,7 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize) ->
     })?;
     let mut zip = zip::ZipArchive::new(file).map_err(Error::Zip)?;
 
+    let mut count = 0u64;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(Error::Zip)?;
         let Some(enclosed_name) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
@@ -267,29 +268,7 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize) ->
                 source: e,
             })?;
             super::validate_symlink_target(output, &output_path, Path::new(&target))?;
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&target, &output_path).map_err(|e| Error::Io {
-                    path: output_path.clone(),
-                    source: e,
-                })?;
-            }
-            #[cfg(windows)]
-            {
-                // On Windows, try directory symlink first since we can't easily distinguish
-                let target_path = output_path.parent().unwrap_or(Path::new(".")).join(&target);
-                if target_path.is_dir() {
-                    std::os::windows::fs::symlink_dir(&target, &output_path).map_err(|e| Error::Io {
-                        path: output_path.clone(),
-                        source: e,
-                    })?;
-                } else {
-                    std::os::windows::fs::symlink_file(&target, &output_path).map_err(|e| Error::Io {
-                        path: output_path.clone(),
-                        source: e,
-                    })?;
-                }
-            }
+            crate::symlink::create(Path::new(&target), &output_path)?;
         } else {
             if let Some(parent) = output_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::Io {
@@ -319,7 +298,15 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize) ->
                 }
             }
         }
+
+        count += 1;
+        tracing::trace!("Extracted {}", stripped.display());
+        if count.is_multiple_of(LOG_INTERVAL) {
+            tracing::debug!("Extracted {count} entries");
+        }
+        tracing::Span::current().pb_inc(1);
     }
+    tracing::debug!("Extracted {count} entries total");
 
     Ok(())
 }

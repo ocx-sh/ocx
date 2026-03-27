@@ -140,6 +140,7 @@ pub(super) fn extract(reader: impl std::io::Read, output: &std::path::Path, stri
     let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
 
+    let mut count = 0u64;
     for entry in archive.entries().map_err(Error::Tar)? {
         let mut entry = entry.map_err(Error::Tar)?;
         let path = entry.path().map_err(Error::Tar)?.to_path_buf();
@@ -155,21 +156,30 @@ pub(super) fn extract(reader: impl std::io::Read, output: &std::path::Path, stri
 
         let output_path = output.join(&stripped);
 
-        // Validate symlink targets resolve within the extraction root.
-        if entry.header().entry_type() == tar::EntryType::Symlink
-            && let Some(target) = entry.link_name().map_err(Error::Tar)?
-        {
-            super::validate_symlink_target(output, &output_path, target.as_ref())?;
-        }
-
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io {
                 path: parent.to_path_buf(),
                 source: e,
             })?;
         }
-        entry.unpack(&output_path).map_err(Error::Tar)?;
+
+        if entry.header().entry_type() == tar::EntryType::Symlink {
+            if let Some(target) = entry.link_name().map_err(Error::Tar)? {
+                super::validate_symlink_target(output, &output_path, target.as_ref())?;
+                crate::symlink::create(target.as_ref(), &output_path)?;
+            }
+        } else {
+            entry.unpack(&output_path).map_err(Error::Tar)?;
+        }
+
+        count += 1;
+        tracing::trace!("Extracted {}", stripped.display());
+        if count.is_multiple_of(LOG_INTERVAL) {
+            tracing::debug!("Extracted {count} entries");
+        }
+        tracing::Span::current().pb_inc(1);
     }
+    tracing::debug!("Extracted {count} entries total");
 
     Ok(())
 }
