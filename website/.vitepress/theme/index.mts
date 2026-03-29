@@ -1,6 +1,8 @@
 import type { Theme } from 'vitepress'
 import DefaultTheme from 'vitepress/theme'
+import HomeLayout from './HomeLayout.vue'
 import 'virtual:group-icons.css'
+import './custom.css'
 
 import Tooltip from './components/Tooltip.vue'
 import FileTree from './components/FileTree.vue'
@@ -19,9 +21,17 @@ import PackageCatalog from './components/PackageCatalog.vue'
 import PackageDetail from './components/PackageDetail.vue'
 import TagBadge from './components/TagBadge.vue'
 import VersionTree from './components/VersionTree.vue'
+import RoadmapTimeline from './components/RoadmapTimeline.vue'
+import RoadmapItem from './components/RoadmapItem.vue'
+import RoadmapPage from './components/RoadmapPage.vue'
+import RoadmapDescription from './components/RoadmapDescription.vue'
+import RoadmapFeatures from './components/RoadmapFeatures.vue'
+import RoadmapFeature from './components/RoadmapFeature.vue'
+import FeatureSection from './components/FeatureSection.vue'
 
 export default {
   extends: DefaultTheme,
+  Layout: HomeLayout,
   enhanceApp({ app }) {
     app.component('Tooltip', Tooltip)
     app.component('FileTree', FileTree)
@@ -41,5 +51,12 @@ export default {
     app.component('PackageDetail', PackageDetail)
     app.component('TagBadge', TagBadge)
     app.component('VersionTree', VersionTree)
+    app.component('RoadmapTimeline', RoadmapTimeline)
+    app.component('RoadmapItem', RoadmapItem)
+    app.component('RoadmapPage', RoadmapPage)
+    app.component('RoadmapDescription', RoadmapDescription)
+    app.component('RoadmapFeatures', RoadmapFeatures)
+    app.component('RoadmapFeature', RoadmapFeature)
+    app.component('FeatureSection', FeatureSection)
   },
 } satisfies Theme

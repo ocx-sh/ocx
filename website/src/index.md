@@ -147,11 +147,11 @@ The local index snapshot plus the content-addressed object store is everything `
 </div>
 
 <div class="cta-cards">
-  <a href="/docs/getting-started" class="cta-card">
-    <img src="/licensed/icons/cta-get-started.svg" alt="" class="cta-card-icon cta-icon-rocket" />
+  <a href="/docs/roadmap" class="cta-card">
+    <img src="/licensed/icons/cta-roadmap.svg" alt="" class="cta-card-icon cta-icon-roadmap" />
     <div class="cta-card-text">
-      <strong>Get Started</strong>
-      <span>Install ocx and run your first package in under a minute.</span>
+      <strong>Roadmap</strong>
+      <span>See what we're building and what's coming next.</span>
     </div>
   </a>
   <a href="/docs/catalog/" class="cta-card">
@@ -385,21 +385,25 @@ The local index snapshot plus the content-addressed object store is everything `
 }
 
 /* CTA icon tinting — matching feature card icon style */
-.cta-icon-rocket {
+/* Roadmap — indigo/brand */
+.cta-icon-roadmap {
   filter: invert(24%) sepia(79%) saturate(1742%) hue-rotate(216deg) brightness(92%) contrast(94%);
 }
+/* Catalog — green */
 .cta-icon-catalog {
   filter: invert(37%) sepia(62%) saturate(592%) hue-rotate(113deg) brightness(92%) contrast(89%);
 }
+/* Discord — purple */
 .cta-icon-discord {
   filter: invert(27%) sepia(51%) saturate(3264%) hue-rotate(253deg) brightness(88%) contrast(93%);
 }
+/* GitHub — amber */
 .cta-icon-github {
   filter: invert(35%) sepia(56%) saturate(764%) hue-rotate(348deg) brightness(93%) contrast(89%);
 }
 
 /* Dark mode CTA icons */
-.dark .cta-icon-rocket {
+.dark .cta-icon-roadmap {
   filter: invert(72%) sepia(40%) saturate(1059%) hue-rotate(197deg) brightness(104%) contrast(101%);
 }
 .dark .cta-icon-catalog {

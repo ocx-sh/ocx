@@ -141,6 +141,77 @@ All globally registered in `theme/index.mts` — use directly in `.md` files wit
 - **Content pages**: `outline: deep` for full heading outline
 - **Catalog pages**: `title`, `description`, `head` meta, `prev`/`next` navigation (generated)
 
+## Icons (Licensed Assets)
+
+All icons are **Icons8 outline/line style**, black SVG on transparent background, licensed for OCX use.
+
+### Directory Structure
+
+| Path | Purpose |
+|------|---------|
+| `src/public/licensed/source/icons/` | Original downloads (named as downloaded, e.g. `layers.svg`) |
+| `src/public/licensed/icons/` | Production copies (named by purpose, e.g. `roadmap-composable.svg`) |
+| `src/public/licensed/source/icons/CATALOG.md` | Full catalog with descriptions and usage mapping |
+
+### Workflow for New Icons
+
+1. Download outline-style black SVG from Icons8
+2. Place original in `licensed/source/icons/{name}.svg`
+3. Copy to `licensed/icons/{context}-{purpose}.svg` (e.g. `cta-roadmap.svg`, `roadmap-interop.svg`, `feature-oci.svg`)
+4. Update `CATALOG.md` — add to the appropriate category table and "Currently In Use" section
+5. Tint with CSS filters (see below)
+
+### Naming Convention
+
+| Prefix | Used for | Example |
+|--------|----------|---------|
+| `feature-` | Index page feature cards | `feature-oci.svg` |
+| `cta-` | CTA section cards | `cta-discord.svg` |
+| `roadmap-` | Roadmap timeline nodes | `roadmap-composable.svg` |
+
+### Icon Tinting
+
+Icons are tinted using CSS `filter` chains. Never hardcode colors — always derive from VitePress CSS variables or use the filter technique for consistent light/dark mode.
+
+**For `<img>` tags** (CTA cards, feature cards): CSS filter chains per icon class.
+
+```css
+/* Light mode */
+.cta-icon-discord {
+  filter: invert(27%) sepia(51%) saturate(3264%) hue-rotate(253deg) brightness(88%) contrast(93%);
+}
+/* Dark mode */
+.dark .cta-icon-discord {
+  filter: invert(76%) sepia(30%) saturate(1148%) hue-rotate(230deg) brightness(103%) contrast(97%);
+}
+```
+
+**For dynamic accent colors** (roadmap nodes): CSS `mask-image` with `background-color` set to a CSS variable.
+
+```vue
+<span
+  class="icon"
+  :style="{
+    maskImage: `url(${icon})`,
+    WebkitMaskImage: `url(${icon})`,
+    backgroundColor: 'var(--accent)',
+  }"
+/>
+```
+
+```css
+.icon {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+}
+```
+
+This renders the icon shape filled with the accent color — works in both light and dark mode automatically.
+
 ## Writing Guidelines
 
 See `.claude/rules/documentation.md` for narrative structure, link conventions, callout usage, tooltip patterns, and precision rules.

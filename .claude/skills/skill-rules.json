@@ -204,6 +204,17 @@
       "priority": "high"
     },
     {
+      "name": "sync-roadmap",
+      "path": ".claude/skills/operations/sync-roadmap/SKILL.md",
+      "description": "Sync the website roadmap with GitHub issues and PRs — updates statuses, adds links, proposes new features",
+      "triggers": {
+        "keywords": ["roadmap", "sync roadmap", "update roadmap"],
+        "intent_patterns": ["sync.*roadmap", "update.*roadmap", "roadmap.*github", "roadmap.*issues"],
+        "file_patterns": ["website/src/docs/roadmap.md"]
+      },
+      "priority": "medium"
+    },
+    {
       "name": "validate-context",
       "path": ".claude/skills/operations/validate-context/SKILL.md",
       "description": "Verify subsystem context rules match current codebase state",

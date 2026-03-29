@@ -1,0 +1,60 @@
+name: Package Request
+description: Request a new package for the ocx catalog
+labels: ["package-request"]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Package name
+      description: Short name for use in OCX (e.g. `cmake`, `uv`, `buf`)
+      placeholder: my-tool
+    validations:
+      required: true
+
+  - type: input
+    id: repo
+    attributes:
+      label: GitHub repository
+      description: Owner/repo format
+      placeholder: owner/repo
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What is it?
+      description: One or two sentences describing what the tool does and who uses it.
+      placeholder: A fast build system for C++ projects, widely used in CI pipelines.
+    validations:
+      required: true
+
+  - type: input
+    id: min-version
+    attributes:
+      label: Minimum version
+      description: Oldest version worth mirroring (semver)
+      placeholder: "1.0.0"
+
+  - type: checkboxes
+    id: platforms
+    attributes:
+      label: Platforms
+      description: Which platforms should be supported?
+      options:
+        - label: Linux x86_64
+          required: false
+        - label: Linux arm64
+          required: false
+        - label: macOS x86_64
+          required: false
+        - label: macOS arm64 (Apple Silicon)
+          required: false
+        - label: Windows x86_64
+          required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Use case
+      description: How do you plan to use this package? (CI, local dev, build system, etc.)

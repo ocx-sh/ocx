@@ -24,12 +24,15 @@ export default defineConfig({
     logo: '/logo.svg',
     nav: [
       { text: 'Home', link: '/' },
-      { text: 'Docs', link: '/docs/user-guide' },
+      { text: 'Roadmap', link: '/docs/roadmap' },
       { text: 'Catalog', link: '/docs/catalog' },
+      { text: 'Docs', link: '/docs/user-guide' },
       { text: 'Team', link: '/team' },
     ],
 
     sidebar: {
+      "/docs/roadmap": [],
+      "/docs/catalog": [],
       "/team": [],
       "/": [
         {
@@ -39,10 +42,6 @@ export default defineConfig({
         {
           text: "Getting Started",
           link: "/docs/getting-started",
-        },
-        {
-          text: "Package Catalog",
-          link: "/docs/catalog",
         },
         {
           text: "User Guide",
