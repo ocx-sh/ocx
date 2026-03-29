@@ -234,7 +234,7 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
       - name: Deploy to server
-        run: rsync -avz --delete dist/ "$DEPLOY_HOST:"
+        run: rsync -avz --delete --exclude=/licensed/ dist/ "$DEPLOY_HOST:"
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}

@@ -22,11 +22,21 @@ tasks:
       - bunx vitepress build
 
   deploy:
-    desc: Deploy site via rsync
+    desc: Deploy site via rsync (preserves licensed assets on server)
     deps:
       - build
     preconditions:
       - sh: '[ -n "$DEPLOY_HOST" ]'
         msg: "DEPLOY_HOST is not set (e.g. ocx-deploy@server)"
     cmds:
-      - rsync -avz --delete .vitepress/dist/ "$DEPLOY_HOST:"
+      - rsync -avz --delete --exclude=/licensed/ .vitepress/dist/ "$DEPLOY_HOST:"
+
+  deploy:licensed:
+    desc: Push licensed assets (icons8 etc.) to server
+    preconditions:
+      - sh: '[ -n "$DEPLOY_HOST" ]'
+        msg: "DEPLOY_HOST is not set (e.g. ocx-deploy@server)"
+      - sh: '[ -d src/public/licensed ]'
+        msg: "No licensed assets found in src/public/licensed/"
+    cmds:
+      - rsync -avz src/public/licensed/ "$DEPLOY_HOST:licensed/"
