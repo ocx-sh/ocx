@@ -17,10 +17,10 @@ Present all proposed issues in a single overview before creating any:
 ```
 ## Proposed Issues
 
-| # | Title | Labels | Depends On |
-|---|-------|--------|------------|
-| 1 | feat: short user-facing title | `enhancement` | — |
-| 2 | fix: another title | `bug` | #1 |
+| # | Title | Type | Depends On |
+|---|-------|------|------------|
+| 1 | feat: short user-facing title | Feature | — |
+| 2 | fix: another title | Bug | #1 |
 
 ### Issue 1: feat: short user-facing title
 
@@ -82,12 +82,28 @@ graph LR
 - #issue — one-line description of why this blocks
 ```
 
-## Labels
+## Issue Types vs Labels
+
+Prefer **GitHub issue types** (`Bug`, `Feature`) over labels that duplicate
+type information (`bug`, `enhancement`).  Issue types are a first-class
+GitHub concept — they appear in filters, views, and project boards without
+label noise.
+
+| Issue type | When to use | CLI flag |
+|------------|-------------|----------|
+| Bug | Something broken | `--label bug` (until `gh` supports `--type`) |
+| Feature | New feature or capability | `--label enhancement` (until `gh` supports `--type`) |
+
+> **Note:** The `gh` CLI does not yet support `--type`.  Until it does, use
+> the corresponding label as a fallback — but do **not** add both a type
+> and a duplicate label once `--type` becomes available.
+
+### Additional labels
+
+Use sparingly. Labels should add information beyond the issue type:
 
 | Label | When to use |
 |-------|-------------|
-| `enhancement` | New feature or capability |
-| `bug` | Something broken |
 | `documentation` | Docs-only changes |
 | `good first issue` | Small, well-scoped, clear acceptance criteria |
 
