@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitepress'
 import { groupIconMdPlugin, groupIconVitePlugin } from 'vitepress-plugin-group-icons'
+import licensedAssetFallback from './plugins/licensed-asset-fallback.mts'
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -98,7 +99,8 @@ export default defineConfig({
           shell: 'vscode-icons:file-type-shell',
           powershell: 'vscode-icons:file-type-powershell',
         },
-      })
+      }),
+      licensedAssetFallback(),
     ]
   }
 })
