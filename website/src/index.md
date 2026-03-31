@@ -56,7 +56,7 @@ irm https://ocx.sh/install.ps1 | iex
 ```
 :::
 
-Open a new terminal and run `ocx install uv:0.10` to install your first package.
+Open a new terminal and run `ocx --remote install uv:0.10` to install your first package.
 
 </div>
 

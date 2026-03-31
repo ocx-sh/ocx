@@ -5,6 +5,10 @@ outline: deep
 
 This guide walks through the core ocx workflow — from running your first package to managing multiple versions. It assumes ocx is [already installed][installation]. Each section builds on the previous one, but they can be read independently.
 
+::: tip First-time setup
+On a fresh install, your [local index][fs-index] is empty — ocx won't find any packages. Pass `--remote` to query the registry directly. Once a package is installed, commands that operate on it ([`find`][cmd-find], [`select`][cmd-select], [`env`][cmd-env], [`exec`][cmd-exec]) work without the flag. To populate your local index for browsing and offline use, run [`ocx index update`][cmd-index-update] with the packages you need.
+:::
+
 ## Quick Start {#quick-start}
 
 Most tools require a separate install step before you can use them for the first time. You configure a source, install the tool, then run it. For a one-off task, that overhead is wasteful.
@@ -12,12 +16,12 @@ Most tools require a separate install step before you can use them for the first
 [`ocx exec`][cmd-exec] collapses that into a single command. If the package is not in the local [object store][fs-objects], it is downloaded automatically. Then the command runs inside an isolated environment containing only the package's declared variables — no ambient `PATH` pollution.
 
 ```sh
-ocx exec uv:0.10 -- uv --version
+ocx --remote exec uv:0.10 -- uv --version
 ```
 
 <Terminal src="/casts/exec.cast" title="Running a package" collapsed />
 
-The binary is cached in the [object store][fs-objects], so subsequent calls with the same version skip the download. Nothing else persists: no [candidate symlink][fs-installs], no [current pointer][fs-installs].
+The binary is cached in the [object store][fs-objects], so subsequent calls with the same version skip the download and don't need `--remote`. Nothing else persists: no [candidate symlink][fs-installs], no [current pointer][fs-installs].
 
 ::: tip
 Use [`ocx exec`][cmd-exec] for one-off tasks or in CI where you want a reproducible, isolated invocation. For tools you reach for every day, read on.
@@ -29,7 +33,7 @@ Pass multiple packages before `--`. Their environments are merged in declaration
 A real-world example: [Bun][bun] is a JavaScript runtime that complements [Node.js][nodejs]. Bringing both runtimes together with a single command means both `node` and `bun` are on `PATH` without any manual setup:
 
 ```sh
-ocx exec nodejs:24 bun:1.3 -- bun --version
+ocx --remote exec nodejs:24 bun:1.3 -- bun --version
 ```
 
 <Terminal src="/casts/exec-multi.cast" title="Running multiple packages together" collapsed />
@@ -42,7 +46,7 @@ Running [`ocx exec`][cmd-exec] re-resolves the package on every invocation. For 
 [`ocx install`][cmd-install] downloads the package into the [content-addressed object store][fs-objects] and creates a [candidate symlink][fs-installs] at `~/.ocx/installs/{registry}/{repo}/candidates/{tag}`. That path never changes after installation. If two tags resolve to the same binary build, only one object lives on disk.
 
 ```sh
-ocx install uv:0.10
+ocx --remote install uv:0.10
 ```
 
 <Terminal src="/casts/install.cast" title="Installing a package" collapsed />
@@ -79,7 +83,7 @@ Installing a package creates a candidate path that includes the tag: `candidates
 [`ocx install --select`][cmd-install] combines installation and selection in one step:
 
 ```sh
-ocx install --select corretto:21
+ocx --remote install --select corretto:21
 ocx find --current corretto
 ```
 
@@ -236,6 +240,7 @@ The sections above cover the everyday workflow. For deeper topics:
 [cmd-shell-profile-load]: ./reference/command-line.md#shell-profile-load
 [cmd-index-catalog]: ./reference/command-line.md#index-catalog
 [cmd-index-list]: ./reference/command-line.md#index-list
+[cmd-index-update]: ./reference/command-line.md#index-update
 [cmd-package-pull]: ./reference/command-line.md#package-pull
 [cmd-ci-export]: ./reference/command-line.md#ci-export
 [arg-offline]: ./reference/command-line.md#arg-offline
