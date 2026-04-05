@@ -7,6 +7,7 @@ env:
 
 includes:
   coverage: ./taskfiles/coverage.taskfile.yml
+  duplo: ./taskfiles/duplo.taskfile.yml
   recordings: ./taskfiles/recordings.taskfile.yml
   schema: ./taskfiles/schema.taskfile.yml
   format: ./taskfiles/format.taskfile.yml

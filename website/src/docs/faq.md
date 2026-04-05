@@ -25,6 +25,32 @@ The grammar is fully unambiguous: `.` separates components, `-` introduces a pre
 
 See [Versioning][ug-versioning] in the user guide for the full tag hierarchy and cascade behavior.
 
+## Dependencies {#dependencies}
+
+### No Version Ranges {#dependencies-no-version-ranges}
+
+ocx dependencies are pinned by <Tooltip term="OCI digest">A SHA-256 content fingerprint. The exact bytes of the dependency determine the digest — the same bytes always produce the same fingerprint. No index lookup, no version resolution, no "find me the latest compatible build."</Tooltip>, not by version ranges. There is no "give me any Java >= 21" logic. The publisher records the exact build they tested against, and that is what you get.
+
+This is a deliberate design choice. Version ranges introduce a resolution algorithm — typically [SAT-solving][sat-solving] or [Minimum Version Selection][go-mvs] — that produces different results depending on what is available in the index at resolution time. Two machines with different index states can resolve the same dependency specification to different binaries. This directly contradicts ocx's reproducibility guarantee: the same metadata should always produce the same result.
+
+::: details Why not Minimum Version Selection?
+[Go modules][go-modules] and [Bazel's Bzlmod][bazel-bzlmod] use Minimum Version Selection (MVS) — the highest minimum version requested by any dependent wins. MVS is deterministic and polynomial-time, but it still requires an index to enumerate available versions. ocx dependencies work offline with no index at all: the digest is the pin. Future tooling will help publishers discover when their pinned dependencies have newer builds available, keeping the update decision explicit.
+:::
+
+### Automatic Security Patches {#dependencies-security-patches}
+
+When a dependency receives a security fix, the publisher must release a new version of their package with the updated digest. ocx does not automatically substitute a newer build — doing so would break the reproducibility guarantee.
+
+This tradeoff matches the [Nix][nix] model: a security patch means rebuilding every affected derivation. The difference is that ocx has no build system — the publisher re-pins the digest and pushes a new tag.
+
+### Shared Dependencies {#dependencies-shared}
+
+When multiple installed packages depend on the same package at the same digest, the dependency is stored once in the [object store][fs-objects] (content-addressed deduplication). Each dependent creates a back-reference, so the shared dependency is not garbage collected until all dependents are removed.
+
+When two packages depend on the same tool at *different* digests, both versions are installed as separate objects. If both contribute to the same environment, scalar variables follow last-writer-wins semantics and ocx emits a warning. Use [`ocx deps --flat`][cmd-deps] to see the evaluation order and [`ocx deps --why`][cmd-deps] to trace conflicting paths.
+
+See [Dependencies][ug-dependencies] in the user guide for the full picture: automatic installation, environment composition, garbage collection, and inspection commands.
+
 ## macOS
 
 ### Code Signing {#macos-codesign}
@@ -106,6 +132,20 @@ ocx resolves this automatically using the [which][which-crate] crate: before spa
 ::: warning PATHEXT must be set
 In environments with a minimal set of environment variables (containers, CI runners, custom shells), `PATHEXT` may not be present. Without it, ocx cannot resolve `.bat` or `.cmd` scripts by name. If you see `Could not resolve 'bun' via PATH`, ensure `PATHEXT` is set — the default Windows value is `.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC`.
 :::
+
+<!-- dependencies -->
+[sat-solving]: https://en.wikipedia.org/wiki/Boolean_satisfiability_problem
+[go-mvs]: https://research.swtch.com/vgo-mvs
+[go-modules]: https://go.dev/ref/mod
+[bazel-bzlmod]: https://bazel.build/external/module
+[nix]: https://nixos.org/
+
+<!-- commands -->
+[cmd-deps]: ./reference/command-line.md#deps
+
+<!-- internal -->
+[fs-objects]: ./user-guide.md#file-structure-objects
+[ug-dependencies]: ./user-guide.md#dependencies
 
 <!-- versioning -->
 [semver]: https://semver.org/

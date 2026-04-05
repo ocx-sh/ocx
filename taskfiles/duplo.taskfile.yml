@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  check:
+    desc: Find duplicate code blocks in Rust source files
+    cmd: git ls-files 'crates/**/*.rs' | duplo -ml 8 -mc 3 -j 4 - - {{.CLI_ARGS}} || true
+    preconditions:
+      - sh: command -v duplo
+        msg: duplo is not installed (https://github.com/dlidstrom/duplo)
+
+  diff:
+    desc: Compare duplication stats between main and HEAD
+    vars:
+      BASE: '{{.BASE | default "main"}}'
+    preconditions:
+      - sh: command -v duplo
+        msg: duplo is not installed (https://github.com/dlidstrom/duplo)
+    cmd: |
+      set -euo pipefail
+      tmp=$(mktemp -d)
+      trap 'rm -rf "$tmp"' EXIT
+
+      # Snapshot base branch Rust files into temp dir
+      git ls-tree -r --name-only {{.BASE}} -- 'crates/' | grep '\.rs$' | while IFS= read -r f; do
+        mkdir -p "$tmp/base/$(dirname "$f")"
+        git show "{{.BASE}}:$f" > "$tmp/base/$f" 2>/dev/null || true
+      done
+
+      # Run duplo on base (suppress per-file output)
+      find "$tmp/base" -name '*.rs' > "$tmp/base.list"
+      duplo -ml 8 -mc 3 -j 4 "$tmp/base.list" "$tmp/base.out" >/dev/null 2>&1 || true
+
+      # Run duplo on HEAD (suppress per-file output)
+      git ls-files 'crates/**/*.rs' > "$tmp/head.list"
+      duplo -ml 8 -mc 3 -j 4 "$tmp/head.list" "$tmp/head.out" >/dev/null 2>&1 || true
+
+      # Extract stats
+      base_blocks=$(grep -oP 'Total \K\d+' "$tmp/base.out" 2>/dev/null || echo 0)
+      head_blocks=$(grep -oP 'Total \K\d+' "$tmp/head.out" 2>/dev/null || echo 0)
+      base_lines=$(grep -oP 'Duplicate lines of code: \K\d+' "$tmp/base.out" 2>/dev/null || echo 0)
+      head_lines=$(grep -oP 'Duplicate lines of code: \K\d+' "$tmp/head.out" 2>/dev/null || echo 0)
+
+      delta_blocks=$(( head_blocks - base_blocks ))
+      delta_lines=$(( head_lines - base_lines ))
+
+      echo "=== Duplication: {{.BASE}} → HEAD ==="
+      printf "  Blocks:  %d → %d (%+d)\n" "$base_blocks" "$head_blocks" "$delta_blocks"
+      printf "  Lines:   %d → %d (%+d)\n" "$base_lines" "$head_lines" "$delta_lines"
+
+      if [ "$delta_blocks" -gt 0 ]; then
+        echo ""
+        echo "Duplication increased. Run 'task duplo:check' for details."
+        exit 1
+      fi

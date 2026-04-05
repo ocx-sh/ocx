@@ -30,6 +30,7 @@ Concise index of all `ocx` CLI commands. For detailed per-command docs, flags, a
 | `find PKGS...` | Resolve installed packages to paths | No | `--candidate`, `--current`, `-p` |
 | `select PKGS...` | Set `current` symlink | No | `-p` |
 | `deselect PKGS...` | Remove `current` symlink | No | — |
+| `deps PKGS...` | Show dependency tree/flat/why | No | `--flat`, `--why`, `--depth`, `-p` |
 | `uninstall PKGS...` | Remove candidate symlink | No | `-d/--deselect`, `--purge` |
 | `clean` | GC unreferenced objects | No | `--dry-run` |
 | `env PKGS...` | Print resolved env vars | **Yes** | `--candidate`, `--current`, `-p` |
@@ -58,7 +59,8 @@ Concise index of all `ocx` CLI commands. For detailed per-command docs, flags, a
 
 | Manager Method | Auto-Install | Symlink | Use In |
 |----------------|-------------|---------|--------|
-| `find_all()` | No | No | `find`, `select` |
+| `find_all()` | No | No | `find`, `select`, `deps` |
+| `resolver().build_graph()` | No | No | `deps` |
 | `find_symlink_all(kind)` | No | Yes (candidate/current) | `find --candidate`, `env --candidate` |
 | `find_or_install_all()` | **Yes** | No | `env`, `exec` |
 | `install_all(candidate=true)` | N/A (is install) | Creates candidate | `install` |

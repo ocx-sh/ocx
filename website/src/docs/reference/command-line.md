@@ -110,7 +110,7 @@ should survive package updates.
 
 Removes unreferenced objects from the local object store.
 
-An object is unreferenced when its `refs/` directory is empty — no candidate or current symlink points to it. This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually.
+An object is unreferenced when nothing points to it — no candidate or current symlink, and no other installed package depends on it. This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
 
 **Usage**
 
@@ -122,6 +122,62 @@ ocx clean [OPTIONS]
 
 - `--dry-run`: Show what would be removed without making any changes.
 - `-h`, `--help`: Print help information.
+
+### `deps` {#deps}
+
+Shows the dependency tree for one or more installed packages. Operates on locally-present packages
+only — no auto-install. See [Dependencies][ug-dependencies] in the user guide for
+background.
+
+**Usage**
+
+```shell
+ocx deps [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to inspect. Accepts multiple packages — when given more than one,
+  the command builds the combined dependency graph (the same graph [`exec`](#exec) uses for environment
+  composition).
+
+**Options**
+
+- `--flat`: Show the resolved evaluation order instead of the tree. This is the exact order
+  [`exec`](#exec) and [`env`](#env) use for environment composition — useful for debugging
+  unexpected variable values.
+- `--why <DEP>`: Explain why a dependency is pulled in. Shows all paths from the given root
+  packages to `<DEP>`. Mutually exclusive with `--flat`.
+- `--depth <N>`: Limit tree depth. `--depth 1` shows direct dependencies only.
+- `-p`, `--platform`: Target platforms to consider when resolving packages.
+- `-h`, `--help`: Print help information.
+
+**Default output** is a logical tree showing declared dependencies. Diamond dependencies
+(the same package reached via multiple paths) are marked with `(*)` and their subtree is
+not expanded again:
+
+```
+myapp:1.0 (sha256:aaa1b2c3…)
+├── ocx.sh/java:21 (sha256:bbb4e5f6…)
+└── ocx.sh/cmake:3.28 (sha256:ccc7d8e9…)
+    └── ocx.sh/gcc:13 (sha256:ddd0a1b2…)
+```
+
+**`--flat`** shows the combined evaluation order after topological sort and deduplication:
+
+```
+Package            Digest
+ocx.sh/gcc:13      sha256:ddd0a1b2…
+ocx.sh/cmake:3.28  sha256:ccc7d8e9…
+ocx.sh/java:21     sha256:bbb4e5f6…
+myapp:1.0          sha256:aaa1b2c3…
+```
+
+**`--why`** traces all paths from roots to a specific dependency:
+
+```
+myapp:1.0 → ocx.sh/cmake:3.28 → ocx.sh/gcc:13
+```
 
 ### `deselect` {#deselect}
 
@@ -150,7 +206,9 @@ Print the resolved environment variables for one or more packages.
 Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
 JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
 
-In the default mode, packages are auto-installed if not already available locally.
+If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
+
+In the default mode, packages are auto-installed if not already available locally (including transitive dependencies).
 See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
 
 **Usage**
@@ -172,7 +230,7 @@ ocx env [OPTIONS] <PACKAGE>...
 ### `exec` {#exec}
 
 Executes a command within the environment of one or more packages.
-Packages are auto-installed if not already available locally (unless [`--offline`](#arg-offline) is set).
+Packages are auto-installed if not already available locally (unless [`--offline`](#arg-offline) is set). If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables.
 
 **Usage**
 
@@ -285,7 +343,7 @@ ocx info
 
 Downloads and installs one or more packages into the local object store.
 
-Installs packages into the [object store](../user-guide.md#file-structure-objects) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands.
+Installs packages into the [object store](../user-guide.md#file-structure-objects) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
 
 **Usage**
 
@@ -528,7 +586,9 @@ ocx ci export cmake:3.28
 
 #### `create` {#package-create}
 
-Bundles a local directory into a compressed package archive ready for publishing.
+Bundles a local directory into a compressed package archive ready for publishing. If the package
+metadata includes [dependencies][ug-dependencies], the declared dependency graph is
+validated for cycles at this stage — catching errors before the package reaches the registry.
 
 **Usage**
 
@@ -557,8 +617,7 @@ Downloads packages into the local [object store][fs-objects] without creating
 [install symlinks][fs-installs].
 
 Unlike [`install`](#install), this command only populates the content-addressed object store — no
-candidate or current symlinks are created. This is the recommended primitive for CI environments
-where reproducibility matters and symlink management is unnecessary.
+candidate or current symlinks are created. If a package declares [dependencies][ug-dependencies], all transitive dependencies are pulled into the object store as well. This is the recommended primitive for CI environments where reproducibility matters and symlink management is unnecessary.
 
 **Usage**
 
@@ -664,3 +723,5 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [fs-objects]: ../user-guide.md#file-structure-objects
 [fs-installs]: ../user-guide.md#file-structure-installs
 [fs-index]: ../user-guide.md#file-structure-index
+[ug-dependencies]: ../user-guide.md#dependencies
+[ug-deps-env]: ../user-guide.md#dependencies-environment

@@ -1,6 +1,6 @@
 ---
 name: swarm-review
-description: Adversarial multi-perspective code reviewer. Use for thorough code review with security, performance, and architecture analysis.
+description: Adversarial multi-perspective code reviewer. Use for thorough code review with security, performance, architecture, and SOTA analysis.
 user-invocable: true
 argument-hint: "branch-name-or-pr-number"
 ---
@@ -60,6 +60,24 @@ Launch `worker-doc-reviewer` to check code-documentation drift:
 - New platforms → `installation.md` + `user-guide.md`
 - Breaking changes → `changelog.md`
 
+### CLI UX Quality
+Use `worker-reviewer` (focus: quality) to evaluate CLI user experience against package manager UX standards:
+- Error messages: actionable (what happened + what to do next), copy-pasteable recovery commands, stderr-only
+- Progress & feedback: indicator within 100ms of any network/disk op, X-of-Y for batch ops, streaming for blobs
+- Output design: stdout-for-data / stderr-for-messages split, `--format json` stability, no ANSI leaks into JSON
+- Command structure: `--help` shows env var overrides, flag naming matches conventions, `--` separator documented with examples
+- Dependency UX: `deps --why` traces, `install` reports what was resolved, re-install distinguishes fresh vs cached
+- Machine/CI UX: meaningful exit codes, `CI=true` suppresses interactive output, `--offline` fails fast with clear error
+Reference: `.claude/artifacts/research_cli_ux.md` for the full checklist and sources (clig.dev, 12 Factor CLI Apps, Evil Martians progress patterns, miette diagnostics).
+
+### Technical Soundness & SOTA
+Use `worker-researcher` to compare the implementation against industry state of the art:
+- How do leading tools (Cargo, npm, pip/uv, Go modules, Helm) solve the same problem?
+- Is the algorithm choice current (e.g., PubGrub, SAT solvers, topological BFS)?
+- Does the data format align with established standards (semver ranges, OCI artifacts)?
+- Are there known pitfalls in the domain that the implementation doesn't address (lock files, supply chain security, dependency confusion)?
+- What emerging patterns or recent publications are relevant?
+
 ## Adversarial Questions
 
 - "What if this assumption is wrong?"
@@ -98,6 +116,8 @@ Launch `worker-doc-reviewer` to check code-documentation drift:
 ### Performance Issues
 ### Architecture Issues
 ### Test Coverage Gaps
+### CLI UX Issues
+### Technical Soundness & SOTA
 ```
 
 ## Constraints

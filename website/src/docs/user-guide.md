@@ -487,6 +487,96 @@ docker login "<registry>"
 
 The docker configuration file location can be overridden by setting the [`DOCKER_CONFIG`][env-docker-config] environment variable.
 
+## Dependencies {#dependencies}
+
+Package publishers can declare that their package requires other packages to function. A web application might need a JavaScript runtime; a build tool might need a compiler. When a publisher builds their package, they pin each dependency to an exact <Tooltip term="OCI digest">A SHA-256 fingerprint that identifies a specific build of a package. The publisher records the exact digest they tested against — not a version range, not a "latest" tag. This means the dependency graph is fully determined by the package metadata alone.</Tooltip>, recording the precise build they tested against.
+
+As a user, you do not need to manage these dependencies yourself. When you install or run a package, ocx handles them automatically.
+
+### Resolution {#dependencies-resolution}
+
+When you pull or install a package that declares dependencies, ocx fetches every required package transitively — dependencies of dependencies, and so on — and stores them in the [object store][fs-objects]. The process is fully automatic and requires no extra flags:
+
+```shell
+ocx package pull webapp:2.0
+```
+
+If `webapp:2.0` declares dependencies on `nodejs:24` and `bun:1.3`, all three packages end up in the object store. Only `webapp:2.0` is the package you explicitly requested — the dependencies are implementation details, fetched and stored but not surfaced as top-level installs.
+
+To actually *run* the package with its dependency environments configured, use [`ocx exec`][cmd-exec]:
+
+```shell
+ocx exec webapp:2.0 -- serve --port 8080
+```
+
+[`ocx exec`][cmd-exec] composes the environments of all dependencies in the correct order before launching the command. Running a package binary directly — without `ocx exec` — does not set up dependency environments. There are no launcher scripts yet; environment composition always goes through [`ocx exec`][cmd-exec] or [`ocx env`][cmd-env].
+
+::: warning install + select does not set up dependency environments
+[`ocx install --select`][cmd-install] creates a [current symlink][fs-installs] that points to the package's content directory. If you or another tool invokes a binary through that symlink directly, the dependency environments are **not** configured — only the package's own files are accessible. For packages with dependencies, always use [`ocx exec`][cmd-exec] to run commands, or [`ocx env`][cmd-env] / [`ocx shell env`][cmd-shell-env] to export the full environment into your shell first.
+:::
+
+::: tip You can still install dependencies explicitly
+If you want `nodejs:24` available as a standalone tool alongside its role as a dependency, install it separately:
+
+```shell
+ocx install --select nodejs:24
+```
+
+Both references — the dependency relationship and your explicit install — coexist. The binary is stored once (content-addressed), and both references protect it from [garbage collection][cmd-clean].
+:::
+
+### Environment {#dependencies-environment}
+
+When you run [`ocx exec`][cmd-exec] or [`ocx env`][cmd-env] with a package that has dependencies, ocx builds the environment by applying each package's declared variables in <Tooltip term="topological order">Dependencies are applied before their dependents. If A depends on B, and B depends on C, the order is C → B → A. Among packages at the same level, alphabetical order (by identifier) is used as a tiebreaker so the result is deterministic.</Tooltip>. Dependencies come first, then the package you requested.
+
+This means a package can override a dependency's scalar variables (like `JAVA_HOME`) while accumulator variables (like `PATH`) are merged naturally — each dependency's `bin/` directory is prepended in order.
+
+::: warning Conflicting scalar variables
+If two dependencies set the same scalar variable (e.g., both set `JAVA_HOME` to different paths), ocx applies <Tooltip term="last-writer-wins">The last package in topological order that sets a scalar variable determines the final value. This is the same behavior as listing multiple packages in `ocx exec pkg1 pkg2 -- cmd` today.</Tooltip> semantics and emits a warning. This is the same behavior as listing multiple packages manually in [`ocx exec`][cmd-exec]. If you see a conflict warning, inspect the dependency tree with [`ocx deps --flat`][cmd-deps] to understand the evaluation order.
+
+This is especially common with the [shell profile][cmd-shell-profile]. If you add a package with dependencies to your profile (e.g., `webapp:2.0` which depends on `nodejs:24`) and also have `nodejs:24` in your profile as a standalone tool, both will contribute environment variables. The profile loads all packages via [`ocx shell env`][cmd-shell-env], which includes dependency environments — so `NODE_HOME` may be set twice from different content paths. To avoid this, either remove the standalone entry from the profile (the dependency provides it), or accept that the profile entry's value wins (it appears later in the load order).
+:::
+
+### Inspection {#dependencies-inspection}
+
+[`ocx deps`][cmd-deps] shows the dependency tree for installed packages. The default view is a logical tree showing the declared relationships:
+
+<Terminal src="/casts/deps.cast" title="Inspecting the dependency tree" collapsed />
+
+Use `--flat` to see the resolved evaluation order — the exact sequence ocx uses when composing environments. This is the primary debugging tool when environment variables are not what you expect:
+
+<Terminal src="/casts/deps-flat.cast" title="Resolved dependency order" collapsed />
+
+When a transitive dependency causes an unexpected conflict, `--why` traces the path from a root package to the dependency in question:
+
+<Terminal src="/casts/deps-why.cast" title="Tracing why a dependency is pulled in" collapsed />
+
+### Cleanup {#dependencies-gc}
+
+Dependencies are protected from garbage collection as long as any package that depends on them is still referenced. When you uninstall a package, its dependencies do not disappear immediately — they remain in the object store until no other installed package depends on them. [`ocx clean`][cmd-clean] removes only objects that have no references at all: no install symlinks and no dependent packages.
+
+::: details How dependency protection works
+When ocx installs a package with dependencies, it creates <Tooltip term="back-references">Entries in a dependency's `refs/` directory that point back to the dependent's object directory. The same mechanism used for install symlinks — just pointing at a different kind of referrer.</Tooltip> in each dependency's `refs/` directory. These back-references prevent the dependency from being collected. When the dependent is removed (and no other references remain), the back-references are cleaned up, and the dependency becomes eligible for collection.
+
+[`ocx clean`][cmd-clean] processes the full dependency graph in a single pass: it identifies all unreferenced objects, removes them, and cascades to any dependencies that become unreferenced as a result. No manual intervention is needed.
+:::
+
+### Scope {#dependencies-scope}
+
+ocx dependencies are deliberately simple — they solve a specific problem without introducing the complexity of a full-featured dependency resolver.
+
+**No version ranges.** A dependency is pinned to an exact digest. There is no "find me any Java >= 21" logic. The publisher chose a specific build, tested against it, and recorded it. This is what makes the dependency graph fully reproducible: the metadata is the complete truth, regardless of what the registry contains today.
+
+**No automatic updates.** When a dependency gets a security patch, the publisher must release a new version of their package with the updated digest. This is a deliberate tradeoff — reproducibility over convenience. Future tooling will help publishers detect when their pinned dependencies have newer builds available.
+
+**Not a project-level lockfile.** Dependencies live in package metadata. They describe what a *single package* needs, not what a *project* needs. A project-level configuration file with version resolution and lock semantics is a separate concept for a future release.
+
+::: info How other tools compare
+[Nix][nix] takes the same approach: every derivation pins its inputs by hash, and the store is content-addressed. There are no version ranges — the exact input is determined at build time. [Go modules][go-modules] use Minimum Version Selection with a `go.sum` integrity file — deterministic, but with a resolution algorithm. [Homebrew][homebrew] uses floating name-only dependencies with no pinning at all.
+
+ocx sits closest to Nix in philosophy — exact pins, no resolution — but without the functional language and the build system. The dependency declaration is a flat list of digests in a JSON file.
+:::
+
 ## CI Integration {#ci}
 
 CI environments need tool binaries to be available and their environment variables exported — but
@@ -522,6 +612,7 @@ digest-derived.
 <!-- external -->
 [concourse-registry]: https://github.com/concourse/registry-image-resource
 [nix]: https://nixos.org/
+[go-modules]: https://go.dev/ref/mod
 [sdkman]: https://sdkman.io/
 [homebrew]: https://brew.sh/
 [docker-images]: https://hub.docker.com/search?image_filter=official
@@ -552,6 +643,10 @@ digest-derived.
 [cmd-package-pull]: ./reference/command-line.md#package-pull
 [cmd-package-push]: ./reference/command-line.md#package-push
 [cmd-ci-export]: ./reference/command-line.md#ci-export
+[cmd-deps]: ./reference/command-line.md#deps
+[cmd-env]: ./reference/command-line.md#env
+[cmd-shell-env]: ./reference/command-line.md#shell-env
+[cmd-shell-profile]: ./reference/command-line.md#shell-profile
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-offline]: ./reference/command-line.md#arg-offline
 [arg-index]: ./reference/command-line.md#arg-index

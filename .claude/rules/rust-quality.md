@@ -41,6 +41,7 @@ Encode valid states as distinct types. State transitions consume `self` and retu
 - **`From` impl hiding `.unwrap()`** — `From` must be infallible. Use `TryFrom` for fallible conversions.
 
 ### Warn (should fix)
+- **`pub(crate)` / `pub(super)` as a design smell** — control visibility through module nesting, not path qualifiers. Use `mod` (private) vs `pub mod` on the module declaration to gate what outsiders can see. Items inside should be either `pub` (visible to whoever can see the module) or private (module-internal). If you feel the need for `pub(crate)` or `pub(super)`, reconsider the module hierarchy first — the parent module should control the boundary, not the item.
 - **Error types without `#[derive(thiserror::Error)]`** — all error types must use thiserror for `Display`/`source()` generation (manual `Display` acceptable when format logic is too complex for `#[error]`).
 - **Public error enums without `#[non_exhaustive]`** — adding a variant is a semver-breaking change without it.
 - **Missing `#[source]` on inner error fields** — every wrapping variant must return its inner error from `source()`. Without it, error chain walking breaks for logging and diagnostics.
@@ -56,6 +57,7 @@ Encode valid states as distinct types. State transitions consume `self` and retu
 - **`#[must_use]`** on return types callers might accidentally discard.
 - **Iterator chains** over materializing intermediate `Vec` — `.iter().map().filter().collect()` instead of building a `Vec` then iterating it.
 - **`impl Into<T>` parameters** — `fn process(name: impl Into<String>)` accepts both `&str` and `String` without forcing callers to allocate.
+- **Early returns over nesting** — prefer `if condition { continue; }` or `if condition { return; }` to reduce indentation depth in loops and functions. Flatten `if !x { ... }` blocks by inverting the condition and returning/continuing early.
 
 ---
 
@@ -100,7 +102,8 @@ See `code-quality.md` for universal YAGNI rules. Rust-specific applications:
 ### Structured Concurrency
 - **`JoinSet`** for bounded parallel work where you need all results. Drop aborts all tasks.
 - **Always join** — never fire-and-forget spawned tasks. Observe `JoinHandle` or use `JoinSet`.
-- **OCX convention**: `_all` methods use `JoinSet` but **preserve input order** — spawn with index, collect results, sort by index.
+- **Deterministic output**: `JoinSet::join_next()` returns results in **completion order**, which is non-deterministic. Every `JoinSet` consumer **must** ensure deterministic output — sort results by path, index, or other stable key before returning. No exceptions.
+- **OCX convention**: `_all` methods use `JoinSet` but **preserve input order** — spawn with index, collect results, sort by index. Internal methods (walkers, GC, ref checks) sort by path.
 - **`spawn_blocking`** for sync I/O and CPU-bound work (>100μs between await points). Use `rayon` for heavy compute with `oneshot` channel bridge.
 
 ### Cancel Safety
@@ -140,11 +143,14 @@ New code must follow established OCX patterns. The reviewer enforces this:
 | Error model | `thiserror::Error` derive, `#[source]`/`#[from]`, `#[non_exhaustive]`, subsystem error types | Manual `Display`/`Error` impls, `.to_string()` in error construction, `String` wrapping source errors, catch-all error variants |
 | Progress | `tracing::info_span!` + `tracing-indicatif` | Custom progress bars, `println!` |
 | Symlinks | `ReferenceManager::link(forward, content)` | Raw `symlink::update/create` |
+| Symlink detection | `symlink::is_link()` for all link checks | `is_symlink()`, `file_type().is_symlink()`, `symlink_metadata()` — these miss Windows NTFS junctions |
 | CLI flow | args → `transform_all()` → `manager.task_all()` → report from results → `api.report()` | Report from CLI args |
 | API output | `Printable` trait, single `print_table()`, static headers, typed enum statuses | Multiple tables, dynamic headers, string statuses |
 | Batch order | `_all()` preserves input order (JoinSet with index tracking) | Unordered results |
+| JoinSet output | Always sort results (by index, path, or stable key) after draining | Returning JoinSet results in completion order |
 | Paths | `to_relaxed_slug()`, `repository_path()` splits on `/` | Manual path joining |
 | Async I/O | `tokio::fs::*`, bounded channels, `spawn_blocking` for CPU | `std::fs::*`, unbounded channels |
+| Test-only methods | Separate `#[cfg(test)] impl Foo` block before `mod tests`, not scattered with `#[cfg(test)]` on individual methods | `#[cfg(test)]` on methods mixed into the production impl block |
 
 **Consistency review questions:**
 - "Does this follow the same pattern as similar existing code?"

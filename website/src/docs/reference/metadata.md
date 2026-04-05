@@ -34,6 +34,7 @@ The metadata file is a JSON object with a `type` discriminator. Currently only t
 | `version` | integer | Yes | Format version. Must be `1`. |
 | `strip_components` | integer | No | Leading path components to strip during extraction. |
 | `env` | array | No | [Environment variable declarations](#env). |
+| `dependencies` | array | No | [Package dependencies](#dependencies) pinned by digest. |
 
 ::: details Why a type discriminator?
 The `type` field allows future metadata formats (e.g. `"manifest"`, `"virtual"`) without
@@ -55,7 +56,7 @@ A package with no environment variables and no extraction options:
 
 ### Full Example {#format-full}
 
-A language runtime with multiple environment variables and archive stripping:
+A language runtime with multiple environment variables, archive stripping, and a dependency:
 
 ```json
 {
@@ -80,6 +81,12 @@ A language runtime with multiple environment variables and archive stripping:
       "type": "path",
       "required": false,
       "value": "${installPath}/lib"
+    }
+  ],
+  "dependencies": [
+    {
+      "identifier": "ocx.sh/gcc:13",
+      "digest": "sha256:a1b2c3d4e5f6..."
     }
   ]
 }
@@ -140,6 +147,65 @@ Constant variables **replace** any existing value of the environment variable.
 Constants are useful for home directory variables (`JAVA_HOME`, `CARGO_HOME`) and
 fixed values that do not depend on the install path (e.g. a version string).
 
+## Dependencies {#dependencies}
+
+The `dependencies` array declares packages that must be present for this package to function.
+Each dependency is pinned by <Tooltip term="OCI digest">A SHA-256 fingerprint identifying a specific
+build. The digest — not the tag — is the authoritative identifier. The tag is advisory, included for
+readability and future update tooling.</Tooltip>, ensuring the same dependency graph is reproduced
+on every machine regardless of the current registry state.
+
+### Dependency Entry {#dependencies-entry}
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `identifier` | string | Yes | Fully qualified OCX identifier including the registry. The tag is advisory. e.g. `ocx.sh/java:21`, `ghcr.io/myorg/tool`. |
+| `digest` | string | Yes | OCI digest (`sha256:…`). May reference an Image Index (platform resolution at install time) or a single manifest. |
+
+```json
+{
+  "$schema": "https://ocx.sh/schemas/metadata/v1.json",
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    { "key": "PATH", "type": "path", "required": true, "value": "${installPath}/bin" }
+  ],
+  "dependencies": [
+    {
+      "identifier": "ocx.sh/java:21",
+      "digest": "sha256:a1b2c3d4e5f6..."
+    },
+    {
+      "identifier": "ocx.sh/cmake:3.28",
+      "digest": "sha256:f6e5d4c3b2a1..."
+    }
+  ]
+}
+```
+
+### Ordering {#dependencies-ordering}
+
+Array position defines the canonical order for environment composition. Dependencies are processed
+in array order — the first entry's environment is applied first. This ordering is preserved
+through transitive resolution: the full dependency graph is <Tooltip term="topologically sorted">
+Kahn's algorithm with a lexicographic tiebreaker on identifier. Dependencies appear before their
+dependents in the final list.</Tooltip>, deduplicated, and applied in that deterministic sequence.
+
+### Registry Requirement {#dependencies-registry}
+
+Every dependency identifier must include an explicit registry (`ocx.sh/java:21`, not just `java:21`).
+Default registry resolution is not applied because the consumer may have a different default registry
+than the publisher. Identifiers without an explicit registry are rejected at deserialization.
+
+### No Version Ranges {#dependencies-no-version-ranges}
+
+The digest is the complete truth — there is nothing to resolve. The tag portion of the identifier
+is purely informational: it records what the publisher pinned against and enables future update
+tooling, but is never used for resolution.
+
+See [Dependencies][ug-dependencies] in the user guide for how dependencies affect
+installation, environment composition, and garbage collection from a user's perspective.
+
 ## Extraction {#extraction}
 
 ### `strip_components` {#extraction-strip-components}
@@ -194,7 +260,8 @@ uvx check-jsonschema --schemafile https://ocx.sh/schemas/metadata/v1.json metada
 ### Version 1 (current) {#version-1}
 
 Initial release. Supports `path` and `constant` variable types, `strip_components`
-for archive extraction, and `${installPath}` template substitution.
+for archive extraction, `${installPath}` template substitution, and optional
+`dependencies` for declaring digest-pinned package dependencies.
 
 <!-- external -->
 [json-schema]: https://json-schema.org/
@@ -209,3 +276,4 @@ for archive extraction, and `${installPath}` template substitution.
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects
+[ug-dependencies]: ../user-guide.md#dependencies
