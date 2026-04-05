@@ -8,14 +8,16 @@
  *   status  — "shipped" | "active" | "planned" (default: "planned")
  *   issue   — GitHub issue number (links to ocx-sh/ocx/issues/{n})
  *   pr      — GitHub PR number (links to ocx-sh/ocx/pull/{n})
+ *   repo    — GitHub owner/repo string for external repos (e.g. "ocx-sh/setup-ocx")
  */
 defineProps<{
   status?: 'shipped' | 'active' | 'planned'
   issue?: string | number
   pr?: string | number
+  repo?: string
 }>()
 
-const repo = 'https://github.com/ocx-sh/ocx'
+const baseRepo = 'https://github.com/ocx-sh/ocx'
 
 const statusTitles: Record<string, string> = {
   shipped: 'Shipped',
@@ -33,7 +35,7 @@ const statusTitles: Record<string, string> = {
     <span class="feature-text"><slot /></span>
     <a
       v-if="issue"
-      :href="`${repo}/issues/${issue}`"
+      :href="`${baseRepo}/issues/${issue}`"
       target="_blank"
       rel="noreferrer"
       class="feature-link"
@@ -47,7 +49,7 @@ const statusTitles: Record<string, string> = {
     </a>
     <a
       v-if="pr"
-      :href="`${repo}/pull/${pr}`"
+      :href="`${baseRepo}/pull/${pr}`"
       target="_blank"
       rel="noreferrer"
       class="feature-link"
@@ -56,6 +58,19 @@ const statusTitles: Record<string, string> = {
     >
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
         <path d="M1.5 3.25a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zm5.677-.177L9.573.677A.25.25 0 0110 .854V2.5h1A2.5 2.5 0 0113.5 5v5.628a2.251 2.251 0 11-1.5 0V5a1 1 0 00-1-1h-1v1.646a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm0 9.5a.75.75 0 100 1.5.75.75 0 000-1.5zm8.25.75a.75.75 0 10-1.5 0 .75.75 0 001.5 0z" />
+      </svg>
+    </a>
+    <a
+      v-if="repo"
+      :href="`https://github.com/${repo}`"
+      target="_blank"
+      rel="noreferrer"
+      class="feature-link"
+      :title="repo"
+      @click.stop
+    >
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M2 2.5A2.5 2.5 0 014.5 0h8.75a.75.75 0 01.75.75v12.5a.75.75 0 01-.75.75h-2.5a.75.75 0 110-1.5h1.75v-2h-8a1 1 0 00-.714 1.7.75.75 0 01-1.072 1.05A2.495 2.495 0 012 11.5zm10.5-1h-8a1 1 0 00-1 1v6.708A2.486 2.486 0 014.5 9h8zM5 12.25v3.25a.25.25 0 00.4.2l1.45-1.087a.25.25 0 01.3 0L8.6 15.7a.25.25 0 00.4-.2v-3.25a.25.25 0 00-.25-.25h-3.5a.25.25 0 00-.25.25z" />
       </svg>
     </a>
   </div>

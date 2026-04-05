@@ -25,10 +25,12 @@ Packages declare dependencies on other packages, enabling automatic resolution f
 
 </RoadmapDescription>
 <RoadmapFeatures>
-  <RoadmapFeature status="active" pr="13">Dependency resolution</RoadmapFeature>
-  <RoadmapFeature status="planned">Dependency declarations</RoadmapFeature>
+  <RoadmapFeature status="shipped" pr="13">Dependency resolution</RoadmapFeature>
+  <RoadmapFeature status="planned" issue="31">Dependency mounting</RoadmapFeature>
+  <RoadmapFeature status="planned" issue="32">Path interpolation</RoadmapFeature>
+  <RoadmapFeature status="planned" issue="28">Parallel resolution</RoadmapFeature>
+  <RoadmapFeature status="planned" issue="33">Toolchain config</RoadmapFeature>
   <RoadmapFeature status="planned">Transitive constraints</RoadmapFeature>
-  <RoadmapFeature status="planned">Composable toolchains</RoadmapFeature>
 </RoadmapFeatures>
 </RoadmapItem>
 
@@ -68,8 +70,9 @@ First-class integrations with the tools and platforms where developers already w
 </RoadmapDescription>
 <RoadmapFeatures>
   <RoadmapFeature status="active" pr="12">Bazel module</RoadmapFeature>
-  <RoadmapFeature status="planned">GitHub Actions</RoadmapFeature>
+  <RoadmapFeature status="active" repo="ocx-sh/setup-ocx">GitHub Actions</RoadmapFeature>
   <RoadmapFeature status="planned">DevContainer features</RoadmapFeature>
+  <RoadmapFeature status="planned" issue="34">mise backend plugin</RoadmapFeature>
   <RoadmapFeature status="planned">Shims & lazy loading</RoadmapFeature>
   <RoadmapFeature status="planned" issue="25">Air-gap export/import</RoadmapFeature>
 </RoadmapFeatures>
@@ -86,6 +89,7 @@ Stabilizing the CLI interface and package metadata format for long-term reliabil
   <RoadmapFeature status="planned">Schema validation</RoadmapFeature>
   <RoadmapFeature status="planned" issue="26">Idempotent PATH setup</RoadmapFeature>
   <RoadmapFeature status="planned" issue="23">Relocatable symlinks</RoadmapFeature>
+  <RoadmapFeature status="planned" issue="27">Content dedup fix</RoadmapFeature>
   <RoadmapFeature status="planned">API documentation</RoadmapFeature>
 </RoadmapFeatures>
 </RoadmapItem>
