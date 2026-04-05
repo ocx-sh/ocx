@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{env, log, oci};
+use ocx_lib::{env, oci};
 
 use crate::{conventions::*, options};
 
@@ -40,18 +40,15 @@ impl Exec {
         let identifier =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
-        let info = context.manager().find_or_install_all(identifier, platforms).await?;
+        let manager = context.manager();
+        let info = manager.find_or_install_all(identifier, platforms).await?;
+
+        let entries = manager.resolve_env(&info).await?;
+        let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
+        process_env.apply_entries(&entries);
 
         use std::process::Stdio;
         use tokio::process::Command;
-
-        let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
-        for info in info {
-            log::debug!("Setting environment variables for package: {}", info.identifier);
-            if let Some(env) = info.metadata.env() {
-                env.resolve_into_env(info.content, &mut process_env)?;
-            }
-        }
 
         let Some((command, args)) = self.command.split_first() else {
             return Err(anyhow::anyhow!("No command provided to execute."));

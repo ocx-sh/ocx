@@ -56,7 +56,7 @@ impl BundleBuilder {
     pub async fn create(self, output: impl AsRef<std::path::Path>) -> Result<()> {
         let output = output.as_ref();
         let temp_path = temp_path_for(output);
-        let mut temp_guard = utility::drop_file::DropFile::new(&temp_path);
+        let mut temp_guard = utility::fs::DropFile::new(&temp_path);
 
         let mut archive = archive::Archive::create_with_compression(&temp_path, self.compression).await?;
         if self.source.is_dir() {

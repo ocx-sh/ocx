@@ -56,12 +56,11 @@ def test_profile_add_content(ocx: OcxRunner, published_package: PackageInfo):
     assert result[0]["status"] == "added"
     assert result[0]["mode"] == "content"
 
-    # Verify profile manifest includes content_digest
+    # Verify profile manifest has digest baked into identifier string
     profile_path = Path(ocx.env["OCX_HOME"]) / "profile.json"
     profile = json.loads(profile_path.read_text())
     assert profile["packages"][0]["mode"] == "content"
-    assert "content_digest" in profile["packages"][0]
-    assert profile["packages"][0]["content_digest"].startswith("sha256:")
+    assert "@sha256:" in profile["packages"][0]["identifier"]
 
 
 # ---------------------------------------------------------------------------
@@ -437,13 +436,19 @@ def test_profile_list_broken_candidate(
 def test_profile_list_broken_content(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """ocx shell profile list shows broken after content object is purged"""
+    """ocx shell profile list shows broken after content object is removed"""
+    import shutil
+
     pkg = published_package
     ocx.json("install", pkg.short)
     ocx.json("shell", "profile", "add", "--content", pkg.short)
 
-    # Purge the object so the content path no longer exists
-    ocx.json("uninstall", "--purge", pkg.short)
+    # Directly remove the object directory (simulates data loss).
+    # Cannot use --purge because the profile content-mode entry protects
+    # the object from GC.
+    result = ocx.json("find", pkg.short)
+    content_path = Path(result[pkg.short]).resolve()
+    shutil.rmtree(content_path.parent)
 
     result = ocx.json("shell", "profile", "list")
     assert len(result) == 1
@@ -655,12 +660,18 @@ def test_profile_load_skips_broken_content(
     ocx: OcxRunner, published_package: PackageInfo
 ):
     """ocx shell profile load skips broken content entries"""
+    import shutil
+
     pkg = published_package
     ocx.json("install", pkg.short)
     ocx.json("shell", "profile", "add", "--content", pkg.short)
 
-    # Break by purging (removes object store content)
-    ocx.json("uninstall", "--purge", pkg.short)
+    # Break by directly removing the object directory (simulates data loss).
+    # Cannot use --purge because the profile content-mode entry protects
+    # the object from GC.
+    result = ocx.json("find", pkg.short)
+    content_path = Path(result[pkg.short]).resolve()
+    shutil.rmtree(content_path.parent)
 
     result = ocx.run(
         "shell", "profile", "load", "--shell", "bash", format=None
@@ -913,7 +924,7 @@ def test_profile_manifest_format(
 def test_profile_manifest_content_digest(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """Content-mode entries store content_digest in profile.json"""
+    """Content-mode entries embed digest in identifier string"""
     pkg = published_package
     ocx.json("install", pkg.short)
     ocx.json("shell", "profile", "add", "--content", pkg.short)
@@ -923,8 +934,7 @@ def test_profile_manifest_content_digest(
 
     entry = profile["packages"][0]
     assert entry["mode"] == "content"
-    assert "content_digest" in entry
-    assert entry["content_digest"].startswith("sha256:")
+    assert "@sha256:" in entry["identifier"]
 
 
 def test_uninstall_preserves_profile_entry(

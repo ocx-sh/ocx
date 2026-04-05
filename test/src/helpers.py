@@ -97,6 +97,7 @@ def make_package(
     bins: list[str] | None = None,
     env: list[dict] | None = None,
     outputs: dict[str, dict[str, str]] | None = None,
+    dependencies: list[dict] | None = None,
 ) -> PackageInfo:
     """Create, bundle, push, and index a test package.
 
@@ -164,15 +165,14 @@ def make_package(
             "value": "${installPath}",
         },
     ]
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "type": "bundle",
-                "version": 1,
-                "env": metadata_env,
-            }
-        )
-    )
+    metadata_obj: dict = {
+        "type": "bundle",
+        "version": 1,
+        "env": metadata_env,
+    }
+    if dependencies:
+        metadata_obj["dependencies"] = dependencies
+    metadata_path.write_text(json.dumps(metadata_obj))
 
     # Create bundle
     bundle = tmp_path / f"bundle-{repo}-{tag}.tar.xz"

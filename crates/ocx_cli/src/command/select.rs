@@ -44,7 +44,7 @@ impl Select {
             packages.insert(
                 raw.raw().to_string(),
                 api::data::install::InstallEntry {
-                    identifier: info.identifier,
+                    identifier: info.identifier.into(),
                     metadata: info.metadata,
                     path: current_path,
                 },

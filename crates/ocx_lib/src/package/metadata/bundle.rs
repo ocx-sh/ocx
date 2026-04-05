@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
-use super::env;
+use super::{dependency::Dependencies, env};
 
 /// Constants of known versions of the bundle metadata format.
 #[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq)]
@@ -13,7 +13,6 @@ pub enum Version {
     V1 = 1,
 }
 
-#[cfg(feature = "jsonschema")]
 impl schemars::JsonSchema for Version {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed("Version")
@@ -32,8 +31,7 @@ impl schemars::JsonSchema for Version {
 ///
 /// Declares the format version, optional extraction options, and environment variables
 /// that OCX should expose when running commands with this package.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Bundle {
     /// The version of the bundle metadata format.
@@ -48,4 +46,9 @@ pub struct Bundle {
 
     #[serde(skip_serializing_if = "env::Env::is_empty", default)]
     pub env: env::Env,
+
+    /// Ordered list of package dependencies, pinned by digest.
+    /// Array order defines environment import order.
+    #[serde(skip_serializing_if = "Dependencies::is_empty", default)]
+    pub dependencies: Dependencies,
 }

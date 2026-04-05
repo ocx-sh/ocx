@@ -6,9 +6,8 @@ use tracing::info_span;
 use crate::{
     file_structure::SymlinkKind,
     log, oci,
-    package::{install_info::InstallInfo, metadata},
+    package::install_info::InstallInfo,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
-    prelude::SerdeExt,
 };
 
 use super::super::PackageManager;
@@ -44,12 +43,9 @@ impl PackageManager {
             return Err(PackageErrorKind::SymlinkNotFound(kind));
         }
 
-        let metadata_path = self
-            .file_structure()
-            .objects
-            .metadata_for_content(&symlink_path)
+        let (metadata, resolved) = super::common::load_object_data(&self.file_structure().objects, &symlink_path)
+            .await
             .map_err(PackageErrorKind::Internal)?;
-        let metadata = metadata::Metadata::read_json_from_path(&metadata_path).map_err(PackageErrorKind::Internal)?;
 
         log::debug!(
             "Resolved '{}' via {:?} symlink at '{}'",
@@ -59,8 +55,9 @@ impl PackageManager {
         );
 
         Ok(InstallInfo {
-            identifier: package.clone(),
+            identifier: resolved.identifier.clone(),
             metadata,
+            resolved,
             content: symlink_path,
         })
     }

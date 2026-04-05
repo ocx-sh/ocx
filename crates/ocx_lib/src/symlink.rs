@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn remove_noop_for_nonexistent() {
         let (_dir, root) = setup();
-        remove(&root.join("nope")).unwrap();
+        remove(root.join("nope")).unwrap();
     }
 
     // ── update ───────────────────────────────────────────────────────────────

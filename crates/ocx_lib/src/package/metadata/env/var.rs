@@ -12,8 +12,7 @@ pub use super::modifier::{Modifier, ModifierKind};
 /// Each variable has a key (the variable name) and a modifier that determines
 /// how the value is resolved. The modifier's type and fields are flattened into
 /// this object in JSON.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Var {
     /// The environment variable name (e.g. `PATH`, `JAVA_HOME`).

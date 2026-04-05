@@ -2,7 +2,12 @@
 // Copyright 2026 The OCX Authors
 
 pub mod error;
-pub mod tasks;
+
+mod tasks;
+
+// Re-export types needed by other modules and CLI commands.
+pub use error::DependencyError;
+pub use tasks::profile_resolve::{ProfileEntryResolution, ResolvedProfileEntry};
 
 use crate::{file_structure, oci, profile::ProfileManager};
 
@@ -10,9 +15,9 @@ use crate::{file_structure, oci, profile::ProfileManager};
 ///
 /// `PackageManager` holds all the context that tasks need — file structure,
 /// index, OCI client — and is cheap to [`Clone`].
-/// When tasks are migrated into this module, they become methods on
-/// `PackageManager`, and any task can issue sub-tasks by calling other methods
-/// on the same instance (e.g. installing transitive dependencies).
+///
+/// Environment variable resolution uses persisted `resolve.json` files
+/// written at install time — see [`resolve_env`](Self::resolve_env).
 ///
 /// Progress reporting is handled via `tracing` spans emitted by task code;
 /// the CLI wires up `tracing-indicatif` (or similar) to visualize them.
@@ -33,7 +38,7 @@ impl PackageManager {
         default_registry: impl Into<String>,
     ) -> Self {
         let default_registry = default_registry.into();
-        let profile = ProfileManager::new(file_structure.clone(), default_registry.clone());
+        let profile = ProfileManager::new(file_structure.clone());
         Self {
             file_structure,
             index,

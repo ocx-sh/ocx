@@ -129,6 +129,67 @@ impl ReferenceManager {
         symlink::remove(forward_path)
     }
 
+    /// Creates a dependency forward-reference in the dependent's `deps/` directory.
+    ///
+    /// The forward-ref allows GC to discover dependencies via filesystem traversal
+    /// (instead of parsing metadata digests), which handles Image Index →
+    /// platform-specific digest resolution correctly. GC determines reachability
+    /// by walking `deps/` edges from root objects (those with install symlink refs
+    /// in `refs/` or profile content-mode references).
+    ///
+    /// No back-reference is created in the dependency's `refs/` — that directory
+    /// is reserved for install symlink refs (candidate/current).
+    pub fn link_dependency(&self, dependent_content: &Path, dependency_content: &Path) -> Result<()> {
+        self.create_forward_dep_ref(dependent_content, dependency_content)
+    }
+
+    /// Creates a forward-dependency symlink in the dependent's `deps/` directory
+    /// pointing to the dependency's content path.
+    fn create_forward_dep_ref(&self, dependent_content: &Path, dependency_content: &Path) -> Result<()> {
+        let deps_dir = self.file_structure.objects.deps_dir_for_content(dependent_content)?;
+        std::fs::create_dir_all(&deps_dir).map_err(|e| Error::InternalFile(deps_dir.clone(), e))?;
+
+        let dep_path = deps_dir.join(Self::ref_name(dependency_content));
+
+        if symlink::is_link(&dep_path) {
+            if let Ok(target) = std::fs::read_link(&dep_path)
+                && target == dependency_content
+            {
+                log::trace!(
+                    "Dependency forward-ref already exists: '{}' → '{}'.",
+                    dep_path.display(),
+                    dependency_content.display(),
+                );
+                return Ok(());
+            }
+            // Stale ref — replace it.
+            symlink::remove(&dep_path)?;
+        }
+
+        symlink::create(dependency_content, &dep_path)?;
+        log::trace!(
+            "Created dependency forward-ref '{}' → '{}'.",
+            dep_path.display(),
+            dependency_content.display(),
+        );
+        Ok(())
+    }
+
+    /// Removes a dependency forward-reference from the dependent's `deps/` directory.
+    ///
+    /// No-op if the forward-ref does not exist.
+    pub fn unlink_dependency(&self, dependent_content: &Path, dependency_content: &Path) -> Result<()> {
+        if let Ok(deps_dir) = self.file_structure.objects.deps_dir_for_content(dependent_content) {
+            let dep_path = deps_dir.join(Self::ref_name(dependency_content));
+            if symlink::is_link(&dep_path) {
+                log::trace!("Removing dependency forward-ref '{}'.", dep_path.display());
+                symlink::remove(&dep_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Returns the paths of all broken back-references found in the object store.
     ///
     /// A back-reference is broken when:
@@ -139,20 +200,36 @@ impl ReferenceManager {
     /// Uses [`ObjectStore::list_all`] to enumerate object directories, so only
     /// `refs/` entries inside known object dirs are inspected.  Package-installed
     /// files under `content/` are never traversed.
-    pub fn broken_refs(&self) -> Result<Vec<PathBuf>> {
-        let object_dirs = self.file_structure.objects.list_all()?;
+    pub async fn broken_refs(&self) -> Result<Vec<PathBuf>> {
+        let object_dirs = self.file_structure.objects.list_all().await?;
         if object_dirs.is_empty() {
             log::trace!("broken_refs: no objects found in store.");
             return Ok(Vec::new());
         }
-        let mut broken = Vec::new();
+
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(50));
+        let mut tasks = tokio::task::JoinSet::new();
+
         for obj in &object_dirs {
             let refs_dir = obj.refs_dir();
-            if !refs_dir.is_dir() {
+            if !tokio::fs::try_exists(&refs_dir).await.unwrap_or(false) {
                 continue;
             }
-            self.check_refs_dir(&refs_dir, &obj.content(), &mut broken)?;
+            let content = obj.content();
+            let sem = std::sync::Arc::clone(&sem);
+            tasks.spawn(async move {
+                let _permit = sem.acquire_owned().await.expect("semaphore closed");
+                check_refs_dir(&refs_dir, &content).await
+            });
         }
+
+        let mut broken = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            broken.extend(result.expect("task panicked")?);
+        }
+
+        broken.sort();
+
         if broken.is_empty() {
             log::debug!("broken_refs: no broken back-refs found.");
         } else {
@@ -160,56 +237,59 @@ impl ReferenceManager {
         }
         Ok(broken)
     }
+}
 
-    fn check_refs_dir(&self, refs_dir: &Path, expected_content: &Path, broken: &mut Vec<PathBuf>) -> Result<()> {
-        let entries = std::fs::read_dir(refs_dir).map_err(|e| Error::InternalFile(refs_dir.to_path_buf(), e))?;
+async fn check_refs_dir(refs_dir: &Path, expected_content: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries = tokio::fs::read_dir(refs_dir)
+        .await
+        .map_err(|e| Error::InternalFile(refs_dir.to_path_buf(), e))?;
+    let mut broken = Vec::new();
 
-        for entry in entries.flatten() {
-            let back_ref = entry.path();
-            if !symlink::is_link(&back_ref) {
-                continue;
-            }
-            let Ok(forward_path) = std::fs::read_link(&back_ref) else {
-                log::trace!(
-                    "Broken back-ref '{}': could not read symlink target.",
-                    back_ref.display()
-                );
-                broken.push(back_ref);
-                continue;
-            };
-            if !symlink::is_link(&forward_path) {
-                // Forward symlink no longer exists.
-                log::trace!(
-                    "Broken back-ref '{}': forward symlink '{}' no longer exists.",
-                    back_ref.display(),
-                    forward_path.display(),
-                );
-                broken.push(back_ref);
-                continue;
-            }
-            // Verify the forward symlink still points to this object's content.
-            let Ok(actual) = std::fs::read_link(&forward_path) else {
-                log::trace!(
-                    "Broken back-ref '{}': could not read target of forward symlink '{}'.",
-                    back_ref.display(),
-                    forward_path.display(),
-                );
-                broken.push(back_ref);
-                continue;
-            };
-            let actual_canon = dunce::canonicalize(&actual).unwrap_or(actual);
-            let expected_canon = dunce::canonicalize(expected_content).ok();
-            if Some(actual_canon) != expected_canon {
-                log::trace!(
-                    "Broken back-ref '{}': forward symlink '{}' points to wrong content.",
-                    back_ref.display(),
-                    forward_path.display(),
-                );
-                broken.push(back_ref);
-            }
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let back_ref = entry.path();
+        if !symlink::is_link(&back_ref) {
+            continue;
         }
-        Ok(())
+        let Ok(forward_path) = tokio::fs::read_link(&back_ref).await else {
+            log::trace!(
+                "Broken back-ref '{}': could not read symlink target.",
+                back_ref.display()
+            );
+            broken.push(back_ref);
+            continue;
+        };
+        if !symlink::is_link(&forward_path) {
+            // Forward symlink no longer exists.
+            log::trace!(
+                "Broken back-ref '{}': forward symlink '{}' no longer exists.",
+                back_ref.display(),
+                forward_path.display(),
+            );
+            broken.push(back_ref);
+            continue;
+        }
+        // Verify the forward symlink still points to this object's content.
+        let Ok(actual) = tokio::fs::read_link(&forward_path).await else {
+            log::trace!(
+                "Broken back-ref '{}': could not read target of forward symlink '{}'.",
+                back_ref.display(),
+                forward_path.display(),
+            );
+            broken.push(back_ref);
+            continue;
+        };
+        let actual_canon = dunce::canonicalize(&actual).unwrap_or(actual);
+        let expected_canon = dunce::canonicalize(expected_content).ok();
+        if Some(actual_canon) != expected_canon {
+            log::trace!(
+                "Broken back-ref '{}': forward symlink '{}' points to wrong content.",
+                back_ref.display(),
+                forward_path.display(),
+            );
+            broken.push(back_ref);
+        }
     }
+    Ok(broken)
 }
 
 #[cfg(test)]
@@ -229,9 +309,20 @@ mod tests {
         (dir, root, rm)
     }
 
-    /// Creates a real content directory at `{root}/objects/reg/repo/{id}/content`.
-    fn make_content(root: &Path, id: &str) -> PathBuf {
-        let p = root.join("objects").join("reg").join("repo").join(id).join("content");
+    /// Creates a real content directory matching the object store layout:
+    /// `{root}/objects/reg/repo/sha256/{8hex}/{8hex}/{16hex}/content`.
+    ///
+    /// `n` selects a unique shard1 value; shard2 and shard3 are fixed.
+    fn make_content(root: &Path, n: u32) -> PathBuf {
+        let p = root
+            .join("objects")
+            .join("reg")
+            .join("repo")
+            .join("sha256")
+            .join(format!("{n:08x}"))
+            .join("aabb1122")
+            .join("ccdd3344eeff5566")
+            .join("content");
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -275,7 +366,7 @@ mod tests {
     #[test]
     fn link_creates_forward_symlink_and_back_ref() {
         let (_dir, root, rm) = setup();
-        let content = make_content(&root, "d1");
+        let content = make_content(&root, 1);
         let forward = fwd(&root, "link1");
 
         rm.link(&forward, &content).unwrap();
@@ -289,7 +380,7 @@ mod tests {
     #[test]
     fn link_is_noop_when_already_pointing_to_same_content() {
         let (_dir, root, rm) = setup();
-        let content = make_content(&root, "d1");
+        let content = make_content(&root, 1);
         let forward = fwd(&root, "link1");
 
         rm.link(&forward, &content).unwrap();
@@ -303,8 +394,8 @@ mod tests {
     #[test]
     fn link_updates_forward_and_moves_back_ref_on_relink() {
         let (_dir, root, rm) = setup();
-        let content_a = make_content(&root, "d_a");
-        let content_b = make_content(&root, "d_b");
+        let content_a = make_content(&root, 0xa);
+        let content_b = make_content(&root, 0xb);
         let forward = fwd(&root, "link1");
 
         rm.link(&forward, &content_a).unwrap();
@@ -321,7 +412,7 @@ mod tests {
     fn link_tolerates_missing_old_content_on_relink() {
         // Forward symlink already points to a GC'd (non-existent) content path.
         let (_dir, root, rm) = setup();
-        let content_b = make_content(&root, "d_b");
+        let content_b = make_content(&root, 0xb);
         let forward = fwd(&root, "link1");
 
         let gone = root
@@ -339,13 +430,13 @@ mod tests {
     #[test]
     fn link_replaces_stale_back_ref_at_target_location() {
         let (_dir, root, rm) = setup();
-        let content = make_content(&root, "d1");
+        let content = make_content(&root, 1);
         let forward = fwd(&root, "link1");
 
         // Pre-plant a stale symlink at the exact back-ref path.
         let back_ref = back_ref_for(&content, &forward);
         std::fs::create_dir_all(back_ref.parent().unwrap()).unwrap();
-        crate::symlink::create(&root.join("nowhere"), &back_ref).unwrap();
+        crate::symlink::create(root.join("nowhere"), &back_ref).unwrap();
 
         rm.link(&forward, &content).unwrap();
 
@@ -364,7 +455,7 @@ mod tests {
     #[test]
     fn unlink_removes_forward_symlink_and_back_ref() {
         let (_dir, root, rm) = setup();
-        let content = make_content(&root, "d1");
+        let content = make_content(&root, 1);
         let forward = fwd(&root, "link1");
 
         rm.link(&forward, &content).unwrap();
@@ -397,26 +488,26 @@ mod tests {
 
     // ── broken_refs ───────────────────────────────────────────────────────────
 
-    #[test]
-    fn broken_refs_empty_when_objects_dir_absent() {
+    #[tokio::test]
+    async fn broken_refs_empty_when_objects_dir_absent() {
         let (_dir, _root, rm) = setup();
-        assert_eq!(rm.broken_refs().unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(rm.broken_refs().await.unwrap(), Vec::<PathBuf>::new());
     }
 
-    #[test]
-    fn broken_refs_empty_when_all_refs_valid() {
+    #[tokio::test]
+    async fn broken_refs_empty_when_all_refs_valid() {
         let (_dir, root, rm) = setup();
-        let content = make_content(&root, "d1");
+        let content = make_content(&root, 1);
         let forward = fwd(&root, "link1");
         rm.link(&forward, &content).unwrap();
 
-        assert_eq!(rm.broken_refs().unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(rm.broken_refs().await.unwrap(), Vec::<PathBuf>::new());
     }
 
-    #[test]
-    fn broken_refs_detects_missing_forward_symlink() {
+    #[tokio::test]
+    async fn broken_refs_detects_missing_forward_symlink() {
         let (_dir, root, rm) = setup();
-        let content = make_content(&root, "d1");
+        let content = make_content(&root, 1);
 
         // Back-ref points to a forward path that does not exist.
         let ghost_fwd = root.join("fwd").join("ghost");
@@ -425,14 +516,14 @@ mod tests {
         let back_ref = refs_dir.join(ReferenceManager::ref_name(&ghost_fwd));
         crate::symlink::create(&ghost_fwd, &back_ref).unwrap();
 
-        assert_eq!(rm.broken_refs().unwrap(), vec![back_ref]);
+        assert_eq!(rm.broken_refs().await.unwrap(), vec![back_ref]);
     }
 
-    #[test]
-    fn broken_refs_detects_forward_pointing_to_wrong_content() {
+    #[tokio::test]
+    async fn broken_refs_detects_forward_pointing_to_wrong_content() {
         let (_dir, root, rm) = setup();
-        let content_a = make_content(&root, "d_a");
-        let content_b = make_content(&root, "d_b");
+        let content_a = make_content(&root, 0xa);
+        let content_b = make_content(&root, 0xb);
         let forward = fwd(&root, "link1");
 
         // forward → content_a, but back-ref lives in content_b's refs/.
@@ -442,38 +533,102 @@ mod tests {
         let back_ref = refs_dir.join(ReferenceManager::ref_name(&forward));
         crate::symlink::create(&forward, &back_ref).unwrap();
 
-        assert_eq!(rm.broken_refs().unwrap(), vec![back_ref]);
+        assert_eq!(rm.broken_refs().await.unwrap(), vec![back_ref]);
     }
 
-    #[test]
-    fn broken_refs_does_not_recurse_into_content_dirs() {
+    #[tokio::test]
+    async fn broken_refs_does_not_recurse_into_content_dirs() {
         let (_dir, root, rm) = setup();
-        let content = make_content(&root, "d1");
+        let content = make_content(&root, 1);
 
         // A "refs" dir inside the content dir must never be inspected.
         std::fs::create_dir_all(content.join("refs")).unwrap();
 
-        assert_eq!(rm.broken_refs().unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(rm.broken_refs().await.unwrap(), Vec::<PathBuf>::new());
     }
 
-    #[test]
-    fn broken_refs_skips_non_symlinks_in_refs_dir() {
+    #[tokio::test]
+    async fn broken_refs_skips_non_symlinks_in_refs_dir() {
         let (_dir, root, rm) = setup();
-        let content = make_content(&root, "d1");
+        let content = make_content(&root, 1);
         let refs_dir = content.parent().unwrap().join("refs");
         std::fs::create_dir_all(&refs_dir).unwrap();
         std::fs::write(refs_dir.join("not_a_symlink"), b"data").unwrap();
 
-        assert_eq!(rm.broken_refs().unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(rm.broken_refs().await.unwrap(), Vec::<PathBuf>::new());
     }
 
-    #[test]
-    fn broken_refs_skips_non_dir_entries_in_objects() {
+    #[tokio::test]
+    async fn broken_refs_skips_non_dir_entries_in_objects() {
         let (_dir, root, rm) = setup();
         let objects = root.join("objects");
         std::fs::create_dir_all(&objects).unwrap();
         std::fs::write(objects.join("stray_file"), b"junk").unwrap();
 
-        assert_eq!(rm.broken_refs().unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(rm.broken_refs().await.unwrap(), Vec::<PathBuf>::new());
+    }
+
+    // ── link_dependency / unlink_dependency ───────────────────────────────
+
+    #[test]
+    fn link_dependency_creates_forward_ref() {
+        let (_dir, root, rm) = setup();
+        let dep_content = make_content(&root, 0xde);
+        let dependent_content = make_content(&root, 0xaa);
+
+        rm.link_dependency(&dependent_content, &dep_content).unwrap();
+
+        // No back-ref in dependency's refs/
+        let refs_dir = dep_content.parent().unwrap().join("refs");
+        assert!(
+            !refs_dir.is_dir() || std::fs::read_dir(&refs_dir).unwrap().next().is_none(),
+            "dependency's refs/ should be empty (no back-refs)"
+        );
+
+        // Forward-ref: dependent's deps/ → dependency's content
+        let dep_path = dependent_content
+            .parent()
+            .unwrap()
+            .join("deps")
+            .join(ReferenceManager::ref_name(&dep_content));
+        assert!(crate::symlink::is_link(&dep_path));
+        assert_eq!(std::fs::read_link(&dep_path).unwrap(), dep_content);
+    }
+
+    #[test]
+    fn link_dependency_is_idempotent() {
+        let (_dir, root, rm) = setup();
+        let dep_content = make_content(&root, 0xde);
+        let dependent_content = make_content(&root, 0xaa);
+
+        rm.link_dependency(&dependent_content, &dep_content).unwrap();
+        rm.link_dependency(&dependent_content, &dep_content).unwrap();
+
+        let deps_dir = dependent_content.parent().unwrap().join("deps");
+        assert_eq!(std::fs::read_dir(&deps_dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn unlink_dependency_removes_forward_ref() {
+        let (_dir, root, rm) = setup();
+        let dep_content = make_content(&root, 0xde);
+        let dependent_content = make_content(&root, 0xaa);
+
+        rm.link_dependency(&dependent_content, &dep_content).unwrap();
+        rm.unlink_dependency(&dependent_content, &dep_content).unwrap();
+
+        // Forward-ref removed
+        let deps_dir = dependent_content.parent().unwrap().join("deps");
+        assert!(std::fs::read_dir(&deps_dir).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn unlink_dependency_is_noop_when_no_ref() {
+        let (_dir, root, rm) = setup();
+        let dep_content = make_content(&root, 0xde);
+        let dependent_content = make_content(&root, 0xaa);
+
+        // Should not error even though no ref was created.
+        rm.unlink_dependency(&dependent_content, &dep_content).unwrap();
     }
 }

@@ -9,8 +9,9 @@ use crate::{
     log, oci,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
     profile::ProfileSnapshot,
-    reference_manager::ReferenceManager,
 };
+
+use super::garbage_collection::GarbageCollector;
 
 use super::super::PackageManager;
 
@@ -24,106 +25,79 @@ pub struct UninstallResult {
     pub purged: Option<PathBuf>,
 }
 
+/// Intermediate result from symlink removal (before purge).
+struct SymlinkRemoval {
+    candidate: Option<PathBuf>,
+    content: Option<PathBuf>,
+}
+
 impl PackageManager {
     /// Removes the candidate symlink for `package` and optionally the current
     /// symlink (`deselect`) and the backing object directory (`purge`).
     ///
     /// Returns `Some(UninstallResult)` when the candidate symlink existed and
     /// was removed, or `None` when no candidate was present (no-op).
-    pub fn uninstall(
+    pub async fn uninstall(
         &self,
         package: &oci::Identifier,
         deselect: bool,
         purge: bool,
         profile: &ProfileSnapshot,
     ) -> Result<Option<UninstallResult>, PackageErrorKind> {
-        let _span =
-            crate::cli::progress::spinner_span(info_span!("Uninstalling", package = %package), package).entered();
-        log::debug!("Uninstalling package '{}'.", package);
-
-        if package.digest().is_some() {
-            return Err(PackageErrorKind::SymlinkRequiresTag);
-        }
-
-        let rm = ReferenceManager::new(self.file_structure().clone());
-        let candidate_path = self.file_structure().installs.candidate(package);
-
-        let content_path = if crate::symlink::is_link(&candidate_path) {
-            let path = std::fs::read_link(&candidate_path).ok();
-            log::trace!("Candidate content path: {:?}", path);
-            rm.unlink(&candidate_path).map_err(PackageErrorKind::Internal)?;
-            path
-        } else {
-            log::warn!(
-                "Package '{}' has no installed candidate at '{}' — nothing to uninstall.",
-                package,
-                candidate_path.display(),
-            );
+        let result = uninstall_symlinks(self.file_structure(), package, deselect).await?;
+        let Some((candidate, content_path)) = result else {
             return Ok(None);
         };
-
-        profile.warn_if_candidate_referenced(package);
-
-        if deselect {
-            let current_path = self.file_structure().installs.current(package);
-            if crate::symlink::is_link(&current_path) {
-                rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
-                profile.warn_if_current_referenced(package);
-            } else {
-                log::debug!(
-                    "Package '{}' has no current symlink at '{}' — skipping deselect.",
-                    package,
-                    current_path.display(),
-                );
-            }
-        }
 
         let mut purged = None;
         if purge
             && let Some(ref content) = content_path
-            && let Ok(refs_dir) = self.file_structure().objects.refs_dir_for_content(content)
+            && let Some(obj_dir) = content.parent()
         {
-            let is_empty = !refs_dir.is_dir()
-                || std::fs::read_dir(&refs_dir)
-                    .map(|mut d| d.next().is_none())
-                    .unwrap_or(true);
-            if is_empty {
-                if let Some(obj_dir) = content.parent() {
-                    profile.warn_if_content_referenced(package);
-
-                    log::info!("Purging unreferenced object: {}", obj_dir.display());
-                    std::fs::remove_dir_all(obj_dir).map_err(|e| {
-                        PackageErrorKind::Internal(crate::Error::InternalFile(obj_dir.to_path_buf(), e))
-                    })?;
-                    purged = Some(obj_dir.to_path_buf());
-                }
-            } else {
-                log::debug!(
-                    "Object at '{}' still has references — skipping purge.",
-                    content.display(),
-                );
+            let gc = GarbageCollector::build(self.file_structure(), profile)
+                .await
+                .map_err(PackageErrorKind::Internal)?;
+            let removed = gc
+                .purge(&[obj_dir.to_path_buf()])
+                .await
+                .map_err(PackageErrorKind::Internal)?;
+            if removed.iter().any(|p| p == obj_dir) {
+                purged = Some(obj_dir.to_path_buf());
             }
         }
 
-        Ok(Some(UninstallResult {
-            candidate: candidate_path,
-            purged,
-        }))
+        Ok(Some(UninstallResult { candidate, purged }))
     }
 
-    pub fn uninstall_all(
+    /// Uninstalls multiple packages, optionally purging unreferenced objects.
+    ///
+    /// Unlike a simple loop over [`PackageManager::uninstall`], this method
+    /// builds the [`GarbageCollector`] reachability graph **once** for all
+    /// packages. The graph walks the entire object store (`O(all objects)`),
+    /// so batching avoids redundant filesystem scans when purging multiple
+    /// packages.
+    pub async fn uninstall_all(
         &self,
         packages: &[oci::Identifier],
         deselect: bool,
         purge: bool,
     ) -> Result<Vec<Option<UninstallResult>>, package_manager::error::Error> {
         let profile = self.profile.snapshot();
-        let mut results: Vec<Option<UninstallResult>> = Vec::with_capacity(packages.len());
+
+        // Phase 1: Remove symlinks for all packages, collecting content paths.
+        let mut removals: Vec<SymlinkRemoval> = Vec::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in packages {
-            match self.uninstall(package, deselect, purge, &profile) {
-                Ok(result) => results.push(result),
+            match uninstall_symlinks(self.file_structure(), package, deselect).await {
+                Ok(Some((candidate, content))) => removals.push(SymlinkRemoval {
+                    candidate: Some(candidate),
+                    content,
+                }),
+                Ok(None) => removals.push(SymlinkRemoval {
+                    candidate: None,
+                    content: None,
+                }),
                 Err(kind) => errors.push(PackageError::new(package.clone(), kind)),
             }
         }
@@ -132,6 +106,104 @@ impl PackageManager {
             return Err(package_manager::error::Error::UninstallFailed(errors));
         }
 
+        // Phase 2: Batch purge — collect all object dirs, purge once.
+        let purge_seeds: Vec<PathBuf> = if purge {
+            removals
+                .iter()
+                .filter_map(|r| {
+                    let content = r.content.as_ref()?;
+                    content.parent().map(|p| p.to_path_buf())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let purged_set: std::collections::HashSet<PathBuf> = if !purge_seeds.is_empty() {
+            let gc = GarbageCollector::build(self.file_structure(), &profile)
+                .await
+                .map_err(|e| {
+                    package_manager::error::Error::UninstallFailed(vec![PackageError::new(
+                        packages[0].clone(),
+                        PackageErrorKind::Internal(e),
+                    )])
+                })?;
+            gc.purge(&purge_seeds)
+                .await
+                .map_err(|e| {
+                    package_manager::error::Error::UninstallFailed(vec![PackageError::new(
+                        packages[0].clone(),
+                        PackageErrorKind::Internal(e),
+                    )])
+                })?
+                .into_iter()
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        // Phase 3: Build results.
+        let results = removals
+            .into_iter()
+            .map(|r| {
+                let candidate = r.candidate?;
+                let purged = r
+                    .content
+                    .as_ref()
+                    .and_then(|c| c.parent())
+                    .filter(|obj_dir| purged_set.contains(*obj_dir))
+                    .map(|obj_dir| obj_dir.to_path_buf());
+                Some(UninstallResult { candidate, purged })
+            })
+            .collect();
+
         Ok(results)
     }
+}
+
+/// Removes install symlinks (candidate + optionally current) without purging.
+/// Returns `(candidate_path, content_path)` or `None` if no candidate existed.
+async fn uninstall_symlinks(
+    fs: &crate::file_structure::FileStructure,
+    package: &oci::Identifier,
+    deselect: bool,
+) -> Result<Option<(PathBuf, Option<PathBuf>)>, PackageErrorKind> {
+    let _span = crate::cli::progress::spinner_span(info_span!("Uninstalling", package = %package), package).entered();
+    log::debug!("Uninstalling package '{}'.", package);
+
+    if package.digest().is_some() {
+        return Err(PackageErrorKind::SymlinkRequiresTag);
+    }
+
+    let rm = super::common::reference_manager(fs);
+    let candidate_path = fs.installs.candidate(package);
+
+    let content_path = if crate::symlink::is_link(&candidate_path) {
+        let path = std::fs::read_link(&candidate_path).ok();
+        log::trace!("Candidate content path: {:?}", path);
+        rm.unlink(&candidate_path).map_err(PackageErrorKind::Internal)?;
+        path
+    } else {
+        log::warn!(
+            "Package '{}' has no installed candidate at '{}' — nothing to uninstall.",
+            package,
+            candidate_path.display(),
+        );
+        return Ok(None);
+    };
+
+    if deselect {
+        let current_path = fs.installs.current(package);
+        if crate::symlink::is_link(&current_path) {
+            rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
+        } else {
+            log::debug!(
+                "Package '{}' has no current symlink at '{}' — skipping deselect.",
+                package,
+                current_path.display(),
+            );
+        }
+    }
+
+    Ok(Some((candidate_path, content_path)))
 }

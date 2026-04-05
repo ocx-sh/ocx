@@ -5,8 +5,11 @@ use std::path::PathBuf;
 
 use crate::{
     log, oci,
-    package::metadata::{self, env::conflict},
-    prelude::SerdeExt,
+    package::{
+        install_info::InstallInfo,
+        metadata::{self, env::conflict},
+        resolved_package::ResolvedPackage,
+    },
     profile::{ProfileEntry, ProfileMode},
 };
 
@@ -15,14 +18,27 @@ use super::super::PackageManager;
 /// A successfully resolved profile entry with its content path and metadata.
 #[derive(Debug)]
 pub struct ResolvedProfileEntry {
-    /// The original identifier string from the profile manifest.
-    pub identifier: String,
+    /// The fully-qualified OCI identifier from the profile manifest.
+    pub identifier: oci::PinnedIdentifier,
     /// The resolution mode used.
     pub mode: ProfileMode,
     /// The resolved content path (object store or symlink depending on mode).
     pub content_path: PathBuf,
     /// The package metadata loaded from the object store.
     pub metadata: metadata::Metadata,
+    /// The resolved dependency closure.
+    pub resolved: ResolvedPackage,
+}
+
+impl From<&ResolvedProfileEntry> for InstallInfo {
+    fn from(entry: &ResolvedProfileEntry) -> Self {
+        Self {
+            identifier: entry.identifier.clone(),
+            metadata: entry.metadata.clone(),
+            resolved: entry.resolved.clone(),
+            content: entry.content_path.clone(),
+        }
+    }
 }
 
 /// The result of resolving a single profile entry.
@@ -32,7 +48,7 @@ pub enum ProfileEntryResolution {
     Resolved(ResolvedProfileEntry),
     /// The entry could not be resolved (broken symlink, missing object, etc.).
     Broken {
-        identifier: String,
+        identifier: oci::Identifier,
         mode: ProfileMode,
         path: Option<PathBuf>,
         reason: String,
@@ -92,7 +108,9 @@ impl PackageManager {
                             if let metadata::env::modifier::Modifier::Constant(c) = &var.modifier {
                                 let resolved_value =
                                     c.value.replace("${installPath}", &entry.content_path.to_string_lossy());
-                                if let Some(conflict) = tracker.track(&entry.identifier, &var.key, &resolved_value) {
+                                if let Some(conflict) =
+                                    tracker.track(&entry.identifier.to_string(), &var.key, &resolved_value)
+                                {
                                     conflicts.push(conflict);
                                 }
                             }
@@ -110,95 +128,86 @@ impl PackageManager {
     }
 
     async fn resolve_profile_entry(&self, entry: &ProfileEntry) -> ProfileEntryResolution {
-        let default_registry = self.default_registry();
-        let identifier = match oci::Identifier::parse_with_default_registry(&entry.identifier, default_registry) {
-            Ok(id) => id,
-            Err(e) => {
-                return ProfileEntryResolution::broken(entry, None, format!("invalid identifier: {e}"));
-            }
-        };
-
         match entry.mode {
             ProfileMode::Candidate => {
-                let path = self.file_structure().installs.candidate(&identifier);
-                self.resolve_symlink_entry(entry, &path).await
+                let path = self.file_structure().installs.candidate(&entry.identifier);
+                resolve_symlink_entry(&self.file_structure().objects, entry, &path).await
             }
             ProfileMode::Current => {
-                let path = self.file_structure().installs.current(&identifier);
-                self.resolve_symlink_entry(entry, &path).await
+                let path = self.file_structure().installs.current(&entry.identifier);
+                resolve_symlink_entry(&self.file_structure().objects, entry, &path).await
             }
-            ProfileMode::Content => self.resolve_content_entry(entry, &identifier).await,
+            ProfileMode::Content => resolve_content_entry(self, entry).await,
+        }
+    }
+}
+
+async fn resolve_symlink_entry(
+    objects: &crate::file_structure::ObjectStore,
+    entry: &ProfileEntry,
+    symlink_path: &std::path::Path,
+) -> ProfileEntryResolution {
+    if !symlink_path.exists() {
+        return ProfileEntryResolution::broken(
+            entry,
+            Some(symlink_path.to_path_buf()),
+            format!("{} symlink does not exist", entry.mode),
+        );
+    }
+
+    match super::common::load_object_data(objects, symlink_path).await {
+        Ok((metadata, resolved)) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
+            identifier: resolved.identifier.clone(),
+            mode: entry.mode,
+            content_path: symlink_path.to_path_buf(),
+            metadata,
+            resolved,
+        }),
+        Err(e) => {
+            log::debug!("Failed to resolve symlink entry '{}': {}", entry.identifier, e);
+            ProfileEntryResolution::broken(entry, Some(symlink_path.to_path_buf()), e.to_string())
+        }
+    }
+}
+
+async fn resolve_content_entry(mgr: &PackageManager, entry: &ProfileEntry) -> ProfileEntryResolution {
+    // Digest is on the identifier — resolve directly from the object store.
+    if let Ok(pinned) = oci::PinnedIdentifier::try_from(entry.identifier.clone()) {
+        let content_path = mgr.file_structure().objects.content(&pinned);
+        if content_path.exists() {
+            return match super::common::load_object_data(&mgr.file_structure().objects, &content_path).await {
+                Ok((metadata, resolved)) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
+                    identifier: pinned,
+                    mode: entry.mode,
+                    content_path,
+                    metadata,
+                    resolved,
+                }),
+                Err(e) => {
+                    log::debug!("Failed to resolve content entry '{}': {}", entry.identifier, e);
+                    ProfileEntryResolution::broken(entry, Some(content_path), e.to_string())
+                }
+            };
         }
     }
 
-    async fn resolve_symlink_entry(
-        &self,
-        entry: &ProfileEntry,
-        symlink_path: &std::path::Path,
-    ) -> ProfileEntryResolution {
-        if !symlink_path.exists() {
-            return ProfileEntryResolution::broken(
-                entry,
-                Some(symlink_path.to_path_buf()),
-                format!("{} symlink does not exist", entry.mode),
-            );
-        }
-
-        match self.load_metadata_for_content(symlink_path) {
-            Ok(metadata) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
-                identifier: entry.identifier.clone(),
-                mode: entry.mode,
-                content_path: symlink_path.to_path_buf(),
-                metadata,
-            }),
-            Err(e) => ProfileEntryResolution::broken(entry, Some(symlink_path.to_path_buf()), e.to_string()),
-        }
+    // Fallback: use find() to resolve via index (backward compat for entries without digest)
+    let mut platforms = Vec::new();
+    if let Some(platform) = oci::Platform::current() {
+        platforms.push(platform);
     }
-
-    async fn resolve_content_entry(
-        &self,
-        entry: &ProfileEntry,
-        identifier: &oci::Identifier,
-    ) -> ProfileEntryResolution {
-        // If we have a stored digest, try to resolve directly from the object store
-        if let Some(digest_str) = &entry.content_digest
-            && let Ok(digest) = oci::Digest::try_from(digest_str.clone())
-        {
-            let id_with_digest = identifier.clone_with_digest(digest);
-            if let Ok(content_path) = self.file_structure().objects.content(&id_with_digest)
-                && content_path.exists()
-            {
-                return match self.load_metadata_for_content(&content_path) {
-                    Ok(metadata) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
-                        identifier: entry.identifier.clone(),
-                        mode: entry.mode,
-                        content_path,
-                        metadata,
-                    }),
-                    Err(e) => ProfileEntryResolution::broken(entry, Some(content_path), e.to_string()),
-                };
-            }
+    platforms.push(oci::Platform::any());
+    match mgr.find(&entry.identifier, platforms).await {
+        Ok(info) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
+            identifier: info.identifier,
+            mode: entry.mode,
+            content_path: info.content,
+            metadata: info.metadata,
+            resolved: info.resolved,
+        }),
+        Err(e) => {
+            log::debug!("Failed to find entry '{}': {}", entry.identifier, e);
+            ProfileEntryResolution::broken(entry, None, e.to_string())
         }
-
-        // Fallback: use find() to resolve via index (backward compat for entries without digest)
-        let mut platforms = Vec::new();
-        if let Some(platform) = oci::Platform::current() {
-            platforms.push(platform);
-        }
-        platforms.push(oci::Platform::any());
-        match self.find(identifier, platforms).await {
-            Ok(info) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
-                identifier: entry.identifier.clone(),
-                mode: entry.mode,
-                content_path: info.content,
-                metadata: info.metadata,
-            }),
-            Err(e) => ProfileEntryResolution::broken(entry, None, e.to_string()),
-        }
-    }
-
-    fn load_metadata_for_content(&self, content_path: &std::path::Path) -> crate::Result<metadata::Metadata> {
-        let metadata_path = self.file_structure().objects.metadata_for_content(content_path)?;
-        metadata::Metadata::read_json_from_path(&metadata_path)
     }
 }

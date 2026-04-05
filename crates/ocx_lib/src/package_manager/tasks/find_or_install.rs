@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::{HashMap, HashSet};
-
 use tokio::task::JoinSet;
 use tracing::{Instrument, info_span};
 
@@ -76,39 +74,6 @@ impl PackageManager {
             );
         }
 
-        let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
-        let mut results: HashMap<oci::Identifier, InstallInfo> = HashMap::with_capacity(packages.len());
-        let mut errors: Vec<PackageError> = Vec::new();
-
-        while let Some(join_result) = tasks.join_next().await {
-            match join_result {
-                Ok((id, Ok(info))) => {
-                    pending.remove(&id);
-                    results.insert(id, info);
-                }
-                Ok((id, Err(kind))) => {
-                    pending.remove(&id);
-                    errors.push(PackageError::new(id, kind));
-                }
-                Err(e) => log::error!("Task panicked: {}", e),
-            }
-        }
-
-        for id in pending {
-            errors.push(PackageError::new(id, PackageErrorKind::TaskPanicked));
-        }
-
-        let mut infos = Vec::with_capacity(packages.len());
-        for package in &packages {
-            if let Some(info) = results.remove(package) {
-                infos.push(info);
-            }
-        }
-
-        if !errors.is_empty() {
-            return Err(package_manager::error::Error::FindFailed(errors));
-        }
-
-        Ok(infos)
+        super::common::drain_package_tasks(&packages, tasks, package_manager::error::Error::FindFailed).await
     }
 }

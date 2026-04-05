@@ -3,6 +3,8 @@
 
 use serde::Serialize;
 
+use ocx_lib::oci;
+
 use crate::api::Printable;
 
 /// A single field in the description.
@@ -20,11 +22,11 @@ pub struct Inner {
 /// JSON format: flat object with title/description/keywords, or `null` when absent.
 pub struct PackageDescription {
     inner: Option<Inner>,
-    identifier: String,
+    identifier: oci::Identifier,
 }
 
 impl PackageDescription {
-    pub fn new(inner: Option<Inner>, identifier: String) -> Self {
+    pub fn new(inner: Option<Inner>, identifier: oci::Identifier) -> Self {
         Self { inner, identifier }
     }
 }

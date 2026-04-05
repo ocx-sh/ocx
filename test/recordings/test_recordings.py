@@ -63,6 +63,7 @@ def test_record(
     cast_name = script["path"].stem
     (
         recorder.build(title=title)
+        .strip_progress()
         .sanitize(sanitize_map)
         .truncate_digests()
         .realign_tables()

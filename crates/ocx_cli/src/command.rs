@@ -8,6 +8,7 @@ use clap::Subcommand;
 pub mod ci;
 pub mod ci_export;
 pub mod clean;
+pub mod deps;
 pub mod deselect;
 pub mod env;
 pub mod exec;
@@ -43,6 +44,8 @@ pub enum Command {
     Ci(ci::Ci),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
+    /// Show the dependency tree for one or more packages.
+    Deps(deps::Deps),
     /// Remove the current-version symlink for one or more packages.
     Deselect(deselect::Deselect),
     /// Resolve packages and print their content directory paths.
@@ -76,6 +79,7 @@ impl Command {
         match self {
             Command::Ci(ci) => ci.execute(context).await,
             Command::Clean(clean) => clean.execute(context).await,
+            Command::Deps(deps) => deps.execute(context).await,
             Command::Deselect(deselect) => deselect.execute(context).await,
             Command::Find(find) => find.execute(context).await,
             Command::Index(index) => index.execute(context).await,

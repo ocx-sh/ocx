@@ -4,6 +4,7 @@
 pub mod catalog;
 pub mod ci_export;
 pub mod clean;
+pub mod deps;
 pub mod env;
 pub mod info;
 pub mod install;

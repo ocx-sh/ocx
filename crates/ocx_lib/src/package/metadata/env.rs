@@ -71,7 +71,6 @@ impl<'de> Deserialize<'de> for Env {
     }
 }
 
-#[cfg(feature = "jsonschema")]
 impl schemars::JsonSchema for Env {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed("Env")

@@ -30,8 +30,7 @@ pub enum AddOutcome {
 /// - `Current` — resolve via the `current` symlink (floating pointer, set by `ocx select`).
 /// - `Candidate` — resolve via the `candidates/{tag}` symlink (pinned to a specific tag).
 /// - `Content` — resolve via the content-addressed object store path (digest-based, changes on update).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ProfileMode {
     Current,
@@ -51,27 +50,46 @@ impl std::fmt::Display for ProfileMode {
 
 /// A single entry in the profile manifest.
 ///
-/// The `identifier` is the fully-qualified OCI identifier (registry/repo or registry/repo:tag).
+/// The `identifier` is the fully-qualified OCI identifier. For `Content` mode entries,
+/// the identifier carries the pinned digest (set via [`Identifier::clone_with_digest`]).
 /// The `mode` determines how the package content path is resolved at shell startup.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct ProfileEntry {
-    /// Fully-qualified OCI identifier (e.g. `ocx.sh/cmake` or `ocx.sh/cmake:3.28`).
-    pub identifier: String,
-    /// Resolution mode: `current` (floating) or `candidate` (pinned to tag).
+    /// Fully-qualified OCI identifier. Content-mode entries include a digest for
+    /// direct object store resolution without re-querying the index.
+    pub identifier: crate::oci::Identifier,
+    /// Resolution mode: `current` (floating), `candidate` (pinned to tag), or `content` (pinned to digest).
     pub mode: ProfileMode,
-    /// Content digest captured at add-time for `Content` mode entries.
-    /// Allows `profile load` to resolve directly from the object store without re-querying the index.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub content_digest: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ProfileEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            identifier: String,
+            mode: ProfileMode,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let identifier = crate::oci::Identifier::parse_with_default_registry(
+            &raw.identifier,
+            crate::oci::identifier::DEFAULT_REGISTRY,
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(ProfileEntry {
+            identifier,
+            mode: raw.mode,
+        })
+    }
 }
 
 /// The profile manifest stored at `$OCX_HOME/profile.json`.
 ///
 /// Contains a list of packages whose environment variables should be loaded
 /// into every new shell session via `ocx shell profile load`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProfileManifest {
     /// Schema version. Currently `1`.
     pub version: u32,
@@ -170,10 +188,11 @@ impl ProfileManifest {
         Ok(())
     }
 
-    /// Adds a package entry to the profile. If an entry with the same identifier
-    /// already exists, it is updated in place (mode may change).
+    /// Adds a package entry to the profile. If an entry with the same
+    /// registry+repo+tag already exists (ignoring digest), it is updated in place.
     pub fn add(&mut self, entry: ProfileEntry) -> AddOutcome {
-        if let Some(existing) = self.packages.iter_mut().find(|e| e.identifier == entry.identifier) {
+        let key = entry.identifier.without_digest();
+        if let Some(existing) = self.packages.iter_mut().find(|e| e.identifier.without_digest() == key) {
             let previous_mode = existing.mode;
             *existing = entry;
             AddOutcome::Updated { previous_mode }
@@ -185,35 +204,25 @@ impl ProfileManifest {
 
     /// Returns all entries whose identifier matches the same registry and repository
     /// as the given identifier (ignoring tag differences).
-    ///
-    /// `default_registry` is used to parse stored identifiers that lack an explicit
-    /// registry prefix. Pass the configured default (e.g. from `OCX_DEFAULT_REGISTRY`).
-    ///
-    /// Entries that fail to parse are silently skipped.
-    pub fn entries_for_repo(&self, identifier: &crate::oci::Identifier, default_registry: &str) -> Vec<&ProfileEntry> {
+    pub fn entries_for_repo(&self, identifier: &crate::oci::Identifier) -> Vec<&ProfileEntry> {
+        let target = identifier.without_specifiers();
         self.packages
             .iter()
-            .filter(|e| {
-                crate::oci::Identifier::parse_with_default_registry(&e.identifier, default_registry)
-                    .ok()
-                    .is_some_and(|parsed| {
-                        parsed.registry() == identifier.registry() && parsed.repository() == identifier.repository()
-                    })
-            })
+            .filter(|e| e.identifier.without_specifiers() == target)
             .collect()
     }
 
-    /// Removes all entries matching the given identifier string.
+    /// Removes all entries matching the given identifier.
     /// Returns `true` if any entry was removed.
-    pub fn remove(&mut self, identifier: &str) -> bool {
+    pub fn remove(&mut self, identifier: &crate::oci::Identifier) -> bool {
         let before = self.packages.len();
-        self.packages.retain(|e| e.identifier != identifier);
+        self.packages.retain(|e| e.identifier != *identifier);
         self.packages.len() < before
     }
 
     /// Returns `true` if the profile contains an entry with the given identifier.
-    pub fn contains(&self, identifier: &str) -> bool {
-        self.packages.iter().any(|e| e.identifier == identifier)
+    pub fn contains(&self, identifier: &crate::oci::Identifier) -> bool {
+        self.packages.iter().any(|e| e.identifier == *identifier)
     }
 }
 
@@ -226,6 +235,17 @@ mod tests {
         let manifest = ProfileManifest::default();
         assert_eq!(manifest.version, 1);
         assert!(manifest.packages.is_empty());
+    }
+
+    fn make_id(s: &str) -> crate::oci::Identifier {
+        s.parse().unwrap()
+    }
+
+    fn make_entry(identifier: &str, mode: ProfileMode) -> ProfileEntry {
+        ProfileEntry {
+            identifier: make_id(identifier),
+            mode,
+        }
     }
 
     #[test]
@@ -241,42 +261,26 @@ mod tests {
         let path = dir.path().join("profile.json");
 
         let mut manifest = ProfileManifest::default();
-        manifest.add(ProfileEntry {
-            identifier: "ocx.sh/cmake".to_string(),
-            mode: ProfileMode::Current,
-            content_digest: None,
-        });
-        manifest.add(ProfileEntry {
-            identifier: "ocx.sh/node:18".to_string(),
-            mode: ProfileMode::Candidate,
-            content_digest: None,
-        });
+        manifest.add(make_entry("ocx.sh/cmake", ProfileMode::Current));
+        manifest.add(make_entry("ocx.sh/node:18", ProfileMode::Candidate));
         manifest.save(&path).unwrap();
 
         let loaded = ProfileManifest::load(&path).unwrap();
         assert_eq!(loaded.version, 1);
         assert_eq!(loaded.packages.len(), 2);
-        assert_eq!(loaded.packages[0].identifier, "ocx.sh/cmake");
+        assert_eq!(loaded.packages[0].identifier, make_id("ocx.sh/cmake"));
         assert_eq!(loaded.packages[0].mode, ProfileMode::Current);
-        assert_eq!(loaded.packages[1].identifier, "ocx.sh/node:18");
+        assert_eq!(loaded.packages[1].identifier, make_id("ocx.sh/node:18"));
         assert_eq!(loaded.packages[1].mode, ProfileMode::Candidate);
     }
 
     #[test]
     fn add_duplicate_updates_mode() {
         let mut manifest = ProfileManifest::default();
-        let outcome1 = manifest.add(ProfileEntry {
-            identifier: "ocx.sh/cmake".to_string(),
-            mode: ProfileMode::Current,
-            content_digest: None,
-        });
+        let outcome1 = manifest.add(make_entry("ocx.sh/cmake", ProfileMode::Current));
         assert_eq!(outcome1, AddOutcome::Added);
 
-        let outcome2 = manifest.add(ProfileEntry {
-            identifier: "ocx.sh/cmake".to_string(),
-            mode: ProfileMode::Candidate,
-            content_digest: None,
-        });
+        let outcome2 = manifest.add(make_entry("ocx.sh/cmake", ProfileMode::Candidate));
         assert_eq!(
             outcome2,
             AddOutcome::Updated {
@@ -291,41 +295,29 @@ mod tests {
     #[test]
     fn remove_existing_entry() {
         let mut manifest = ProfileManifest::default();
-        manifest.add(ProfileEntry {
-            identifier: "ocx.sh/cmake".to_string(),
-            mode: ProfileMode::Current,
-            content_digest: None,
-        });
-        assert!(manifest.remove("ocx.sh/cmake"));
+        manifest.add(make_entry("ocx.sh/cmake", ProfileMode::Current));
+        assert!(manifest.remove(&make_id("ocx.sh/cmake")));
         assert!(manifest.packages.is_empty());
     }
 
     #[test]
     fn remove_nonexistent_returns_false() {
         let mut manifest = ProfileManifest::default();
-        assert!(!manifest.remove("ocx.sh/cmake"));
+        assert!(!manifest.remove(&make_id("ocx.sh/cmake")));
     }
 
     #[test]
     fn contains_check() {
         let mut manifest = ProfileManifest::default();
-        manifest.add(ProfileEntry {
-            identifier: "ocx.sh/cmake".to_string(),
-            mode: ProfileMode::Current,
-            content_digest: None,
-        });
-        assert!(manifest.contains("ocx.sh/cmake"));
-        assert!(!manifest.contains("ocx.sh/node"));
+        manifest.add(make_entry("ocx.sh/cmake", ProfileMode::Current));
+        assert!(manifest.contains(&make_id("ocx.sh/cmake")));
+        assert!(!manifest.contains(&make_id("ocx.sh/node")));
     }
 
     #[test]
     fn serde_json_format() {
         let mut manifest = ProfileManifest::default();
-        manifest.add(ProfileEntry {
-            identifier: "ocx.sh/cmake".to_string(),
-            mode: ProfileMode::Current,
-            content_digest: None,
-        });
+        manifest.add(make_entry("ocx.sh/cmake", ProfileMode::Current));
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         assert!(json.contains(r#""version": 1"#));
         assert!(json.contains(r#""mode": "current""#));
@@ -346,49 +338,20 @@ mod tests {
     }
 
     #[test]
-    fn content_digest_roundtrip() {
+    fn content_digest_on_identifier_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profile.json");
+        let digest = crate::oci::Digest::Sha256("a".repeat(64));
 
         let mut manifest = ProfileManifest::default();
         manifest.add(ProfileEntry {
-            identifier: "ocx.sh/cmake:3.28".to_string(),
+            identifier: make_id("ocx.sh/cmake:3.28").clone_with_digest(digest.clone()),
             mode: ProfileMode::Content,
-            content_digest: Some("sha256:abc123".to_string()),
         });
         manifest.save(&path).unwrap();
 
         let loaded = ProfileManifest::load(&path).unwrap();
-        assert_eq!(loaded.packages[0].content_digest.as_deref(), Some("sha256:abc123"));
-    }
-
-    #[test]
-    fn content_digest_none_omitted_from_json() {
-        let entry = ProfileEntry {
-            identifier: "ocx.sh/cmake".to_string(),
-            mode: ProfileMode::Candidate,
-            content_digest: None,
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(
-            !json.contains("content_digest"),
-            "None content_digest should be omitted"
-        );
-    }
-
-    #[test]
-    fn backward_compat_load_without_content_digest() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("profile.json");
-        // Old format without content_digest field
-        std::fs::write(
-            &path,
-            r#"{"version": 1, "packages": [{"identifier": "ocx.sh/cmake", "mode": "current"}]}"#,
-        )
-        .unwrap();
-
-        let loaded = ProfileManifest::load(&path).unwrap();
-        assert_eq!(loaded.packages[0].content_digest, None);
+        assert_eq!(loaded.packages[0].identifier.digest(), Some(digest));
     }
 
     #[test]

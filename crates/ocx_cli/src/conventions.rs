@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::{oci, package::install_info::InstallInfo, package::metadata::env::exporter};
+use ocx_lib::{oci, package::install_info::InstallInfo, package_manager::PackageManager};
+
+use crate::options;
 
 /// Infers a metadata file path based on the archive file path.
 /// For example, if the content path is `/path/to/package.tar.gz`, this function will return `/path/to/package-metadata.json`.
@@ -43,17 +45,25 @@ pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
     }
 }
 
-/// Resolves package metadata environment variables into flat entries via [`exporter::Exporter`].
-pub fn resolve_env_entries(packages: &[InstallInfo]) -> ocx_lib::Result<Vec<exporter::Entry>> {
-    let mut entries = Vec::new();
-    for info in packages {
-        let mut exp = exporter::Exporter::new(&info.content);
-        if let Some(env) = info.metadata.env() {
-            for v in env {
-                exp.add(v)?;
-            }
-        }
-        entries.extend(exp.take());
-    }
-    Ok(entries)
+/// Resolves packages using either symlink-based or platform-based lookup.
+///
+/// When `content_path` specifies a symlink kind (candidate/current), packages
+/// are resolved via `find_symlink_all`. Otherwise falls back to `find_all`
+/// with platform matching.
+pub async fn resolve_packages(
+    packages: impl IntoIterator<Item = options::Identifier>,
+    platforms: &[oci::Platform],
+    content_path: &options::ContentPath,
+    manager: &PackageManager,
+    default_registry: &str,
+) -> anyhow::Result<Vec<InstallInfo>> {
+    let platforms = platforms_or_default(platforms);
+    let identifiers = options::Identifier::transform_all(packages, default_registry)?;
+
+    let package_infos = if let Some(kind) = content_path.symlink_kind() {
+        manager.find_symlink_all(identifiers, kind).await?
+    } else {
+        manager.find_all(identifiers, platforms).await?
+    };
+    Ok(package_infos)
 }
