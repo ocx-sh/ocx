@@ -3,9 +3,11 @@
 
 use std::path::PathBuf;
 
-use crate::{log, profile::ProfileSnapshot};
+use crate::file_structure::StaleEntry;
+use crate::log;
 
 use super::super::PackageManager;
+use super::garbage_collection::GarbageCollector;
 
 pub struct CleanResult {
     pub objects: Vec<PathBuf>,
@@ -13,109 +15,76 @@ pub struct CleanResult {
 }
 
 impl PackageManager {
-    pub fn clean(&self, dry_run: bool) -> crate::Result<CleanResult> {
+    pub async fn clean(&self, dry_run: bool) -> crate::Result<CleanResult> {
         let profile = self.profile.snapshot();
-        let objects = self.clean_unreferenced_objects(dry_run, &profile)?;
-        let temp = self.clean_stale_temp(dry_run)?;
+
+        let garbage_collector = GarbageCollector::build(self.file_structure(), &profile).await?;
+        let targets = garbage_collector.unreachable_objects();
+
+        log::debug!(
+            "Scanning for unreferenced entries{}: {} candidate(s).",
+            if dry_run { " (dry run)" } else { "" },
+            targets.len(),
+        );
+
+        let objects = garbage_collector.delete_objects(&targets, dry_run).await?;
+        let temp = clean_temp(self.file_structure(), dry_run).await?;
         Ok(CleanResult { objects, temp })
     }
+}
 
-    /// Removes objects whose `refs/` directory is empty or absent.
-    ///
-    /// Objects referenced by content-mode profile entries are kept even if
-    /// their `refs/` directory is empty, to avoid breaking shell startup.
-    fn clean_unreferenced_objects(&self, dry_run: bool, profile: &ProfileSnapshot) -> crate::Result<Vec<PathBuf>> {
-        let object_dirs = self.file_structure().objects.list_all()?;
+/// Removes stale temp directories and orphan lock files.
+///
+/// Uses [`TempStore::stale_entries`] which discovers entries from both
+/// `.lock` files and directories, acquiring locks where possible to
+/// prevent races with concurrent installs.
+async fn clean_temp(fs: &crate::file_structure::FileStructure, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+    let stale = fs.temp.stale_entries()?;
 
-        log::debug!(
-            "Scanning {} object(s) for unreferenced entries{}.",
-            object_dirs.len(),
-            if dry_run { " (dry run)" } else { "" },
-        );
+    log::debug!(
+        "Found {} stale temp entry/entries{}.",
+        stale.len(),
+        if dry_run { " (dry run)" } else { "" },
+    );
 
-        let mut removed = Vec::new();
+    let mut removed = Vec::new();
 
-        for obj in object_dirs {
-            let refs_dir = obj.refs_dir();
-            let is_empty = !refs_dir.is_dir()
-                || std::fs::read_dir(&refs_dir)
-                    .map(|mut d| d.next().is_none())
-                    .unwrap_or(true);
-
-            log::trace!(
-                "Object '{}': refs/ {}.",
-                obj.dir.display(),
-                if is_empty { "is empty" } else { "has references" },
-            );
-
-            if is_empty {
-                // Check if a content-mode profile entry references this digest
-                if let Some(partial_digest) = obj.digest_string()
-                    && profile.references_digest(&partial_digest)
-                {
-                    log::info!("Keeping profiled object: {}", obj.dir.display());
-                    continue;
-                }
-
-                log::info!(
-                    "{} unreferenced object: {}",
-                    if dry_run { "Would remove" } else { "Removing" },
-                    obj.dir.display(),
-                );
-                if !dry_run {
-                    std::fs::remove_dir_all(&obj.dir).map_err(|e| crate::Error::InternalFile(obj.dir.clone(), e))?;
-                }
-                removed.push(obj.dir.clone());
+    for entry in stale {
+        match entry {
+            StaleEntry::Locked(acquired) => {
+                let dir_path = acquired.dir.dir.clone();
+                remove_stale_dir(&dir_path, dry_run, "stale").await?;
+                // Drop releases the OS lock and auto-deletes the .lock file.
+                drop(acquired);
+                removed.push(dir_path);
+            }
+            StaleEntry::Orphan(dir_path) => {
+                remove_stale_dir(&dir_path, dry_run, "orphan").await?;
+                removed.push(dir_path);
             }
         }
-
-        log::debug!(
-            "{} {} unreferenced object(s).",
-            if dry_run { "Would remove" } else { "Removed" },
-            removed.len(),
-        );
-
-        Ok(removed)
     }
 
-    /// Removes temp directories whose `install.lock` is not held by any process.
-    ///
-    /// Uses [`TempStore::stale_dirs`] which acquires locks, preventing races
-    /// with concurrent installs.
-    fn clean_stale_temp(&self, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
-        let stale = self.file_structure().temp.stale_dirs()?;
+    log::debug!(
+        "{} {} stale temp entry/entries.",
+        if dry_run { "Would remove" } else { "Removed" },
+        removed.len(),
+    );
 
-        log::debug!(
-            "Found {} stale temp dir(s){}.",
-            stale.len(),
-            if dry_run { " (dry run)" } else { "" },
-        );
+    Ok(removed)
+}
 
-        let mut removed = Vec::new();
-
-        for acquired in stale {
-            let dir_path = acquired.dir.dir.clone();
-            log::info!(
-                "{} stale temp dir: {}",
-                if dry_run { "Would remove" } else { "Removing" },
-                dir_path.display(),
-            );
-            if !dry_run {
-                // Remove while holding the lock — prevents races with
-                // concurrent installs. The fd-based advisory lock remains
-                // valid even after the file is unlinked (POSIX semantics).
-                std::fs::remove_dir_all(&dir_path).map_err(|e| crate::Error::InternalFile(dir_path.clone(), e))?;
-            }
-            drop(acquired);
-            removed.push(dir_path);
-        }
-
-        log::debug!(
-            "{} {} stale temp dir(s).",
-            if dry_run { "Would remove" } else { "Removed" },
-            removed.len(),
-        );
-
-        Ok(removed)
+async fn remove_stale_dir(dir_path: &std::path::Path, dry_run: bool, label: &str) -> crate::Result<()> {
+    log::info!(
+        "{} {} temp dir: {}",
+        if dry_run { "Would remove" } else { "Removing" },
+        label,
+        dir_path.display(),
+    );
+    if !dry_run && dir_path.exists() {
+        tokio::fs::remove_dir_all(dir_path)
+            .await
+            .map_err(|e| crate::Error::InternalFile(dir_path.to_path_buf(), e))?;
     }
+    Ok(())
 }
