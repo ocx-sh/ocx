@@ -60,9 +60,18 @@ pub enum PackageErrorKind {
     /// A spawned task panicked unexpectedly.
     #[error("task panicked unexpectedly")]
     TaskPanicked,
+    /// The identifier has no digest after resolution.
+    #[error("identifier has no digest after resolution")]
+    DigestMissing,
     /// An underlying internal error (I/O, OCI, network, etc.).
     #[error(transparent)]
     Internal(#[from] crate::Error),
+}
+
+impl From<crate::oci::client::error::ClientError> for PackageErrorKind {
+    fn from(e: crate::oci::client::error::ClientError) -> Self {
+        Self::Internal(e.into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -91,4 +100,19 @@ fn write_batch(f: &mut std::fmt::Formatter<'_>, verb: &str, errors: &[PackageErr
         }
         Ok(())
     }
+}
+
+/// Errors from dependency resolution operations.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DependencyError {
+    /// Two transitive dependencies resolve to different digests for the same repository.
+    #[error("Conflicting digests for {repository}: {}", digests.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))]
+    Conflict {
+        repository: String,
+        digests: Vec<oci::Digest>,
+    },
+    /// Dependency setup coordination failed (capacity, timeout, or abandoned leader).
+    #[error("Dependency setup failed: {0}")]
+    SetupFailed(#[from] crate::utility::singleflight::Error),
 }

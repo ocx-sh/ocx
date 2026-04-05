@@ -16,16 +16,16 @@ pub struct InstallStatus {
 
 impl Default for InstallStatus {
     fn default() -> Self {
-        Self::new()
+        Self {
+            timestamp: chrono::Utc::now(),
+            ok: false,
+        }
     }
 }
 
 impl InstallStatus {
     pub fn new() -> Self {
-        Self {
-            timestamp: chrono::Utc::now(),
-            ok: false,
-        }
+        Self::default()
     }
 
     pub fn ok(self) -> Self {
@@ -62,7 +62,7 @@ pub async fn check_install_status(
             return (false, None);
         }
     };
-    let status = match InstallStatus::read_json_from_path(status_path) {
+    let status = match InstallStatus::read_json(status_path).await {
         Ok(status) => status,
         Err(error) => {
             log::debug!(

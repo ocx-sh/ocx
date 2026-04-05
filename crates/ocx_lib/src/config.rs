@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn test_config_from_file_content() {
         let config_str = test::data::include_str!("config.toml");
-        let config = Config::from_file_content(&config_str).unwrap();
+        let config = Config::from_file_content(config_str).unwrap();
         assert_eq!(config.registries.len(), 2);
         assert_eq!(config.registries[0].prefix, "ocx.io/packages/");
         assert_eq!(config.registries[0].location, None);

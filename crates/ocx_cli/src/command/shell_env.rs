@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log, oci, shell};
+use ocx_lib::{log, oci, package::metadata::env::modifier::ModifierKind, shell};
 
 use crate::{conventions::*, options};
 
@@ -51,27 +51,23 @@ impl ShellEnv {
             }
         };
         log::debug!("Using shell: {}", shell);
-        let platforms = platforms_or_default(&self.platforms);
-        let identifiers =
-            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
-
         let manager = context.manager();
-
-        let package_infos = if let Some(kind) = self.content_path.symlink_kind() {
-            manager.find_symlink_all(identifiers, kind).await?
-        } else {
-            manager.find_all(identifiers, platforms).await?
-        };
+        let package_infos = resolve_packages(
+            self.packages.clone(),
+            &self.platforms,
+            &self.content_path,
+            manager,
+            &context.default_registry(),
+        )
+        .await?;
 
         println!("{}", shell.comment("ocx env"));
-        for package_info in package_infos {
-            let mut profile_builder = shell.profile_builder(package_info.content);
-            if let Some(env) = package_info.metadata.env() {
-                for var in env {
-                    profile_builder.add(var.clone());
-                }
+        let entries = manager.resolve_env(&package_infos).await?;
+        for entry in &entries {
+            match entry.kind {
+                ModifierKind::Path => println!("{}", shell.export_path(&entry.key, &entry.value)),
+                ModifierKind::Constant => println!("{}", shell.export_constant(&entry.key, &entry.value)),
             }
-            print!("{}", profile_builder.take());
         }
 
         Ok(ExitCode::SUCCESS)

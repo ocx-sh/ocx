@@ -96,6 +96,20 @@ impl Env {
         }
     }
 
+    /// Applies resolved environment entries to this environment.
+    ///
+    /// This is the bridge from [`exporter::Entry`](crate::package::metadata::env::exporter::Entry)
+    /// (the canonical resolved env var) to the process environment used by `exec`.
+    pub fn apply_entries(&mut self, entries: &[crate::package::metadata::env::exporter::Entry]) {
+        use crate::package::metadata::env::modifier::ModifierKind;
+        for entry in entries {
+            match entry.kind {
+                ModifierKind::Path => self.add_path(&entry.key, &entry.value),
+                ModifierKind::Constant => self.set(&entry.key, &entry.value),
+            }
+        }
+    }
+
     /// Resolve a command name to a full executable path using PATH
     /// (and PATHEXT on Windows).
     ///
@@ -322,5 +336,58 @@ mod tests {
             assert_eq!(env.get("PATH").unwrap(), "C:\\Windows");
             assert_eq!(env.get("path").unwrap(), "C:\\Windows");
         }
+    }
+
+    #[test]
+    fn apply_entries_constant() {
+        use crate::package::metadata::env::{exporter::Entry, modifier::ModifierKind};
+
+        let mut env = Env::clean();
+        let entries = vec![Entry {
+            key: "JAVA_HOME".to_string(),
+            value: "/opt/java".to_string(),
+            kind: ModifierKind::Constant,
+        }];
+        env.apply_entries(&entries);
+        assert_eq!(env.get("JAVA_HOME").unwrap(), "/opt/java");
+    }
+
+    #[test]
+    fn apply_entries_path_prepends() {
+        use crate::package::metadata::env::{exporter::Entry, modifier::ModifierKind};
+
+        let mut env = Env::clean();
+        env.set("PATH", "/usr/bin");
+        let entries = vec![Entry {
+            key: "PATH".to_string(),
+            value: "/opt/bin".to_string(),
+            kind: ModifierKind::Path,
+        }];
+        env.apply_entries(&entries);
+        let path = env.get("PATH").unwrap().to_str().unwrap();
+        assert!(path.starts_with("/opt/bin"));
+        assert!(path.ends_with("/usr/bin"));
+    }
+
+    #[test]
+    fn apply_entries_mixed() {
+        use crate::package::metadata::env::{exporter::Entry, modifier::ModifierKind};
+
+        let mut env = Env::clean();
+        let entries = vec![
+            Entry {
+                key: "HOME".to_string(),
+                value: "/home/user".to_string(),
+                kind: ModifierKind::Constant,
+            },
+            Entry {
+                key: "PATH".to_string(),
+                value: "/opt/bin".to_string(),
+                kind: ModifierKind::Path,
+            },
+        ];
+        env.apply_entries(&entries);
+        assert_eq!(env.get("HOME").unwrap(), "/home/user");
+        assert_eq!(env.get("PATH").unwrap(), "/opt/bin");
     }
 }

@@ -403,7 +403,7 @@ mod tests {
     async fn is_macho_rejects_short_file() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("short");
-        std::fs::write(&path, &[0xFE, 0xED]).unwrap(); // only 2 bytes
+        std::fs::write(&path, [0xFE, 0xED]).unwrap(); // only 2 bytes
         assert!(!super::is_macho(&path).await);
     }
 

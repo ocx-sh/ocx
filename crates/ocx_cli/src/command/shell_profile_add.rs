@@ -70,16 +70,17 @@ impl ShellProfileAdd {
             .into_iter()
             .zip(infos)
             .map(|(identifier, info)| {
-                let content_digest = if mode == profile::ProfileMode::Content {
-                    info.identifier.digest().map(|d| d.to_string())
+                // For content mode, bake the digest into the identifier for direct
+                // object store resolution without re-querying the index.
+                let identifier = if mode == profile::ProfileMode::Content {
+                    identifier.clone_with_digest(info.identifier.digest())
                 } else {
-                    None
+                    identifier
                 };
                 profile::ProfileAddInput {
                     identifier,
                     mode,
                     content_path: info.content,
-                    content_digest,
                 }
             })
             .collect();

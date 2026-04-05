@@ -1,22 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::{HashMap, HashSet};
-
 use tokio::task::JoinSet;
 use tracing::{Instrument, info_span};
 
 use crate::{
     log, oci,
-    oci::index::SelectResult,
     package::install_info::InstallInfo,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
-    reference_manager::ReferenceManager,
 };
 
 use super::super::PackageManager;
 
 impl PackageManager {
+    /// Downloads a package and creates install symlinks.
+    ///
+    /// Delegates to [`PackageManager::pull`] for the actual download and
+    /// transitive dependency resolution (see that method for concurrency
+    /// safety), then optionally creates:
+    ///
+    /// - A **candidate** symlink at `installs/{repo}/candidates/{tag}` when
+    ///   `candidate` is `true` — pins this version as an installed candidate.
+    /// - A **current** symlink at `installs/{repo}/current` when `select` is
+    ///   `true` — makes this version the active selection.
+    ///
+    /// Symlinks are managed via [`ReferenceManager::link`] which also creates
+    /// back-references in the object store for GC tracking.
     pub async fn install(
         &self,
         package: &oci::Identifier,
@@ -24,57 +33,9 @@ impl PackageManager {
         candidate: bool,
         select: bool,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        log::debug!("Installing package: {}", package);
+        let install_info = self.pull(package, platforms).await?;
 
-        let identifier = match self.index().select(package, platforms).await {
-            Ok(SelectResult::Found(id)) => id,
-            Ok(SelectResult::Ambiguous(v)) => return Err(PackageErrorKind::SelectionAmbiguous(v)),
-            Ok(SelectResult::NotFound) => return Err(PackageErrorKind::NotFound),
-            Err(e) => return Err(PackageErrorKind::Internal(e)),
-        };
-
-        log::debug!("Resolved package identifier: {}", &identifier);
-
-        let storage = self
-            .file_structure()
-            .objects
-            .path(&identifier)
-            .map_err(PackageErrorKind::Internal)?;
-        let temp_path = self
-            .file_structure()
-            .temp
-            .path(&identifier)
-            .map_err(PackageErrorKind::Internal)?;
-
-        let client = self.client().map_err(PackageErrorKind::Internal)?;
-        let acquire = match self
-            .file_structure()
-            .temp
-            .try_acquire(&temp_path)
-            .map_err(PackageErrorKind::Internal)?
-        {
-            Some(r) => r,
-            None => {
-                log::debug!("Temp dir locked by another process, waiting: {}", temp_path.display());
-                self.file_structure()
-                    .temp
-                    .acquire_with_timeout(&temp_path, client.lock_timeout())
-                    .await
-                    .map_err(PackageErrorKind::Internal)?
-            }
-        };
-        if acquire.was_cleaned {
-            log::debug!("Cleaned previous temp data at {}", temp_path.display());
-        }
-
-        let install_info = client
-            .pull_package(identifier.clone(), &storage, acquire)
-            .await
-            .map_err(PackageErrorKind::Internal)?;
-
-        log::debug!("Package install succeeded for '{}'.", &identifier);
-
-        let rm = ReferenceManager::new(self.file_structure().clone());
+        let rm = super::common::reference_manager(self.file_structure());
         if candidate {
             let link_path = self.file_structure().installs.candidate(package);
             log::debug!("Creating candidate symlink at '{}'.", link_path.display());
@@ -91,6 +52,18 @@ impl PackageManager {
         Ok(install_info)
     }
 
+    /// Installs multiple packages in parallel.
+    ///
+    /// Each task creates its own [`PullTracker`] internally via
+    /// [`PackageManager::pull`]. Cross-package diamond dependencies are
+    /// deduplicated by the object store check (defense layer 2) and
+    /// file locking (defense layer 3).
+    ///
+    /// Results are returned in input order via
+    /// [`drain_package_tasks`](super::common::drain_package_tasks).
+    ///
+    /// See [`PackageManager::install`] for per-package behavior and
+    /// [`PackageManager::pull`] for concurrency safety.
     pub async fn install_all(
         &self,
         packages: Vec<oci::Identifier>,
@@ -130,39 +103,6 @@ impl PackageManager {
             );
         }
 
-        let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
-        let mut results: HashMap<oci::Identifier, InstallInfo> = HashMap::with_capacity(packages.len());
-        let mut errors: Vec<PackageError> = Vec::new();
-
-        while let Some(join_result) = tasks.join_next().await {
-            match join_result {
-                Ok((id, Ok(info))) => {
-                    pending.remove(&id);
-                    results.insert(id, info);
-                }
-                Ok((id, Err(kind))) => {
-                    pending.remove(&id);
-                    errors.push(PackageError::new(id, kind));
-                }
-                Err(e) => log::error!("Task panicked: {}", e),
-            }
-        }
-
-        for id in pending {
-            errors.push(PackageError::new(id, PackageErrorKind::TaskPanicked));
-        }
-
-        let mut infos = Vec::with_capacity(packages.len());
-        for package in &packages {
-            if let Some(info) = results.remove(package) {
-                infos.push(info);
-            }
-        }
-
-        if !errors.is_empty() {
-            return Err(package_manager::error::Error::InstallFailed(errors));
-        }
-
-        Ok(infos)
+        super::common::drain_package_tasks(&packages, tasks, package_manager::error::Error::InstallFailed).await
     }
 }

@@ -5,11 +5,12 @@ use serde::Serialize;
 
 use crate::oci;
 
-use super::metadata;
+use super::{metadata, resolved_package::ResolvedPackage};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallInfo {
-    pub identifier: oci::Identifier,
+    pub identifier: oci::PinnedIdentifier,
     pub metadata: metadata::Metadata,
+    pub resolved: ResolvedPackage,
     pub content: std::path::PathBuf,
 }

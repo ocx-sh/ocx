@@ -45,19 +45,17 @@ impl CiExport {
         };
         log::debug!("Using CI flavor: {}", flavor);
 
-        let platforms = platforms_or_default(&self.platforms);
-        let identifiers =
-            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
-
         let manager = context.manager();
+        let package_infos = resolve_packages(
+            self.packages.clone(),
+            &self.platforms,
+            &self.content_path,
+            manager,
+            &context.default_registry(),
+        )
+        .await?;
 
-        let package_infos = if let Some(kind) = self.content_path.symlink_kind() {
-            manager.find_symlink_all(identifiers, kind).await?
-        } else {
-            manager.find_all(identifiers, platforms).await?
-        };
-
-        let entries = resolve_env_entries(&package_infos)?;
+        let entries = manager.resolve_env(&package_infos).await?;
 
         flavor.export(&entries)?;
 

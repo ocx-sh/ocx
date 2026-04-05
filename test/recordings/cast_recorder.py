@@ -25,6 +25,15 @@ _DIGEST_PATH_RE = re.compile(r"sha256/([a-f0-9]{8})/[a-f0-9]{8}/[a-f0-9]{16}")
 # OCI reference digest: @sha256:64-hex-chars
 _DIGEST_REF_RE = re.compile(r"@sha256:([a-f0-9]{8})[a-f0-9]{56}")
 
+# Matches everything from a braille spinner char up to the final erase-line
+# before real output.  The spinner uses \r\x1b[2K to overwrite itself, and
+# the last occurrence precedes the actual command output (table header, tree, etc.).
+_PROGRESS_PREFIX_RE = re.compile(
+    r"^(.*\r\x1b\[2K)"                  # greedy: last \r\x1b[2K in the prefix
+    r"(?=\x1b\[[\d;]*m|[^\x1b\r])",     # followed by ANSI style or visible char
+    re.DOTALL,
+)
+
 @dataclass
 class CastEvent:
     timestamp: float
@@ -75,6 +84,25 @@ class CastRecording:
         for event in self.events:
             for old, new in replacements.items():
                 event.data = event.data.replace(old, new)
+        return self
+
+    def strip_progress(self) -> CastRecording:
+        """Remove progress spinner artifacts from output events.
+
+        The tracing-indicatif spinner uses ``\\r\\x1b[2K`` (carriage-return +
+        erase-line) to overwrite itself, and cursor-up/down sequences for
+        multi-line progress bars.  When the command completes, the spinner is
+        erased and the real output (table, tree, etc.) follows on the same line.
+
+        Terminal emulators faithfully replay the cursor movement, which can
+        leave ghost empty lines in the rendered GIF.  This method strips
+        everything before the last erase-line sequence in each event, so only
+        the clean output remains.
+        """
+        self._merge_close_events()
+        for event in self.events:
+            if "\u2800" <= event.data[:1] <= "\u28FF" or "⠁" in event.data:
+                event.data = _PROGRESS_PREFIX_RE.sub("", event.data)
         return self
 
     def truncate_digests(self) -> CastRecording:

@@ -24,19 +24,18 @@ impl ShellProfileRemove {
         let default_registry = context.default_registry();
         let identifiers = options::Identifier::transform_all(self.packages.clone().into_iter(), default_registry)?;
 
-        let id_strings: Vec<String> = identifiers.iter().map(|id| id.to_string()).collect();
-        let results = context.manager().profile().remove_all(&id_strings)?;
+        let results = context.manager().profile().remove_all(&identifiers)?;
 
-        let entries: Vec<_> = id_strings
+        let entries: Vec<_> = identifiers
             .into_iter()
             .zip(results)
-            .map(|(id_str, removed)| {
+            .map(|(id, removed)| {
                 let status = if removed {
                     ProfileRemovedStatus::Removed
                 } else {
                     ProfileRemovedStatus::Absent
                 };
-                ProfileRemovedEntry::new(id_str, status)
+                ProfileRemovedEntry::new(id.to_string(), status)
             })
             .collect();
 

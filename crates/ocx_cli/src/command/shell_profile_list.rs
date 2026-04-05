@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::package_manager::tasks::profile_resolve::ProfileEntryResolution;
+use ocx_lib::package_manager::ProfileEntryResolution;
 
 use crate::api;
 
@@ -25,7 +25,7 @@ impl ShellProfileList {
             .into_iter()
             .map(|resolution| match resolution {
                 ProfileEntryResolution::Resolved(entry) => api::data::profile::ProfileListEntry::new(
-                    entry.identifier,
+                    entry.identifier.to_string(),
                     entry.mode,
                     api::data::profile::ProfileStatus::Active,
                     Some(entry.content_path),
@@ -33,7 +33,7 @@ impl ShellProfileList {
                 ProfileEntryResolution::Broken {
                     identifier, mode, path, ..
                 } => api::data::profile::ProfileListEntry::new(
-                    identifier,
+                    identifier.to_string(),
                     mode,
                     api::data::profile::ProfileStatus::Broken,
                     path,

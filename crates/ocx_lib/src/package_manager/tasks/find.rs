@@ -1,22 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::{HashMap, HashSet};
-
 use tokio::task::JoinSet;
 use tracing::{Instrument, info_span};
 
 use crate::{
     log, oci,
-    oci::index::SelectResult,
-    package::{install_info::InstallInfo, metadata},
+    package::install_info::InstallInfo,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
-    prelude::SerdeExt,
 };
 
 use super::super::PackageManager;
 
 impl PackageManager {
+    /// Finds a package in the object store without index resolution.
+    ///
+    /// The identifier must carry a digest. Returns the installed package
+    /// info if present, or `None` if the object is absent.
+    ///
+    /// Also serves as defense layer 2 in the concurrent pull safety model —
+    /// see [`PackageManager::pull`] for details.
+    pub async fn find_plain(
+        &self,
+        identifier: &oci::PinnedIdentifier,
+    ) -> Result<Option<InstallInfo>, PackageErrorKind> {
+        super::common::find_in_store(&self.file_structure().objects, identifier).await
+    }
+
     pub async fn find(
         &self,
         package: &oci::Identifier,
@@ -24,36 +34,13 @@ impl PackageManager {
     ) -> Result<InstallInfo, PackageErrorKind> {
         log::debug!("Finding package: {}", package);
 
-        let identifier = match self.index().select(package, platforms).await {
-            Ok(SelectResult::Found(id)) => id,
-            Ok(SelectResult::Ambiguous(v)) => return Err(PackageErrorKind::SelectionAmbiguous(v)),
-            Ok(SelectResult::NotFound) => return Err(PackageErrorKind::NotFound),
-            Err(e) => return Err(PackageErrorKind::Internal(e)),
-        };
+        let identifier = self.resolve(package, platforms).await?;
 
         log::debug!("Resolved package identifier: {}", &identifier);
 
-        let content = self
-            .file_structure()
-            .objects
-            .content(&identifier)
-            .map_err(PackageErrorKind::Internal)?;
-        if !content.exists() {
-            log::debug!("Content directory not found locally for '{}'.", identifier);
-            return Err(PackageErrorKind::NotFound);
-        }
-
-        let metadata_path = self
-            .file_structure()
-            .objects
-            .metadata(&identifier)
-            .map_err(PackageErrorKind::Internal)?;
-        let metadata = metadata::Metadata::read_json_from_path(metadata_path).map_err(PackageErrorKind::Internal)?;
-
-        Ok(InstallInfo {
-            identifier,
-            metadata,
-            content,
+        self.find_plain(&identifier).await?.ok_or_else(|| {
+            log::debug!("Package not found locally for '{}'.", identifier);
+            PackageErrorKind::NotFound
         })
     }
 
@@ -94,40 +81,105 @@ impl PackageManager {
             );
         }
 
-        let mut pending: HashSet<oci::Identifier> = packages.iter().cloned().collect();
-        let mut results: HashMap<oci::Identifier, InstallInfo> = HashMap::with_capacity(packages.len());
-        let mut errors: Vec<PackageError> = Vec::new();
+        super::common::drain_package_tasks(&packages, tasks, package_manager::error::Error::FindFailed).await
+    }
+}
 
-        while let Some(join_result) = tasks.join_next().await {
-            match join_result {
-                Ok((id, Ok(info))) => {
-                    pending.remove(&id);
-                    results.insert(id, info);
-                }
-                Ok((id, Err(kind))) => {
-                    pending.remove(&id);
-                    errors.push(PackageError::new(id, kind));
-                }
-                Err(e) => log::error!("Task panicked: {}", e),
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use crate::{
+        file_structure::FileStructure,
+        oci,
+        oci::index::{Index, LocalConfig, LocalIndex},
+        package_manager::PackageManager,
+    };
 
-        for id in pending {
-            errors.push(PackageError::new(id, PackageErrorKind::TaskPanicked));
-        }
+    const SHA256_HEX: &str = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
+    const VALID_METADATA_JSON: &str = r#"{"type":"bundle","version":1}"#;
 
-        // Preserve input order.
-        let mut infos = Vec::with_capacity(packages.len());
-        for package in &packages {
-            if let Some(info) = results.remove(package) {
-                infos.push(info);
-            }
-        }
+    fn valid_resolve_json() -> String {
+        format!(r#"{{"identifier":"example.com/test/pkg@sha256:{SHA256_HEX}","dependencies":[]}}"#,)
+    }
 
-        if !errors.is_empty() {
-            return Err(package_manager::error::Error::FindFailed(errors));
-        }
+    fn test_pinned() -> oci::PinnedIdentifier {
+        let id = oci::Identifier::new_registry("test/pkg", "example.com")
+            .clone_with_digest(oci::Digest::Sha256(SHA256_HEX.to_string()));
+        oci::PinnedIdentifier::try_from(id).unwrap()
+    }
 
-        Ok(infos)
+    /// Creates a `PackageManager` backed by a temp directory.
+    fn setup_manager() -> (tempfile::TempDir, PackageManager, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_local(LocalIndex::new(LocalConfig {
+            root: dir.path().join("index"),
+        }));
+        let mgr = PackageManager::new(fs.clone(), index, None, "example.com");
+        let obj_path = fs.objects.path(&test_pinned());
+        (dir, mgr, obj_path)
+    }
+
+    #[tokio::test]
+    async fn find_plain_present_returns_install_info() {
+        let (_dir, mgr, obj_path) = setup_manager();
+        std::fs::create_dir_all(obj_path.join("content")).unwrap();
+        std::fs::write(obj_path.join("metadata.json"), VALID_METADATA_JSON).unwrap();
+        std::fs::write(obj_path.join("resolve.json"), valid_resolve_json()).unwrap();
+
+        let result = mgr.find_plain(&test_pinned()).await.unwrap();
+        assert!(result.is_some());
+        let info = result.unwrap();
+        assert_eq!(info.identifier, test_pinned());
+        assert_eq!(info.content, obj_path.join("content"));
+        assert!(info.resolved.dependencies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_plain_absent_no_content_returns_none() {
+        let (_dir, mgr, obj_path) = setup_manager();
+        std::fs::create_dir_all(&obj_path).unwrap();
+        std::fs::write(obj_path.join("metadata.json"), VALID_METADATA_JSON).unwrap();
+        std::fs::write(obj_path.join("resolve.json"), valid_resolve_json()).unwrap();
+
+        let result = mgr.find_plain(&test_pinned()).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_plain_absent_no_metadata_returns_none() {
+        let (_dir, mgr, obj_path) = setup_manager();
+        std::fs::create_dir_all(obj_path.join("content")).unwrap();
+
+        let result = mgr.find_plain(&test_pinned()).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_plain_absent_no_resolve_returns_none() {
+        let (_dir, mgr, obj_path) = setup_manager();
+        std::fs::create_dir_all(obj_path.join("content")).unwrap();
+        std::fs::write(obj_path.join("metadata.json"), VALID_METADATA_JSON).unwrap();
+
+        let result = mgr.find_plain(&test_pinned()).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_plain_absent_empty_returns_none() {
+        let (_dir, mgr, _obj_path) = setup_manager();
+
+        let result = mgr.find_plain(&test_pinned()).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_plain_invalid_metadata_returns_error() {
+        let (_dir, mgr, obj_path) = setup_manager();
+        std::fs::create_dir_all(obj_path.join("content")).unwrap();
+        std::fs::write(obj_path.join("metadata.json"), "not valid json").unwrap();
+        std::fs::write(obj_path.join("resolve.json"), valid_resolve_json()).unwrap();
+
+        let result = mgr.find_plain(&test_pinned()).await;
+        assert!(result.is_err());
     }
 }

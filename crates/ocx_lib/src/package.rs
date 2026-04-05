@@ -9,6 +9,7 @@ pub mod info;
 pub mod install_info;
 pub mod install_status;
 pub mod metadata;
+pub mod resolved_package;
 pub mod tag;
 pub mod version;
 

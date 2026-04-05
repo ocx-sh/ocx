@@ -35,4 +35,7 @@ pub enum ProfileError {
     /// The profile manifest is locked by another process.
     #[error("profile manifest '{}' is locked by another process", path.display())]
     Locked { path: PathBuf },
+    /// Content mode requires a digest on the identifier for direct object store resolution.
+    #[error("content mode requires a digest for '{identifier}'")]
+    ContentModeRequiresDigest { identifier: String },
 }

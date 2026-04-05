@@ -31,11 +31,12 @@ tasks:
       OCX_MIRROR_COMMAND: "{{.OCX_MIRROR_BINARY}}"
 
   quick:
-    desc: Run acceptance tests without rebuilding the binary
+    desc: Run acceptance tests in parallel without rebuilding the binary
     cmds:
       - task: default
         vars:
           SKIP_BUILD: "true"
+          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
 
   parallel:
     desc: Run acceptance tests in parallel

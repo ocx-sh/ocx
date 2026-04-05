@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log::*, shell};
+use ocx_lib::{log::*, package::install_info::InstallInfo, package::metadata::env::modifier::ModifierKind, shell};
 
 /// Output shell export statements for all profiled packages.
 ///
@@ -36,22 +36,24 @@ impl ShellProfileLoad {
             }
         };
 
-        let manifest = context.manager().profile().load()?;
+        let manager = context.manager();
+        let manifest = manager.profile().load()?;
 
-        let (resolved, conflicts) = context.manager().resolve_profile_env(&manifest.packages).await;
+        let (resolved, conflicts) = manager.resolve_profile_env(&manifest.packages).await;
 
         for conflict in &conflicts {
             warn!("{}", conflict);
         }
 
+        // Convert resolved profile entries to InstallInfo for dependency expansion.
+        let install_infos: Vec<_> = resolved.iter().map(InstallInfo::from).collect();
+
         println!("{}", detected_shell.comment("ocx profile"));
-        for entry in &resolved {
-            if let Some(env) = entry.metadata.env() {
-                let mut profile_builder = detected_shell.profile_builder(&entry.content_path);
-                for var in env {
-                    profile_builder.add(var.clone());
-                }
-                print!("{}", profile_builder.take());
+        let entries = manager.resolve_env(&install_infos).await?;
+        for entry in &entries {
+            match entry.kind {
+                ModifierKind::Path => println!("{}", detected_shell.export_path(&entry.key, &entry.value)),
+                ModifierKind::Constant => println!("{}", detected_shell.export_constant(&entry.key, &entry.value)),
             }
         }
 

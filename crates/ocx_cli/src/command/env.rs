@@ -49,7 +49,7 @@ impl Env {
             manager.find_or_install_all(identifiers, platforms).await?
         };
 
-        let entries = resolve_env_entries(&info)?;
+        let entries = manager.resolve_env(&info).await?;
         let all_entries = entries
             .into_iter()
             .map(|e| api::data::env::EnvEntry {

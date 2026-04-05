@@ -26,7 +26,7 @@ pub struct Clean {
 
 impl Clean {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let result = context.manager().clean(self.dry_run)?;
+        let result = context.manager().clean(self.dry_run).await?;
 
         context
             .api()

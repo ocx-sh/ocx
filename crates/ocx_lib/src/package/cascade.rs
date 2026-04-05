@@ -619,7 +619,7 @@ mod tests {
             let data = StubTransportData::new();
             let client = test_client(&data);
             let result = has_blocking_platform(&client, &test_identifier(), &[], &platform("linux/amd64")).await;
-            assert_eq!(result.unwrap(), false);
+            assert!(!result.unwrap());
         }
 
         #[tokio::test]
@@ -629,7 +629,7 @@ mod tests {
             seed_index(&data, &blocker.to_string(), &["linux/amd64"]);
             let client = test_client(&data);
             let result = has_blocking_platform(&client, &test_identifier(), &[blocker], &platform("linux/amd64")).await;
-            assert_eq!(result.unwrap(), true);
+            assert!(result.unwrap());
         }
 
         #[tokio::test]
@@ -639,7 +639,7 @@ mod tests {
             seed_index(&data, &blocker.to_string(), &["linux/amd64"]);
             let client = test_client(&data);
             let result = has_blocking_platform(&client, &test_identifier(), &[blocker], &platform("linux/arm64")).await;
-            assert_eq!(result.unwrap(), false);
+            assert!(!result.unwrap());
         }
 
         #[tokio::test]
@@ -661,7 +661,7 @@ mod tests {
             seed_index(&data, &b2.to_string(), &["linux/amd64"]);
             let client = test_client(&data);
             let result = has_blocking_platform(&client, &test_identifier(), &[b1, b2], &platform("linux/amd64")).await;
-            assert_eq!(result.unwrap(), true);
+            assert!(result.unwrap());
         }
 
         #[tokio::test]
@@ -673,7 +673,7 @@ mod tests {
             seed_index(&data, &b2.to_string(), &["linux/arm64"]);
             let client = test_client(&data);
             let result = has_blocking_platform(&client, &test_identifier(), &[b1, b2], &platform("linux/amd64")).await;
-            assert_eq!(result.unwrap(), false);
+            assert!(!result.unwrap());
         }
 
         #[tokio::test]
@@ -690,7 +690,7 @@ mod tests {
                 .insert(oci::native::Reference::from(&id).to_string(), (manifest_data, digest));
             let client = test_client(&data);
             let result = has_blocking_platform(&client, &test_identifier(), &[blocker], &platform("linux/amd64")).await;
-            assert_eq!(result.unwrap(), false);
+            assert!(!result.unwrap());
         }
 
         // ── resolve_cascade_tags ────────────────────────────────

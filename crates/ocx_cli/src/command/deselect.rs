@@ -3,6 +3,8 @@
 
 use std::process::ExitCode;
 
+use ocx_lib::profile::ProfileMode;
+
 use crate::{api, options};
 use clap::Parser;
 
@@ -23,7 +25,7 @@ impl Deselect {
         let identifiers =
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
 
-        let results = context.manager().deselect_all(&identifiers)?;
+        let results = context.manager().deselect_all(&identifiers).await?;
 
         let entries = self
             .packages
@@ -39,6 +41,22 @@ impl Deselect {
                 api::data::removed::RemovedEntry::new(name, status, symlink_path)
             })
             .collect();
+
+        let snapshot = context.manager().profile().snapshot();
+        for identifier in &identifiers {
+            for entry in snapshot.entries_for(identifier) {
+                if entry.mode == ProfileMode::Current {
+                    tracing::warn!(
+                        "{} is in your shell profile in current mode. \
+                         Re-select with `ocx select {}` or switch to \
+                         `ocx shell profile add --candidate {}`.",
+                        entry.identifier,
+                        entry.identifier,
+                        entry.identifier,
+                    );
+                }
+            }
+        }
 
         context.api().report(&api::data::removed::Removed::new(entries))?;
 

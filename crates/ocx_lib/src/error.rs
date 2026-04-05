@@ -68,6 +68,13 @@ pub enum Error {
     /// A digest string could not be parsed.
     #[error(transparent)]
     Digest(#[from] crate::oci::digest::error::DigestError),
+
+    /// A dependency graph operation failed.
+    #[error(transparent)]
+    Dependency(#[from] crate::package_manager::DependencyError),
+    /// A pinned identifier validation failed.
+    #[error(transparent)]
+    PinnedIdentifier(#[from] crate::oci::pinned_identifier::PinnedIdentifierError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

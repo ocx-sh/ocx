@@ -71,7 +71,7 @@ impl PackageInfo {
             None => None,
         };
 
-        let report = PackageDescription::new(inner, identifier.to_string());
+        let report = PackageDescription::new(inner, identifier);
         context.api().report(&report)?;
 
         Ok(ExitCode::SUCCESS)

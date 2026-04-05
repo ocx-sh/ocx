@@ -42,7 +42,7 @@ impl PackagePush {
             self.content.display(),
             metadata_path.display()
         );
-        let metadata = package::metadata::Metadata::read_json_from_path(&metadata_path)?;
+        let metadata = package::metadata::Metadata::read_json(&metadata_path).await?;
         let info = package::info::Info {
             identifier: identifier.clone(),
             metadata,

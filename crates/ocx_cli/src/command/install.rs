@@ -11,7 +11,7 @@ use crate::{api, conventions::platforms_or_default, options};
 
 #[derive(Parser, Clone)]
 pub struct Install {
-    /// Force overwrite of output file if it already exists
+    /// Also set the installed version as current (creates the current symlink)
     #[clap(short = 's', long = "select")]
     select: bool,
 
@@ -56,7 +56,7 @@ impl Install {
                 (
                     raw.raw().to_string(),
                     api::data::install::InstallEntry {
-                        identifier: info.identifier.clone(),
+                        identifier: info.identifier.clone().into(),
                         metadata: info.metadata.clone(),
                         path,
                     },

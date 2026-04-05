@@ -3,6 +3,8 @@
 
 use std::process::ExitCode;
 
+use ocx_lib::profile::ProfileMode;
+
 use crate::{api, options};
 use clap::Parser;
 
@@ -36,7 +38,8 @@ impl Uninstall {
 
         let results = context
             .manager()
-            .uninstall_all(&identifiers, self.deselect, self.purge)?;
+            .uninstall_all(&identifiers, self.deselect, self.purge)
+            .await?;
 
         let mut entries = Vec::new();
         for (pkg, result) in self.packages.iter().zip(results) {
@@ -62,6 +65,38 @@ impl Uninstall {
                         api::data::removed::RemovedStatus::Absent,
                         None,
                     ));
+                }
+            }
+        }
+
+        let snapshot = context.manager().profile().snapshot();
+        for identifier in &identifiers {
+            for entry in snapshot.entries_for(identifier) {
+                match entry.mode {
+                    ProfileMode::Candidate => tracing::warn!(
+                        "{} is in your shell profile in candidate mode. \
+                         Re-install with `ocx install {}` or remove with \
+                         `ocx shell profile remove {}`.",
+                        entry.identifier,
+                        entry.identifier,
+                        entry.identifier,
+                    ),
+                    ProfileMode::Current => tracing::warn!(
+                        "{} is in your shell profile in current mode. \
+                         Re-select with `ocx select {}` or switch to \
+                         `ocx shell profile add --candidate {}`.",
+                        entry.identifier,
+                        entry.identifier,
+                        entry.identifier,
+                    ),
+                    ProfileMode::Content => tracing::warn!(
+                        "{} is in your shell profile in content mode. \
+                         Re-install with `ocx install {}` or remove with \
+                         `ocx shell profile remove {}`.",
+                        entry.identifier,
+                        entry.identifier,
+                        entry.identifier,
+                    ),
                 }
             }
         }

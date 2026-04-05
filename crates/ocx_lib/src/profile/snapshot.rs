@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::{log, oci, profile::ProfileMode};
+use crate::{oci, profile::ProfileMode};
 
 use super::{ProfileEntry, ProfileManifest};
 
@@ -15,105 +15,40 @@ use super::{ProfileEntry, ProfileManifest};
 #[derive(Debug, Clone)]
 pub struct ProfileSnapshot {
     manifest: ProfileManifest,
-    default_registry: String,
 }
 
 impl ProfileSnapshot {
     /// Loads the profile manifest from `path`. Returns an empty snapshot on
     /// any error (missing file, parse failure, etc.) so callers never need
     /// to handle profile I/O errors.
-    pub fn load(path: &Path, default_registry: impl Into<String>) -> Self {
+    pub fn load(path: &Path) -> Self {
         let manifest = ProfileManifest::load(path).unwrap_or_default();
-        Self {
-            manifest,
-            default_registry: default_registry.into(),
-        }
+        Self { manifest }
     }
 
     /// Creates an empty snapshot (no entries). Useful in tests.
     pub fn empty() -> Self {
         Self {
             manifest: ProfileManifest::default(),
-            default_registry: crate::oci::identifier::DEFAULT_REGISTRY.to_string(),
         }
     }
 
-    /// Warns if any candidate-mode entry has an identifier that exactly matches
-    /// `package`. Returns `true` if at least one warning was emitted.
-    pub fn warn_if_candidate_referenced(&self, package: &oci::Identifier) -> bool {
-        let package_str = package.to_string();
-        let mut warned = false;
-        for entry in &self.manifest.packages {
-            if entry.mode == ProfileMode::Candidate && entry.identifier == package_str {
-                log::warn!(
-                    "`{}` is in your shell profile (candidate mode). \
-                     Run `ocx install {}` to restore, \
-                     or `ocx shell profile remove {}` to clean up.",
-                    entry.identifier,
-                    entry.identifier,
-                    entry.identifier,
-                );
-                warned = true;
-            }
-        }
-        warned
-    }
-
-    /// Warns if any current-mode entry shares the same registry/repository as
-    /// `package`. Returns `true` if at least one warning was emitted.
-    pub fn warn_if_current_referenced(&self, package: &oci::Identifier) -> bool {
-        let mut warned = false;
-        for entry in self.manifest.entries_for_repo(package, &self.default_registry) {
-            if entry.mode == ProfileMode::Current {
-                log::warn!(
-                    "`{}` is in your shell profile (current mode). \
-                     Run `ocx select {}` to restore, \
-                     or switch to candidate mode with `ocx shell profile add --candidate {}`.",
-                    entry.identifier,
-                    entry.identifier,
-                    entry.identifier,
-                );
-                warned = true;
-            }
-        }
-        warned
-    }
-
-    /// Warns if any content-mode entry shares the same registry/repository as
-    /// `package`. Returns `true` if at least one warning was emitted.
-    pub fn warn_if_content_referenced(&self, package: &oci::Identifier) -> bool {
-        let mut warned = false;
-        for entry in self.manifest.entries_for_repo(package, &self.default_registry) {
-            if entry.mode == ProfileMode::Content {
-                log::warn!(
-                    "`{}` is in your shell profile (content mode). \
-                     Run `ocx install {}` to restore, \
-                     or `ocx shell profile remove {}` to clean up.",
-                    entry.identifier,
-                    entry.identifier,
-                    entry.identifier,
-                );
-                warned = true;
-            }
-        }
-        warned
-    }
-
-    /// Checks whether any content-mode entry's `content_digest` matches the
-    /// given partial digest prefix (as reconstructed from an object store path).
+    /// Returns identifiers (with digest baked in) for all content-mode profile entries.
     ///
-    /// Uses prefix matching because the sharded object path only encodes the
-    /// first 32 hex characters of the digest.
-    pub fn references_digest(&self, partial_digest: &str) -> bool {
-        self.manifest.packages.iter().any(|e| {
-            e.mode == ProfileMode::Content && e.content_digest.as_ref().is_some_and(|d| d.starts_with(partial_digest))
-        })
+    /// Entries without a stored digest or with an unparseable identifier are silently skipped.
+    pub fn content_digests(&self) -> Vec<&oci::Identifier> {
+        self.manifest
+            .packages
+            .iter()
+            .filter(|e| e.mode == ProfileMode::Content && e.identifier.digest().is_some())
+            .map(|e| &e.identifier)
+            .collect()
     }
 
     /// Returns all entries whose identifier matches the same registry and
     /// repository as `package` (ignoring tag differences).
     pub fn entries_for(&self, package: &oci::Identifier) -> Vec<&ProfileEntry> {
-        self.manifest.entries_for_repo(package, &self.default_registry)
+        self.manifest.entries_for_repo(package)
     }
 
     /// Returns all entries in the snapshot.
@@ -132,7 +67,6 @@ mod tests {
                 version: 1,
                 packages: entries,
             },
-            default_registry: crate::oci::identifier::DEFAULT_REGISTRY.to_string(),
         }
     }
 
@@ -144,38 +78,46 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_empty() {
-        let snap = ProfileSnapshot::load(Path::new("/nonexistent/profile.json"), "ocx.sh");
+        let snap = ProfileSnapshot::load(Path::new("/nonexistent/profile.json"));
         assert!(snap.entries().is_empty());
     }
 
-    #[test]
-    fn references_digest_matches_prefix() {
-        let snap = snapshot_with(vec![ProfileEntry {
-            identifier: "ocx.sh/cmake:3.28".to_string(),
-            mode: ProfileMode::Content,
-            content_digest: Some("sha256:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9".to_string()),
-        }]);
-        assert!(snap.references_digest("sha256:43567c07f1a6b07b5e8dc052108c9d4c"));
-        assert!(!snap.references_digest("sha256:00000000f1a6b07b5e8dc052108c9d4c"));
+    fn make_id(s: &str) -> crate::oci::Identifier {
+        s.parse().unwrap()
+    }
+
+    fn make_digest() -> crate::oci::Digest {
+        crate::oci::Digest::Sha256("a".repeat(64))
     }
 
     #[test]
-    fn references_digest_ignores_non_content_entries() {
+    fn content_digests_returns_identifiers_with_digest() {
         let snap = snapshot_with(vec![ProfileEntry {
-            identifier: "ocx.sh/cmake:3.28".to_string(),
+            identifier: make_id("ocx.sh/cmake:3.28").clone_with_digest(make_digest()),
+            mode: ProfileMode::Content,
+        }]);
+        let ids = snap.content_digests();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].registry(), "ocx.sh");
+        assert_eq!(ids[0].repository(), "cmake");
+        assert!(ids[0].digest().is_some());
+    }
+
+    #[test]
+    fn content_digests_ignores_non_content_entries() {
+        let snap = snapshot_with(vec![ProfileEntry {
+            identifier: make_id("ocx.sh/cmake:3.28").clone_with_digest(make_digest()),
             mode: ProfileMode::Candidate,
-            content_digest: Some("sha256:43567c07f1a6b07b5e8dc052108c9d4c".to_string()),
         }]);
-        assert!(!snap.references_digest("sha256:43567c07f1a6b07b5e8dc052108c9d4c"));
+        assert!(snap.content_digests().is_empty());
     }
 
     #[test]
-    fn references_digest_handles_none_digest() {
+    fn content_digests_skips_entries_without_digest() {
         let snap = snapshot_with(vec![ProfileEntry {
-            identifier: "ocx.sh/cmake".to_string(),
+            identifier: make_id("ocx.sh/cmake"),
             mode: ProfileMode::Content,
-            content_digest: None,
         }]);
-        assert!(!snap.references_digest("sha256:anything"));
+        assert!(snap.content_digests().is_empty());
     }
 }
