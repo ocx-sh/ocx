@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+mod acquire_result;
+mod stale_entry;
+mod temp_dir;
+
+pub use acquire_result::TempAcquireResult;
+pub use stale_entry::{StaleEntry, TempEntry};
+pub use temp_dir::TempDir;
+
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::{Error, Result, file_lock, oci};
 
-const LOCK_FILE_NAME: &str = "install.lock";
+const LOCK_EXTENSION: &str = "lock";
 
 /// Deterministic temporary directory for in-progress downloads.
 ///
@@ -17,13 +26,16 @@ const LOCK_FILE_NAME: &str = "install.lock";
 /// Layout:
 /// ```text
 /// {root}/
-///   {32-hex-char-hash}/
+///   {32-hex-char-hash}.lock   ← sibling lock file (outside the dir)
+///   {32-hex-char-hash}/        ← temp content directory
 ///     metadata.json
 ///     content.{ext}
 ///     content/
 ///     manifest.json
-///     install.lock
 /// ```
+///
+/// The lock file lives as a sibling of the temp directory so the directory
+/// can be atomically moved (renamed) while the lock is still held.
 ///
 /// Both the `install` task and the `clean` command use [`TempStore::try_acquire`]
 /// to lock and prepare temp directories. A successful acquire clears any
@@ -53,11 +65,16 @@ impl TempStore {
         Ok(self.root.join(Self::dir_name(identifier, &digest)))
     }
 
-    /// Lists all temp directories currently present.
+    /// Returns the sibling lock file path for a given temp directory path.
+    pub fn lock_path_for(dir: &Path) -> PathBuf {
+        dir.with_extension(LOCK_EXTENSION)
+    }
+
+    /// Lists all temp entries currently present.
     ///
-    /// A temp directory is identified by containing an `install.lock` file.
+    /// Discovers entries from both `.lock` files and directories in the root.
     /// Returns an empty vec if the root does not exist.
-    pub fn list_all(&self) -> Result<Vec<TempDir>> {
+    pub fn list_all(&self) -> Result<Vec<TempEntry>> {
         if !self.root.exists() {
             return Ok(Vec::new());
         }
@@ -65,13 +82,37 @@ impl TempStore {
             Ok(entries) => entries,
             Err(_) => return Ok(Vec::new()),
         };
-        let mut result = Vec::new();
+
+        // Collect unique base names from both .lock files and directories.
+        let mut bases = HashSet::new();
+        let mut lock_bases = HashSet::new();
+        let mut dir_bases = HashSet::new();
+
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && path.join(LOCK_FILE_NAME).exists() {
-                result.push(TempDir { dir: path });
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some(LOCK_EXTENSION) {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    let base = stem.to_string();
+                    lock_bases.insert(base.clone());
+                    bases.insert(base);
+                }
+            } else if path.is_dir()
+                && let Some(name) = path.file_name().and_then(|s| s.to_str())
+            {
+                let base = name.to_string();
+                dir_bases.insert(base.clone());
+                bases.insert(base);
             }
         }
+
+        let result = bases
+            .into_iter()
+            .map(|base| TempEntry {
+                dir: self.root.join(&base),
+                has_lock_file: lock_bases.contains(&base),
+            })
+            .collect();
+
         Ok(result)
     }
 
@@ -95,42 +136,56 @@ impl TempStore {
     /// available or `timeout` expires.
     pub async fn acquire_with_timeout(&self, path: &Path, timeout: std::time::Duration) -> Result<TempAcquireResult> {
         let file = Self::prepare_lock_file(path)?;
-        let lock_path = path.join(LOCK_FILE_NAME);
+        let lock_path = Self::lock_path_for(path);
         let lock = file_lock::FileLock::lock_exclusive_with_timeout(file, timeout)
             .await
             .map_err(|e| Error::InternalFile(lock_path, e))?;
         Self::finish_acquire(path, lock)
     }
 
-    /// Creates the temp directory and lock file, returning the file handle.
-    fn prepare_lock_file(path: &Path) -> Result<std::fs::File> {
-        std::fs::create_dir_all(path).map_err(|e| Error::InternalFile(path.to_path_buf(), e))?;
-        let lock_path = path.join(LOCK_FILE_NAME);
+    /// Creates the sibling lock file and returns the file handle.
+    ///
+    /// Ensures the temp root exists but does NOT create the temp directory
+    /// itself — that happens in [`finish_acquire`] after the lock is held.
+    fn prepare_lock_file(dir_path: &Path) -> Result<std::fs::File> {
+        if let Some(parent) = dir_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::InternalFile(parent.to_path_buf(), e))?;
+        }
+        let lock_path = Self::lock_path_for(dir_path);
         std::fs::File::create(&lock_path).map_err(|e| Error::InternalFile(lock_path, e))
     }
 
-    /// Shared post-lock logic: check for and clean leftover artifacts.
-    fn finish_acquire(path: &Path, lock: file_lock::FileLock) -> Result<TempAcquireResult> {
+    /// Shared post-lock logic: create the content directory, check for and
+    /// clean leftover artifacts.
+    fn finish_acquire(dir_path: &Path, lock: file_lock::FileLock) -> Result<TempAcquireResult> {
+        std::fs::create_dir_all(dir_path).map_err(|e| Error::InternalFile(dir_path.to_path_buf(), e))?;
         let dir = TempDir {
-            dir: path.to_path_buf(),
+            dir: dir_path.to_path_buf(),
         };
         let was_cleaned = dir.has_artifacts()?;
         if was_cleaned {
             dir.clear()?;
         }
-        Ok(TempAcquireResult { dir, lock, was_cleaned })
+        Ok(TempAcquireResult { lock, dir, was_cleaned })
     }
 
-    /// Returns all stale temp dirs (those whose lock is not held).
+    /// Returns all stale temp entries (those whose lock is not held, plus orphans).
     ///
-    /// Each returned result holds the exclusive lock, preventing races with
+    /// For entries with a lock file, acquires the lock to prevent races with
     /// concurrent installs. Dirs that are actively locked are skipped.
-    pub fn stale_dirs(&self) -> Result<Vec<TempAcquireResult>> {
-        let dirs = self.list_all()?;
+    /// Directories without a lock file are returned as orphans.
+    pub fn stale_entries(&self) -> Result<Vec<StaleEntry>> {
+        let entries = self.list_all()?;
         let mut result = Vec::new();
-        for temp_dir in dirs {
-            if let Some(acquired) = self.try_acquire(&temp_dir.dir)? {
-                result.push(acquired);
+        for entry in entries {
+            if entry.has_lock_file {
+                if let Some(acquired) = self.try_acquire(&entry.dir)? {
+                    result.push(StaleEntry::Locked(acquired));
+                }
+                // else: another process holds the lock, skip
+            } else {
+                // No lock file → orphan directory, safe to clean directly.
+                result.push(StaleEntry::Orphan(entry.dir));
             }
         }
         Ok(result)
@@ -142,54 +197,6 @@ impl TempStore {
         let input = format!("{}\0{}\0{}", identifier.registry(), identifier.repository(), digest,);
         let hash = hex::encode(Sha256::digest(input.as_bytes()));
         hash[..32].to_string()
-    }
-}
-
-/// Result of acquiring a temp directory via [`TempStore::try_acquire`] or
-/// [`TempStore::acquire_with_timeout`].
-///
-/// Holds the exclusive lock for the directory's lifetime. When this value
-/// is dropped, the lock is released.
-pub struct TempAcquireResult {
-    pub dir: TempDir,
-    pub lock: file_lock::FileLock,
-    /// `true` if the directory contained leftover artifacts that were cleaned.
-    pub was_cleaned: bool,
-}
-
-/// Represents a single temp directory.
-pub struct TempDir {
-    pub dir: PathBuf,
-}
-
-impl TempDir {
-    /// Returns `true` if the directory contains any files or subdirectories
-    /// besides `install.lock`.
-    fn has_artifacts(&self) -> Result<bool> {
-        let entries = std::fs::read_dir(&self.dir).map_err(|e| Error::InternalFile(self.dir.clone(), e))?;
-        for entry in entries.flatten() {
-            if entry.file_name() != LOCK_FILE_NAME {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Removes all files and subdirectories except `install.lock`.
-    fn clear(&self) -> Result<()> {
-        let entries = std::fs::read_dir(&self.dir).map_err(|e| Error::InternalFile(self.dir.clone(), e))?;
-        for entry in entries.flatten() {
-            if entry.file_name() == LOCK_FILE_NAME {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path).map_err(|e| Error::InternalFile(path, e))?;
-            } else {
-                std::fs::remove_file(&path).map_err(|e| Error::InternalFile(path, e))?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -251,23 +258,48 @@ mod tests {
     }
 
     #[test]
-    fn list_all_finds_temp_dir() {
+    fn list_all_finds_entry_with_lock_and_dir() {
         let dir = tempfile::tempdir().unwrap();
         let temp = dir.path().join("abc12345678901234567890123456789");
         std::fs::create_dir_all(&temp).unwrap();
-        std::fs::write(temp.join("install.lock"), b"").unwrap();
+        std::fs::write(TempStore::lock_path_for(&temp), b"").unwrap();
 
         let store = TempStore::new(dir.path());
-        let dirs = store.list_all().unwrap();
-        assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0].dir, temp);
+        let entries = store.list_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].dir, temp);
+        assert!(entries[0].has_lock_file);
     }
 
     #[test]
-    fn list_all_ignores_dirs_without_lock() {
+    fn list_all_finds_orphan_lock_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("abc123")).unwrap();
+        let temp = dir.path().join("abc12345678901234567890123456789");
+        std::fs::write(TempStore::lock_path_for(&temp), b"").unwrap();
 
+        let store = TempStore::new(dir.path());
+        let entries = store.list_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].dir, temp);
+        assert!(entries[0].has_lock_file);
+    }
+
+    #[test]
+    fn list_all_finds_orphan_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("abc12345678901234567890123456789");
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let store = TempStore::new(dir.path());
+        let entries = store.list_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].dir, temp);
+        assert!(!entries[0].has_lock_file);
+    }
+
+    #[test]
+    fn list_all_ignores_dirs_without_lock_or_content() {
+        let dir = tempfile::tempdir().unwrap();
         let store = TempStore::new(dir.path());
         assert_eq!(store.list_all().unwrap().len(), 0);
     }
@@ -283,6 +315,8 @@ mod tests {
         let acquired = result.unwrap();
         assert!(!acquired.was_cleaned);
         assert_eq!(acquired.dir.dir, temp_path);
+        assert!(TempStore::lock_path_for(&temp_path).exists());
+        assert!(temp_path.exists());
     }
 
     #[test]
@@ -302,18 +336,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let temp_path = dir.path().join("test_dir");
         std::fs::create_dir_all(&temp_path).unwrap();
-        std::fs::write(temp_path.join(LOCK_FILE_NAME), b"").unwrap();
         std::fs::write(temp_path.join("metadata.json"), b"{}").unwrap();
         std::fs::create_dir(temp_path.join("content")).unwrap();
 
         let store = TempStore::new(dir.path());
         let acquired = store.try_acquire(&temp_path).unwrap().unwrap();
         assert!(acquired.was_cleaned);
-
-        // install.lock should still exist, but artifacts should be gone.
-        assert!(temp_path.join(LOCK_FILE_NAME).exists());
         assert!(!temp_path.join("metadata.json").exists());
         assert!(!temp_path.join("content").exists());
+        assert!(TempStore::lock_path_for(&temp_path).exists());
         drop(acquired);
     }
 
@@ -321,8 +352,6 @@ mod tests {
     fn try_acquire_reports_not_cleaned_when_empty() {
         let dir = tempfile::tempdir().unwrap();
         let temp_path = dir.path().join("test_dir");
-        std::fs::create_dir_all(&temp_path).unwrap();
-        std::fs::write(temp_path.join(LOCK_FILE_NAME), b"").unwrap();
 
         let store = TempStore::new(dir.path());
         let acquired = store.try_acquire(&temp_path).unwrap().unwrap();
@@ -331,37 +360,68 @@ mod tests {
     }
 
     #[test]
-    fn stale_dirs_returns_unlocked_dirs() {
+    fn drop_cleans_up_lock_file() {
         let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("aaa");
-        let b = dir.path().join("bbb");
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(a.join("install.lock"), b"").unwrap();
-        std::fs::write(b.join("install.lock"), b"").unwrap();
+        let temp_path = dir.path().join("test_dir");
+        let lock_path = TempStore::lock_path_for(&temp_path);
 
         let store = TempStore::new(dir.path());
-        let stale = store.stale_dirs().unwrap();
-        assert_eq!(stale.len(), 2);
+        let acquired = store.try_acquire(&temp_path).unwrap().unwrap();
+        assert!(lock_path.exists());
+        drop(acquired);
+        assert!(!lock_path.exists());
     }
 
     #[test]
-    fn stale_dirs_skips_locked_dirs() {
+    fn stale_entries_returns_unlocked_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("aaa");
         let b = dir.path().join("bbb");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(a.join("install.lock"), b"").unwrap();
-        std::fs::write(b.join("install.lock"), b"").unwrap();
+        std::fs::write(TempStore::lock_path_for(&a), b"").unwrap();
+        std::fs::write(TempStore::lock_path_for(&b), b"").unwrap();
 
         let store = TempStore::new(dir.path());
+        let stale = store.stale_entries().unwrap();
+        assert_eq!(stale.len(), 2);
+        assert!(stale.iter().all(|e| matches!(e, StaleEntry::Locked(_))));
+    }
 
-        // Lock one of them externally.
-        let _lock = file_lock::FileLock::try_exclusive(std::fs::File::open(a.join("install.lock")).unwrap()).unwrap();
+    #[test]
+    fn stale_entries_skips_locked_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("aaa");
+        let b = dir.path().join("bbb");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(TempStore::lock_path_for(&a), b"").unwrap();
+        std::fs::write(TempStore::lock_path_for(&b), b"").unwrap();
 
-        let stale = store.stale_dirs().unwrap();
+        let store = TempStore::new(dir.path());
+        let _lock =
+            file_lock::FileLock::try_exclusive(std::fs::File::open(TempStore::lock_path_for(&a)).unwrap()).unwrap();
+
+        let stale = store.stale_entries().unwrap();
         assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0].dir.dir, b);
+        match &stale[0] {
+            StaleEntry::Locked(acquired) => assert_eq!(acquired.dir.dir, b),
+            StaleEntry::Orphan(_) => panic!("expected Locked, got Orphan"),
+        }
+    }
+
+    #[test]
+    fn stale_entries_returns_orphan_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let orphan = dir.path().join("orphan_dir");
+        std::fs::create_dir_all(&orphan).unwrap();
+
+        let store = TempStore::new(dir.path());
+        let stale = store.stale_entries().unwrap();
+        assert_eq!(stale.len(), 1);
+        match &stale[0] {
+            StaleEntry::Orphan(path) => assert_eq!(*path, orphan),
+            StaleEntry::Locked(_) => panic!("expected Orphan, got Locked"),
+        }
     }
 }

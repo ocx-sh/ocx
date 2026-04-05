@@ -10,7 +10,7 @@ mod temp_store;
 pub use index_store::IndexStore;
 pub use install_store::{InstallStore, SymlinkKind};
 pub use object_store::{ObjectDir, ObjectStore};
-pub use temp_store::{TempAcquireResult, TempDir, TempStore};
+pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
 
 /// Root layout of the local OCX data directory.
 ///
