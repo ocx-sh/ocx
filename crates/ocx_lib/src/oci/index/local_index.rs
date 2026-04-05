@@ -103,7 +103,7 @@ impl LocalIndex {
     /// Writes the tags map to disk and updates the in-memory cache.
     async fn persist_tags(&self, identifier: &oci::Identifier, tags: HashMap<String, oci::Digest>) -> Result<()> {
         let tags_path = self.index_store.tags(identifier);
-        tags.write_json_to_path(tags_path)?;
+        tags.write_json(&tags_path).await?;
 
         let cache = self.cache.write().await;
         cache.set_tags(identifier.clone(), tags).await;
@@ -122,7 +122,7 @@ impl LocalIndex {
             .await?
             .ok_or_else(|| super::error::Error::RemoteManifestNotFound(identifier.to_string()))?;
         let path = self.index_store.manifest(identifier, digest);
-        manifest.write_json_to_path(path)?;
+        manifest.write_json(&path).await?;
 
         if let oci::Manifest::ImageIndex(image_index) = manifest {
             for manifest in image_index.manifests {
@@ -133,7 +133,7 @@ impl LocalIndex {
                     .await?
                     .ok_or_else(|| super::error::Error::RemoteManifestNotFound(identifier.to_string()))?;
                 let path = self.index_store.manifest(&identifier, &digest);
-                manifest.write_json_to_path(path)?;
+                manifest.write_json(&path).await?;
             }
         }
 
@@ -158,7 +158,7 @@ impl LocalIndex {
             return Ok(None);
         }
 
-        let tags = HashMap::<String, oci::Digest>::read_json_from_path(tags_path)?;
+        let tags = HashMap::<String, oci::Digest>::read_json(tags_path).await?;
         {
             let cache = self.cache.write().await;
             cache.set_tags(identifier.clone(), tags.clone()).await;
@@ -196,7 +196,7 @@ impl LocalIndex {
             digest,
             manifest_path.display()
         );
-        let manifest = oci::Manifest::read_json_from_path(manifest_path)?;
+        let manifest = oci::Manifest::read_json(manifest_path).await?;
         {
             log::trace!(
                 "Caching manifest for identifier '{}' and digest '{}'.",

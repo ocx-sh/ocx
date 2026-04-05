@@ -74,8 +74,10 @@ mod tests {
     use std::sync::Mutex;
     use tokio::io::AsyncWriteExt;
 
+    type ProgressValues = Arc<Mutex<Vec<u64>>>;
+
     /// Collects all progress values reported by the callback.
-    fn progress_tracker() -> (Arc<dyn Fn(u64) + Send + Sync>, Arc<Mutex<Vec<u64>>>) {
+    fn progress_tracker() -> (Arc<dyn Fn(u64) + Send + Sync>, ProgressValues) {
         let values = Arc::new(Mutex::new(Vec::new()));
         let values_clone = Arc::clone(&values);
         let callback: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |n| {

@@ -62,5 +62,8 @@ pub use platform::Platform;
 pub mod digest;
 pub use digest::Digest;
 
+pub mod pinned_identifier;
+pub use pinned_identifier::PinnedIdentifier;
+
 mod file_storage;
 pub use file_storage::FileStorage;

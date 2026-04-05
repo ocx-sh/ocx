@@ -34,22 +34,18 @@ pub enum IdentifierErrorKind {
     /// The repository portion exceeds the 255-character limit.
     #[error("repository exceeds 255-character limit")]
     RepositoryTooLong,
-    /// The digest uses an unsupported algorithm.
-    #[error("unsupported digest algorithm '{0}'")]
-    DigestUnsupported(String),
-    /// The digest hex string has an invalid length.
-    #[error("digest {algorithm} hex must be {expected} chars, got {actual}")]
-    DigestInvalidLength {
-        algorithm: String,
-        expected: usize,
-        actual: usize,
-    },
-    /// The digest string has an invalid format (missing prefix, non-hex chars, etc.).
+    /// The digest string is invalid (unsupported algorithm, wrong length, non-hex chars, etc.).
     #[error("invalid digest format")]
     DigestInvalidFormat,
     /// The identifier format is invalid (cannot be parsed).
     #[error("invalid format")]
     InvalidFormat,
+    /// The identifier does not contain an explicit registry.
+    #[error("identifier must include an explicit registry (e.g. 'ocx.sh/tool:1.0', not 'tool:1.0')")]
+    MissingRegistry,
+    /// The identifier contains a directory traversal segment (`.` or `..`).
+    #[error("identifier must not use '.' or '..' as a path segment")]
+    DirectoryTraversal,
     /// The identifier resolved to a Docker Hub default domain, which is not supported.
     #[error("Docker Hub default domain is not supported")]
     DockerHubDefault,

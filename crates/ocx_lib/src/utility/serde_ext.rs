@@ -4,28 +4,39 @@
 use crate::prelude::*;
 
 pub trait SerdeExt: Sized {
-    fn read_json_from_path(path: impl AsRef<std::path::Path>) -> crate::Result<Self>;
-    fn write_json_to_path(&self, path: impl AsRef<std::path::Path>) -> crate::Result<()>;
+    /// Reads and deserializes JSON from the given path.
+    fn read_json(
+        path: impl AsRef<std::path::Path> + Send,
+    ) -> impl std::future::Future<Output = crate::Result<Self>> + Send;
+
+    /// Serializes and writes JSON to the given path.
+    fn write_json(
+        &self,
+        path: impl AsRef<std::path::Path> + Send,
+    ) -> impl std::future::Future<Output = crate::Result<()>> + Send;
 }
 
 impl<T> SerdeExt for T
 where
-    T: serde::de::DeserializeOwned + serde::Serialize,
+    T: serde::de::DeserializeOwned + serde::Serialize + Send + Sync,
 {
-    fn read_json_from_path(path: impl AsRef<std::path::Path>) -> crate::Result<Self> {
-        let file = std::fs::File::open(&path).map_err(|error| crate::error::file_error(&path, error))?;
-        let reader = std::io::BufReader::new(file);
-        let value = serde_json::from_reader(reader)?;
-        Ok(value)
+    async fn read_json(path: impl AsRef<std::path::Path> + Send) -> crate::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|error| crate::error::file_error(&path, error))?;
+        serde_json::from_slice(&bytes).map_err(Into::into)
     }
 
-    fn write_json_to_path(&self, path: impl AsRef<std::path::Path>) -> crate::Result<()> {
-        if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent).ignore();
+    async fn write_json(&self, path: impl AsRef<std::path::Path> + Send) -> crate::Result<()> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.ignore();
         }
-        let file = std::fs::File::create(&path).map_err(|error| crate::error::file_error(&path, error))?;
-        let writer = std::io::BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, self)?;
+        let bytes = serde_json::to_vec_pretty(self)?;
+        tokio::fs::write(&path, bytes)
+            .await
+            .map_err(|error| crate::error::file_error(&path, error))?;
         Ok(())
     }
 }

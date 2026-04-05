@@ -159,6 +159,16 @@ impl OciTransport for NativeTransport {
         Ok((data.to_vec(), digest))
     }
 
+    async fn pull_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<Vec<u8>> {
+        log::debug!("Pulling blob {} for image {} into memory", digest, image);
+        let mut buf = Vec::new();
+        self.client
+            .pull_blob(image, digest, &mut buf)
+            .await
+            .map_err(registry_error)?;
+        Ok(buf)
+    }
+
     async fn pull_blob_to_file(
         &self,
         image: &oci::native::Reference,
@@ -297,21 +307,23 @@ mod tests {
     use futures::StreamExt;
     use std::sync::Mutex;
 
-    /// Replicates the chunking + progress stream from `do_push_blob` and verifies
-    /// that progress reports lag behind yielded chunks (conservative reporting).
-    #[tokio::test]
-    async fn upload_progress_stream_reports_confirmed_bytes() {
-        let data = Bytes::from(vec![0u8; 100]);
+    /// Creates a chunked progress stream that mirrors `do_push_blob`'s upload logic.
+    ///
+    /// Returns the progress reports collector and the byte stream.
+    fn make_progress_stream(
+        data: Bytes,
+        chunk_size: usize,
+    ) -> (
+        Arc<Mutex<Vec<u64>>>,
+        impl futures::Stream<Item = std::result::Result<Bytes, std::io::Error>>,
+    ) {
         let total = data.len() as u64;
-        let chunk_size = 30usize;
         let chunk_count = (total as usize).div_ceil(chunk_size);
-
         let reports = Arc::new(Mutex::new(Vec::new()));
         let reports_clone = Arc::clone(&reports);
         let progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |n| {
             reports_clone.lock().unwrap().push(n);
         });
-
         let progress_stream = stream::unfold((0usize, 0u64), move |(index, confirmed)| {
             if index >= chunk_count {
                 return std::future::ready(None);
@@ -323,6 +335,14 @@ mod tests {
             let confirmed = confirmed + chunk.len() as u64;
             std::future::ready(Some((Ok::<_, std::io::Error>(chunk), (index + 1, confirmed))))
         });
+        (reports, progress_stream)
+    }
+
+    /// Replicates the chunking + progress stream from `do_push_blob` and verifies
+    /// that progress reports lag behind yielded chunks (conservative reporting).
+    #[tokio::test]
+    async fn upload_progress_stream_reports_confirmed_bytes() {
+        let (reports, progress_stream) = make_progress_stream(Bytes::from(vec![0u8; 100]), 30);
 
         // Consume the stream (simulates push_blob_stream polling).
         let collected: Vec<Bytes> = progress_stream.map(|r| r.unwrap()).collect().await;
@@ -348,28 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_chunking_single_chunk() {
-        let data = Bytes::from(vec![0u8; 10]);
-        let total = data.len() as u64;
-        let chunk_size = 1024usize; // larger than data
-        let chunk_count = (total as usize).div_ceil(chunk_size);
-
-        let reports = Arc::new(Mutex::new(Vec::new()));
-        let reports_clone = Arc::clone(&reports);
-        let progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |n| {
-            reports_clone.lock().unwrap().push(n);
-        });
-
-        let progress_stream = stream::unfold((0usize, 0u64), move |(index, confirmed)| {
-            if index >= chunk_count {
-                return std::future::ready(None);
-            }
-            let start = index * chunk_size;
-            let end = ((index + 1) * chunk_size).min(total as usize);
-            let chunk = data.slice(start..end);
-            progress(confirmed);
-            let confirmed = confirmed + chunk.len() as u64;
-            std::future::ready(Some((Ok::<_, std::io::Error>(chunk), (index + 1, confirmed))))
-        });
+        let (reports, progress_stream) = make_progress_stream(Bytes::from(vec![0u8; 10]), 1024);
 
         let collected: Vec<Bytes> = progress_stream.map(|r| r.unwrap()).collect().await;
 

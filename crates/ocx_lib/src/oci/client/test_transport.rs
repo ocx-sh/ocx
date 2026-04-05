@@ -14,6 +14,7 @@ use crate::oci::{self, Digest, RegistryOperation};
 ///
 /// Fields are public so they can be accessed through the lock guards
 /// returned by [`StubTransportData::read`] and [`StubTransportData::write`].
+#[derive(Default)]
 pub(crate) struct StubTransportInner {
     /// Pages of tags returned by successive `list_tags` calls (consumed FIFO).
     pub tags: Vec<Vec<String>>,
@@ -37,23 +38,6 @@ pub(crate) struct StubTransportInner {
     /// When set, `pull_manifest_raw` returns a `Registry` error with this
     /// message for any image not in `manifests` (instead of `ManifestNotFound`).
     pub pull_manifest_error_override: Option<String>,
-}
-
-impl Default for StubTransportInner {
-    fn default() -> Self {
-        Self {
-            tags: vec![],
-            repositories: vec![],
-            manifests: HashMap::new(),
-            blobs: HashMap::new(),
-            digest: None,
-            push_results: vec![],
-            calls: vec![],
-            auth_calls: vec![],
-            capture_pushes: false,
-            pull_manifest_error_override: None,
-        }
-    }
 }
 
 /// Shared data handle for [`StubTransport`].
@@ -188,6 +172,12 @@ impl OciTransport for StubTransport {
         } else {
             Err(ClientError::ManifestNotFound(key))
         }
+    }
+
+    async fn pull_blob(&self, _image: &oci::native::Reference, digest: &str) -> Result<Vec<u8>> {
+        self.record(&format!("pull_blob:{}", digest));
+        let inner = self.data.read();
+        Ok(inner.blobs.get(digest).cloned().unwrap_or_default())
     }
 
     async fn pull_blob_to_file(

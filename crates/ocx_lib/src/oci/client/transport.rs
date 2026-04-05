@@ -68,6 +68,12 @@ pub trait OciTransport: Send + Sync {
         accepted_media_types: &[&str],
     ) -> Result<(Vec<u8>, String)>;
 
+    /// Pulls a blob into memory, returning the raw bytes.
+    ///
+    /// Suitable for small blobs (config, metadata) where writing to disk
+    /// and reading back would be wasteful.
+    async fn pull_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<Vec<u8>>;
+
     /// Pulls a blob and writes it to the specified file path.
     ///
     /// The output file is wrapped in a
