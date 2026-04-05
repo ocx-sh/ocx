@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use error::DigestError;
 
+const DIGEST_SHORT_LEN: usize = 12;
 /// Small wrapper of the OCI digest, with some extra convenience methods.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Digest {
     /// A SHA256 digest, which is the most common type of digest used in OCI.
     Sha256(String),
@@ -22,6 +23,37 @@ impl Digest {
     /// Creates a new digest from the given data, using the SHA256 algorithm.
     pub fn sha256(data: impl AsRef<[u8]>) -> Self {
         Self::Sha256(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(data)))
+    }
+
+    /// Returns the algorithm prefix and hex string without allocating.
+    pub fn parts(&self) -> (&str, &str) {
+        match self {
+            Digest::Sha256(hex) => ("sha256", hex),
+            Digest::Sha384(hex) => ("sha384", hex),
+            Digest::Sha512(hex) => ("sha512", hex),
+        }
+    }
+
+    /// Returns the algorithm prefix (e.g., "sha256").
+    pub fn algorithm(&self) -> &str {
+        self.parts().0
+    }
+
+    /// Returns the hex string of the digest (without the algorithm prefix).
+    pub fn hex(&self) -> &str {
+        self.parts().1
+    }
+
+    /// Returns the first [`DIGEST_SHORT_LEN`] characters of the hex string for display purposes.
+    pub fn short_hex(&self) -> &str {
+        &self.hex()[..DIGEST_SHORT_LEN]
+    }
+
+    /// Returns a truncated digest string (`algorithm:short_hex`) of [`DIGEST_SHORT_LEN`] hex
+    /// characters for display purposes.
+    pub fn to_short_string(&self) -> String {
+        let (alg, hex) = self.parts();
+        format!("{}:{}", alg, &hex[..DIGEST_SHORT_LEN])
     }
 }
 
@@ -97,6 +129,20 @@ impl<'de> Deserialize<'de> for Digest {
     }
 }
 
+impl schemars::JsonSchema for Digest {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Digest")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "OCI content-addressed digest (e.g. 'sha256:abcdef...').",
+            "pattern": "^sha(256|384|512):[0-9a-f]+$"
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +161,48 @@ mod tests {
         let digest_str = "sha512:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d943567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
         let digest = Digest::try_from(digest_str).unwrap();
         assert!(matches!(digest, Digest::Sha512(_)));
+    }
+
+    #[test]
+    fn algorithm_returns_prefix() {
+        let d256 = Digest::Sha256("a".repeat(64));
+        let d384 = Digest::Sha384("b".repeat(96));
+        let d512 = Digest::Sha512("c".repeat(128));
+        assert_eq!(d256.algorithm(), "sha256");
+        assert_eq!(d384.algorithm(), "sha384");
+        assert_eq!(d512.algorithm(), "sha512");
+    }
+
+    #[test]
+    fn hex_returns_raw_hex_without_prefix() {
+        let hex = "43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
+        let digest = Digest::Sha256(hex.to_string());
+        assert_eq!(digest.hex(), hex);
+    }
+
+    #[test]
+    fn short_hex_truncates_to_constant_length() {
+        let hex = "43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
+        let digest = Digest::Sha256(hex.to_string());
+        assert_eq!(digest.short_hex(), &hex[..DIGEST_SHORT_LEN]);
+        assert_eq!(digest.short_hex().len(), DIGEST_SHORT_LEN);
+    }
+
+    #[test]
+    fn to_short_string_includes_algorithm_and_truncated_hex() {
+        let hex = "43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
+        let digest = Digest::Sha256(hex.to_string());
+        assert_eq!(digest.to_short_string(), format!("sha256:{}", &hex[..DIGEST_SHORT_LEN]));
+    }
+
+    #[test]
+    fn to_short_string_works_for_all_algorithms() {
+        let d384 = Digest::Sha384("ab".repeat(48));
+        assert!(d384.to_short_string().starts_with("sha384:"));
+        assert_eq!(d384.to_short_string().len(), "sha384:".len() + DIGEST_SHORT_LEN);
+
+        let d512 = Digest::Sha512("cd".repeat(64));
+        assert!(d512.to_short_string().starts_with("sha512:"));
+        assert_eq!(d512.to_short_string().len(), "sha512:".len() + DIGEST_SHORT_LEN);
     }
 }

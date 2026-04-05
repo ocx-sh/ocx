@@ -24,7 +24,7 @@ const DOCKER_HUB_DOMAINS: &[&str] = &["docker.io", "index.docker.io"];
 ///
 /// Conversion to `native::Reference` (for OCI transport calls) is available via
 /// `From<&Identifier>`.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Identifier {
     registry: String,
     repository: String,
@@ -46,13 +46,30 @@ impl Identifier {
         }
     }
 
+    /// Parses an identifier string that must contain an explicit registry.
+    ///
+    /// Returns [`IdentifierErrorKind::MissingRegistry`] if the input does not
+    /// contain an explicit registry (e.g. `"cmake:3.28"` or `"myorg/tool"`).
+    /// Returns [`IdentifierErrorKind::DirectoryTraversal`] if any path segment
+    /// is `.` or `..`.
+    pub fn parse(input: &str) -> Result<Self, IdentifierError> {
+        validate_segments(input)?;
+        if !has_explicit_registry(input) {
+            return Err(IdentifierError {
+                input: input.to_string(),
+                kind: IdentifierErrorKind::MissingRegistry,
+            });
+        }
+        parse_internal(input, DEFAULT_REGISTRY)
+    }
+
     /// Parses an identifier string, using `default_registry` for inputs that
     /// do not contain an explicit registry (e.g. `"cmake:3.28"` or `"myorg/tool"`).
     ///
     /// If the input already contains a registry (detected by a `.` or `:` in the
     /// first path segment, or `"localhost"`), the default is ignored.
     pub fn parse_with_default_registry(s: &str, default_registry: &str) -> Result<Self, IdentifierError> {
-        parse(s, default_registry)
+        parse_internal(s, default_registry)
     }
 
     /// Returns a new identifier with the given tag, dropping any existing digest.
@@ -76,6 +93,40 @@ impl Identifier {
             repository: self.repository.clone(),
             tag: self.tag.clone(),
             digest: Some(digest),
+        }
+    }
+
+    /// Returns a new identifier with the digest stripped, preserving registry, repository, and tag.
+    ///
+    /// Useful for matching entries that differ only by digest (e.g., candidate vs content mode).
+    pub fn without_digest(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            repository: self.repository.clone(),
+            tag: self.tag.clone(),
+            digest: None,
+        }
+    }
+
+    /// Returns a new identifier with the tag stripped, preserving registry, repository, and digest.
+    pub fn without_tag(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            repository: self.repository.clone(),
+            tag: None,
+            digest: self.digest.clone(),
+        }
+    }
+
+    /// Returns a new identifier with only registry and repository — tag and digest stripped.
+    ///
+    /// Useful for grouping or deduplicating by package identity regardless of version.
+    pub fn without_specifiers(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            repository: self.repository.clone(),
+            tag: None,
+            digest: None,
         }
     }
 
@@ -133,7 +184,7 @@ impl std::str::FromStr for Identifier {
     type Err = IdentifierError;
 
     fn from_str(value: &str) -> Result<Self, IdentifierError> {
-        parse(value, DEFAULT_REGISTRY)
+        parse_internal(value, DEFAULT_REGISTRY)
     }
 }
 
@@ -152,7 +203,7 @@ impl<'de> Deserialize<'de> for Identifier {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        s.parse::<Identifier>().map_err(serde::de::Error::custom)
+        Identifier::parse(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -211,7 +262,31 @@ impl TryFrom<native::Reference> for Identifier {
 
 // ── Parser ───────────────────────────────────────────────────────────
 
-fn parse(input: &str, default_registry: &str) -> Result<Identifier, IdentifierError> {
+/// Validates that no path segment is `.` or `..` (directory traversal defence).
+fn validate_segments(input: &str) -> Result<(), IdentifierError> {
+    let name_part = input.split_once('@').map_or(input, |(name, _)| name);
+    for segment in name_part.split('/') {
+        let dir_name = segment.split_once(':').map_or(segment, |(name, _)| name);
+        if dir_name == "." || dir_name == ".." {
+            return Err(IdentifierError {
+                input: input.to_string(),
+                kind: IdentifierErrorKind::DirectoryTraversal,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Checks whether the input contains an explicit registry in the first path segment.
+fn has_explicit_registry(input: &str) -> bool {
+    let name_part = input.split_once('@').map_or(input, |(name, _)| name);
+    match name_part.split_once('/') {
+        None => false,
+        Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
+    }
+}
+
+fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, IdentifierError> {
     if input.is_empty() {
         return Err(IdentifierError {
             input: String::new(),
@@ -263,47 +338,10 @@ fn parse(input: &str, default_registry: &str) -> Result<Identifier, IdentifierEr
 
 /// Parses a digest string like `sha256:abcdef...` into a `Digest`.
 fn parse_digest(input: &str, digest_str: &str) -> Result<Digest, IdentifierError> {
-    let (algo, hex) = digest_str.split_once(':').ok_or_else(|| IdentifierError {
+    Digest::try_from(digest_str).map_err(|_| IdentifierError {
         input: input.to_string(),
         kind: IdentifierErrorKind::DigestInvalidFormat,
-    })?;
-
-    let expected_len = match algo {
-        "sha256" => 64,
-        "sha384" => 96,
-        "sha512" => 128,
-        _ => {
-            return Err(IdentifierError {
-                input: input.to_string(),
-                kind: IdentifierErrorKind::DigestUnsupported(algo.to_string()),
-            });
-        }
-    };
-
-    if hex.len() != expected_len {
-        return Err(IdentifierError {
-            input: input.to_string(),
-            kind: IdentifierErrorKind::DigestInvalidLength {
-                algorithm: algo.to_string(),
-                expected: expected_len,
-                actual: hex.len(),
-            },
-        });
-    }
-
-    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(IdentifierError {
-            input: input.to_string(),
-            kind: IdentifierErrorKind::DigestInvalidFormat,
-        });
-    }
-
-    match algo {
-        "sha256" => Ok(Digest::Sha256(hex.to_string())),
-        "sha384" => Ok(Digest::Sha384(hex.to_string())),
-        "sha512" => Ok(Digest::Sha512(hex.to_string())),
-        _ => unreachable!(),
-    }
+    })
 }
 
 /// Splits the tag from the name portion. Returns `(name_without_tag, Option<tag>)`.
@@ -359,6 +397,19 @@ fn prepend_domain(name: &str, domain: &str) -> String {
                 name.into()
             }
         }
+    }
+}
+
+impl schemars::JsonSchema for Identifier {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Identifier")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'."
+        })
     }
 }
 
@@ -517,13 +568,13 @@ mod tests {
     #[test]
     fn bad_digest_algo_errors() {
         let err = "test.com/repo@md5:abcdef".parse::<Identifier>().unwrap_err();
-        assert!(matches!(err.kind, IdentifierErrorKind::DigestUnsupported(_)));
+        assert!(matches!(err.kind, IdentifierErrorKind::DigestInvalidFormat));
     }
 
     #[test]
     fn bad_digest_length_errors() {
         let err = "test.com/repo@sha256:abc".parse::<Identifier>().unwrap_err();
-        assert!(matches!(err.kind, IdentifierErrorKind::DigestInvalidLength { .. }));
+        assert!(matches!(err.kind, IdentifierErrorKind::DigestInvalidFormat));
     }
 
     // ── Display roundtrip ────────────────────────────────────────────────
@@ -648,5 +699,87 @@ mod tests {
         let base: Identifier = "test.com/repo".parse().unwrap();
         let tagged = base.clone_with_tag("3.28.1+b1");
         assert_eq!(tagged.tag(), Some("3.28.1_b1"));
+    }
+
+    // ── parse (strict, no default registry) ─────────────────────────────
+
+    #[test]
+    fn parse_rejects_bare_name() {
+        let err = Identifier::parse("cmake:3.28").unwrap_err();
+        assert!(matches!(err.kind, IdentifierErrorKind::MissingRegistry));
+    }
+
+    #[test]
+    fn parse_rejects_org_repo() {
+        let err = Identifier::parse("myorg/cmake").unwrap_err();
+        assert!(matches!(err.kind, IdentifierErrorKind::MissingRegistry));
+    }
+
+    #[test]
+    fn parse_accepts_explicit_registry() {
+        let id = Identifier::parse("ocx.sh/cmake:3.28").unwrap();
+        assert_eq!(id.registry(), "ocx.sh");
+        assert_eq!(id.repository(), "cmake");
+        assert_eq!(id.tag(), Some("3.28"));
+    }
+
+    #[test]
+    fn parse_accepts_localhost() {
+        let id = Identifier::parse("localhost/repo:tag").unwrap();
+        assert_eq!(id.registry(), "localhost");
+    }
+
+    #[test]
+    fn parse_accepts_port() {
+        let id = Identifier::parse("localhost:5000/repo:tag").unwrap();
+        assert_eq!(id.registry(), "localhost:5000");
+    }
+
+    #[test]
+    fn parse_rejects_dotdot_traversal() {
+        let err = Identifier::parse("ocx.sh/../evil").unwrap_err();
+        assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
+    }
+
+    #[test]
+    fn parse_rejects_dot_traversal() {
+        let err = Identifier::parse("ocx.sh/org/./evil").unwrap_err();
+        assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
+    }
+
+    #[test]
+    fn parse_rejects_dotdot_with_tag() {
+        let err = Identifier::parse("ocx.sh/..:tag").unwrap_err();
+        assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
+    }
+
+    #[test]
+    fn deserialize_rejects_bare_name() {
+        let err = serde_json::from_str::<Identifier>(r#""cmake:3.28""#).unwrap_err();
+        assert!(err.to_string().contains("explicit registry"));
+    }
+
+    // ── parse_with_default_registry (CLI path) ──────────────────────────
+
+    #[test]
+    fn parse_with_default_registry_accepts_bare_name() {
+        let id = Identifier::parse_with_default_registry("cmake:3.28", "ocx.sh").unwrap();
+        assert_eq!(id.registry(), "ocx.sh");
+        assert_eq!(id.repository(), "cmake");
+        assert_eq!(id.tag(), Some("3.28"));
+    }
+
+    #[test]
+    fn parse_with_default_registry_accepts_org_repo() {
+        let id = Identifier::parse_with_default_registry("myorg/cmake", "ocx.sh").unwrap();
+        assert_eq!(id.registry(), "ocx.sh");
+        assert_eq!(id.repository(), "myorg/cmake");
+    }
+
+    #[test]
+    fn from_str_uses_default_registry() {
+        let id: Identifier = "cmake:3.28".parse().unwrap();
+        assert_eq!(id.registry(), DEFAULT_REGISTRY);
+        assert_eq!(id.repository(), "cmake");
     }
 }

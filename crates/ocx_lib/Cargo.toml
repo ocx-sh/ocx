@@ -6,12 +6,8 @@ license.workspace = true
 publish = false
 exclude = ["src/test_data/**"]
 
-[features]
-default = []
-jsonschema = ["dep:schemars"]
-
 [dependencies]
-schemars = { version = "1", optional = true }
+schemars = "1"
 tokio = { workspace = true }
 
 oci-client = "0.16.0"

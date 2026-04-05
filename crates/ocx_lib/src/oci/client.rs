@@ -6,7 +6,7 @@ use crate::{
     MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1,
     MEDIA_TYPE_PNG, MEDIA_TYPE_SVG, Result, archive, compression, log, media_type_file_ext, media_type_from_path,
     media_type_select, media_type_select_some, oci,
-    package::{self, info::Info, install_info, install_status, metadata, tag::InternalTag},
+    package::{self, info::Info, metadata, tag::InternalTag},
     prelude::SerdeExt,
     utility,
 };
@@ -27,14 +27,6 @@ pub use builder::ClientBuilder;
 pub use transport::OciTransport;
 
 use error::ClientError;
-
-/// Result of downloading manifest + blobs to the temp directory.
-struct TempDownload {
-    manifest: oci::ImageManifest,
-    metadata: metadata::Metadata,
-    blob_compression: compression::CompressionAlgorithm,
-    blob_file_ext: &'static str,
-}
 
 pub struct Client {
     transport: Box<dyn OciTransport>,
@@ -119,7 +111,7 @@ impl Client {
     pub async fn fetch_manifest(&self, identifier: &Identifier) -> Result<(Digest, oci::Manifest)> {
         let ref_ = native::Reference::from(identifier);
         self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
-        let (manifest, digest_str) = self.pull_manifest(&ref_).await?;
+        let (manifest, digest_str) = self.fetch_manifest_raw(&ref_).await?;
         let digest = digest_str.try_into()?;
         Ok((digest, manifest))
     }
@@ -208,80 +200,33 @@ impl Client {
     }
 
     // ── Package pull ─────────────────────────────────────────────────
+    //
+    // Three composable methods for fetching a package from a registry:
+    //
+    //   pull_manifest  → ImageManifest   (validate digest, media types, layers)
+    //   pull_metadata  → Metadata        (fetch config blob — deps, env, etc.)
+    //   pull_content   → TempAcquireResult (download content blob, extract, codesign)
+    //
+    // Both `pull_metadata` and `pull_content` accept an optional manifest.
+    // If `None`, they call `pull_manifest` internally.
 
-    pub async fn pull_package(
+    /// Fetches and validates the OCI manifest for a pinned package.
+    ///
+    /// Verifies the manifest digest matches the identifier.
+    /// Returns the [`ImageManifest`](oci::ImageManifest) without asserting media types.
+    pub async fn pull_manifest(
         &self,
-        identifier: Identifier,
-        output_path: impl AsRef<std::path::Path>,
-        temp: crate::file_structure::TempAcquireResult,
-    ) -> Result<install_info::InstallInfo> {
-        let output_path = output_path.as_ref().to_path_buf();
-        let temp_path = &temp.dir.dir;
-        log::debug!("Pulling package {} to {}", identifier, output_path.display());
+        identifier: &oci::PinnedIdentifier,
+    ) -> std::result::Result<oci::ImageManifest, ClientError> {
+        let expected_digest = identifier.digest().to_string();
+        let image = native::Reference::from(&**identifier);
 
-        let identifier_digest = identifier
-            .digest()
-            .map(|d| d.to_string())
-            .ok_or_else(|| ClientError::InvalidManifest("identifier must carry a digest".into()))?;
-
-        // Check if already installed at the final output path.
-        let metadata_path = output_path.join("metadata.json");
-        let content_path = output_path.join("content");
-        let install_path = output_path.join("install.json");
-        let lock_path = output_path.join("install.lock");
-
-        if let (true, Some(status)) =
-            install_status::check_install_status(&install_path, &lock_path, self.lock_timeout).await
-        {
-            log::debug!(
-                "Package '{}' is already installed (ok={}, timestamp={})",
-                identifier,
-                status.ok,
-                status.timestamp
-            );
-            let metadata = metadata::Metadata::read_json_from_path(&metadata_path)?;
-            return Ok(install_info::InstallInfo {
-                identifier,
-                metadata,
-                content: content_path,
-            });
-        }
-
-        let image = native::Reference::from(&identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
-        let mut temp_guard = utility::drop_file::DropFile::new(temp_path.to_path_buf());
-        let download = self
-            .download_to_temp(&identifier, &identifier_digest, temp_path)
-            .await?;
-        self.extract_and_finalize(&identifier, download, temp_path, &output_path)
-            .await?;
-
-        // Clean up temp directory — files have been moved to the output path.
-        temp_guard.unlink().ok();
-        drop(temp);
-
-        let metadata = metadata::Metadata::read_json_from_path(output_path.join("metadata.json"))?;
-        Ok(install_info::InstallInfo {
-            identifier,
-            metadata,
-            content: output_path.join("content"),
-        })
-    }
-
-    /// Downloads manifest and blobs to the temp directory, validating the manifest.
-    async fn download_to_temp(
-        &self,
-        identifier: &Identifier,
-        expected_digest: &str,
-        temp_path: &std::path::Path,
-    ) -> std::result::Result<TempDownload, ClientError> {
-        let image = native::Reference::from(identifier);
-
-        let (manifest, digest_str) = self.pull_manifest(&image).await?;
+        let (manifest, digest_str) = self.fetch_manifest_raw(&image).await?;
         if digest_str != expected_digest {
             return Err(ClientError::DigestMismatch {
-                expected: expected_digest.to_string(),
+                expected: expected_digest,
                 actual: digest_str,
             });
         }
@@ -290,47 +235,91 @@ impl Client {
             _ => return Err(ClientError::UnexpectedManifestType),
         };
 
+        Ok(manifest)
+    }
+
+    /// Fetches the package metadata from the config blob (~1KB).
+    ///
+    /// If `manifest` is `None`, fetches it via [`pull_manifest`](Self::pull_manifest).
+    pub async fn pull_metadata(
+        &self,
+        identifier: &oci::PinnedIdentifier,
+        manifest: Option<&oci::ImageManifest>,
+    ) -> std::result::Result<metadata::Metadata, ClientError> {
+        let owned;
+        let manifest = match manifest {
+            Some(m) => m,
+            None => {
+                owned = self.pull_manifest(identifier).await?;
+                &owned
+            }
+        };
+
         media_type_select(&manifest.config.media_type, &[MEDIA_TYPE_PACKAGE_METADATA_V1])
             .map_err(|e| ClientError::InvalidManifest(e.to_string()))?;
+
+        let image = native::Reference::from(&**identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+
+        let bytes = self.transport.pull_blob(&image, &manifest.config.digest).await?;
+        serde_json::from_slice(&bytes).map_err(ClientError::Serialization)
+    }
+
+    /// Downloads the content blob and extracts it into a temp directory.
+    ///
+    /// Takes ownership of `temp` — on error, the temp directory is cleaned up
+    /// automatically. On success, returns the [`TempAcquireResult`] back.
+    ///
+    /// The temp directory will contain after success:
+    /// - `metadata.json` (serialized metadata)
+    /// - `content/` (extracted archive)
+    /// - `manifest.json` (OCI manifest for audit)
+    ///
+    /// If `manifest` is `None`, fetches it via [`pull_manifest`](Self::pull_manifest).
+    pub async fn pull_content(
+        &self,
+        identifier: &oci::PinnedIdentifier,
+        manifest: Option<&oci::ImageManifest>,
+        metadata: &metadata::Metadata,
+        output_dir: &std::path::Path,
+    ) -> std::result::Result<(), ClientError> {
+        let owned;
+        let manifest = match manifest {
+            Some(m) => m,
+            None => {
+                owned = self.pull_manifest(identifier).await?;
+                &owned
+            }
+        };
+
         media_type_select_some(&manifest.artifact_type, &[MEDIA_TYPE_PACKAGE_V1])
             .map_err(|e| ClientError::InvalidManifest(e.to_string()))?;
-
-        if manifest.layers.len() != 1 {
-            return Err(ClientError::InvalidManifest(format!(
-                "expected exactly 1 layer, got {}",
-                manifest.layers.len()
-            )));
+        if manifest.layers.is_empty() {
+            return Err(ClientError::InvalidManifest("manifest has no layers".to_string()));
         }
+
+        let mut temp_guard = utility::fs::DropFile::new(output_dir.to_path_buf());
+        let image = native::Reference::from(&**identifier);
+
+        // Write metadata.json to temp so it's available for the final move.
+        metadata
+            .write_json(output_dir.join("metadata.json"))
+            .await
+            .map_err(ClientError::internal)?;
+
+        // Download content blob — potentially large, show progress.
         let blob_layer = &manifest.layers[0];
         let blob_compression =
             compression::CompressionAlgorithm::from_media_type(&blob_layer.media_type).ok_or_else(|| {
                 ClientError::InvalidManifest(format!("unsupported layer media type: {}", blob_layer.media_type))
             })?;
         let blob_file_ext = media_type_file_ext(&blob_layer.media_type).unwrap_or("blob");
-
-        let metadata_path = temp_path.join("metadata.json");
-        let content_path = temp_path.join("content");
+        let content_path = output_dir.join("content");
         let blob_path = content_path.with_added_extension(blob_file_ext);
-
-        log::info!(
-            "Pulling package {} with digest {} to temp {}",
-            identifier,
-            expected_digest,
-            temp_path.display()
-        );
-        // Config blob — tiny (<1kB), no progress needed.
-        self.transport
-            .pull_blob_to_file(
-                &image,
-                &manifest.config.digest,
-                &metadata_path,
-                0,
-                transport::no_progress(),
-            )
-            .await?;
-
-        // Package blob — potentially large, show progress.
         let blob_total_size = u64::try_from(blob_layer.size).unwrap_or(0);
+
+        log::info!("Downloading package {} to temp {}", identifier, output_dir.display());
+
         let bar = crate::cli::progress::ProgressBar::bytes(
             tracing::info_span!("Downloading", package = %identifier),
             blob_total_size,
@@ -345,29 +334,34 @@ impl Client {
                 .await?;
         }
 
-        let metadata = metadata::Metadata::read_json_from_path(&metadata_path).map_err(ClientError::internal)?;
+        // Extract archive + codesign.
+        self.extract_to_temp(identifier, metadata, blob_compression, blob_file_ext, output_dir)
+            .await?;
 
-        Ok(TempDownload {
-            manifest,
-            metadata,
-            blob_compression,
-            blob_file_ext,
-        })
+        // Write manifest.json for audit.
+        manifest
+            .write_json(output_dir.join("manifest.json"))
+            .await
+            .map_err(ClientError::internal)?;
+
+        temp_guard.retain();
+        Ok(())
     }
 
-    /// Extracts the downloaded archive and moves files from temp to the final output path.
-    async fn extract_and_finalize(
+    /// Extracts the downloaded archive within the temp directory and signs content.
+    async fn extract_to_temp(
         &self,
-        identifier: &Identifier,
-        download: TempDownload,
-        temp_path: &std::path::Path,
-        output_path: &std::path::Path,
+        identifier: &oci::PinnedIdentifier,
+        metadata: &metadata::Metadata,
+        blob_compression: compression::CompressionAlgorithm,
+        blob_file_ext: &str,
+        output_dir: &std::path::Path,
     ) -> std::result::Result<(), ClientError> {
-        let temp_content_path = temp_path.join("content");
-        let blob_path = temp_content_path.with_added_extension(download.blob_file_ext);
-        let _drop_blob = utility::drop_file::DropFile::new(blob_path.clone());
+        let temp_content_path = output_dir.join("content");
+        let blob_path = temp_content_path.with_added_extension(blob_file_ext);
+        let _drop_blob = utility::fs::DropFile::new(blob_path.clone());
 
-        match &download.metadata {
+        match metadata {
             metadata::Metadata::Bundle(bundle) => {
                 log::debug!(
                     "Extracting bundle package {} to {}",
@@ -381,7 +375,7 @@ impl Client {
                 );
 
                 let extract_options = archive::ExtractOptions {
-                    algorithm: Some(download.blob_compression),
+                    algorithm: Some(blob_compression),
                     strip_components: bundle.strip_components.unwrap_or(0).into(),
                 };
                 async {
@@ -394,38 +388,10 @@ impl Client {
             }
         }
 
-        // Move temp contents to the final output path.
-        // Wrap in DropFile so partial output is cleaned up on failure.
-        std::fs::create_dir_all(output_path).map_err(|e| ClientError::Io {
-            path: output_path.to_path_buf(),
-            source: e,
-        })?;
-        let mut output_guard = utility::drop_file::DropFile::new(output_path.to_path_buf());
-
-        let final_metadata = output_path.join("metadata.json");
-        let final_content = output_path.join("content");
-        let final_manifest = output_path.join("manifest.json");
-        let final_install = output_path.join("install.json");
-
-        Self::move_path(&temp_path.join("metadata.json"), &final_metadata)?;
-        Self::move_path(&temp_content_path, &final_content)?;
-
-        crate::codesign::sign_extracted_content(&final_content)
+        crate::codesign::sign_extracted_content(&temp_content_path)
             .await
             .map_err(ClientError::internal)?;
 
-        download
-            .manifest
-            .write_json_to_path(&final_manifest)
-            .map_err(ClientError::internal)?;
-
-        let install_status = package::install_status::InstallStatus::new().ok();
-        install_status
-            .write_json_to_path(&final_install)
-            .map_err(ClientError::internal)?;
-
-        // All steps succeeded — keep the output directory.
-        output_guard.retain();
         Ok(())
     }
 
@@ -670,7 +636,7 @@ impl Client {
         let image = super::native::Reference::from(&desc_identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
-        let (manifest, _digest) = match self.pull_manifest(&image).await {
+        let (manifest, _digest) = match self.fetch_manifest_raw(&image).await {
             Ok(result) => result,
             Err(ClientError::ManifestNotFound(_)) => return Ok(None),
             Err(e) => return Err(e),
@@ -750,7 +716,10 @@ impl Client {
     // ── Internal helpers ─────────────────────────────────────────────
 
     /// Pulls and parses a manifest from the registry.
-    async fn pull_manifest(&self, image: &oci::Reference) -> std::result::Result<(oci::Manifest, String), ClientError> {
+    async fn fetch_manifest_raw(
+        &self,
+        image: &oci::Reference,
+    ) -> std::result::Result<(oci::Manifest, String), ClientError> {
         log::debug!("Pulling manifest for image {}", image);
         let (data, digest) = self
             .transport
@@ -758,17 +727,6 @@ impl Client {
             .await?;
         let manifest: oci::Manifest = serde_json::from_slice(&data).map_err(ClientError::Serialization)?;
         Ok((manifest, digest))
-    }
-
-    /// Moves a file or directory from `src` to `dst` (rename on same filesystem).
-    fn move_path(src: &std::path::Path, dst: &std::path::Path) -> std::result::Result<(), ClientError> {
-        if src.exists() {
-            std::fs::rename(src, dst).map_err(|e| ClientError::Io {
-                path: src.to_path_buf(),
-                source: e,
-            })?;
-        }
-        Ok(())
     }
 }
 
@@ -809,29 +767,12 @@ mod tests {
 
     use std::sync::Mutex;
 
-    use crate::file_lock;
-    use crate::file_structure::{TempAcquireResult, TempDir, TempStore};
-    use crate::prelude::SerdeExt;
+    use crate::file_structure::TempStore;
 
     // ── Test helpers ─────────────────────────────────────────────────
 
     fn stub(data: &StubTransportData) -> Client {
         Client::with_transport(Box::new(StubTransport::new(data.clone())))
-    }
-
-    /// Acquire a temp directory for use in pull_package tests.
-    fn test_acquire(path: &std::path::Path) -> TempAcquireResult {
-        std::fs::create_dir_all(path).unwrap();
-        let lock_path = path.join("install.lock");
-        let file = std::fs::File::create(&lock_path).unwrap();
-        let lock = file_lock::FileLock::try_exclusive(file).unwrap();
-        TempAcquireResult {
-            dir: TempDir {
-                dir: path.to_path_buf(),
-            },
-            lock,
-            was_cleaned: false,
-        }
     }
 
     fn test_identifier(tag: &str) -> Identifier {
@@ -841,6 +782,10 @@ mod tests {
     fn test_identifier_with_digest(digest_hex: &str) -> Identifier {
         let digest = oci::Digest::Sha256(digest_hex.to_string());
         Identifier::new_registry("test/pkg", "example.com").clone_with_digest(digest)
+    }
+
+    fn test_pinned(digest_hex: &str) -> oci::PinnedIdentifier {
+        oci::PinnedIdentifier::try_from(test_identifier_with_digest(digest_hex)).unwrap()
     }
 
     /// Build a valid image manifest with the given config and layer digests.
@@ -871,20 +816,6 @@ mod tests {
         let data = serde_json::to_vec(manifest).unwrap();
         let digest = Digest::sha256(&data).to_string();
         (data, digest)
-    }
-
-    /// Write install.json + metadata.json at `output_path` to simulate
-    /// a completed installation, so `pull_package` will return early.
-    fn write_completed_install(output_path: &std::path::Path) {
-        std::fs::create_dir_all(output_path).unwrap();
-        let status = package::install_status::InstallStatus::new().ok();
-        status.write_json_to_path(output_path.join("install.json")).unwrap();
-        let metadata = metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
-            version: package::metadata::bundle::Version::V1,
-            strip_components: None,
-            env: Default::default(),
-        });
-        metadata.write_json_to_path(output_path.join("metadata.json")).unwrap();
     }
 
     // ── Pagination tests ─────────────────────────────────────────────
@@ -958,15 +889,15 @@ mod tests {
         assert!(matches!(fetched, oci::Manifest::Image(_)));
     }
 
-    // ── pull_package tests ───────────────────────────────────────────
+    // ── pull_manifest tests ─────────────────────────────────────
 
     #[tokio::test]
-    async fn pull_package_digest_mismatch() {
+    async fn pull_manifest_digest_mismatch() {
         let manifest = oci::Manifest::Image(make_image_manifest("sha256:cfg", "sha256:layer"));
         let (manifest_data, _real_digest) = serialize_manifest(&manifest);
         let wrong_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-        let id = test_identifier_with_digest("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let id = test_pinned("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
         let data = StubTransportData::new();
         data.write()
@@ -974,16 +905,14 @@ mod tests {
             .insert(id.to_string(), (manifest_data, wrong_digest.to_string()));
         let client = stub(&data);
 
-        let dir = tempfile::tempdir().unwrap();
-        let temp = test_acquire(&dir.path().join("temp"));
-        let result = client.pull_package(id, dir.path().join("output"), temp).await;
+        let result = client.pull_manifest(&id).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("digest mismatch"), "got: {}", err_msg);
     }
 
     #[tokio::test]
-    async fn pull_package_unexpected_manifest_type() {
+    async fn pull_manifest_unexpected_manifest_type() {
         let index = oci::ImageIndex {
             schema_version: 2,
             media_type: Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
@@ -995,7 +924,7 @@ mod tests {
         let (manifest_data, digest_str) = serialize_manifest(&manifest);
 
         let digest_hex = digest_str.strip_prefix("sha256:").unwrap();
-        let id = test_identifier_with_digest(digest_hex);
+        let id = test_pinned(digest_hex);
 
         let data = StubTransportData::new();
         data.write()
@@ -1003,9 +932,7 @@ mod tests {
             .insert(id.to_string(), (manifest_data, digest_str));
         let client = stub(&data);
 
-        let dir = tempfile::tempdir().unwrap();
-        let temp = test_acquire(&dir.path().join("temp"));
-        let result = client.pull_package(id, dir.path().join("out"), temp).await;
+        let result = client.pull_manifest(&id).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -1015,90 +942,132 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn pull_package_no_digest_in_identifier() {
-        let data = StubTransportData::new();
-        let client = stub(&data);
-        let id = test_identifier("1.0");
+    // ── pull_manifest: no longer validates media types ────────────
 
-        let dir = tempfile::tempdir().unwrap();
-        let temp = test_acquire(&dir.path().join("temp"));
-        let result = client.pull_package(id, dir.path().join("out"), temp).await;
+    #[tokio::test]
+    async fn pull_manifest_accepts_any_media_types() {
+        let mut m = make_image_manifest("sha256:cfg", "sha256:layer");
+        m.config.media_type = "application/vnd.other.config".to_string();
+        m.artifact_type = Some("application/vnd.other.artifact".to_string());
+        let manifest = oci::Manifest::Image(m);
+        let (manifest_data, digest_str) = serialize_manifest(&manifest);
+        let digest_hex = digest_str.strip_prefix("sha256:").unwrap();
+        let id = test_pinned(digest_hex);
+
+        let data = StubTransportData::new();
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        let client = stub(&data);
+
+        let result = client.pull_manifest(&id).await;
+        assert!(result.is_ok(), "pull_manifest should not validate media types");
+    }
+
+    // ── pull_metadata tests ─────────────────────────────────────
+
+    /// Helper: register a manifest + config blob in the stub, returning the pinned ID.
+    fn setup_manifest_and_blob(
+        data: &StubTransportData,
+        manifest: oci::ImageManifest,
+        config_blob: &[u8],
+    ) -> oci::PinnedIdentifier {
+        let config_digest = &manifest.config.digest;
+        data.write()
+            .blobs
+            .insert(config_digest.to_string(), config_blob.to_vec());
+
+        let oci_manifest = oci::Manifest::Image(manifest);
+        let (manifest_data, digest_str) = serialize_manifest(&oci_manifest);
+        let digest_hex = digest_str.strip_prefix("sha256:").unwrap();
+        let id = test_pinned(digest_hex);
+
+        data.write()
+            .manifests
+            .insert(id.to_string(), (manifest_data, digest_str));
+        id
+    }
+
+    #[tokio::test]
+    async fn pull_metadata_success() {
+        let metadata_json = br#"{"type":"bundle","version":1}"#;
+        let data = StubTransportData::new();
+        let manifest = make_image_manifest("sha256:cfg", "sha256:layer");
+        let id = setup_manifest_and_blob(&data, manifest, metadata_json);
+        let client = stub(&data);
+
+        let result = client.pull_metadata(&id, None).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn pull_metadata_rejects_wrong_config_media_type() {
+        let metadata_json = br#"{"type":"bundle","version":1}"#;
+        let mut manifest = make_image_manifest("sha256:cfg", "sha256:layer");
+        manifest.config.media_type = "application/vnd.wrong".to_string();
+
+        let data = StubTransportData::new();
+        let id = setup_manifest_and_blob(&data, manifest.clone(), metadata_json);
+        let client = stub(&data);
+
+        let result = client.pull_metadata(&id, Some(&manifest)).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("digest"), "got: {}", err_msg);
+        assert!(err_msg.contains("Invalid manifest"), "got: {}", err_msg);
     }
 
-    // ── Re-entrant install tests ────────────────────────────────────
+    // ── pull_content tests ──────────────────────────────────────
 
     #[tokio::test]
-    async fn pull_package_skips_download_when_already_installed() {
-        let id = test_identifier_with_digest("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    async fn pull_content_rejects_wrong_artifact_type() {
+        let mut manifest = make_image_manifest("sha256:cfg", "sha256:layer");
+        manifest.artifact_type = Some("application/vnd.wrong".to_string());
+
         let data = StubTransportData::new();
+        let id = setup_manifest_and_blob(&data, manifest.clone(), b"{}");
         let client = stub(&data);
 
+        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("output");
-        write_completed_install(&output);
 
-        let temp = test_acquire(&dir.path().join("temp"));
-        let info = client.pull_package(id.clone(), &output, temp).await.unwrap();
-
-        // Verify no transport calls were made — install was short-circuited.
-        assert!(
-            data.read().calls.is_empty(),
-            "expected no transport calls, got: {:?}",
-            data.read().calls
-        );
-        assert_eq!(info.content, output.join("content"));
-        assert_eq!(info.identifier, id);
+        match client.pull_content(&id, Some(&manifest), &metadata, dir.path()).await {
+            Err(e) => assert!(e.to_string().contains("Invalid manifest"), "got: {}", e),
+            Ok(_) => panic!("should reject wrong artifact type"),
+        }
     }
 
     #[tokio::test]
-    async fn pull_package_reentrant_second_call_skips_download() {
-        // Simulate two sequential "installs" of the same package to the same
-        // output path. The first fails (no manifest data configured), but we
-        // manually write a completed install status. The second call should
-        // detect the completed install and skip the download entirely.
-        let id = test_identifier_with_digest("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    async fn pull_content_rejects_empty_layers() {
+        let mut manifest = make_image_manifest("sha256:cfg", "sha256:layer");
+        manifest.layers.clear();
+
         let data = StubTransportData::new();
+        let id = setup_manifest_and_blob(&data, manifest.clone(), b"{}");
         let client = stub(&data);
+
+        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("output");
 
-        // First "install" — fails because no manifest is configured.
-        let temp1 = test_acquire(&dir.path().join("temp1"));
-        let result = client.pull_package(id.clone(), &output, temp1).await;
-        assert!(result.is_err());
-        assert_eq!(data.read().calls.len(), 1); // pull_manifest_raw was called
-
-        // Simulate successful install by writing status files.
-        write_completed_install(&output);
-
-        // Second "install" — should detect existing install and skip download.
-        let temp2 = test_acquire(&dir.path().join("temp2"));
-        let info = client.pull_package(id.clone(), &output, temp2).await.unwrap();
-
-        // Only the one call from the first attempt; no new transport calls.
-        assert_eq!(data.read().calls.len(), 1);
-        assert_eq!(info.content, output.join("content"));
+        match client.pull_content(&id, Some(&manifest), &metadata, dir.path()).await {
+            Err(e) => assert!(e.to_string().contains("no layers"), "got: {}", e),
+            Ok(_) => panic!("should reject empty layers"),
+        }
     }
 
-    #[tokio::test]
-    async fn temp_acquire_cleans_leftover_before_download() {
-        let id = test_identifier_with_digest("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
-        let data = StubTransportData::new();
-        let client = stub(&data);
+    // ── TempStore tests ─────────────────────────────────────────────
 
+    #[tokio::test]
+    async fn temp_acquire_cleans_leftover_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let temp_root = dir.path().join("temp_root");
         let temp_path = temp_root.join("some_hash");
 
         // Simulate leftover artifacts from a crashed download.
-        std::fs::create_dir_all(&temp_path).unwrap();
-        std::fs::write(temp_path.join("install.lock"), b"").unwrap();
-        std::fs::write(temp_path.join("metadata.json"), b"stale").unwrap();
-        std::fs::create_dir(temp_path.join("content")).unwrap();
+        tokio::fs::create_dir_all(&temp_path).await.unwrap();
+        tokio::fs::write(temp_path.join("metadata.json"), b"stale")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(temp_path.join("content")).await.unwrap();
 
         let store = TempStore::new(&temp_root);
         let acquired = store.try_acquire(&temp_path).unwrap().unwrap();
@@ -1107,12 +1076,8 @@ mod tests {
         assert!(acquired.was_cleaned);
         assert!(!temp_path.join("metadata.json").exists());
         assert!(!temp_path.join("content").exists());
-        assert!(temp_path.join("install.lock").exists());
-
-        // The cleaned temp can be passed to pull_package (which will fail
-        // because no manifest is configured, but the point is it accepts it).
-        let result = client.pull_package(id, dir.path().join("output"), acquired).await;
-        assert!(result.is_err());
+        // Lock file is a sibling, not inside the dir.
+        assert!(TempStore::lock_path_for(&temp_path).exists());
     }
 
     // ── Paginate unit test ───────────────────────────────────────────
@@ -1350,11 +1315,6 @@ mod tests {
             Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
         }
 
-        fn test_identifier_with_digest(digest_hex: &str) -> Identifier {
-            let digest = oci::Digest::Sha256(digest_hex.to_string());
-            Identifier::new_registry("test/pkg", "example.com").clone_with_digest(digest)
-        }
-
         fn stub_with_capture(data: &StubTransportData) -> Client {
             data.write().capture_pushes = true;
             Client::with_transport(Box::new(StubTransport::new(data.clone())))
@@ -1442,36 +1402,16 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn pull_package_authenticates_with_pull() {
-            let id = test_identifier_with_digest("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        async fn pull_manifest_authenticates_with_pull() {
+            let id = test_pinned("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
             let data = StubTransportData::new();
             let client = stub(&data);
 
-            let dir = tempfile::tempdir().unwrap();
             // Will fail (no manifest), but auth should have been called first.
-            let _ = client
-                .pull_package(id, dir.path().join("out"), test_acquire(&dir.path().join("temp")))
-                .await;
+            let _ = client.pull_manifest(&id).await;
             let calls = auth_calls(&data);
             assert_eq!(calls.len(), 1);
             assert!(matches!(calls[0].1, RegistryOperation::Pull));
-        }
-
-        #[tokio::test]
-        async fn pull_package_skips_auth_when_already_installed() {
-            let id = test_identifier_with_digest("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-            let data = StubTransportData::new();
-            let client = stub(&data);
-
-            let dir = tempfile::tempdir().unwrap();
-            let output = dir.path().join("output");
-            write_completed_install(&output);
-
-            let temp = test_acquire(&dir.path().join("temp"));
-            client.pull_package(id, &output, temp).await.unwrap();
-
-            // No auth call — early return before network.
-            assert!(auth_calls(&data).is_empty());
         }
 
         #[tokio::test]
@@ -1483,7 +1423,7 @@ mod tests {
             let id = test_identifier("1.0");
             let dir = tempfile::tempdir().unwrap();
             let archive_path = dir.path().join("pkg.tar.gz");
-            std::fs::write(&archive_path, b"fake-archive").unwrap();
+            tokio::fs::write(&archive_path, b"fake-archive").await.unwrap();
 
             let info = Info {
                 identifier: id,
@@ -1491,6 +1431,7 @@ mod tests {
                     version: package::metadata::bundle::Version::V1,
                     strip_components: None,
                     env: Default::default(),
+                    dependencies: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             };
@@ -1556,7 +1497,7 @@ mod tests {
             let id = test_identifier("1.0");
             let dir = tempfile::tempdir().unwrap();
             let archive_path = dir.path().join("pkg.tar.gz");
-            std::fs::write(&archive_path, b"fake-archive").unwrap();
+            tokio::fs::write(&archive_path, b"fake-archive").await.unwrap();
 
             let info = Info {
                 identifier: id,
@@ -1564,6 +1505,7 @@ mod tests {
                     version: package::metadata::bundle::Version::V1,
                     strip_components: None,
                     env: Default::default(),
+                    dependencies: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             };
