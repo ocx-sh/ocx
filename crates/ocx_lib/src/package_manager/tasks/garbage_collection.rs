@@ -61,12 +61,14 @@ impl GarbageCollector {
 
     /// Deletes the given object directories from disk.
     ///
-    /// For each target: re-checks `has_live_refs` as a best-effort guard
-    /// against concurrent installs, unlinks dependency forward-refs via
+    /// For each target: unlinks dependency forward-refs via
     /// [`ReferenceManager`], then removes the directory.
     ///
     /// Handles `NotFound` errors from `remove_dir_all` gracefully — a
     /// concurrent deletion or external cleanup is not treated as failure.
+    ///
+    /// **Note:** No guard against concurrent installs. Do not run `clean`
+    /// while other OCX operations are in progress.
     pub async fn delete_objects(&self, targets: &HashSet<PathBuf>, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
         if targets.is_empty() {
             return Ok(Vec::new());

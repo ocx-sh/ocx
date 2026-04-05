@@ -45,12 +45,12 @@ def _push_with_deps(
     )
 
 
-def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, export: bool = False) -> dict:
+def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str | None = None) -> dict:
     """Build a dependency descriptor from a published PackageInfo."""
     digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     entry: dict = {"identifier": f"{pkg.fq}@{digest}"}
-    if export:
-        entry["export"] = True
+    if visibility is not None:
+        entry["visibility"] = visibility
     return entry
 
 
@@ -185,7 +185,7 @@ def test_env_includes_dependency_vars(ocx: OcxRunner, unique_repo: str, tmp_path
     app_repo = f"{unique_repo}_app"
 
     leaf = _push_leaf(ocx, leaf_repo, tmp_path)
-    dep = _dep_entry(ocx, leaf, export=True)
+    dep = _dep_entry(ocx, leaf, visibility="public")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
 
     ocx.json("install", "--select", app.short)
@@ -284,12 +284,12 @@ def _setup_leaf_and_app(ocx, unique_repo, tmp_path):
     return leaf, app
 
 
-def _setup_leaf_and_app_exported(ocx, unique_repo, tmp_path):
-    """Common setup: push leaf + app with one exported dep, install app."""
+def _setup_leaf_and_app_public(ocx, unique_repo, tmp_path):
+    """Common setup: push leaf + app with one public dep, install app."""
     leaf_repo = f"{unique_repo}_leaf"
     app_repo = f"{unique_repo}_app"
     leaf = _push_leaf(ocx, leaf_repo, tmp_path)
-    dep = _dep_entry(ocx, leaf, export=True)
+    dep = _dep_entry(ocx, leaf, visibility="public")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
     ocx.json("install", "--select", app.short)
     return leaf, app
@@ -324,18 +324,18 @@ def _setup_diamond(ocx, unique_repo, tmp_path):
     return d, b, c, a
 
 
-def _setup_diamond_exported(ocx, unique_repo, tmp_path):
-    """Common setup: push D, B->D, C->D, A->{B,C}, all exported, install A."""
+def _setup_diamond_public(ocx, unique_repo, tmp_path):
+    """Common setup: push D, B->D, C->D, A->{B,C}, all public, install A."""
     d_repo = f"{unique_repo}_d"
     b_repo = f"{unique_repo}_b"
     c_repo = f"{unique_repo}_c"
     a_repo = f"{unique_repo}_a"
     d = _push_leaf(ocx, d_repo, tmp_path)
-    b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d, export=True)])
-    c = _push_with_deps(ocx, c_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d, export=True)])
+    b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d, visibility="public")])
+    c = _push_with_deps(ocx, c_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d, visibility="public")])
     a = _push_with_deps(
         ocx, a_repo, "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, b, export=True), _dep_entry(ocx, c, export=True)],
+        deps=[_dep_entry(ocx, b, visibility="public"), _dep_entry(ocx, c, visibility="public")],
     )
     ocx.json("install", "--select", a.short)
     return d, b, c, a
@@ -577,7 +577,7 @@ def test_clean_preserves_shared_dependency(ocx: OcxRunner, unique_repo: str, tmp
 
 def test_exec_with_deps_includes_dep_env(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """exec app -- env output includes env var from exported leaf dependency."""
-    leaf, app = _setup_leaf_and_app_exported(ocx, unique_repo, tmp_path)
+    leaf, app = _setup_leaf_and_app_public(ocx, unique_repo, tmp_path)
 
     result = ocx.plain("exec", app.short, "--", "env")
     leaf_home_key = leaf.repo.upper().replace("-", "_") + "_HOME"
@@ -592,7 +592,7 @@ def test_env_dependency_order_deps_first(ocx: OcxRunner, unique_repo: str, tmp_p
     app_repo = f"{unique_repo}_app"
 
     leaf = _push_leaf(ocx, leaf_repo, tmp_path)
-    dep = _dep_entry(ocx, leaf, export=True)
+    dep = _dep_entry(ocx, leaf, visibility="public")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
     ocx.json("install", "--select", app.short)
 
@@ -648,7 +648,7 @@ def test_deps_tree_depth_limits_nesting(ocx: OcxRunner, unique_repo: str, tmp_pa
 def test_deps_flat_conflicting_digests_reports_error(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """--flat with two roots depending on exported different digests of the same repo errors."""
+    """--flat with two roots depending on exported different digests of the same repo warns."""
     d_repo = f"{unique_repo}_d"
     a_repo = f"{unique_repo}_a"
     b_repo = f"{unique_repo}_b"
@@ -658,18 +658,18 @@ def test_deps_flat_conflicting_digests_reports_error(
     d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
 
     # A depends on D v1 (exported), B depends on D v2 (exported) — conflicting digests
-    a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, export=True)])
-    b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v2, export=True)])
+    a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, visibility="public")])
+    b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v2, visibility="public")])
 
     ocx.json("install", "--select", a.short)
     ocx.json("install", "--select", b.short)
 
     result = ocx.run("deps", "--flat", a.short, b.short, check=False)
-    assert result.returncode != 0, (
-        "expected non-zero exit when --flat detects conflicting digests for the same package"
+    assert result.returncode == 0, (
+        f"conflicting digests should warn, not error; got rc={result.returncode}: {result.stderr!r}"
     )
-    assert "conflict" in result.stderr.lower(), (
-        f"expected 'conflict' in stderr; got: {result.stderr!r}"
+    assert "conflicting" in result.stderr.lower(), (
+        f"expected 'conflicting' warning in stderr; got: {result.stderr!r}"
     )
 
 
@@ -684,7 +684,7 @@ def test_shell_env_includes_transitive_dep_vars(
     """shell env on A->B (exported) should include B's env vars as shell exports."""
     leaf = _push_leaf(ocx, f"{unique_repo}_leaf", tmp_path)
     app = _push_with_deps(
-        ocx, f"{unique_repo}_app", "1.0.0", tmp_path, deps=[_dep_entry(ocx, leaf, export=True)]
+        ocx, f"{unique_repo}_app", "1.0.0", tmp_path, deps=[_dep_entry(ocx, leaf, visibility="public")]
     )
     ocx.json("install", "--select", app.short)
 
@@ -701,7 +701,7 @@ def test_exec_diamond_transitive_dep_env(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """exec on A->{B,C}->D (all exported) sees D's env vars through the diamond."""
-    d, b, c, a = _setup_diamond_exported(ocx, unique_repo, tmp_path)
+    d, b, c, a = _setup_diamond_public(ocx, unique_repo, tmp_path)
 
     result = ocx.plain("exec", a.short, "--", "env")
     assert result.returncode == 0
@@ -741,27 +741,31 @@ def test_transitive_ref_chain_integrity(
 def test_deep_conflict_at_depth_two(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """A->B->D v1 and A->C->D v2 (all exported): conflict detected at transitive depth 2."""
+    """A->B->D v1 and A->C->D v2 (all exported): conflict warned at transitive depth 2."""
     d_repo = f"{unique_repo}_d"
     d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
     d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
 
     b = _push_with_deps(
-        ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, export=True)]
+        ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, visibility="public")]
     )
     c = _push_with_deps(
-        ocx, f"{unique_repo}_c", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v2, export=True)]
+        ocx, f"{unique_repo}_c", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v2, visibility="public")]
     )
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, b, export=True), _dep_entry(ocx, c, export=True)],
+        deps=[_dep_entry(ocx, b, visibility="public"), _dep_entry(ocx, c, visibility="public")],
     )
 
     ocx.json("install", "--select", a.short)
 
     result = ocx.run("deps", "--flat", a.short, check=False)
-    assert result.returncode != 0, "expected conflict for D at depth 2"
-    assert "conflict" in result.stderr.lower()
+    assert result.returncode == 0, (
+        f"conflicting digests should warn, not error; got rc={result.returncode}: {result.stderr!r}"
+    )
+    assert "conflicting" in result.stderr.lower(), (
+        f"expected 'conflicting' warning in stderr; got: {result.stderr!r}"
+    )
 
 
 def test_clean_cascades_transitive_chain(
@@ -979,7 +983,7 @@ def test_env_candidate_deduplicates_root_that_is_also_dependency(
     app_repo = f"{unique_repo}_app"
 
     lib = _push_leaf(ocx, lib_repo, tmp_path)
-    dep = _dep_entry(ocx, lib, export=True)
+    dep = _dep_entry(ocx, lib, visibility="public")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
 
     # Install both — app gets candidate symlink, lib gets candidate symlink.
@@ -1002,14 +1006,14 @@ def test_env_candidate_deduplicates_root_that_is_also_dependency(
 # ---------------------------------------------------------------------------
 
 
-def test_export_false_suppresses_dep_env(
+def test_sealed_suppresses_dep_env(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A depends on B (export: false): ocx env A must NOT contain B_HOME."""
     b = _push_leaf(ocx, f"{unique_repo}_b", tmp_path)
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, b, export=False)],
+        deps=[_dep_entry(ocx, b, visibility="sealed")],
     )
     ocx.json("install", "--select", a.short)
 
@@ -1021,14 +1025,14 @@ def test_export_false_suppresses_dep_env(
     )
 
 
-def test_export_true_includes_dep_env(
+def test_public_includes_dep_env(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A depends on B (export: true): ocx env A MUST contain B_HOME."""
     b = _push_leaf(ocx, f"{unique_repo}_b", tmp_path)
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, b, export=True)],
+        deps=[_dep_entry(ocx, b, visibility="public")],
     )
     ocx.json("install", "--select", a.short)
 
@@ -1040,7 +1044,7 @@ def test_export_true_includes_dep_env(
     )
 
 
-def test_non_exported_conflicting_deps_coexist(
+def test_sealed_conflicting_deps_coexist(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A depends on D v1 (non-exported), B depends on D v2 (non-exported): env A B succeeds."""
@@ -1050,11 +1054,11 @@ def test_non_exported_conflicting_deps_coexist(
 
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, d_v1, export=False)],
+        deps=[_dep_entry(ocx, d_v1, visibility="sealed")],
     )
     b = _push_with_deps(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, d_v2, export=False)],
+        deps=[_dep_entry(ocx, d_v2, visibility="sealed")],
     )
 
     ocx.json("install", "--select", a.short)
@@ -1067,47 +1071,47 @@ def test_non_exported_conflicting_deps_coexist(
     )
 
 
-def test_exported_conflicting_deps_error(
+def test_public_conflicting_deps_error(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """A depends on D v1 (exported), B depends on D v2 (exported): env A B fails."""
+    """A depends on D v1 (exported), B depends on D v2 (exported): env A B warns."""
     d_repo = f"{unique_repo}_d"
     d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
     d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
 
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, d_v1, export=True)],
+        deps=[_dep_entry(ocx, d_v1, visibility="public")],
     )
     b = _push_with_deps(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, d_v2, export=True)],
+        deps=[_dep_entry(ocx, d_v2, visibility="public")],
     )
 
     ocx.json("install", "--select", a.short)
     ocx.json("install", "--select", b.short)
 
     result = ocx.run("env", a.short, b.short, check=False)
-    assert result.returncode != 0, (
-        "exported conflicting deps should cause an error"
+    assert result.returncode == 0, (
+        f"conflicting digests should warn, not error; got rc={result.returncode}: {result.stderr!r}"
     )
-    assert "conflict" in result.stderr.lower(), (
-        f"expected 'conflict' in stderr; got: {result.stderr!r}"
+    assert "conflicting" in result.stderr.lower(), (
+        f"expected 'conflicting' warning in stderr; got: {result.stderr!r}"
     )
 
 
-def test_transitive_export_propagates(
+def test_transitive_public_propagates(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A->B(export:true)->C(export:true): ocx env A contains C's env."""
     c = _push_leaf(ocx, f"{unique_repo}_c", tmp_path)
     b = _push_with_deps(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, c, export=True)],
+        deps=[_dep_entry(ocx, c, visibility="public")],
     )
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, b, export=True)],
+        deps=[_dep_entry(ocx, b, visibility="public")],
     )
     ocx.json("install", "--select", a.short)
 
@@ -1119,18 +1123,18 @@ def test_transitive_export_propagates(
     )
 
 
-def test_export_false_blocks_transitive_chain(
+def test_sealed_blocks_transitive_chain(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A->B(export:false)->C(export:true): ocx env A does NOT contain C's env."""
     c = _push_leaf(ocx, f"{unique_repo}_c", tmp_path)
     b = _push_with_deps(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, c, export=True)],
+        deps=[_dep_entry(ocx, c, visibility="public")],
     )
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, b, export=False)],
+        deps=[_dep_entry(ocx, b, visibility="sealed")],
     )
     ocx.json("install", "--select", a.short)
 
@@ -1142,14 +1146,14 @@ def test_export_false_blocks_transitive_chain(
     )
 
 
-def test_gc_protects_non_exported_dep(
+def test_gc_protects_sealed_dep(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A depends on B (export: false). Clean does not collect B while A is installed."""
     b = _push_leaf(ocx, f"{unique_repo}_b", tmp_path)
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
-        deps=[_dep_entry(ocx, b, export=False)],
+        deps=[_dep_entry(ocx, b, visibility="sealed")],
     )
     ocx.json("install", "--select", a.short)
     assert _count_object_dirs(ocx) == 2  # A + B
@@ -1158,6 +1162,114 @@ def test_gc_protects_non_exported_dep(
 
     assert _count_object_dirs(ocx) == 2, (
         "non-exported dep B should be protected from GC while A is installed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Visibility levels (private, interface)
+# ---------------------------------------------------------------------------
+
+
+def test_private_includes_dep_env_for_direct_target(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path,
+):
+    """A depends on B (visibility: private): ocx env A MUST contain B_HOME.
+
+    When A is the direct exec/env target, its private deps are self-visible
+    and should contribute to the environment.
+    """
+    b_home_key = f"{unique_repo}_B_HOME".upper().replace("-", "_")
+    b = _push_leaf(ocx, f"{unique_repo}_b", tmp_path, env=[
+        {"key": b_home_key, "type": "constant", "value": "${installPath}"}
+    ])
+    _push_with_deps(
+        ocx, f"{unique_repo}_app", "1.0.0", tmp_path,
+        deps=[_dep_entry(ocx, b, visibility="private")],
+    )
+    ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
+
+    env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
+    env_keys = [e["key"] for e in env_result]
+    assert b_home_key in env_keys, (
+        f"private dep key {b_home_key!r} MUST appear in env for direct target; got keys: {env_keys}"
+    )
+
+
+def test_private_suppresses_dep_env_for_consumer(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path,
+):
+    """Root→(public)→A→(private)→B: ocx env Root must NOT contain B_HOME.
+
+    B is private to A — when Root consumes A publicly, B's env should not
+    leak to Root because Private doesn't export (propagation: Sealed).
+    """
+    b_home_key = f"{unique_repo}_B_HOME".upper().replace("-", "_")
+    b = _push_leaf(ocx, f"{unique_repo}_b", tmp_path, env=[
+        {"key": b_home_key, "type": "constant", "value": "${installPath}"}
+    ])
+    a = _push_with_deps(
+        ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
+        deps=[_dep_entry(ocx, b, visibility="private")],
+    )
+    _push_with_deps(
+        ocx, f"{unique_repo}_root", "1.0.0", tmp_path,
+        deps=[_dep_entry(ocx, a, visibility="public")],
+    )
+    ocx.json("install", "--select", f"{unique_repo}_root:1.0.0")
+
+    env_result = ocx.json("env", f"{unique_repo}_root:1.0.0")
+    env_keys = [e["key"] for e in env_result]
+    assert b_home_key not in env_keys, (
+        f"private transitive dep key {b_home_key!r} should NOT appear for consumer; got keys: {env_keys}"
+    )
+
+
+def test_interface_includes_dep_env(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path,
+):
+    """A depends on B (visibility: interface): ocx env A MUST contain B_HOME.
+
+    Interface behaves like public for consumer env resolution. This test locks
+    in that behavior.
+    """
+    b_home_key = f"{unique_repo}_B_HOME".upper().replace("-", "_")
+    b = _push_leaf(ocx, f"{unique_repo}_b", tmp_path, env=[
+        {"key": b_home_key, "type": "constant", "value": "${installPath}"}
+    ])
+    _push_with_deps(
+        ocx, f"{unique_repo}_app", "1.0.0", tmp_path,
+        deps=[_dep_entry(ocx, b, visibility="interface")],
+    )
+    ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
+
+    env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
+    env_keys = [e["key"] for e in env_result]
+    assert b_home_key in env_keys, (
+        f"interface dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
+    )
+
+
+def test_deps_flat_shows_visibility_column(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path,
+):
+    """--flat JSON shows visibility field with correct values."""
+    leaf = _push_leaf(ocx, f"{unique_repo}_leaf", tmp_path)
+    _push_with_deps(
+        ocx, f"{unique_repo}_app", "1.0.0", tmp_path,
+        deps=[_dep_entry(ocx, leaf, visibility="public")],
+    )
+    ocx.run("install", "--select", f"{unique_repo}_app:1.0.0")
+
+    result = ocx.json("deps", "--flat", f"{unique_repo}_app:1.0.0")
+    entries = result["entries"]
+    leaf_entry = next(e for e in entries if f"{unique_repo}_leaf" in e["identifier"])
+    app_entry = next(e for e in entries if f"{unique_repo}_app" in e["identifier"])
+
+    assert leaf_entry["visibility"] == "public", (
+        f"public dep should show 'public', got {leaf_entry['visibility']!r}"
+    )
+    assert app_entry["visibility"] == "public", (
+        f"root package should show 'public', got {app_entry['visibility']!r}"
     )
 
 

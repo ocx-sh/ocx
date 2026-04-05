@@ -30,7 +30,7 @@ pub struct Exec {
     packages: Vec<options::Identifier>,
 
     /// Command to execute, with arguments. The command will be executed with the environment with the packages.
-    #[clap(allow_hyphen_values = true, allow_hyphen_values = true, num_args = 1..)]
+    #[clap(allow_hyphen_values = true, num_args = 1..)]
     command: Vec<String>,
 }
 

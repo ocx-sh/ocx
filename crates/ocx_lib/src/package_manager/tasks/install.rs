@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use tokio::task::JoinSet;
-use tracing::{Instrument, info_span};
-
 use crate::{
     log, oci,
     package::install_info::InstallInfo,
@@ -35,35 +32,18 @@ impl PackageManager {
     ) -> Result<InstallInfo, PackageErrorKind> {
         let install_info = self.pull(package, platforms).await?;
 
-        let rm = super::common::reference_manager(self.file_structure());
-        if candidate {
-            let link_path = self.file_structure().installs.candidate(package);
-            log::debug!("Creating candidate symlink at '{}'.", link_path.display());
-            rm.link(&link_path, &install_info.content)
-                .map_err(PackageErrorKind::Internal)?;
-        }
-        if select {
-            let link_path = self.file_structure().installs.current(package);
-            log::debug!("Creating current symlink at '{}'.", link_path.display());
-            rm.link(&link_path, &install_info.content)
-                .map_err(PackageErrorKind::Internal)?;
-        }
+        create_install_symlinks(self, package, &install_info, candidate, select)?;
 
         Ok(install_info)
     }
 
-    /// Installs multiple packages in parallel.
+    /// Installs multiple packages in parallel using a shared singleflight
+    /// group for cross-package diamond dependency deduplication.
     ///
-    /// Each task creates its own [`PullTracker`] internally via
-    /// [`PackageManager::pull`]. Cross-package diamond dependencies are
-    /// deduplicated by the object store check (defense layer 2) and
-    /// file locking (defense layer 3).
-    ///
-    /// Results are returned in input order via
-    /// [`drain_package_tasks`](super::common::drain_package_tasks).
-    ///
-    /// See [`PackageManager::install`] for per-package behavior and
-    /// [`PackageManager::pull`] for concurrency safety.
+    /// Phase 1: [`pull_all`](PackageManager::pull_all) downloads all packages
+    /// and their transitive deps with a shared singleflight group.
+    /// Phase 2: Install symlinks are created sequentially (cheap I/O, no
+    /// contention benefit from parallelism).
     pub async fn install_all(
         &self,
         packages: Vec<oci::Identifier>,
@@ -71,38 +51,40 @@ impl PackageManager {
         candidate: bool,
         select: bool,
     ) -> Result<Vec<InstallInfo>, package_manager::error::Error> {
-        if packages.is_empty() {
-            return Ok(Vec::new());
-        }
-        if packages.len() == 1 {
-            let info = self
-                .install(&packages[0], platforms, candidate, select)
-                .instrument(crate::cli::progress::spinner_span(
-                    info_span!("Installing", package = %packages[0]),
-                    &packages[0],
-                ))
-                .await
-                .map_err(|kind| {
-                    package_manager::error::Error::InstallFailed(vec![PackageError::new(packages[0].clone(), kind)])
+        // Phase 1: Pull all packages with shared singleflight group.
+        let infos = self.pull_all(&packages, platforms).await?;
+
+        // Phase 2: Create symlinks sequentially.
+        if candidate || select {
+            for (pkg, info) in packages.iter().zip(infos.iter()) {
+                create_install_symlinks(self, pkg, info, candidate, select).map_err(|kind| {
+                    package_manager::error::Error::InstallFailed(vec![PackageError::new(pkg.clone(), kind)])
                 })?;
-            return Ok(vec![info]);
+            }
         }
 
-        let mut tasks = JoinSet::new();
-        for package in &packages {
-            let mgr = self.clone();
-            let package = package.clone();
-            let platforms = platforms.clone();
-            let span = crate::cli::progress::spinner_span(info_span!("Installing", package = %package), &package);
-            tasks.spawn(
-                async move {
-                    let result = mgr.install(&package, platforms, candidate, select).await;
-                    (package, result)
-                }
-                .instrument(span),
-            );
-        }
-
-        super::common::drain_package_tasks(&packages, tasks, package_manager::error::Error::InstallFailed).await
+        Ok(infos)
     }
+}
+
+/// Creates candidate and/or current symlinks for a single package.
+fn create_install_symlinks(
+    mgr: &PackageManager,
+    package: &oci::Identifier,
+    info: &InstallInfo,
+    candidate: bool,
+    select: bool,
+) -> Result<(), PackageErrorKind> {
+    let rm = super::common::reference_manager(mgr.file_structure());
+    if candidate {
+        let link_path = mgr.file_structure().installs.candidate(package);
+        log::debug!("Creating candidate symlink at '{}'.", link_path.display());
+        rm.link(&link_path, &info.content).map_err(PackageErrorKind::Internal)?;
+    }
+    if select {
+        let link_path = mgr.file_structure().installs.current(package);
+        log::debug!("Creating current symlink at '{}'.", link_path.display());
+        rm.link(&link_path, &info.content).map_err(PackageErrorKind::Internal)?;
+    }
+    Ok(())
 }

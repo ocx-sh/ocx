@@ -45,11 +45,11 @@ def _push_leaf(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs) -> PackageIn
     return make_package(ocx, repo, "1.0.0", tmp_path, new=True, **kwargs)
 
 
-def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, export: bool = False) -> dict:
+def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str | None = None) -> dict:
     digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     entry: dict = {"identifier": f"{pkg.fq}@{digest}"}
-    if export:
-        entry["export"] = True
+    if visibility is not None:
+        entry["visibility"] = visibility
     return entry
 
 
@@ -69,8 +69,8 @@ def test_env_offline_includes_transitive_dep_vars(
 ):
     """Install A->B->C (all exported) online, then offline env on A includes C's env vars."""
     c = _push_leaf(ocx, f"{unique_repo}_c", tmp_path)
-    b = _push_with_deps(ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, c, export=True)])
-    a = _push_with_deps(ocx, f"{unique_repo}_a", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b, export=True)])
+    b = _push_with_deps(ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, c, visibility="public")])
+    a = _push_with_deps(ocx, f"{unique_repo}_a", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b, visibility="public")])
 
     ocx.json("install", "--select", a.short)
 
@@ -90,7 +90,7 @@ def test_exec_offline_with_transitive_deps(
     """Install A->B (exported) online, then offline exec on A sees B's env vars."""
     leaf = _push_leaf(ocx, f"{unique_repo}_leaf", tmp_path)
     app = _push_with_deps(
-        ocx, f"{unique_repo}_app", "1.0.0", tmp_path, deps=[_dep_entry(ocx, leaf, export=True)]
+        ocx, f"{unique_repo}_app", "1.0.0", tmp_path, deps=[_dep_entry(ocx, leaf, visibility="public")]
     )
 
     ocx.json("install", "--select", app.short)

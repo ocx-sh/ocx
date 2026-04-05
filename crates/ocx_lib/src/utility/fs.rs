@@ -7,10 +7,13 @@ mod drop_file;
 pub use dir_walker::{DirWalker, WalkAction};
 pub use drop_file::DropFile;
 
-/// Atomically moves `src` directory to `dst`.
+/// Moves `src` directory to `dst` via same-filesystem rename.
 ///
 /// Creates parent directories of `dst` if needed. If `dst` already exists
 /// (e.g., from a crashed previous attempt), it is removed first.
+///
+/// Uses `tokio::fs::rename` which requires `src` and `dst` to reside on
+/// the same filesystem. Cross-device moves return an OS error.
 pub async fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), crate::Error> {
     if let Some(parent) = dst.parent() {
         tokio::fs::create_dir_all(parent)

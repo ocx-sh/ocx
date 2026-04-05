@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::oci;
 
+use super::visibility::Visibility;
+
 /// A pinned dependency descriptor.
 ///
 /// The digest references either an OCI Image Index (for platform-aware
@@ -19,13 +21,11 @@ pub struct Dependency {
     /// the digest is used for resolution.
     pub identifier: oci::PinnedIdentifier,
 
-    /// Whether this dependency's environment variables are exported to the
-    /// parent package's environment. When `false` (the default), the
-    /// dependency is installed and GC-protected but its env vars are not
-    /// included when resolving the parent's environment. This controls
-    /// env export only — not installation or GC behavior.
+    /// Controls how this dependency's environment variables propagate.
+    /// Default: `Sealed` — no env contribution. See [`Visibility`] for the
+    /// four levels and their semantics.
     #[serde(default)]
-    pub export: bool,
+    pub visibility: Visibility,
 }
 
 /// Ordered list of package dependencies.
@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(dep.identifier.repository(), "java");
         assert_eq!(dep.identifier.tag(), Some("21"));
         assert_eq!(dep.identifier.digest(), make_digest());
-        assert!(!dep.export);
+        assert_eq!(dep.visibility, Visibility::Sealed);
 
         let reserialized = serde_json::to_string(&dep).unwrap();
         let dep2: Dependency = serde_json::from_str(&reserialized).unwrap();
@@ -148,34 +148,62 @@ mod tests {
     }
 
     #[test]
-    fn dependency_export_true_roundtrip() {
+    fn dependency_visibility_public_roundtrip() {
         let json = format!(
-            r#"{{"identifier":"ocx.sh/java:21@sha256:{}","export":true}}"#,
+            r#"{{"identifier":"ocx.sh/java:21@sha256:{}","visibility":"public"}}"#,
             sha256_hex()
         );
         let dep: Dependency = serde_json::from_str(&json).unwrap();
-        assert!(dep.export);
+        assert_eq!(dep.visibility, Visibility::Public);
 
         let reserialized = serde_json::to_string(&dep).unwrap();
         let dep2: Dependency = serde_json::from_str(&reserialized).unwrap();
-        assert!(dep2.export);
+        assert_eq!(dep2.visibility, Visibility::Public);
     }
 
     #[test]
-    fn dependency_export_false_roundtrip() {
+    fn dependency_visibility_sealed_roundtrip() {
         let json = format!(
-            r#"{{"identifier":"ocx.sh/java:21@sha256:{}","export":false}}"#,
+            r#"{{"identifier":"ocx.sh/java:21@sha256:{}","visibility":"sealed"}}"#,
             sha256_hex()
         );
         let dep: Dependency = serde_json::from_str(&json).unwrap();
-        assert!(!dep.export);
+        assert_eq!(dep.visibility, Visibility::Sealed);
     }
 
     #[test]
-    fn dependency_omitted_export_defaults_to_false() {
+    fn dependency_visibility_private_roundtrip() {
+        let json = format!(
+            r#"{{"identifier":"ocx.sh/java:21@sha256:{}","visibility":"private"}}"#,
+            sha256_hex()
+        );
+        let dep: Dependency = serde_json::from_str(&json).unwrap();
+        assert_eq!(dep.visibility, Visibility::Private);
+
+        let reserialized = serde_json::to_string(&dep).unwrap();
+        let dep2: Dependency = serde_json::from_str(&reserialized).unwrap();
+        assert_eq!(dep2.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn dependency_visibility_interface_roundtrip() {
+        let json = format!(
+            r#"{{"identifier":"ocx.sh/java:21@sha256:{}","visibility":"interface"}}"#,
+            sha256_hex()
+        );
+        let dep: Dependency = serde_json::from_str(&json).unwrap();
+        assert_eq!(dep.visibility, Visibility::Interface);
+
+        let reserialized = serde_json::to_string(&dep).unwrap();
+        let dep2: Dependency = serde_json::from_str(&reserialized).unwrap();
+        assert_eq!(dep2.visibility, Visibility::Interface);
+    }
+
+    #[test]
+    fn dependency_omitted_visibility_defaults_to_sealed() {
         let json = format!(r#"{{"identifier":"ocx.sh/java:21@sha256:{}"}}"#, sha256_hex());
         let dep: Dependency = serde_json::from_str(&json).unwrap();
-        assert!(!dep.export);
+        assert_eq!(dep.visibility, Visibility::Sealed);
     }
 
     #[test]
@@ -311,7 +339,7 @@ mod tests {
                 "type": "bundle",
                 "version": 1,
                 "dependencies": [
-                    {{"identifier": "ocx.sh/java:21@sha256:{hex}", "export": true}}
+                    {{"identifier": "ocx.sh/java:21@sha256:{hex}", "visibility": "public"}}
                 ]
             }}"#
         );
@@ -319,12 +347,15 @@ mod tests {
         assert_eq!(metadata.dependencies().len(), 1);
         let dep = metadata.dependencies().iter().next().unwrap();
         assert_eq!(dep.identifier.repository(), "java");
-        assert!(dep.export);
+        assert_eq!(dep.visibility, Visibility::Public);
 
         let reserialized = serde_json::to_string_pretty(&metadata).unwrap();
         let metadata2: crate::package::metadata::Metadata = serde_json::from_str(&reserialized).unwrap();
         assert_eq!(metadata2.dependencies().len(), 1);
-        assert!(metadata2.dependencies().iter().next().unwrap().export);
+        assert_eq!(
+            metadata2.dependencies().iter().next().unwrap().visibility,
+            Visibility::Public,
+        );
     }
 
     #[test]
@@ -346,13 +377,16 @@ mod tests {
                     {{"key": "PATH", "type": "path", "value": "${{installPath}}/bin", "required": true}}
                 ],
                 "dependencies": [
-                    {{"identifier": "ocx.sh/java:21@sha256:{hex}", "export": true}}
+                    {{"identifier": "ocx.sh/java:21@sha256:{hex}", "visibility": "public"}}
                 ]
             }}"#
         );
         let metadata: crate::package::metadata::Metadata = serde_json::from_str(&json).unwrap();
         assert!(!metadata.env().unwrap().is_empty());
         assert_eq!(metadata.dependencies().len(), 1);
-        assert!(metadata.dependencies().iter().next().unwrap().export);
+        assert_eq!(
+            metadata.dependencies().iter().next().unwrap().visibility,
+            Visibility::Public,
+        );
     }
 }

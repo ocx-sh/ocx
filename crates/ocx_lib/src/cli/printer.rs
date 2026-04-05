@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::borrow::Cow;
 use std::fmt::Write;
 
 use serde::Serialize;
@@ -17,21 +18,46 @@ const STYLE_TREE_LABEL: console::Style = console::Style::new().bold();
 const STYLE_TREE_CHROME: console::Style = console::Style::new().dim();
 const STYLE_TREE_ANNOTATION: console::Style = console::Style::new().yellow();
 
+/// A single annotation on a tree node.
+///
+/// Each annotation carries text, an optional title, and an optional
+/// [`console::Style`].  When no style is provided, the printer falls
+/// back to its default annotation style.
+pub struct Annotation {
+    pub text: Cow<'static, str>,
+    pub style: Option<console::Style>,
+}
+
+impl Annotation {
+    /// Creates an annotation with the printer's default style.
+    pub fn new(text: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            text: text.into(),
+            style: None,
+        }
+    }
+
+    /// Sets a custom style for this annotation.
+    pub fn with_style(mut self, style: console::Style) -> Self {
+        self.style = Some(style);
+        self
+    }
+}
+
 /// Trait for types that can be rendered as a tree.
 pub trait TreeItem {
     /// The primary display text for this node (shown bold when color is enabled).
     fn label(&self) -> String;
-    /// Optional secondary text shown after the label (shown dim when color is enabled).
-    fn detail(&self) -> Option<String> {
-        None
-    }
     /// Child nodes.
     fn children(&self) -> &[Self]
     where
         Self: Sized;
-    /// Optional suffix annotation (e.g., "(*)"), shown in yellow when color is enabled.
-    fn annotation(&self) -> Option<&str> {
-        None
+    /// Annotations appended after the label, separated by `·`.
+    ///
+    /// Each annotation carries its own style hint. The printer applies the
+    /// annotation's style when present, falling back to a default otherwise.
+    fn annotations(&self) -> Vec<Annotation> {
+        Vec::new()
     }
 }
 
@@ -143,24 +169,33 @@ impl Printer {
             "├── "
         };
 
+        let annotations = node.annotations();
+
         if self.color {
-            let detail = node
-                .detail()
-                .map_or(String::new(), |d| format!(" {}", STYLE_TREE_CHROME.apply_to(d)));
-            let annotation = node
-                .annotation()
-                .map_or(String::new(), |a| format!(" {}", STYLE_TREE_ANNOTATION.apply_to(a)));
+            let mut suffix = String::new();
+            for ann in &annotations {
+                let style = ann.style.as_ref().unwrap_or(&STYLE_TREE_ANNOTATION);
+                write!(
+                    suffix,
+                    " {} {}",
+                    STYLE_TREE_CHROME.apply_to("·"),
+                    style.apply_to(&ann.text)
+                )
+                .unwrap();
+            }
 
             println!(
-                "{}{}{}{detail}{annotation}",
+                "{}{}{}{suffix}",
                 STYLE_TREE_CHROME.apply_to(prefix),
                 STYLE_TREE_CHROME.apply_to(connector),
                 STYLE_TREE_LABEL.apply_to(node.label()),
             );
         } else {
-            let detail = node.detail().map_or(String::new(), |d| format!(" {d}"));
-            let annotation = node.annotation().map_or(String::new(), |a| format!(" {a}"));
-            println!("{prefix}{connector}{}{detail}{annotation}", node.label());
+            let mut suffix = String::new();
+            for ann in &annotations {
+                write!(suffix, " · {}", ann.text).unwrap();
+            }
+            println!("{prefix}{connector}{}{suffix}", node.label());
         }
 
         let children = node.children();

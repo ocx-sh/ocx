@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# title: Inspecting the dependency tree
-# setup: deps-export
-ocx install --select webapp:2.0
+# title: Dependency tree with visibility
+# setup: deps-visibility
 ocx deps webapp:2.0

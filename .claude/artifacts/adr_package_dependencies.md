@@ -3,7 +3,7 @@
 ## Metadata
 
 **Status:** Amended
-**Date:** 2026-04-03
+**Date:** 2026-04-05
 **Deciders:** mherwig, architect
 **Beads Issue:** N/A
 **Related PRD:** N/A
@@ -95,12 +95,11 @@ A new optional `dependencies` array in the `Bundle` metadata type. Each entry is
   "env": [...],
   "dependencies": [
     {
-      "identifier": "ocx.sh/java:21",
-      "digest": "sha256:a1b2c3d4e5f6..."
+      "identifier": "ocx.sh/java:21@sha256:a1b2c3d4e5f6...",
+      "visibility": "private"
     },
     {
-      "identifier": "ocx.sh/cmake:3.28",
-      "digest": "sha256:f6e5d4c3b2a1..."
+      "identifier": "ocx.sh/cmake:3.28@sha256:f6e5d4c3b2a1..."
     }
   ]
 }
@@ -114,9 +113,8 @@ The tag portion is **advisory**: it records what the publisher pinned against an
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `identifier` | Yes | Fully qualified OCX identifier with registry, optionally with `:tag`. e.g. `ocx.sh/java:21`, `ghcr.io/myorg/tool`. **Registry is mandatory** — no default registry fallback. |
-| `digest` | Yes | OCI digest (`sha256:...`). May reference an Image Index (platform resolution applies at install time) or a single manifest (no platform resolution needed). For cross-compilation, pin the platform-specific manifest digest directly. |
-| `export` | No | Boolean (default `false`). When `true`, the dependency's env vars are included in the parent's environment. When `false`, the dep is installed and GC-protected but its env vars are suppressed. |
+| `identifier` | Yes | Fully qualified pinned OCX identifier with registry and inline OCI digest (`@sha256:...`), optionally with `:tag`. e.g. `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`, `ghcr.io/myorg/tool@sha256:...`. **Registry is mandatory** — no default registry fallback. The digest may reference an Image Index (platform resolution applies at install time) or a single manifest (no platform resolution needed). For cross-compilation, pin the platform-specific manifest digest directly. |
+| `visibility` | No | Enum: `sealed` (default), `private`, `public`, `interface`. Controls how the dependency's environment variables propagate — see [Dependency visibility](#dependency-visibility) below. |
 
 **Ordering matters.** Dependencies are processed in array order. This is the canonical import order for environment composition.
 
@@ -147,13 +145,69 @@ Dependencies can themselves have dependencies, forming a DAG. A cycle is a fatal
 
 The existing `ConstantTracker` detects when a scalar variable is overwritten by a different package and **emits a warning**. This is consistent with how `ocx exec pkg1 pkg2 -- cmd` handles conflicts today — dependencies do not introduce a new problem, they just make it possible for conflicts to occur transitively.
 
-**Export control.** Each dependency declaration carries an `export: bool` field (default `false`). When `export` is `true`, the dependency's environment variables are included when resolving the parent's environment. When `false`, the dependency is installed and GC-protected but its env vars are suppressed. This prevents environment pollution — most dependencies are implementation details whose env vars should not leak to consumers.
+### Dependency visibility
 
-**Propagation rule:** If a parent dependency has `export: false`, all packages in that subtree are forced to `export: false` regardless of their own flags. If `export: true`, child packages preserve their own export flags. Diamond deduplication uses first-wins semantics.
+Each dependency declaration carries a `visibility` field that controls how the dependency's environment variables propagate. This replaces the earlier `export: bool` flag with a richer model inspired by CMake's `target_link_libraries` visibility (PUBLIC/PRIVATE/INTERFACE) and Gradle's `api`/`implementation` split.
 
-**Conflict detection scope:** Only exported dependencies participate in conflict detection. Two non-exported deps with the same repository but different digests do NOT trigger a conflict — their env vars are never composed, so there is nothing to conflict.
+**The two axes.** Visibility answers two independent questions about a dependency's env vars:
 
-**Future direction — per-invocation isolation via shims (separate ADR).** Auto-generated launcher scripts that invoke dependencies through `ocx exec`, giving each tool its own clean environment. Shims add a third isolation layer orthogonal to export: a shim-wrapped package's env (including its exported deps) stays inside the shim subprocess and never leaks to the caller. The `export` flag remains about the dependency relationship — "does this package need the dep's env vars to function?" — regardless of whether the package is consumed via shim or `ocx exec`. A package that needs `JAVA_HOME` from its Java dependency must declare `export: true` whether it runs inside a shim or not. The `${deps.NAME.installPath}` interpolation syntax is the natural companion to `export: false` — letting packages reference dependency install paths without requiring env export.
+1. **Self-use:** Does the package need this dep's env vars for its own execution (shims, entry points)?
+2. **Consumer propagation:** Do consumers of this package see this dep's env vars?
+
+**The four levels:**
+
+| Visibility | Self-use | Consumer | Use case |
+|---|---|---|---|
+| `sealed` (default) | No | No | Structural dependency — content accessed by mount point, symlink, or direct path. Env vars irrelevant. Most deps in a tool-focused package manager. |
+| `private` | Yes | No | Package's own shims/entry points need the dep's env to execute, but consumers don't see it. E.g., `my-tool` needs `java` internally for its shims. |
+| `public` | Yes | Yes | Both the package and its consumers need the dep's env. E.g., `maven` needs `java` and consumers also need Java to compile. |
+| `interface` | No | Yes | Dep's env forwarded to consumers but not used by the package itself. Meta-packages or stack packages that compose environments for others. |
+
+**Default: `sealed`.** This is the most restrictive level and prevents environment pollution by default. The package author must explicitly opt in to env propagation. This matches the prior `export: false` default behavior.
+
+**Propagation rule.** When a parent consumes a dependency, the parent is a *consumer* of that dependency. What the parent sees from the dep's tree is what the dep **exports to its consumers** (consumer-visible axis). The parent's declared visibility for the dep determines the *terms* of the relationship.
+
+**The rule is: if the child exports (consumer-visible), the result equals the edge. Otherwise, the result is sealed.**
+
+```
+propagate(edge, child) = if child.is_consumer_visible() { edge } else { Sealed }
+```
+
+*Propagation table* (edge × child → effective visibility from parent):
+
+| Parent → Dep ↓ \ Dep → Transitive → | `public` | `interface` | `private` | `sealed` |
+|---|---|---|---|---|
+| **`public`** | `public` | `public` | `sealed` | `sealed` |
+| **`private`** | `private` | `private` | `sealed` | `sealed` |
+| **`interface`** | `interface` | `interface` | `sealed` | `sealed` |
+| **`sealed`** | `sealed` | `sealed` | `sealed` | `sealed` |
+
+Pattern: child exports (`public`/`interface`) → result = edge. Child doesn't export (`private`/`sealed`) → `sealed`.
+
+This works recursively in the bottom-up `ResolvedPackage::with_dependencies()` builder: each dep's transitive deps already carry their cumulative effective visibility from deeper levels. `propagate` only checks whether the immediate child exports.
+
+**Diamond merge.** When two paths reach the same dep with different effective visibilities, take the **most open** — OR on each axis independently. If *any* path in the graph makes a dep visible on an axis, it stays visible.
+
+```
+merge(a, b) = from_axes(a.self || b.self, a.consumer || b.consumer)
+```
+
+*Diamond merge table* (path A ∨ path B → merged visibility):
+
+| Path A ↓ \ Path B → | `sealed` | `private` | `public` | `interface` |
+|---|---|---|---|---|
+| **`sealed`** | `sealed` | `private` | `public` | `interface` |
+| **`private`** | `private` | `private` | `public` | `public` |
+| **`public`** | `public` | `public` | `public` | `public` |
+| **`interface`** | `interface` | `public` | `public` | `interface` |
+
+**Conflict detection scope:** Only consumer-visible dependencies participate in conflict detection. Two sealed or private deps with the same repository but different digests do NOT trigger a conflict — their env vars are never composed in the consumer context, so there is nothing to conflict.
+
+**Current implementation scope:** All four visibility levels are fully implemented in the propagation algebra and persisted in `resolve.json`. The `resolve_env()` consumer path filters by `is_consumer_visible()` — `public` and `interface` contribute env vars, `private` and `sealed` do not. The self-visible axis (`public`, `private`) activates when self-execution environments (shims, entry points) are built — at that point, `private` deps will contribute to a package's own shim env while remaining invisible to consumers.
+
+**Future direction — per-variable overrides.** The visibility enum sets the **default propagation policy** for all of a dependency's env vars. A future extension may allow per-variable overrides (e.g., `expose: [PATH]` on a `sealed` dep to get tools on PATH without the full env). This layers on top of visibility without changing the enum.
+
+**Future direction — per-invocation isolation via shims (separate ADR).** Auto-generated launcher scripts that invoke dependencies through `ocx exec`, giving each tool its own clean environment. Shims implement the self-use axis: when a shim runs, it resolves env for its package as root, including `private` deps. The shim subprocess env never leaks to the caller. The `visibility` field controls the dependency relationship — "how does this dep's env flow?" — regardless of whether the package is consumed via shim or `ocx exec`. The `${deps.NAME.installPath}` interpolation syntax is the natural companion to `sealed` visibility — letting packages reference dependency install paths without requiring env propagation.
 
 ### Environment composition order
 
@@ -283,13 +337,31 @@ New file: `dependency.rs`
 /// For cross-compilation, pin the platform-specific manifest digest directly.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Dependency {
-    /// Fully qualified OCX identifier with required registry.
-    /// The tag portion is advisory (for update tooling) — only
+    /// Fully qualified pinned OCX identifier with required explicit registry
+    /// and digest. The tag portion is advisory (for update tooling) — only
     /// the digest is used for resolution.
-    pub identifier: oci::Identifier,
+    pub identifier: oci::PinnedIdentifier,
 
-    /// OCI digest pinning the exact version.
-    pub digest: oci::Digest,
+    /// Controls how this dependency's environment variables propagate.
+    /// Default: `Sealed` — no env contribution.
+    #[serde(default)]
+    pub visibility: Visibility,
+}
+
+/// How a dependency's environment variables propagate to the package
+/// and its consumers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    /// No env propagation. Content accessed structurally (mount, path).
+    #[default]
+    Sealed,
+    /// Env available for self-execution (shims), not propagated to consumers.
+    Private,
+    /// Env available for self-execution AND propagated to consumers.
+    Public,
+    /// Env propagated to consumers but not used by the package itself.
+    Interface,
 }
 ```
 
@@ -314,7 +386,7 @@ pub struct Dependencies {
 
 Internally, `Dependencies` provides map-like lookup by identifier (via linear scan — dependency lists are small) and enforces uniqueness on construction/deserialization. Array position = declaration order = environment import order.
 
-The identifier is the existing `oci::Identifier` type, which always carries a registry internally. Custom `Serialize`/`Deserialize` impls on `Dependency` ensure the identifier string form always includes the registry (via `Display`) and that deserialization rejects short-form identifiers without an explicit registry.
+The identifier is the `oci::PinnedIdentifier` type — an `Identifier` guaranteed to carry a digest. The digest is encoded inline in the identifier string (e.g. `ocx.sh/java:21@sha256:a1b2...`). Custom `Serialize`/`Deserialize` impls on `PinnedIdentifier` ensure the string form always includes the registry and digest, and that deserialization rejects identifiers without an explicit registry or without a digest.
 
 New type: `PinnedIdentifier` (in `crates/ocx_lib/src/oci/pinned_identifier.rs`)
 
@@ -332,6 +404,17 @@ New type: `ResolvedPackage` (in `crates/ocx_lib/src/package/resolved_package.rs`
 Persisted as `resolve.json` alongside `metadata.json` in each object directory. Written by `pull` at install time after platform resolution and transitive dependency collection. Read by `find`, `deps`, `env`/`exec` for environment composition and dependency inspection.
 
 ```rust
+/// A dependency in the transitive closure with its pre-computed visibility.
+///
+/// The `visibility` field encodes the effective visibility from the root
+/// package's perspective, computed via `Visibility::propagate` through
+/// the dependency chain. Diamond deps use `Visibility::merge` (OR on
+/// each axis) — if ANY path makes a dep visible, it stays visible.
+pub struct ResolvedDependency {
+    pub identifier: PinnedIdentifier,
+    pub visibility: Visibility,
+}
+
 /// The fully resolved dependency closure for a package.
 ///
 /// `identifier` is the platform-specific pinned identifier (after
@@ -340,7 +423,7 @@ Persisted as `resolve.json` alongside `metadata.json` in each object directory. 
 /// package itself is NOT included in `dependencies`.
 pub struct ResolvedPackage {
     pub identifier: PinnedIdentifier,
-    pub dependencies: Vec<PinnedIdentifier>,
+    pub dependencies: Vec<ResolvedDependency>,
 }
 ```
 
@@ -542,7 +625,7 @@ ocx install myapp:1.0 --select
 │  │                                                                     │
 │  ├─ Download myapp → objects/.../sha256:aaa.../                        │
 │  │  └─ metadata.json declares: dependencies:                           │
-│  │       [{ "identifier": "ocx.sh/java:21", "digest": "sha256:bbb" }] │
+│  │       [{ "identifier": "ocx.sh/java:21@sha256:bbb..." }]           │
 │  │                                                                     │
 │  ├─ Resolve dependency: java@sha256:bbb (Image Index → sha256:ccc)     │
 │  │                                                                     │
@@ -636,8 +719,8 @@ metadata.json (v1, Bundle):
   ],
   "dependencies": [
     {
-      "identifier": "ocx.sh/java:21",
-      "digest": "sha256:a1b2c3d4e5f6..."
+      "identifier": "ocx.sh/java:21@sha256:a1b2c3d4e5f6...",
+      "visibility": "private"
     }
   ]
 }
@@ -719,3 +802,4 @@ metadata.json (v1, Bundle):
 | 2026-03-28 | architect | Added "Future directions (exploratory)" section: relaxing digest-pin at project config layer, transitive collision auto-resolution via cascade lineage, consumer-side version overrides. All exploratory — not design commitments. |
 | 2026-03-28 | review | Simplified reference model: `refs/` for install symlink back-refs only, `deps/` for dependency forward-refs only. Removed dependency back-refs from `refs/` — redundant with graph reachability walk. GC simplified from Kahn's ref-count to plain BFS reachability from roots. Kahn's algorithm retained for topological sorting in env resolution. |
 | 2026-04-03 | review | Post-implementation consistency pass. Status → Accepted. Fixed stale Kahn's refs in CLI impact table and risks. Promoted `resolve.json` from open question to core design. Added `PinnedIdentifier` and `ResolvedPackage` to data model. Updated `Dependency.digest` type from `String` to `oci::Digest`. Removed `jsonschema` feature gate. Added profile content-mode entries as GC roots. Updated implementation plan and validation checklists to reflect current state. |
+| 2026-04-05 | architect | Replaced `export: bool` with `Visibility` enum (`sealed`, `private`, `public`, `interface`). Inspired by CMake's `target_link_libraries` visibility model. `sealed` (default) = no env propagation (backward-compatible with `export: false`). `private` = self-execution only (new). `public` = self + consumers (= old `export: true`). `interface` = consumers only (new). Added propagation tables for both consumer-visible and self-visible axes. Per-variable overrides deferred as future extension. |

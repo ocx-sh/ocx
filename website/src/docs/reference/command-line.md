@@ -112,6 +112,10 @@ Removes unreferenced objects from the local object store.
 
 An object is unreferenced when nothing points to it — no candidate or current symlink, and no other installed package depends on it. This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
 
+::: danger
+Do not run `clean` concurrently with other OCX commands. A concurrent install may reference an object that `clean` is about to remove, causing the install to fail.
+:::
+
 **Usage**
 
 ```shell
