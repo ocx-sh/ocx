@@ -96,6 +96,27 @@ Removes all unreferenced objects (empty `refs/` directory) and stale temp dirs.
 
 ---
 
+### `ocx deps PACKAGES...`
+
+Shows the dependency graph for installed packages.
+
+| Flag | Purpose |
+|------|---------|
+| `--flat` | Show evaluation-order list instead of tree |
+| `--why PKG` | Trace all paths from roots to a specific dependency (matches by registry/repository, tag ignored) |
+| `--depth N` | Limit tree depth (tree view only) |
+| `-p/--platform` | Comma-separated platforms |
+
+- Calls `manager.find_all(packages)` then `manager.resolver().build_graph(&infos)`
+- Three mutually exclusive views: tree (default), flat (`--flat`), why (`--why`)
+- Tree view uses `(*)` to mark repeated subtrees (not re-expanded)
+- Flat view shows topological evaluation order (same order as `exec`/`env`)
+- Why view traces dependency paths from roots to a target
+- Returns `DepsTree` | `DepsFlat` | `DepsWhy` → reported via `api::data::deps`
+- Report formats: tree with digest annotations, two-column table (flat), arrow-joined paths (why)
+
+---
+
 ## Environment & Execution Commands
 
 ### `ocx env PACKAGES...`

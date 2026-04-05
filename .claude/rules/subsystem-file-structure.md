@@ -10,7 +10,7 @@ paths:
 
 ## Design Rationale
 
-Content-addressed storage (by SHA-256 digest) provides Nix-like dedup and immutable paths without Nix-like complexity. Three separate stores (objects, index, installs) enforce separation of concerns — immutable content, cached metadata, and mutable symlinks are independent lifecycles. Back-references (`refs/`) enable lock-free, concurrent-safe GC: `ocx clean` only removes objects with empty `refs/`, no graph traversal needed. See `architecture-principles.md` for the full pattern catalog.
+Content-addressed storage (by SHA-256 digest) provides Nix-like dedup and immutable paths without Nix-like complexity. Three separate stores (objects, index, installs) enforce separation of concerns — immutable content, cached metadata, and mutable symlinks are independent lifecycles. Install symlink back-references (`refs/`) track which install symlinks point to an object. Dependency forward-references (`deps/`) encode the dependency graph on the filesystem. GC uses BFS reachability from roots (objects with install refs or profile content-mode refs) through `deps/` edges. See `architecture-principles.md` for the full pattern catalog.
 
 Content-addressed local storage layout, symlink management, and reference tracking at `crates/ocx_lib/src/file_structure/`.
 
@@ -45,7 +45,7 @@ One instance per session. Sub-stores accessible as public fields.
 
 Layout: `{root}/{registry_slug}/{repo_path}/{algorithm}/{shard1_8hex}/{shard2_8hex}/{shard3_16hex}/`
 
-Each object directory contains: `content/` (extracted files), `metadata.json`, `refs/` (back-references).
+Each object directory contains: `content/` (extracted files), `metadata.json`, `refs/` (install symlink back-references), `deps/` (dependency forward-references).
 
 Key methods: `path()`, `content()`, `metadata()`, `refs_dir_for_content()`, `list_all() → Vec<ObjectDir>`.
 
@@ -97,26 +97,29 @@ All digest types: `{algorithm}/{hex[0..8]}/{hex[8..16]}/{hex[16..32]}` (3 levels
 
 ## ReferenceManager
 
-Manages forward symlinks + back-references for safe garbage collection. **Always use this for install symlinks, never raw `symlink::update/create`.**
+Manages install symlinks + dependency forward-refs for safe garbage collection. **Always use this for install symlinks, never raw `symlink::update/create`.**
 
 ```rust
-pub fn link(&self, forward_path: &Path, content_path: &Path) -> Result<()>
-pub fn unlink(&self, forward_path: &Path) -> Result<()>
+pub fn link(&self, forward_path: &Path, content_path: &Path) -> Result<()>      // install symlink + back-ref
+pub fn unlink(&self, forward_path: &Path) -> Result<()>                          // remove install symlink + back-ref
+pub fn link_dependency(&self, dependent: &Path, dependency: &Path) -> Result<()> // forward-ref in deps/ only
+pub fn unlink_dependency(&self, dependent: &Path, dependency: &Path) -> Result<()>
 pub fn broken_refs(&self) -> Result<Vec<PathBuf>>
 ```
 
 **Arg order for `link()` is `(link, target)` — opposite of `symlink::update(target, link)`.** This is a common source of confusion.
 
-Back-reference: `objects/.../refs/{16_hex_hash}` → forward symlink path. Hash: first 16 hex chars of SHA256(forward_path bytes).
+Install back-reference: `objects/.../refs/{16_hex_hash}` → forward symlink path. Dependency forward-reference: `objects/.../deps/{16_hex_hash}` → dependency content path. Hash: first 16 hex chars of SHA256(path bytes).
 
-**Idempotent**: `link()` is no-op if forward already points to content. `unlink()` is no-op if forward doesn't exist.
+**Idempotent**: `link()` is no-op if forward already points to content. `unlink()` is no-op if forward doesn't exist. `link_dependency()` is no-op if forward-ref already exists and points to the same target.
 
 ## GC Safety
 
-An object is safe to delete when its `refs/` directory is empty (no forward symlinks point to it). This is lock-free because:
-- Each back-ref has a unique name (hash of forward path)
+GC uses BFS reachability: objects with valid install refs in `refs/` or profile content-mode references are roots. BFS follows `deps/` forward-refs to mark all reachable objects. Everything unreachable is collected. This is lock-free because:
+- Each ref has a unique name (hash of path)
 - Symlink create/delete are atomic POSIX operations
 - No global coordination needed
+- Before deletion, `refs/` is re-checked as a best-effort guard against concurrent installs
 
 ## symlink Module
 

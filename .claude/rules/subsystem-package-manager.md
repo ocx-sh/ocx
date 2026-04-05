@@ -12,16 +12,30 @@ Facade over FileStructure + Index + Client with task implementations at `crates/
 
 The facade pattern provides a single coordination point for all package operations, hiding the complexity of store + index + client interactions. Three-layer errors (`Error` → `PackageError` → `PackageErrorKind`) enable per-package diagnosis in batch operations — `_all` methods can report exactly which package failed and why while continuing with the rest. See `architecture-principles.md` for the full pattern catalog.
 
+## Task Module Architecture
+
+`PackageManager` is extended via `impl PackageManager` blocks in `tasks/` submodules. Because all task modules share a single `impl` namespace, **keep each module's `impl PackageManager` surface minimal**:
+
+- **Only `pub` methods** on `impl PackageManager` — these are the facade API called by CLI commands.
+- **Implementation details as module-private free functions** — helpers, multi-step orchestration, internal state machines. Free functions take explicit parameters (`&FileStructure`, `&ObjectStore`, etc.) instead of `&self`, preventing accidental coupling to the full facade.
+- **Extract to a free function when**: the method has private helpers, orchestrates multiple steps, or would clutter the shared `impl` namespace.
+- **Keep inline when**: the method is self-contained with no sub-helpers.
+- **`tasks/common.rs`** — shared free functions (`find_in_store`, `load_object_data`, `reference_manager`, `export_env`) visible only to sibling task modules. No `impl PackageManager`.
+- **`package_manager.rs` stays lean** — only struct definition, constructor, field accessors, `is_offline()`. All business logic lives in task modules.
+
 ## Module Map
 
 | File | Purpose |
 |------|---------|
-| `package_manager.rs` | `PackageManager` facade struct |
+| `package_manager.rs` | `PackageManager` facade struct + accessors only |
 | `error.rs` | Three-layer error model |
-| `tasks/find.rs` | `find()`, `find_all()` — resolve installed packages |
+| `tasks/common.rs` | Shared free functions for task modules |
+| `tasks/resolve.rs` | `resolve()`, `resolve_all()`, `resolve_env()` — index + env resolution |
+| `tasks/find.rs` | `find()`, `find_plain()`, `find_all()` — resolve installed packages |
 | `tasks/find_symlink.rs` | `find_symlink()`, `find_symlink_all()` — resolve via candidate/current |
 | `tasks/find_or_install.rs` | `find_or_install()`, `find_or_install_all()` — auto-install on miss |
-| `tasks/install.rs` | `install()`, `install_all()` — download and install |
+| `tasks/pull.rs` | `pull()`, `pull_all()` — download + transitive deps (PullTracker is module-private) |
+| `tasks/install.rs` | `install()`, `install_all()` — pull + create symlinks |
 | `tasks/uninstall.rs` | `uninstall()`, `uninstall_all()` — remove symlinks, optional purge |
 | `tasks/deselect.rs` | `deselect()`, `deselect_all()` — remove current symlink |
 | `tasks/clean.rs` | `clean()` — GC unreferenced objects + stale temps |

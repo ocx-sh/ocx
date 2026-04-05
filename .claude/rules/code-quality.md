@@ -95,15 +95,40 @@ Before writing new code, ask:
 
 **Run `task verify`** — this executes all gates in order. Do not run gates individually unless debugging a specific failure. Run `task --list` to discover all available task commands.
 
+### Prerequisites
+
+`task verify` requires these tools installed and available:
+
+| Tool | Install | Used by |
+|------|---------|---------|
+| `cargo-nextest` | Auto-installed by task | `test:unit` |
+| `hawkeye` | Auto-installed by task | `license:check` |
+| `cargo-deny` | Auto-installed by task | `license:deps` |
+| `ocx.sh/shellcheck:0.11` | `ocx install --select shellcheck:0.11` | `lint:shell` |
+| `ocx.sh/shfmt:3` | `ocx install --select shfmt:3` | `lint:shell` |
+| Docker (registry:2) | System install | `test:parallel` |
+| `uv` | System install | `lint:ai-config`, `test:parallel` |
+
+Shell linting tools (`shellcheck`, `shfmt`) are managed by OCX itself and must be installed in the global OCX store (`~/.ocx`). The project uses a pinned local index at `.ocx/index/` (set via `OCX_INDEX` in the root taskfile) so versions are locked. First-time setup:
+
+```sh
+ocx index update shellcheck shfmt     # fetch tag metadata
+ocx install --select shellcheck:0.11  # install shellcheck
+ocx install --select shfmt:3          # install shfmt
+```
+
+### Gates (in order)
+
 `task verify` runs:
 1. `format:check` — `cargo fmt --check`
 2. `clippy:check` — `cargo clippy --workspace --locked`
-3. `lint:shell` — shellcheck + shfmt on `.sh` scripts
-4. `license:check` — SPDX headers (hawkeye)
-5. `license:deps` — dependency license audit (cargo-deny)
-6. `build` — `cargo build --release -p ocx --locked`
-7. `test:unit` — `cargo nextest run --workspace --release --locked`
-8. `test:parallel` — acceptance tests with pytest-xdist
+3. `lint:shell` — shellcheck + shfmt on `.sh` scripts (via `ocx exec`)
+4. `lint:ai-config` — AI config structural tests (`.claude/tests/`)
+5. `license:check` — SPDX headers (hawkeye)
+6. `license:deps` — dependency license audit (cargo-deny)
+7. `build` — `cargo build --release -p ocx --locked`
+8. `test:unit` — `cargo nextest run --workspace --release --locked`
+9. `test:parallel` — acceptance tests with pytest-xdist
 
 ## Taskfile Conventions
 

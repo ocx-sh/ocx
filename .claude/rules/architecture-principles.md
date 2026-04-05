@@ -28,7 +28,7 @@ Patched dependency: `oci-client` at `external/rust-oci-client` (local git submod
 | **Composite root** | `FileStructure` wraps `ObjectStore` + `IndexStore` + `InstallStore` + `TempStore` | Separation of concerns for four distinct storage roles |
 | **Three-layer errors** | `Error` → `PackageError` → `PackageErrorKind` | Per-package diagnosis in batch operations |
 | **Command pattern** | CLI: args → identifiers → manager task → report data → API output | Uniform flow from input to output |
-| **Back-references for GC** | Forward symlinks + `refs/` directory | Lock-free, concurrent-safe garbage collection |
+| **Ref separation for GC** | `refs/` for install back-refs, `deps/` for dependency forward-refs | BFS reachability from roots through `deps/` edges; lock-free |
 | **Option-based results** | `IndexImpl` returns `Option` (None = not found) | Not-found is not an error at the index layer |
 | **Extension traits** | `StringExt` (slugify), `ResultExt`, `VecExt` in prelude | Ergonomic API surface without polluting core types |
 | **Builder pattern** | `ClientBuilder`, `BundleBuilder` | Fluent construction with many optional parameters |

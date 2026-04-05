@@ -41,7 +41,7 @@ cargo test -p ocx_lib -- <test_name> --nocapture # with output
 cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v --no-build
 ```
 
-**Always run `task verify` after completing an implementation.** Always run `cargo fmt` before committing.
+**Always run `task verify` after completing an implementation.** Always run `cargo fmt` before committing. Shell linting requires `ocx.sh/shellcheck:0.11` and `ocx.sh/shfmt:3` installed — see `code-quality.md` for first-time setup.
 
 ## Architecture
 

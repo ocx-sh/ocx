@@ -23,7 +23,7 @@ The Rust types are the single source of truth. The JSON Schema and documentation
 
 If you change any file under `crates/ocx_lib/src/package/metadata/`:
 
-1. **Ensure `JsonSchema` derives are present.** Every `Serialize`/`Deserialize` struct and enum needs `#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]`. Types with custom `Deserialize` or `serde_repr` need manual `impl schemars::JsonSchema` (see `Version`, `Env` for examples).
+1. **Ensure `JsonSchema` derives are present.** Every `Serialize`/`Deserialize` struct and enum needs `#[derive(schemars::JsonSchema)]`. Types with custom `Deserialize` or `serde_repr` need manual `impl schemars::JsonSchema` (see `Version`, `Env` for examples).
 2. **Regenerate the schema.** Run `task schema:generate` and verify the output looks correct.
 3. **Update the docs page.** If you added/removed/renamed fields, update `website/src/docs/reference/metadata.md` to match — tables, examples, and descriptions.
 4. **Add doc comments.** Every public field should have a `///` doc comment — schemars uses these as `description` in the JSON Schema.
@@ -31,7 +31,7 @@ If you change any file under `crates/ocx_lib/src/package/metadata/`:
 ## Schema Generation
 
 - Generator: `crates/ocx_schema/` — a build-only binary (`publish = false`)
-- Feature flag: `ocx_lib` exposes `schemars` derives behind `features = ["jsonschema"]`, keeping it out of the release binary
+- `schemars` is a regular dependency of `ocx_lib` (no feature flag — dead code is stripped by the linker)
 - Build integration: `task schema:generate` runs automatically before `website build`
 - Output: `website/src/public/schemas/metadata/v1.json` (gitignored, regenerated on build)
 - Published URL: `https://ocx.sh/schemas/metadata/v1.json`

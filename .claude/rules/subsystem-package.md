@@ -45,7 +45,7 @@ Metadata (tagged enum: "type" = "bundle")
                  └─ Constant { value: String }
 ```
 
-Every `Serialize`/`Deserialize` struct needs `#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]`.
+Every `Serialize`/`Deserialize` struct needs `#[derive(schemars::JsonSchema)]`.
 
 ## Environment Variable Types
 
