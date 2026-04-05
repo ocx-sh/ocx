@@ -33,11 +33,13 @@ impl ReferenceManager {
         Self { file_structure }
     }
 
-    /// Derives the back-reference name for `forward_path`.
+    /// Derives the reference name for a path.
     ///
     /// The name is the first 16 hex characters of the SHA-256 hash of the
-    /// forward path bytes — unique and fixed-length regardless of path length.
-    fn ref_name(forward_path: &Path) -> String {
+    /// path bytes — unique and fixed-length regardless of path length.
+    /// Used for both install back-refs (`refs/`) and dependency
+    /// forward-refs (`deps/`).
+    pub fn ref_name(forward_path: &Path) -> String {
         let mut hasher = Sha256::new();
         hasher.update(forward_path.as_os_str().as_encoded_bytes());
         hex::encode(&hasher.finalize()[..8])

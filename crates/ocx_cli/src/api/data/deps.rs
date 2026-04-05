@@ -1,50 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::fmt;
-
 use serde::Serialize;
 
-use ocx_lib::{cli::TreeItem, oci};
+use ocx_lib::{
+    cli::{Annotation, TreeItem},
+    oci,
+    package::metadata::visibility::Visibility,
+};
 
 use crate::api::Printable;
 
-/// Whether a dependency is exported to the package environment.
-///
-/// `Exported` means the dependency's env vars are included in `exec`/`env`.
-/// `Local` means the dependency is installed for GC/tree purposes only.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ExportStatus {
-    Exported,
-    Local,
-}
+const STYLE_DIGEST: console::Style = console::Style::new().color256(117); // light sky blue
+const STYLE_REPEATED: console::Style = console::Style::new().italic().dim();
 
-impl From<bool> for ExportStatus {
-    fn from(exported: bool) -> Self {
-        if exported {
-            ExportStatus::Exported
-        } else {
-            ExportStatus::Local
-        }
-    }
-}
-
-impl fmt::Display for ExportStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ExportStatus::Exported => write!(f, "exported"),
-            ExportStatus::Local => write!(f, "local"),
-        }
+const fn visibility_style(vis: Visibility) -> console::Style {
+    match vis {
+        Visibility::Public => console::Style::new().color256(114), // soft green
+        Visibility::Private => console::Style::new().italic().color256(179), // warm amber
+        Visibility::Interface => console::Style::new().italic().color256(141), // lavender
+        Visibility::Sealed => console::Style::new().italic().dim().color256(245), // muted gray
     }
 }
 
 /// A node in the dependency tree (for tree view output).
+///
+/// `visibility` is `None` for root nodes (the packages the user asked about)
+/// and `Some(v)` for dependencies, where `v` is the visibility as declared
+/// by the parent — not the propagated result.
 #[derive(Debug, Clone, Serialize)]
 pub struct Dependency {
     pub identifier: oci::Identifier,
     pub repeated: bool,
-    pub exported: bool,
+    pub visibility: Option<Visibility>,
     pub dependencies: Vec<Dependency>,
 }
 
@@ -62,7 +50,6 @@ impl Dependencies {
 
 impl TreeItem for Dependency {
     fn label(&self) -> String {
-        // Display identifier without digest — the digest is shown in detail().
         match self.identifier.tag() {
             Some(tag) => format!(
                 "{}/{}:{}",
@@ -74,26 +61,22 @@ impl TreeItem for Dependency {
         }
     }
 
-    fn detail(&self) -> Option<String> {
-        self.identifier.digest().map(|d| format!("({})", d.to_short_string()))
-    }
-
     fn children(&self) -> &[Self] {
-        if self.repeated {
-            // Don't expand repeated subtrees
-            &[]
-        } else {
-            &self.dependencies
-        }
+        if self.repeated { &[] } else { &self.dependencies }
     }
 
-    fn annotation(&self) -> Option<&str> {
-        match (self.repeated, self.exported) {
-            (true, false) => Some("(*) (local)"),
-            (true, true) => Some("(*)"),
-            (false, false) => Some("(local)"),
-            (false, true) => None,
+    fn annotations(&self) -> Vec<Annotation> {
+        let mut out = Vec::new();
+        if let Some(digest) = self.identifier.digest() {
+            out.push(Annotation::new(digest.to_short_string()).with_style(STYLE_DIGEST));
         }
+        if let Some(vis) = self.visibility {
+            out.push(Annotation::new(vis.to_string()).with_style(visibility_style(vis)));
+        }
+        if self.repeated {
+            out.push(Annotation::new("repeated").with_style(STYLE_REPEATED));
+        }
+        out
     }
 }
 
@@ -115,7 +98,7 @@ pub struct FlatDependencies {
 #[derive(Serialize)]
 pub struct FlatDependency {
     pub identifier: oci::Identifier,
-    pub exported: ExportStatus,
+    pub visibility: Visibility,
 }
 
 impl FlatDependencies {
@@ -134,10 +117,10 @@ impl Printable for FlatDependencies {
                 Some(tag) => format!("{}/{}:{}", id.registry(), id.repository(), tag),
                 None => format!("{}/{}", id.registry(), id.repository()),
             });
-            rows[1].push(entry.exported.to_string());
+            rows[1].push(entry.visibility.to_string());
             rows[2].push(id.digest().map_or_else(String::new, |d| d.to_string()));
         }
-        printer.print_table(&["Package", "Exported", "Digest"], &rows);
+        printer.print_table(&["Package", "Visibility", "Digest"], &rows);
     }
 }
 
@@ -145,6 +128,7 @@ impl Printable for FlatDependencies {
 #[derive(Serialize)]
 pub struct DependenciesTrace {
     pub paths: Vec<Vec<oci::Identifier>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
@@ -174,6 +158,7 @@ impl Printable for DependenciesTrace {
 mod tests {
     use super::*;
     use ocx_lib::cli::TreeItem;
+    use ocx_lib::package::metadata::visibility::Visibility;
 
     fn make_digest(hex_char: char) -> oci::Digest {
         oci::Digest::Sha256(hex_char.to_string().repeat(64))
@@ -187,7 +172,7 @@ mod tests {
         Dependency {
             identifier: make_identifier(identifier).clone_with_digest(digest),
             repeated,
-            exported: true,
+            visibility: Some(Visibility::Public),
             dependencies: deps,
         }
     }
@@ -198,37 +183,91 @@ mod tests {
         assert_eq!(node.label(), "ocx.sh/cmake:3.28");
     }
 
+    fn annotation_texts(node: &Dependency) -> Vec<String> {
+        node.annotations().into_iter().map(|a| a.text.into_owned()).collect()
+    }
+
     #[test]
-    fn tree_node_detail_returns_short_digest() {
+    fn tree_node_digest_annotation() {
         let node = make_node("ocx.sh/cmake:3.28", make_digest('a'), false, vec![]);
-        let detail = node.detail().unwrap();
-        assert_eq!(detail, format!("({})", make_digest('a').to_short_string()));
+        let texts = annotation_texts(&node);
+        assert_eq!(texts[0], make_digest('a').to_short_string());
     }
 
     #[test]
-    fn tree_node_repeated_annotation() {
-        let node = make_node("pkg", make_digest('a'), true, vec![]);
-        assert_eq!(node.annotation(), Some("(*)"));
-    }
-
-    #[test]
-    fn tree_node_exported_no_annotation() {
-        let node = make_node("pkg", make_digest('a'), false, vec![]);
-        assert_eq!(node.annotation(), None);
-    }
-
-    #[test]
-    fn tree_node_local_annotation() {
+    fn tree_root_only_digest_annotation() {
         let mut node = make_node("pkg", make_digest('a'), false, vec![]);
-        node.exported = false;
-        assert_eq!(node.annotation(), Some("(local)"));
+        node.visibility = None;
+        let texts = annotation_texts(&node);
+        assert_eq!(texts.len(), 1, "root node should only have digest");
+        assert_eq!(texts[0], make_digest('a').to_short_string());
     }
 
     #[test]
-    fn tree_node_repeated_and_local_shows_both() {
+    fn tree_node_public_annotation() {
+        let node = make_node("pkg", make_digest('a'), false, vec![]);
+        let texts = annotation_texts(&node);
+        assert!(texts.contains(&make_digest('a').to_short_string()));
+        assert!(texts.contains(&"public".to_string()));
+    }
+
+    #[test]
+    fn tree_node_repeated_public_has_three_annotations() {
+        let node = make_node("pkg", make_digest('a'), true, vec![]);
+        let texts = annotation_texts(&node);
+        assert!(texts.contains(&make_digest('a').to_short_string()));
+        assert!(texts.contains(&"repeated".to_string()));
+        assert!(texts.contains(&"public".to_string()));
+    }
+
+    #[test]
+    fn tree_node_sealed_annotation() {
+        let mut node = make_node("pkg", make_digest('a'), false, vec![]);
+        node.visibility = Some(Visibility::Sealed);
+        let texts = annotation_texts(&node);
+        assert!(texts.contains(&"sealed".to_string()));
+    }
+
+    #[test]
+    fn tree_node_repeated_and_sealed_shows_both() {
         let mut node = make_node("pkg", make_digest('a'), true, vec![]);
-        node.exported = false;
-        assert_eq!(node.annotation(), Some("(*) (local)"));
+        node.visibility = Some(Visibility::Sealed);
+        let texts = annotation_texts(&node);
+        assert!(texts.contains(&"repeated".to_string()));
+        assert!(texts.contains(&"sealed".to_string()));
+    }
+
+    #[test]
+    fn tree_node_private_annotation() {
+        let mut node = make_node("pkg", make_digest('a'), false, vec![]);
+        node.visibility = Some(Visibility::Private);
+        assert!(annotation_texts(&node).contains(&"private".to_string()));
+    }
+
+    #[test]
+    fn tree_node_interface_annotation() {
+        let mut node = make_node("pkg", make_digest('a'), false, vec![]);
+        node.visibility = Some(Visibility::Interface);
+        assert!(annotation_texts(&node).contains(&"interface".to_string()));
+    }
+
+    #[test]
+    fn tree_node_repeated_and_private_shows_both() {
+        let mut node = make_node("pkg", make_digest('a'), true, vec![]);
+        node.visibility = Some(Visibility::Private);
+        let texts = annotation_texts(&node);
+        assert!(texts.contains(&"repeated".to_string()));
+        assert!(texts.contains(&"private".to_string()));
+    }
+
+    #[test]
+    fn annotations_order_is_digest_visibility_repeated() {
+        let node = make_node("pkg", make_digest('a'), true, vec![]);
+        let texts = annotation_texts(&node);
+        assert_eq!(texts.len(), 3);
+        assert_eq!(texts[0], make_digest('a').to_short_string());
+        assert_eq!(texts[1], "public");
+        assert_eq!(texts[2], "repeated");
     }
 
     #[test]

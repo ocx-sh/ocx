@@ -212,24 +212,26 @@ def dependencies(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
     }
 
 
-def deps_export(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
-    """Packages with mixed export flags for deps command demos.
+def deps_visibility(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+    """Packages with mixed visibility levels for deps command demos.
 
-    Diamond dependency graph through nodejs, with export annotations::
+    Diamond dependency graph through nodejs, with visibility annotations::
 
         webapp:2.0
-        ├── server:1.0   (exported)  → nodejs:24  (exported)
-        ├── bun:1.3      (exported)
-        └── renderer:1.0 (local)     → nodejs:24  (*) (local)
+        ├── server:1.0    (public)    → nodejs:24  (public)
+        ├── bun:1.3       (public)
+        ├── renderer:1.0  (private)   → nodejs:24  (*) (private)
+        └── templates:1.0 (sealed)
 
     server is an Express-style framework that exports Node.js at runtime.
     bun is a standalone bundler (no transitive deps).
     renderer is an SSR engine that runs JS templates via Node.js — the
-    webapp uses it internally but doesn't export it (local). Creates the
-    diamond through nodejs.
+    webapp needs it internally for its shims but doesn't expose it to
+    consumers (private). Creates the diamond through nodejs.
+    templates is static content accessed by path — no env needed (sealed).
 
-    Tree annotations: (local), (*), (*) (local).
-    Flat view: exported/local column.
+    Tree annotations: (private), (*), (sealed).
+    Flat view: visibility column with all levels.
     Why view: two paths from webapp to nodejs.
     """
     from src.registry import fetch_manifest_digest
@@ -247,40 +249,50 @@ def deps_export(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
         ocx, "bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
         outputs={"bun": {"--version": "1.3.10"}},
     )
+    templates = make_package(
+        ocx, "templates", "1.0.0", tmp_path, bins=["tpl"],
+        outputs={"tpl": {"--version": "templates 1.0.0"}},
+    )
 
     node_digest = fetch_manifest_digest(ocx.registry, nodejs.repo, nodejs.tag)
     bun_digest = fetch_manifest_digest(ocx.registry, bun.repo, bun.tag)
+    templates_digest = fetch_manifest_digest(ocx.registry, templates.repo, templates.tag)
 
     # Intermediate packages (depend on nodejs)
     server = make_package(
         ocx, "server", "1.0.0", tmp_path, bins=["server"], env=path_env,
-        dependencies=[{"identifier": f"{nodejs.fq}@{node_digest}", "export": True}],
+        dependencies=[{"identifier": f"{nodejs.fq}@{node_digest}", "visibility": "public"}],
         outputs={"server": {"--version": "server 1.0.0"}},
     )
     renderer = make_package(
         ocx, "renderer", "1.0.0", tmp_path, bins=["render"], env=path_env,
-        dependencies=[{"identifier": f"{nodejs.fq}@{node_digest}", "export": True}],
+        dependencies=[{"identifier": f"{nodejs.fq}@{node_digest}", "visibility": "public"}],
         outputs={"render": {"--version": "renderer 1.0.0"}},
     )
 
     server_digest = fetch_manifest_digest(ocx.registry, server.repo, server.tag)
     renderer_digest = fetch_manifest_digest(ocx.registry, renderer.repo, renderer.tag)
 
-    # Root: webapp depends on server (exported), bun (exported), renderer (local)
+    # Root: webapp depends on server (public), bun (public), renderer (private)
     webapp = make_package(
         ocx, "webapp", "2.0.0", tmp_path, bins=["serve"],
         env=path_env + [{"key": "APP_HOME", "type": "constant", "value": "${installPath}"}],
         dependencies=[
-            {"identifier": f"{server.fq}@{server_digest}", "export": True},
-            {"identifier": f"{bun.fq}@{bun_digest}", "export": True},
-            {"identifier": f"{renderer.fq}@{renderer_digest}"},
+            {"identifier": f"{server.fq}@{server_digest}", "visibility": "public"},
+            {"identifier": f"{bun.fq}@{bun_digest}", "visibility": "public"},
+            {"identifier": f"{renderer.fq}@{renderer_digest}", "visibility": "private"},
+            {"identifier": f"{templates.fq}@{templates_digest}"},
         ],
         outputs={"serve": {"--version": "webapp 2.0.0"}},
     )
 
+    # Pre-install so recordings don't need `ocx install` on screen.
+    ocx.run("install", "--select", webapp.short)
+
     return {
         "nodejs": [nodejs],
         "bun": [bun],
+        "templates": [templates],
         "server": [server],
         "renderer": [renderer],
         "webapp": [webapp],
@@ -293,5 +305,5 @@ SETUPS: dict[str, Callable] = {
     "full-catalog": full_catalog,
     "variants": variants,
     "dependencies": dependencies,
-    "deps-export": deps_export,
+    "deps-visibility": deps_visibility,
 }

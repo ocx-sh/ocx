@@ -34,7 +34,10 @@ pub async fn find_in_store(
     let content = storage.join("content");
     let metadata_path = storage.join("metadata.json");
     let resolve_path = storage.join("resolve.json");
-    if content.is_dir() && metadata_path.is_file() && resolve_path.is_file() {
+    if tokio::fs::try_exists(&content).await.unwrap_or(false)
+        && tokio::fs::try_exists(&metadata_path).await.unwrap_or(false)
+        && tokio::fs::try_exists(&resolve_path).await.unwrap_or(false)
+    {
         let (metadata_result, resolved_result): (crate::Result<metadata::Metadata>, crate::Result<ResolvedPackage>) = tokio::join!(
             metadata::Metadata::read_json(&metadata_path),
             ResolvedPackage::read_json(&resolve_path),

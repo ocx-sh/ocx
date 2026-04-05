@@ -22,8 +22,8 @@ impl PackageManager {
         match self.find(package, platforms.clone()).await {
             Ok(info) => Ok(info),
             Err(PackageErrorKind::NotFound) if !self.is_offline() => {
-                log::info!("Package '{}' not found locally, installing.", package);
-                self.install(package, platforms, false, false).await
+                log::info!("Package '{}' not found locally, pulling.", package);
+                self.pull(package, platforms).await
             }
             Err(PackageErrorKind::NotFound) => {
                 log::error!("Package not found and offline mode is enabled: {}", package);

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub mod bundle;
 pub mod dependency;
 pub mod env;
+pub mod visibility;
 
 /// OCX package metadata.
 ///

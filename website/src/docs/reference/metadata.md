@@ -85,8 +85,7 @@ A language runtime with multiple environment variables, archive stripping, and a
   ],
   "dependencies": [
     {
-      "identifier": "ocx.sh/gcc:13",
-      "digest": "sha256:a1b2c3d4e5f6..."
+      "identifier": "ocx.sh/gcc:13@sha256:a1b2c3d4e5f6..."
     }
   ]
 }
@@ -159,8 +158,8 @@ on every machine regardless of the current registry state.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `identifier` | string | Yes | Fully qualified OCX identifier including the registry. The tag is advisory. e.g. `ocx.sh/java:21`, `ghcr.io/myorg/tool`. |
-| `digest` | string | Yes | OCI digest (`sha256:…`). May reference an Image Index (platform resolution at install time) or a single manifest. |
+| `identifier` | string | Yes | Fully qualified pinned OCX identifier including the registry and an inline OCI digest (`@sha256:…`). The tag is advisory; only the digest is authoritative. The digest may reference an Image Index (platform resolution at install time) or a single manifest. e.g. `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`, `ghcr.io/myorg/tool@sha256:...`. |
+| `visibility` | string | No | Controls how the dependency's environment variables propagate. Default: `sealed`. See [Visibility](#dependencies-visibility). |
 
 ```json
 {
@@ -172,16 +171,48 @@ on every machine regardless of the current registry state.
   ],
   "dependencies": [
     {
-      "identifier": "ocx.sh/java:21",
-      "digest": "sha256:a1b2c3d4e5f6..."
+      "identifier": "ocx.sh/java:21@sha256:a1b2c3d4e5f6...",
+      "visibility": "private"
     },
     {
-      "identifier": "ocx.sh/cmake:3.28",
-      "digest": "sha256:f6e5d4c3b2a1..."
+      "identifier": "ocx.sh/cmake:3.28@sha256:f6e5d4c3b2a1..."
     }
   ]
 }
 ```
+
+### Visibility {#dependencies-visibility}
+
+Each dependency's `visibility` field controls how its environment variables propagate through the
+dependency chain. The model is inspired by [CMake's `target_link_libraries`][cmake-tll] visibility
+(PUBLIC/PRIVATE/INTERFACE).
+
+| Value | Self-execution | Consumer propagation | Use case |
+|---|---|---|---|
+| `sealed` (default) | No | No | Structural dependency — content accessed by path, not env. Most deps. |
+| `private` | Yes | No | Package's own shims need the dep's env, consumers don't. |
+| `public` | Yes | Yes | Both the package and consumers need the dep's env. |
+| `interface` | No | Yes | Meta-packages that forward env to consumers without using it. |
+
+::: details Transitive Propagation
+
+When dependencies form a chain (Root → Dep → Transitive), visibility propagates using a simple
+rule: **if the child exports (consumer-visible), the result equals the parent's edge; otherwise
+the result is `sealed`.**
+
+| Parent → Dep | Dep → Transitive | Transitive from Parent |
+|---|---|---|
+| `public` | `public` / `interface` | `public` |
+| `public` | `private` / `sealed` | `sealed` |
+| `private` | `public` / `interface` | `private` |
+| `private` | `private` / `sealed` | `sealed` |
+| `interface` | `public` / `interface` | `interface` |
+| `interface` | `private` / `sealed` | `sealed` |
+| `sealed` | any | `sealed` |
+
+When two paths reach the same dependency (diamond), the most open visibility wins — each axis
+(self-visible, consumer-visible) is OR-merged independently.
+:::
 
 ### Ordering {#dependencies-ordering}
 
@@ -193,7 +224,7 @@ dependents in the final list.</Tooltip>, deduplicated, and applied in that deter
 
 ### Registry Requirement {#dependencies-registry}
 
-Every dependency identifier must include an explicit registry (`ocx.sh/java:21`, not just `java:21`).
+Every dependency identifier must include an explicit registry (`ocx.sh/java:21@sha256:a1b2c3d4e5f6...`, not just `java:21@sha256:a1b2c3d4e5f6...`).
 Default registry resolution is not applied because the consumer may have a different default registry
 than the publisher. Identifiers without an explicit registry are rejected at deserialization.
 
@@ -266,6 +297,7 @@ for archive extraction, `${installPath}` template substitution, and optional
 <!-- external -->
 [json-schema]: https://json-schema.org/
 [check-jsonschema]: https://github.com/python-jsonschema/check-jsonschema
+[cmake-tll]: https://cmake.org/cmake/help/latest/command/target_link_libraries.html
 
 <!-- schema -->
 [schema-url]: /schemas/metadata/v1.json

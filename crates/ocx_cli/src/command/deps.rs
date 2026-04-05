@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitCode;
 
@@ -11,7 +10,11 @@ use clap::Parser;
 use ocx_lib::{
     file_structure::FileStructure,
     oci,
-    package::{install_info::InstallInfo, metadata::Metadata, resolved_package::ResolvedPackage},
+    package::{
+        install_info::InstallInfo,
+        metadata::{Metadata, visibility::Visibility},
+        resolved_package::ResolvedPackage,
+    },
     prelude::SerdeExt,
 };
 
@@ -58,8 +61,8 @@ impl Deps {
         let fs = manager.file_structure();
 
         if self.flat {
-            // Validate no conflicts among exported deps.
-            manager.resolve_exported_set(&infos).await?;
+            // Validate no conflicts among visible deps.
+            manager.resolve_visible_set(&infos).await?;
 
             let mut seen = HashSet::new();
             let mut entries = Vec::new();
@@ -70,27 +73,27 @@ impl Deps {
                     if seen.insert(dep.identifier.digest()) {
                         entries.push(api::data::deps::FlatDependency {
                             identifier: oci::Identifier::from(dep.identifier.clone()),
-                            exported: dep.exported.into(),
+                            visibility: dep.visibility,
                         });
                     }
                 }
-                // Root packages are always exported — they are the roots of env resolution.
+                // Root packages are always public — they are the roots of env resolution.
                 if seen.insert(info.resolved.identifier.digest()) {
                     entries.push(api::data::deps::FlatDependency {
                         identifier: oci::Identifier::from(info.resolved.identifier.clone()),
-                        exported: api::data::deps::ExportStatus::Exported,
+                        visibility: ocx_lib::package::metadata::visibility::Visibility::Public,
                     });
                 }
             }
             context.api().report(&api::data::deps::FlatDependencies::new(entries))?;
         } else if let Some(ref why_pkg) = self.why {
-            // Why view: find all paths from roots to target via metadata + deps/ symlinks.
+            // Why view: find all paths from roots to target via resolve.json.
             let why_id = why_pkg.with_domain(context.default_registry())?;
             let mut all_paths = Vec::new();
 
             for info in &infos {
                 let mut current_path = vec![oci::Identifier::from(info.identifier.clone())];
-                find_paths_to(fs, &info.content, &why_id, &mut current_path, &mut all_paths).await;
+                find_paths_to(fs, info, &why_id, &mut current_path, &mut all_paths).await;
             }
 
             if all_paths.is_empty() {
@@ -108,12 +111,12 @@ impl Deps {
                 .api()
                 .report(&api::data::deps::DependenciesTrace::new(all_paths))?;
         } else {
-            // Tree view (default): walk metadata deps + resolve via deps/ symlinks.
+            // Tree view (default): walk metadata deps, resolve via resolve.json.
             let mut seen = HashSet::new();
             let max_depth = self.depth.unwrap_or(usize::MAX);
             let mut tree_roots = Vec::with_capacity(infos.len());
             for info in &infos {
-                tree_roots.push(build_tree_node(fs, info, true, max_depth, 0, &mut seen).await);
+                tree_roots.push(build_tree_node(fs, info, None, max_depth, 0, &mut seen).await);
             }
             context.api().report(&api::data::deps::Dependencies::new(tree_roots))?;
         }
@@ -127,7 +130,7 @@ impl Deps {
 fn build_tree_node<'a>(
     fs: &'a FileStructure,
     info: &'a InstallInfo,
-    exported: bool,
+    visibility: Option<Visibility>,
     max_depth: usize,
     current_depth: usize,
     seen: &'a mut HashSet<String>,
@@ -139,11 +142,15 @@ fn build_tree_node<'a>(
         let children = if is_repeated || current_depth >= max_depth {
             Vec::new()
         } else {
-            let dep_contents = read_deps_symlinks(fs, &info.content);
+            // Resolve declared deps to content paths via resolve.json (not deps/ symlinks).
+            // The resolved transitive closure maps (registry, repo) → platform-specific identifier.
+            let resolved_map = resolved_dep_map(&info.resolved);
             let mut children = Vec::new();
             for dep in info.metadata.dependencies() {
-                if let Some(dep_info) = resolve_dep(fs, &dep.identifier, &dep_contents).await {
-                    children.push(build_tree_node(fs, &dep_info, dep.export, max_depth, current_depth + 1, seen).await);
+                if let Some(dep_info) = resolve_dep_via_metadata(fs, &dep.identifier, &resolved_map).await {
+                    children.push(
+                        build_tree_node(fs, &dep_info, Some(dep.visibility), max_depth, current_depth + 1, seen).await,
+                    );
                 }
             }
             children
@@ -152,7 +159,7 @@ fn build_tree_node<'a>(
         api::data::deps::Dependency {
             identifier: info.identifier.clone().into(),
             repeated: is_repeated,
-            exported,
+            visibility,
             dependencies: children,
         }
     })
@@ -162,20 +169,16 @@ fn build_tree_node<'a>(
 
 fn find_paths_to<'a>(
     fs: &'a FileStructure,
-    content_path: &'a Path,
+    info: &'a InstallInfo,
     target: &'a oci::Identifier,
     current_path: &'a mut Vec<oci::Identifier>,
     all_paths: &'a mut Vec<Vec<oci::Identifier>>,
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        let metadata_path = content_path.with_file_name("metadata.json");
-        let Ok(metadata) = Metadata::read_json(&metadata_path).await else {
-            return;
-        };
+        // Resolve declared deps via resolve.json (not deps/ symlinks).
+        let resolved_map = resolved_dep_map(&info.resolved);
 
-        let dep_contents = read_deps_symlinks(fs, content_path);
-
-        for dep in metadata.dependencies() {
+        for dep in info.metadata.dependencies() {
             let dep_id = &dep.identifier;
             current_path.push(dep_id.clone().into());
 
@@ -183,8 +186,8 @@ fn find_paths_to<'a>(
                 all_paths.push(current_path.clone());
             }
 
-            if let Some(dep_info) = resolve_dep(fs, dep_id, &dep_contents).await {
-                find_paths_to(fs, &dep_info.content, target, current_path, all_paths).await;
+            if let Some(dep_info) = resolve_dep_via_metadata(fs, dep_id, &resolved_map).await {
+                find_paths_to(fs, &dep_info, target, current_path, all_paths).await;
             }
 
             current_path.pop();
@@ -194,51 +197,49 @@ fn find_paths_to<'a>(
 
 // ── Shared resolution helpers ────────────────────────────────────────
 
-/// Reads deps/ symlinks for a package and returns their canonicalized content paths.
-fn read_deps_symlinks(fs: &FileStructure, content_path: &Path) -> Vec<PathBuf> {
-    let deps_dir = match fs.objects.deps_dir_for_content(content_path) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
-    let entries = match std::fs::read_dir(&deps_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    entries
-        .flatten()
-        .filter_map(|e| {
-            // canonicalize follows symlinks and resolves to absolute path.
-            let canonical = std::fs::canonicalize(e.path()).ok()?;
-            if canonical.is_dir() { Some(canonical) } else { None }
+/// Builds a lookup from `(registry, repo)` to the platform-resolved
+/// [`PinnedIdentifier`] using the pre-computed resolve.json data.
+///
+/// This replaces the previous `read_deps_symlinks` approach — resolve.json
+/// is the canonical source written at pull time, and digest-pinned metadata
+/// cannot form cycles by construction.
+fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<(String, String), &oci::PinnedIdentifier> {
+    resolved
+        .dependencies
+        .iter()
+        .map(|rd| {
+            let key = (
+                rd.identifier.registry().to_owned(),
+                rd.identifier.repository().to_owned(),
+            );
+            (key, &rd.identifier)
         })
         .collect()
 }
 
-/// Resolves a declared dependency to an InstallInfo.
-///
-/// Tries direct digest lookup first (single-platform manifests), then
-/// falls back to matching deps/ symlink targets by repository directory.
-async fn resolve_dep(fs: &FileStructure, id: &oci::Identifier, dep_contents: &[PathBuf]) -> Option<InstallInfo> {
-    // Primary: direct digest lookup.
-    if let Ok(pinned) = oci::PinnedIdentifier::try_from(id.clone()) {
-        let content = fs.objects.content(&pinned);
-        if content.is_dir() {
-            return load_install_info(content).await;
-        }
+/// Resolves a declared dependency to an [`InstallInfo`] using the parent's
+/// resolve.json map (not deps/ symlinks).
+async fn resolve_dep_via_metadata(
+    fs: &FileStructure,
+    id: &oci::PinnedIdentifier,
+    resolved_map: &HashMap<(String, String), &oci::PinnedIdentifier>,
+) -> Option<InstallInfo> {
+    // Primary: direct digest lookup (single-platform manifests where
+    // the declared digest matches the stored content digest).
+    let content = fs.objects.content(id);
+    if tokio::fs::try_exists(&content).await.unwrap_or(false) {
+        return load_install_info(content).await;
     }
 
-    // Fallback: match by repository directory prefix in deps/ symlinks.
-    let repo_dir_raw = fs.objects.repository_dir(id);
-    let repo_dir = std::fs::canonicalize(&repo_dir_raw).unwrap_or(repo_dir_raw);
-    for content in dep_contents {
-        if content.starts_with(&repo_dir) {
-            return load_install_info(content.clone()).await;
-        }
-    }
-    None
+    // Fallback: the declared digest is an Image Index digest — look up the
+    // platform-resolved identifier from the parent's resolve.json.
+    let key = (id.registry().to_owned(), id.repository().to_owned());
+    let resolved_id = resolved_map.get(&key)?;
+    let content = fs.objects.content(resolved_id);
+    load_install_info(content).await
 }
 
-async fn load_install_info(content: PathBuf) -> Option<InstallInfo> {
+async fn load_install_info(content: std::path::PathBuf) -> Option<InstallInfo> {
     let (metadata, resolved) = tokio::join!(
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),

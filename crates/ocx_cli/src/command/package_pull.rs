@@ -31,12 +31,7 @@ impl PackagePull {
             options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
         let install_infos = context
             .manager()
-            .install_all(
-                oci_packages.clone(),
-                platforms_or_default(&self.platforms),
-                false,
-                false,
-            )
+            .pull_all(&oci_packages, platforms_or_default(&self.platforms))
             .await?;
 
         let entries = self

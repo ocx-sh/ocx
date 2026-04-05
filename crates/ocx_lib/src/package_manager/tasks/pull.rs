@@ -240,15 +240,18 @@ async fn setup_owned(
             .dependencies()
             .iter()
             .zip(dependencies.iter())
-            .map(|(decl, info)| (info.resolved.clone(), decl.export)),
+            .map(|(decl, info)| (info.resolved.clone(), decl.visibility)),
     );
     post_download_actions(&temp.dir.dir, &resolved).await?;
 
+    // Create deps/ symlinks in temp dir BEFORE move — targets are absolute
+    // paths to dependency content already in the object store. This ensures
+    // the move is atomic: no window where the object exists without deps/.
+    // NOTE: issue #23 (relative symlinks) will need to revisit this approach.
+    link_dependencies_in_temp(&temp.dir.dir, &dependencies)?;
+
     // Atomic move temp → object store.
     let install_info = move_temp_to_object_store(mgr.file_structure(), pinned, &metadata, resolved, temp).await?;
-
-    // Link dependency forward-refs (all deps, regardless of export).
-    link_dependencies(mgr.file_structure(), &install_info, &dependencies)?;
 
     log::debug!("Pull succeeded for '{}'.", pinned);
     Ok(install_info)
@@ -372,21 +375,26 @@ async fn move_temp_to_object_store(
     })
 }
 
-/// Creates dependency forward-refs (`deps/` symlinks) for each dependency.
-/// ALL deps get symlinks regardless of export flag — export only controls
+/// Creates dependency forward-refs (`deps/` symlinks) inside the temp directory.
+///
+/// Symlink targets are absolute paths to dependency content directories already
+/// present in the object store (deps are pulled before the dependent). After
+/// `move_dir` the symlinks remain valid because their targets are not inside the
+/// temp directory being moved.
+///
+/// ALL deps get symlinks regardless of visibility — visibility only controls
 /// env composition, not GC or filesystem presence.
-fn link_dependencies(
-    fs: &file_structure::FileStructure,
-    install_info: &InstallInfo,
-    dep_infos: &[InstallInfo],
-) -> Result<(), PackageErrorKind> {
+fn link_dependencies_in_temp(temp_dir: &std::path::Path, dep_infos: &[InstallInfo]) -> Result<(), PackageErrorKind> {
     if dep_infos.is_empty() {
         return Ok(());
     }
-    let rm = super::common::reference_manager(fs);
+    let deps_dir = temp_dir.join("deps");
+    std::fs::create_dir_all(&deps_dir)
+        .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(deps_dir.clone(), e)))?;
     for info in dep_infos {
-        rm.link_dependency(&install_info.content, &info.content)
-            .map_err(PackageErrorKind::Internal)?;
+        let name = crate::reference_manager::ReferenceManager::ref_name(&info.content);
+        let link_path = deps_dir.join(name);
+        crate::symlink::create(&info.content, &link_path).map_err(PackageErrorKind::Internal)?;
     }
     Ok(())
 }

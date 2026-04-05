@@ -10,7 +10,7 @@ use crate::{
     oci,
     oci::index::SelectResult,
     package::install_info::InstallInfo,
-    package_manager::{self, DependencyError, error::PackageError, error::PackageErrorKind},
+    package_manager::{self, error::PackageError, error::PackageErrorKind},
 };
 
 use super::super::PackageManager;
@@ -75,9 +75,14 @@ impl PackageManager {
 
     /// Resolves environment entries for packages, including transitive deps.
     ///
-    /// Uses pre-computed export flags from resolve.json — no recursive metadata
+    /// Uses pre-computed visibility from resolve.json — no recursive metadata
     /// walk needed. Dependencies are already in topological order (deps before
     /// dependents) from `with_dependencies`.
+    ///
+    /// Root packages are direct exec/env targets, so both self-visible and
+    /// consumer-visible deps contribute (everything except Sealed). The
+    /// propagation algebra already ensures transitive deps behind Private
+    /// edges get the correct resolved visibility.
     ///
     /// Detects conflicts: if the same `registry/repo` appears with different
     /// digests across the requested packages, an error is returned.
@@ -91,9 +96,11 @@ impl PackageManager {
         let mut entries = Vec::new();
 
         for pkg in packages {
-            // Exported transitive deps first (topological order preserved).
+            // Visible transitive deps first (topological order preserved).
+            // Root packages are direct exec targets — include self-visible
+            // (Private, Public) and consumer-visible (Public, Interface) deps.
             for dep in &pkg.resolved.dependencies {
-                if !dep.exported {
+                if !dep.visibility.is_visible() {
                     continue;
                 }
                 if !check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)? {
@@ -111,19 +118,19 @@ impl PackageManager {
         Ok(entries)
     }
 
-    /// Returns the set of digests that are transitively exported by the given
-    /// packages. Roots are always included.
+    /// Returns the set of digests that are visible from the given packages.
+    /// Roots are always included.
     ///
-    /// Uses pre-computed export flags — no metadata loading needed, just
+    /// Uses pre-computed visibility — no metadata loading needed, just
     /// identifier filtering. Detects conflicts: if the same `registry/repo`
-    /// appears with different digests among exported deps, an error is returned.
-    pub async fn resolve_exported_set(&self, packages: &[InstallInfo]) -> crate::Result<HashSet<oci::Digest>> {
+    /// appears with different digests among visible deps, an error is returned.
+    pub async fn resolve_visible_set(&self, packages: &[InstallInfo]) -> crate::Result<HashSet<oci::Digest>> {
         let mut seen_digests = HashSet::new();
         let mut seen_repos: HashMap<(String, String), oci::Digest> = HashMap::new();
 
         for pkg in packages {
             for dep in &pkg.resolved.dependencies {
-                if dep.exported {
+                if dep.visibility.is_visible() {
                     check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)?;
                 }
             }
@@ -133,8 +140,12 @@ impl PackageManager {
     }
 }
 
-/// Checks for conflicts and deduplicates an exported dependency.
-/// Returns `true` if newly inserted, `false` if already seen.
+/// Deduplicates a visible dependency by digest, warning on conflicts.
+///
+/// Returns `true` if newly inserted, `false` if already seen (or conflict
+/// where first-seen wins). When the same `registry/repo` appears with
+/// different digests, a warning is emitted and the first-seen digest is
+/// kept — matching the last-writer-wins semantics of scalar env vars.
 fn check_exported(
     id: &oci::PinnedIdentifier,
     seen_digests: &mut HashSet<oci::Digest>,
@@ -145,10 +156,14 @@ fn check_exported(
     if let Some(existing) = seen_repos.get(&repo_key)
         && *existing != digest
     {
-        return Err(crate::Error::Dependency(DependencyError::Conflict {
-            repository: format!("{}/{}", id.registry(), id.repository()),
-            digests: vec![existing.clone(), digest.clone()],
-        }));
+        tracing::warn!(
+            "Conflicting digests for {}/{}: keeping {}, ignoring {}.",
+            id.registry(),
+            id.repository(),
+            existing,
+            digest,
+        );
+        return Ok(false);
     }
     seen_repos.insert(repo_key, digest.clone());
     Ok(seen_digests.insert(digest))

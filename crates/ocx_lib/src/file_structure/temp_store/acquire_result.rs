@@ -13,8 +13,9 @@ use super::temp_dir::TempDir;
 /// is dropped, the OS lock is released and the sibling `.lock` file is
 /// deleted (best-effort).
 ///
-/// Field order matters: `lock` is declared first so it is dropped first,
-/// releasing the OS lock before the `Drop` impl deletes the file.
+/// The custom `Drop` impl deletes the `.lock` file while the OS lock
+/// (`FileLock`) is still held — field destructors run after `Drop::drop`,
+/// preventing a window where the file exists unlocked.
 pub struct TempAcquireResult {
     pub lock: file_lock::FileLock,
     pub dir: TempDir,

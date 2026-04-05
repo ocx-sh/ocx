@@ -104,6 +104,7 @@ See `code-quality.md` for universal YAGNI rules. Rust-specific applications:
 - **Always join** — never fire-and-forget spawned tasks. Observe `JoinHandle` or use `JoinSet`.
 - **Deterministic output**: `JoinSet::join_next()` returns results in **completion order**, which is non-deterministic. Every `JoinSet` consumer **must** ensure deterministic output — sort results by path, index, or other stable key before returning. No exceptions.
 - **OCX convention**: `_all` methods use `JoinSet` but **preserve input order** — spawn with index, collect results, sort by index. Internal methods (walkers, GC, ref checks) sort by path.
+- **`.expect()` on `JoinHandle` / `join_next()`**: Acceptable for swallowing task panics at the join boundary — the `.expect()` message should describe the panicking context. However, the **inner `Result`** from the task must always be propagated via `?` — never silently dropped.
 - **`spawn_blocking`** for sync I/O and CPU-bound work (>100μs between await points). Use `rayon` for heavy compute with `oneshot` channel bridge.
 
 ### Cancel Safety

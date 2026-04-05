@@ -537,6 +537,57 @@ If two dependencies set the same scalar variable (e.g., both set `JAVA_HOME` to 
 This is especially common with the [shell profile][cmd-shell-profile]. If you add a package with dependencies to your profile (e.g., `webapp:2.0` which depends on `nodejs:24`) and also have `nodejs:24` in your profile as a standalone tool, both will contribute environment variables. The profile loads all packages via [`ocx shell env`][cmd-shell-env], which includes dependency environments — so `NODE_HOME` may be set twice from different content paths. To avoid this, either remove the standalone entry from the profile (the dependency provides it), or accept that the profile entry's value wins (it appears later in the load order).
 :::
 
+### Visibility {#dependencies-visibility}
+
+Not every dependency's environment should leak to consumers. A build tool that wraps a compiler
+might need `CC` and `LD_LIBRARY_PATH` internally, but users of the build tool shouldn't see those
+variables in their own environment. Conversely, a meta-package that bundles a runtime stack
+should forward everything to whoever depends on it.
+
+The `visibility` field on each dependency entry controls this. It has four levels:
+
+| Level | Self | Export | Example |
+|---|---|---|---|
+| `sealed` *(default)* | No | No | Structural dep — accessed by path, not env. |
+| `private` | Yes | No | Internal tool needed for own shims/entry points. |
+| `public` | Yes | Yes | Shared runtime both sides need (e.g. Java). |
+| `interface` | No | Yes | Meta-package that composes env for consumers. |
+
+```json
+{
+  "dependencies": [
+    { "identifier": "ocx.sh/java:21", "digest": "sha256:a1b2…", "visibility": "private" },
+    { "identifier": "ocx.sh/maven:3",  "digest": "sha256:c3d4…", "visibility": "public" }
+  ]
+}
+```
+
+In this example, `java` is private — the package needs it internally but consumers don't get
+`JAVA_HOME`. `maven` is public — both the package and its consumers see Maven's environment.
+
+When dependencies form chains, visibility propagates using a simple rule: **if the child exports
+(public or interface), the result equals the parent's edge; otherwise sealed.** When two paths
+reach the same dependency through a diamond, the most open visibility wins.
+
+The tree view annotates non-public dependencies so you can see visibility at a glance — `(private)`
+deps are used internally, `(sealed)` deps are structural only, and `public` deps have no annotation:
+
+<Terminal src="/casts/deps.cast" title="Dependency tree with visibility" collapsed />
+
+The flat view shows the effective visibility in its own column — this is the primary tool for
+debugging which dependencies actually contribute to the environment:
+
+<Terminal src="/casts/deps-flat.cast" title="Flat view with visibility column" collapsed />
+
+::: details Self-execution path
+All four visibility levels are fully implemented in the propagation algebra and stored in
+`resolve.json`. The consumer-visible axis (`public`, `interface`) controls which deps contribute
+to [`ocx exec`][cmd-exec] and [`ocx env`][cmd-env] today. The self-visible axis (`public`,
+`private`) will activate when self-execution environments (shims, entry points) are added in
+a future release — at that point, `private` deps will contribute to a package's own shim
+execution but remain invisible to consumers.
+:::
+
 ### Inspection {#dependencies-inspection}
 
 [`ocx deps`][cmd-deps] shows the dependency tree for installed packages. The default view is a logical tree showing the declared relationships:
