@@ -16,9 +16,9 @@ impl PackageManager {
     /// transitive dependency resolution (see that method for concurrency
     /// safety), then optionally creates:
     ///
-    /// - A **candidate** symlink at `installs/{repo}/candidates/{tag}` when
+    /// - A **candidate** symlink at `symlinks/{repo}/candidates/{tag}` when
     ///   `candidate` is `true` — pins this version as an installed candidate.
-    /// - A **current** symlink at `installs/{repo}/current` when `select` is
+    /// - A **current** symlink at `symlinks/{repo}/current` when `select` is
     ///   `true` — makes this version the active selection.
     ///
     /// Symlinks are managed via [`ReferenceManager::link`] which also creates
@@ -77,12 +77,12 @@ fn create_install_symlinks(
 ) -> Result<(), PackageErrorKind> {
     let rm = super::common::reference_manager(mgr.file_structure());
     if candidate {
-        let link_path = mgr.file_structure().installs.candidate(package);
+        let link_path = mgr.file_structure().symlinks.candidate(package);
         log::debug!("Creating candidate symlink at '{}'.", link_path.display());
         rm.link(&link_path, &info.content).map_err(PackageErrorKind::Internal)?;
     }
     if select {
-        let link_path = mgr.file_structure().installs.current(package);
+        let link_path = mgr.file_structure().symlinks.current(package);
         log::debug!("Creating current symlink at '{}'.", link_path.display());
         rm.link(&link_path, &info.content).map_err(PackageErrorKind::Internal)?;
     }

@@ -21,7 +21,7 @@ ocx --remote exec uv:0.10 -- uv --version
 
 <Terminal src="/casts/exec.cast" title="Running a package" collapsed />
 
-The binary is cached in the [object store][fs-objects], so subsequent calls with the same version skip the download and don't need `--remote`. Nothing else persists: no [candidate symlink][fs-installs], no [current pointer][fs-installs].
+The binary is cached in the [object store][fs-objects], so subsequent calls with the same version skip the download and don't need `--remote`. Nothing else persists: no [candidate symlink][fs-symlinks], no [current pointer][fs-symlinks].
 
 ::: tip
 Use [`ocx exec`][cmd-exec] for one-off tasks or in CI where you want a reproducible, isolated invocation. For tools you reach for every day, read on.
@@ -43,7 +43,7 @@ ocx --remote exec nodejs:24 bun:1.3 -- bun --version
 
 Running [`ocx exec`][cmd-exec] re-resolves the package on every invocation. For tools you use across multiple sessions — compilers, interpreters, build utilities — you want a persistent, named install that is available offline and at a known, stable path.
 
-[`ocx install`][cmd-install] downloads the package into the [content-addressed object store][fs-objects] and creates a [candidate symlink][fs-installs] at `~/.ocx/installs/{registry}/{repo}/candidates/{tag}`. That path never changes after installation. If two tags resolve to the same binary build, only one object lives on disk.
+[`ocx install`][cmd-install] downloads the package into the [content-addressed object store][fs-objects] and creates a [candidate symlink][fs-symlinks] at `~/.ocx/symlinks/{registry}/{repo}/candidates/{tag}`. That path never changes after installation. If two tags resolve to the same binary build, only one object lives on disk.
 
 ```sh
 ocx --remote install uv:0.10
@@ -72,7 +72,7 @@ ocx ci export uv:0.10
 ```
 :::
 
-See the [object store][fs-objects] and [install symlinks][fs-installs] sections of the user guide for the full three-store architecture behind this.
+See the [object store][fs-objects] and [install symlinks][fs-symlinks] sections of the user guide for the full three-store architecture behind this.
 
 ## Switching Versions {#switching-versions}
 
@@ -105,7 +105,7 @@ See [path resolution][path-resolution] in the user guide for the full comparison
 
 ## Uninstalling {#uninstalling}
 
-[`ocx uninstall`][cmd-uninstall] removes the [candidate symlink][fs-installs] and its back-reference from the object's `refs/` directory. The binary itself is kept unless `--purge` is given and `refs/` is empty after the uninstall.
+[`ocx uninstall`][cmd-uninstall] removes the [candidate symlink][fs-symlinks] and its back-reference from the object's `refs/` directory. The binary itself is kept unless `--purge` is given and `refs/` is empty after the uninstall.
 
 ```sh
 ocx install uv:0.10
@@ -117,7 +117,7 @@ ocx uninstall uv:0.10
 If the package was also selected, pass `--deselect` to remove the `current` pointer in the same step, or run [`ocx deselect`][cmd-deselect] separately first.
 
 ::: warning Uninstall removes the symlink, not necessarily the binary
-The [candidate symlink][fs-installs] is removed immediately. The binary object in the [object store][fs-objects] is preserved unless `--purge` is given and no other references remain. To remove all unreferenced objects in one pass, use [`ocx clean`][cmd-clean].
+The [candidate symlink][fs-symlinks] is removed immediately. The binary object in the [object store][fs-objects] is preserved unless `--purge` is given and no other references remain. To remove all unreferenced objects in one pass, use [`ocx clean`][cmd-clean].
 :::
 
 See the [object store][fs-objects] section of the user guide for how the `refs/` back-reference system makes garbage collection safe.
@@ -134,7 +134,7 @@ ocx env corretto:21
 
 <Terminal src="/casts/env.cast" title="Package environment" collapsed />
 
-For shell profile integration, [`ocx shell env`][cmd-shell-env] emits shell-specific `export` statements designed for `eval`. Pass `--current` to reference the [floating pointer][fs-installs] rather than a pinned version — the shell picks up new versions automatically whenever you run [`ocx select`][cmd-select]:
+For shell profile integration, [`ocx shell env`][cmd-shell-env] emits shell-specific `export` statements designed for `eval`. Pass `--current` to reference the [floating pointer][fs-symlinks] rather than a pinned version — the shell picks up new versions automatically whenever you run [`ocx select`][cmd-select]:
 
 ```sh
 eval "$(ocx shell env --current corretto)"
@@ -249,7 +249,7 @@ The sections above cover the everyday workflow. For deeper topics:
 
 <!-- user guide sections -->
 [fs-objects]: ./user-guide.md#file-structure-objects
-[fs-installs]: ./user-guide.md#file-structure-installs
+[fs-symlinks]: ./user-guide.md#file-structure-symlinks
 [fs-index]: ./user-guide.md#file-structure-index
 [path-resolution]: ./user-guide.md#path-resolution
 [versioning-tags]: ./user-guide.md#versioning-tags

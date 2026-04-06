@@ -205,10 +205,10 @@ impl ProfileManifest {
     /// Returns all entries whose identifier matches the same registry and repository
     /// as the given identifier (ignoring tag differences).
     pub fn entries_for_repo(&self, identifier: &crate::oci::Identifier) -> Vec<&ProfileEntry> {
-        let target = identifier.without_specifiers();
+        let target = crate::oci::Repository::from(identifier);
         self.packages
             .iter()
-            .filter(|e| e.identifier.without_specifiers() == target)
+            .filter(|e| crate::oci::Repository::from(&e.identifier) == target)
             .collect()
     }
 

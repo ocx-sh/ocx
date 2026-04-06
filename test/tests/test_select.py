@@ -18,7 +18,7 @@ def test_select_switches_current_symlink(
 
     current = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / v1.repo
         / "current"
@@ -35,7 +35,7 @@ def test_deselect_removes_current_symlink(
 
     current = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "current"
@@ -57,7 +57,7 @@ def test_reselect_after_deselect(
 
     current = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "current"

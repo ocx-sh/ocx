@@ -121,13 +121,16 @@ ocx index catalog                   # List known repositories
 
 Global flags: `--offline`, `--remote`, `--format json`.
 
-## Three-Store Architecture
+## Storage Layout
 
 ```
 ~/.ocx/
-├── objects/{registry}/{repo}/{digest}/   # Content-addressed binaries (immutable)
-├── index/{registry}/                     # Local metadata mirror (offline/reproducibility)
-└── installs/{registry}/{repo}/           # Stable symlinks (candidates + current)
+├── blobs/{registry}/                     # Raw OCI blobs (manifests, referrers, image indexes)
+├── layers/{registry}/                    # Extracted OCI tar layers (content-addressed, shared across packages)
+├── packages/{registry}/                  # Assembled packages (content/ hardlinked from layers/)
+├── tags/{registry}/                      # Tag-to-digest mappings (local metadata mirror)
+├── symlinks/{registry}/                  # Install symlinks (candidates + current)
+└── temp/                                 # Download staging directories
 ```
 
 ## Technical Overview

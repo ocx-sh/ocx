@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
-use crate::{Result, compression, log::*};
+use crate::{Result, compression, log::*, utility::fs::path::validate_symlinks_in_dir};
 
 mod backend;
 mod error;
@@ -21,85 +21,6 @@ pub struct Archive {
 /// Returns `true` if the path has a `.zip` extension.
 fn is_zip(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-}
-
-/// Lexically normalizes a path by resolving `.` and `..` components without filesystem access.
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                if matches!(components.last(), Some(Component::Normal(_))) {
-                    components.pop();
-                } else if !matches!(components.last(), Some(Component::RootDir | Component::Prefix(_))) {
-                    components.push(component);
-                }
-            }
-            Component::CurDir => {}
-            other => components.push(other),
-        }
-    }
-    components.iter().collect()
-}
-
-/// Returns `true` if the normalized path contains any `..` components,
-/// meaning it escapes its logical root.
-fn escapes_root(path: &Path) -> bool {
-    normalize_path(path)
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-}
-
-/// Validates that a symlink target resolves within `root`.
-///
-/// `link_path` is the absolute path where the symlink is (or will be) located.
-/// `target` is the raw symlink target (typically relative).
-fn validate_symlink_target(root: &Path, link_path: &Path, target: &Path) -> Result<()> {
-    if target.is_absolute() {
-        return Err(error::Error::SymlinkEscape {
-            link: link_path.to_path_buf(),
-            target: target.to_path_buf(),
-        }
-        .into());
-    }
-    let parent = link_path.parent().unwrap_or(root);
-    let resolved = normalize_path(&parent.join(target));
-    let normalized_root = normalize_path(root);
-    if !resolved.starts_with(&normalized_root) {
-        return Err(error::Error::SymlinkEscape {
-            link: link_path.to_path_buf(),
-            target: target.to_path_buf(),
-        }
-        .into());
-    }
-    Ok(())
-}
-
-/// Recursively validates that all symlinks under `dir` resolve within `root`.
-fn validate_symlinks_in_dir(root: &Path, dir: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(dir).map_err(|e| error::Error::Io {
-        path: dir.to_path_buf(),
-        source: e,
-    })? {
-        let entry = entry.map_err(|e| error::Error::Io {
-            path: dir.to_path_buf(),
-            source: e,
-        })?;
-        let ft = entry.file_type().map_err(|e| error::Error::Io {
-            path: entry.path(),
-            source: e,
-        })?;
-        if ft.is_symlink() {
-            let target = std::fs::read_link(entry.path()).map_err(|e| error::Error::Io {
-                path: entry.path(),
-                source: e,
-            })?;
-            validate_symlink_target(root, &entry.path(), &target)?;
-        } else if ft.is_dir() {
-            validate_symlinks_in_dir(root, &entry.path())?;
-        }
-    }
-    Ok(())
 }
 
 impl Archive {
@@ -341,19 +262,10 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_path() {
-        assert_eq!(normalize_path(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
-        assert_eq!(normalize_path(Path::new("/a/../../b")), PathBuf::from("/b"));
-        assert_eq!(normalize_path(Path::new("a/./b")), PathBuf::from("a/b"));
-        assert_eq!(normalize_path(Path::new("a/../b")), PathBuf::from("b"));
-        assert_eq!(normalize_path(Path::new("../../x")), PathBuf::from("../../x"));
-    }
-
-    #[test]
     fn test_validate_symlink_same_dir() {
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/link");
-        assert!(validate_symlink_target(root, link, Path::new("sibling")).is_ok());
+        assert!(crate::symlink::validate_target(root, link, Path::new("sibling")).is_ok());
     }
 
     #[test]
@@ -361,7 +273,7 @@ mod tests {
         // link is in a subdirectory, target goes up one level but stays in root
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/sub/link");
-        assert!(validate_symlink_target(root, link, Path::new("../file")).is_ok());
+        assert!(crate::symlink::validate_target(root, link, Path::new("../file")).is_ok());
     }
 
     #[test]
@@ -369,7 +281,7 @@ mod tests {
         // link in sub/link -> ../other/file (stays within root)
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/sub/link");
-        assert!(validate_symlink_target(root, link, Path::new("../other/file")).is_ok());
+        assert!(crate::symlink::validate_target(root, link, Path::new("../other/file")).is_ok());
     }
 
     #[test]
@@ -377,7 +289,7 @@ mod tests {
         // link at depth 3, goes up exactly 3 levels to root — still within root
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/a/b/c/link");
-        assert!(validate_symlink_target(root, link, Path::new("../../../file")).is_ok());
+        assert!(crate::symlink::validate_target(root, link, Path::new("../../../file")).is_ok());
     }
 
     #[test]
@@ -385,7 +297,7 @@ mod tests {
         // link at depth 1, target goes up 2 levels — escapes root
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/sub/link");
-        assert!(validate_symlink_target(root, link, Path::new("../../etc/passwd")).is_err());
+        assert!(crate::symlink::validate_target(root, link, Path::new("../../etc/passwd")).is_err());
     }
 
     #[test]
@@ -393,14 +305,14 @@ mod tests {
         // link at root level, target goes up — escapes
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/link");
-        assert!(validate_symlink_target(root, link, Path::new("../outside")).is_err());
+        assert!(crate::symlink::validate_target(root, link, Path::new("../outside")).is_err());
     }
 
     #[test]
     fn test_validate_symlink_absolute_target() {
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/link");
-        assert!(validate_symlink_target(root, link, Path::new("/etc/passwd")).is_err());
+        assert!(crate::symlink::validate_target(root, link, Path::new("/etc/passwd")).is_err());
     }
 
     #[test]
@@ -408,7 +320,7 @@ mod tests {
         // ./sibling is equivalent to sibling — should be fine
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/link");
-        assert!(validate_symlink_target(root, link, Path::new("./sibling")).is_ok());
+        assert!(crate::symlink::validate_target(root, link, Path::new("./sibling")).is_ok());
     }
 
     #[test]
@@ -416,7 +328,7 @@ mod tests {
         // sub/../other/./file normalizes to other/file — stays within root
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/link");
-        assert!(validate_symlink_target(root, link, Path::new("sub/../other/./file")).is_ok());
+        assert!(crate::symlink::validate_target(root, link, Path::new("sub/../other/./file")).is_ok());
     }
 
     #[test]
@@ -424,7 +336,7 @@ mod tests {
         // sub/../../outside normalizes to ../outside — escapes
         let root = Path::new("/tmp/root");
         let link = Path::new("/tmp/root/link");
-        assert!(validate_symlink_target(root, link, Path::new("sub/../../outside")).is_err());
+        assert!(crate::symlink::validate_target(root, link, Path::new("sub/../../outside")).is_err());
     }
 
     /// Relative symlinks that stay within root survive a tar round-trip.

@@ -31,7 +31,7 @@ If you manage your `PATH` manually — for example, in a CI environment or a dot
 curl -fsSL https://ocx.sh/install.sh | sh -s -- --no-modify-path
 ```
 
-You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path] as an environment variable. Either way, add `~/.ocx/installs/ocx.sh/ocx/current/bin` to your `PATH` yourself.
+You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path] as an environment variable. Either way, add `~/.ocx/symlinks/ocx.sh/ocx/current/bin` to your `PATH` yourself.
 :::
 
 ## GitHub Releases {#github-releases}

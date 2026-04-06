@@ -472,7 +472,7 @@ mod tests {
 
         let original = create_file_with_magic(&bin_dir, "original", &0xFEED_FACFu32.to_be_bytes());
         let hardlink = bin_dir.join("hardlink");
-        std::fs::hard_link(&original, &hardlink).unwrap();
+        crate::hardlink::create(&original, &hardlink).unwrap();
 
         let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;

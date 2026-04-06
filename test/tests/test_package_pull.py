@@ -12,7 +12,7 @@ def test_package_pull_populates_object_store(
 
     content = Path(result[published_package.short])
     assert_dir_exists(content)
-    assert "objects" in str(content), f"Expected object store path, got: {content}"
+    assert "packages" in str(content), f"Expected package store path, got: {content}"
 
 
 def test_package_pull_does_not_create_candidate_symlink(
@@ -24,7 +24,7 @@ def test_package_pull_does_not_create_candidate_symlink(
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "candidates"
@@ -42,7 +42,7 @@ def test_package_pull_does_not_create_current_symlink(
 
     current = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "current"

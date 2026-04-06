@@ -55,8 +55,8 @@ def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str | None = Non
 
 
 def _objects_dir(ocx: OcxRunner) -> Path:
-    """Return the objects/ directory root."""
-    return Path(ocx.ocx_home) / "objects"
+    """Return the packages/ directory root."""
+    return Path(ocx.ocx_home) / "packages"
 
 
 def _count_object_dirs(ocx: OcxRunner) -> int:
@@ -104,11 +104,11 @@ def test_install_deps_no_symlinks_for_deps(ocx: OcxRunner, unique_repo: str, tmp
 
     # App should have candidate symlink
     reg_slug = registry_dir(ocx.registry)
-    app_candidate = Path(ocx.ocx_home) / "installs" / reg_slug / app_repo / "candidates" / "1.0.0"
+    app_candidate = Path(ocx.ocx_home) / "symlinks" / reg_slug / app_repo / "candidates" / "1.0.0"
     assert_symlink_exists(app_candidate)
 
     # Leaf should NOT have candidate symlink (it was pulled as a dependency)
-    leaf_candidate = Path(ocx.ocx_home) / "installs" / reg_slug / leaf_repo / "candidates" / "1.0.0"
+    leaf_candidate = Path(ocx.ocx_home) / "symlinks" / reg_slug / leaf_repo / "candidates" / "1.0.0"
     assert_not_exists(leaf_candidate)
 
 
@@ -268,9 +268,9 @@ def test_package_without_deps_works(published_package: PackageInfo, ocx: OcxRunn
 
 
 def _find_content_path(ocx: OcxRunner, pkg: PackageInfo) -> Path:
-    """Return the resolved content path for an installed package."""
+    """Return the content path for an installed package."""
     result = ocx.json("find", pkg.short)
-    return Path(result[pkg.short]).resolve()
+    return Path(result[pkg.short])
 
 
 def _setup_leaf_and_app(ocx, unique_repo, tmp_path):
@@ -499,13 +499,13 @@ def test_dependency_forward_refs_created(ocx: OcxRunner, unique_repo: str, tmp_p
 
     app_content = _find_content_path(ocx, app)
     app_obj_dir = app_content.parent
-    deps_dir = app_obj_dir / "deps"
-    assert deps_dir.exists(), "deps/ directory should exist on dependent object"
+    deps_dir = app_obj_dir / "refs" / "deps"
+    assert deps_dir.exists(), "refs/deps/ directory should exist on dependent object"
 
     dep_entries = list(deps_dir.iterdir())
-    assert len(dep_entries) >= 1, f"expected at least 1 forward-ref in deps/, got {len(dep_entries)}"
+    assert len(dep_entries) >= 1, f"expected at least 1 forward-ref in refs/deps/, got {len(dep_entries)}"
     # At least one should be a symlink
-    assert any(e.is_symlink() for e in dep_entries), "expected symlink entries in deps/"
+    assert any(e.is_symlink() for e in dep_entries), "expected symlink entries in refs/deps/"
 
 
 def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
@@ -523,8 +523,8 @@ def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tm
 
     # Verify forward refs restored on app
     app_content = _find_content_path(ocx, app)
-    deps_dir = app_content.parent / "deps"
-    assert deps_dir.exists(), "deps/ should be restored after reinstall"
+    deps_dir = app_content.parent / "refs" / "deps"
+    assert deps_dir.exists(), "refs/deps/ should be restored after reinstall"
     assert any(e.is_symlink() for e in deps_dir.iterdir()), "forward-ref symlinks should be restored"
 
 
@@ -887,7 +887,8 @@ def test_clean_dry_run_transitive_chain(
     after = _count_object_dirs(ocx)
 
     assert after == before, "dry-run must not remove objects"
-    assert len(result) == 3, f"expected 3 collectible objects in dry-run; got {len(result)}"
+    # 3 packages + 3 layers (each package has one extracted layer)
+    assert len(result) == 6, f"expected 6 collectible entries in dry-run; got {len(result)}"
 
 
 def test_clean_partial_diamond_preserves_shared_leaf(
@@ -1301,20 +1302,27 @@ def test_diamond_intermediate_deps_forward_refs(
 
 
 def _find_object_dir(ocx: OcxRunner, reg_slug: str, repo: str) -> Path:
-    """Find the single object directory for a given repo in the object store.
+    """Find the single package directory for a given repo in the package store.
 
-    Object dirs are sharded: ``objects/{reg}/{repo}/{algo}/{s1}/{s2}/{s3}/``.
-    We identify the actual object dir by looking for the ``content/`` subdirectory.
+    Package dirs are sharded by digest only: ``packages/{reg}/{algo}/{prefix}/{suffix}/``.
+    We identify the package by checking each object's ``resolve.json`` for the repo name.
     """
-    repo_dir = Path(ocx.ocx_home) / "objects" / reg_slug / repo
-    obj_dirs = [p.parent for p in repo_dir.rglob("content") if p.is_dir()]
-    assert len(obj_dirs) == 1, f"expected 1 object dir for {repo}, got {len(obj_dirs)}"
+    store_dir = Path(ocx.ocx_home) / "packages" / reg_slug
+    obj_dirs = []
+    for content_path in store_dir.rglob("content"):
+        if content_path.is_dir():
+            resolve_path = content_path.parent / "resolve.json"
+            if resolve_path.exists():
+                data = json.loads(resolve_path.read_text())
+                if repo in data.get("identifier", ""):
+                    obj_dirs.append(content_path.parent)
+    assert len(obj_dirs) == 1, f"expected 1 package dir for {repo}, got {len(obj_dirs)}"
     return obj_dirs[0]
 
 
 def _list_dep_targets(obj_dir: Path) -> list[Path]:
-    """Resolve all deps/ symlinks to their target content directories."""
-    deps_dir = obj_dir / "deps"
+    """Read all refs/deps/ symlinks to their target content directories."""
+    deps_dir = obj_dir / "refs" / "deps"
     if not deps_dir.exists():
         return []
     return sorted(entry.resolve() for entry in deps_dir.iterdir() if entry.is_symlink())

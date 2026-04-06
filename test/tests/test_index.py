@@ -116,12 +116,12 @@ def test_index_update_tag_scoped(
     make_package(ocx, repo, "1.0", tmp_path, new=True, cascade=False)
     make_package(ocx, repo, "2.0", tmp_path, new=False, cascade=False)
 
-    # Wipe the index so we start fresh.
+    # Wipe the tag store so we start fresh.
     import shutil
     ocx_home = Path(ocx.env["OCX_HOME"])
-    index_dir = ocx_home / "index"
-    if index_dir.exists():
-        shutil.rmtree(index_dir)
+    tags_dir = ocx_home / "tags"
+    if tags_dir.exists():
+        shutil.rmtree(tags_dir)
 
     # Update only tag 1.0 — should NOT fetch 2.0.
     ocx.plain("index", "update", f"{fq}:1.0")
@@ -135,9 +135,9 @@ def test_index_update_tag_scoped(
     assert "1.0" in result.stdout
     assert "2.0" in result.stdout
 
-    # Wipe index again and update bare (no tag) — should get both.
-    if index_dir.exists():
-        shutil.rmtree(index_dir)
+    # Wipe tag store again and update bare (no tag) — should get both.
+    if tags_dir.exists():
+        shutil.rmtree(tags_dir)
     ocx.plain("index", "update", fq)
     result = ocx.plain("index", "list", fq)
     assert "1.0" in result.stdout

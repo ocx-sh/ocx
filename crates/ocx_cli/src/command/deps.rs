@@ -182,7 +182,7 @@ fn find_paths_to<'a>(
             let dep_id = &dep.identifier;
             current_path.push(dep_id.clone().into());
 
-            if dep_id.registry() == target.registry() && dep_id.repository() == target.repository() {
+            if oci::Repository::from(&**dep_id) == oci::Repository::from(target) {
                 all_paths.push(current_path.clone());
             }
 
@@ -203,17 +203,11 @@ fn find_paths_to<'a>(
 /// This replaces the previous `read_deps_symlinks` approach — resolve.json
 /// is the canonical source written at pull time, and digest-pinned metadata
 /// cannot form cycles by construction.
-fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<(String, String), &oci::PinnedIdentifier> {
+fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<oci::Repository, &oci::PinnedIdentifier> {
     resolved
         .dependencies
         .iter()
-        .map(|rd| {
-            let key = (
-                rd.identifier.registry().to_owned(),
-                rd.identifier.repository().to_owned(),
-            );
-            (key, &rd.identifier)
-        })
+        .map(|rd| (oci::Repository::from(&*rd.identifier), &rd.identifier))
         .collect()
 }
 
@@ -222,20 +216,20 @@ fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<(String, String), &oc
 async fn resolve_dep_via_metadata(
     fs: &FileStructure,
     id: &oci::PinnedIdentifier,
-    resolved_map: &HashMap<(String, String), &oci::PinnedIdentifier>,
+    resolved_map: &HashMap<oci::Repository, &oci::PinnedIdentifier>,
 ) -> Option<InstallInfo> {
     // Primary: direct digest lookup (single-platform manifests where
     // the declared digest matches the stored content digest).
-    let content = fs.objects.content(id);
+    let content = fs.packages.content(id);
     if tokio::fs::try_exists(&content).await.unwrap_or(false) {
         return load_install_info(content).await;
     }
 
     // Fallback: the declared digest is an Image Index digest — look up the
     // platform-resolved identifier from the parent's resolve.json.
-    let key = (id.registry().to_owned(), id.repository().to_owned());
-    let resolved_id = resolved_map.get(&key)?;
-    let content = fs.objects.content(resolved_id);
+    let repo_key = oci::Repository::from(&**id);
+    let resolved_id = resolved_map.get(&repo_key)?;
+    let content = fs.packages.content(resolved_id);
     load_install_info(content).await
 }
 

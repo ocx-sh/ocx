@@ -130,12 +130,12 @@ impl PackageManager {
     async fn resolve_profile_entry(&self, entry: &ProfileEntry) -> ProfileEntryResolution {
         match entry.mode {
             ProfileMode::Candidate => {
-                let path = self.file_structure().installs.candidate(&entry.identifier);
-                resolve_symlink_entry(&self.file_structure().objects, entry, &path).await
+                let path = self.file_structure().symlinks.candidate(&entry.identifier);
+                resolve_symlink_entry(&self.file_structure().packages, entry, &path).await
             }
             ProfileMode::Current => {
-                let path = self.file_structure().installs.current(&entry.identifier);
-                resolve_symlink_entry(&self.file_structure().objects, entry, &path).await
+                let path = self.file_structure().symlinks.current(&entry.identifier);
+                resolve_symlink_entry(&self.file_structure().packages, entry, &path).await
             }
             ProfileMode::Content => resolve_content_entry(self, entry).await,
         }
@@ -143,7 +143,7 @@ impl PackageManager {
 }
 
 async fn resolve_symlink_entry(
-    objects: &crate::file_structure::ObjectStore,
+    objects: &crate::file_structure::PackageStore,
     entry: &ProfileEntry,
     symlink_path: &std::path::Path,
 ) -> ProfileEntryResolution {
@@ -173,9 +173,9 @@ async fn resolve_symlink_entry(
 async fn resolve_content_entry(mgr: &PackageManager, entry: &ProfileEntry) -> ProfileEntryResolution {
     // Digest is on the identifier — resolve directly from the object store.
     if let Ok(pinned) = oci::PinnedIdentifier::try_from(entry.identifier.clone()) {
-        let content_path = mgr.file_structure().objects.content(&pinned);
+        let content_path = mgr.file_structure().packages.content(&pinned);
         if content_path.exists() {
-            return match super::common::load_object_data(&mgr.file_structure().objects, &content_path).await {
+            return match super::common::load_object_data(&mgr.file_structure().packages, &content_path).await {
                 Ok((metadata, resolved)) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
                     identifier: pinned,
                     mode: entry.mode,

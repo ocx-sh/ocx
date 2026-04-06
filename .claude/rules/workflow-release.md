@@ -46,7 +46,7 @@ All commits must follow [Conventional Commits](https://www.conventionalcommits.o
 
 ### OCX Package Directory Structure
 
-When publishing OCX to its own registry (`ocx.sh/ocx`), the archive must contain `bin/ocx` (or `bin/ocx.exe` on Windows) at the root. The `~/.ocx/env` bootstrap file resolves the binary at `$OCX_HOME/installs/ocx.sh/ocx/current/bin/ocx`. If the package layout differs, the env file path breaks.
+When publishing OCX to its own registry (`ocx.sh/ocx`), the archive must contain `bin/ocx` (or `bin/ocx.exe` on Windows) at the root. The `~/.ocx/env` bootstrap file resolves the binary at `$OCX_HOME/symlinks/ocx.sh/ocx/current/bin/ocx`. If the package layout differs, the env file path breaks.
 
 ### Shell Startup: Static PATH, Dynamic Completions
 

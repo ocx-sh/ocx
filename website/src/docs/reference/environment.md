@@ -66,7 +66,7 @@ It is recommended to specify the registry explicitly in the package reference.
 
 ### `OCX_HOME` {#ocx-home}
 
-The root directory for all OCX data — the [object store][fs-objects], [local index][fs-index], and [install symlinks][fs-installs].
+The root directory for all OCX data — the [object store][fs-objects], [local index][fs-index], and [install symlinks][fs-symlinks].
 If not set, defaults to `~/.ocx`.
 
 ```sh
@@ -221,5 +221,5 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects
 [fs-index]: ../user-guide.md#file-structure-index
-[fs-installs]: ../user-guide.md#file-structure-installs
+[fs-symlinks]: ../user-guide.md#file-structure-symlinks
 [faq-codesign]: ../faq.md#macos-codesign

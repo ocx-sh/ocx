@@ -92,7 +92,7 @@ All globally registered in `theme/index.mts` — use directly in `.md` files wit
       <Description>immutable content-addressed store</Description>
     </Node>
     <Node name="index/" icon="📋" />
-    <Node name="installs/" icon="🔗" />
+    <Node name="symlinks/" icon="🔗" />
   </Node>
 </Tree>
 

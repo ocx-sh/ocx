@@ -149,17 +149,17 @@ impl ProfileManager {
     fn create_symlinks_for_mode(&self, rm: &ReferenceManager, input: &ProfileAddInput) -> crate::Result<()> {
         match input.mode {
             ProfileMode::Candidate => {
-                let candidate_path = self.file_structure.installs.candidate(&input.identifier);
+                let candidate_path = self.file_structure.symlinks.candidate(&input.identifier);
                 if !candidate_path.exists() {
                     rm.link(&candidate_path, &input.content_path)?;
                 }
             }
             ProfileMode::Current => {
-                let candidate_path = self.file_structure.installs.candidate(&input.identifier);
+                let candidate_path = self.file_structure.symlinks.candidate(&input.identifier);
                 if !candidate_path.exists() {
                     rm.link(&candidate_path, &input.content_path)?;
                 }
-                let current_path = self.file_structure.installs.current(&input.identifier);
+                let current_path = self.file_structure.symlinks.current(&input.identifier);
                 if !current_path.exists() {
                     rm.link(&current_path, &input.content_path)?;
                 }

@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::task::JoinSet;
 
 use crate::{
-    file_structure::{self, ObjectStore},
+    file_structure::{self, PackageStore},
     log, oci,
     package::{install_info::InstallInfo, metadata, resolved_package::ResolvedPackage},
     package_manager::error::{self, PackageError, PackageErrorKind},
@@ -27,13 +27,15 @@ use crate::{
 /// present, or `None` if the object is absent. Also serves as defense layer 2
 /// in the concurrent pull safety model.
 pub async fn find_in_store(
-    objects: &ObjectStore,
+    objects: &PackageStore,
     identifier: &oci::PinnedIdentifier,
 ) -> Result<Option<InstallInfo>, PackageErrorKind> {
-    let storage = objects.path(identifier);
-    let content = storage.join("content");
-    let metadata_path = storage.join("metadata.json");
-    let resolve_path = storage.join("resolve.json");
+    let pkg = file_structure::PackageDir {
+        dir: objects.path(identifier),
+    };
+    let content = pkg.content();
+    let metadata_path = pkg.metadata();
+    let resolve_path = pkg.resolve();
     if tokio::fs::try_exists(&content).await.unwrap_or(false)
         && tokio::fs::try_exists(&metadata_path).await.unwrap_or(false)
         && tokio::fs::try_exists(&resolve_path).await.unwrap_or(false)
@@ -57,11 +59,11 @@ pub async fn find_in_store(
 
 /// Loads metadata.json and resolve.json for an existing content path.
 ///
-/// Uses `ObjectStore::metadata_for_content` / `resolve_for_content` which
+/// Uses `PackageStore::metadata_for_content` / `resolve_for_content` which
 /// follow symlinks, making this safe for both direct object paths and install
 /// symlinks.
 pub async fn load_object_data(
-    objects: &ObjectStore,
+    objects: &PackageStore,
     content_path: &Path,
 ) -> Result<(metadata::Metadata, ResolvedPackage), crate::Error> {
     let metadata_path = objects.metadata_for_content(content_path)?;

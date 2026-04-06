@@ -1,10 +1,15 @@
 """Acceptance tests for uninstall --purge with dependency-aware scoped GC."""
 
+import os
+import sys
 from pathlib import Path
+
+import pytest
 
 from src import OcxRunner, PackageInfo, assert_dir_exists, assert_not_exists
 from src.helpers import make_package
 from src.registry import fetch_manifest_digest
+from tests.test_assembly import _make_two_packages_sharing_layer
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +33,7 @@ def _push_with_deps(
 
 
 def _objects_dir(ocx: OcxRunner) -> Path:
-    return Path(ocx.ocx_home) / "objects"
+    return Path(ocx.ocx_home) / "packages"
 
 
 def _count_object_dirs(ocx: OcxRunner) -> int:
@@ -40,7 +45,7 @@ def _count_object_dirs(ocx: OcxRunner) -> int:
 
 def _find_content_path(ocx: OcxRunner, pkg: PackageInfo) -> Path:
     result = ocx.json("find", pkg.short)
-    return Path(result[pkg.short]).resolve()
+    return Path(result[pkg.short])
 
 
 # ---------------------------------------------------------------------------
@@ -279,3 +284,78 @@ def test_purge_protects_dep_still_reachable_from_other_root(
     # Uninstall A with purge — A is still reachable as a dependency of R
     ocx.plain("uninstall", "--purge", "-d", a.short)
     assert _count_object_dirs(ocx) == 3, "R still depends on A, nothing should be purged"
+
+
+# ---------------------------------------------------------------------------
+# Shared-layer hardlink survival (Sub-plan 6 / I5 purge variant)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="inode comparison not meaningful on Windows")
+def test_purge_preserves_shared_layer_inodes(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """Purging package A leaves package B's hardlinked files intact with the same inode.
+
+    Two packages reference the same OCI layer (pushed from identical binary content
+    but with distinct per-repo metadata so they are separate packages).
+
+    After installing both:
+    - A file in package B's content/ shares an inode with the same file in A's
+      content/ (both are hardlinks to the same underlying layer inode).
+
+    After purging package A:
+    - Package A's content directory is gone.
+    - Package B's file still exists and is still readable.
+    - The inode of B's file is unchanged (the hardlink kept the inode alive).
+    """
+    short_a, short_b, shared_file_rel = _make_two_packages_sharing_layer(
+        ocx, tmp_path, unique_repo
+    )
+
+    # Install both packages
+    ocx.json("install", "--select", short_a)
+    ocx.json("install", "--select", short_b)
+
+    result_a = ocx.json("find", short_a)
+    result_b = ocx.json("find", short_b)
+    content_a = Path(result_a[short_a])
+    content_b = Path(result_b[short_b])
+    file_a = content_a / shared_file_rel
+    file_b = content_b / shared_file_rel
+
+    assert file_a.exists(), f"Package A file not found before purge: {file_a}"
+    assert file_b.exists(), f"Package B file not found before purge: {file_b}"
+
+    # Both files must hardlink to the same underlying inode before the purge.
+    inode_a_before = os.stat(str(file_a)).st_ino
+    inode_b_before = os.stat(str(file_b)).st_ino
+    assert inode_a_before == inode_b_before, (
+        f"Shared-layer hardlink missing before purge: "
+        f"A inode={inode_a_before}, B inode={inode_b_before}"
+    )
+
+    # Purge package A (removes its candidate symlink and content directory)
+    ocx.plain("uninstall", "--purge", "-d", short_a)
+
+    # Behaviour-centric assertions: A's content path must disappear, B's must
+    # survive with its hardlink intact (same inode as before the purge).
+    assert not content_a.exists(), (
+        f"A's content must be gone after purge: {content_a}"
+    )
+    assert content_b.exists(), (
+        f"B's content must survive A's purge: {content_b}"
+    )
+    assert file_b.exists(), f"Package B file vanished after purging A: {file_b}"
+
+    inode_b_after = os.stat(str(file_b)).st_ino
+    assert inode_b_after == inode_b_before, (
+        f"B's hardlinked file must retain its inode "
+        f"(before={inode_b_before}, after={inode_b_after})"
+    )
+
+    # Verify the content is still correct
+    content_bytes = file_b.read_text()
+    assert "shared-layer-binary" in content_bytes, (
+        f"Package B's file content corrupted after purging A: {content_bytes!r}"
+    )

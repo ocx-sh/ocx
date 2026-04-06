@@ -176,7 +176,7 @@ async fn uninstall_symlinks(
     }
 
     let rm = super::common::reference_manager(fs);
-    let candidate_path = fs.installs.candidate(package);
+    let candidate_path = fs.symlinks.candidate(package);
 
     let content_path = if crate::symlink::is_link(&candidate_path) {
         let path = std::fs::read_link(&candidate_path).ok();
@@ -193,7 +193,7 @@ async fn uninstall_symlinks(
     };
 
     if deselect {
-        let current_path = fs.installs.current(package);
+        let current_path = fs.symlinks.current(package);
         if crate::symlink::is_link(&current_path) {
             rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
         } else {

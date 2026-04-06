@@ -76,8 +76,8 @@ Concise index of all `ocx` CLI commands. User-facing per-command documentation l
 | Mode | Path | Stable? | Auto-Install? | Commands |
 |------|------|---------|---------------|----------|
 | Object store (default) | `$OCX_HOME/objects/.../content/` | No (digest changes) | Yes (find_or_install) or No (find) | `exec`, `env`, `find` |
-| `--candidate` | `$OCX_HOME/installs/.../candidates/{tag}` | **Yes** | No | `find --candidate`, `env --candidate` |
-| `--current` | `$OCX_HOME/installs/.../current` | **Yes** | No | `find --current`, `env --current` |
+| `--candidate` | `$OCX_HOME/symlinks/.../candidates/{tag}` | **Yes** | No | `find --candidate`, `env --candidate` |
+| `--current` | `$OCX_HOME/symlinks/.../current` | **Yes** | No | `find --current`, `env --current` |
 
 Use `--candidate` or `--current` when embedding paths in configs, IDE settings, or shell profiles.
 

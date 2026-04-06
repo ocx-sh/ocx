@@ -346,6 +346,59 @@ impl Client {
         Ok(())
     }
 
+    /// Downloads and extracts a single OCI layer to the specified directory.
+    ///
+    /// Creates `{output_dir}/content/` with the extracted files and runs
+    /// code-signing on macOS. The downloaded blob archive is removed after
+    /// extraction.
+    ///
+    /// Callers are responsible for creating `output_dir` and writing the
+    /// digest marker file.
+    pub async fn pull_layer(
+        &self,
+        identifier: &oci::PinnedIdentifier,
+        layer: &oci::Descriptor,
+        metadata: &metadata::Metadata,
+        output_dir: &std::path::Path,
+    ) -> std::result::Result<(), ClientError> {
+        let blob_compression =
+            compression::CompressionAlgorithm::from_media_type(&layer.media_type).ok_or_else(|| {
+                ClientError::InvalidManifest(format!("unsupported layer media type: {}", layer.media_type))
+            })?;
+        let blob_file_ext = media_type_file_ext(&layer.media_type).unwrap_or("blob");
+        let content_path = output_dir.join("content");
+        let blob_path = content_path.with_added_extension(blob_file_ext);
+        let blob_total_size = u64::try_from(layer.size).unwrap_or(0);
+
+        let image = native::Reference::from(&**identifier);
+
+        log::info!(
+            "Downloading layer {} to {}",
+            &layer.digest[..std::cmp::min(19, layer.digest.len())],
+            output_dir.display()
+        );
+
+        let bar = crate::cli::progress::ProgressBar::bytes(
+            tracing::info_span!("Downloading", package = %identifier),
+            blob_total_size,
+            identifier,
+        );
+        let on_progress = bar.callback();
+
+        {
+            let _guard = bar.enter();
+            self.transport
+                .pull_blob_to_file(&image, &layer.digest, &blob_path, blob_total_size, on_progress)
+                .await?;
+        }
+
+        // Extract archive + codesign.
+        self.extract_to_temp(identifier, metadata, blob_compression, blob_file_ext, output_dir)
+            .await?;
+
+        Ok(())
+    }
+
     /// Extracts the downloaded archive within the temp directory and signs content.
     async fn extract_to_temp(
         &self,

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+mod assemble;
 mod dir_walker;
 mod drop_file;
+pub mod path;
 
-pub use dir_walker::{DirWalker, WalkAction};
+pub use assemble::{AssemblyError, AssemblyStats, assemble_from_layer, assemble_from_layers};
+pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 
 /// Moves `src` directory to `dst` via same-filesystem rename.

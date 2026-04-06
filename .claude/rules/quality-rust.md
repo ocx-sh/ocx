@@ -34,6 +34,15 @@ Define behavior as a trait, inject the implementation. Prefer static dispatch (`
 ### Typestate Pattern
 Encode valid states as distinct types. State transitions consume `self` and return a new type, making invalid transitions compile errors. Zero runtime overhead via `PhantomData`. Use when protocol correctness matters (connection states, build phases).
 
+### Version Enum via `serde_repr`
+For versioned on-disk formats, encode known versions as a `#[repr(u8)]` enum with `serde_repr`. Deserialization rejects unknown versions automatically — no manual version check needed. Prefer this over a raw `u32` field with a `CURRENT_VERSION` constant and manual validation.
+
+```rust
+#[derive(Serialize_repr, Deserialize_repr, PartialEq)]
+#[repr(u8)]
+pub enum Version { V1 = 1 }
+```
+
 ---
 
 ## Anti-Patterns (Tiered Severity)
@@ -155,6 +164,12 @@ See `quality-core.md` for universal YAGNI rules. Rust-specific applications:
 ## Testing Conventions
 
 - **Test-only methods**: prefer a separate `#[cfg(test)] impl Foo { ... }` block before `mod tests`, not scattered `#[cfg(test)]` on individual methods mixed into the production `impl`. This keeps the production surface clear and makes test scaffolding explicit.
+
+---
+
+## Refactoring Tooling (Rust-Specific)
+
+When the LSP tool is available, use rust-analyzer for symbol operations — `findReferences`, `goToDefinition`, `workspaceSymbol` give semantically precise results. See `quality-core.md` for the general principle.
 
 ---
 

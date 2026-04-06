@@ -24,7 +24,8 @@ def test_env_constant_contains_content_path(
     env_result = ocx.json("env", pkg.short)
     home_entry = next(e for e in env_result if e["key"] == home_key)
     assert registry_dir(ocx.registry) in home_entry["value"]
-    assert pkg.repo in home_entry["value"]
+    # CAS layout: packages/{registry}/sha256/{prefix}/{suffix}/content
+    assert "packages" in home_entry["value"]
 
 
 def test_env_candidate_uses_symlink_path(
