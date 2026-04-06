@@ -12,7 +12,7 @@ def test_uninstall_removes_candidate_symlink(
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "candidates"
@@ -36,7 +36,7 @@ def test_uninstall_preserves_current_symlink(
 
     current = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / v1.repo
         / "current"
@@ -55,7 +55,7 @@ def test_uninstall_deselect_removes_both(
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "candidates"
@@ -63,7 +63,7 @@ def test_uninstall_deselect_removes_both(
     )
     current = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "current"

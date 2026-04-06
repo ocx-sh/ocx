@@ -267,7 +267,7 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize) ->
                 path: output_path.clone(),
                 source: e,
             })?;
-            super::validate_symlink_target(output, &output_path, Path::new(&target))?;
+            crate::symlink::validate_target(output, &output_path, Path::new(&target))?;
             crate::symlink::create(Path::new(&target), &output_path)?;
         } else {
             if let Some(parent) = output_path.parent() {

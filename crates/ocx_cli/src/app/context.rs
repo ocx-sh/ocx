@@ -3,7 +3,9 @@
 
 use ocx_lib::{
     cli::{ColorModeConfig, Printer},
-    env, file_structure, log,
+    env,
+    file_structure::{self, BlobStore, TagStore},
+    log,
     oci::{self, index},
     package_manager,
 };
@@ -50,12 +52,14 @@ impl Context {
             )
         };
         let file_structure = file_structure::FileStructure::new();
+        let tag_root = options
+            .index
+            .clone()
+            .or_else(|| env::var("OCX_INDEX").map(std::path::PathBuf::from))
+            .unwrap_or_else(|| file_structure.tags.root().to_path_buf());
         let local_index = index::LocalIndex::new(index::LocalConfig {
-            root: options
-                .index
-                .clone()
-                .or_else(|| env::var("OCX_INDEX").map(std::path::PathBuf::from))
-                .unwrap_or_else(|| file_structure.index.root().clone()),
+            tag_store: TagStore::new(tag_root),
+            blob_store: BlobStore::new(file_structure.blobs.root().to_path_buf()),
         });
 
         let selected_index = if options.remote {

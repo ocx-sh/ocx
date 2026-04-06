@@ -65,5 +65,8 @@ pub use digest::Digest;
 pub mod pinned_identifier;
 pub use pinned_identifier::PinnedIdentifier;
 
+pub mod repository;
+pub use repository::Repository;
+
 mod file_storage;
 pub use file_storage::FileStorage;

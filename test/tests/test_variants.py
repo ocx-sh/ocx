@@ -21,7 +21,7 @@ def test_install_variant_package(
     ocx.plain("install", f"{unique_repo}:debug-1.0.0")
     candidate = (
         Path(ocx.ocx_home)
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / unique_repo
         / "candidates"
@@ -43,7 +43,7 @@ def test_install_variant_rolling_tag(
     ocx.plain("install", f"{unique_repo}:debug-1")
     candidate = (
         Path(ocx.ocx_home)
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / unique_repo
         / "candidates"
@@ -64,7 +64,7 @@ def test_select_variant_package(
     ocx.plain("install", "--select", f"{unique_repo}:debug-1.0.0")
     current = (
         Path(ocx.ocx_home)
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / unique_repo
         / "current"
@@ -90,7 +90,7 @@ def test_variant_and_default_coexist(
 
     installs = (
         Path(ocx.ocx_home)
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / unique_repo
         / "candidates"

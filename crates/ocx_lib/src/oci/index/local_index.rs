@@ -4,25 +4,34 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::{Result, file_structure::IndexStore, log, oci, package::tag::Tag, prelude::*};
+use crate::{
+    Result,
+    file_structure::{BlobStore, TagStore},
+    log, oci,
+    package::tag::Tag,
+    prelude::*,
+};
 
 use super::index_impl;
 
 mod cache;
 mod config;
+mod tag_lock;
 
 pub use config::Config;
 
 #[derive(Clone)]
 pub struct LocalIndex {
-    index_store: IndexStore,
+    tag_store: TagStore,
+    blob_store: BlobStore,
     cache: cache::SharedCache,
 }
 
 impl LocalIndex {
     pub fn new(config: Config) -> Self {
         Self {
-            index_store: IndexStore::new(config.root),
+            tag_store: config.tag_store,
+            blob_store: config.blob_store,
             cache: cache::SharedCache::default(),
         }
     }
@@ -91,7 +100,7 @@ impl LocalIndex {
             return Ok(());
         }
 
-        let manifest_path = self.index_store.manifest(identifier, &digest);
+        let manifest_path = self.blob_store.data(identifier.registry(), &digest);
         if !manifest_path.exists() {
             self.update_manifest(index, identifier, &digest).await?;
         }
@@ -100,10 +109,11 @@ impl LocalIndex {
         Ok(())
     }
 
-    /// Writes the tags map to disk and updates the in-memory cache.
+    /// Writes the tags map to disk as a versioned [`TagLock`] and updates the in-memory cache.
     async fn persist_tags(&self, identifier: &oci::Identifier, tags: HashMap<String, oci::Digest>) -> Result<()> {
-        let tags_path = self.index_store.tags(identifier);
-        tags.write_json(&tags_path).await?;
+        let tags_path = self.tag_store.tags(identifier);
+        let tag_lock = tag_lock::TagLock::new(identifier, tags.clone());
+        tag_lock.write_json(&tags_path).await?;
 
         let cache = self.cache.write().await;
         cache.set_tags(identifier.clone(), tags).await;
@@ -121,7 +131,7 @@ impl LocalIndex {
             .fetch_manifest(identifier)
             .await?
             .ok_or_else(|| super::error::Error::RemoteManifestNotFound(identifier.to_string()))?;
-        let path = self.index_store.manifest(identifier, digest);
+        let path = self.blob_store.data(identifier.registry(), digest);
         manifest.write_json(&path).await?;
 
         if let oci::Manifest::ImageIndex(image_index) = manifest {
@@ -132,7 +142,7 @@ impl LocalIndex {
                     .fetch_manifest(&identifier)
                     .await?
                     .ok_or_else(|| super::error::Error::RemoteManifestNotFound(identifier.to_string()))?;
-                let path = self.index_store.manifest(&identifier, &digest);
+                let path = self.blob_store.data(identifier.registry(), &digest);
                 manifest.write_json(&path).await?;
             }
         }
@@ -148,7 +158,7 @@ impl LocalIndex {
             }
         }
 
-        let tags_path = self.index_store.tags(identifier);
+        let tags_path = self.tag_store.tags(identifier);
         if !tags_path.exists() {
             log::debug!(
                 "Tags file '{}' not found for identifier '{}'.",
@@ -158,7 +168,8 @@ impl LocalIndex {
             return Ok(None);
         }
 
-        let tags = HashMap::<String, oci::Digest>::read_json(tags_path).await?;
+        let tag_lock = tag_lock::TagLock::read_json(&tags_path).await?;
+        let tags = tag_lock.into_tags(identifier, &tags_path)?;
         {
             let cache = self.cache.write().await;
             cache.set_tags(identifier.clone(), tags.clone()).await;
@@ -180,7 +191,7 @@ impl LocalIndex {
             }
         }
 
-        let manifest_path = self.index_store.manifest(identifier, digest);
+        let manifest_path = self.blob_store.data(identifier.registry(), digest);
         if !manifest_path.exists() {
             log::debug!(
                 "Manifest file not found for identifier '{}' and digest '{}'.",
@@ -215,7 +226,7 @@ impl LocalIndex {
 #[async_trait]
 impl index_impl::IndexImpl for LocalIndex {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
-        self.index_store.list_repositories(registry)
+        self.tag_store.list_repositories(registry).await
     }
 
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
@@ -286,7 +297,8 @@ impl index_impl::IndexImpl for LocalIndex {
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(Self {
-            index_store: self.index_store.clone(),
+            tag_store: self.tag_store.clone(),
+            blob_store: self.blob_store.clone(),
             cache: self.cache.clone(),
         })
     }

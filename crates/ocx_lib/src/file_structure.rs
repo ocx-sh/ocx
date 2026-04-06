@@ -1,36 +1,44 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+mod blob_store;
+mod cas_path;
 pub mod error;
-mod index_store;
-mod install_store;
-mod object_store;
+mod layer_store;
+mod package_store;
+mod symlink_store;
+mod tag_store;
 mod temp_store;
 
-pub use index_store::IndexStore;
-pub use install_store::{InstallStore, SymlinkKind};
-pub use object_store::{ObjectDir, ObjectStore};
+pub use blob_store::{BlobDir, BlobStore};
+pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, write_digest_file};
+pub use layer_store::{LayerDir, LayerStore};
+pub use package_store::{PackageDir, PackageStore};
+pub use symlink_store::{SymlinkKind, SymlinkStore};
+pub use tag_store::TagStore;
 pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
 
 /// Root layout of the local OCX data directory.
 ///
 /// `FileStructure` is a thin composite that provides typed, well-named access
-/// to each of the three top-level stores:
+/// to six top-level stores:
 ///
-/// - **`objects`**  — content-addressed binary store (immutable blobs)
-/// - **`index`**    — cached OCI index (tags, manifests)
-/// - **`installs`** — install symlinks (candidate / current)
-///
-/// Callers that only need one of the sub-stores can receive an individual
-/// `ObjectStore`, `IndexStore`, or `InstallStore` reference instead.
+/// - **`blobs`**    — content-addressed raw blob store
+/// - **`layers`**   — content-addressed extracted layer store
+/// - **`packages`** — content-addressed package store (content, metadata, refs)
+/// - **`tags`**     — tag-to-digest mapping store (local index)
+/// - **`symlinks`** — install symlinks (candidate / current)
+/// - **`temp`**     — temporary staging directories for in-progress downloads
 ///
 /// Default root: `~/.ocx` (resolved via [`default_ocx_root`]).
 #[derive(Debug, Clone)]
 pub struct FileStructure {
     root: std::path::PathBuf,
-    pub objects: ObjectStore,
-    pub index: IndexStore,
-    pub installs: InstallStore,
+    pub blobs: BlobStore,
+    pub layers: LayerStore,
+    pub packages: PackageStore,
+    pub tags: TagStore,
+    pub symlinks: SymlinkStore,
     pub temp: TempStore,
 }
 
@@ -50,12 +58,19 @@ impl FileStructure {
     /// Creates a `FileStructure` rooted at `root`.
     pub fn with_root(root: std::path::PathBuf) -> Self {
         Self {
-            objects: ObjectStore::new(root.join("objects")),
-            index: IndexStore::new(root.join("index")),
-            installs: InstallStore::new(root.join("installs")),
+            blobs: BlobStore::new(root.join("blobs")),
+            layers: LayerStore::new(root.join("layers")),
+            packages: PackageStore::new(root.join("packages")),
+            tags: TagStore::new(root.join("tags")),
+            symlinks: SymlinkStore::new(root.join("symlinks")),
             temp: TempStore::new(root.join("temp")),
             root,
         }
+    }
+
+    /// Returns the root directory of this file structure (e.g., `~/.ocx`).
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
     }
 
     /// Returns the path to the profile manifest file (`$OCX_HOME/profile.json`).

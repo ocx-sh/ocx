@@ -13,7 +13,7 @@ use ocx_lib::file_structure::SymlinkKind;
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct ContentPath {
     /// Resolve the content path via the installed candidate symlink
-    /// (`~/.ocx/installs/<registry>/<repo>/candidates/<tag>`).
+    /// (`~/.ocx/symlinks/<registry>/<repo>/candidates/<tag>`).
     ///
     /// The package must be installed before this flag can be used.
     /// Digest identifiers are rejected — use a tag-only identifier instead.
@@ -22,7 +22,7 @@ pub struct ContentPath {
     candidate: bool,
 
     /// Resolve the content path via the current-selected symlink
-    /// (`~/.ocx/installs/<registry>/<repo>/current`).
+    /// (`~/.ocx/symlinks/<registry>/<repo>/current`).
     ///
     /// A version of the package must be selected before this flag can be used.
     /// Digest identifiers are rejected. The tag portion of the identifier is

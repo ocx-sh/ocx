@@ -56,7 +56,7 @@ tasks:
     desc: Temporary dirty update to solve chicken-and-egg for ocx automation within this repository.
     cmds:
       - cargo build --release --bin ocx
-      - cp target/release/ocx ~/.ocx/installs/ocx.sh/ocx/current/bin/ocx
+      - cp target/release/ocx ~/.ocx/symlinks/ocx.sh/ocx/current/bin/ocx
 
   push:
     vars:

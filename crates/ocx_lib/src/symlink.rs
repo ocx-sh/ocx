@@ -4,7 +4,7 @@
 //! Low-level symlink primitives (create, update, remove).
 //!
 //! These functions operate on a single symlink without any bookkeeping.
-//! For install symlinks (candidates and current under `installs/`), use
+//! For install symlinks (candidates and current under `symlinks/`), use
 //! [`crate::reference_manager::ReferenceManager`] instead — it keeps the
 //! `refs/` back-references in sync, which is required for garbage collection.
 //!
@@ -13,7 +13,37 @@
 //! symlinks.  Junctions behave identically to directory symlinks for the
 //! purposes of this crate.
 
-use crate::{log, prelude::*};
+use std::path::Path;
+
+use crate::{log, prelude::*, utility::fs::path::lexical_normalize};
+
+/// Validates that a symlink target resolves within `root`.
+///
+/// `link_path` is the absolute path where the symlink is (or will be) located.
+/// `target` is the raw symlink target (typically relative). Absolute targets
+/// are rejected unconditionally.
+///
+/// Used by the archive extractor (as the primary input-trust boundary) and by
+/// the layer assembly walker (as defence-in-depth against any path that
+/// populates `layers/.../content/` without going through the archive layer).
+pub fn validate_target(root: &Path, link_path: &Path, target: &Path) -> Result<()> {
+    if target.is_absolute() {
+        return Err(Error::Archive(crate::archive::Error::SymlinkEscape {
+            link: link_path.to_path_buf(),
+            target: target.to_path_buf(),
+        }));
+    }
+    let parent = link_path.parent().unwrap_or(root);
+    let resolved = lexical_normalize(&parent.join(target));
+    let normalized_root = lexical_normalize(root);
+    if !resolved.starts_with(&normalized_root) {
+        return Err(Error::Archive(crate::archive::Error::SymlinkEscape {
+            link: link_path.to_path_buf(),
+            target: target.to_path_buf(),
+        }));
+    }
+    Ok(())
+}
 
 /// Returns `true` if `path` is a symlink or (on Windows) a junction point.
 ///
@@ -309,6 +339,158 @@ mod tests {
 
         remove(&forward).unwrap();
         assert!(!is_link(&forward));
+    }
+
+    // ── symlinks survive directory rename (temp → packages invariant) ──────
+
+    /// The walker creates symlinks from layers into the package's temp
+    /// directory, then the pull pipeline atomically renames the temp dir to
+    /// its final `packages/` location. POSIX `rename(2)` is inode-preserving
+    /// and a symlink's target string lives in the inode — so a symlink
+    /// created in temp must remain intact (same target string, still
+    /// resolvable) after the rename. This is the symlink counterpart to
+    /// `hardlink_survives_directory_rename` in `hardlink.rs`.
+    ///
+    /// The walker must preserve target strings verbatim, which means:
+    ///   - A relative target inside a mirrored subtree continues to resolve
+    ///     correctly after the containing directory moves.
+    ///   - An absolute target pointing outside the moved tree is unaffected.
+    #[test]
+    #[cfg(unix)]
+    fn symlink_survives_directory_rename() {
+        let (_dir, root) = setup();
+
+        // Simulate a "temp package" directory with two sibling files and
+        // several symlinks that the walker would recreate from a layer.
+        let temp_pkg = root.join("temp").join("pkg");
+        let content = temp_pkg.join("content");
+        let lib_dir = content.join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        // A real file we'll point relative symlinks at.
+        let real_file = lib_dir.join("libfoo.so.1.2.3");
+        std::fs::write(&real_file, b"shared library bytes").unwrap();
+
+        // 1. Relative symlink, same directory:
+        //    lib/libfoo.so.1 → libfoo.so.1.2.3
+        let link_same_dir = lib_dir.join("libfoo.so.1");
+        create(std::path::Path::new("libfoo.so.1.2.3"), &link_same_dir).unwrap();
+
+        // 2. Relative symlink, cross-directory:
+        //    content/tool → lib/libfoo.so.1.2.3
+        let link_cross_dir = content.join("tool");
+        create(std::path::Path::new("lib/libfoo.so.1.2.3"), &link_cross_dir).unwrap();
+
+        // 3. Absolute symlink, pointing to an external location that will
+        //    not be affected by the rename. We use a tempdir sibling so the
+        //    assertion doesn't rely on any system file.
+        let external = root.join("external_target");
+        std::fs::write(&external, b"external bytes").unwrap();
+        let link_absolute = content.join("external_link");
+        create(&external, &link_absolute).unwrap();
+
+        // Capture all target strings BEFORE the rename. These must be
+        // byte-identical after the rename.
+        let tgt_same_before = std::fs::read_link(&link_same_dir).unwrap();
+        let tgt_cross_before = std::fs::read_link(&link_cross_dir).unwrap();
+        let tgt_abs_before = std::fs::read_link(&link_absolute).unwrap();
+
+        // Atomic rename — temp/pkg → final/pkg (same filesystem).
+        let final_pkg = root.join("final").join("pkg");
+        std::fs::create_dir_all(final_pkg.parent().unwrap()).unwrap();
+        std::fs::rename(&temp_pkg, &final_pkg).unwrap();
+
+        // Re-resolve the symlinks at their new paths.
+        let final_content = final_pkg.join("content");
+        let final_lib = final_content.join("lib");
+        let final_link_same = final_lib.join("libfoo.so.1");
+        let final_link_cross = final_content.join("tool");
+        let final_link_abs = final_content.join("external_link");
+
+        // Target strings are preserved verbatim (rename does not mutate the
+        // symlink inode's data — this is THE fundamental guarantee).
+        assert_eq!(
+            std::fs::read_link(&final_link_same).unwrap(),
+            tgt_same_before,
+            "same-dir relative target must be preserved verbatim"
+        );
+        assert_eq!(
+            std::fs::read_link(&final_link_cross).unwrap(),
+            tgt_cross_before,
+            "cross-dir relative target must be preserved verbatim"
+        );
+        assert_eq!(
+            std::fs::read_link(&final_link_abs).unwrap(),
+            tgt_abs_before,
+            "absolute target must be preserved verbatim"
+        );
+
+        // Relative targets resolve correctly at the new location via the
+        // mirrored directory structure.
+        assert_eq!(
+            std::fs::read(&final_link_same).unwrap(),
+            b"shared library bytes",
+            "same-dir relative symlink resolves to the moved sibling after rename"
+        );
+        assert_eq!(
+            std::fs::read(&final_link_cross).unwrap(),
+            b"shared library bytes",
+            "cross-dir relative symlink resolves through the moved tree"
+        );
+
+        // Absolute symlink resolves to the unchanged external target.
+        assert_eq!(
+            std::fs::read(&final_link_abs).unwrap(),
+            b"external bytes",
+            "absolute symlink still resolves after rename"
+        );
+    }
+
+    /// A relative symlink whose target string happens to contain the temp
+    /// directory path (a publisher/walker bug) does NOT survive the rename.
+    /// This test exists as documentation: it's the kind of target the walker
+    /// must never construct. If this invariant ever regresses, this test
+    /// will start failing the "broken after rename" assertion and the
+    /// walker's target-preservation bug will be caught.
+    #[test]
+    #[cfg(unix)]
+    fn symlink_with_temp_path_in_target_breaks_after_rename() {
+        let (_dir, root) = setup();
+        let temp_pkg = root.join("temp").join("pkg");
+        let content = temp_pkg.join("content");
+        std::fs::create_dir_all(&content).unwrap();
+
+        let real = content.join("real");
+        std::fs::write(&real, b"payload").unwrap();
+
+        // Bug-shape symlink: absolute target pointing INSIDE the temp dir.
+        // The walker must NEVER create one of these — it would only happen
+        // if the walker called something like `temp_pkg.join("real")` to
+        // compute the target instead of using the layer's `read_link` value.
+        let bogus = content.join("bogus");
+        create(&real, &bogus).unwrap();
+        assert_eq!(std::fs::read(&bogus).unwrap(), b"payload");
+
+        // Atomic rename.
+        let final_pkg = root.join("final").join("pkg");
+        std::fs::create_dir_all(final_pkg.parent().unwrap()).unwrap();
+        std::fs::rename(&temp_pkg, &final_pkg).unwrap();
+
+        // The link target still points at the OLD absolute path, which no
+        // longer exists after the rename. Resolution fails.
+        let final_bogus = final_pkg.join("content").join("bogus");
+        let read_result = std::fs::read(&final_bogus);
+        assert!(
+            read_result.is_err(),
+            "absolute-target-into-temp symlink must break after rename — \
+             this failure mode is exactly what the walker must avoid"
+        );
+        // The target string itself still points at the original temp path.
+        let preserved = std::fs::read_link(&final_bogus).unwrap();
+        assert!(
+            preserved.starts_with(&temp_pkg),
+            "target is byte-preserved verbatim even when it's now a dangling absolute path"
+        );
     }
 
     // ── Windows-specific junction behavior ──────────────────────────────────

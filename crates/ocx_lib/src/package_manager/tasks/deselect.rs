@@ -27,7 +27,7 @@ impl PackageManager {
         }
 
         let rm = super::common::reference_manager(self.file_structure());
-        let current_path = self.file_structure().installs.current(package);
+        let current_path = self.file_structure().symlinks.current(package);
 
         if crate::symlink::is_link(&current_path) {
             rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;

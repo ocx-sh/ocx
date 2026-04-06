@@ -52,7 +52,7 @@ impl Install {
             .zip(oci_packages.iter())
             .zip(install_infos.iter())
             .map(|((raw, oci_pkg), info)| {
-                let path = fs.installs.candidate(oci_pkg);
+                let path = fs.symlinks.candidate(oci_pkg);
                 (
                     raw.raw().to_string(),
                     api::data::install::InstallEntry {

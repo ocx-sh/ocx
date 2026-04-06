@@ -150,7 +150,7 @@ pub(super) fn extract(reader: impl std::io::Read, output: &std::path::Path, stri
         }
 
         // Reject entries whose path escapes the output root.
-        if stripped.is_absolute() || super::escapes_root(&stripped) {
+        if stripped.is_absolute() || crate::utility::fs::path::escapes_root(&stripped) {
             return Err(Error::EntryEscape(path).into());
         }
 
@@ -165,7 +165,7 @@ pub(super) fn extract(reader: impl std::io::Read, output: &std::path::Path, stri
 
         if entry.header().entry_type() == tar::EntryType::Symlink {
             if let Some(target) = entry.link_name().map_err(Error::Tar)? {
-                super::validate_symlink_target(output, &output_path, target.as_ref())?;
+                crate::symlink::validate_target(output, &output_path, target.as_ref())?;
                 crate::symlink::create(target.as_ref(), &output_path)?;
             }
         } else {

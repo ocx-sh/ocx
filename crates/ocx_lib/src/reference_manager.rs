@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::{Error, Result, file_structure::FileStructure, log, symlink};
+use crate::{Error, Result, file_structure::FileStructure, file_structure::cas_ref_name, log, symlink};
 
 /// Manages forward symlinks and their back-references inside the object store.
 ///
@@ -33,13 +33,13 @@ impl ReferenceManager {
         Self { file_structure }
     }
 
-    /// Derives the reference name for a path.
+    /// Derives the reference name for an install symlink's forward path.
     ///
     /// The name is the first 16 hex characters of the SHA-256 hash of the
     /// path bytes — unique and fixed-length regardless of path length.
-    /// Used for both install back-refs (`refs/`) and dependency
-    /// forward-refs (`deps/`).
-    pub fn ref_name(forward_path: &Path) -> String {
+    /// Used for install back-refs (`refs/symlinks/`) where the ref's identity
+    /// is the symlink location, not a content digest.
+    pub fn name_for_path(forward_path: &Path) -> String {
         let mut hasher = Sha256::new();
         hasher.update(forward_path.as_os_str().as_encoded_bytes());
         hex::encode(&hasher.finalize()[..8])
@@ -50,9 +50,9 @@ impl ReferenceManager {
     fn back_ref_path(&self, content_path: &Path, forward_path: &Path) -> Result<PathBuf> {
         Ok(self
             .file_structure
-            .objects
-            .refs_dir_for_content(content_path)?
-            .join(Self::ref_name(forward_path)))
+            .packages
+            .refs_symlinks_dir_for_content(content_path)?
+            .join(Self::name_for_path(forward_path)))
     }
 
     /// Creates or updates a forward symlink from `forward_path` to `content_path`,
@@ -139,19 +139,37 @@ impl ReferenceManager {
     /// by walking `deps/` edges from root objects (those with install symlink refs
     /// in `refs/` or profile content-mode references).
     ///
+    /// The filename is derived from `dependency_digest` via
+    /// [`cas_path::cas_ref_name`] so the ref is self-describing: a quick look
+    /// at `refs/deps/` tells you exactly which package digests the dependent
+    /// points at.
+    ///
     /// No back-reference is created in the dependency's `refs/` — that directory
     /// is reserved for install symlink refs (candidate/current).
-    pub fn link_dependency(&self, dependent_content: &Path, dependency_content: &Path) -> Result<()> {
-        self.create_forward_dep_ref(dependent_content, dependency_content)
+    pub fn link_dependency(
+        &self,
+        dependent_content: &Path,
+        dependency_content: &Path,
+        dependency_digest: &crate::oci::Digest,
+    ) -> Result<()> {
+        self.create_forward_dep_ref(dependent_content, dependency_content, dependency_digest)
     }
 
     /// Creates a forward-dependency symlink in the dependent's `deps/` directory
     /// pointing to the dependency's content path.
-    fn create_forward_dep_ref(&self, dependent_content: &Path, dependency_content: &Path) -> Result<()> {
-        let deps_dir = self.file_structure.objects.deps_dir_for_content(dependent_content)?;
+    fn create_forward_dep_ref(
+        &self,
+        dependent_content: &Path,
+        dependency_content: &Path,
+        dependency_digest: &crate::oci::Digest,
+    ) -> Result<()> {
+        let deps_dir = self
+            .file_structure
+            .packages
+            .refs_deps_dir_for_content(dependent_content)?;
         std::fs::create_dir_all(&deps_dir).map_err(|e| Error::InternalFile(deps_dir.clone(), e))?;
 
-        let dep_path = deps_dir.join(Self::ref_name(dependency_content));
+        let dep_path = deps_dir.join(cas_ref_name(dependency_digest));
 
         if symlink::is_link(&dep_path) {
             if let Ok(target) = std::fs::read_link(&dep_path)
@@ -180,9 +198,13 @@ impl ReferenceManager {
     /// Removes a dependency forward-reference from the dependent's `deps/` directory.
     ///
     /// No-op if the forward-ref does not exist.
-    pub fn unlink_dependency(&self, dependent_content: &Path, dependency_content: &Path) -> Result<()> {
-        if let Ok(deps_dir) = self.file_structure.objects.deps_dir_for_content(dependent_content) {
-            let dep_path = deps_dir.join(Self::ref_name(dependency_content));
+    pub fn unlink_dependency(&self, dependent_content: &Path, dependency_digest: &crate::oci::Digest) -> Result<()> {
+        if let Ok(deps_dir) = self
+            .file_structure
+            .packages
+            .refs_deps_dir_for_content(dependent_content)
+        {
+            let dep_path = deps_dir.join(cas_ref_name(dependency_digest));
             if symlink::is_link(&dep_path) {
                 log::trace!("Removing dependency forward-ref '{}'.", dep_path.display());
                 symlink::remove(&dep_path)?;
@@ -192,28 +214,28 @@ impl ReferenceManager {
         Ok(())
     }
 
-    /// Returns the paths of all broken back-references found in the object store.
+    /// Returns the paths of all broken back-references found in the package store.
     ///
     /// A back-reference is broken when:
     /// - Its target (the forward path) no longer exists, or
-    /// - The forward path no longer points to the expected content (the object
+    /// - The forward path no longer points to the expected content (the package
     ///   was re-linked without going through [`ReferenceManager`]).
     ///
-    /// Uses [`ObjectStore::list_all`] to enumerate object directories, so only
-    /// `refs/` entries inside known object dirs are inspected.  Package-installed
+    /// Uses [`PackageStore::list_all`] to enumerate package directories, so only
+    /// `refs/` entries inside known package dirs are inspected.  Package-installed
     /// files under `content/` are never traversed.
     pub async fn broken_refs(&self) -> Result<Vec<PathBuf>> {
-        let object_dirs = self.file_structure.objects.list_all().await?;
-        if object_dirs.is_empty() {
-            log::trace!("broken_refs: no objects found in store.");
+        let package_dirs = self.file_structure.packages.list_all().await?;
+        if package_dirs.is_empty() {
+            log::trace!("broken_refs: no packages found in store.");
             return Ok(Vec::new());
         }
 
         let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(50));
         let mut tasks = tokio::task::JoinSet::new();
 
-        for obj in &object_dirs {
-            let refs_dir = obj.refs_dir();
+        for obj in &package_dirs {
+            let refs_dir = obj.refs_symlinks_dir();
             if !tokio::fs::try_exists(&refs_dir).await.unwrap_or(false) {
                 continue;
             }
@@ -311,22 +333,28 @@ mod tests {
         (dir, root, rm)
     }
 
-    /// Creates a real content directory matching the object store layout:
-    /// `{root}/objects/reg/repo/sha256/{8hex}/{8hex}/{16hex}/content`.
+    /// Creates a real content directory matching the package store layout:
+    /// `{root}/packages/reg/sha256/{2hex}/{30hex}/content`.
     ///
-    /// `n` selects a unique shard1 value; shard2 and shard3 are fixed.
+    /// `n` selects a unique prefix; the suffix is fixed padding.
     fn make_content(root: &Path, n: u32) -> PathBuf {
         let p = root
-            .join("objects")
+            .join("packages")
             .join("reg")
-            .join("repo")
             .join("sha256")
-            .join(format!("{n:08x}"))
-            .join("aabb1122")
-            .join("ccdd3344eeff5566")
+            .join(format!("{n:02x}"))
+            .join("aabb1122ccdd3344eeff5566778899")
             .join("content");
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// Returns a full 64-hex sha256 digest whose 32-hex CAS prefix matches
+    /// the layout produced by [`make_content`] for the same `n`.
+    fn make_digest(n: u32) -> crate::oci::Digest {
+        crate::oci::Digest::Sha256(format!(
+            "{n:02x}aabb1122ccdd3344eeff5566778899000000000000000000000000000000000000"
+        ))
     }
 
     /// Returns the path for a forward symlink at `{root}/fwd/{name}` (parent created).
@@ -341,25 +369,26 @@ mod tests {
             .parent()
             .unwrap()
             .join("refs")
-            .join(ReferenceManager::ref_name(forward))
+            .join("symlinks")
+            .join(ReferenceManager::name_for_path(forward))
     }
 
-    // ── ref_name ──────────────────────────────────────────────────────────────
+    // ── name_for_path ─────────────────────────────────────────────────────────
 
     #[test]
-    fn ref_name_is_deterministic_and_16_hex_chars() {
-        let path = Path::new("/home/user/.ocx/installs/ocx.sh/cmake/candidates/3.28");
-        let name = ReferenceManager::ref_name(path);
-        assert_eq!(name, ReferenceManager::ref_name(path));
+    fn name_for_path_is_deterministic_and_16_hex_chars() {
+        let path = Path::new("/home/user/.ocx/symlinks/ocx.sh/cmake/candidates/3.28");
+        let name = ReferenceManager::name_for_path(path);
+        assert_eq!(name, ReferenceManager::name_for_path(path));
         assert_eq!(name.len(), 16);
         assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn ref_name_differs_for_different_paths() {
+    fn name_for_path_differs_for_different_paths() {
         assert_ne!(
-            ReferenceManager::ref_name(Path::new("/link/a")),
-            ReferenceManager::ref_name(Path::new("/link/b")),
+            ReferenceManager::name_for_path(Path::new("/link/a")),
+            ReferenceManager::name_for_path(Path::new("/link/b")),
         );
     }
 
@@ -513,9 +542,9 @@ mod tests {
 
         // Back-ref points to a forward path that does not exist.
         let ghost_fwd = root.join("fwd").join("ghost");
-        let refs_dir = content.parent().unwrap().join("refs");
+        let refs_dir = content.parent().unwrap().join("refs").join("symlinks");
         std::fs::create_dir_all(&refs_dir).unwrap();
-        let back_ref = refs_dir.join(ReferenceManager::ref_name(&ghost_fwd));
+        let back_ref = refs_dir.join(ReferenceManager::name_for_path(&ghost_fwd));
         crate::symlink::create(&ghost_fwd, &back_ref).unwrap();
 
         assert_eq!(rm.broken_refs().await.unwrap(), vec![back_ref]);
@@ -528,11 +557,11 @@ mod tests {
         let content_b = make_content(&root, 0xb);
         let forward = fwd(&root, "link1");
 
-        // forward → content_a, but back-ref lives in content_b's refs/.
+        // forward → content_a, but back-ref lives in content_b's refs/symlinks/.
         crate::symlink::create(&content_a, &forward).unwrap();
-        let refs_dir = content_b.parent().unwrap().join("refs");
+        let refs_dir = content_b.parent().unwrap().join("refs").join("symlinks");
         std::fs::create_dir_all(&refs_dir).unwrap();
-        let back_ref = refs_dir.join(ReferenceManager::ref_name(&forward));
+        let back_ref = refs_dir.join(ReferenceManager::name_for_path(&forward));
         crate::symlink::create(&forward, &back_ref).unwrap();
 
         assert_eq!(rm.broken_refs().await.unwrap(), vec![back_ref]);
@@ -553,7 +582,7 @@ mod tests {
     async fn broken_refs_skips_non_symlinks_in_refs_dir() {
         let (_dir, root, rm) = setup();
         let content = make_content(&root, 1);
-        let refs_dir = content.parent().unwrap().join("refs");
+        let refs_dir = content.parent().unwrap().join("refs").join("symlinks");
         std::fs::create_dir_all(&refs_dir).unwrap();
         std::fs::write(refs_dir.join("not_a_symlink"), b"data").unwrap();
 
@@ -561,11 +590,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broken_refs_skips_non_dir_entries_in_objects() {
+    async fn broken_refs_skips_non_dir_entries_in_packages() {
         let (_dir, root, rm) = setup();
-        let objects = root.join("objects");
-        std::fs::create_dir_all(&objects).unwrap();
-        std::fs::write(objects.join("stray_file"), b"junk").unwrap();
+        let packages = root.join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(packages.join("stray_file"), b"junk").unwrap();
 
         assert_eq!(rm.broken_refs().await.unwrap(), Vec::<PathBuf>::new());
     }
@@ -576,23 +605,27 @@ mod tests {
     fn link_dependency_creates_forward_ref() {
         let (_dir, root, rm) = setup();
         let dep_content = make_content(&root, 0xde);
+        let dep_digest = make_digest(0xde);
         let dependent_content = make_content(&root, 0xaa);
 
-        rm.link_dependency(&dependent_content, &dep_content).unwrap();
+        rm.link_dependency(&dependent_content, &dep_content, &dep_digest)
+            .unwrap();
 
-        // No back-ref in dependency's refs/
-        let refs_dir = dep_content.parent().unwrap().join("refs");
+        // No back-ref in dependency's refs/symlinks/
+        let refs_dir = dep_content.parent().unwrap().join("refs").join("symlinks");
         assert!(
             !refs_dir.is_dir() || std::fs::read_dir(&refs_dir).unwrap().next().is_none(),
-            "dependency's refs/ should be empty (no back-refs)"
+            "dependency's refs/symlinks/ should be empty (no back-refs)"
         );
 
-        // Forward-ref: dependent's deps/ → dependency's content
+        // Forward-ref: dependent's refs/deps/ → dependency's content, named
+        // after the dependency digest so it's self-describing.
         let dep_path = dependent_content
             .parent()
             .unwrap()
+            .join("refs")
             .join("deps")
-            .join(ReferenceManager::ref_name(&dep_content));
+            .join(crate::file_structure::cas_ref_name(&dep_digest));
         assert!(crate::symlink::is_link(&dep_path));
         assert_eq!(std::fs::read_link(&dep_path).unwrap(), dep_content);
     }
@@ -601,12 +634,15 @@ mod tests {
     fn link_dependency_is_idempotent() {
         let (_dir, root, rm) = setup();
         let dep_content = make_content(&root, 0xde);
+        let dep_digest = make_digest(0xde);
         let dependent_content = make_content(&root, 0xaa);
 
-        rm.link_dependency(&dependent_content, &dep_content).unwrap();
-        rm.link_dependency(&dependent_content, &dep_content).unwrap();
+        rm.link_dependency(&dependent_content, &dep_content, &dep_digest)
+            .unwrap();
+        rm.link_dependency(&dependent_content, &dep_content, &dep_digest)
+            .unwrap();
 
-        let deps_dir = dependent_content.parent().unwrap().join("deps");
+        let deps_dir = dependent_content.parent().unwrap().join("refs").join("deps");
         assert_eq!(std::fs::read_dir(&deps_dir).unwrap().count(), 1);
     }
 
@@ -614,23 +650,26 @@ mod tests {
     fn unlink_dependency_removes_forward_ref() {
         let (_dir, root, rm) = setup();
         let dep_content = make_content(&root, 0xde);
+        let dep_digest = make_digest(0xde);
         let dependent_content = make_content(&root, 0xaa);
 
-        rm.link_dependency(&dependent_content, &dep_content).unwrap();
-        rm.unlink_dependency(&dependent_content, &dep_content).unwrap();
+        rm.link_dependency(&dependent_content, &dep_content, &dep_digest)
+            .unwrap();
+        rm.unlink_dependency(&dependent_content, &dep_digest).unwrap();
 
         // Forward-ref removed
-        let deps_dir = dependent_content.parent().unwrap().join("deps");
+        let deps_dir = dependent_content.parent().unwrap().join("refs").join("deps");
         assert!(std::fs::read_dir(&deps_dir).unwrap().next().is_none());
     }
 
     #[test]
     fn unlink_dependency_is_noop_when_no_ref() {
         let (_dir, root, rm) = setup();
-        let dep_content = make_content(&root, 0xde);
+        let _dep_content = make_content(&root, 0xde);
+        let dep_digest = make_digest(0xde);
         let dependent_content = make_content(&root, 0xaa);
 
         // Should not error even though no ref was created.
-        rm.unlink_dependency(&dependent_content, &dep_content).unwrap();
+        rm.unlink_dependency(&dependent_content, &dep_digest).unwrap();
     }
 }

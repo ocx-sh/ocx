@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::oci;
 
-/// Selects which install symlink path [`InstallStore`] should return.
+/// Selects which install symlink path [`SymlinkStore`] should return.
 ///
 /// - `Candidate` — the tag-pinned symlink written by `ocx install`.
 /// - `Current`   — the selection symlink written by `ocx install --select`,
@@ -16,9 +16,9 @@ pub enum SymlinkKind {
     Current,
 }
 
-/// Manages install symlinks for installed packages.
+/// Manages symlinks for installed packages.
 ///
-/// Install symlinks provide stable, human-readable paths to package content
+/// Symlink store provides stable, human-readable paths to package content
 /// that remain constant across version upgrades, making them safe to embed in
 /// shell profiles or toolchain configurations.
 ///
@@ -32,13 +32,17 @@ pub enum SymlinkKind {
 ///         {tag}               — symlink (written by `ocx install`)
 /// ```
 #[derive(Debug, Clone)]
-pub struct InstallStore {
+pub struct SymlinkStore {
     root: PathBuf,
 }
 
-impl InstallStore {
+impl SymlinkStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Returns the base directory for all symlinks belonging to the given identifier.
@@ -93,48 +97,46 @@ mod tests {
 
     #[test]
     fn current_path_structure() {
-        let store = InstallStore::new("/installs");
+        let store = SymlinkStore::new("/symlinks");
         assert_eq!(
             store.current(&id_with_tag()),
-            PathBuf::from("/installs/example.com/cmake/current")
+            PathBuf::from("/symlinks/example.com/cmake/current")
         );
     }
 
     #[test]
     fn candidates_dir_path_structure() {
-        let store = InstallStore::new("/installs");
+        let store = SymlinkStore::new("/symlinks");
         assert_eq!(
             store.candidates(&id_with_tag()),
-            PathBuf::from("/installs/example.com/cmake/candidates")
+            PathBuf::from("/symlinks/example.com/cmake/candidates")
         );
     }
 
     #[test]
     fn candidate_uses_tag() {
-        let store = InstallStore::new("/installs");
+        let store = SymlinkStore::new("/symlinks");
         assert_eq!(
             store.candidate(&id_with_tag()),
-            PathBuf::from("/installs/example.com/cmake/candidates/3.28")
+            PathBuf::from("/symlinks/example.com/cmake/candidates/3.28")
         );
     }
 
     #[test]
     fn candidate_falls_back_to_latest_when_no_tag() {
-        let store = InstallStore::new("/installs");
+        let store = SymlinkStore::new("/symlinks");
         assert_eq!(
             store.candidate(&id_no_tag()),
-            PathBuf::from("/installs/example.com/cmake/candidates/latest")
+            PathBuf::from("/symlinks/example.com/cmake/candidates/latest")
         );
     }
-
-    // ── symlink dispatch ──────────────────────────────────────────────────────
 
     // ── nested repository ─────────────────────────────────────────────────
 
     #[test]
     fn current_path_nested_repo() {
-        let store = InstallStore::new("/installs");
-        let expected = PathBuf::from("/installs")
+        let store = SymlinkStore::new("/symlinks");
+        let expected = PathBuf::from("/symlinks")
             .join("example.com")
             .join("org")
             .join("sub")
@@ -145,8 +147,8 @@ mod tests {
 
     #[test]
     fn candidate_path_nested_repo() {
-        let store = InstallStore::new("/installs");
-        let expected = PathBuf::from("/installs")
+        let store = SymlinkStore::new("/symlinks");
+        let expected = PathBuf::from("/symlinks")
             .join("example.com")
             .join("org")
             .join("sub")
@@ -160,7 +162,7 @@ mod tests {
 
     #[test]
     fn symlink_candidate_returns_candidate_path() {
-        let store = InstallStore::new("/installs");
+        let store = SymlinkStore::new("/symlinks");
         assert_eq!(
             store.symlink(&id_with_tag(), SymlinkKind::Candidate),
             store.candidate(&id_with_tag()),
@@ -169,10 +171,18 @@ mod tests {
 
     #[test]
     fn symlink_current_returns_current_path() {
-        let store = InstallStore::new("/installs");
+        let store = SymlinkStore::new("/symlinks");
         assert_eq!(
             store.symlink(&id_with_tag(), SymlinkKind::Current),
             store.current(&id_with_tag()),
         );
+    }
+
+    // ── root accessor ─────────────────────────────────────────────────────
+
+    #[test]
+    fn root_returns_store_root() {
+        let store = SymlinkStore::new("/symlinks");
+        assert_eq!(store.root(), Path::new("/symlinks"));
     }
 }

@@ -191,10 +191,30 @@ impl TempStore {
         Ok(result)
     }
 
-    /// Hash of the full identifier into a flat 32-char hex directory name.
+    /// Returns the temp directory path for a layer extraction.
+    ///
+    /// Layers are not repository-scoped at the CAS level — two packages in
+    /// different repositories may share the same layer digest. The middle
+    /// component is therefore a fixed `__layer__` sentinel rather than a
+    /// repository name. Null-byte delimiters keep the keyspace disjoint from
+    /// any legitimate repository path (which cannot contain NUL).
+    pub fn layer_path(&self, registry: &str, digest: &oci::Digest) -> PathBuf {
+        use sha2::{Digest as _, Sha256};
+        let input = format!("{registry}\0__layer__\0{digest}");
+        let hash = hex::encode(Sha256::digest(input.as_bytes()));
+        self.root.join(&hash[..32])
+    }
+
+    /// Hash of the CAS identity into a flat 32-char hex directory name.
+    ///
+    /// Keyed by `registry + digest` only (no repository) so the temp lock
+    /// matches the final `PackageStore::path` which is also repo-agnostic.
+    /// Two processes installing the same digest from different repositories
+    /// must serialize on the same lock to avoid the late finisher clobbering
+    /// the early finisher's `refs/` back-references via `move_dir`.
     fn dir_name(identifier: &oci::Identifier, digest: &oci::Digest) -> String {
         use sha2::{Digest as _, Sha256};
-        let input = format!("{}\0{}\0{}", identifier.registry(), identifier.repository(), digest,);
+        let input = format!("{}\0{}", identifier.registry(), digest);
         let hash = hex::encode(Sha256::digest(input.as_bytes()));
         hash[..32].to_string()
     }
@@ -243,6 +263,41 @@ mod tests {
         let id_a = oci::Identifier::new_registry("cmake", "a.com").clone_with_digest(digest());
         let id_b = oci::Identifier::new_registry("cmake", "b.com").clone_with_digest(digest());
         assert_ne!(store.path(&id_a).unwrap(), store.path(&id_b).unwrap());
+    }
+
+    #[test]
+    fn layer_path_differs_from_identifier_path() {
+        // A layer path must never collide with a package path derived from
+        // the same digest — the keyspace separators (`__layer__` vs a real
+        // repository name) prevent this at the hash-input level.
+        let store = TempStore::new("/temp");
+        let id = id_with_digest();
+        let layer_path = store.layer_path(id.registry(), &digest());
+        let pkg_path = store.path(&id).unwrap();
+        assert_ne!(
+            layer_path, pkg_path,
+            "layer path must not collide with package path for the same digest"
+        );
+    }
+
+    #[test]
+    fn layer_path_is_deterministic() {
+        let store = TempStore::new("/temp");
+        let d = digest();
+        let p1 = store.layer_path("example.com", &d);
+        let p2 = store.layer_path("example.com", &d);
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn layer_path_differs_across_registries() {
+        let store = TempStore::new("/temp");
+        let d = digest();
+        assert_ne!(
+            store.layer_path("a.com", &d),
+            store.layer_path("b.com", &d),
+            "layer path must separate registry keyspaces"
+        );
     }
 
     #[test]

@@ -37,13 +37,13 @@ impl PackageManager {
             log::warn!("--current ignores the tag '{tag}' of '{package}'");
         }
 
-        let symlink_path = self.file_structure().installs.symlink(package, kind);
+        let symlink_path = self.file_structure().symlinks.symlink(package, kind);
 
         if !symlink_path.exists() {
             return Err(PackageErrorKind::SymlinkNotFound(kind));
         }
 
-        let (metadata, resolved) = super::common::load_object_data(&self.file_structure().objects, &symlink_path)
+        let (metadata, resolved) = super::common::load_object_data(&self.file_structure().packages, &symlink_path)
             .await
             .map_err(PackageErrorKind::Internal)?;
 

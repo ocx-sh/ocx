@@ -90,9 +90,9 @@ impl PackageManager {
         &self,
         packages: &[InstallInfo],
     ) -> crate::Result<Vec<crate::package::metadata::env::exporter::Entry>> {
-        let objects = &self.file_structure().objects;
+        let objects = &self.file_structure().packages;
         let mut seen_digests = HashSet::new();
-        let mut seen_repos: HashMap<(String, String), oci::Digest> = HashMap::new();
+        let mut seen_repos: HashMap<oci::Repository, oci::Digest> = HashMap::new();
         let mut entries = Vec::new();
 
         for pkg in packages {
@@ -126,7 +126,7 @@ impl PackageManager {
     /// appears with different digests among visible deps, an error is returned.
     pub async fn resolve_visible_set(&self, packages: &[InstallInfo]) -> crate::Result<HashSet<oci::Digest>> {
         let mut seen_digests = HashSet::new();
-        let mut seen_repos: HashMap<(String, String), oci::Digest> = HashMap::new();
+        let mut seen_repos: HashMap<oci::Repository, oci::Digest> = HashMap::new();
 
         for pkg in packages {
             for dep in &pkg.resolved.dependencies {
@@ -149,17 +149,16 @@ impl PackageManager {
 fn check_exported(
     id: &oci::PinnedIdentifier,
     seen_digests: &mut HashSet<oci::Digest>,
-    seen_repos: &mut HashMap<(String, String), oci::Digest>,
+    seen_repos: &mut HashMap<oci::Repository, oci::Digest>,
 ) -> crate::Result<bool> {
     let digest = id.digest();
-    let repo_key = (id.registry().to_owned(), id.repository().to_owned());
+    let repo_key = oci::Repository::from(&**id);
     if let Some(existing) = seen_repos.get(&repo_key)
         && *existing != digest
     {
         tracing::warn!(
-            "Conflicting digests for {}/{}: keeping {}, ignoring {}.",
-            id.registry(),
-            id.repository(),
+            "Conflicting digests for {}: keeping {}, ignoring {}.",
+            repo_key,
             existing,
             digest,
         );

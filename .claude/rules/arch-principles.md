@@ -25,10 +25,10 @@ Patched dependency: `oci-client` at `external/rust-oci-client` (local git submod
 |-----------|-------|-----|
 | **Facade** | `PackageManager`, `Index`, `Client` | Single coordination point hides subsystem complexity |
 | **Strategy / trait dispatch** | `IndexImpl` (local/remote), `OciTransport` (native/test), archive backends (tar/zip) | Testability, swappable implementations |
-| **Composite root** | `FileStructure` wraps `ObjectStore` + `IndexStore` + `InstallStore` + `TempStore` | Separation of concerns for four distinct storage roles |
+| **Composite root** | `FileStructure` wraps `BlobStore` + `LayerStore` + `PackageStore` + `TagStore` + `SymlinkStore` + `TempStore` | Three-tier CAS: raw blobs → extracted layers → assembled packages; tags and symlinks are the mutable namespace on top |
 | **Three-layer errors** | `Error` → `PackageError` → `PackageErrorKind` | Per-package diagnosis in batch operations |
 | **Command pattern** | CLI: args → identifiers → manager task → report data → API output | Uniform flow from input to output |
-| **Ref separation for GC** | `refs/` for install back-refs, `deps/` for dependency forward-refs | BFS reachability from roots through `deps/` edges; lock-free |
+| **Ref separation for GC** | `refs/symlinks/` (install back-refs, GC roots), `refs/deps/`, `refs/layers/`, `refs/blobs/` (forward-refs) | Single BFS pass across all three CAS tiers for reachability; lock-free |
 | **Option-based results** | `IndexImpl` returns `Option` (None = not found) | Not-found is not an error at the index layer |
 | **Extension traits** | `StringExt` (slugify), `ResultExt`, `VecExt` in prelude | Ergonomic API surface without polluting core types |
 | **Builder pattern** | `ClientBuilder`, `BundleBuilder` | Fluent construction with many optional parameters |
@@ -52,10 +52,12 @@ CLI command (clap parse)
 
 | Concept | Definition |
 |---------|-----------|
-| **Object** | Content-addressed binary stored by digest in `objects/{registry}/{repo}/{digest}/` |
+| **Blob** | Raw OCI blob (manifests, image indexes, referrers) stored in `blobs/{registry}/{algorithm}/{2hex}/{remaining_hex}/` |
+| **Layer** | Extracted OCI tar layer stored in `layers/{registry}/{algorithm}/{2hex}/{remaining_hex}/content/` |
+| **Package** | Assembled package stored in `packages/{registry}/{algorithm}/{2hex}/{remaining_hex}/`; `content/` files are hardlinked from `layers/` |
 | **Index** | Local JSON snapshot of registry metadata (tags, manifests) for offline/reproducibility |
-| **Candidate** | Symlink at `installs/{repo}/candidates/{tag}` — pinned at install time |
-| **Current** | Floating symlink at `installs/{repo}/current` — set by `ocx select` |
+| **Candidate** | Symlink at `symlinks/{registry}/{repo}/candidates/{tag}` — pinned at install time |
+| **Current** | Floating symlink at `symlinks/{registry}/{repo}/current` — set by `ocx select` |
 | **Digest** | SHA-256 content hash — the immutable identity of a package version |
 | **Tag** | Mutable alias to a digest (e.g., `3.28`, `latest`) |
 | **Cascade** | Publisher convention: push `3.28.1` and auto-update `3.28`, `3`, `latest` tags |
@@ -63,7 +65,7 @@ CLI command (clap parse)
 | **Slug** | Filesystem-safe encoding: `to_relaxed_slug()` preserves `[a-zA-Z0-9._-]`, replaces rest with `_` |
 | **Identifier** | Parsed OCI reference: `registry/repo:tag@digest` with default registry fallback |
 | **Manifest** | OCI image manifest or image index (multi-platform) |
-| **Refs** | Back-reference directory in object store for lock-free GC tracking |
+| **Refs** | Reference sub-directories inside `packages/.../refs/`: `symlinks/` (GC roots from install symlinks), `deps/` (forward-refs to other packages), `layers/` (forward-refs to layers), `blobs/` (forward-refs to blobs) |
 
 ## ADR Index
 
@@ -79,6 +81,7 @@ CLI command (clap parse)
 | `adr_release_install_strategy.md` | Release and install phased strategy |
 | `adr_sbom_strategy.md` | SBOM generation approach |
 | `adr_version_build_separator.md` | Underscore as build separator in version tags |
+| `adr_three_tier_cas_storage.md` | Three-tier content-addressed storage (blobs + layers + packages) |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before making decisions in the same domain.
 

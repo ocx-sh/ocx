@@ -20,17 +20,26 @@ pub enum Digest {
 }
 
 impl Digest {
+    /// All supported digest algorithm names, matching the enum variants.
+    ///
+    /// This is the single source of truth for algorithm string identifiers.
+    /// Used by CAS path validation, Display, and TryFrom implementations.
+    pub const ALGORITHMS: &[&str] = &["sha256", "sha384", "sha512"];
+
     /// Creates a new digest from the given data, using the SHA256 algorithm.
     pub fn sha256(data: impl AsRef<[u8]>) -> Self {
         Self::Sha256(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(data)))
     }
 
     /// Returns the algorithm prefix and hex string without allocating.
+    ///
+    /// Algorithm strings are sourced from [`Self::ALGORITHMS`] — the single
+    /// source of truth for algorithm names.
     pub fn parts(&self) -> (&str, &str) {
         match self {
-            Digest::Sha256(hex) => ("sha256", hex),
-            Digest::Sha384(hex) => ("sha384", hex),
-            Digest::Sha512(hex) => ("sha512", hex),
+            Digest::Sha256(hex) => (Self::ALGORITHMS[0], hex),
+            Digest::Sha384(hex) => (Self::ALGORITHMS[1], hex),
+            Digest::Sha512(hex) => (Self::ALGORITHMS[2], hex),
         }
     }
 
@@ -59,11 +68,8 @@ impl Digest {
 
 impl std::fmt::Display for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Digest::Sha256(digest) => write!(f, "sha256:{}", digest),
-            Digest::Sha384(digest) => write!(f, "sha384:{}", digest),
-            Digest::Sha512(digest) => write!(f, "sha512:{}", digest),
-        }
+        let (algorithm, hex) = self.parts();
+        write!(f, "{algorithm}:{hex}")
     }
 }
 
@@ -79,15 +85,24 @@ impl TryFrom<&str> for Digest {
             }
         }
 
-        if let Some(digest) = value.strip_prefix("sha256:") {
-            check_digest(value, digest, 64)?;
-            Ok(Digest::Sha256(digest.to_string()))
-        } else if let Some(digest) = value.strip_prefix("sha384:") {
-            check_digest(value, digest, 96)?;
-            Ok(Digest::Sha384(digest.to_string()))
-        } else if let Some(digest) = value.strip_prefix("sha512:") {
-            check_digest(value, digest, 128)?;
-            Ok(Digest::Sha512(digest.to_string()))
+        if let Some(hex) = value
+            .strip_prefix(Digest::ALGORITHMS[0])
+            .and_then(|s| s.strip_prefix(':'))
+        {
+            check_digest(value, hex, 64)?;
+            Ok(Digest::Sha256(hex.to_string()))
+        } else if let Some(hex) = value
+            .strip_prefix(Digest::ALGORITHMS[1])
+            .and_then(|s| s.strip_prefix(':'))
+        {
+            check_digest(value, hex, 96)?;
+            Ok(Digest::Sha384(hex.to_string()))
+        } else if let Some(hex) = value
+            .strip_prefix(Digest::ALGORITHMS[2])
+            .and_then(|s| s.strip_prefix(':'))
+        {
+            check_digest(value, hex, 128)?;
+            Ok(Digest::Sha512(hex.to_string()))
         } else {
             Err(DigestError::Invalid(value.to_owned()))
         }
@@ -161,6 +176,37 @@ mod tests {
         let digest_str = "sha512:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d943567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
         let digest = Digest::try_from(digest_str).unwrap();
         assert!(matches!(digest, Digest::Sha512(_)));
+    }
+
+    #[test]
+    fn algorithms_constant_covers_all_variants() {
+        // If a new variant is added to Digest, this test will fail until
+        // ALGORITHMS is updated to include the new algorithm string.
+        // The round-trip (Display → TryFrom) ensures that `parts()`, `Display`,
+        // and `TryFrom` all agree on the algorithm prefix strings.
+        let all = [
+            Digest::Sha256("a".repeat(64)),
+            Digest::Sha384("b".repeat(96)),
+            Digest::Sha512("c".repeat(128)),
+        ];
+        for d in &all {
+            assert!(
+                Digest::ALGORITHMS.contains(&d.algorithm()),
+                "Digest::ALGORITHMS is missing '{}'",
+                d.algorithm()
+            );
+            // Round-trip: parts() → Display → TryFrom. If any of the three
+            // sites uses a different string, this breaks.
+            let displayed = d.to_string();
+            let parsed = Digest::try_from(displayed.as_str())
+                .unwrap_or_else(|_| panic!("Display output '{}' failed to round-trip through TryFrom", displayed));
+            assert_eq!(&parsed, d, "round-trip mismatch for {}", d.algorithm());
+        }
+        assert_eq!(
+            Digest::ALGORITHMS.len(),
+            all.len(),
+            "Digest::ALGORITHMS has entries not covered by test variants"
+        );
     }
 
     #[test]

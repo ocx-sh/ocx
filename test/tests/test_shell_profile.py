@@ -610,8 +610,8 @@ def test_profile_load_content_mode(
     )
     assert "export" in result.stdout
     assert "PATH" in result.stdout
-    # Content-mode paths go through objects/, not installs/
-    assert "objects" in result.stdout
+    # Content-mode paths go through packages/, not symlinks/
+    assert "packages" in result.stdout
 
 
 def test_profile_load_skips_broken(
@@ -855,7 +855,7 @@ def test_profile_load_offline(
 def test_profile_load_content_vs_symlink_path(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """Content-mode path uses objects/, candidate-mode uses installs/"""
+    """Content-mode path uses packages/, candidate-mode uses symlinks/"""
     pkg = published_package
     ocx.json("install", pkg.short)
 
@@ -871,9 +871,9 @@ def test_profile_load_content_vs_symlink_path(
         "shell", "profile", "load", "--shell", "bash", format=None
     )
 
-    # Candidate uses installs/, content uses objects/
-    assert "installs" in result_candidate.stdout
-    assert "objects" in result_content.stdout
+    # Candidate uses symlinks/, content uses packages/
+    assert "symlinks" in result_candidate.stdout
+    assert "packages" in result_content.stdout
 
 
 # ---------------------------------------------------------------------------

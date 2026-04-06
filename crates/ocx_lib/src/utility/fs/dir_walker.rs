@@ -14,14 +14,73 @@ use crate::Result;
 const DEFAULT_CONCURRENCY: usize = 50;
 
 /// Instructs the walker how to handle a directory entry.
-pub enum WalkAction<T> {
-    /// This directory is a leaf — include `T` in results, do not recurse.
-    Leaf(T),
-    /// Skip this directory entirely (do not recurse, do not include).
-    Skip,
-    /// Recurse into child directories, optionally skipping children whose
-    /// file name matches one of the provided names.
-    Descend { skip_names: &'static [&'static str] },
+///
+/// Each directory can yield zero or more items AND optionally descend into
+/// children. Use the convenience constructors for common patterns.
+pub struct WalkDecision<T> {
+    /// Items to yield from this directory.
+    pub items: Vec<T>,
+    /// Whether to recurse into child directories.
+    pub descend: bool,
+    /// Child directory names to skip when descending.
+    pub skip_names: &'static [&'static str],
+}
+
+impl<T> WalkDecision<T> {
+    /// This directory is a leaf — include one item, do not recurse.
+    pub fn leaf(item: T) -> Self {
+        Self {
+            items: vec![item],
+            descend: false,
+            skip_names: &[],
+        }
+    }
+
+    /// Recurse into child directories with no skip list.
+    pub fn descend() -> Self {
+        Self {
+            items: Vec::new(),
+            descend: true,
+            skip_names: &[],
+        }
+    }
+
+    /// Recurse into child directories, skipping children whose file name
+    /// matches one of the provided names.
+    pub fn descend_skip(skip_names: &'static [&'static str]) -> Self {
+        Self {
+            items: Vec::new(),
+            descend: true,
+            skip_names,
+        }
+    }
+
+    /// Skip this directory entirely (no items, no recursion).
+    pub fn skip() -> Self {
+        Self {
+            items: Vec::new(),
+            descend: false,
+            skip_names: &[],
+        }
+    }
+
+    /// Yield multiple items from this directory, do not recurse.
+    pub fn collect(items: Vec<T>) -> Self {
+        Self {
+            items,
+            descend: false,
+            skip_names: &[],
+        }
+    }
+
+    /// Yield multiple items from this directory AND recurse into children.
+    pub fn collect_and_descend(items: Vec<T>) -> Self {
+        Self {
+            items,
+            descend: true,
+            skip_names: &[],
+        }
+    }
 }
 
 /// Async BFS directory walker with semaphore-bounded concurrency.
@@ -57,7 +116,7 @@ pub enum WalkAction<T> {
 pub struct DirWalker<T, F>
 where
     T: Send + 'static,
-    F: Fn(&Path, usize) -> WalkAction<T> + Send + Sync + 'static,
+    F: Fn(&Path, usize) -> WalkDecision<T> + Send + Sync + 'static,
 {
     root: PathBuf,
     classify: F,
@@ -69,7 +128,7 @@ where
 impl<T, F> DirWalker<T, F>
 where
     T: Send + 'static,
-    F: Fn(&Path, usize) -> WalkAction<T> + Send + Sync + 'static,
+    F: Fn(&Path, usize) -> WalkDecision<T> + Send + Sync + 'static,
 {
     /// Creates a new walker rooted at `root` with the given classification function.
     pub fn new(root: impl Into<PathBuf>, classify: F) -> Self {
@@ -122,9 +181,7 @@ where
             // Drain all pending tasks before spawning the next wave.
             while let Some(result) = tasks.join_next().await {
                 let result = result.expect("task panicked")?;
-                if let Some((path, item)) = result.leaf {
-                    results.push((path, item));
-                }
+                results.extend(result.items);
                 queue.extend(result.children);
             }
         }
@@ -135,63 +192,60 @@ where
 }
 
 struct ExploreResult<T> {
-    leaf: Option<(PathBuf, T)>,
+    items: Vec<(PathBuf, T)>,
     children: Vec<(PathBuf, usize)>,
 }
 
 async fn explore_dir<T, F>(dir: PathBuf, depth: usize, max_depth: usize, classify: &F) -> Result<ExploreResult<T>>
 where
     T: Send + 'static,
-    F: Fn(&Path, usize) -> WalkAction<T> + Send + Sync,
+    F: Fn(&Path, usize) -> WalkDecision<T> + Send + Sync,
 {
-    let action = classify(&dir, depth);
+    let decision = classify(&dir, depth);
 
-    match action {
-        WalkAction::Leaf(item) => Ok(ExploreResult {
-            leaf: Some((dir, item)),
-            children: Vec::new(),
-        }),
-        WalkAction::Skip => Ok(ExploreResult {
-            leaf: None,
-            children: Vec::new(),
-        }),
-        WalkAction::Descend { skip_names } => {
-            if depth >= max_depth {
-                crate::log::warn!("Directory walk hit max depth at '{}'", dir.display());
-                return Ok(ExploreResult {
-                    leaf: None,
-                    children: Vec::new(),
-                });
-            }
+    let items: Vec<(PathBuf, T)> = decision.items.into_iter().map(|item| (dir.clone(), item)).collect();
 
-            let mut entries = tokio::fs::read_dir(&dir)
-                .await
-                .map_err(|e| crate::Error::InternalFile(dir.clone(), e))?;
-            let mut children = Vec::new();
-            while let Some(entry) = entries
-                .next_entry()
-                .await
-                .map_err(|e| crate::Error::InternalFile(dir.clone(), e))?
-            {
-                let path = entry.path();
-                if !entry
-                    .file_type()
-                    .await
-                    .map_err(|e| crate::Error::InternalFile(path.clone(), e))?
-                    .is_dir()
-                {
-                    continue;
-                }
-                if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                    && skip_names.contains(&name)
-                {
-                    continue;
-                }
-                children.push((path, depth + 1));
-            }
-            Ok(ExploreResult { leaf: None, children })
-        }
+    if !decision.descend {
+        return Ok(ExploreResult {
+            items,
+            children: Vec::new(),
+        });
     }
+
+    if depth >= max_depth {
+        crate::log::warn!("Directory walk hit max depth at '{}'", dir.display());
+        return Ok(ExploreResult {
+            items,
+            children: Vec::new(),
+        });
+    }
+
+    let mut entries = tokio::fs::read_dir(&dir)
+        .await
+        .map_err(|e| crate::Error::InternalFile(dir.clone(), e))?;
+    let mut children = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| crate::Error::InternalFile(dir.clone(), e))?
+    {
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .await
+            .map_err(|e| crate::Error::InternalFile(path.clone(), e))?
+            .is_dir()
+        {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && decision.skip_names.contains(&name)
+        {
+            continue;
+        }
+        children.push((path, depth + 1));
+    }
+    Ok(ExploreResult { items, children })
 }
 
 #[cfg(test)]
@@ -235,7 +289,7 @@ mod tests {
         }
     }
 
-    type ClassifyFn = fn(&Path, usize) -> WalkAction<PathBuf>;
+    type ClassifyFn = fn(&Path, usize) -> WalkDecision<PathBuf>;
 
     /// Helper: creates a default walker with marker-based classify.
     fn walker(tree: &TreeBuilder) -> DirWalker<PathBuf, ClassifyFn> {
@@ -243,42 +297,40 @@ mod tests {
     }
 
     /// Classify that treats any directory containing a "marker" file as a leaf.
-    fn marker_classify(dir: &Path, _depth: usize) -> WalkAction<PathBuf> {
+    fn marker_classify(dir: &Path, _depth: usize) -> WalkDecision<PathBuf> {
         if dir.join("marker").is_file() {
-            return WalkAction::Leaf(dir.to_path_buf());
+            return WalkDecision::leaf(dir.to_path_buf());
         }
-        WalkAction::Descend { skip_names: &[] }
+        WalkDecision::descend()
     }
 
     /// Classify that skips directories named "skip_me".
-    fn skip_classify(dir: &Path, _depth: usize) -> WalkAction<PathBuf> {
+    fn skip_classify(dir: &Path, _depth: usize) -> WalkDecision<PathBuf> {
         if dir.join("marker").is_file() {
-            return WalkAction::Leaf(dir.to_path_buf());
+            return WalkDecision::leaf(dir.to_path_buf());
         }
-        WalkAction::Descend {
-            skip_names: &["skip_me"],
-        }
+        WalkDecision::descend_skip(&["skip_me"])
     }
 
     /// Classify that returns every directory as a leaf (no recursion).
-    fn leaf_everything(dir: &Path, _depth: usize) -> WalkAction<PathBuf> {
-        WalkAction::Leaf(dir.to_path_buf())
+    fn leaf_everything(dir: &Path, _depth: usize) -> WalkDecision<PathBuf> {
+        WalkDecision::leaf(dir.to_path_buf())
     }
 
     /// Classify that skips every directory (no results, no recursion).
-    fn skip_everything(_dir: &Path, _depth: usize) -> WalkAction<PathBuf> {
-        WalkAction::Skip
+    fn skip_everything(_dir: &Path, _depth: usize) -> WalkDecision<PathBuf> {
+        WalkDecision::skip()
     }
 
     /// Shared classify: accepts markers only at depth 3, skips markers at other depths.
-    fn depth_aware(dir: &Path, depth: usize) -> WalkAction<PathBuf> {
+    fn depth_aware(dir: &Path, depth: usize) -> WalkDecision<PathBuf> {
         if dir.join("marker").is_file() {
             if depth == 3 {
-                return WalkAction::Leaf(dir.to_path_buf());
+                return WalkDecision::leaf(dir.to_path_buf());
             }
-            return WalkAction::Skip;
+            return WalkDecision::skip();
         }
-        WalkAction::Descend { skip_names: &[] }
+        WalkDecision::descend()
     }
 
     // ── empty / nonexistent ─────────────────────────────────────────────

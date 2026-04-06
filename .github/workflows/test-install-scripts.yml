@@ -26,7 +26,7 @@ jobs:
           OCX_NO_MODIFY_PATH=1 bash website/src/public/install.sh $version_arg
       - name: Verify installation
         run: |
-          export PATH="$HOME/.ocx/installs/ocx.sh/ocx/current/bin:$PATH"
+          export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/current/bin:$PATH"
           ocx version
           test -f "$HOME/.ocx/env"
 
@@ -48,7 +48,7 @@ jobs:
             alpine:latest sh -c "
               apk add --no-cache curl tar xz &&
               sh /install.sh $version_arg &&
-              export PATH=\"\$HOME/.ocx/installs/ocx.sh/ocx/current/bin:\$PATH\" &&
+              export PATH=\"\$HOME/.ocx/symlinks/ocx.sh/ocx/current/bin:\$PATH\" &&
               ocx version &&
               test -f \"\$HOME/.ocx/env\"
             "
@@ -68,7 +68,7 @@ jobs:
           OCX_NO_MODIFY_PATH=1 bash website/src/public/install.sh $version_arg
       - name: Verify installation
         run: |
-          export PATH="$HOME/.ocx/installs/ocx.sh/ocx/current/bin:$PATH"
+          export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/current/bin:$PATH"
           ocx version
           test -f "$HOME/.ocx/env"
 
@@ -89,6 +89,6 @@ jobs:
       - name: Verify installation
         shell: pwsh
         run: |
-          $env:PATH = "$env:USERPROFILE\.ocx\installs\ocx.sh\ocx\current\bin;$env:PATH"
+          $env:PATH = "$env:USERPROFILE\.ocx\symlinks\ocx.sh\ocx\current\bin;$env:PATH"
           ocx version
           Test-Path "$env:USERPROFILE\.ocx\env.ps1"

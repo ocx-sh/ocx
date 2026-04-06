@@ -95,8 +95,8 @@ should survive package updates.
 | Mode | Flag | Path |
 |------|------|------|
 | Object store (default) | _(none)_ | `~/.ocx/objects/…/{digest}/content` |
-| Candidate symlink | `--candidate` | `~/.ocx/installs/…/candidates/{tag}/content` |
-| Current symlink | `--current` | `~/.ocx/installs/…/current/content` |
+| Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/{tag}/content` |
+| Current symlink | `--current` | `~/.ocx/symlinks/…/current/content` |
 
 **Constraints**
 
@@ -618,7 +618,7 @@ ocx package create [OPTIONS] <PATH>
 #### `pull` {#package-pull}
 
 Downloads packages into the local [object store][fs-objects] without creating
-[install symlinks][fs-installs].
+[install symlinks][fs-symlinks].
 
 Unlike [`install`](#install), this command only populates the content-addressed object store — no
 candidate or current symlinks are created. If a package declares [dependencies][ug-dependencies], all transitive dependencies are pulled into the object store as well. This is the recommended primitive for CI environments where reproducibility matters and symlink management is unnecessary.
@@ -725,7 +725,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects
-[fs-installs]: ../user-guide.md#file-structure-installs
+[fs-symlinks]: ../user-guide.md#file-structure-symlinks
 [fs-index]: ../user-guide.md#file-structure-index
 [ug-dependencies]: ../user-guide.md#dependencies
 [ug-deps-env]: ../user-guide.md#dependencies-environment

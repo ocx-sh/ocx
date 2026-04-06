@@ -14,7 +14,7 @@ impl PackageManager {
     /// Returns the list of actually deleted object directories (may be empty
     /// if the object is still reachable from another root).
     pub async fn purge(&self, identifier: &oci::PinnedIdentifier) -> crate::Result<Vec<PathBuf>> {
-        let obj_dir = self.file_structure().objects.path(identifier);
+        let obj_dir = self.file_structure().packages.path(identifier);
         let profile = self.profile.snapshot();
         let gc = GarbageCollector::build(self.file_structure(), &profile).await?;
         gc.purge(&[obj_dir]).await
@@ -27,7 +27,7 @@ impl PackageManager {
     pub async fn purge_all(&self, identifiers: &[oci::PinnedIdentifier]) -> crate::Result<Vec<PathBuf>> {
         let obj_dirs: Vec<PathBuf> = identifiers
             .iter()
-            .map(|id| self.file_structure().objects.path(id))
+            .map(|id| self.file_structure().packages.path(id))
             .collect();
         let profile = self.profile.snapshot();
         let gc = GarbageCollector::build(self.file_structure(), &profile).await?;

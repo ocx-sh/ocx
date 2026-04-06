@@ -110,10 +110,10 @@ fi
 echo "OK: ~/.ocx/env exists"
 
 # Check binary is accessible via the current symlink
-OCX_BIN="\$HOME/.ocx/installs/ocx.sh/ocx/current/bin/ocx"
+OCX_BIN="\$HOME/.ocx/symlinks/ocx.sh/ocx/current/bin/ocx"
 if [ ! -x "\$OCX_BIN" ]; then
     # Check if candidate exists but current doesn't
-    if ls "\$HOME/.ocx/installs/ocx.sh/ocx/candidates/" 2>/dev/null; then
+    if ls "\$HOME/.ocx/symlinks/ocx.sh/ocx/candidates/" 2>/dev/null; then
         echo "FAIL: candidates exist but current symlink is missing"
     else
         echo "FAIL: no installation found at \$OCX_BIN"
@@ -130,16 +130,16 @@ VERSION=\$("\$OCX_BIN" version 2>&1) || true
 echo "OK: ocx version = \$VERSION"
 
 # Check candidate symlink
-if ls "\$HOME/.ocx/installs/ocx.sh/ocx/candidates/" >/dev/null 2>&1; then
+if ls "\$HOME/.ocx/symlinks/ocx.sh/ocx/candidates/" >/dev/null 2>&1; then
     echo "OK: candidate symlinks exist:"
-    ls -la "\$HOME/.ocx/installs/ocx.sh/ocx/candidates/"
+    ls -la "\$HOME/.ocx/symlinks/ocx.sh/ocx/candidates/"
 else
     echo "WARN: no candidate symlinks found"
 fi
 
 # Check current symlink
-if [ -L "\$HOME/.ocx/installs/ocx.sh/ocx/current" ]; then
-    echo "OK: current symlink -> \$(readlink "\$HOME/.ocx/installs/ocx.sh/ocx/current")"
+if [ -L "\$HOME/.ocx/symlinks/ocx.sh/ocx/current" ]; then
+    echo "OK: current symlink -> \$(readlink "\$HOME/.ocx/symlinks/ocx.sh/ocx/current")"
 else
     echo "WARN: current is not a symlink"
 fi

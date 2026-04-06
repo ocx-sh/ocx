@@ -116,6 +116,12 @@ Before writing new code, ask:
 
 ---
 
+## Refactoring Tooling
+
+Before starting refactoring work, check available tools via `ToolSearch` — capabilities like LSP may be available as deferred tools that aren't loaded by default. Prefer semantic tooling (LSP `findReferences`, `workspaceSymbol`, `goToDefinition`) over text-based search (Grep) for symbol-level operations like renames and reference lookups. Fall back to Grep for non-code searches (comments, docs, config files).
+
+---
+
 ## Refactoring Discipline
 
 **Two Hats Rule**: Never mix refactoring and optimization in the same session.

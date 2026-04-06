@@ -24,7 +24,7 @@ impl PackageManager {
         &self,
         identifier: &oci::PinnedIdentifier,
     ) -> Result<Option<InstallInfo>, PackageErrorKind> {
-        super::common::find_in_store(&self.file_structure().objects, identifier).await
+        super::common::find_in_store(&self.file_structure().packages, identifier).await
     }
 
     pub async fn find(
@@ -88,7 +88,7 @@ impl PackageManager {
 #[cfg(test)]
 mod tests {
     use crate::{
-        file_structure::FileStructure,
+        file_structure::{self, BlobStore, FileStructure, TagStore},
         oci,
         oci::index::{Index, LocalConfig, LocalIndex},
         package_manager::PackageManager,
@@ -112,34 +112,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fs = FileStructure::with_root(dir.path().to_path_buf());
         let index = Index::from_local(LocalIndex::new(LocalConfig {
-            root: dir.path().join("index"),
+            tag_store: TagStore::new(dir.path().join("tags")),
+            blob_store: BlobStore::new(dir.path().join("blobs")),
         }));
         let mgr = PackageManager::new(fs.clone(), index, None, "example.com");
-        let obj_path = fs.objects.path(&test_pinned());
+        let obj_path = fs.packages.path(&test_pinned());
         (dir, mgr, obj_path)
     }
 
     #[tokio::test]
     async fn find_plain_present_returns_install_info() {
         let (_dir, mgr, obj_path) = setup_manager();
-        std::fs::create_dir_all(obj_path.join("content")).unwrap();
-        std::fs::write(obj_path.join("metadata.json"), VALID_METADATA_JSON).unwrap();
-        std::fs::write(obj_path.join("resolve.json"), valid_resolve_json()).unwrap();
+        let pkg = file_structure::PackageDir { dir: obj_path.clone() };
+        std::fs::create_dir_all(pkg.content()).unwrap();
+        std::fs::write(pkg.metadata(), VALID_METADATA_JSON).unwrap();
+        std::fs::write(pkg.resolve(), valid_resolve_json()).unwrap();
 
         let result = mgr.find_plain(&test_pinned()).await.unwrap();
         assert!(result.is_some());
         let info = result.unwrap();
         assert_eq!(info.identifier, test_pinned());
-        assert_eq!(info.content, obj_path.join("content"));
+        assert_eq!(info.content, pkg.content());
         assert!(info.resolved.dependencies.is_empty());
     }
 
     #[tokio::test]
     async fn find_plain_absent_no_content_returns_none() {
         let (_dir, mgr, obj_path) = setup_manager();
+        let pkg = file_structure::PackageDir { dir: obj_path.clone() };
         std::fs::create_dir_all(&obj_path).unwrap();
-        std::fs::write(obj_path.join("metadata.json"), VALID_METADATA_JSON).unwrap();
-        std::fs::write(obj_path.join("resolve.json"), valid_resolve_json()).unwrap();
+        std::fs::write(pkg.metadata(), VALID_METADATA_JSON).unwrap();
+        std::fs::write(pkg.resolve(), valid_resolve_json()).unwrap();
 
         let result = mgr.find_plain(&test_pinned()).await.unwrap();
         assert!(result.is_none());
@@ -148,7 +151,8 @@ mod tests {
     #[tokio::test]
     async fn find_plain_absent_no_metadata_returns_none() {
         let (_dir, mgr, obj_path) = setup_manager();
-        std::fs::create_dir_all(obj_path.join("content")).unwrap();
+        let pkg = file_structure::PackageDir { dir: obj_path };
+        std::fs::create_dir_all(pkg.content()).unwrap();
 
         let result = mgr.find_plain(&test_pinned()).await.unwrap();
         assert!(result.is_none());
@@ -157,8 +161,9 @@ mod tests {
     #[tokio::test]
     async fn find_plain_absent_no_resolve_returns_none() {
         let (_dir, mgr, obj_path) = setup_manager();
-        std::fs::create_dir_all(obj_path.join("content")).unwrap();
-        std::fs::write(obj_path.join("metadata.json"), VALID_METADATA_JSON).unwrap();
+        let pkg = file_structure::PackageDir { dir: obj_path };
+        std::fs::create_dir_all(pkg.content()).unwrap();
+        std::fs::write(pkg.metadata(), VALID_METADATA_JSON).unwrap();
 
         let result = mgr.find_plain(&test_pinned()).await.unwrap();
         assert!(result.is_none());
@@ -175,9 +180,10 @@ mod tests {
     #[tokio::test]
     async fn find_plain_invalid_metadata_returns_error() {
         let (_dir, mgr, obj_path) = setup_manager();
-        std::fs::create_dir_all(obj_path.join("content")).unwrap();
-        std::fs::write(obj_path.join("metadata.json"), "not valid json").unwrap();
-        std::fs::write(obj_path.join("resolve.json"), valid_resolve_json()).unwrap();
+        let pkg = file_structure::PackageDir { dir: obj_path };
+        std::fs::create_dir_all(pkg.content()).unwrap();
+        std::fs::write(pkg.metadata(), "not valid json").unwrap();
+        std::fs::write(pkg.resolve(), valid_resolve_json()).unwrap();
 
         let result = mgr.find_plain(&test_pinned()).await;
         assert!(result.is_err());

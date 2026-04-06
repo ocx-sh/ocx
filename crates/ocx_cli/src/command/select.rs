@@ -38,7 +38,7 @@ impl Select {
         let mut packages = HashMap::with_capacity(package_infos.len());
 
         for (raw, info) in self.packages.iter().zip(package_infos) {
-            let current_path = fs.installs.current(&info.identifier);
+            let current_path = fs.symlinks.current(&info.identifier);
             rm.link(&current_path, &info.content)?;
 
             packages.insert(

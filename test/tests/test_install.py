@@ -12,7 +12,7 @@ def test_install_creates_candidate_symlink(
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "candidates"
@@ -40,7 +40,7 @@ def test_install_select_creates_current_symlink(
 
     current = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / pkg.repo
         / "current"
@@ -76,7 +76,7 @@ def test_install_without_select_preserves_current(
 
     current = (
         Path(ocx.env["OCX_HOME"])
-        / "installs"
+        / "symlinks"
         / registry_dir(ocx.registry)
         / v1.repo
         / "current"
