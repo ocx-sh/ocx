@@ -11,6 +11,11 @@ use tokio::io::AsyncWrite;
 /// Number of bytes between periodic debug log messages during transfers.
 const LOG_BYTE_INTERVAL: u64 = 32 * 1024 * 1024;
 
+/// Maximum bytes forwarded to the inner writer per `poll_write` call.
+/// Capping writes produces more frequent progress callbacks for smoother
+/// progress bar updates. 32 KiB yields ~1500 updates for a 50 MB download.
+const MAX_WRITE_SIZE: usize = 32 * 1024;
+
 /// An `AsyncWrite` wrapper that reports progress after every write.
 ///
 /// Wraps an inner `AsyncWrite` and calls `on_progress(bytes_written_so_far)`
@@ -39,7 +44,8 @@ impl<W: AsyncWrite> ProgressWriter<W> {
 impl<W: AsyncWrite> AsyncWrite for ProgressWriter<W> {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = &mut *self;
-        match this.inner.as_mut().poll_write(cx, buf) {
+        let capped = &buf[..buf.len().min(MAX_WRITE_SIZE)];
+        match this.inner.as_mut().poll_write(cx, capped) {
             Poll::Ready(Ok(n)) => {
                 this.bytes_written += n as u64;
                 (this.on_progress)(this.bytes_written);
@@ -131,5 +137,65 @@ mod tests {
         // These should not panic or error — they delegate to Vec's no-op impls.
         writer.flush().await.unwrap();
         writer.shutdown().await.unwrap();
+    }
+
+    /// A write of 128 KiB must produce at least 4 progress callbacks (128K / 32K = 4).
+    /// Without the `MAX_WRITE_SIZE` cap, `Vec<u8>` would accept the full buffer in one
+    /// `poll_write`, firing only 1 callback.
+    #[tokio::test]
+    async fn large_write_produces_multiple_callbacks() {
+        let buf = Vec::new();
+        let (on_progress, values) = progress_tracker();
+        let mut writer = ProgressWriter::new(buf, 0, on_progress);
+
+        writer.write_all(&[0u8; 128 * 1024]).await.unwrap();
+
+        assert!(
+            values.lock().unwrap().len() >= 4,
+            "expected at least 4 progress callbacks for a 128 KiB write (cap = 32 KiB), got {}",
+            values.lock().unwrap().len()
+        );
+    }
+
+    /// Capping writes to 32 KiB must not lose any bytes.
+    #[tokio::test]
+    async fn capped_write_preserves_all_data() {
+        let buf = Vec::new();
+        let (on_progress, _) = progress_tracker();
+        let mut writer = ProgressWriter::new(buf, 0, on_progress);
+
+        writer.write_all(&[42u8; 128 * 1024]).await.unwrap();
+
+        let inner = *Pin::into_inner(writer.inner);
+        assert_eq!(inner.len(), 128 * 1024, "all 131072 bytes must be written");
+        assert!(inner.iter().all(|&b| b == 42), "all bytes must be 42");
+    }
+
+    /// A write smaller than the cap must produce exactly one callback.
+    #[tokio::test]
+    async fn small_write_unaffected_by_cap() {
+        let buf = Vec::new();
+        let (on_progress, values) = progress_tracker();
+        let mut writer = ProgressWriter::new(buf, 0, on_progress);
+
+        writer.write_all(&[0u8; 1024]).await.unwrap();
+
+        let vals = values.lock().unwrap();
+        assert_eq!(vals.len(), 1, "a 1 KiB write should produce exactly one callback");
+        assert_eq!(vals[0], 1024, "callback must report 1024 bytes written");
+    }
+
+    /// A write of exactly 32 KiB (the cap boundary) must produce exactly one callback.
+    #[tokio::test]
+    async fn exact_cap_boundary() {
+        let buf = Vec::new();
+        let (on_progress, values) = progress_tracker();
+        let mut writer = ProgressWriter::new(buf, 0, on_progress);
+
+        writer.write_all(&[0u8; 32 * 1024]).await.unwrap();
+
+        let vals = values.lock().unwrap();
+        assert_eq!(vals.len(), 1, "a write of exactly 32 KiB should not be split");
+        assert_eq!(vals[0], 32768, "callback must report 32768 bytes written");
     }
 }
