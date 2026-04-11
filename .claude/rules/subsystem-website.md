@@ -214,7 +214,7 @@ This renders the icon shape filled with the accent color — works in both light
 
 ## Writing Guidelines
 
-See `.claude/rules/documentation.md` for narrative structure, link conventions, callout usage, tooltip patterns, and precision rules.
+See `.claude/rules/docs-style.md` for narrative structure, link conventions, callout usage, tooltip patterns, and precision rules.
 
 ## Generated Content Pipeline
 

@@ -18,12 +18,11 @@ Description best practices:
   GOOD: "API design skill. Use when designing REST APIs, GraphQL schemas, or gRPC services."
   BAD:  "Helps with APIs"
 
-Supporting files (auto-discovered):
-  - FORMS.md: Input templates
-  - REFERENCE.md: Technical reference
-  - resources/: Additional materials
+Supporting files: place sibling .md files next to SKILL.md for progressive
+disclosure (e.g. commit_reference.md). No subdirectories — Claude Code only
+discovers skills at .claude/skills/<name>/SKILL.md exactly.
 
-Location: .claude/skills/[domain]/[skill-name]/SKILL.md
+Location: .claude/skills/[skill-name]/SKILL.md
 -->
 
 # [Skill Name]
@@ -64,5 +63,5 @@ Location: .claude/skills/[domain]/[skill-name]/SKILL.md
 
 ## Resources
 
-- [Resource Name](./resources/resource.md)
-- [External Link](https://example.com)
+- `[Sibling Reference](./[skill-name]_reference.md)` — optional progressive-disclosure file alongside SKILL.md
+- `[External Link](https://example.com)`

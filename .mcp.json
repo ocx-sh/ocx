@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      }
+    },
+    "context7": {
+      "command": "bunx",
+      "args": [
+        "@upstash/context7-mcp"
+      ]
+    }
+  }
+}

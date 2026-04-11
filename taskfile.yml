@@ -2,6 +2,9 @@
 
 version: '3'
 
+vars:
+  REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
+
 env:
   OCX_INDEX: '{{ .ROOT_DIR }}/.ocx/index'
 
@@ -16,6 +19,9 @@ includes:
   lint: ./taskfiles/lint.taskfile.yml
   sbom: ./taskfiles/sbom.taskfile.yml
   catalog: ./taskfiles/catalog.taskfile.yml
+  claude:
+    taskfile: ./.claude/taskfile.yml
+    dir: ./.claude
   mirror: ./taskfiles/mirror.taskfile.yml
   mirror-sdk: ./taskfiles/mirror-sdk.taskfile.yml
   test:
@@ -30,7 +36,7 @@ tasks:
     desc: Updates this repository's index lock.
     cmds:
       - rm -rf .ocx/index
-      - ocx index update shellcheck:0.11 shfmt:3
+      - ocx index update shellcheck:0.11 shfmt:3 lychee:0
   ocx:dirty-update:
     desc: Temporary dirty update to solve chicken-and-egg for ocx automation within this repository.
     cmds:
@@ -114,18 +120,13 @@ tasks:
     cmds:
       - cargo deny check licenses
 
-  lint:ai-config:
-    desc: Validate AI configuration structural integrity
-    dir: .claude/tests
-    cmd: uv run pytest test_ai_config.py -v
-
   verify:
     desc: Run all checks (fmt, clippy, lint, license, build, unit tests, acceptance tests)
     cmds:
       - task: format:check
       - task: clippy:check
       - task: lint:shell
-      - task: lint:ai-config
+      - task: claude:verify
       - task: license:check
       - task: license:deps
       - task: build

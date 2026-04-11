@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 
 import hook_utils
 from hook_utils import StateManager
-import skill_activation_prompt
 import pre_tool_use_validator
 import pre_commit_verification
 import conventional_commit_validator
@@ -185,114 +184,6 @@ class TestStateManager:
         sm.trim_tracker(max_lines=100, threshold=110)
         result_lines = sm.tracker_file.read_text().splitlines()
         assert len(result_lines) == 100
-
-
-# ---------------------------------------------------------------------------
-# TestSkillActivation
-# ---------------------------------------------------------------------------
-
-
-class TestSkillActivation:
-    def _make_skill(
-        self,
-        tmp_path: Path,
-        name: str,
-        keywords: list[str],
-        intent_patterns: list[str],
-        priority: str = "medium",
-    ) -> dict:
-        """Create a skill dict with a physical SKILL.md on disk."""
-        skill_path = tmp_path / f"{name}" / "SKILL.md"
-        skill_path.parent.mkdir(parents=True, exist_ok=True)
-        skill_path.write_text(f"# {name}\nSkill content.")
-        return {
-            "name": name,
-            "description": f"{name} skill",
-            "path": str(skill_path.relative_to(tmp_path)),
-            "priority": priority,
-            "triggers": {
-                "keywords": keywords,
-                "intent_patterns": intent_patterns,
-            },
-        }
-
-    def test_keyword_match(self, tmp_path: Path) -> None:
-        """A skill is matched when its keyword appears in the prompt."""
-        skill = self._make_skill(tmp_path, "builder", ["implement"], [])
-        matches = skill_activation_prompt.match_skills(
-            "Please implement a new feature", [skill], str(tmp_path)
-        )
-        assert len(matches) == 1
-        assert matches[0]["match_type"] == "keyword"
-        assert matches[0]["matched_term"] == "implement"
-
-    def test_intent_pattern_match(self, tmp_path: Path) -> None:
-        """A skill is matched via regex intent pattern when no keyword hits."""
-        skill = self._make_skill(tmp_path, "reviewer", [], [r"review\s+my\s+code"])
-        matches = skill_activation_prompt.match_skills(
-            "Can you review my code please?", [skill], str(tmp_path)
-        )
-        assert len(matches) == 1
-        assert matches[0]["match_type"] == "intent"
-
-    def test_no_match_returns_empty(self, tmp_path: Path) -> None:
-        """An unrelated prompt produces no matches."""
-        skill = self._make_skill(tmp_path, "builder", ["deploy"], [r"deploy\s+now"])
-        matches = skill_activation_prompt.match_skills(
-            "What is the weather today?", [skill], str(tmp_path)
-        )
-        assert matches == []
-
-    def test_dedup_keyword_prevents_intent_match(self, tmp_path: Path) -> None:
-        """A skill that already matched via keyword is not re-matched via intent."""
-        skill = self._make_skill(
-            tmp_path, "builder", ["refactor"], [r"refactor\s+this"]
-        )
-        matches = skill_activation_prompt.match_skills(
-            "refactor this module", [skill], str(tmp_path)
-        )
-        # Should appear exactly once (keyword wins, intent skipped)
-        assert len(matches) == 1
-        assert matches[0]["match_type"] == "keyword"
-
-    def test_priority_grouping_order_in_format(self, tmp_path: Path) -> None:
-        """format_suggestions places critical before high before medium before low."""
-        skills = [
-            self._make_skill(tmp_path, "low-skill", ["lowkw"], [], priority="low"),
-            self._make_skill(tmp_path, "critical-skill", ["critkw"], [], priority="critical"),
-            self._make_skill(tmp_path, "high-skill", ["highkw"], [], priority="high"),
-        ]
-        matches = skill_activation_prompt.match_skills(
-            "lowkw critkw highkw", skills, str(tmp_path)
-        )
-        output = skill_activation_prompt.format_suggestions(matches)
-        crit_pos = output.index("CRITICAL")
-        high_pos = output.index("HIGH")
-        low_pos = output.index("LOW")
-        assert crit_pos < high_pos < low_pos
-
-    def test_missing_skill_file_skipped(self, tmp_path: Path) -> None:
-        """Skills whose path does not exist on disk are silently skipped."""
-        ghost_skill = {
-            "name": "ghost",
-            "description": "ghost skill",
-            "path": "nonexistent/SKILL.md",
-            "priority": "high",
-            "triggers": {"keywords": ["ghost"], "intent_patterns": []},
-        }
-        matches = skill_activation_prompt.match_skills(
-            "ghost trigger", [ghost_skill], str(tmp_path)
-        )
-        assert matches == []
-
-    def test_invalid_regex_skipped(self, tmp_path: Path) -> None:
-        """An invalid intent regex is silently skipped without raising."""
-        skill = self._make_skill(tmp_path, "broken", [], [r"[invalid(regex"])
-        # Should not raise; returns empty
-        matches = skill_activation_prompt.match_skills(
-            "anything", [skill], str(tmp_path)
-        )
-        assert matches == []
 
 
 # ---------------------------------------------------------------------------

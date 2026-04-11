@@ -10,7 +10,7 @@ Package metadata, environment resolution, bundling, cascade publishing, and vers
 
 ## Design Rationale
 
-Tagged enum metadata (`Metadata::Bundle`) supports future format versions without breaking existing packages. Cascade is a publisher convention (tag naming), not enforced at the registry level — this keeps the registry layer generic while enabling rich version semantics. Environment variable templates use `${installPath}` substitution so packages declare their env needs declaratively. See `architecture-principles.md` for the full pattern catalog.
+Tagged enum metadata (`Metadata::Bundle`) supports future format versions without breaking existing packages. Cascade is a publisher convention (tag naming), not enforced at the registry level — this keeps the registry layer generic while enabling rich version semantics. Environment variable templates use `${installPath}` substitution so packages declare their env needs declaratively. See `arch-principles.md` for the full pattern catalog.
 
 ## Module Map
 

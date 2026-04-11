@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OCX is a Rust-based package manager that uses OCI registries (Docker Hub, GHCR, private registries) as storage for pre-built binaries. It is a "backend tool" designed for use by other tools (GitHub Actions, Bazel, Python scripts) rather than end users directly. The binary is named `ocx`.
 
+## Project Identity
+
+For the full product vision, competitive positioning ("why not Homebrew / Nix / ORAS / mise"), target users, differentiators, and use cases, read [`product-context.md`](./.claude/rules/product-context.md). Consult it when reasoning about project direction, scope trade-offs, ADR motivation, research framing, or anything where product context shapes a technical decision. It is the canonical OCX product context — keep it current (the update protocol is at the bottom of the same file).
+
+## Rule Catalog
+
+Before planning, researching, or making architectural decisions, consult [[.claude/rules.md](./.claude/rules.md)](.claude/rules.md) — the authoritative catalog of what rules exist in this project and when each applies. Auto-loaded rules (via path globs) only fire when you edit matching files; the catalog covers cases where you need guidance *before* any file is open. Always scan "By concern" in plan and research phases.
+
 ## Build & Development Commands
 
 **Task runner**: [`task`](https://taskfile.dev) (Taskfile v3) is the primary task runner. **Always check available tasks with `task --list` before inventing ad-hoc commands.** Taskfiles exist at root (`taskfile.yml`), `test/taskfile.yml`, `website/taskfile.yml`, and `taskfiles/*.taskfile.yml` (included from root).
@@ -41,7 +49,11 @@ cargo test -p ocx_lib -- <test_name> --nocapture # with output
 cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v --no-build
 ```
 
-**Always run `task verify` after completing an implementation.** Always run `cargo fmt` before committing. Shell linting requires `ocx.sh/shellcheck:0.11` and `ocx.sh/shfmt:3` installed — see `code-quality.md` for first-time setup.
+**Always run `task verify` after completing an implementation.** Always run `cargo fmt` before committing.
+
+**Lint tooling first-time setup** (one-off): `shellcheck`, `shfmt`, and `lychee` are managed by OCX itself via the pinned local index at `.ocx/index/`. Run `ocx index update shellcheck shfmt lychee && ocx install --select shellcheck:0.11 && ocx install --select shfmt:3 && ocx install --select lychee:0` once. `lychee` powers `task claude:lint:links` (cross-reference check scoped to `.claude/`, `CLAUDE.md`, `AGENTS.md`) and becomes available once the `mirrors/lychee/` mirror is synced.
+
+**Taskfile conventions**: composite tasks aggregate subtasks (e.g., `lint:shell` calls `shell:lint` + `shell:format:check`, not raw tools). Each linter/formatter gets its own subtask so it's independently runnable. `task verify` references composite tasks only — one entry per concern.
 
 ## Architecture
 
@@ -53,14 +65,14 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 
 | Subsystem | Rule | Scope |
 |-----------|------|-------|
-| OCI registry/index | `subsystem-oci.md` | `crates/ocx_lib/src/oci/**` |
-| Storage/symlinks | `subsystem-file-structure.md` | `crates/ocx_lib/src/file_structure/**` |
-| Package metadata | `subsystem-package.md` | `crates/ocx_lib/src/package/**` |
-| Package manager | `subsystem-package-manager.md` | `crates/ocx_lib/src/package_manager/**` |
-| CLI commands/API | `subsystem-cli.md` | `crates/ocx_cli/src/**` |
-| Mirror tool | `subsystem-mirror.md` | `crates/ocx_mirror/**` |
-| Acceptance tests | `subsystem-tests.md` | `test/**` |
-| Website/docs | `subsystem-website.md` | `website/**` |
+| OCI registry/index | [subsystem-oci.md](./.claude/rules/subsystem-oci.md) | `crates/ocx_lib/src/oci/**` |
+| Storage/symlinks | [subsystem-file-structure.md](./.claude/rules/subsystem-file-structure.md) | `crates/ocx_lib/src/file_structure/**` |
+| Package metadata | [subsystem-package.md](./.claude/rules/subsystem-package.md) | `crates/ocx_lib/src/package/**` |
+| Package manager | [subsystem-package-manager.md](./.claude/rules/subsystem-package-manager.md) | `crates/ocx_lib/src/package_manager/**` |
+| CLI commands/API | [subsystem-cli.md](./.claude/rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
+| Mirror tool | [subsystem-mirror.md](./.claude/rules/subsystem-mirror.md) | `crates/ocx_mirror/**` |
+| Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
+| Website/docs | [subsystem-website.md](./.claude/rules/subsystem-website.md) | `website/**` |
 
 **Read the relevant subsystem rule before working on code in that area.**
 
@@ -78,12 +90,12 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 
 ## Acceptance Test Structure
 
-Tests live in `test/` using pytest + Docker Compose (registry:2 on localhost:5000). See `subsystem-tests.md` for full fixture reference and patterns.
+Tests live in `test/` using pytest + Docker Compose (registry:2 on localhost:5000). See [subsystem-tests.md](./.claude/rules/subsystem-tests.md) for full fixture reference and patterns.
 
 ## Deep Context
 
-- `.claude/references/project-identity.md` — Product vision, positioning, competitive analysis, use cases (on-demand)
-- `.claude/rules/architecture-principles.md` — Design principles, glossary, ADR index (auto-loads on Rust files)
+- `.claude/rules/product-context.md` — Product vision, positioning, competitive analysis, use cases (auto-loads on website/agents/skill paths)
+- `.claude/rules/arch-principles.md` — Design principles, glossary, ADR index (auto-loads on Rust files)
 - `website/src/docs/user-guide.md` — Primary conceptual doc: three-store architecture, versioning, locking, auth
 
 
@@ -125,7 +137,7 @@ When receiving user feedback or corrections, evaluate whether the insight should
 
 ## Tech Stack
 
-@.claude/rules/tech-strategy.md
+@.claude/rules/product-tech-strategy.md
 
 ## Workflow
 
@@ -142,7 +154,7 @@ When receiving user feedback or corrections, evaluate whether the insight should
 
 **During development**: Use `task checkpoint` to save progress. This amends all changes into a single "Checkpoint" commit on the feature branch.
 
-**Landing a feature**: When a feature is finished:
+**Landing a feature**: When a feature is finished, run `/finalize` to clean up the branch history into a sequence of Conventional Commits ready to fast-forward onto `main`. See [workflow-git.md](./.claude/rules/workflow-git.md) for the two-phase model (`/commit` during development, `/finalize` before landing). Manual fallback:
 1. Amend the checkpoint commit with a proper conventional commit message: `git commit --amend -m "feat: ..."`
 2. Rebase the feature branch onto `main`: `git rebase main`
 3. Switch to `main`: `git checkout main`
@@ -164,25 +176,10 @@ When receiving user feedback or corrections, evaluate whether the insight should
 | Plan | `plan_[task].md` | `plan_api_refactor.md` |
 | Security Audit | `security_audit_[date].md` | `security_audit_2025-01.md` |
 
-## Personas (Skills)
+## Skills & Personas
 
-Persona skills in `.claude/skills/personas/` provide specialized roles with OCX domain knowledge:
-
-| Skill | Role | Use |
-|-------|------|-----|
-| `/architect` | Principal Architect | System design, ADRs, where features land |
-| `/builder` | Software Engineer | Implementation, debugging, testing, refactoring |
-| `/qa-engineer` | QA Engineer | Test strategy, unit + acceptance tests |
-| `/security-auditor` | Security Auditor | Threat modeling, STRIDE analysis |
-| `/code-check` | Codebase Auditor | SOLID, DRY, OCX pattern compliance |
-| `/swarm-plan` | Planning Orchestrator | Parallel exploration, decomposition |
-| `/swarm-execute` | Execution Orchestrator | Parallel workers, quality gates |
-| `/swarm-review` | Adversarial Reviewer | Multi-perspective code review |
-
-## Skills
-
-Check `.claude/skills/` before ad-hoc generation. Skills are auto-suggested based on context via `.claude/skills/skill-rules.json`.
+Persona skills (`/architect`, `/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`, `/swarm-plan`, `/swarm-execute`, `/swarm-review`) and task skills live in `.claude/skills/`. See the "Skills by task topic" table in [[.claude/rules.md](./.claude/rules.md)](.claude/rules.md) for the full map. Skills are auto-suggested via `.claude/skills/skill-rules.json`; check `.claude/skills/` before ad-hoc generation.
 
 ## Feature Development
 
-See `.claude/rules/feature-workflow.md` for the full workflow: swarm (primary) and agent teams (experimental).
+See `.claude/rules/workflow-feature.md` for the full workflow: swarm (primary) and agent teams (experimental).

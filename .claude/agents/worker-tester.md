@@ -16,6 +16,7 @@ Focused testing agent for swarm execution. Writes tests and validates implementa
 Write tests from the **design record** (plan artifact), NOT from the implementation or stubs. This mode runs *before* implementation — tests encode the expected behavior as an executable specification.
 
 **Process:**
+
 1. Read the plan artifact's Testing Strategy, component contracts, and user experience sections
 2. Write unit tests that verify each documented behavior, error case, and edge case
 3. Write acceptance tests that verify each user-facing scenario
@@ -23,6 +24,7 @@ Write tests from the **design record** (plan artifact), NOT from the implementat
 5. If a behavior in the design has no corresponding test, flag it
 
 **Rules:**
+
 - Tests describe WHAT, not HOW — test observable behavior, not internal implementation
 - Each test must trace to a specific requirement in the design record
 - Do NOT read implementation code or stub bodies — only the design record for behavior, and stub *signatures* (types, params, return types) for compilation
@@ -34,9 +36,21 @@ Write tests from the **design record** (plan artifact), NOT from the implementat
 
 Write tests to validate an existing implementation and improve coverage.
 
+## Rules
+
+Consult [.claude/rules.md](../rules.md) for the full rule catalog. Before writing tests, scan the "Writing tests" row in "By concern" and the relevant language quality rule. In implementation phases, [quality-rust.md](../rules/quality-rust.md) / [quality-python.md](../rules/quality-python.md) + [subsystem-tests.md](../rules/subsystem-tests.md) auto-load from the files you edit.
+
+## Always Apply (block-tier compliance)
+
+- No `.unwrap()` / `.expect()` in library code (tests themselves may unwrap) — see [quality-rust.md](../rules/quality-rust.md)
+- No blocking I/O in async code — see [quality-rust.md](../rules/quality-rust.md)
+- Tests must be deterministic and isolated (no shared mutable state, no order dependence) — see [subsystem-tests.md](../rules/subsystem-tests.md)
+- Never auto-commit — see [workflow-swarm.md](../rules/workflow-swarm.md)
+
 ## Test Infrastructure
 
 ### Rust Unit Tests
+
 - Location: alongside source code in `#[cfg(test)] mod tests { ... }`
 - Run: `cargo nextest run -p ocx_lib <test_name>` or `cargo test -p ocx_lib -- <test_name> --nocapture`
 - Use `tempfile::tempdir()` for isolated filesystem tests
@@ -44,6 +58,7 @@ Write tests to validate an existing implementation and improve coverage.
 - Use `test_transport.rs` mock for OCI client tests
 
 ### Pytest Acceptance Tests
+
 - Location: `test/tests/test_*.py`
 - Key fixtures: `ocx` (OcxRunner), `published_package`, `published_two_versions`, `unique_repo`
 - Runner API: `ocx.json("command", pkg.short)`, `ocx.plain(...)`, `ocx.run(..., check=False)`
@@ -52,9 +67,11 @@ Write tests to validate an existing implementation and improve coverage.
 - Run single: `cd test && uv run pytest tests/test_file.py::test_name -v --no-build`
 
 ## Task Runner
+
 Use `task` commands: `task test:quick` (all acceptance tests, skip rebuild), `task test:unit` (cargo nextest), `task coverage` (LLVM report). Run `task --list` to discover commands.
 
 ## Constraints
+
 - Tests must be deterministic and isolated
 - No shared state between tests
 - No order-dependent tests
@@ -66,4 +83,5 @@ Use `task` commands: `task test:quick` (all acceptance tests, skip rebuild), `ta
 - Run `task verify` before reporting completion (required by swarm coordination protocol)
 
 ## On Completion
+
 Report: tests added/modified, coverage of new code paths, any failing tests found. In specification mode, also report: design requirements covered, any gaps found in the design record.

@@ -13,7 +13,9 @@ Focused writing agent for OCX website documentation. Input: gap report from `wor
 
 ## Rules
 
-Follow `.claude/rules/documentation.md` strictly. Key requirements:
+Consult [.claude/rules.md](../rules.md) for the full rule catalog — the "Website / docs work" row in "By concern" lists everything relevant. [docs-style.md](../rules/docs-style.md) + [subsystem-website.md](../rules/subsystem-website.md) + [quality-vite.md](../rules/quality-vite.md) auto-load when editing `website/**`; the catalog helps when planning docs structure before touching a file.
+
+Key requirements from [docs-style.md](../rules/docs-style.md) (fire at attention):
 
 - **Narrative structure**: idea → problem → solution, then depth
 - **No marketing language** — let examples make the case
@@ -28,7 +30,7 @@ Follow `.claude/rules/documentation.md` strictly. Key requirements:
 2. **Grep for existing patterns** — match the style of adjacent sections
 3. **Identify Diátaxis type** — reference, explanation, how-to, or tutorial
 4. **Search the internet** for real examples before writing analogies or comparisons
-5. **Read `subsystem-website.md`** for component APIs and VitePress patterns
+5. **Read [subsystem-website.md](../rules/subsystem-website.md)** for component APIs and VitePress patterns
 
 ## Writing Standards by Documentation Type
 

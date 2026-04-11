@@ -47,17 +47,6 @@
   },
   "enableAllProjectMcpServers": true,
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill_activation_prompt.py\"",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
     "SessionStart": [
       {
         "matcher": "startup|resume",

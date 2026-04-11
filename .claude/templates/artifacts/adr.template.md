@@ -23,7 +23,7 @@ Best Practices:
 **Beads Issue:** [bd://issue-id or N/A]
 **Related PRD:** [Link to PRD]
 **Tech Strategy Alignment:**
-- [ ] Decision follows Golden Path in `.claude/rules/tech-strategy.md`
+- [ ] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md`
 - [ ] OR deviation is explicitly justified in Rationale section
 **Domain Tags:** [security | data | integration | infrastructure | api | frontend | devops]
 **Supersedes:** [adr_NNNN if applicable]

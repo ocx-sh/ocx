@@ -10,7 +10,7 @@ OCI registry client, index management, identifiers, and platform matching at `cr
 
 ## Design Rationale
 
-Trait-based dispatch (`IndexImpl`) enables swapping local/remote index implementations and injecting test transports without changing callers. `RemoteIndex` caches aggressively (RwLock per clone) to avoid redundant registry calls in batch operations. `IndexImpl` methods return `Option` (None = not found) because absence is a normal query result at the index layer, not an error. See `architecture-principles.md` for the full pattern catalog.
+Trait-based dispatch (`IndexImpl`) enables swapping local/remote index implementations and injecting test transports without changing callers. `RemoteIndex` caches aggressively (RwLock per clone) to avoid redundant registry calls in batch operations. `IndexImpl` methods return `Option` (None = not found) because absence is a normal query result at the index layer, not an error. See `arch-principles.md` for the full pattern catalog.
 
 ## Module Map
 
@@ -117,3 +117,4 @@ async fn fetch_manifest_digest(&self, id: &Identifier) -> Result<Option<Digest>>
 - **Cache coherence issue**: Some commands call `context.remote_client()` directly instead of going through `default_index`. This bypasses cache and can produce inconsistent results. All index operations should route through `default_index`.
 - **`oci-client` flush audit**: `pull_blob` was missing `out.flush().await?` causing truncated files. Fixed in `pull_blob`, but audit other `AsyncWrite` methods.
 - **Submodule at `external/rust-oci-client/`** is a patched fork. Changes need upstream PRs. Only format new code (upstream uses 100-char rustfmt).
+- **When unsure about the current `oci-client` API**, query Context7 MCP (`mcp__context7__resolve-library-id` → `mcp__context7__get-library-docs`) before guessing. The upstream crate evolves independently of our patched fork, and training-data knowledge of its API shape decays quickly.

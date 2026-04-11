@@ -41,9 +41,9 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "taskfile.yml",
         (
             "- CLAUDE.md (Build & Development Commands section)\n"
-            "- .claude/rules/code-quality.md (task verify pipeline)\n"
-            "- .claude/skills/personas/builder/SKILL.md (Task Runner section)\n"
-            "- .claude/skills/personas/qa-engineer/SKILL.md (Task Runner section)"
+            "- .claude/rules/quality-core.md (task verify pipeline)\n"
+            "- .claude/skills/builder/SKILL.md (Task Runner section)\n"
+            "- .claude/skills/qa-engineer/SKILL.md (Task Runner section)"
         ),
         "the root Taskfile",
     ),
@@ -51,7 +51,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "taskfiles/*",
         (
             "- CLAUDE.md (Build & Development Commands section)\n"
-            "- .claude/rules/code-quality.md (task verify pipeline)"
+            "- .claude/rules/quality-core.md (task verify pipeline)"
         ),
         "an included Taskfile",
     ),
@@ -59,7 +59,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "test/taskfile.yml",
         (
             "- .claude/rules/subsystem-tests.md (Running Tests section)\n"
-            "- .claude/skills/personas/qa-engineer/SKILL.md (Task Runner section)"
+            "- .claude/skills/qa-engineer/SKILL.md (Task Runner section)"
         ),
         "the test Taskfile",
     ),
@@ -67,7 +67,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "website/taskfile.yml",
         (
             "- .claude/rules/subsystem-website.md (Task Commands section)\n"
-            "- .claude/skills/product/documentation/SKILL.md (Website Build section)"
+            "- .claude/skills/docs/SKILL.md (Website Build section)"
         ),
         "the website Taskfile",
     ),
@@ -75,8 +75,8 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "website/.vitepress/theme/components/*",
         (
             "- .claude/rules/subsystem-website.md (Custom Vue Components section)\n"
-            "- .claude/rules/documentation.md (Vue Components Available section)\n"
-            "- .claude/skills/product/documentation/SKILL.md (Vue Components section)"
+            "- .claude/rules/docs-style.md (Vue Components Available section)\n"
+            "- .claude/skills/docs/SKILL.md (Vue Components section)"
         ),
         "a Vue component — update props/slots in AI config if the component API changed",
     ),
@@ -92,13 +92,13 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     ),
     (
         ".github/workflows/*",
-        "- .claude/skills/operations/ci-workflows/SKILL.md",
+        "- .claude/rules/subsystem-ci.md",
         "a CI workflow",
     ),
     (
         "Cargo.toml",
         (
-            "- .claude/skills/core-engineering/dependency-management/SKILL.md"
+            "- .claude/skills/deps/SKILL.md"
             " (if dependencies changed)\n"
             "- CLAUDE.md (Architecture section, if new crates added)"
         ),
@@ -106,7 +106,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     ),
     (
         "deny.toml",
-        "- .claude/skills/core-engineering/dependency-management/SKILL.md (License Policy section)",
+        "- .claude/skills/deps/SKILL.md (License Policy section)",
         "the cargo-deny config",
     ),
     (
@@ -116,13 +116,13 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     ),
     (
         ".claude/rules/subsystem-*.md",
-        "- .claude/rules/architecture-principles.md (Design Principles table, Cross-Cutting Modules)",
+        "- .claude/rules/arch-principles.md (Design Principles table, Cross-Cutting Modules)",
         "a subsystem context rule — verify architecture principles are still accurate",
     ),
     (
         ".claude/artifacts/adr_*.md",
-        "- .claude/rules/architecture-principles.md (ADR Index table)",
-        "an ADR — update the ADR Index in architecture-principles.md",
+        "- .claude/rules/arch-principles.md (ADR Index table)",
+        "an ADR — update the ADR Index in arch-principles.md",
     ),
 ]
 

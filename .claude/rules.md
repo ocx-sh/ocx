@@ -1,0 +1,132 @@
+# OCX Rule Catalog
+
+This file is the entry point for `.claude/rules/`. It exists because path-scoped
+rules only fire when you edit a matching file, which is not enough when you are
+planning, researching, or making architectural decisions before any code exists.
+
+## When to consult this catalog
+
+- Plan or architecture phase — scan "By concern" before drafting
+- Research phase — find quality criteria for the topic you are evaluating
+- Onboarding to a new area — scan "By subsystem" / "By language"
+- Writing ADRs, RFCs, research artifacts — find the rules relevant to the topic
+- Updating AI config — see "AI config changes" row in "By concern"
+
+If you are editing code and the relevant rule already auto-loaded via its
+`paths:` glob, you do not need to re-read it from the catalog. The catalog is
+for cases where path-scoping cannot fire.
+
+## How to update this catalog
+
+Any change to `.claude/rules/` must be reflected here in the same commit:
+
+- New rule → add row in the relevant tables below
+- Deleted rule → remove all references
+- Changed `paths:` glob → update "By auto-load path" table
+- New skill → add entry in "Skills by task topic"
+
+The structural tests in `.claude/tests/test_ai_config.py` fail when the catalog
+drifts from reality. Run `task claude:tests` locally before committing
+catalog changes.
+
+## By concern — "if you care about X, consult these"
+
+| Concern | Rules & skills |
+|---|---|
+| Product vision / positioning / competitors | [product-context.md](./rules/product-context.md) — canonical identity doc; update when positioning shifts (see Update Protocol section at bottom) |
+| Adopting a third-party library or tool | [product-tech-strategy.md](./rules/product-tech-strategy.md), [subsystem-deps.md](./rules/subsystem-deps.md), skill `deps`, `quality-{lang}.md` |
+| Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, skill `architect` |
+| Website / docs work | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), skill `docs` |
+| Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
+| CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
+| Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
+| Metadata / schema changes | [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md), [subsystem-package.md](./rules/subsystem-package.md) |
+| CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md), [workflow-release.md](./rules/workflow-release.md) |
+| AI config changes | [meta-ai-config.md](./rules/meta-ai-config.md) + this catalog, skill `meta-maintain-config` |
+| GitHub issues / planning artifacts | [workflow-github-issues.md](./rules/workflow-github-issues.md), [workflow-feature.md](./rules/workflow-feature.md) |
+| Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `finalize` |
+| Swarm / multi-agent workflows | [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md), skills `swarm-plan`, `swarm-execute`, `swarm-review` |
+| Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
+| Mirror / bundling | [subsystem-mirror.md](./rules/subsystem-mirror.md) |
+| Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
+| Releases | [workflow-release.md](./rules/workflow-release.md) |
+
+## By language
+
+| Language | Quality rule | Related |
+|---|---|---|
+| Rust | [quality-rust.md](./rules/quality-rust.md) | [arch-principles.md](./rules/arch-principles.md), [quality-core.md](./rules/quality-core.md), [subsystem-deps.md](./rules/subsystem-deps.md) |
+| Python (acceptance tests) | [quality-python.md](./rules/quality-python.md) | [subsystem-tests.md](./rules/subsystem-tests.md) |
+| TypeScript (website) | [quality-typescript.md](./rules/quality-typescript.md) | [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md) |
+| Bash (tasks, hooks) | [quality-bash.md](./rules/quality-bash.md) | — |
+| Vue / VitePress | [quality-vite.md](./rules/quality-vite.md) | [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md) |
+
+## By subsystem
+
+Mirrors the subsystem table in `CLAUDE.md`. This catalog is the single source
+of truth — `CLAUDE.md` may summarize or reference by pointer.
+
+| Subsystem | Rule | Path scope |
+|---|---|---|
+| OCI registry/index | [subsystem-oci.md](./rules/subsystem-oci.md) | `crates/ocx_lib/src/oci/**` |
+| Storage/symlinks | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `crates/ocx_lib/src/file_structure/**` |
+| Package metadata | [subsystem-package.md](./rules/subsystem-package.md) | `crates/ocx_lib/src/package/**` |
+| Package manager | [subsystem-package-manager.md](./rules/subsystem-package-manager.md) | `crates/ocx_lib/src/package_manager/**` |
+| CLI commands/API | [subsystem-cli.md](./rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
+| Mirror tool | [subsystem-mirror.md](./rules/subsystem-mirror.md) | `crates/ocx_mirror/**` |
+| Acceptance tests | [subsystem-tests.md](./rules/subsystem-tests.md) | `test/**` |
+| Website/docs | [subsystem-website.md](./rules/subsystem-website.md) | `website/**` |
+| CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md) | `.github/workflows/**` |
+| Dependencies | [subsystem-deps.md](./rules/subsystem-deps.md) | `Cargo.toml`, `deny.toml`, `.licenserc.toml` |
+| Taskfiles | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` |
+
+## By auto-load path — "what fires when you edit"
+
+| Edit path | Rules that auto-load |
+|---|---|
+| `**/*.rs` | [quality-rust.md](./rules/quality-rust.md) (+ [arch-principles.md](./rules/arch-principles.md) under `crates/**`, `external/**`) |
+| `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
+| `Cargo.toml`, `crates/*/Cargo.toml`, `deny.toml`, `.licenserc.toml` | [subsystem-deps.md](./rules/subsystem-deps.md) |
+| `crates/ocx_lib/src/oci/**` | + [subsystem-oci.md](./rules/subsystem-oci.md) |
+| `crates/ocx_lib/src/file_structure/**`, `file_structure.rs`, `reference_manager.rs`, `symlink.rs` | + [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
+| `crates/ocx_lib/src/package/**`, `package.rs` | + [subsystem-package.md](./rules/subsystem-package.md) |
+| `crates/ocx_lib/src/package_manager/**`, `package_manager.rs` | + [subsystem-package-manager.md](./rules/subsystem-package-manager.md) |
+| `crates/ocx_lib/src/package/metadata/**`, `crates/ocx_schema/**` | + [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
+| `crates/ocx_cli/src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md) |
+| `crates/ocx_cli/src/api/**`, `command/**` | + [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
+| `crates/ocx_mirror/**`, `mirrors/**` | + [subsystem-mirror.md](./rules/subsystem-mirror.md) |
+| `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
+| `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md) |
+| `website/**` | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), [product-context.md](./rules/product-context.md) |
+| `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md) |
+| `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
+| `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) |
+| `.github/workflows/**`, `.github/actions/**`, `dependabot.yml` | [subsystem-ci.md](./rules/subsystem-ci.md) |
+| `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md) |
+| `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
+| `.claude/**` | [meta-ai-config.md](./rules/meta-ai-config.md) |
+| `.claude/agents/**`, `.claude/skills/swarm-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
+
+Globals (always loaded or imported into `CLAUDE.md`): [quality-core.md](./rules/quality-core.md),
+[quality-security.md](./rules/quality-security.md), [workflow-github-issues.md](./rules/workflow-github-issues.md), [product-tech-strategy.md](./rules/product-tech-strategy.md).
+
+## Skills by task topic
+
+| Task topic | Skill |
+|---|---|
+| Adding/choosing a dependency | `deps` |
+| Writing docs | `docs` |
+| Security review | `security-auditor` |
+| Architecture decision | `architect` |
+| Code quality audit | `code-check` |
+| Implementation / debugging | `builder` |
+| Test strategy | `qa-engineer` |
+| Planning a feature (multi-agent) | `swarm-plan` |
+| Executing a feature (multi-agent) | `swarm-execute` |
+| Adversarial review | `swarm-review` |
+| Releases | (see [workflow-release.md](./rules/workflow-release.md)) |
+| AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
+| Mirror configuration | `ocx-create-mirror` |
+| Roadmap sync | `ocx-sync-roadmap` |
+| Commits (working phase) | `commit` |
+| Finalize branch for merge onto main | `finalize` |

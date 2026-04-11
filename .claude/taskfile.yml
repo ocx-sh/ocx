@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  REPORTS_DIR: '{{if .REPORTS_ROOT}}{{.REPORTS_ROOT}}/claude{{else}}{{.TASKFILE_DIR}}/reports{{end}}'
+
+x-shared:
+  claude-sources: &claude-sources
+    - '**/*'
+    - '../CLAUDE.md'
+    - '../AGENTS.md'
+    - '../taskfile.yml'
+    - '../taskfiles/**/*.yml'
+    - '../.github/workflows/**'
+    - exclude: 'artifacts/**'
+    - exclude: '**/__pycache__/**'
+    - exclude: '**/.venv/**'
+    - exclude: '**/.state/**'
+    - exclude: '**/.locks/**'
+
+tasks:
+  verify:
+    desc: Validate the .claude/ subsystem (structural tests + link check)
+    cmds:
+      - task: tests
+      - task: lint:links
+
+  statusline:install:
+    desc: Install the enhanced cross-platform Claude Code statusline to ~/.claude/
+    platforms: [linux, darwin]
+    cmds:
+      - bash scripts/statusline-install.sh
+
+  tests:
+    desc: Validate AI configuration structural integrity (.claude/tests/test_ai_config.py)
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - mkdir -p {{.REPORTS_DIR}}
+      - >
+        uv run --directory tests pytest test_ai_config.py -v
+        --junitxml={{.REPORTS_DIR}}/tests.junit.xml
+    sources: *claude-sources
+    generates:
+      - '{{.REPORTS_DIR}}/tests.junit.xml'
+
+  lint:links:
+    desc: Check markdown cross-references in .claude/, CLAUDE.md, and AGENTS.md (offline)
+    dir: '{{.TASKFILE_DIR}}'
+    env:
+      OCX_INDEX: '{{.HOME}}/.ocx/index'
+    cmds:
+      - mkdir -p {{.REPORTS_DIR}}
+      - >
+        ocx exec ocx.sh/lychee:0 --
+        lychee --offline --no-progress --include-verbatim
+        --exclude-path artifacts
+        --exclude-path tests/.venv
+        --format json --output {{.REPORTS_DIR}}/lint-links.json
+        ../CLAUDE.md ../AGENTS.md .
+    sources: *claude-sources
+    generates:
+      - '{{.REPORTS_DIR}}/lint-links.json'

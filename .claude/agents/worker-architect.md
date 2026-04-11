@@ -39,7 +39,7 @@ Read `.claude/rules/subsystem-*.md` for the relevant subsystem before designing.
 Save to `.claude/artifacts/adr_[topic].md` or `.claude/artifacts/plan_[task].md`.
 
 ## Constraints
-- Follow tech-strategy.md Golden Paths
+- Follow product-tech-strategy.md Golden Paths
 - NO implementation code (design docs only)
 - ALWAYS read existing code before designing
 - ALWAYS reference subsystem context rules

@@ -21,7 +21,7 @@ Uses C4 model for architecture visualization (Context → Container → Componen
 **Related ADRs:** [Links to relevant ADRs]
 
 **Tech Strategy Alignment:**
-- [ ] Language/Framework follows Golden Path (`.claude/rules/tech-strategy.md`)
+- [ ] Language/Framework follows Golden Path (`.claude/rules/product-tech-strategy.md`)
 - [ ] Database choice aligns with Data section (PostgreSQL for OLTP)
 - [ ] Infrastructure tier appropriate (Static/Agile/Production)
 - [ ] Observability uses OpenTelemetry (OTel) with OTLP protocol

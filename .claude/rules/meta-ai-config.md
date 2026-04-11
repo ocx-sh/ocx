@@ -7,6 +7,18 @@ paths:
 
 Governs how `.claude/` artifacts (skills, rules, agents, hooks) are maintained. Loads when working on any `.claude/` file.
 
+## Three Activation Layers
+
+Claude Code has three distinct rule-activation mechanisms. Each serves a different purpose — conflating them produces either dead rules or context bloat.
+
+| Layer | Activation | Use for | Example |
+|---|---|---|---|
+| **Rule** (`.claude/rules/*.md`) | `paths:` glob — fires when editing matching file | Standards/context needed *while writing* the file | `quality-rust.md` on `**/*.rs` |
+| **Skill** (`.claude/skills/<name>/SKILL.md`) | `description` matched by LLM against the current task | Workflow + criteria for a task topic | `deps` for "add a crate" |
+| **Catalog** (`.claude/rules.md`) | Read-on-demand during planning, pointed at from CLAUDE.md | Discovering what rules exist *before* any file is open | — |
+
+Path-scoped rules don't fire during planning, research, or architecture work — no file is open yet. Skills require the LLM to already know the skill exists. The catalog (`.claude/rules.md`) closes this gap: it's the authoritative map browsed during plan/research phases. Any change to `.claude/rules/` must be reflected in the catalog in the same commit; structural tests enforce parity.
+
 ## Core Principle: Context Budget
 
 Every rule, skill description, and CLAUDE.md line competes for the same context window. Bloated config causes Claude to ignore instructions.
@@ -36,12 +48,19 @@ Must Claude know it every session?
 
 ## Research Protocol
 
-**Every edit to AI configuration must be research-informed.** Spawn agents before writing:
+**Every edit to AI configuration must be research-informed.** AI config work uses the **canonical multi-agent research pattern** defined in `/swarm-plan` (Phases 1-2: Discover + Research). Do not reinvent it — delegate.
 
-1. **`worker-researcher`** — Search code.claude.com/docs + domain best practices + community patterns
-2. **`worker-explorer`** — Check existing `.claude/` artifacts for conventions and cross-references
+Spawn workers in parallel before writing:
 
-Never author a skill, rule, or agent from memory alone.
+- **`worker-explorer`** (1-2 agents) — Check existing `.claude/` artifacts for conventions, cross-references, and prior decisions. Map the neighborhood of the artifact being created or changed.
+- **`worker-researcher`** (1-3 agents, split by axis when non-trivial):
+  - *Claude Code / tooling axis* — `code.claude.com/docs`, frontmatter conventions, new hook/skill/agent features
+  - *Domain axis* — best practices for the artifact's subject (Rust patterns, OCI spec, cargo-deny, testing, etc.)
+  - *Community axis* — how other projects structure similar artifacts
+
+Persist substantial findings as `.claude/artifacts/research_[topic].md` so future AI config sessions can reuse them. Never author a skill, rule, or agent from memory alone.
+
+See `/swarm-plan` "Research as a Reusable Primitive" for the full pattern contract.
 
 ## Artifact Conventions
 
@@ -51,8 +70,9 @@ Never author a skill, rule, or agent from memory alone.
 - <200 lines. If longer, split by domain.
 - Structure: types → invariants → gotchas → cross-refs
 - Dead glob detection: after renaming directories, verify `paths:` patterns still match files
+- **Shareable quality rules** use the `quality-*.md` naming convention (e.g., `quality-rust.md`, `quality-python.md`). These must be **project-independent** — no references to OCX types, modules, or conventions. OCX-specific patterns live in `arch-principles.md` and `subsystem-*.md`. Shareable rules use broad `paths:` globs (e.g., `**/*.rs`) so they activate regardless of project layout.
 
-### Skills (`.claude/skills/{category}/{name}/SKILL.md`)
+### Skills (`.claude/skills/<name>/SKILL.md` — canonical flat layout)
 
 - `description` is the #1 discovery factor — write as "what it does + when to use it" (max 1024 chars)
 - `argument-hint` must be a quoted string
@@ -60,12 +80,14 @@ Never author a skill, rule, or agent from memory alone.
 - `disable-model-invocation: true` for action skills with side effects (commit, deploy, release)
 - Progressive disclosure: SKILL.md <500 lines, reference files for details
 - `context: fork` to run in isolated subagent (protects main context)
+- **No category subdirectories.** Claude Code discovers skills at `.claude/skills/<name>/SKILL.md` exactly and does not recurse deeper for in-project skills. Nesting for grouping (e.g., `personas/`, `operations/`) silently breaks `/slash-command` discovery. Enforce at the test layer.
 
 ### Agents (`.claude/agents/worker-{name}.md`)
 
 - `model`: haiku (exploration), sonnet (implementation/review), opus (architecture)
 - `tools`: minimum needed for the role
 - Keep concise — agents inherit project rules automatically
+- **Minimal anchored preamble + catalog pointer.** Agents point at `.claude/rules.md` for the full rule catalog, then inline a short "Always Apply" preamble (≤5 block-tier anchors, each tagged with its source rule file). The preamble fires at attention even when path-scoped auto-loading hasn't triggered yet. Anchors must cite their source file so drift is visible at review time. This replaces the earlier "deliberate redundancy" pattern where entire rule checklists were duplicated into agent bodies — that approach caused drift and heavy maintenance cost.
 
 ### Hooks (`.claude/hooks/*.py`)
 
@@ -77,12 +99,6 @@ Never author a skill, rule, or agent from memory alone.
 - Shared utilities in `hook_utils.py` — import via `sys.path` insertion
 - Use `PreToolUse` for blocking, `PostToolUse` for logging/reminders (never exit non-zero)
 
-### Skill Rules (`skill-rules.json`)
-
-- All paths must point to existing SKILL.md files
-- `priority`: high (personas, core), medium (language, audit), low (docs, deps)
-- Keep descriptions concise — they consume the 2% skill description budget
-
 ## Anti-Patterns
 
 1. **Global rule >200 lines** — same problem as bloated CLAUDE.md
@@ -93,24 +109,25 @@ Never author a skill, rule, or agent from memory alone.
 6. **Too many auto-triggering skills** — description budget fills up, skills get excluded
 7. **Dead glob patterns** — rules silently never fire after directory renames
 8. **Config drift** — embedded project knowledge goes stale as code evolves
+9. **Category subdirectories under `.claude/skills/`** — breaks slash command discovery. Caught structurally by `test_all_skills_at_flat_layout`.
+10. **Language rules with project-specific content** — `quality-{lang}.md` files are shareable across repos. Any reference to OCX types (`PackageErrorKind`, `ReferenceManager`) or modules (`ocx_lib/`, `crates/ocx_mirror/`) belongs in `arch-principles.md` or `subsystem-*.md`, not in a language rule. Enforced structurally by `test_shareable_rules_no_ocx_leak`.
+11. **Catalog drift** — adding, removing, or renaming a rule in `.claude/rules/` without updating `.claude/rules.md` in the same commit. Enforced by `test_catalog_covers_all_rules` and `test_catalog_references_resolve`.
 
 ## Consistency Checks
 
 When editing any `.claude/` artifact:
 
 - [ ] Frontmatter follows conventions for the artifact type
-- [ ] `skill-rules.json` entry exists and path is valid
 - [ ] Cross-references point to existing files
 - [ ] New rules reference subsystem context rules where relevant
 - [ ] CLAUDE.md stays under 200 lines
 - [ ] Global rules total is manageable (currently 5 — monitor growth)
-- [ ] AI config structural tests pass: `task lint:ai-config`
+- [ ] AI config structural tests pass: `task claude:tests`
 
 ## Structural Validation Tests
 
-`.claude/tests/test_ai_config.py` is the automated enforcement layer for the checklist above. These tests live alongside the config they validate (not in `test/`, which is for OCX binary acceptance tests). They run as part of `task verify` (via `lint:ai-config`) and catch:
+`.claude/tests/test_ai_config.py` is the automated enforcement layer for the checklist above. These tests live alongside the config they validate (not in `test/`, which is for OCX binary acceptance tests). They run as part of `task verify` (via `claude:tests`) and catch:
 
-- **skill-rules.json integrity**: all paths exist, no duplicate names, no orphaned SKILL.md files, no ambiguous keyword overlaps across priority tiers, no overly broad single-word triggers on operations skills
 - **Rule glob validity**: every `paths:` glob in scoped rules matches at least one file on disk (dead glob detection)
 - **CLAUDE.md consistency**: line budget, stated principle count matches headings, stated worktree count matches table rows
 - **Cross-reference accuracy**: workflow filenames in rules exist on disk, artifact paths in skills use correct directories
@@ -133,13 +150,13 @@ When editing any `.claude/` artifact:
 ### Running the tests
 
 ```sh
-task lint:ai-config                    # via task runner (used by task verify)
+task claude:tests                      # via task runner (used by task verify)
 cd .claude/tests && uv run pytest -v   # directly
 ```
 
 ### Principle: test the contract, not the content
 
-AI config tests validate **structural invariants** (paths exist, counts match, conventions hold). They do NOT validate semantic correctness (is the rule's advice accurate? does the skill produce good output?). Semantic validation is the job of the `/validate-context` skill, invoked on demand.
+AI config tests validate **structural invariants** (paths exist, counts match, conventions hold). They do NOT validate semantic correctness (is the rule's advice accurate? does the skill produce good output?). Semantic validation is the job of the `/meta-validate-context` skill, invoked on demand.
 
 ## Automated Staleness Detection
 
@@ -156,10 +173,10 @@ The PostToolUse hook (`post-tool-use-tracker.sh`) fires on every `Edit|Write` an
 |---------|--------|
 | New subsystem created | Add `subsystem-{name}.md` scoped rule |
 | Codebase pattern changed | Update affected subsystem rules |
-| New tool integrated | Add to relevant skills, `code-quality.md`, and `config_reminder` in hook |
-| Taskfile changed | Update CLAUDE.md, code-quality.md, relevant skill Task Runner sections |
-| Vue component added/changed | Update `subsystem-website.md`, `documentation.md`, documentation skill |
-| CI workflow changed | Update `ci-workflows` skill |
-| Claude Code new release | Run `/maintain-ai-config research "Claude Code features"` |
+| New tool integrated | Add to relevant skills, `quality-core.md`, and `config_reminder` in hook |
+| Taskfile changed | Update CLAUDE.md, quality-core.md, relevant skill Task Runner sections |
+| Vue component added/changed | Update `subsystem-website.md`, `docs-style.md`, documentation skill |
+| CI workflow changed | Update `subsystem-ci.md` rule |
+| Claude Code new release | Run `/meta-maintain-config research "Claude Code features"` |
 | Directory renamed | Verify `paths:` globs in scoped rules still match |
-| Config feels stale | Run `/maintain-ai-config refresh` |
+| Config feels stale | Run `/meta-maintain-config refresh` |

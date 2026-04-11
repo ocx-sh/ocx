@@ -10,7 +10,7 @@ paths:
 
 ## Design Rationale
 
-Content-addressed storage (by SHA-256 digest) provides Nix-like dedup and immutable paths without Nix-like complexity. Three separate stores (objects, index, installs) enforce separation of concerns — immutable content, cached metadata, and mutable symlinks are independent lifecycles. Install symlink back-references (`refs/`) track which install symlinks point to an object. Dependency forward-references (`deps/`) encode the dependency graph on the filesystem. GC uses BFS reachability from roots (objects with install refs or profile content-mode refs) through `deps/` edges. See `architecture-principles.md` for the full pattern catalog.
+Content-addressed storage (by SHA-256 digest) provides Nix-like dedup and immutable paths without Nix-like complexity. Three separate stores (objects, index, installs) enforce separation of concerns — immutable content, cached metadata, and mutable symlinks are independent lifecycles. Install symlink back-references (`refs/`) track which install symlinks point to an object. Dependency forward-references (`deps/`) encode the dependency graph on the filesystem. GC uses BFS reachability from roots (objects with install refs or profile content-mode refs) through `deps/` edges. See `arch-principles.md` for the full pattern catalog.
 
 Content-addressed local storage layout, symlink management, and reference tracking at `crates/ocx_lib/src/file_structure/`.
 

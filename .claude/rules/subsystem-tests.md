@@ -9,7 +9,7 @@ Pytest acceptance tests with Docker Compose registry at `test/`.
 
 ## Design Rationale
 
-Pytest (not Rust integration tests) because acceptance tests exercise the real compiled binary against a real OCI registry — catching issues that unit tests with mocked transports miss. Session-scoped registry (started once in `pytest_sessionstart`) enables fast parallel runs with pytest-xdist. UUID-prefixed repo names provide test isolation on a shared registry without per-test cleanup. See `architecture-principles.md` for the full pattern catalog.
+Pytest (not Rust integration tests) because acceptance tests exercise the real compiled binary against a real OCI registry — catching issues that unit tests with mocked transports miss. Session-scoped registry (started once in `pytest_sessionstart`) enables fast parallel runs with pytest-xdist. UUID-prefixed repo names provide test isolation on a shared registry without per-test cleanup. See `arch-principles.md` for the full pattern catalog.
 
 ## Structure
 

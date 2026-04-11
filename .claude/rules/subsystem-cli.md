@@ -9,7 +9,7 @@ Thin CLI shell using clap at `crates/ocx_cli/src/`. One file per subcommand, out
 
 ## Design Rationale
 
-The CLI is intentionally thin — all business logic lives in `ocx_lib` so it can be reused by other consumers (mirror tool, future SDK). Single `Context` struct with lazy init avoids constructing unused clients/indices. The `Printable` trait gives each report type ownership of its own formatting (plain + JSON), enforcing the single-table rule without a central formatter. See `architecture-principles.md` for the full pattern catalog.
+The CLI is intentionally thin — all business logic lives in `ocx_lib` so it can be reused by other consumers (mirror tool, future SDK). Single `Context` struct with lazy init avoids constructing unused clients/indices. The `Printable` trait gives each report type ownership of its own formatting (plain + JSON), enforcing the single-table rule without a central formatter. See `arch-principles.md` for the full pattern catalog.
 
 ## Module Map
 
@@ -81,4 +81,4 @@ pub trait Printable: serde::Serialize {
 3. Add `report_{name}()` method to `Api` (delegates to `self.report()`)
 4. Call from `command/{name}.rs` with data built from task results
 
-See `cli-api-patterns.md` for the full contract, `cli-commands.md` for the quick reference, and `.claude/references/cli-commands-detail.md` for per-command docs with flags, task methods, and workflow examples.
+See `subsystem-cli-api.md` for the full contract and `subsystem-cli-commands.md` for the quick reference. User-facing per-command docs live at `website/src/docs/reference/command-line.md`.

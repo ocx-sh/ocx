@@ -1,5 +1,7 @@
 # Research: Documentation Review Best Practices
 
+> _Historical note: skill paths in this document predate the 2026-04 flatten. References to `.claude/skills/personas/...` map to `.claude/skills/...` post-flatten._
+
 ## Metadata
 
 **Date:** 2026-03-22

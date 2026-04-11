@@ -10,7 +10,7 @@ Separate crate (`ocx_mirror`) for mirroring upstream tool releases to OCI regist
 
 ## Design Rationale
 
-Separate crate because the mirror tool is a standalone binary with its own CLI, not part of the `ocx` package manager. Two-phase pipeline (prepare concurrently, push sequentially) ensures cascade tag ordering correctness — tags must be pushed in semver order so `latest` always points to the highest version. See `architecture-principles.md` for the full pattern catalog.
+Separate crate because the mirror tool is a standalone binary with its own CLI, not part of the `ocx` package manager. Two-phase pipeline (prepare concurrently, push sequentially) ensures cascade tag ordering correctness — tags must be pushed in semver order so `latest` always points to the highest version. See `arch-principles.md` for the full pattern catalog.
 
 ## Module Map
 

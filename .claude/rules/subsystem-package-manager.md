@@ -10,7 +10,7 @@ Facade over FileStructure + Index + Client with task implementations at `crates/
 
 ## Design Rationale
 
-The facade pattern provides a single coordination point for all package operations, hiding the complexity of store + index + client interactions. Three-layer errors (`Error` → `PackageError` → `PackageErrorKind`) enable per-package diagnosis in batch operations — `_all` methods can report exactly which package failed and why while continuing with the rest. See `architecture-principles.md` for the full pattern catalog.
+The facade pattern provides a single coordination point for all package operations, hiding the complexity of store + index + client interactions. Three-layer errors (`Error` → `PackageError` → `PackageErrorKind`) enable per-package diagnosis in batch operations — `_all` methods can report exactly which package failed and why while continuing with the rest. See `arch-principles.md` for the full pattern catalog.
 
 ## Task Module Architecture
 

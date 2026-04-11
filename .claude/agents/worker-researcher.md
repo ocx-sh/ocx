@@ -68,6 +68,12 @@ When the orchestrator requests it, or when findings are substantial enough to in
 - **Include**: Links, trend analysis, recommendations, date (findings decay)
 - **Purpose**: Available for future `/architect` and `/swarm-plan` sessions
 
+## Tool Preferences
+
+- **Library / crate docs (Rust, Python, TypeScript)**: prefer Context7 MCP — `mcp__context7__resolve-library-id` followed by `mcp__context7__get-library-docs`. Training data for crate APIs is often stale; Context7 is live. Use WebFetch/WebSearch only when Context7 lacks coverage or for blog posts, Anthropic docs, and ecosystem think pieces.
+- **GitHub repos / issues / PRs / releases**: prefer GitHub MCP tools (`mcp__github__get_repository`, `mcp__github__list_issues`, `mcp__github__get_pull_request`, `mcp__github__list_releases`) over ad-hoc WebFetch of github.com URLs. Fallback: `gh` CLI or WebFetch when a view is not exposed via MCP.
+- **General web content** (blogs, specs, RFCs, vendor docs): WebFetch + WebSearch as before.
+
 ## Constraints
 
 - Cite sources for all claims — URLs required
