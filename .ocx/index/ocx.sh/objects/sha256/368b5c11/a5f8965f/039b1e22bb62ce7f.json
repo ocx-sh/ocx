@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:1ae290eea6bf7485a9b5bd13b482436cc7536153ba12f2fd3e9ab0a3366cbd2d",
+      "size": 452,
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:3407c1ddd39e808e58529c792b10025e90ae286fdca9a3a62bc25365dceb3b21",
+      "size": 452,
+      "platform": {
+        "architecture": "arm64",
+        "os": "darwin"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:9d64375663b7649eed16760d3d2773f8740baf619bd2ed0c2c0ef2894d5bd336",
+      "size": 452,
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:4b118ac54897e775a1865d853c11a8788aa0f85b317f2758b58117f570229330",
+      "size": 452,
+      "platform": {
+        "architecture": "amd64",
+        "os": "windows"
+      }
+    }
+  ],
+  "artifactType": "application/vnd.sh.ocx.package.v1"
+}

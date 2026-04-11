@@ -58,6 +58,11 @@ includes:
     vars:
       PACKAGE: git-cliff
       REPO: ocx.sh/git-cliff
+  lychee:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: lychee
+      REPO: ocx.sh/lychee
   bun:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:
@@ -105,6 +110,7 @@ tasks:
       - task: git-cliff:describe
       - task: go-task:describe
       - task: jfrog-cli:describe
+      - task: lychee:describe
       - task: mold:describe
       - task: nodejs:describe
       - task: ocx:describe
