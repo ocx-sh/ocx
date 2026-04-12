@@ -117,6 +117,31 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — they se
 | `ci/` | CI flavor dispatch (GitHub Actions export) | `ci export` command |
 | `profile/` | `ProfileManager` + `ProfileManifest` for shell profiles | Shell profile commands |
 | `shell/` | `ShellProfileBuilder` — shell-specific export generation | Shell commands |
-| `utility/` | Extension traits: `StringExt`, `ResultExt`, `VecExt`, `SerdeExt` | Everywhere via prelude |
+| `utility/` | Extension traits + async + fs helpers — see [Utility Catalog](#utility-catalog) below | Everywhere (prelude for extension traits) |
 | `compression/` | Compression level configuration | Archive, OCI push |
 | `codesign/` | macOS ad-hoc code signing for Mach-O binaries | Package extraction |
+
+## Utility Catalog
+
+**Rule: before writing a small helper inside a module, check this table.** A helper reinvented in one module is wasted effort and a drift risk. If a new helper is broadly applicable, upstream it to `utility/` (or a crate-root module for linking/locking primitives) in the same change and re-export via `prelude` when universally useful.
+
+| Need | Use | Where |
+|---|---|---|
+| Append an extra extension (`foo.json` → `foo.json.lock`) | `Path::with_added_extension(..)` | std (stable) |
+| Read / write JSON with path-context errors | `SerdeExt::read_json` / `write_json` | prelude |
+| Slugify for filesystem use | `StringExt::to_slug` / `to_relaxed_slug` | prelude |
+| Sorted / dedup a `Vec` fluently | `VecExt::sorted` / `unique_clone` | prelude |
+| Ignore a `Result` deliberately | `ResultExt::ignore` | prelude |
+| Cross-process advisory file lock (shared/exclusive, timeout, RAII) | `file_lock::FileLock` | `crates/ocx_lib/src/file_lock.rs` |
+| RAII "delete path on drop" guard | `utility::fs::DropFile` | `utility/fs/drop_file.rs` |
+| Watch-based async singleflight (dedupe in-flight work by key) | `utility::singleflight` | `utility/singleflight.rs` |
+| Parallel directory tree walk with pruning decisions | `utility::fs::{DirWalker, WalkDecision}` | `utility/fs/dir_walker.rs` |
+| Lexical path normalize / containment check (no FS I/O) | `utility::fs::path::{lexical_normalize, escapes_root, validate_symlinks_in_dir}` | `utility/fs/path.rs` |
+| Move a directory (same-filesystem rename, overwrite-safe) | `utility::fs::move_dir` | `utility/fs.rs` |
+| Hardlink file (dedup layer into package) | `hardlink::create` / `update` | `crates/ocx_lib/src/hardlink.rs` |
+| Create / update / probe a symlink (cross-platform, junction-aware) | `symlink::create` / `update` / `remove` / `is_link` | `crates/ocx_lib/src/symlink.rs` |
+| Assemble a layer's content tree into a package (hardlinks + symlinks) | `utility::fs::assemble_from_layer(s)` | `utility/fs/assemble.rs` |
+| Boolean-like env string (`true/1/yes/on`) | `utility::boolean_string::BooleanString` | `utility/boolean_string.rs` |
+| File error with path context | `error::file_error(path, io_err)` | `crates/ocx_lib/src/error.rs` |
+
+**Check std first, then this catalog, then invent.** Most "small helper" needs are already covered by `std::path`, `tokio::fs`, or an existing entry above. If you add a new entry here, keep the row to one line and put implementation details in the target module's doc comment, not in this table.
