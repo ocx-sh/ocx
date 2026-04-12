@@ -113,11 +113,12 @@ Otherwise, `AskUserQuestion`:
 
 - Stage files **by name**, never `git add -A` / `.`. This prevents both accidentally-committed secrets **and** the bug where pre-staged files from a previous session get swept into a commit whose message doesn't describe them.
 - Warn before staging anything matching `.env*`, `*credentials*`, `*.pem`, `*.key`, or `token` patterns; require explicit confirmation.
+- **`--amend` must fold the dirty tree into HEAD.** When `/commit --amend` is invoked and the working tree has uncommitted changes, those changes **must** be staged and included in the amend — an `--amend` with nothing staged silently becomes a message-only amend that drops the user's active work. Always `git add <files>` before `git commit --amend`, even when the user only asked to "amend". After the amend, run `git show --stat HEAD` and confirm the expected files appear in the diff stat before reporting success.
 - Pre-commit hook (`pre_commit_verification.py`) blocks commits without fresh `task verify`. When it blocks, run `task verify` (not `--no-verify`), then mark state in a separate `Bash` call (combining with the commit in one `&&` chain does not satisfy the hook):
   ```sh
   echo $(date +%s) > .claude/hooks/.state/commit-verified
   ```
-  Then retry.
+  Then retry. **On retry, re-run `git add` too** — a blocked Bash invocation ran nothing, not even the part before `&&`, so staging is gone if it was chained.
 - Commit with a HEREDOC:
 
   ```sh
