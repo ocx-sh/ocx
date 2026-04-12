@@ -22,7 +22,7 @@ pub struct IndexCatalog {
 impl IndexCatalog {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let registries = if self.registries.is_empty() {
-            vec![context.default_registry()]
+            vec![context.default_registry().to_string()]
         } else {
             self.registries.clone()
         };

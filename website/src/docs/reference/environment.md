@@ -54,10 +54,25 @@ For `basic` authentication, this value will be used as the password.
 
 This value is ignored if the `OCX_AUTH_<REGISTRY>_TYPE` is not set to `bearer` or `basic`.
 
+### `OCX_CONFIG_FILE` {#ocx-config-file}
+
+Path to an extra [configuration file][config-ref] to load. The file layers on top of the discovered tier chain (system, user, `$OCX_HOME/config.toml`) at highest file-tier precedence — it does not replace them. Use it to refine ambient config without rewriting it, or combine with [`OCX_NO_CONFIG`](#ocx-no-config) for a fully hermetic load.
+
+Equivalent to the `--config` CLI flag, but injectable via environment — the intended use is CI and Docker setups where the env is controlled but the command line is not.
+
+```sh
+export OCX_CONFIG_FILE=/etc/ocx/ci.toml
+```
+
+If both `OCX_CONFIG_FILE` and `--config` are set, both load — `--config` sits at the highest file-tier precedence and wins on conflicting scalars. Missing files produce a clear error with the path.
+
+**Escape hatch**: setting this to the empty string (`OCX_CONFIG_FILE=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
+
 ### `OCX_DEFAULT_REGISTRY` {#ocx-default-registry}
 
-The default registry to use when no registry is specified in a package reference on the [command line](./command-line.md).
-If not set, OCX will default to `ocx.sh`.
+The default registry to use when no registry is specified in a package reference on the [command line][cmd-ref].
+Overrides the `[registry] default` key in the [configuration file][config-ref].
+If neither is set, OCX uses `ocx.sh`.
 
 ::: warning
 This variable is mostly intended for testing.
@@ -104,14 +119,26 @@ This variable disables TLS for the listed registries. Only use it for local deve
 ### `OCX_LOG` {#ocx-log}
 
 The log level for OCX.
-You can set this variable to the same values as the [`--log-level`](command-line.md#arg-log-level) command line option (e.g. `warn`, `info`, etc.).
-If [`--log-level`](command-line.md#arg-log-level) is specified, it will take precedence over this environment variable.
-For more information on log levels, see the [command line reference](command-line.md#arg-log-level).
+You can set this variable to the same values as the [`--log-level`][arg-log-level] command line option (e.g. `warn`, `info`, etc.).
+If [`--log-level`][arg-log-level] is specified, it will take precedence over this environment variable.
+For more information on log levels, see the [command line reference][arg-log-level].
 
 ### `OCX_LOG_CONSOLE` {#ocx-log-console}
 
 Similar to [`OCX_LOG`](#ocx-log), but specifically for configuring the log level of messages emitted to the console.
 If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) for console messages.
+
+### `OCX_NO_CONFIG` {#ocx-no-config}
+
+When set to a [truthy value](#truthy-values), OCX skips the **discovered** [configuration][config-ref] chain — no system, user, or `$OCX_HOME/config.toml` is loaded. Explicit paths supplied via [`--config`][arg-config] or [`OCX_CONFIG_FILE`](#ocx-config-file) still load, because they represent deliberate intent rather than ambient environment.
+
+Use this for CI reproducibility: locked workflows should ignore any ambient config that might leak in from the runner image or a mounted home directory.
+
+Combined with an explicit path, this is the canonical hermetic pattern:
+
+```sh
+OCX_NO_CONFIG=1 ocx --config /ci/ocx.toml install cmake:3.28
+```
 
 ### `OCX_NO_UPDATE_CHECK` {#ocx-no-update-check}
 
@@ -143,7 +170,7 @@ This variable has no effect on non-macOS systems.
 ### `OCX_OFFLINE` {#ocx-offline}
 
 When set to a [truthy value](#truthy-values), OCX will run in offline mode, which will not attempt to fetch any remote information.
-The command line option [`--offline`](command-line#arg-offline) takes precedence over this variable.
+The command line option [`--offline`][arg-offline] takes precedence over this variable.
 
 ### `OCX_REMOTE` {#ocx-remote}
 
@@ -184,6 +211,12 @@ for multiline values).
 
 The location of the Docker configuration directory. Read by the Docker credential helper that ocx delegates to when resolving registry credentials from `~/.docker/config.json`.
 
+### `XDG_CONFIG_HOME` {#external-xdg-config-home}
+
+User-level configuration base directory, defined by the [XDG Base Directory Specification][xdg-basedir]. OCX uses it to locate the user-tier [configuration file][config-ref]: the user tier is `$XDG_CONFIG_HOME/ocx/config.toml`, falling back to `~/.config/ocx/config.toml` when the variable is unset.
+
+OCX does not write anything to this directory — it is read-only for the config loader. This follows the XDG convention for CLI tools that need user-level configuration separate from data (`~/.ocx/`).
+
 ### `NO_COLOR` {#external-no-color}
 
 When set to any non-empty value, disables ANSI color output.
@@ -212,12 +245,20 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [github-multiline-env]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strings
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
+[xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/
 
 <!-- commands -->
+[cmd-ref]: command-line.md
 [cmd-ci-export]: command-line.md#ci-export
 [arg-color]: command-line.md#arg-color
+[arg-config]: command-line.md#arg-config
 [arg-index]: command-line.md#arg-index
+[arg-log-level]: command-line.md#arg-log-level
+[arg-offline]: command-line.md#arg-offline
 [arg-remote]: command-line.md#arg-remote
+
+<!-- reference -->
+[config-ref]: ./configuration.md
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote

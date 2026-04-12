@@ -57,7 +57,7 @@ impl ShellEnv {
             &self.platforms,
             &self.content_path,
             manager,
-            &context.default_registry(),
+            context.default_registry(),
         )
         .await?;
 

@@ -209,6 +209,17 @@ The sections above cover the everyday workflow. For deeper topics:
 - **[Command Reference][cmd-ref]** — full documentation for every flag and option. Covers global flags ([`--offline`][arg-offline], [`--remote`][arg-remote], [`--index`][arg-index]), output formats, and all subcommands.
 - **[Environment Reference][env-ref]** — every environment variable ocx reads, including auth configuration for private registries.
 
+### Config file {#next-steps-config}
+
+No setup is required — OCX works out of the box without any config file. When you want to set a persistent default (like a private registry hostname), place a `config.toml` in [`$OCX_HOME`][env-ocx-home]`/` (default: `~/.ocx/config.toml`):
+
+```toml
+[registry]
+default = "registry.company.com"
+```
+
+Environment variables and CLI flags always override config values. For full details, see the [Configuration reference][config-ref].
+
 [`ocx index catalog`][cmd-index-catalog] and [`ocx index list`][cmd-index-list] let you browse what is available in the registry before installing:
 
 <Terminal src="/casts/index.cast" title="Browsing available packages" collapsed />
@@ -224,6 +235,7 @@ The sections above cover the everyday workflow. For deeper topics:
 [user-guide]: ./user-guide.md
 [cmd-ref]: ./reference/command-line.md
 [env-ref]: ./reference/environment.md
+[config-ref]: ./reference/configuration.md
 
 <!-- commands -->
 [cmd-install]: ./reference/command-line.md#install
@@ -246,6 +258,9 @@ The sections above cover the everyday workflow. For deeper topics:
 [arg-offline]: ./reference/command-line.md#arg-offline
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-index]: ./reference/command-line.md#arg-index
+
+<!-- environment -->
+[env-ocx-home]: ./reference/environment.md#ocx-home
 
 <!-- user guide sections -->
 [fs-objects]: ./user-guide.md#file-structure-objects

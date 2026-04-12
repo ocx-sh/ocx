@@ -686,6 +686,26 @@ ocx dependencies are deliberately simple — they solve a specific problem witho
 ocx sits closest to Nix in philosophy — exact pins, no resolution — but without the functional language and the build system. The dependency declaration is a flat list of digests in a JSON file.
 :::
 
+## Configuration {#configuration}
+
+OCX behavior is controlled at three layers: config files, environment variables, and CLI flags. Higher layers always win — CLI flags override environment variables, which override config files.
+
+Config files are in [TOML][toml] format and live in three locations:
+
+| Tier | Path |
+|------|------|
+| System | `/etc/ocx/config.toml` |
+| User | [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` or `~/.config/ocx/config.toml` |
+| OCX home | [`$OCX_HOME`][env-ocx-home]`/config.toml` (default: `~/.ocx/config.toml`) |
+
+Files are loaded lowest-to-highest and merged. Missing files are silently skipped. No config file is required.
+
+**Explicit additions.** [`--config`][arg-config] `FILE` or [`OCX_CONFIG_FILE`][env-config-file]`=/path/to/file.toml` layers an extra file on top of the discovered chain — useful for refining ambient config without rewriting it. Both can be set together ([`--config`][arg-config] sits at highest file-tier precedence). The specified file must exist. To disable an ambient [`OCX_CONFIG_FILE`][env-config-file] without unsetting it, set it to the empty string.
+
+**Kill switch.** [`OCX_NO_CONFIG`][env-no-config]`=1` skips the discovered chain (system, user, [`$OCX_HOME`][env-ocx-home]) but leaves explicit paths intact. Combine with [`--config`][arg-config] or [`OCX_CONFIG_FILE`][env-config-file] for a fully hermetic CI load: `OCX_NO_CONFIG=1 ocx --config ci.toml ...`.
+
+See the [Configuration reference][config-ref] for the full list of config keys, merge rules, examples, and error messages.
+
 ## CI Integration {#ci}
 
 CI environments need tool binaries to be available and their environment variables exported — but
@@ -719,6 +739,7 @@ digest-derived.
 :::
 
 <!-- external -->
+[toml]: https://toml.io/
 [concourse-registry]: https://github.com/concourse/registry-image-resource
 [nix]: https://nixos.org/
 [go-modules]: https://go.dev/ref/mod
@@ -741,6 +762,7 @@ digest-derived.
 [pnpm]: https://pnpm.io/motivation#saving-disk-space
 
 <!-- commands -->
+[arg-config]: ./reference/command-line.md#arg-config
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-package-create]: ./reference/command-line.md#package-create
 [cmd-deselect]: ./reference/command-line.md#deselect
@@ -766,10 +788,16 @@ digest-derived.
 <!-- environment -->
 [env-ocx-home]: ./reference/environment.md#ocx-home
 [env-ocx-index]: ./reference/environment.md#ocx-index
+[env-config-file]: ./reference/environment.md#ocx-config-file
+[env-no-config]: ./reference/environment.md#ocx-no-config
 [env-auth-type]: ./reference/environment.md#ocx-auth-registry-type
 [env-auth-user]: ./reference/environment.md#ocx-auth-registry-user
 [env-auth-token]: ./reference/environment.md#ocx-auth-registry-token
 [env-docker-config]: ./reference/environment.md#external-docker-config
+[xdg-basedir]: ./reference/environment.md#external-xdg-config-home
+
+<!-- reference pages -->
+[config-ref]: ./reference/configuration.md
 
 <!-- internal -->
 [versioning-variants]: #versioning-variants
