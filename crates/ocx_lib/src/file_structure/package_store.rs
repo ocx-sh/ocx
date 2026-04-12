@@ -206,6 +206,14 @@ impl PackageStore {
         Ok(package_dir_for_content(content_path)?.join("resolve.json"))
     }
 
+    /// Returns the `digest` file path for the package that owns `content_path`.
+    ///
+    /// `content_path` may be a real path or a symlink; symlinks are resolved
+    /// before navigating to the sibling file.
+    pub fn digest_file_for_content(&self, content_path: &Path) -> Result<PathBuf> {
+        Ok(package_dir_for_content(content_path)?.join(super::cas_path::DIGEST_FILENAME))
+    }
+
     /// Lists all package directories currently present in the store.
     ///
     /// A package directory is identified by the presence of a `content/` child

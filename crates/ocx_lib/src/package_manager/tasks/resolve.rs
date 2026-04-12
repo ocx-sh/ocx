@@ -111,7 +111,7 @@ impl PackageManager {
                 super::common::export_env(&content, &dep_metadata, &mut entries)?;
             }
             // Then the root package itself.
-            if check_exported(&pkg.resolved.identifier, &mut seen_digests, &mut seen_repos)? {
+            if check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)? {
                 super::common::export_env(&pkg.content, &pkg.metadata, &mut entries)?;
             }
         }
@@ -134,7 +134,7 @@ impl PackageManager {
                     check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)?;
                 }
             }
-            check_exported(&pkg.resolved.identifier, &mut seen_digests, &mut seen_repos)?;
+            check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)?;
         }
         Ok(seen_digests)
     }

@@ -131,11 +131,23 @@ impl PackageManager {
         match entry.mode {
             ProfileMode::Candidate => {
                 let path = self.file_structure().symlinks.candidate(&entry.identifier);
-                resolve_symlink_entry(&self.file_structure().packages, entry, &path).await
+                resolve_symlink_entry(
+                    &self.file_structure().packages,
+                    entry,
+                    &path,
+                    crate::file_structure::SymlinkKind::Candidate,
+                )
+                .await
             }
             ProfileMode::Current => {
                 let path = self.file_structure().symlinks.current(&entry.identifier);
-                resolve_symlink_entry(&self.file_structure().packages, entry, &path).await
+                resolve_symlink_entry(
+                    &self.file_structure().packages,
+                    entry,
+                    &path,
+                    crate::file_structure::SymlinkKind::Current,
+                )
+                .await
             }
             ProfileMode::Content => resolve_content_entry(self, entry).await,
         }
@@ -146,6 +158,7 @@ async fn resolve_symlink_entry(
     objects: &crate::file_structure::PackageStore,
     entry: &ProfileEntry,
     symlink_path: &std::path::Path,
+    kind: crate::file_structure::SymlinkKind,
 ) -> ProfileEntryResolution {
     if !symlink_path.exists() {
         return ProfileEntryResolution::broken(
@@ -156,13 +169,23 @@ async fn resolve_symlink_entry(
     }
 
     match super::common::load_object_data(objects, symlink_path).await {
-        Ok((metadata, resolved)) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
-            identifier: resolved.identifier.clone(),
-            mode: entry.mode,
-            content_path: symlink_path.to_path_buf(),
-            metadata,
-            resolved,
-        }),
+        Ok((metadata, resolved)) => {
+            let identifier =
+                match super::common::identifier_for_symlink(objects, symlink_path, &entry.identifier, kind).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        log::debug!("Failed to reconstruct identifier for '{}': {}", entry.identifier, e);
+                        return ProfileEntryResolution::broken(entry, Some(symlink_path.to_path_buf()), e.to_string());
+                    }
+                };
+            ProfileEntryResolution::Resolved(ResolvedProfileEntry {
+                identifier,
+                mode: entry.mode,
+                content_path: symlink_path.to_path_buf(),
+                metadata,
+                resolved,
+            })
+        }
         Err(e) => {
             log::debug!("Failed to resolve symlink entry '{}': {}", entry.identifier, e);
             ProfileEntryResolution::broken(entry, Some(symlink_path.to_path_buf()), e.to_string())

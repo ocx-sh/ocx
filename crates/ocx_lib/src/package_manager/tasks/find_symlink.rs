@@ -43,7 +43,11 @@ impl PackageManager {
             return Err(PackageErrorKind::SymlinkNotFound(kind));
         }
 
-        let (metadata, resolved) = super::common::load_object_data(&self.file_structure().packages, &symlink_path)
+        let packages = &self.file_structure().packages;
+        let (metadata, resolved) = super::common::load_object_data(packages, &symlink_path)
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+        let identifier = super::common::identifier_for_symlink(packages, &symlink_path, package, kind)
             .await
             .map_err(PackageErrorKind::Internal)?;
 
@@ -55,7 +59,7 @@ impl PackageManager {
         );
 
         Ok(InstallInfo {
-            identifier: resolved.identifier.clone(),
+            identifier,
             metadata,
             resolved,
             content: symlink_path,

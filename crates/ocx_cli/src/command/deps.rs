@@ -78,9 +78,9 @@ impl Deps {
                     }
                 }
                 // Root packages are always public — they are the roots of env resolution.
-                if seen.insert(info.resolved.identifier.digest()) {
+                if seen.insert(info.identifier.digest()) {
                     entries.push(api::data::deps::FlatDependency {
-                        identifier: oci::Identifier::from(info.resolved.identifier.clone()),
+                        identifier: oci::Identifier::from(info.identifier.clone()),
                         visibility: ocx_lib::package::metadata::visibility::Visibility::Public,
                     });
                 }
@@ -222,7 +222,7 @@ async fn resolve_dep_via_metadata(
     // the declared digest matches the stored content digest).
     let content = fs.packages.content(id);
     if tokio::fs::try_exists(&content).await.unwrap_or(false) {
-        return load_install_info(content).await;
+        return load_install_info(id.clone(), content).await;
     }
 
     // Fallback: the declared digest is an Image Index digest — look up the
@@ -230,10 +230,10 @@ async fn resolve_dep_via_metadata(
     let repo_key = oci::Repository::from(&**id);
     let resolved_id = resolved_map.get(&repo_key)?;
     let content = fs.packages.content(resolved_id);
-    load_install_info(content).await
+    load_install_info((*resolved_id).clone(), content).await
 }
 
-async fn load_install_info(content: std::path::PathBuf) -> Option<InstallInfo> {
+async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path::PathBuf) -> Option<InstallInfo> {
     let (metadata, resolved) = tokio::join!(
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),
@@ -241,7 +241,7 @@ async fn load_install_info(content: std::path::PathBuf) -> Option<InstallInfo> {
     let metadata = metadata.ok()?;
     let resolved = resolved.ok()?;
     Some(InstallInfo {
-        identifier: resolved.identifier.clone(),
+        identifier,
         metadata,
         resolved,
         content,
