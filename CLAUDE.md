@@ -16,14 +16,17 @@ Before planning, researching, or making architectural decisions, consult [[.clau
 
 ## Build & Development Commands
 
-**Task runner**: [`task`](https://taskfile.dev) (Taskfile v3) is the primary task runner. **Always check available tasks with `task --list` before inventing ad-hoc commands.** Taskfiles exist at root (`taskfile.yml`), `test/taskfile.yml`, `website/taskfile.yml`, and `taskfiles/*.taskfile.yml` (included from root).
+**Task runner**: [`task`](https://taskfile.dev) (Taskfile v3) is the primary task runner. **Always check available tasks with `task --list` before inventing ad-hoc commands.** Taskfiles are tree-structured: root (`taskfile.yml`), subsystem dirs (`test/`, `website/`, `.claude/`, `mirror-sdk-py/`), and `taskfiles/*.taskfile.yml` for cross-cutting concerns.
 
 **Key workflows:**
 ```sh
 task                           # fast check (format + clippy + cargo check)
-task verify                    # full quality gate (fmt, clippy, lint, license, build, unit tests, acceptance tests)
+task verify                    # full quality gate (parallel lint, then build + tests)
+task --force verify            # bypass caching — run everything
+task rust:verify               # Rust-only gate (format, clippy, license, build, unit tests)
+task shell:verify              # shell-only gate (shellcheck + shfmt)
 task checkpoint                # save progress (amends into single "Checkpoint" commit)
-task build                     # release binary
+task rust:build                # release binary
 task test                      # build + registry + all acceptance tests
 task test:quick                # skip binary rebuild
 task test:parallel             # pytest-xdist (-n auto)
@@ -53,7 +56,7 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 
 **Lint tooling first-time setup** (one-off): `shellcheck`, `shfmt`, and `lychee` are managed by OCX itself via the pinned local index at `.ocx/index/`. Run `ocx index update shellcheck shfmt lychee && ocx install --select shellcheck:0.11 && ocx install --select shfmt:3 && ocx install --select lychee:0` once. `lychee` powers `task claude:lint:links` (cross-reference check scoped to `.claude/`, `CLAUDE.md`, `AGENTS.md`) and becomes available once the `mirrors/lychee/` mirror is synced.
 
-**Taskfile conventions**: composite tasks aggregate subtasks (e.g., `lint:shell` calls `shell:lint` + `shell:format:check`, not raw tools). Each linter/formatter gets its own subtask so it's independently runnable. `task verify` references composite tasks only — one entry per concern.
+**Taskfile conventions**: subsystem verify tasks (`rust:verify`, `shell:verify`, `claude:verify`) are the AI development-loop gates — run the subsystem gate for the code you changed. Full `task verify` runs only as the final gate before commit. The verify pipeline has two phases: parallel lint (`deps:`) then sequential build+test (`cmds:`). Reusable tool templates use `ocx.taskfile.yml` included with different `vars:`. See [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md) for full conventions.
 
 ## Architecture
 

@@ -40,6 +40,13 @@ tasks:
 
   parallel:
     desc: Run acceptance tests in parallel
+    sources:
+      - tests/**/*.py
+      - src/**/*.py
+      - conftest.py
+      - tests/conftest.py
+      - pyproject.toml
+      - '{{.ROOT_DIR}}/target/release/ocx'
     cmds:
       - task: default
         vars:

@@ -9,12 +9,24 @@ vars:
 tasks:
   generate:
     desc: Generate JSON Schema for metadata.json
+    sources:
+      - '{{.ROOT_DIR}}/crates/ocx_schema/src/**/*.rs'
+      - '{{.ROOT_DIR}}/crates/ocx_lib/src/**/*.rs'
+      - '{{.ROOT_DIR}}/Cargo.lock'
+    status:
+      - test -f {{.METADATA_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.METADATA_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- metadata > {{.METADATA_SCHEMA_DIR}}/v1.json
 
   generate-profile:
     desc: Generate JSON Schema for profile.json
+    sources:
+      - '{{.ROOT_DIR}}/crates/ocx_schema/src/**/*.rs'
+      - '{{.ROOT_DIR}}/crates/ocx_lib/src/**/*.rs'
+      - '{{.ROOT_DIR}}/Cargo.lock'
+    status:
+      - test -f {{.PROFILE_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.PROFILE_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- profile > {{.PROFILE_SCHEMA_DIR}}/v1.json

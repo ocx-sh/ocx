@@ -1,0 +1,101 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+x-shared:
+  rust-sources: &rust-sources
+    - '{{.ROOT_DIR}}/crates/**/*.rs'
+    - '{{.ROOT_DIR}}/crates/**/Cargo.toml'
+    - '{{.ROOT_DIR}}/Cargo.lock'
+    - '{{.ROOT_DIR}}/rustfmt.toml'
+    - '{{.ROOT_DIR}}/clippy.toml'
+    - exclude: '{{.ROOT_DIR}}/target/**'
+
+tasks:
+  verify:
+    desc: Rust quality gate (format, clippy, license, build, unit tests)
+    summary: |
+      Runs all Rust-specific checks sequentially (fail-fast):
+        1. cargo fmt --check
+        2. cargo clippy
+        3. hawkeye license headers
+        4. cargo-deny license audit
+        5. cargo build --release
+        6. cargo nextest run
+      Use during review-fix loops when only Rust code changed.
+    cmds:
+      - task: format:check
+      - task: clippy:check
+      - task: license:check
+      - task: license:deps
+      - task: build
+      - task: test:unit
+
+  format:check:
+    desc: Check Rust formatting
+    sources: *rust-sources
+    cmd: cargo fmt --check
+
+  format:apply:
+    desc: Apply Rust formatting
+    cmd: cargo fmt
+
+  clippy:check:
+    desc: Run clippy linter
+    sources: *rust-sources
+    cmd: cargo clippy --workspace --locked --all-targets -- -D warnings
+
+  clippy:fix:
+    desc: Auto-fix clippy warnings
+    cmd: cargo clippy --workspace --locked --all-targets --fix --allow-dirty
+
+  build:
+    desc: Build release binary
+    sources: *rust-sources
+    status:
+      - test -f {{.ROOT_DIR}}/target/release/ocx
+    method: timestamp
+    cmd: cargo build --release -p ocx --locked
+
+  install:nextest:
+    internal: true
+    cmds:
+      - task: :.ensure-cargo-tool
+        vars: { TOOL: cargo-nextest, CRATE: cargo-nextest }
+
+  test:unit:
+    desc: Run unit tests
+    sources: *rust-sources
+    deps:
+      - install:nextest
+    cmd: cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
+
+  install:hawkeye:
+    internal: true
+    cmds:
+      - task: :.ensure-cargo-tool
+        vars: { TOOL: hawkeye, CRATE: hawkeye }
+
+  install:cargo-deny:
+    internal: true
+    cmds:
+      - task: :.ensure-cargo-tool
+        vars: { TOOL: cargo-deny, CRATE: cargo-deny }
+
+  license:check:
+    desc: Check license headers on all source files
+    deps:
+      - install:hawkeye
+    cmd: hawkeye check
+
+  license:format:
+    desc: Add or fix license headers on all source files
+    deps:
+      - install:hawkeye
+    cmd: hawkeye format
+
+  license:deps:
+    desc: Audit dependency licenses with cargo-deny
+    deps:
+      - install:cargo-deny
+    cmd: cargo deny check licenses

@@ -89,3 +89,8 @@ Cascade is a **publisher convention** (not registry-enforced). `--cascade` autom
 - Build separator: `+` parses but normalizes to `_` in output (OCI forbids `+`)
 
 `Tag` enum: `Latest`, `Internal(InternalTag)`, `Version(Version)`, `Canonical(String)`, `Other(String)`.
+
+## Quality Gate
+
+During review-fix loops, run `task rust:verify` — not full `task verify`.
+Full `task verify` is the final gate before commit.

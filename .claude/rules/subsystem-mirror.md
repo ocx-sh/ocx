@@ -77,3 +77,8 @@ YAML files in `mirrors/` (e.g., `mirror-cmake.yml`, `mirror-go.yml`). Each defin
 ## Error Model
 
 `MirrorError` enum with exit codes: 0 (success), 2 (spec invalid), 3 (execution failed), 4 (source error).
+
+## Quality Gate
+
+During review-fix loops, run `task rust:verify` — not full `task verify`.
+Full `task verify` is the final gate before commit.

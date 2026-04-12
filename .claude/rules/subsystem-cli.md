@@ -82,3 +82,8 @@ pub trait Printable: serde::Serialize {
 4. Call from `command/{name}.rs` with data built from task results
 
 See `subsystem-cli-api.md` for the full contract and `subsystem-cli-commands.md` for the quick reference. User-facing per-command docs live at `website/src/docs/reference/command-line.md`.
+
+## Quality Gate
+
+During review-fix loops, run `task rust:verify` — not full `task verify`.
+Full `task verify` is the final gate before commit.

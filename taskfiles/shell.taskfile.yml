@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  verify:
+    desc: Shell script quality gate (shellcheck + shfmt)
+    cmds:
+      - task: :shellcheck:exec
+      - task: :shfmt:exec
+        vars: { ARGS: '-d -i 4 -ci' }
+
+  format:
+    desc: Format shell scripts with shfmt
+    cmds:
+      - task: :shfmt:exec
+        vars: { ARGS: '-w -i 4 -ci' }

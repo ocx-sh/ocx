@@ -2,6 +2,20 @@
 
 version: '3'
 
+includes:
+  schema:
+    taskfile: ./schema.taskfile.yml
+    internal: true
+  sbom:
+    taskfile: ./sbom.taskfile.yml
+    internal: true
+  catalog:
+    taskfile: ./catalog.taskfile.yml
+    internal: true
+  recordings:
+    taskfile: ./recordings.taskfile.yml
+    internal: true
+
 vars:
   DEPLOY_HOST: '{{.DEPLOY_HOST | default "ocx-deploy"}}'
 
@@ -18,10 +32,10 @@ tasks:
     deps:
       - install
     cmds:
-      - task: :schema:generate
-      - task: :recordings:build
-      - task: :sbom:generate:page
-      - task: :catalog:generate
+      - task: schema:generate
+      - task: recordings:build
+      - task: sbom:generate:page
+      - task: catalog:generate
       - bunx vitepress build
 
   deploy:

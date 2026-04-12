@@ -118,3 +118,8 @@ async fn fetch_manifest_digest(&self, id: &Identifier) -> Result<Option<Digest>>
 - **`oci-client` flush audit**: `pull_blob` was missing `out.flush().await?` causing truncated files. Fixed in `pull_blob`, but audit other `AsyncWrite` methods.
 - **Submodule at `external/rust-oci-client/`** is a patched fork. Changes need upstream PRs. Only format new code (upstream uses 100-char rustfmt).
 - **When unsure about the current `oci-client` API**, query Context7 MCP (`mcp__context7__resolve-library-id` → `mcp__context7__get-library-docs`) before guessing. The upstream crate evolves independently of our patched fork, and training-data knowledge of its API shape decays quickly.
+
+## Quality Gate
+
+During review-fix loops, run `task rust:verify` — not full `task verify`.
+Full `task verify` is the final gate before commit.

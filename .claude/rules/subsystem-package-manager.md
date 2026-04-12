@@ -110,3 +110,8 @@ enum PackageErrorKind {
 - Parallel tasks (`JoinSet`): each task spawned with `.instrument(span)` carrying package name
 - Sequential tasks: `.entered()` guard inside loop
 - No custom progress abstraction
+
+## Quality Gate
+
+During review-fix loops, run `task rust:verify` — not full `task verify`.
+Full `task verify` is the final gate before commit.

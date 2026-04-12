@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Tool execution template backed by OCX. Each include creates a tool
+# namespace (e.g., `shellcheck:`, `shfmt:`) — callers interact with
+# the tool, not with OCX directly.
+#
+# Root taskfile registers tools:
+#
+#   shellcheck:
+#     taskfile: ./taskfiles/ocx.taskfile.yml
+#     internal: true
+#     vars: { PACKAGE: 'ocx.sh/shellcheck:0.11', TOOL: shellcheck, GLOB: '*.sh' }
+#
+# Subsystem taskfiles call the tool:
+#
+#   - task: :shellcheck:exec                        # defaults (no extra args)
+#   - task: :shfmt:exec
+#     vars: { ARGS: '-d -i 4 -ci' }                 # check mode
+#
+# Identity vars (set at include time):
+#   PACKAGE — OCX package reference
+#   TOOL    — binary name
+#   GLOB    — git ls-files glob pattern
+
+version: '3'
+
+tasks:
+  exec:
+    internal: true
+    requires:
+      vars: [PACKAGE, TOOL, GLOB]
+    preconditions:
+      - sh: '[ -n "$(git ls-files "{{.GLOB}}")" ]'
+        msg: 'No {{.GLOB}} files found, skipping {{.TOOL}}'
+    cmd: ocx exec {{.PACKAGE}} -- {{.TOOL}} {{.ARGS}} {{.FILES}}
+    vars:
+      ARGS: '{{.ARGS | default ""}}'
+      FILES:
+        sh: git ls-files '{{.GLOB}}' | tr '\n' ' '

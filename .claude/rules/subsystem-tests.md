@@ -109,3 +109,8 @@ cd test && uv run pytest tests/test_install.py::test_name -v --no-build
 ## Test Files
 
 19 test files covering: install, find, select, uninstall, purge, clean, offline, env, exec, package lifecycle, cascade, package pull, describe, package info, index, color, mirror, CI export, shell profile.
+
+## Quality Gate
+
+During review-fix loops, run `task test:parallel` — not full `task verify`.
+Acceptance tests only; no Rust rebuild needed when using `--no-build`.

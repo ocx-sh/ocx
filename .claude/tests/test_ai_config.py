@@ -827,21 +827,22 @@ class TestHookScript:
 
 
 class TestTaskfileLint:
-    """lint.taskfile.yml must handle empty file lists gracefully."""
+    """ocx.taskfile.yml must handle empty file lists gracefully."""
 
     def test_shell_lint_handles_no_scripts(self) -> None:
         """Bug captured: when git ls-files '*.sh' returns nothing, shellcheck
-        is called with no arguments and exits non-zero, failing task verify."""
-        taskfile = ROOT / "taskfiles" / "lint.taskfile.yml"
+        is called with no arguments and exits non-zero, failing task verify.
+        The guard now lives in the reusable ocx-exec template."""
+        taskfile = ROOT / "taskfiles" / "ocx.taskfile.yml"
         text = taskfile.read_text()
 
-        # There should be a precondition or guard for empty SCRIPTS
+        # There should be a precondition or guard for empty file lists
         has_guard = bool(re.search(
             r"(preconditions|status|\[ -[nz]|\[\[ -[nz]|test -[nz]|exit 0)",
             text,
         ))
         assert has_guard, (
-            "lint.taskfile.yml has no guard for empty SCRIPTS variable. "
-            "When no .sh files exist, shellcheck/shfmt are called with no "
-            "arguments and fail."
+            "ocx.taskfile.yml has no guard for empty file lists. "
+            "When no matching files exist, the tool is called with no "
+            "arguments and fails."
         )

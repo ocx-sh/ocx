@@ -224,3 +224,8 @@ See `.claude/rules/docs-style.md` for narrative structure, link conventions, cal
 | Terminal recordings | pytest + registry:2 | `task recordings:build` |
 | SBOM / dependencies | cargo-cyclonedx + Python | `task sbom:generate:page` |
 | Package catalog | Python + ocx.sh registry | `task catalog:generate` |
+
+## Quality Gate
+
+During review-fix loops, run `task website:build` — not full `task verify`.
+Full website build pipeline validates generated content, schema, and VitePress output.
