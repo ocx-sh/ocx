@@ -1,3 +1,10 @@
+---
+paths:
+  - "CHANGELOG.md"
+  - "cliff.toml"
+  - "dist-workspace.toml"
+---
+
 # Git & Commit Workflow
 
 Shared branch-and-commit hygiene for OCX. Consumed by the `/commit` skill (working phase) and the `/finalize` skill (rebasing phase). Catalog-only: referenced on demand, not auto-loaded via a path glob — nothing in the repo is "a git file".
@@ -78,6 +85,14 @@ Every commit on a branch must pass `task verify` before it lands on `main`. The 
 | Branch has messy history, prepare to land on main | `/finalize` |
 | "Squash this branch into one commit for the changelog" | `/finalize` (squash-all mode) |
 | Reword a stranded Checkpoint deep in history | `/finalize` |
+
+## Submodule Workflow (`external/`)
+
+Code in `external/` (e.g., `rust-oci-client`) is a fork of an upstream repo. Three rules:
+
+1. **Upstream-first**: Make changes upstream-compliant. After the change works locally, plan an upstream PR.
+2. **Format only new code**: Do NOT run `rustfmt`/`cargo fmt` on the entire file — only format lines you introduced. The upstream may use different style (e.g., 100-char width vs OCX's 120-char). Reformatting bloats diffs and blocks upstream PRs.
+3. **No `Co-Authored-By`**: Submodule commits must not have `Co-Authored-By` trailers (upstream convention).
 
 ## References
 
