@@ -7,21 +7,63 @@ use std::path::PathBuf;
 
 use crate::{MEDIA_TYPE_TAR_GZ, MEDIA_TYPE_TAR_XZ, oci};
 
-/// Archive file extensions OCX accepts after a layer digest.
+/// Supported archive media types for digest layer references.
 ///
-/// Each tuple is `(suffix, media_type)` where `suffix` does *not*
-/// include the leading dot. Ordered so longer suffixes are tried
-/// first, which matters when `tgz`/`tar.gz` overlap prefixes on the
-/// same digest token.
-const KNOWN_LAYER_EXTENSIONS: &[(&str, &str)] = &[
-    ("tar.gz", MEDIA_TYPE_TAR_GZ),
-    ("tgz", MEDIA_TYPE_TAR_GZ),
-    ("tar.xz", MEDIA_TYPE_TAR_XZ),
-    ("txz", MEDIA_TYPE_TAR_XZ),
-];
+/// The OCI distribution spec does not expose a layer's media type via
+/// blob HEAD, so when pushing a cross-package digest reference the
+/// publisher must re-declare the format. This closed enum makes the
+/// set of acceptable values total — `FromStr` and `Display` round-trip
+/// without any runtime fallback — and prevents stringly-typed drift in
+/// callers constructing `LayerRef::Digest` directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveMediaType {
+    /// `application/vnd.oci.image.layer.v1.tar+gzip`
+    TarGz,
+    /// `application/vnd.oci.image.layer.v1.tar+xz`
+    TarXz,
+}
+
+impl ArchiveMediaType {
+    /// All supported archive media types. The single source of truth
+    /// for iteration — `FromStr` walks this set when resolving an
+    /// extension suffix back to a variant.
+    pub const ALL: &'static [Self] = &[Self::TarGz, Self::TarXz];
+
+    /// Returns the OCI media type string for the manifest descriptor.
+    pub fn as_media_type(self) -> &'static str {
+        match self {
+            Self::TarGz => MEDIA_TYPE_TAR_GZ,
+            Self::TarXz => MEDIA_TYPE_TAR_XZ,
+        }
+    }
+
+    /// Filename extensions (without the leading dot) that map to this
+    /// media type. The first entry is the canonical form; any
+    /// additional entries are accepted aliases. `FromStr` tries them
+    /// in order, so the canonical form wins when a string could match
+    /// multiple.
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::TarGz => &["tar.gz", "tgz"],
+            Self::TarXz => &["tar.xz", "txz"],
+        }
+    }
+
+    /// Returns the canonical filename extension (without the leading dot).
+    pub fn canonical_extension(self) -> &'static str {
+        self.extensions()[0]
+    }
+}
+
+impl std::fmt::Display for ArchiveMediaType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_media_type())
+    }
+}
 
 /// Error produced when a string cannot be parsed as a [`LayerRef`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LayerRefParseError {
     /// A bare digest (`sha256:abc...`) was supplied without a media
     /// type extension suffix. Digest references must spell out the
@@ -50,7 +92,7 @@ pub enum LayerRef {
     /// [`FromStr`](std::str::FromStr) impl for the CLI syntax.
     Digest {
         digest: oci::Digest,
-        media_type: &'static str,
+        media_type: ArchiveMediaType,
     },
 }
 
@@ -59,12 +101,7 @@ impl std::fmt::Display for LayerRef {
         match self {
             LayerRef::File(path) => write!(f, "{}", path.display()),
             LayerRef::Digest { digest, media_type } => {
-                let ext = KNOWN_LAYER_EXTENSIONS
-                    .iter()
-                    .find(|(_, mt)| mt == media_type)
-                    .map(|(ext, _)| *ext)
-                    .unwrap_or("bin");
-                write!(f, "{digest}.{ext}")
+                write!(f, "{digest}.{}", media_type.canonical_extension())
             }
         }
     }
@@ -100,12 +137,17 @@ impl std::str::FromStr for LayerRef {
         let looks_like_path = s.starts_with("./") || s.starts_with('/');
 
         if !looks_like_path {
-            for (ext, media_type) in KNOWN_LAYER_EXTENSIONS {
-                let suffix = format!(".{ext}");
-                if let Some(hex_part) = s.strip_suffix(&suffix)
-                    && let Ok(digest) = oci::Digest::try_from(hex_part)
-                {
-                    return Ok(LayerRef::Digest { digest, media_type });
+            for media_type in ArchiveMediaType::ALL {
+                for ext in media_type.extensions() {
+                    let suffix = format!(".{ext}");
+                    if let Some(hex_part) = s.strip_suffix(&suffix)
+                        && let Ok(digest) = oci::Digest::try_from(hex_part)
+                    {
+                        return Ok(LayerRef::Digest {
+                            digest,
+                            media_type: *media_type,
+                        });
+                    }
                 }
             }
 
@@ -136,7 +178,7 @@ mod tests {
         match lr {
             LayerRef::Digest { digest, media_type } => {
                 assert!(matches!(digest, oci::Digest::Sha256(ref h) if h == &hex));
-                assert_eq!(media_type, MEDIA_TYPE_TAR_GZ);
+                assert_eq!(media_type, ArchiveMediaType::TarGz);
             }
             _ => panic!("expected Digest variant, got {lr:?}"),
         }
@@ -148,7 +190,7 @@ mod tests {
         let input = format!("sha256:{hex}.tgz");
         let lr: LayerRef = input.parse().unwrap();
         match lr {
-            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, MEDIA_TYPE_TAR_GZ),
+            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, ArchiveMediaType::TarGz),
             _ => panic!("expected Digest variant"),
         }
     }
@@ -159,7 +201,7 @@ mod tests {
         let input = format!("sha256:{hex}.tar.xz");
         let lr: LayerRef = input.parse().unwrap();
         match lr {
-            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, MEDIA_TYPE_TAR_XZ),
+            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, ArchiveMediaType::TarXz),
             _ => panic!("expected Digest variant"),
         }
     }
@@ -170,7 +212,7 @@ mod tests {
         let input = format!("sha256:{hex}.txz");
         let lr: LayerRef = input.parse().unwrap();
         match lr {
-            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, MEDIA_TYPE_TAR_XZ),
+            LayerRef::Digest { media_type, .. } => assert_eq!(media_type, ArchiveMediaType::TarXz),
             _ => panic!("expected Digest variant"),
         }
     }
@@ -238,7 +280,7 @@ mod tests {
         let hex = "a".repeat(64);
         let lr = LayerRef::Digest {
             digest: oci::Digest::Sha256(hex.clone()),
-            media_type: MEDIA_TYPE_TAR_GZ,
+            media_type: ArchiveMediaType::TarGz,
         };
         assert_eq!(lr.to_string(), format!("sha256:{hex}.tar.gz"));
     }
@@ -248,7 +290,7 @@ mod tests {
         let hex = "b".repeat(64);
         let lr = LayerRef::Digest {
             digest: oci::Digest::Sha256(hex.clone()),
-            media_type: MEDIA_TYPE_TAR_XZ,
+            media_type: ArchiveMediaType::TarXz,
         };
         assert_eq!(lr.to_string(), format!("sha256:{hex}.tar.xz"));
     }
@@ -259,5 +301,38 @@ mod tests {
         let input = format!("sha256:{hex}.tar.gz");
         let lr: LayerRef = input.parse().unwrap();
         assert_eq!(lr.to_string(), input);
+    }
+
+    #[test]
+    fn tgz_alias_round_trips_to_canonical_tar_gz() {
+        let hex = "a".repeat(64);
+        let short = format!("sha256:{hex}.tgz");
+        let lr: LayerRef = short.parse().unwrap();
+        // Canonical display normalizes the alias to `tar.gz`.
+        assert_eq!(lr.to_string(), format!("sha256:{hex}.tar.gz"));
+        // The re-parsed canonical form is structurally equal to the original parse.
+        let reparsed: LayerRef = lr.to_string().parse().unwrap();
+        match (lr, reparsed) {
+            (
+                LayerRef::Digest {
+                    digest: d1,
+                    media_type: m1,
+                },
+                LayerRef::Digest {
+                    digest: d2,
+                    media_type: m2,
+                },
+            ) => {
+                assert_eq!(d1, d2);
+                assert_eq!(m1, m2);
+            }
+            _ => panic!("expected Digest variants"),
+        }
+    }
+
+    #[test]
+    fn archive_media_type_as_media_type_matches_constants() {
+        assert_eq!(ArchiveMediaType::TarGz.as_media_type(), MEDIA_TYPE_TAR_GZ);
+        assert_eq!(ArchiveMediaType::TarXz.as_media_type(), MEDIA_TYPE_TAR_XZ);
     }
 }
