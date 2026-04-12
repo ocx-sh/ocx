@@ -33,6 +33,13 @@ tasks:
   build:
     desc: Generate all .cast recordings
     dir: "{{.ROOT_DIR}}/test"
+    sources:
+      - recordings/**/*.py
+      - recordings/**/*.sh
+      - conftest.py
+      - src/**/*.py
+      - pyproject.toml
+      - '{{.OCX_BINARY}}'
     cmds:
       - task: ensure-binary
         vars:
@@ -41,14 +48,35 @@ tasks:
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
 
+  parallel:
+    desc: Generate all .cast recordings in parallel
+    dir: "{{.ROOT_DIR}}/test"
+    sources:
+      - recordings/**/*.py
+      - recordings/**/*.sh
+      - conftest.py
+      - src/**/*.py
+      - pyproject.toml
+      - '{{.OCX_BINARY}}'
+    cmds:
+      - task: ensure-binary
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - uv run pytest recordings/ -n auto {{.CLI_ARGS | default "-v"}}
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
+
   gifs:
     desc: Convert all .cast files to animated GIFs (requires agg)
     deps: [ensure-font]
     dir: "{{.ROOT_DIR}}/test"
+    sources:
+      - '{{.CASTS_DIR}}/*.cast'
+      - recordings/cast_to_gif.py
     cmd: uv run python recordings/cast_to_gif.py --font-dir "{{.FONTS_DIR}}/CascadiaCode" "{{.CASTS_DIR}}" "{{.GIFS_DIR}}"
 
   default:
     desc: Build all recordings and convert to GIFs
     cmds:
-      - task: build
+      - task: parallel
       - task: gifs

@@ -2,10 +2,6 @@
 
 version: '3'
 
-output:
-  group:
-    error_only: true
-
 vars:
   REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
 
@@ -42,6 +38,9 @@ includes:
     dir: ./.claude
   test:
     taskfile: ./test/taskfile.yml
+    dir: ./test
+  recordings:
+    taskfile: ./website/recordings.taskfile.yml
     dir: ./test
   website:
     taskfile: ./website/taskfile.yml

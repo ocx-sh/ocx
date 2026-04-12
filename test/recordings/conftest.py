@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -123,4 +124,5 @@ def setup_env(
             f"Unknown setup '{setup_name}' in {script['path'].name}. "
             f"Available: {', '.join(SETUPS)}"
         )
-    return setup_fn(ocx, tmp_path)
+    prefix = f"r_{uuid4().hex[:8]}_"
+    return setup_fn(ocx, tmp_path, prefix)

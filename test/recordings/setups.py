@@ -13,7 +13,7 @@ from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 
 
-def basic(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+def basic(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Single package, one version."""
     uv_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
@@ -21,14 +21,14 @@ def basic(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
     return {
         "uv": [
             make_package(
-                ocx, "uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
+                ocx, f"{prefix}uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
                 outputs={"uv": {"--version": "uv 0.10.10"}},
             ),
         ],
     }
 
 
-def multi_version(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+def multi_version(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """One package with multiple versions."""
     corretto_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
@@ -37,7 +37,7 @@ def multi_version(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]
     return {
         "corretto": [
             make_package(
-                ocx, "corretto", "21.0.0", tmp_path,
+                ocx, f"{prefix}corretto", "21.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
                 outputs={"java": {"-version": (
                     "openjdk 21.0.10 2026-01-20 LTS\n"
@@ -46,7 +46,7 @@ def multi_version(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]
                 )}},
             ),
             make_package(
-                ocx, "corretto", "25.0.0", tmp_path,
+                ocx, f"{prefix}corretto", "25.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env, new=False,
                 outputs={"java": {"-version": (
                     "openjdk 25.0.2 2026-01-20 LTS\n"
@@ -58,7 +58,7 @@ def multi_version(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]
     }
 
 
-def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Multiple packages for index/catalog demos."""
     uv_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
@@ -83,13 +83,13 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
     return {
         "uv": [
             make_package(
-                ocx, "uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
+                ocx, f"{prefix}uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
                 outputs={"uv": {"--version": "uv 0.10.10"}},
             ),
         ],
         "cmake": [
             make_package(
-                ocx, "cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
+                ocx, f"{prefix}cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
                 outputs={"cmake": {"--version": (
                     "cmake version 4.2.3\n"
                     "\n"
@@ -99,7 +99,7 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
         ],
         "corretto": [
             make_package(
-                ocx, "corretto", "21.0.0", tmp_path,
+                ocx, f"{prefix}corretto", "21.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
                 outputs={"java": {"-version": (
                     "openjdk 21.0.10 2026-01-20 LTS\n"
@@ -108,7 +108,7 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
                 )}},
             ),
             make_package(
-                ocx, "corretto", "25.0.0", tmp_path,
+                ocx, f"{prefix}corretto", "25.0.0", tmp_path,
                 bins=["java", "javac"], env=corretto_env, new=False,
                 outputs={"java": {"-version": (
                     "openjdk 25.0.2 2026-01-20 LTS\n"
@@ -119,26 +119,26 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
         ],
         "ocx": [
             make_package(
-                ocx, "ocx", "0.1.0", tmp_path, bins=["ocx"], env=ocx_env,
+                ocx, f"{prefix}ocx", "0.1.0", tmp_path, bins=["ocx"], env=ocx_env,
                 outputs={"ocx": {"--version": "ocx 0.1.0"}},
             ),
         ],
         "nodejs": [
             make_package(
-                ocx, "nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
+                ocx, f"{prefix}nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
                 outputs={"node": {"--version": "v24.14.0"}},
             ),
         ],
         "bun": [
             make_package(
-                ocx, "bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
+                ocx, f"{prefix}bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
                 outputs={"bun": {"--version": "1.3.10"}},
             ),
         ],
     }
 
 
-def variants(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+def variants(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Python with multiple variant builds for variant discovery demos."""
     python_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
@@ -147,17 +147,17 @@ def variants(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
     return {
         "python": [
             make_package(
-                ocx, "python", "pgo.lto-3.13.0", tmp_path / "pgo-lto",
+                ocx, f"{prefix}python", "pgo.lto-3.13.0", tmp_path / "pgo-lto",
                 bins=["python3"], env=python_env,
                 outputs={"python3": {"--version": "Python 3.13.4"}},
             ),
             make_package(
-                ocx, "python", "debug-3.13.0", tmp_path / "debug",
+                ocx, f"{prefix}python", "debug-3.13.0", tmp_path / "debug",
                 bins=["python3"], env=python_env, new=False,
                 outputs={"python3": {"--version": "Python 3.13.4 (debug)"}},
             ),
             make_package(
-                ocx, "python", "freethreaded-3.13.0", tmp_path / "freethreaded",
+                ocx, f"{prefix}python", "freethreaded-3.13.0", tmp_path / "freethreaded",
                 bins=["python3"], env=python_env, new=False,
                 outputs={"python3": {"--version": "Python 3.13.4 (freethreaded)"}},
             ),
@@ -165,7 +165,7 @@ def variants(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
     }
 
 
-def dependencies(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+def dependencies(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Packages with dependency relationships for deps command demos.
 
     Dependency graph: webapp -> {nodejs, bun}
@@ -186,11 +186,11 @@ def dependencies(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
     ]
 
     nodejs = make_package(
-        ocx, "nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
+        ocx, f"{prefix}nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
         outputs={"node": {"--version": "v24.14.0"}},
     )
     bun = make_package(
-        ocx, "bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
+        ocx, f"{prefix}bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
         outputs={"bun": {"--version": "1.3.10"}},
     )
 
@@ -200,7 +200,7 @@ def dependencies(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
     bun_dep = {"identifier": f"{bun.fq}@{bun_digest}"}
 
     webapp = make_package(
-        ocx, "webapp", "2.0.0", tmp_path, bins=["serve"],
+        ocx, f"{prefix}webapp", "2.0.0", tmp_path, bins=["serve"],
         env=webapp_env, dependencies=[node_dep, bun_dep],
         outputs={"serve": {"--version": "webapp 2.0.0"}},
     )
@@ -212,7 +212,7 @@ def dependencies(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]
     }
 
 
-def deps_visibility(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInfo]]:
+def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Packages with mixed visibility levels for deps command demos.
 
     Diamond dependency graph through nodejs, with visibility annotations::
@@ -242,15 +242,15 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInf
 
     # Leaf packages (no deps of their own)
     nodejs = make_package(
-        ocx, "nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
+        ocx, f"{prefix}nodejs", "24.0.0", tmp_path, bins=["node"], env=node_env,
         outputs={"node": {"--version": "v24.14.0"}},
     )
     bun = make_package(
-        ocx, "bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
+        ocx, f"{prefix}bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
         outputs={"bun": {"--version": "1.3.10"}},
     )
     templates = make_package(
-        ocx, "templates", "1.0.0", tmp_path, bins=["tpl"],
+        ocx, f"{prefix}templates", "1.0.0", tmp_path, bins=["tpl"],
         outputs={"tpl": {"--version": "templates 1.0.0"}},
     )
 
@@ -260,12 +260,12 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInf
 
     # Intermediate packages (depend on nodejs)
     server = make_package(
-        ocx, "server", "1.0.0", tmp_path, bins=["server"], env=path_env,
+        ocx, f"{prefix}server", "1.0.0", tmp_path, bins=["server"], env=path_env,
         dependencies=[{"identifier": f"{nodejs.fq}@{node_digest}", "visibility": "public"}],
         outputs={"server": {"--version": "server 1.0.0"}},
     )
     renderer = make_package(
-        ocx, "renderer", "1.0.0", tmp_path, bins=["render"], env=path_env,
+        ocx, f"{prefix}renderer", "1.0.0", tmp_path, bins=["render"], env=path_env,
         dependencies=[{"identifier": f"{nodejs.fq}@{node_digest}", "visibility": "public"}],
         outputs={"render": {"--version": "renderer 1.0.0"}},
     )
@@ -275,7 +275,7 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInf
 
     # Root: webapp depends on server (public), bun (public), renderer (private)
     webapp = make_package(
-        ocx, "webapp", "2.0.0", tmp_path, bins=["serve"],
+        ocx, f"{prefix}webapp", "2.0.0", tmp_path, bins=["serve"],
         env=path_env + [{"key": "APP_HOME", "type": "constant", "value": "${installPath}"}],
         dependencies=[
             {"identifier": f"{server.fq}@{server_digest}", "visibility": "public"},
@@ -299,7 +299,9 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path) -> dict[str, list[PackageInf
     }
 
 
-SETUPS: dict[str, Callable] = {
+SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]
+
+SETUPS: dict[str, SetupFn] = {
     "basic": basic,
     "multi-version": multi_version,
     "full-catalog": full_catalog,

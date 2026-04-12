@@ -24,6 +24,7 @@ tasks:
     cmd: bun install
 
   serve:
+    interactive: true
     deps:
       - install
     cmd: bunx vitepress dev
@@ -33,7 +34,7 @@ tasks:
       - install
     cmds:
       - task: schema:generate
-      - task: recordings:build
+      - task: recordings:parallel
       - task: sbom:generate:page
       - task: catalog:generate
       - bunx vitepress build
