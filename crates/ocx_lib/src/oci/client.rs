@@ -562,12 +562,26 @@ impl Client {
                                 ClientError::InvalidManifest(format!("unsupported archive: {}", path.display()))
                             })?;
 
+                        // BOUNDED: LAYER_PUSH_CONCURRENCY caps simultaneous
+                        // in-memory archives at 4 × (layer size). Do not raise
+                        // the constant without either switching to a streaming
+                        // push path or auditing the RSS budget for the largest
+                        // layers callers ship.
                         let package_data = tokio::fs::read(path).await.map_err(|e| ClientError::Io {
                             path: path.to_path_buf(),
                             source: e,
                         })?;
                         let package_data_len = package_data.len();
-                        let package_digest = Digest::sha256(&package_data).to_string();
+                        // Hash on a blocking thread: Digest::sha256 is
+                        // CPU-bound over potentially hundreds of MB and
+                        // would otherwise stall the Tokio executor mid-
+                        // `buffered()` stream.
+                        let (package_data, package_digest) = tokio::task::spawn_blocking(move || {
+                            let digest = Digest::sha256(&package_data).to_string();
+                            (package_data, digest)
+                        })
+                        .await
+                        .map_err(|e| ClientError::Internal(Box::new(e)))?;
 
                         log::trace!(
                             "Layer {}: digest={}, size={}",
