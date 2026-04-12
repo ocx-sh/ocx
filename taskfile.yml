@@ -77,6 +77,10 @@ tasks:
   check:
     cmd: cargo check
 
+  run:
+    desc: Build and run ocx (pass args after --)
+    cmd: cargo run --release --bin ocx -- {{.CLI_ARGS}}
+
   default:
     deps:
       - task: rust:format:check
