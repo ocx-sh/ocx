@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
 use crate::file_lock::FileLock;
-use crate::{Result, error::file_error, oci, prelude::*};
+use crate::{Result, error::file_error, log, oci, prelude::*};
 
 use super::tag_lock::TagLock;
 
@@ -52,14 +52,22 @@ impl TagGuard {
                 .map_err(|e| file_error(parent, e))?;
         }
         // Sync handle: `fs2::FileExt` advisory-locks on the raw fd, and the
-        // handle must outlive the lock (owned by `FileLock`).
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&target_path)
-            .map_err(|e| file_error(&target_path, e))?;
+        // handle must outlive the lock (owned by `FileLock`). Run the blocking
+        // `open` on the blocking pool so the reactor thread never blocks on a
+        // filesystem syscall.
+        let open_path = target_path.clone();
+        let file = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&open_path)
+        })
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(std::convert::identity)
+        .map_err(|e| file_error(&target_path, e))?;
         let lock = FileLock::lock_exclusive_with_timeout(file, LOCK_TIMEOUT)
             .await
             .map_err(|e| file_error(&target_path, e))?;
@@ -77,7 +85,14 @@ impl TagGuard {
     /// lock concurrently; an exclusive writer waits until the last reader
     /// drops.
     pub async fn acquire_shared(target_path: PathBuf) -> Result<Option<Self>> {
-        let file = match std::fs::OpenOptions::new().read(true).open(&target_path) {
+        // Run the blocking `open` on the blocking pool; matches the
+        // off-reactor pattern in `acquire_exclusive`.
+        let open_path = target_path.clone();
+        let open_result = tokio::task::spawn_blocking(move || std::fs::OpenOptions::new().read(true).open(&open_path))
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(std::convert::identity);
+        let file = match open_result {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(file_error(&target_path, e)),
@@ -92,8 +107,14 @@ impl TagGuard {
     }
 
     /// Reads and parses the current tag file under the lock. Returns an
-    /// empty map when the file is missing or was freshly created by an
-    /// exclusive acquire and not yet written.
+    /// empty map when the file is missing, was freshly created by an
+    /// exclusive acquire and not yet written, **or** is unparseable.
+    ///
+    /// The unparseable case is the documented kill-9 recovery window: a
+    /// writer killed mid-`write_disk` can leave the file truncated or
+    /// corrupt. Treat that the same as "no tags yet" so the next chain walk
+    /// or `ocx index update` can rewrite it cleanly, and log a warn so the
+    /// recovery is observable.
     pub async fn read_disk(&self, identifier: &oci::Identifier) -> Result<HashMap<String, oci::Digest>> {
         match tokio::fs::metadata(&self.target_path).await {
             Ok(m) if m.len() == 0 => return Ok(HashMap::new()),
@@ -101,8 +122,19 @@ impl TagGuard {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
             Err(e) => return Err(file_error(&self.target_path, e)),
         }
-        let tag_lock = TagLock::read_json(&self.target_path).await?;
-        tag_lock.into_tags(identifier, &self.target_path)
+        let parsed = TagLock::read_json(&self.target_path)
+            .await
+            .and_then(|tag_lock| tag_lock.into_tags(identifier, &self.target_path));
+        match parsed {
+            Ok(tags) => Ok(tags),
+            Err(e) => {
+                log::warn!(
+                    "Tag file '{}' is unparseable ({e}) — treating as empty for recovery.",
+                    self.target_path.display()
+                );
+                Ok(HashMap::new())
+            }
+        }
     }
 
     /// Overwrites the tag file in place with a `TagLock` containing `tags`.

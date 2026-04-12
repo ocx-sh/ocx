@@ -57,7 +57,7 @@ impl ChainedIndex {
         for source in &self.sources {
             match self.cache.update(source, &tagged).await {
                 Ok(()) => {
-                    log::info!("Fetched tag '{}' from chained source, retrying cache lookup.", tagged);
+                    log::debug!("Fetched tag '{}' from chained source, retrying cache lookup.", tagged);
                     return Ok(());
                 }
                 Err(e) => {
@@ -89,16 +89,33 @@ impl index_impl::IndexImpl for ChainedIndex {
     }
 
     async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {
-        if let Some(result) = self.cache.fetch_manifest(identifier).await? {
-            return Ok(Some(result));
+        // Cache read errors (e.g. a truncated tag file from a kill-9 during
+        // `TagGuard::write_disk`) must not short-circuit the chain walk —
+        // degrading to the source is the whole point of the fallback.
+        match self.cache.fetch_manifest(identifier).await {
+            Ok(Some(result)) => return Ok(Some(result)),
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "Local tag cache read failed for '{}', falling back to chained source: {e}",
+                    identifier
+                );
+            }
         }
         self.walk_chain(identifier).await?;
         self.cache.fetch_manifest(identifier).await
     }
 
     async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
-        if let Some(digest) = self.cache.fetch_manifest_digest(identifier).await? {
-            return Ok(Some(digest));
+        match self.cache.fetch_manifest_digest(identifier).await {
+            Ok(Some(digest)) => return Ok(Some(digest)),
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "Local tag cache read failed for '{}', falling back to chained source: {e}",
+                    identifier
+                );
+            }
         }
         self.walk_chain(identifier).await?;
         self.cache.fetch_manifest_digest(identifier).await
@@ -701,5 +718,64 @@ mod tests {
             result.is_some(),
             "tag fetched in first call must be persisted so a cache-only second call succeeds"
         );
+    }
+
+    // Case 13: a corrupted on-disk tag file (the documented kill-9 recovery
+    // window from `tag_guard.rs`) must not short-circuit the chain walk.
+    // `ChainedIndex::fetch_manifest` should log a warn, degrade to the source,
+    // and the re-read of the now-rewritten file must succeed.
+    #[tokio::test]
+    async fn corrupted_cache_read_falls_back_to_chain() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+
+        // Corrupt the on-disk tag file with unparseable bytes so the first
+        // `cache.fetch_manifest` call errors. The tag path follows
+        // `tags/{registry_slug}/{repo}.json` (TagStore layout).
+        let tag_file = cache_dir
+            .path()
+            .join("tags")
+            .join(REGISTRY)
+            .join(format!("{REPO}.json"));
+        std::fs::create_dir_all(tag_file.parent().unwrap()).unwrap();
+        std::fs::write(&tag_file, b"{not valid json at all").unwrap();
+
+        let source = make_source(TestIndex::with_tag(TAG, digest_a()));
+        let chained = super::super::Index::from_chained(cache, vec![source]);
+
+        let result = chained
+            .fetch_manifest(&tagged_id())
+            .await
+            .expect("corrupt cache must degrade to chain walk, not propagate");
+        let (digest, _) = result.expect("chain walk must recover the manifest from the source");
+        assert_eq!(digest, digest_a());
+    }
+
+    // Case 13b: same degrade path for `fetch_manifest_digest`.
+    #[tokio::test]
+    async fn corrupted_cache_read_digest_falls_back_to_chain() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+
+        let tag_file = cache_dir
+            .path()
+            .join("tags")
+            .join(REGISTRY)
+            .join(format!("{REPO}.json"));
+        std::fs::create_dir_all(tag_file.parent().unwrap()).unwrap();
+        std::fs::write(&tag_file, b"").unwrap();
+        // Truncated-but-nonzero would also exercise `read_disk`'s error path;
+        // an empty file (len == 0) is treated as "no tags yet" so we need
+        // actual garbage to force a parse error.
+        std::fs::write(&tag_file, b"garbage").unwrap();
+
+        let source = make_source(TestIndex::with_tag(TAG, digest_a()));
+        let chained = super::super::Index::from_chained(cache, vec![source]);
+
+        let result = chained
+            .fetch_manifest_digest(&tagged_id())
+            .await
+            .expect("corrupt cache must degrade for digest queries too");
+        assert_eq!(result, Some(digest_a()));
     }
 }
