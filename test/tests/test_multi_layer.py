@@ -351,6 +351,35 @@ def test_push_digest_layer_not_found(
     assert "not found" in result.stderr.lower() or "blob" in result.stderr.lower()
 
 
+def test_push_digest_only_without_metadata_fails(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """When every layer is a digest reference, `--metadata` is mandatory —
+    there is no file layer to sniff a sibling metadata path from. The
+    guard must fire before any network I/O."""
+    # Stage a real layer so we have a valid digest on the registry to
+    # reference. Without this, the push could fail for the wrong reason
+    # (BlobNotFound) and hide the guard we're trying to cover.
+    layer_a = _make_layer_content(tmp_path, "a", {"lib/a.so": "a"})
+    bundle_a = _bundle_layer(ocx, layer_a, tmp_path)
+    _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a)], tmp_path)
+    ocx.plain("index", "update", f"{unique_repo}:1.0.0")
+    layer_a_digest = _fetch_layer_digest(ocx.registry, unique_repo, "1.0.0")
+
+    result = ocx.run(
+        "package", "push", "-p", current_platform(),
+        "-n",
+        f"{ocx.registry}/{unique_repo}:2.0.0",
+        f"{layer_a_digest}.tar.gz",
+        check=False, format=None,
+    )
+    assert result.returncode != 0
+    combined = (result.stderr + result.stdout).lower()
+    assert "--metadata" in combined or "metadata is required" in combined, (
+        f"expected a metadata-required error, got:\n{result.stderr}\n{result.stdout}"
+    )
+
+
 def test_cascade_multi_layer(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):

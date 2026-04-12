@@ -1646,28 +1646,6 @@ mod tests {
         assert!(result.is_err(), "walker must reject a layer exceeding the entry cap");
     }
 
-    /// Item 1: multi-layer manifests are rejected at the pull boundary with
-    /// a typed `ClientError::InvalidManifest` referencing issue #22. This
-    /// test locks in the error surface so a future regression that replaces
-    /// the typed error with a panic is caught at test time.
-    ///
-    /// Note: the actual check lives in `pull.rs`, not the walker. This test
-    /// exists here because the walker is the thing that *could* handle
-    /// multi-layer merging (tests above already lock in that contract), so
-    /// this file is the natural place to document "the walker supports N>1
-    /// but the pipeline gates at N=1".
-    #[test]
-    fn multi_layer_error_surface_is_documented_here() {
-        // This is a compile-time assertion that `ClientError::InvalidManifest`
-        // is the chosen error variant for the pull-side multi-layer gate.
-        // If the variant is renamed or removed, this test stops compiling
-        // and points the reader at the call site in `pull.rs`.
-        let err = crate::oci::client::error::ClientError::InvalidManifest(
-            "multi-layer package assembly is not yet supported (#22)".to_string(),
-        );
-        assert!(format!("{err}").contains("multi-layer"));
-    }
-
     // ── 3.1: Boundary / degenerate inputs ───────────────────────────────────
 
     /// ML-1: Empty sources slice returns AssemblyStats::default() and does NOT
