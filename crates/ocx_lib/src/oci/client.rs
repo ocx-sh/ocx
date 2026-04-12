@@ -608,7 +608,7 @@ impl Client {
                         log::trace!("Layer {}: verified, media_type={}, size={}", digest, media_type, size);
 
                         Ok(oci::Descriptor {
-                            media_type: (*media_type).to_string(),
+                            media_type: media_type.as_media_type().to_string(),
                             digest: digest.to_string(),
                             size: size as i64,
                             urls: None,
@@ -1775,7 +1775,7 @@ mod tests {
 
             let layers = [LayerRef::Digest {
                 digest: oci::Digest::try_from(layer_digest).unwrap(),
-                media_type: crate::MEDIA_TYPE_TAR_XZ,
+                media_type: crate::publisher::ArchiveMediaType::TarXz,
             }];
             let (manifest, _bytes, _digest) = client
                 .push_multi_layer_manifest(&info("2.0.0"), &layers)
@@ -1816,7 +1816,7 @@ mod tests {
 
             let layers = [LayerRef::Digest {
                 digest: oci::Digest::try_from(missing_digest).unwrap(),
-                media_type: crate::MEDIA_TYPE_TAR_GZ,
+                media_type: crate::publisher::ArchiveMediaType::TarGz,
             }];
             let err = client
                 .push_multi_layer_manifest(&info("2.0.0"), &layers)

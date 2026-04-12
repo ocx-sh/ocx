@@ -10,7 +10,7 @@
 
 mod layer_ref;
 
-pub use layer_ref::LayerRef;
+pub use layer_ref::{ArchiveMediaType, LayerRef};
 
 use std::collections::BTreeSet;
 use std::path::Path;
