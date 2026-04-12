@@ -181,7 +181,7 @@ impl OciTransport for StubTransport {
             Some(blob) => Ok(blob.len() as u64),
             None => Err(ClientError::BlobNotFound {
                 registry: image.registry().to_string(),
-                digest: digest.to_string(),
+                digest_str: digest.to_string(),
             }),
         }
     }

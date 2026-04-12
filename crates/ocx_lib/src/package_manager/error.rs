@@ -70,6 +70,9 @@ pub enum PackageErrorKind {
         _0.identifier
     )]
     OfflineManifestMissing(Box<OfflineManifestMissing>),
+    /// A referenced blob (layer digest) was not present in the registry.
+    #[error("blob {digest_str} not found in registry '{registry}'")]
+    BlobNotFound { registry: String, digest_str: String },
     /// Multiple candidates matched the platform selection.
     #[error("ambiguous selection: {}", _0.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "))]
     SelectionAmbiguous(Vec<oci::Identifier>),
@@ -95,7 +98,12 @@ pub enum PackageErrorKind {
 
 impl From<crate::oci::client::error::ClientError> for PackageErrorKind {
     fn from(e: crate::oci::client::error::ClientError) -> Self {
-        Self::Internal(e.into())
+        match e {
+            crate::oci::client::error::ClientError::BlobNotFound { registry, digest_str } => {
+                Self::BlobNotFound { registry, digest_str }
+            }
+            other => Self::Internal(other.into()),
+        }
     }
 }
 
@@ -129,4 +137,33 @@ pub enum DependencyError {
     /// Dependency setup coordination failed (capacity, timeout, or abandoned leader).
     #[error("Dependency setup failed: {0}")]
     SetupFailed(#[from] crate::utility::singleflight::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci::client::error::ClientError;
+
+    #[test]
+    fn client_blob_not_found_routes_to_typed_kind() {
+        let e = ClientError::BlobNotFound {
+            registry: "example.com".to_string(),
+            digest_str: "sha256:abc".to_string(),
+        };
+        let kind: PackageErrorKind = e.into();
+        match kind {
+            PackageErrorKind::BlobNotFound { registry, digest_str } => {
+                assert_eq!(registry, "example.com");
+                assert_eq!(digest_str, "sha256:abc");
+            }
+            other => panic!("expected BlobNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_client_errors_still_route_to_internal() {
+        let e = ClientError::ManifestNotFound("example.com/pkg".to_string());
+        let kind: PackageErrorKind = e.into();
+        assert!(matches!(kind, PackageErrorKind::Internal(_)));
+    }
 }

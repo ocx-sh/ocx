@@ -23,8 +23,13 @@ pub enum ClientError {
     #[error("Manifest not found: {0}")]
     ManifestNotFound(String),
     /// A referenced blob does not exist in the registry.
-    #[error("Blob not found in registry '{registry}': {digest}")]
-    BlobNotFound { registry: String, digest: String },
+    ///
+    /// `digest_str` is the stringified OCI digest (e.g.
+    /// `sha256:<hex>`). It is already flattened from [`crate::oci::Digest`]
+    /// at the call site, so the field name reflects that callers
+    /// cannot assume it is re-parseable back into a structured type.
+    #[error("Blob not found in registry '{registry}': {digest_str}")]
+    BlobNotFound { registry: String, digest_str: String },
     /// A registry operation failed.
     #[error("Registry operation failed: {0}")]
     Registry(#[source] Box<dyn std::error::Error + Send + Sync>),
