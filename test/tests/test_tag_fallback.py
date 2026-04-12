@@ -17,6 +17,7 @@ Acceptance criteria (from issue #41):
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import shutil
@@ -260,6 +261,70 @@ def test_ac6a_nonexistent_tag_fails_with_diagnostic(
     combined_output = result.stderr + result.stdout
     assert combined_output.strip(), (
         "AC6a: stderr/stdout must contain diagnostic output, but both were empty"
+    )
+
+
+# ── Concurrent writers racing the tag log ────────────────────────────────
+
+
+def test_parallel_install_races_preserve_both_tags(
+    ocx: OcxRunner,
+    ocx_binary: Path,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """Two concurrent `ocx install` subprocesses sharing one OCX_HOME must both
+    succeed and the persisted tag log must contain both entries.
+
+    The local index starts empty, so each child process takes the transparent
+    tag-fallback path, fetches from the remote registry, and writes its own
+    tag into the local tag log. Without per-repo locking + atomic rename, the
+    two writers race on the same JSON file and one of two failure modes
+    surfaces: the tag file is truncated/corrupt, or one of the two tags is
+    silently lost via last-writer-wins on stale in-memory state.
+
+    With the per-repo lock + in-place write path wired up, both entries
+    must survive.
+    """
+    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path / "v1", new=True, cascade=False)
+    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", new=False, cascade=False)
+    assert v1.repo == v2.repo, "both versions must target the same repo for the race"
+
+    # Fresh local index → both installs exercise the fallback path.
+    _wipe_local_index(ocx)
+
+    def run_install(pkg_short: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(ocx_binary), "--format", "json", "install", pkg_short],
+            capture_output=True,
+            text=True,
+            env=ocx.env,
+            check=False,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run_install, v1.short), pool.submit(run_install, v2.short)]
+        results = [f.result() for f in futures]
+
+    for pkg, result in zip((v1, v2), results, strict=True):
+        assert result.returncode == 0, (
+            f"concurrent install of {pkg.short} failed (rc={result.returncode}).\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+
+    tag_file = _tag_file_path(ocx, v1)
+    assert tag_file.exists(), "tag file must exist after the racing installs"
+
+    data = json.loads(tag_file.read_text())
+    tags = data.get("tags", {})
+    assert v1.tag in tags, (
+        f"tag {v1.tag!r} missing from tag log after concurrent race; "
+        f"present tags: {sorted(tags)}"
+    )
+    assert v2.tag in tags, (
+        f"tag {v2.tag!r} missing from tag log after concurrent race; "
+        f"present tags: {sorted(tags)}"
     )
 
 
