@@ -54,16 +54,16 @@ jobs:
           tool: cargo-nextest
       - name: Check formatting
         id: fmt
-        run: task format:check
+        run: task rust:format:check
         continue-on-error: true
       - name: Clippy
         id: clippy
-        run: task clippy:check
+        run: task rust:clippy:check
         continue-on-error: true
       - name: Build
-        run: task build
+        run: task rust:build
       - name: Test
-        run: task test:unit -- --profile ci
+        run: task rust:test:unit -- --profile ci
       - name: Build Mirror
         run: cargo build --release -p ocx_mirror --locked
       - name: Upload Binaries

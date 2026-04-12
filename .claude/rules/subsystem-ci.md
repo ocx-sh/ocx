@@ -18,7 +18,7 @@ Every check a developer can run locally MUST be defined as a Taskfile task. CI c
 ```yaml
 # CORRECT
 - name: Clippy
-  run: task clippy:check
+  run: task rust:clippy:check
 
 # WRONG — will drift from taskfile
 - name: Clippy
@@ -44,19 +44,19 @@ Test results are more valuable than lint results. Pattern: `continue-on-error: t
 ```yaml
 - name: Check formatting
   id: fmt
-  run: task format:check
+  run: task rust:format:check
   continue-on-error: true
 
 - name: Clippy
   id: clippy
-  run: task clippy:check
+  run: task rust:clippy:check
   continue-on-error: true
 
 - name: Build
-  run: task build
+  run: task rust:build
 
 - name: Test
-  run: task test:unit -- --profile ci
+  run: task rust:test:unit -- --profile ci
 
 - name: Publish Test Results
   if: ${{ !cancelled() }}
