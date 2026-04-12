@@ -35,6 +35,49 @@ pub use transport::OciTransport;
 
 use error::ClientError;
 
+/// Verifies that a blob on disk hashes to its claimed digest.
+///
+/// Streams the file through SHA-256 and compares against `expected`
+/// (an OCI digest string like `sha256:<hex>`). On mismatch, removes
+/// the blob and returns [`ClientError::DigestMismatch`]. This defends
+/// against a compromised or misbehaving registry serving different
+/// bytes for the same digest (CWE-345).
+///
+/// This is the **second line of defense** against bad registry
+/// responses. The first line is the archive walker in
+/// `utility::fs::assemble`, which validates the on-disk structure
+/// (entry count caps, depth caps, symlink containment, overlap
+/// detection) during extraction. The walker catches malformed or
+/// malicious *archive contents*; this function catches the narrower
+/// case of a registry serving different bytes for the same digest —
+/// i.e. a digest/bytes mismatch that the walker cannot see because
+/// it operates after extraction.
+async fn verify_blob_digest(blob_path: &std::path::Path, expected: &str) -> std::result::Result<(), ClientError> {
+    let actual = Digest::sha256_file(blob_path).await.map_err(|e| ClientError::Io {
+        path: blob_path.to_path_buf(),
+        source: e,
+    })?;
+    if actual.to_string() == expected {
+        return Ok(());
+    }
+    // Best-effort cleanup of the tampered blob so a subsequent pull
+    // retries from the registry instead of re-reading the bad bytes.
+    // The primary error reported to the caller is the digest
+    // mismatch; a failure to unlink is logged for diagnostics but
+    // must not mask it.
+    if let Err(e) = tokio::fs::remove_file(blob_path).await {
+        log::debug!(
+            "failed to remove tampered blob at {} after digest mismatch: {}",
+            blob_path.display(),
+            e
+        );
+    }
+    Err(ClientError::DigestMismatch {
+        expected: expected.to_string(),
+        actual: actual.to_string(),
+    })
+}
+
 pub struct Client {
     transport: Box<dyn OciTransport>,
     pub(super) lock_timeout: std::time::Duration,
@@ -340,6 +383,8 @@ impl Client {
                 .await?;
         }
 
+        verify_blob_digest(&blob_path, &blob_layer.digest).await?;
+
         self.extract_to_temp(identifier, metadata, blob_compression, blob_file_ext, output_dir)
             .await?;
 
@@ -398,6 +443,8 @@ impl Client {
                 .pull_blob_to_file(&image, &layer.digest, &blob_path, blob_total_size, on_progress)
                 .await?;
         }
+
+        verify_blob_digest(&blob_path, &layer.digest).await?;
 
         // Extract archive + codesign.
         self.extract_to_temp(identifier, metadata, blob_compression, blob_file_ext, output_dir)
@@ -1117,6 +1164,40 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Invalid manifest"), "got: {}", err_msg);
+    }
+
+    // ── verify_blob_digest tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn verify_blob_digest_accepts_matching_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        tokio::fs::write(&path, b"hello world").await.unwrap();
+
+        let expected = Digest::sha256(b"hello world").to_string();
+        verify_blob_digest(&path, &expected).await.unwrap();
+        assert!(path.exists(), "matching blob must not be deleted");
+    }
+
+    #[tokio::test]
+    async fn verify_blob_digest_rejects_tampered_content_and_deletes_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        tokio::fs::write(&path, b"evil bytes").await.unwrap();
+
+        // Claim the digest of different bytes — simulating a registry
+        // that served different content for the same digest (CWE-345).
+        let expected = Digest::sha256(b"honest bytes").to_string();
+
+        let err = verify_blob_digest(&path, &expected).await.unwrap_err();
+        match err {
+            ClientError::DigestMismatch { expected: e, actual } => {
+                assert_eq!(e, expected);
+                assert_ne!(actual, expected);
+            }
+            other => panic!("expected DigestMismatch, got {other:?}"),
+        }
+        assert!(!path.exists(), "tampered blob must be deleted");
     }
 
     // ── pull_content tests ──────────────────────────────────────

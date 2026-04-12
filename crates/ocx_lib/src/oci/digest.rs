@@ -31,6 +31,28 @@ impl Digest {
         Self::Sha256(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(data)))
     }
 
+    /// Streams a file from disk through SHA-256 without loading it
+    /// into memory, returning a [`Digest::Sha256`].
+    ///
+    /// Used by the pull path to verify that a blob written to disk
+    /// matches its claimed digest before extraction, without
+    /// reallocating the full archive.
+    pub async fn sha256_file(path: &std::path::Path) -> std::io::Result<Self> {
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(path).await?;
+        let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            sha2::Digest::update(&mut hasher, &buf[..n]);
+        }
+        Ok(Self::Sha256(hex::encode(sha2::Digest::finalize(hasher))))
+    }
+
     /// Returns the algorithm prefix and hex string without allocating.
     ///
     /// Algorithm strings are sourced from [`Self::ALGORITHMS`] — the single
