@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use ocx_lib::package::info::Info;
 use ocx_lib::package::version::Version;
-use ocx_lib::publisher::Publisher;
+use ocx_lib::publisher::{LayerRef, Publisher};
 
 use super::mirror_result::MirrorResult;
 use super::mirror_task::VariantContext;
@@ -31,10 +31,11 @@ pub async fn push_and_cascade(
 ) -> Result<MirrorResult> {
     let version_str = info.identifier.tag_or_latest().to_string();
     let platform = info.platform.clone();
+    let layers = [LayerRef::File(bundle_path.to_path_buf())];
 
     if cascade {
         publisher
-            .push_cascade(info.clone(), bundle_path, cascade_versions.clone())
+            .push_cascade(info.clone(), &layers, cascade_versions.clone())
             .await?;
 
         // Default variant aliasing: generate unadorned tags for the default variant.
@@ -53,7 +54,7 @@ pub async fn push_and_cascade(
                 platform: info.platform,
             };
             publisher
-                .push_cascade(bare_info, bundle_path, cascade_versions.clone())
+                .push_cascade(bare_info, &layers, cascade_versions.clone())
                 .await?;
         }
 
@@ -64,7 +65,7 @@ pub async fn push_and_cascade(
         });
     }
 
-    publisher.push(info, bundle_path).await?;
+    publisher.push(info, &layers).await?;
 
     Ok(MirrorResult::Pushed {
         version: version_str,

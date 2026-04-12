@@ -174,6 +174,18 @@ impl OciTransport for StubTransport {
         }
     }
 
+    async fn head_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<u64> {
+        self.record(&format!("head_blob:{}", digest));
+        let inner = self.data.read();
+        match inner.blobs.get(digest) {
+            Some(blob) => Ok(blob.len() as u64),
+            None => Err(ClientError::BlobNotFound {
+                registry: image.registry().to_string(),
+                digest: digest.to_string(),
+            }),
+        }
+    }
+
     async fn pull_blob(&self, _image: &oci::native::Reference, digest: &str) -> Result<Vec<u8>> {
         self.record(&format!("pull_blob:{}", digest));
         let inner = self.data.read();

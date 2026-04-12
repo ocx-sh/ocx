@@ -193,7 +193,7 @@ pub async fn resolve_cascade_tags(
 pub async fn push_with_cascade(
     client: &oci::Client,
     package_info: package::info::Info,
-    file: impl AsRef<std::path::Path>,
+    layers: &[crate::publisher::LayerRef],
     other_versions: BTreeSet<Version>,
     version: &Version,
 ) -> Result<()> {
@@ -207,7 +207,7 @@ pub async fn push_with_cascade(
     .await?;
 
     log::debug!("Pushing package with identifier {}", package_info.identifier);
-    let (_manifest, manifest_data, manifest_sha256) = client.push_image_manifest(&package_info, file.as_ref()).await?;
+    let (_manifest, manifest_data, manifest_sha256) = client.push_multi_layer_manifest(&package_info, layers).await?;
     let manifest_size = manifest_data.len() as i64;
 
     let primary_tag = package_info.identifier.tag_or_latest().to_string();

@@ -668,26 +668,44 @@ digest are safe to run concurrently.
 
 #### `push` {#package-push}
 
-Publishes a package bundle to the registry. A [candidate symlink](../user-guide.md#path-resolution) is created locally after a successful push.
+Publishes a package to the registry as one or more layers. Each layer is uploaded as an OCI blob and recorded in a single image manifest, in the order given on the command line.
 
 **Usage**
 
 ```shell
-ocx package push [OPTIONS] <IDENTIFIER> <CONTENT>
+ocx package push [OPTIONS] --platform <PLATFORM> <IDENTIFIER> <LAYERS>...
 ```
 
 **Arguments**
 
 - `<IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000`.
-- `<CONTENT>`: Path to the package bundle (`.tar.xz`) to publish.
+- `<LAYERS>...`: One or more layers, in order (base layer first, top layer last). Each layer is either:
+  - a path to a pre-built archive file (`.tar.gz`, `.tar.xz`, `.zip`), or
+  - an OCI digest (e.g. `sha256:abc…`) of a layer that already exists in the target registry.
 
 **Options**
 
 - `-p`, `--platform <PLATFORM>`: Target platform of the package (required).
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
-- `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the bundle.
+- `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when all layers are digest references.
 - `-h`, `--help`: Print help information.
+
+::: tip Layer reuse
+Digest-referenced layers are not re-uploaded — ocx only HEADs the registry to verify they exist. This is the foundation of the [layer dedup model](../user-guide.md#file-structure-layers): a base layer pushed once can be referenced from any number of subsequent packages by digest.
+
+```shell
+# Push a fresh base + tool combination
+ocx package push -p linux/amd64 mytool:1.0.0 base.tar.gz tool.tar.gz
+
+# Reuse the same base by digest in a later release
+ocx package push -p linux/amd64 mytool:1.0.1 sha256:abc123… newtool.tar.gz
+```
+:::
+
+::: warning Bring your own archives
+`ocx package push` does not bundle a directory for you. Each file layer must be a pre-built archive. Re-bundling the same content yields a non-deterministic digest (timestamps, compression entropy) and defeats layer reuse — use [`ocx package create`](#package-create) to produce a stable archive once, then push and reference it by digest from later commands.
+:::
 
 #### `describe` {#package-describe}
 

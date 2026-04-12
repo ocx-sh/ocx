@@ -195,6 +195,18 @@ impl OciTransport for NativeTransport {
             .map_err(registry_error)
     }
 
+    async fn head_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<u64> {
+        log::debug!("HEAD blob {} for image {}", digest, image);
+        match self.client.fetch_blob_size(image, digest).await {
+            Ok(Some(size)) => Ok(size),
+            Ok(None) => Err(ClientError::BlobNotFound {
+                registry: image.registry().to_string(),
+                digest: digest.to_string(),
+            }),
+            Err(e) => Err(registry_error(e)),
+        }
+    }
+
     async fn push_manifest(&self, image: &oci::native::Reference, manifest: &oci::Manifest) -> Result<String> {
         self.client.push_manifest(image, manifest).await.map_err(registry_error)
     }

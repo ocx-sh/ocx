@@ -8,6 +8,10 @@
 //! It is the publishing counterpart to [`PackageManager`](crate::package_manager::PackageManager),
 //! which handles local-store operations.
 
+mod layer_ref;
+
+pub use layer_ref::LayerRef;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -44,22 +48,31 @@ impl Publisher {
         self.client.ensure_auth(identifier, oci::RegistryOperation::Push).await
     }
 
-    /// Push a package to the registry without cascade.
-    pub async fn push(&self, info: Info, file: &Path) -> Result<()> {
+    /// Push a package with one or more layers to the registry.
+    ///
+    /// Each `LayerRef::File` is uploaded as a new blob. Each `LayerRef::Digest`
+    /// is verified to exist via HEAD. The manifest contains one descriptor per
+    /// layer in the order provided.
+    pub async fn push(&self, info: Info, layers: &[LayerRef]) -> Result<()> {
         log::debug!("Pushing package with identifier {}", info.identifier);
-        self.client.push_package(info, file).await?;
+        self.client.push_package(info, layers).await?;
         Ok(())
     }
 
-    /// Push a package and cascade rolling tags.
+    /// Push a package with cascade tag management.
     ///
     /// `existing_versions` is the set of versions already in the registry,
     /// used to compute which rolling tags this push should update.
-    pub async fn push_cascade(&self, info: Info, file: &Path, existing_versions: BTreeSet<Version>) -> Result<()> {
+    pub async fn push_cascade(
+        &self,
+        info: Info,
+        layers: &[LayerRef],
+        existing_versions: BTreeSet<Version>,
+    ) -> Result<()> {
         let version = Version::parse(info.identifier.tag_or_latest())
             .ok_or_else(|| crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string()))?;
 
-        package::cascade::push_with_cascade(&self.client, info, file, existing_versions, &version).await
+        package::cascade::push_with_cascade(&self.client, info, layers, existing_versions, &version).await
     }
 
     /// Push a complete description artifact to the `__ocx.desc` tag.
