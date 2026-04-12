@@ -154,6 +154,10 @@ Set `dir:` on the include block when all tasks should run relative to the sub-ta
 | `preconditions:` + `msg:` | Guard -- abort if not ready | Failure aborts; downstream tasks do not run |
 | `status:` | Cache -- skip if done | Exit 0 = up-to-date, skip silently |
 
+## OCX-Specific Task Contracts
+
+- **Generation tasks** (`schema:generate`, `recordings:*`, `catalog:generate`) should depend on the compiled binary via `deps: [build]` + `sources: [target/release/ocx_schema]`, NOT on Rust source file lists. Cargo already tracks source dependencies — duplicating that in Taskfile is maintenance overhead.
+
 ## Sources
 
 - [Taskfile schema reference](https://taskfile.dev/docs/reference/schema)

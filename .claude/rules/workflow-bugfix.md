@@ -116,4 +116,4 @@ Close the loop so the fix is traceable.
 - [workflow-intent.md](./workflow-intent.md) — work-type router
 - [workflow-git.md](./workflow-git.md) — commit conventions (`fix:` type)
 - [quality-core.md](./quality-core.md) — code review checklist
-- [workflow-github-issues.md](./workflow-github-issues.md) — issue creation protocol
+- [workflow-github.md](./workflow-github.md) — issue creation protocol

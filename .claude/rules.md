@@ -46,7 +46,7 @@ catalog changes.
 | Metadata / schema changes | [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md), [subsystem-package.md](./rules/subsystem-package.md) |
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md), [workflow-release.md](./rules/workflow-release.md) |
 | AI config changes | [meta-ai-config.md](./rules/meta-ai-config.md) + this catalog, skill `meta-maintain-config` |
-| GitHub issues / planning artifacts | [workflow-github-issues.md](./rules/workflow-github-issues.md), [workflow-feature.md](./rules/workflow-feature.md) |
+| GitHub issues & PRs / planning artifacts | [workflow-github.md](./rules/workflow-github.md), [workflow-feature.md](./rules/workflow-feature.md) |
 | Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `finalize` |
 | Swarm / multi-agent workflows | [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md), skills `swarm-plan`, `swarm-execute`, `swarm-review` |
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
@@ -104,14 +104,20 @@ of truth — `CLAUDE.md` may summarize or reference by pointer.
 | `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md) |
 | `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) |
-| `.github/workflows/**`, `.github/actions/**`, `dependabot.yml` | [subsystem-ci.md](./rules/subsystem-ci.md) |
-| `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md) |
+| `.github/workflows/**`, `.github/actions/**`, `dependabot.yml` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
+| `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
+| `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md) |
 | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
 | `.claude/**` | [meta-ai-config.md](./rules/meta-ai-config.md) |
 | `.claude/agents/**`, `.claude/skills/swarm-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
 
 Globals (always loaded or imported into `CLAUDE.md`): [quality-core.md](./rules/quality-core.md),
-[quality-security.md](./rules/quality-security.md), [workflow-github-issues.md](./rules/workflow-github-issues.md), [workflow-intent.md](./rules/workflow-intent.md), [product-tech-strategy.md](./rules/product-tech-strategy.md).
+[product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md), this catalog.
+
+Scoped workflow rules (loaded by path match and consumed by skills on demand):
+[quality-security.md](./rules/quality-security.md) (`.github/workflows/**`, `.github/actions/**`),
+[workflow-github.md](./rules/workflow-github.md) (`.github/ISSUE_TEMPLATE/**`),
+[workflow-git.md](./rules/workflow-git.md) (`CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml`).
 
 ## Skills by task topic
 

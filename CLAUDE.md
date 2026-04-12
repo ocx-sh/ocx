@@ -12,7 +12,9 @@ For the full product vision, competitive positioning ("why not Homebrew / Nix / 
 
 ## Rule Catalog
 
-Before planning, researching, or making architectural decisions, consult [[.claude/rules.md](./.claude/rules.md)](.claude/rules.md) — the authoritative catalog of what rules exist in this project and when each applies. Auto-loaded rules (via path globs) only fire when you edit matching files; the catalog covers cases where you need guidance *before* any file is open. Always scan "By concern" in plan and research phases.
+Before planning, researching, or making architectural decisions, scan "By concern" in the catalog below. Auto-loaded rules (via path globs) fire when you edit matching files; the catalog covers cases where guidance is needed *before* any file is open.
+
+@.claude/rules.md
 
 ## Build & Development Commands
 
