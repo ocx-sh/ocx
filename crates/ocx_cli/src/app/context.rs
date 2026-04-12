@@ -68,6 +68,8 @@ impl Context {
             } else {
                 return Err(anyhow::anyhow!("Remote index is not available in offline mode."));
             }
+        } else if let Some(remote_index) = &remote_index {
+            index::Index::from_cached_remote(local_index.clone(), remote_index.clone())
         } else {
             index::Index::from_local(local_index.clone())
         };
@@ -105,13 +107,8 @@ impl Context {
         self.remote_index.as_ref().ok_or(ocx_lib::Error::OfflineMode)
     }
 
-    #[allow(dead_code)]
     pub fn local_index(&self) -> &oci::index::LocalIndex {
         &self.local_index
-    }
-
-    pub fn local_index_mut(&mut self) -> &mut oci::index::LocalIndex {
-        &mut self.local_index
     }
 
     pub fn default_index(&self) -> &oci::index::Index {

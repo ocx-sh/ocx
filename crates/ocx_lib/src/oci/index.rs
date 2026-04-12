@@ -13,6 +13,7 @@ pub use local_index::LocalIndex;
 pub use remote_index::Config as RemoteConfig;
 pub use remote_index::Index as RemoteIndex;
 
+mod chained_index;
 mod index_impl;
 mod local_index;
 mod remote_index;
@@ -48,6 +49,31 @@ impl Index {
         Self {
             inner: Box::new(local_index),
         }
+    }
+
+    /// Inject an arbitrary `IndexImpl` implementation.
+    ///
+    /// Used exclusively in unit tests to wrap `TestIndex` fakes without
+    /// exposing `IndexImpl` as a public trait.  Not available in production
+    /// builds.
+    #[cfg(test)]
+    pub(super) fn from_impl(inner: impl index_impl::IndexImpl + 'static) -> Self {
+        Self { inner: Box::new(inner) }
+    }
+
+    /// Construct an index that reads from `cache` first, falling through to
+    /// `sources` in order on miss. Successful source fetches are persisted
+    /// into `cache` via `update_tag`.
+    pub fn from_chained(cache: LocalIndex, sources: Vec<Index>) -> Self {
+        Self {
+            inner: Box::new(chained_index::ChainedIndex::new(cache, sources)),
+        }
+    }
+
+    /// Convenience: cache + single remote source. Equivalent to
+    /// `Index::from_chained(cache, vec![Index::from_remote(remote)])`.
+    pub fn from_cached_remote(cache: LocalIndex, remote: RemoteIndex) -> Self {
+        Self::from_chained(cache, vec![Index::from_remote(remote)])
     }
 
     /// List all repositories available in the given registry.

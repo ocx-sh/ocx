@@ -23,9 +23,9 @@ impl IndexUpdate {
         let mut join_set = tokio::task::JoinSet::new();
         for identifier in &packages {
             let remote_index = remote_index.clone();
-            let mut context = context.clone();
+            let context = context.clone();
             let identifier = identifier.clone();
-            join_set.spawn(async move { context.local_index_mut().update(&remote_index, &identifier).await });
+            join_set.spawn(async move { context.local_index().update(&remote_index, &identifier).await });
         }
 
         while let Some(result) = join_set.join_next().await {

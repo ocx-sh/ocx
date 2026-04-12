@@ -44,7 +44,7 @@ pub struct Context {
 }
 ```
 
-Accessors: `manager()`, `api()`, `file_structure()`, `default_index()`, `local_index_mut()`, `remote_client()`.
+Accessors: `manager()`, `api()`, `file_structure()`, `default_index()`, `local_index()`, `remote_client()`.
 
 ## Command Pattern
 
