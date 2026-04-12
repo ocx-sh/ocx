@@ -23,7 +23,28 @@ listed in **See Also** at the bottom.
 - Extract shared logic only when **2+ genuinely different callers** exist — incidental similarity is not duplication
 - Prefer the language's zero-cost abstraction mechanism (generics, protocols, type parameters) over runtime indirection
 - Single source of truth for business logic — if a rule exists in two places, one will go stale
-- **When NOT to DRY**: test code (explicit > clever), similar error handling representing distinct situations, coupling risk outweighs deduplication
+- **When NOT to DRY** (prefer DAMP — Descriptive And Meaningful Phrases): test code should be self-contained and readable in isolation, even at the cost of repetition. Also: similar error handling representing distinct situations, coupling risk outweighs deduplication
+
+### KISS (Keep It Simple, Stupid)
+
+Simplicity is a prerequisite for reliability. Every line of code, every abstraction, every
+indirection is a liability until proven otherwise.
+
+- Prefer straightforward code that a newcomer can read over clever code that impresses peers
+- If the design needs a diagram to explain, it may be too complex for the problem
+- Complexity is not a badge of thoroughness — it is a cost that compounds over time
+- When in doubt, write the naive solution first; optimize only when measurement demands it
+
+### Choose Boring Technology
+
+Teams have a finite budget of "innovation tokens" (Dan McKinley, 2015). Boring technology
+is mature, battle-tested, and has *known* failure modes — novel technology introduces
+unknown unknowns that compound operational cost.
+
+- Default to the established option; save novelty for where it genuinely differentiates
+- "Best tool for the job" is a local optimization — the actual job is keeping the system running
+- Each novel dependency/framework/language spends an innovation token; budget ~3 total
+- When evaluating alternatives, weigh operational maturity and team familiarity, not just features
 
 ### YAGNI
 
@@ -103,6 +124,28 @@ Before writing new code, ask:
 - **Hat 2: Optimization** — Improve performance, NOT behavior. Benchmarks required.
 
 When switching hats, commit first, then switch context.
+
+---
+
+## Verification Honesty
+
+Verification claims must be evidence-backed. Hedging language in review verdicts, commit
+messages, and completion reports masks uncertainty and degrades trust in quality gates.
+
+### Banned Phrases
+
+| Phrase | Replace With |
+|--------|-------------|
+| "should work" | "verified by [test name / command output]" |
+| "probably", "likely" | state what was checked and what the result was |
+| "seems to" | "confirmed that [X] by [method]" |
+| "Great!", "Perfect!", "Done!" | evidence of completion (test pass, clean diff, gate output) |
+
+### Classification
+
+- Hedging in a review verdict or completion report: **Warn-tier**
+- Premature celebration before verification evidence: **Warn-tier**
+- Stating "verified" without citing evidence: **Block-tier** (false verification)
 
 ---
 

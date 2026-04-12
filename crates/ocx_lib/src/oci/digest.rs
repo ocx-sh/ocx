@@ -34,7 +34,7 @@ impl Digest {
         }
     }
 
-    /// Returns the algorithm prefix (e.g., "sha256").
+    /// Algorithm prefix, e.g. `"sha256"`.
     pub fn algorithm(&self) -> &str {
         self.parts().0
     }

@@ -20,13 +20,20 @@ Multi-perspective code review with root cause analysis and OCX-specific pattern 
 
 ## Review Perspectives
 
-Launch parallel workers for:
+Reviews follow a two-stage order. **Stage 1**: launch correctness perspectives (OCX Pattern Compliance, Test Coverage). If Stage 1 has actionable findings, report them for remediation before Stage 2. **Stage 2**: launch all remaining perspectives in parallel. This prevents wasting quality polish on code that doesn't meet spec.
+
+### Stage 1 — Correctness (run first)
 
 ### OCX Pattern Compliance
 - Error model: `PackageErrorKind` used correctly, three layers maintained
 - Symlink safety: `ReferenceManager` used (not raw symlinks)
 - API contract: single table, static headers, enum statuses, actual results
 - Command pattern: args → manager → report (not echoing CLI args)
+
+### Test Coverage
+New code has tests. Bug fixes have regression tests. Edge cases covered.
+
+### Stage 2 — Quality, Security, Performance (run after Stage 1 clean)
 
 ### Security
 Per `.claude/rules/quality-security.md`: OWASP Top 10, CWE references, auth flow, input validation, symlink traversal, archive extraction safety.
@@ -36,9 +43,6 @@ Per `.claude/rules/quality-core.md`: N+1 patterns, blocking I/O in async paths, 
 
 ### Architecture
 SOLID principles, subsystem boundary respect, dependency direction.
-
-### Test Coverage
-New code has tests. Bug fixes have regression tests. Edge cases covered.
 
 ### Rust Quality
 Per `.claude/rules/quality-rust.md`: Block/Warn/Suggest tier items, async correctness (JoinSet order, cancel safety, bounded channels), SOLID compliance in Rust, code duplication detection.

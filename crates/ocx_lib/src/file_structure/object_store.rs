@@ -24,12 +24,12 @@ pub struct ObjectDir {
 }
 
 impl ObjectDir {
-    /// Path to the package content directory.
+    /// `content/` — the installed package files.
     pub fn content(&self) -> PathBuf {
         self.dir.join("content")
     }
 
-    /// Path to the package metadata file.
+    /// `metadata.json` — package metadata.
     pub fn metadata(&self) -> PathBuf {
         self.dir.join("metadata.json")
     }
@@ -91,7 +91,7 @@ impl ObjectStore {
             .join(super::repository_path(identifier.repository()))
     }
 
-    /// Returns the object directory path for the given identifier.
+    /// Object directory path: `{root}/{registry}/{repo}/{sharded_digest}/`.
     pub fn path(&self, identifier: &oci::PinnedIdentifier) -> PathBuf {
         self.root
             .join(super::slugify(identifier.registry()))
@@ -99,12 +99,12 @@ impl ObjectStore {
             .join(Self::digest_path(&identifier.digest()))
     }
 
-    /// Returns the `content/` path for the given identifier.
+    /// `{object}/content/` — the installed package files.
     pub fn content(&self, identifier: &oci::PinnedIdentifier) -> PathBuf {
         self.path(identifier).join("content")
     }
 
-    /// Returns the `metadata.json` path for the given identifier.
+    /// `{object}/metadata.json` — package metadata.
     pub fn metadata(&self, identifier: &oci::PinnedIdentifier) -> PathBuf {
         self.path(identifier).join("metadata.json")
     }
@@ -133,12 +133,12 @@ impl ObjectStore {
         Ok(Self::object_dir_for_content(content_path)?.join("deps"))
     }
 
-    /// Returns the `resolve.json` path for the given identifier.
+    /// `{object}/resolve.json` — cached resolution result.
     pub fn resolve(&self, identifier: &oci::PinnedIdentifier) -> PathBuf {
         self.path(identifier).join("resolve.json")
     }
 
-    /// Returns the `install.json` path for the given identifier.
+    /// `{object}/install.json` — install status record.
     pub fn install_status(&self, identifier: &oci::PinnedIdentifier) -> PathBuf {
         self.path(identifier).join("install.json")
     }

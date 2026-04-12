@@ -35,7 +35,10 @@ catalog changes.
 |---|---|
 | Product vision / positioning / competitors | [product-context.md](./rules/product-context.md) — canonical identity doc; update when positioning shifts (see Update Protocol section at bottom) |
 | Adopting a third-party library or tool | [product-tech-strategy.md](./rules/product-tech-strategy.md), [subsystem-deps.md](./rules/subsystem-deps.md), skill `deps`, `quality-{lang}.md` |
+| Starting any task (work-type routing) | [workflow-intent.md](./rules/workflow-intent.md) (global) — classifies work, checks GitHub context, routes to correct workflow |
 | Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, skill `architect` |
+| Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify |
+| Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
 | Website / docs work | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), skill `docs` |
 | Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
@@ -108,7 +111,7 @@ of truth — `CLAUDE.md` may summarize or reference by pointer.
 | `.claude/agents/**`, `.claude/skills/swarm-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
 
 Globals (always loaded or imported into `CLAUDE.md`): [quality-core.md](./rules/quality-core.md),
-[quality-security.md](./rules/quality-security.md), [workflow-github-issues.md](./rules/workflow-github-issues.md), [product-tech-strategy.md](./rules/product-tech-strategy.md).
+[quality-security.md](./rules/quality-security.md), [workflow-github-issues.md](./rules/workflow-github-issues.md), [workflow-intent.md](./rules/workflow-intent.md), [product-tech-strategy.md](./rules/product-tech-strategy.md).
 
 ## Skills by task topic
 

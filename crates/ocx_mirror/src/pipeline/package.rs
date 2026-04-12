@@ -40,7 +40,6 @@ pub async fn extract_and_bundle(
         }
     }
 
-    // Write metadata.json into content dir
     let metadata_path = content_dir.join("metadata.json");
     let metadata_json = serde_json::to_string_pretty(metadata)?;
     tokio::fs::write(&metadata_path, metadata_json).await?;

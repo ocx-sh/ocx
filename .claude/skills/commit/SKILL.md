@@ -43,19 +43,20 @@ For rebasing-phase cleanup (squash, reword, split `main..HEAD`), use `/finalize`
 - `git log -1 --pretty=%s` — is HEAD itself a Checkpoint?
 - `gh pr view --json number,state 2>/dev/null` — open PR for this branch?
 
-If the working tree is clean **and** HEAD is not a Checkpoint needing finalization, stop with "nothing to commit".
+If the working tree is clean **and** HEAD is not a Checkpoint, stop with "nothing to commit".
 
 ### 2. Checkpoint scan (window, not just HEAD)
 
 Look at the last 5 commits for any with subject exactly `Checkpoint`.
 
-**Case A — HEAD itself is `Checkpoint`**: ask via `AskUserQuestion`:
+**Case A — HEAD itself is `Checkpoint`**:
 
-| Option | Effect |
+Two sub-cases based on working tree state:
+
+| Sub-case | Behavior |
 |---|---|
-| **Amend checkpoint** (default) | Stage everything and `git commit --amend --no-edit` — rolling WIP |
-| **Finalize as conventional commit** | Stage everything and `git commit --amend -m "<drafted message>"` |
-| **New commit on top** | Leave Checkpoint untouched, new conventional commit on top |
+| **Dirty tree** (unstaged/untracked changes exist) | **Auto-amend** — stage all changed files by name and `git commit --amend --no-edit`. No question. Rolling Checkpoints absorb all active changes as a union. Report what was folded in. |
+| **Clean tree** (no changes, Checkpoint holds accumulated work) | The Checkpoint itself is the deliverable. Draft a conventional commit message from the Checkpoint's diff (`git diff main..HEAD`), show it, and amend: `git commit --amend -m "<drafted message>"`. This is the "finalize in place" path — the user called `/commit` to give the Checkpoint a real name. |
 
 **Case B — `Checkpoint` exists at HEAD~1..HEAD~5 but not HEAD (stranded)**: warn the user. It means a previous session made real work inside a Checkpoint then landed other commits on top without finalizing it. Offer:
 

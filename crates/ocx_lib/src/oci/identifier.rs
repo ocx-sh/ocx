@@ -86,7 +86,7 @@ impl Identifier {
         }
     }
 
-    /// Returns a new identifier with the given digest, preserving the existing tag.
+    /// Clones with the given digest, preserving the existing tag.
     pub fn clone_with_digest(&self, digest: Digest) -> Self {
         Self {
             registry: self.registry.clone(),
@@ -96,8 +96,6 @@ impl Identifier {
         }
     }
 
-    /// Returns a new identifier with the digest stripped, preserving registry, repository, and tag.
-    ///
     /// Useful for matching entries that differ only by digest (e.g., candidate vs content mode).
     pub fn without_digest(&self) -> Self {
         Self {
@@ -108,7 +106,7 @@ impl Identifier {
         }
     }
 
-    /// Returns a new identifier with the tag stripped, preserving registry, repository, and digest.
+    /// Strips the tag, preserving registry, repository, and digest.
     pub fn without_tag(&self) -> Self {
         Self {
             registry: self.registry.clone(),
@@ -161,7 +159,7 @@ impl Identifier {
         self.tag.as_deref().unwrap_or("latest")
     }
 
-    /// Returns the content-addressed digest, if any.
+    /// Content-addressed digest, if pinned.
     pub fn digest(&self) -> Option<Digest> {
         self.digest.clone()
     }

@@ -120,7 +120,7 @@ No secrets in code — use env vars or secret managers. Validate all external in
 
 ### 4. Keep It Simple
 
-Small functions, single responsibility. No premature abstraction — three similar lines beat a bad helper. Delete dead code. Avoid `any` types. Fix warnings before committing.
+Small functions, single responsibility. No premature abstraction — three similar lines beat a bad helper. Delete dead code. Avoid `any` types. Fix warnings before committing. Comments explain *why*, never *what* — do not add comments that restate code. Assume a senior engineer as the reader.
 
 ### 5. Don't Repeat Yourself
 
@@ -183,6 +183,6 @@ When receiving user feedback or corrections, evaluate whether the insight should
 
 Persona skills (`/architect`, `/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`, `/swarm-plan`, `/swarm-execute`, `/swarm-review`) and task skills live in `.claude/skills/`. See the "Skills by task topic" table in [[.claude/rules.md](./.claude/rules.md)](.claude/rules.md) for the full map. Skills are auto-suggested via `.claude/skills/skill-rules.json`; check `.claude/skills/` before ad-hoc generation.
 
-## Feature Development
+## Starting Work
 
-See `.claude/rules/workflow-feature.md` for the full workflow: swarm (primary) and agent teams (experimental).
+Every task starts with [workflow-intent.md](./.claude/rules/workflow-intent.md) — classify the work (feature, bug fix, or refactoring), check GitHub for related issues/PRs, then follow the appropriate workflow. See also: [workflow-feature.md](./.claude/rules/workflow-feature.md), [workflow-bugfix.md](./.claude/rules/workflow-bugfix.md), [workflow-refactor.md](./.claude/rules/workflow-refactor.md).

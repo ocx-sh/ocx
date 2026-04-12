@@ -234,13 +234,11 @@ impl Sync {
             return Ok(());
         }
 
-        // Prepare work directory (scoped per spec name)
         let work_dir = self.options.work_dir.join(&spec.name);
         tokio::fs::create_dir_all(&work_dir)
             .await
             .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
 
-        // Execute
         let http_client = reqwest::Client::new();
 
         let compression_threads = crate::spec::resolve_compression_threads(

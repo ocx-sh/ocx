@@ -36,9 +36,14 @@ After implementation passes `task verify`, enter a bounded review-fix cycle that
 
 ### Loop Protocol
 
-**Round 1 (full review):**
-Launch all applicable review perspectives in parallel, scoped to changed files:
-- `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) *— optional for ≤3 files*
+**Round 1 — Stage 1 (spec compliance first):**
+Launch spec-compliance review alone, scoped to changed files:
+- `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) *— optional for ≤3 files; if skipped, proceed directly to Stage 2*
+
+If spec-compliance has actionable findings, fix them (builder pass + subsystem verify) before proceeding to Stage 2. Rationale: polishing code that doesn't meet the design record wastes effort.
+
+**Round 1 — Stage 2 (remaining perspectives in parallel):**
+Launch all other applicable perspectives in parallel, scoped to changed files:
 - `worker-reviewer` (focus: `quality`)
 - `worker-reviewer` (focus: `security`) *— if touching auth, input handling, or external data*
 - `worker-reviewer` (focus: `performance`) *— if touching hot paths or async code*

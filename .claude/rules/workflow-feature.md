@@ -7,7 +7,7 @@ paths:
 
 # Feature Development Workflow
 
-Two workflows for implementing features, from planning through quality gates.
+Two workflows for implementing features, from planning through quality gates. Use the `plan.template.md` template from `.claude/templates/artifacts/` when creating plan artifacts. Referenced from [workflow-intent.md](./workflow-intent.md) when work is classified as a feature.
 
 ## Swarm Workflow (Primary)
 

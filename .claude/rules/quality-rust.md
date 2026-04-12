@@ -184,6 +184,54 @@ See `quality-core.md` for the universal review checklist. Rust-specific addition
 
 ---
 
+## Comment Quality
+
+Comments communicate what the code cannot. The code communicates *what*; comments communicate *why*.
+
+### The Ousterhout Test
+
+> "If someone unfamiliar with the code could write your comment just by reading the code, it adds no value."
+
+Before adding a comment, apply three substitution tests: (1) Can a better name eliminate the need? (2) Can extraction into a named function eliminate the need? (3) Can a type (enum, newtype) eliminate the need? Only add the comment if all three fail.
+
+### Two-Register Model
+
+| Register | Syntax | Audience | Content |
+|----------|--------|----------|---------|
+| **Doc comments** | `///` / `//!` | API consumers (rustdoc) | Contract: what it does, when it fails, invariants |
+| **Inline comments** | `//` | Maintainers reading the implementation | Rationale: why this approach, non-obvious constraints |
+
+Never mix: don't explain implementation mechanics in `///`, don't explain API contracts in `//`.
+
+### Block-tier (must fix)
+
+- **Commented-out code** — delete it; version control preserves history
+- **`unsafe` without `// SAFETY:`** — already required above, re-confirmed
+
+### Warn-tier (should fix)
+
+- **Narration comments** — comments restating what the next line does (`// Create a new vector` above `let v = Vec::new()`)
+- **Tautological doc comments** — `///` that restates the function name without adding information (`/// Returns the path` on `fn path()`)
+- **Closing brace comments** — `} // end if`, `} // end for`
+
+### Positive Requirements
+
+- Public items: `///` with a summary that adds information beyond the name
+- Functions returning `Result`: `# Errors` section
+- Modules: `//!` inner doc comment at top
+- `unsafe` blocks: `// SAFETY:` explaining the relied-upon invariant
+
+### Patterns to Preserve
+
+- `// ── Section ──` dividers in long files (aids scanning)
+- Phase/step comments in multi-step orchestration (`// Phase 1:`, `// Step 1:`)
+- Parenthetical qualifications explaining *why* (`// tolerate failure (stale ref or GC'd object)`)
+- Issue references (`// NOTE: issue #23`)
+- Comments explaining non-obvious constraints or "why this looks wrong but is correct"
+- External references (RFCs, specs, algorithm citations)
+
+---
+
 ## Sources
 
 Authoritative references used in this rule:

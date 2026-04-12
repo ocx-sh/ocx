@@ -63,9 +63,13 @@ When the orchestrator provides a file list (from `git diff main...HEAD --name-on
 Every finding must be classified:
 
 - **Actionable** — can be fixed without human input (code quality, missing tests, naming, patterns, security fixes with clear remediation)
-- **Deferred** — requires human decision (design questions, scope changes, architectural trade-offs, external dependency choices)
+- **Deferred** — requires human decision. State the reason explicitly: "reason: human judgment needed on [specific question]". Do not hedge with "probably" or "might" — if the reason is unclear, investigate further before classifying.
 
 This classification drives the review-fix loop in `/swarm-execute` — only perspectives with actionable findings trigger re-review.
+
+### Verification Honesty
+
+Review verdicts and finding descriptions must be evidence-backed. Banned: "should work", "probably", "seems to", "likely". State what was verified and how. See `quality-core.md` Verification Honesty section.
 
 ## Output Format
 

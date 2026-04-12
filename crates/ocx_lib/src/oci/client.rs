@@ -307,7 +307,6 @@ impl Client {
             .await
             .map_err(ClientError::internal)?;
 
-        // Download content blob — potentially large, show progress.
         let blob_layer = &manifest.layers[0];
         let blob_compression =
             compression::CompressionAlgorithm::from_media_type(&blob_layer.media_type).ok_or_else(|| {
@@ -334,7 +333,6 @@ impl Client {
                 .await?;
         }
 
-        // Extract archive + codesign.
         self.extract_to_temp(identifier, metadata, blob_compression, blob_file_ext, output_dir)
             .await?;
 
@@ -435,7 +433,6 @@ impl Client {
             .map(|mt| mt.to_string())
             .ok_or_else(|| ClientError::InvalidManifest(format!("unsupported archive: {}", path.display())))?;
 
-        // Read file and calculate digest for content-addressing.
         let package_data = tokio::fs::read(path).await.map_err(|e| ClientError::Io {
             path: path.to_path_buf(),
             source: e,
@@ -445,7 +442,6 @@ impl Client {
 
         log::trace!("Calculated package digest: {}", package_digest);
 
-        // Package blob — potentially large, show progress.
         {
             let bar = crate::cli::progress::ProgressBar::bytes(
                 tracing::info_span!("Uploading", package = %package_info.identifier),
@@ -546,14 +542,12 @@ impl Client {
         let image = super::native::Reference::from(&desc_identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
 
-        // Push empty config blob.
         let config_data = b"{}".to_vec();
         let config_digest = Digest::sha256(&config_data).to_string();
         self.transport
             .push_blob(&image, config_data, &config_digest, transport::no_progress())
             .await?;
 
-        // Push README blob.
         let readme_bytes = description.readme.as_bytes();
         let readme_len = readme_bytes.len();
         let readme_digest = Digest::sha256(readme_bytes).to_string();
@@ -569,7 +563,6 @@ impl Client {
             annotations: Some([(oci::annotations::TITLE.to_string(), "README.md".to_string())].into()),
         }];
 
-        // Push logo blob if provided.
         if let Some(logo) = &description.logo {
             let logo_len = logo.data.len();
             let logo_digest = Digest::sha256(&logo.data).to_string();
@@ -651,7 +644,6 @@ impl Client {
             }
         };
 
-        // Validate artifact type.
         match &image_manifest.artifact_type {
             Some(at) if at == MEDIA_TYPE_DESCRIPTION_V1 => {}
             other => {
@@ -663,7 +655,6 @@ impl Client {
             }
         }
 
-        // Pull layers by media type into temp files.
         let mut readme: Option<String> = None;
         let mut logo: Option<package::description::Logo> = None;
 

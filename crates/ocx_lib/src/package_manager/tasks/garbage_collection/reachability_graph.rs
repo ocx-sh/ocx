@@ -42,7 +42,6 @@ impl ReachabilityGraph {
             file_structure.objects.root().clone()
         }));
 
-        // Resolve profile content-mode entries to object store paths (forward lookup).
         let profile_roots: HashSet<PathBuf> = profile
             .content_digests()
             .into_iter()
@@ -56,7 +55,6 @@ impl ReachabilityGraph {
             })
             .collect();
 
-        // Spawn parallel I/O tasks to probe refs/ and deps/ for each object.
         let sem = Arc::new(Semaphore::new(BUILD_CONCURRENCY));
         let mut tasks = JoinSet::new();
 
@@ -77,7 +75,6 @@ impl ReachabilityGraph {
             });
         }
 
-        // Collect results and assemble the graph.
         let mut roots = HashSet::new();
         let mut dep_edges = HashMap::new();
         let mut all_objects = HashSet::new();

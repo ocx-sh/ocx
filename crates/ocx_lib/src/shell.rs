@@ -41,7 +41,6 @@ impl Shell {
         let path = path.as_ref();
         log::trace!("Detecting shell from path: {}", path.display());
 
-        // If the path is a symlink, we try to resolve it to get the actual shell, before falling back to filename matching.
         if crate::symlink::is_link(path) {
             log::trace!("Shell is a symlink, attempting to resolve it...");
             if let Ok(canonical_path) = std::fs::read_link(path)
@@ -51,7 +50,6 @@ impl Shell {
             }
         }
 
-        // Extracts the filename from the path and matches it against known shell names.
         let filename = path.file_stem()?.to_str()?;
         match filename {
             "ash" | "busybox" => Some(Self::Ash),
