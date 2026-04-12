@@ -21,17 +21,14 @@ pub struct ResolvedDependency {
 /// Persisted resolution state for an installed package.
 ///
 /// Written to `resolve.json` in each object directory at install time.
-/// Contains the package's own fully-resolved identifier and its transitive
-/// dependency closure in topological order (deps before dependents).
-///
-/// The `identifier` is always the **platform-resolved** identifier — for
-/// multi-platform packages this is the platform-specific manifest digest,
-/// never the Image Index digest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Contains the package's transitive dependency closure in topological order
+/// (deps before dependents). The root package's own identifier is **not**
+/// stored here — it is redundant with the caller context and would couple the
+/// identity of a shared, deduplicated package directory to whichever installer
+/// won the cross-repo race.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedPackage {
-    /// The fully resolved identifier of this package (registry/repo:tag@digest).
-    pub identifier: PinnedIdentifier,
-
     /// Transitive dependency closure with pre-computed visibility.
     /// Deps before dependents. The root package itself is **not** included.
     /// Leaf packages (no dependencies) have an empty vec.
@@ -40,28 +37,33 @@ pub struct ResolvedPackage {
 
 impl ResolvedPackage {
     /// Creates a leaf package with no dependencies.
-    pub fn new(identifier: PinnedIdentifier) -> Self {
+    pub fn new() -> Self {
         Self {
-            identifier,
             dependencies: Vec::new(),
         }
     }
 
     /// Builds the transitive dependency closure from resolved direct deps.
     ///
-    /// Each item is `(child_resolved, edge_visibility)` where `edge_visibility`
-    /// is the parent's declared visibility for this edge. Propagation rule:
-    /// if the child exports (consumer-visible), result = edge; otherwise Sealed.
-    /// Diamond deps use [`Visibility::merge`] — if any path makes a dep visible,
-    /// the final visibility is the most open.
+    /// Each item is `(child_id, child_resolved, edge_visibility)`. The
+    /// identifier is supplied separately because [`ResolvedPackage`] no longer
+    /// carries its own root identifier — that would couple shared package
+    /// directories to whichever installer won the cross-repo race.
+    ///
+    /// Propagation rule: if the child exports (consumer-visible), result =
+    /// edge; otherwise Sealed. Diamond deps use [`Visibility::merge`] — if any
+    /// path makes a dep visible, the final visibility is the most open.
     ///
     /// Preserves topological order (deps before dependents) and deduplicates
     /// by identity (advisory tags stripped).
-    pub fn with_dependencies(mut self, deps: impl IntoIterator<Item = (ResolvedPackage, Visibility)>) -> Self {
+    pub fn with_dependencies(
+        mut self,
+        deps: impl IntoIterator<Item = (PinnedIdentifier, ResolvedPackage, Visibility)>,
+    ) -> Self {
         // Maps stripped identity → index in self.dependencies for OR dedup.
         let mut seen: std::collections::HashMap<PinnedIdentifier, usize> = std::collections::HashMap::new();
 
-        for (dep, edge) in deps {
+        for (dep_id, dep, edge) in deps {
             // Bubble up transitive deps first (preserves topological order).
             for transitive in dep.dependencies {
                 let propagated = edge.propagate(transitive.visibility);
@@ -80,14 +82,14 @@ impl ResolvedPackage {
             }
 
             // Then add the direct dep itself.
-            let key = dep.identifier.strip_advisory();
+            let key = dep_id.strip_advisory();
             if let Some(&idx) = seen.get(&key) {
                 self.dependencies[idx].visibility = self.dependencies[idx].visibility.merge(edge);
             } else {
                 let idx = self.dependencies.len();
                 seen.insert(key, idx);
                 self.dependencies.push(ResolvedDependency {
-                    identifier: dep.identifier,
+                    identifier: dep_id,
                     visibility: edge,
                 });
             }
@@ -121,9 +123,39 @@ mod tests {
         PinnedIdentifier::try_from(id).unwrap()
     }
 
-    /// Helper: build a ResolvedPackage leaf with no dependencies.
-    fn leaf(repo: &str, hex: char) -> ResolvedPackage {
-        ResolvedPackage::new(make_pinned_repo(repo, hex))
+    /// Test wrapper pairing an identifier with its resolved closure.
+    ///
+    /// Production [`ResolvedPackage`] no longer carries an identifier, but
+    /// the test helpers need to chain resolutions by name — the wrapper keeps
+    /// the (id, resolved) tuple together while tests build graphs.
+    #[derive(Clone)]
+    struct TestPkg {
+        id: PinnedIdentifier,
+        resolved: ResolvedPackage,
+    }
+
+    impl std::ops::Deref for TestPkg {
+        type Target = ResolvedPackage;
+        fn deref(&self) -> &Self::Target {
+            &self.resolved
+        }
+    }
+
+    impl TestPkg {
+        fn with_dependencies(mut self, deps: impl IntoIterator<Item = (TestPkg, Visibility)>) -> Self {
+            self.resolved = self
+                .resolved
+                .with_dependencies(deps.into_iter().map(|(p, v)| (p.id, p.resolved, v)));
+            self
+        }
+    }
+
+    /// Helper: build a `TestPkg` leaf with no dependencies.
+    fn leaf(repo: &str, hex: char) -> TestPkg {
+        TestPkg {
+            id: make_pinned_repo(repo, hex),
+            resolved: ResolvedPackage::new(),
+        }
     }
 
     /// Helper: assert a dep at index has the expected repo and visibility.
@@ -144,7 +176,6 @@ mod tests {
             visibility: Visibility::Public,
         };
         let pkg = ResolvedPackage {
-            identifier: make_pinned(),
             dependencies: vec![dep.clone()],
         };
         let json = serde_json::to_string(&pkg).unwrap();
@@ -160,7 +191,6 @@ mod tests {
             visibility: Visibility::Sealed,
         };
         let pkg = ResolvedPackage {
-            identifier: make_pinned(),
             dependencies: vec![dep.clone()],
         };
         let json = serde_json::to_string(&pkg).unwrap();
@@ -181,7 +211,6 @@ mod tests {
             },
         ];
         let pkg = ResolvedPackage {
-            identifier: make_pinned(),
             dependencies: deps.clone(),
         };
         let json = serde_json::to_string(&pkg).unwrap();
@@ -191,35 +220,43 @@ mod tests {
 
     #[test]
     fn serde_leaf_package_empty_dependencies() {
-        let pkg = ResolvedPackage {
-            identifier: make_pinned(),
-            dependencies: vec![],
-        };
+        let pkg = ResolvedPackage { dependencies: vec![] };
         let json = serde_json::to_string(&pkg).unwrap();
         let deserialized: ResolvedPackage = serde_json::from_str(&json).unwrap();
         assert!(deserialized.dependencies.is_empty());
     }
 
     #[test]
-    fn deserialize_rejects_missing_identifier() {
+    fn deserialize_accepts_empty_dependencies() {
         let json = r#"{"dependencies": []}"#;
+        let pkg: ResolvedPackage = serde_json::from_str(json).unwrap();
+        assert!(pkg.dependencies.is_empty());
+    }
+
+    #[test]
+    fn deserialize_rejects_missing_dependencies() {
+        let json = "{}";
         let result = serde_json::from_str::<ResolvedPackage>(json);
         assert!(result.is_err());
     }
 
     #[test]
-    fn deserialize_rejects_missing_dependencies() {
+    fn deserialize_rejects_old_format_with_identifier_field() {
+        // Old format had a root `identifier` — rejected with deny_unknown_fields
+        // to force a fresh install rather than silently loading stale repo data.
         let id = make_pinned();
-        let json = format!(r#"{{"identifier": "{}"}}"#, id);
+        let json = format!(r#"{{"identifier":"{}","dependencies":[]}}"#, id);
         let result = serde_json::from_str::<ResolvedPackage>(&json);
-        assert!(result.is_err());
+        assert!(
+            result.is_err(),
+            "old format with root identifier field should fail deserialization"
+        );
     }
 
     #[test]
-    fn deserialize_rejects_old_format_bare_strings() {
-        let id = make_pinned();
+    fn deserialize_rejects_old_format_bare_string_deps() {
         let dep = make_dep_pinned();
-        let json = format!(r#"{{"identifier":"{}","dependencies":["{}"]}}"#, id, dep);
+        let json = format!(r#"{{"dependencies":["{}"]}}"#, dep);
         let result = serde_json::from_str::<ResolvedPackage>(&json);
         assert!(
             result.is_err(),

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -1304,20 +1303,17 @@ def test_diamond_intermediate_deps_forward_refs(
 def _find_object_dir(ocx: OcxRunner, reg_slug: str, repo: str) -> Path:
     """Find the single package directory for a given repo in the package store.
 
-    Package dirs are sharded by digest only: ``packages/{reg}/{algo}/{prefix}/{suffix}/``.
-    We identify the package by checking each object's ``resolve.json`` for the repo name.
+    Package dirs are sharded by registry + digest only (no repo in the path),
+    so ``find`` is the authoritative way to resolve a repo name to a content
+    path. For transitive deps (not installed directly and thus without an
+    install symlink) we fall back to the bare repo name so ``ocx find``
+    resolves via the local index.
     """
-    store_dir = Path(ocx.ocx_home) / "packages" / reg_slug
-    obj_dirs = []
-    for content_path in store_dir.rglob("content"):
-        if content_path.is_dir():
-            resolve_path = content_path.parent / "resolve.json"
-            if resolve_path.exists():
-                data = json.loads(resolve_path.read_text())
-                if repo in data.get("identifier", ""):
-                    obj_dirs.append(content_path.parent)
-    assert len(obj_dirs) == 1, f"expected 1 package dir for {repo}, got {len(obj_dirs)}"
-    return obj_dirs[0]
+    find_result = ocx.json("find", repo)
+    key = next(iter(find_result))
+    content_path = Path(find_result[key]).resolve()
+    assert content_path.name == "content", f"unexpected find target: {content_path}"
+    return content_path.parent
 
 
 def _list_dep_targets(obj_dir: Path) -> list[Path]:

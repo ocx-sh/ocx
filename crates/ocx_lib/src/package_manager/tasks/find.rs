@@ -98,7 +98,7 @@ mod tests {
     const VALID_METADATA_JSON: &str = r#"{"type":"bundle","version":1}"#;
 
     fn valid_resolve_json() -> String {
-        format!(r#"{{"identifier":"example.com/test/pkg@sha256:{SHA256_HEX}","dependencies":[]}}"#,)
+        r#"{"dependencies":[]}"#.to_string()
     }
 
     fn test_pinned() -> oci::PinnedIdentifier {

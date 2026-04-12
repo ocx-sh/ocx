@@ -11,7 +11,7 @@ mod tag_store;
 mod temp_store;
 
 pub use blob_store::{BlobDir, BlobStore};
-pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, write_digest_file};
+pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, read_digest_file, write_digest_file};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore};
 pub use symlink_store::{SymlinkKind, SymlinkStore};

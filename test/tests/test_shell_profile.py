@@ -785,6 +785,35 @@ def test_profile_load_follows_select(
     # The current symlink now points to v2's content
 
 
+def test_profile_list_current_mode_drops_stale_tag_after_select(
+    ocx: OcxRunner, published_two_versions: tuple[PackageInfo, PackageInfo]
+):
+    """Regression: current-mode entry originally added as v1 must not report
+    `v1@<digest-of-v2>` after `ocx select v2`. The reconstructed identifier
+    for a current symlink must strip the caller's tag so the reported
+    identifier does not mix a stale tag with a newer digest."""
+    v1, v2 = published_two_versions
+    ocx.json("install", "-s", v1.short)
+    ocx.json("install", v2.short)
+    ocx.json("shell", "profile", "add", "--current", v1.short)
+    ocx.json("select", v2.short)
+
+    result = ocx.json("shell", "profile", "list")
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["mode"] == "current"
+    assert entry["status"] == "active"
+
+    package = entry["package"]
+    # Must not contain the stale v1 tag — that would be a hybrid identifier
+    # `pkg:v1@<digest-of-v2>` which doesn't correspond to any real install.
+    assert f":{v1.tag}" not in package, (
+        f"current-mode entry still reports stale tag '{v1.tag}': {package}"
+    )
+    # Must carry a digest so downstream consumers can pin the actually-selected content.
+    assert "@sha256:" in package, f"expected digest in reported identifier: {package}"
+
+
 def test_profile_load_empty_profile(ocx: OcxRunner):
     """No entries → comment-only output for all shells, exit 0"""
     for shell in ("bash", "zsh", "fish", "powershell"):

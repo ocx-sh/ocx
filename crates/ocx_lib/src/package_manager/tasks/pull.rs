@@ -327,14 +327,14 @@ async fn setup_owned(
 
     // Build resolved package and enrich temp dir.
     // Order invariant: setup_dependencies returns results in declaration order.
-    let resolved = ResolvedPackage::new(pinned.clone()).with_dependencies(
+    let resolved = ResolvedPackage::new().with_dependencies(
         metadata
             .dependencies()
             .iter()
             .zip(dependencies.iter())
-            .map(|(decl, info)| (info.resolved.clone(), decl.visibility)),
+            .map(|(decl, info)| (info.identifier.clone(), info.resolved.clone(), decl.visibility)),
     );
-    post_download_actions(&pkg, &resolved).await?;
+    post_download_actions(&pkg, pinned, &resolved).await?;
 
     // Create remaining forward-ref symlinks in temp dir BEFORE move — targets
     // are absolute paths already in their respective stores. This ensures the
@@ -437,6 +437,7 @@ async fn setup_dependencies(
 /// - Writes the `digest` file for recovery of the full digest from the truncated CAS path.
 async fn post_download_actions(
     pkg: &file_structure::PackageDir,
+    pinned: &oci::PinnedIdentifier,
     resolved: &ResolvedPackage,
 ) -> Result<(), PackageErrorKind> {
     resolved
@@ -450,7 +451,7 @@ async fn post_download_actions(
         .await
         .map_err(PackageErrorKind::Internal)?;
 
-    file_structure::write_digest_file(&pkg.digest_file(), &resolved.identifier.digest())
+    file_structure::write_digest_file(&pkg.digest_file(), &pinned.digest())
         .await
         .map_err(PackageErrorKind::Internal)?;
 

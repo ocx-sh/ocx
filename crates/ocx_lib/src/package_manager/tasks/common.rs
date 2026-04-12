@@ -57,6 +57,37 @@ pub async fn find_in_store(
     }
 }
 
+/// Reconstructs the [`PinnedIdentifier`](oci::PinnedIdentifier) for a package
+/// loaded through an install symlink (candidate or current).
+///
+/// Registry and repository come from the caller-supplied [`oci::Identifier`].
+/// The digest is read from the shared package directory's `digest` file so the
+/// result is the truly installed content digest, not whatever first installer
+/// happened to win a cross-repo dedup race.
+///
+/// Tag handling depends on `kind`:
+/// - [`SymlinkKind::Candidate`]: caller's tag is preserved — candidate symlinks
+///   are keyed by tag, so the tag and digest always agree by construction.
+/// - [`SymlinkKind::Current`]: caller's tag is stripped. `current` points at
+///   whatever digest was most recently selected, which may have been installed
+///   under a different tag than the caller supplied. Keeping the caller's tag
+///   would produce a hybrid identifier (`pkg:old-tag@new-digest`) that never
+///   existed as a real install.
+pub async fn identifier_for_symlink(
+    objects: &PackageStore,
+    symlink_path: &Path,
+    identifier: &oci::Identifier,
+    kind: file_structure::SymlinkKind,
+) -> Result<oci::PinnedIdentifier, crate::Error> {
+    let digest_path = objects.digest_file_for_content(symlink_path)?;
+    let digest = file_structure::read_digest_file(&digest_path).await?;
+    let base = match kind {
+        file_structure::SymlinkKind::Candidate => identifier.clone(),
+        file_structure::SymlinkKind::Current => identifier.without_tag(),
+    };
+    Ok(oci::PinnedIdentifier::try_from(base.clone_with_digest(digest))?)
+}
+
 /// Loads metadata.json and resolve.json for an existing content path.
 ///
 /// Uses `PackageStore::metadata_for_content` / `resolve_for_content` which
