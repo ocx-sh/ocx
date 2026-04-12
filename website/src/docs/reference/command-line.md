@@ -680,8 +680,9 @@ ocx package push [OPTIONS] --platform <PLATFORM> <IDENTIFIER> <LAYERS>...
 
 - `<IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000`.
 - `<LAYERS>...`: One or more layers, in order (base layer first, top layer last). Each layer is either:
-  - a path to a pre-built archive file (`.tar.gz`, `.tar.xz`, `.zip`), or
-  - an OCI digest (e.g. `sha256:abc…`) of a layer that already exists in the target registry.
+  - a path to a pre-built archive file (`.tar.gz`, `.tgz`, `.tar.xz`, or `.txz`), or
+  - a digest reference of the form `sha256:<hex>.<ext>` (e.g. `sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.tar.gz`) pointing at a layer that already exists in the target registry. The `<ext>` suffix is mandatory — OCI blob HEADs do not carry the original media type, so the publisher must declare it. Bare digests are rejected.
+  - To force file interpretation of a pathological filename that happens to match the digest shape, prefix it with `./` (e.g. `./sha256:abc….tar.gz`).
 
 **Options**
 
@@ -698,8 +699,10 @@ Digest-referenced layers are not re-uploaded — ocx only HEADs the registry to 
 # Push a fresh base + tool combination
 ocx package push -p linux/amd64 mytool:1.0.0 base.tar.gz tool.tar.gz
 
-# Reuse the same base by digest in a later release
-ocx package push -p linux/amd64 mytool:1.0.1 sha256:abc123… newtool.tar.gz
+# Reuse the same base by digest in a later release.
+# The digest is the full 64-char sha256 hex written verbatim —
+# the ellipsis is shown here only to keep the example short.
+ocx package push -p linux/amd64 mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.gz
 ```
 :::
 

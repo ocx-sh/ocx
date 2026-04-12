@@ -111,14 +111,19 @@ The layer store enables a different kind of dedup than the package store. The pa
 # Two-layer package: shared base + package-specific top
 ocx package push -p linux/amd64 mytool:1.2.3 base.tar.gz tool.tar.gz
 
-# Re-publish with the base layer reused by digest — no re-upload
-ocx package push -p linux/amd64 mytool:1.2.4 sha256:abc123… newtool.tar.gz
+# Re-publish with the base layer reused by digest — no re-upload.
+# The digest ref must spell out the original archive extension
+# (`.tar.gz` / `.tgz` / `.tar.xz` / `.txz`) — OCI blob HEADs do not
+# carry the media type, so ocx refuses to guess.
+ocx package push -p linux/amd64 mytool:1.2.4 sha256:<hex>.tar.gz newtool.tar.gz
 ```
 
 The order matters for the manifest descriptor list, but assembled content must not overlap — two layers cannot contain the same file path. Overlap is rejected at install time with a clear error.
 
 ::: warning Bring your own archives
-`ocx package push` does **not** bundle a directory for you. Each layer must be a pre-built archive (`.tar.gz`, `.tar.xz`, `.zip`). This is intentional: archive creation is non-deterministic (timestamps, compression entropy, file ordering), so re-bundling the same content yields a different digest and defeats layer reuse. Use [`ocx package create`][cmd-package-create] if you need to bundle a directory — that command produces a stable archive once, which you can then push and reference by digest from any number of subsequent packages.
+`ocx package push` does **not** bundle a directory for you. Each layer must be a pre-built archive (`.tar.gz` / `.tgz` or `.tar.xz` / `.txz`). This is intentional: archive creation is non-deterministic (timestamps, compression entropy, file ordering), so re-bundling the same content yields a different digest and defeats layer reuse. Use [`ocx package create`][cmd-package-create] if you need to bundle a directory — that command produces a stable archive once, which you can then push and reference by digest from any number of subsequent packages.
+
+If a file in your current directory is literally named like a digest reference (e.g. `sha256:abc….tar.gz`), prefix it with `./` to force file interpretation — bare `sha256:…` tokens are always parsed as digest refs.
 :::
 
 ::: tip Designing for reuse
