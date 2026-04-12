@@ -42,32 +42,28 @@ impl ChainedIndex {
     ///
     /// An empty `sources` Vec returns `Ok(())` (cache-only behavior).
     async fn walk_chain(&self, identifier: &oci::Identifier) -> Result<()> {
-        // The chain only fetches when the caller names a specific tag.
-        // Untagged identifiers (bare `pkg`) would require `list_tags` against
-        // the registry to discover what's available, but `ChainedIndex::list_tags`
-        // deliberately delegates to the cache only — tag discovery is the job
-        // of `ocx index update`, not transparent install-time resolution. As a
-        // result, `ocx install <pkg>` on an empty local index still returns
-        // NotFound; the user must run `ocx index update <pkg>` first. Digest-only
-        // identifiers (`pkg@sha256:...`) similarly cannot be discovered here.
-        if identifier.tag().is_none() {
+        // Digest-only identifiers (`pkg@sha256:…`) cannot be discovered via
+        // tag fallback — bail out. For every other shape, fall back under
+        // `tag_or_latest()`, which returns the explicit tag when present and
+        // `"latest"` for bare identifiers. That keeps `ocx install cmake`
+        // behaving the same as `ocx install cmake:latest` on a fresh machine;
+        // full tag discovery stays the job of `ocx index update`.
+        if identifier.tag().is_none() && identifier.digest().is_some() {
             return Ok(());
         }
+        let tagged = identifier.clone_with_tag(identifier.tag_or_latest());
 
         let mut last_error: Option<crate::Error> = None;
         for source in &self.sources {
-            match self.cache.update_tag(source, identifier).await {
+            match self.cache.update(source, &tagged).await {
                 Ok(()) => {
-                    log::info!(
-                        "Fetched tag '{}' from chained source, retrying cache lookup.",
-                        identifier
-                    );
+                    log::info!("Fetched tag '{}' from chained source, retrying cache lookup.", tagged);
                     return Ok(());
                 }
                 Err(e) => {
                     // AC6: surface the underlying cause so users can distinguish
                     // "manifest not found" vs "connection timed out" vs "401 unauthorized".
-                    log::warn!("Could not fetch tag '{}' from chained source: {e}", identifier);
+                    log::warn!("Could not fetch tag '{}' from chained source: {e}", tagged);
                     last_error = Some(e);
                 }
             }
@@ -332,7 +328,7 @@ mod tests {
         // Populate the cache by running update_tag via a source that has the tag.
         let seed_source = TestIndex::with_tag(TAG, digest_a());
         let seed_index = make_source(seed_source);
-        cache.update_tag(&seed_index, &tagged_id()).await.unwrap();
+        cache.update(&seed_index, &tagged_id()).await.unwrap();
 
         // Now build the ChainedIndex with a *spy* source that records calls.
         let spy = TestIndex::empty();
@@ -483,6 +479,44 @@ mod tests {
         );
     }
 
+    // Case 5c: bare identifier (no tag, no digest) → chain walks under implicit
+    // `:latest`. `ocx install cmake` on a fresh machine must behave the same as
+    // `ocx install cmake:latest` — the fallback chain substitutes "latest" and
+    // persists it for the subsequent cache lookup.
+    #[tokio::test]
+    async fn bare_identifier_walks_chain_as_latest() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+
+        let source = make_source(TestIndex::with_tag("latest", digest_a()));
+        let chained = super::super::Index::from_chained(cache, vec![source]);
+
+        let bare = Identifier::new_registry(REPO, REGISTRY);
+        let result = chained.fetch_manifest(&bare).await.unwrap();
+
+        assert!(result.is_some(), "bare identifier must resolve via implicit :latest");
+        let (digest, _) = result.unwrap();
+        assert_eq!(digest, digest_a());
+    }
+
+    // Case 5d: bare identifier + source has no "latest" → degrades to None.
+    #[tokio::test]
+    async fn bare_identifier_latest_missing_returns_none() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+
+        // Source knows about TAG (3.28) but not "latest".
+        let source = make_source(TestIndex::with_tag(TAG, digest_a()));
+        let chained = super::super::Index::from_chained(cache, vec![source]);
+
+        let bare = Identifier::new_registry(REPO, REGISTRY);
+        let result = chained.fetch_manifest(&bare).await.unwrap();
+        assert!(
+            result.is_none(),
+            "bare identifier with no remote :latest should degrade to None"
+        );
+    }
+
     // Case 6: box_clone shares caches — mutation after clone is visible.
     //
     // Clone the ChainedIndex (via Index::clone → box_clone), seed the cache on
@@ -498,7 +532,7 @@ mod tests {
 
         // Seed the shared cache via the original by using a source that has the tag.
         let seed_source = make_source(TestIndex::with_tag(TAG, digest_a()));
-        cache.update_tag(&seed_source, &tagged_id()).await.unwrap();
+        cache.update(&seed_source, &tagged_id()).await.unwrap();
 
         // The cloned index should see the tag because caches are shared via Arc.
         let result_via_clone = cloned.fetch_manifest(&tagged_id()).await.unwrap();
