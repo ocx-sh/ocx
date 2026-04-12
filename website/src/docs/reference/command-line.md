@@ -292,14 +292,18 @@ cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.2
 #### `catalog` {#index-catalog}
 
 ```bash
-ocx index catalog [OPTIONS]
+ocx index catalog [OPTIONS] [REGISTRY...]
 ```
 
-Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly.
+Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/cmake`).
+
+**Arguments**
+
+- `[REGISTRY...]`: Registries to query. Accepts zero or more registry hostnames. Defaults to `OCX_DEFAULT_REGISTRY` (or `ocx.sh`) when omitted.
 
 **Options**
 
-- `--with-tags`: Include available tags for each package. Slower — requires fetching additional information for each package.
+- `--tags`: Include available tags for each package. Slower — requires fetching additional information for each package.
 
 #### `list` {#index-list}
 
