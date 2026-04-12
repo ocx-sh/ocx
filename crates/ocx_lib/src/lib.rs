@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-pub(crate) mod config;
+mod config;
 mod media_type;
+
+pub use config::Config;
+pub use config::loader::{ConfigInputs, ConfigLoader};
 
 #[cfg(test)]
 #[path = "../test/mod.rs"]

@@ -17,7 +17,8 @@ async fn main() -> ExitCode {
         Ok(exit_code) => exit_code,
         Err(err) => {
             // TODO: Custom error type that can provide more structured information incl. error codes.
-            log::error!("Error: {err}");
+            // {err:#} walks the anyhow source chain so causes (e.g. "permission denied") surface to users.
+            log::error!("Error: {err:#}");
             ExitCode::FAILURE
         }
     }

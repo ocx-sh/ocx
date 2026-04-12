@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_lib::{
+    ConfigInputs, ConfigLoader,
     cli::{ColorModeConfig, Printer},
     env,
     file_structure::{self, BlobStore, TagStore},
@@ -24,6 +25,7 @@ pub struct Context {
     api: api::Api,
     default_index: oci::index::Index,
     manager: package_manager::PackageManager,
+    default_registry: String,
 }
 
 impl Context {
@@ -39,6 +41,12 @@ impl Context {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         log::debug!("Creating context with options: {:?}", options);
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: options.config.as_deref(),
+            cwd: None,
+        })
+        .await?;
 
         let api = api::Api::new(options.format, Printer::new(color_config.stdout));
 
@@ -83,7 +91,13 @@ impl Context {
         };
         let selected_index = index::Index::from_chained(local_index.clone(), sources, mode);
 
-        let default_registry = env::string("OCX_DEFAULT_REGISTRY", ocx_lib::oci::DEFAULT_REGISTRY.into());
+        let default_registry = env::string(
+            "OCX_DEFAULT_REGISTRY",
+            config
+                .resolved_default_registry()
+                .map(str::to_owned)
+                .unwrap_or_else(|| ocx_lib::oci::DEFAULT_REGISTRY.into()),
+        );
 
         let manager = package_manager::PackageManager::new(
             file_structure.clone(),
@@ -101,6 +115,7 @@ impl Context {
             local_index,
             default_index: selected_index,
             manager,
+            default_registry,
         })
     }
 
@@ -124,8 +139,8 @@ impl Context {
         &self.default_index
     }
 
-    pub fn default_registry(&self) -> String {
-        env::string("OCX_DEFAULT_REGISTRY", ocx_lib::oci::DEFAULT_REGISTRY.into())
+    pub fn default_registry(&self) -> &str {
+        &self.default_registry
     }
 
     pub fn file_structure(&self) -> &file_structure::FileStructure {
