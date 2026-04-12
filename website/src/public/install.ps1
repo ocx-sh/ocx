@@ -209,12 +209,13 @@ function Modify-Profile {
 
     $profilePath = $PROFILE.CurrentUserCurrentHost
 
-    # Build the source line
+    # Build the source line — guarded with `Test-Path` so that deleting
+    # $OcxHome does not make the PowerShell profile error on startup.
     if ($OcxHome -eq (Join-Path $env:USERPROFILE '.ocx')) {
-        $sourceLine = '. "$env:USERPROFILE\.ocx\env.ps1"'
+        $sourceLine = 'if (Test-Path "$env:USERPROFILE\.ocx\env.ps1") { . "$env:USERPROFILE\.ocx\env.ps1" }'
     }
     else {
-        $sourceLine = ". `"$OcxHome\env.ps1`""
+        $sourceLine = "if (Test-Path `"$OcxHome\env.ps1`") { . `"$OcxHome\env.ps1`" }"
     }
 
     # Create profile directory and file if they don't exist

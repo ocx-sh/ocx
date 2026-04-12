@@ -127,12 +127,15 @@ Remove-Item -Recurse -Force $(if ($env:OCX_HOME) { $env:OCX_HOME } else { "$env:
 ```
 :::
 
-Then remove the shell integration line from your profile:
+Then remove the shell integration line from your profile (look for any line
+containing `.ocx/env` — the current installer wraps it in an existence check
+so that removing `~/.ocx/` alone no longer errors on shell startup, but any
+previously-added unguarded line should still be removed):
 
-- **bash**: remove `. "$HOME/.ocx/env"` from `~/.bash_profile` or `~/.profile`
-- **zsh**: remove `. "$HOME/.ocx/env"` from `~/.zshenv`
+- **bash**: remove the `.ocx/env` source line from `~/.bash_profile` or `~/.profile`
+- **zsh**: remove the `.ocx/env` source line from `~/.zshenv`
 - **fish**: delete `~/.config/fish/conf.d/ocx.fish`
-- **PowerShell**: remove the `. "...\.ocx\env.ps1"` line from your `$PROFILE`
+- **PowerShell**: remove the `.ocx\env.ps1` source line from your `$PROFILE`
 
 ::: warning This deletes everything
 This removes all installed packages, the local index cache, and ocx itself. If you only want to remove specific packages, use [`ocx uninstall --purge`][cmd-uninstall] and [`ocx clean`][cmd-clean] instead.
