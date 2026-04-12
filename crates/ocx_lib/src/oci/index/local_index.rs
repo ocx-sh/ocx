@@ -41,7 +41,7 @@ impl LocalIndex {
     ///
     /// When the identifier includes a tag (e.g., `cmake:3.28`), only that single tag is fetched — no tag
     /// listing is performed. When the identifier has no tag (e.g., `cmake`), all tags are fetched.
-    pub async fn update(&mut self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
+    pub async fn update(&self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
         if identifier.tag().is_some() {
             self.update_tag(index, identifier).await
         } else {
@@ -50,7 +50,7 @@ impl LocalIndex {
     }
 
     /// Updates a single tag in the local index without listing all remote tags.
-    async fn update_tag(&mut self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
+    pub(super) async fn update_tag(&self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
         let tag = identifier.tag_or_latest().to_owned();
         let mut this_tags = self.get_tags(identifier).await?.unwrap_or_default();
 
@@ -59,7 +59,7 @@ impl LocalIndex {
     }
 
     /// Updates all tags in the local index by listing remote tags and syncing each one.
-    async fn update_all_tags(&mut self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
+    async fn update_all_tags(&self, index: &super::Index, identifier: &oci::Identifier) -> Result<()> {
         let remote_tags = index.list_tags(identifier).await?.unwrap_or_default();
         let mut this_tags = self.get_tags(identifier).await?.unwrap_or_default();
 
@@ -75,7 +75,7 @@ impl LocalIndex {
     ///
     /// Fetches the digest for the tag, skips if unchanged, and updates the manifest if needed.
     async fn sync_tag(
-        &mut self,
+        &self,
         index: &super::Index,
         identifier: &oci::Identifier,
         tag: &str,
@@ -122,7 +122,7 @@ impl LocalIndex {
     }
 
     async fn update_manifest(
-        &mut self,
+        &self,
         index: &super::Index,
         identifier: &oci::Identifier,
         digest: &oci::Digest,
