@@ -89,6 +89,11 @@ pub trait OciTransport: Send + Sync {
         on_progress: ProgressFn,
     ) -> Result<()>;
 
+    /// HEAD a blob to verify existence and retrieve its content length.
+    ///
+    /// Returns `Ok(size)` if the blob exists, `Err(ClientError::BlobNotFound)` if not.
+    async fn head_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<u64>;
+
     // ── Write operations ─────────────────────────────────────────────
 
     /// Pushes a typed OCI manifest and returns the resulting digest string.

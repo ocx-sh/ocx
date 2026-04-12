@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_mirror", "crates/ocx_schema"]
+# The submodule is pulled in via [patch.crates-io] below; excluding it here
+# lets `cargo` commands run directly inside `external/rust-oci-client/` (for
+# the fork's own test suite) without the outer workspace claiming ownership.
+exclude = ["external/rust-oci-client"]
 
 [workspace.package]
 version = "0.2.1"

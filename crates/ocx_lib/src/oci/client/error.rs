@@ -22,6 +22,9 @@ pub enum ClientError {
     /// The requested manifest does not exist in the registry.
     #[error("Manifest not found: {0}")]
     ManifestNotFound(String),
+    /// A referenced blob does not exist in the registry.
+    #[error("Blob not found in registry '{registry}': {digest}")]
+    BlobNotFound { registry: String, digest: String },
     /// A registry operation failed.
     #[error("Registry operation failed: {0}")]
     Registry(#[source] Box<dyn std::error::Error + Send + Sync>),

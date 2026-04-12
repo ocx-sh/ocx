@@ -11,9 +11,16 @@ use crate::{
     utility,
 };
 
+use futures::stream::{self, StreamExt, TryStreamExt};
 use tracing::Instrument;
 
 use super::{Digest, Identifier, native};
+
+/// Maximum number of layer push/verify operations to run concurrently.
+///
+/// Each `LayerRef::File` reads the full archive into memory before
+/// uploading, so unbounded fan-out would OOM on multi-GB layers.
+const LAYER_PUSH_CONCURRENCY: usize = 4;
 
 mod builder;
 pub mod error;
@@ -451,19 +458,18 @@ impl Client {
     pub async fn push_package(
         &self,
         package_info: Info,
-        file: impl AsRef<std::path::Path>,
+        layers: &[crate::publisher::LayerRef],
     ) -> Result<(Digest, oci::Manifest)> {
-        let path = file.as_ref();
         log::debug!(
-            "Pushing package {} from file {}",
+            "Pushing package {} with {} layer(s)",
             package_info.identifier,
-            path.display()
+            layers.len()
         );
 
         let image = native::Reference::from(&package_info.identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
 
-        let (manifest, manifest_data, manifest_sha256) = self.push_image_manifest(&package_info, path).await?;
+        let (manifest, manifest_data, manifest_sha256) = self.push_multi_layer_manifest(&package_info, layers).await?;
 
         let (index_digest, index) = self
             .update_image_index(&package_info, &manifest_data, &manifest_sha256)
@@ -473,47 +479,106 @@ impl Client {
         Ok((index_digest, oci::Manifest::ImageIndex(index)))
     }
 
-    /// Pushes config blob + package blob + image manifest. Returns the manifest,
-    /// its serialized bytes, and its SHA-256 digest string.
-    pub(crate) async fn push_image_manifest(
+    /// Pushes config blob + N layer blobs + image manifest.
+    ///
+    /// For `LayerRef::File` layers: reads file, computes digest, uploads blob.
+    /// For `LayerRef::Digest` layers: HEADs the blob to verify existence
+    /// and learn its size, and uses the caller-supplied `media_type`
+    /// for the manifest descriptor. The OCI spec does not expose a
+    /// layer's media type via blob HEAD, so the caller is responsible
+    /// for declaring it at the CLI (see `LayerRef::FromStr`).
+    /// Returns the manifest, its serialized bytes, and its SHA-256 digest string.
+    pub(crate) async fn push_multi_layer_manifest(
         &self,
         package_info: &Info,
-        path: &std::path::Path,
+        layers: &[crate::publisher::LayerRef],
     ) -> std::result::Result<(oci::ImageManifest, Vec<u8>, String), ClientError> {
+        use crate::publisher::LayerRef;
+
+        if layers.is_empty() {
+            return Err(ClientError::InvalidManifest(
+                "package must have at least one layer".to_string(),
+            ));
+        }
+
         let image = native::Reference::from(&package_info.identifier);
 
-        let package_media_type = media_type_from_path(path)
-            .map(|mt| mt.to_string())
-            .ok_or_else(|| ClientError::InvalidManifest(format!("unsupported archive: {}", path.display())))?;
+        // Upload file layers and verify digest layers concurrently, preserving
+        // input order so manifest descriptors match the caller-supplied order.
+        // Bounded by `LAYER_PUSH_CONCURRENCY` to cap in-memory archive buffers.
+        let layer_descriptors: Vec<oci::Descriptor> = stream::iter(layers.iter())
+            .map(|layer| async {
+                match layer {
+                    LayerRef::File(path) => {
+                        let package_media_type =
+                            media_type_from_path(path).map(|mt| mt.to_string()).ok_or_else(|| {
+                                ClientError::InvalidManifest(format!("unsupported archive: {}", path.display()))
+                            })?;
 
-        let package_data = tokio::fs::read(path).await.map_err(|e| ClientError::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-        let package_data_len = package_data.len();
-        let package_digest = Digest::sha256(&package_data).to_string();
+                        let package_data = tokio::fs::read(path).await.map_err(|e| ClientError::Io {
+                            path: path.to_path_buf(),
+                            source: e,
+                        })?;
+                        let package_data_len = package_data.len();
+                        let package_digest = Digest::sha256(&package_data).to_string();
 
-        log::trace!("Calculated package digest: {}", package_digest);
+                        log::trace!(
+                            "Layer {}: digest={}, size={}",
+                            path.display(),
+                            package_digest,
+                            package_data_len
+                        );
 
-        {
-            let bar = crate::cli::progress::ProgressBar::bytes(
-                tracing::info_span!("Uploading", package = %package_info.identifier),
-                package_data_len as u64,
-                &package_info.identifier,
-            );
-            let on_progress = bar.callback();
+                        let bar = crate::cli::progress::ProgressBar::bytes(
+                            tracing::info_span!("Uploading", layer = %path.display()),
+                            package_data_len as u64,
+                            &package_info.identifier,
+                        );
+                        let on_progress = bar.callback();
+                        let span = bar.into_span();
+                        self.transport
+                            .push_blob(&image, package_data, &package_digest, on_progress)
+                            .instrument(span)
+                            .await?;
 
-            let _guard = bar.enter();
-            self.transport
-                .push_blob(&image, package_data, &package_digest, on_progress)
-                .await?;
-        }
+                        Ok::<oci::Descriptor, ClientError>(oci::Descriptor {
+                            media_type: package_media_type,
+                            digest: package_digest,
+                            size: package_data_len as i64,
+                            urls: None,
+                            annotations: None,
+                        })
+                    }
+                    LayerRef::Digest { digest, media_type } => {
+                        // The caller supplies `media_type` because the OCI
+                        // distribution spec does not expose a layer's media
+                        // type via blob HEAD — only the blob bytes and
+                        // Content-Length. See `LayerRef::FromStr` for the
+                        // `sha256:<hex>.<ext>` CLI syntax that carries this
+                        // information from the user to here.
+                        let size = self.transport.head_blob(&image, &digest.to_string()).await?;
+
+                        log::trace!("Layer {}: verified, media_type={}, size={}", digest, media_type, size);
+
+                        Ok(oci::Descriptor {
+                            media_type: (*media_type).to_string(),
+                            digest: digest.to_string(),
+                            size: size as i64,
+                            urls: None,
+                            annotations: None,
+                        })
+                    }
+                }
+            })
+            .buffered(LAYER_PUSH_CONCURRENCY)
+            .try_collect()
+            .await?;
 
         // Config blob — tiny, no progress needed.
         let config_data = serde_json::to_vec(&package_info.metadata).map_err(ClientError::Serialization)?;
         let config_data_len = config_data.len();
         let config_sha256 = Digest::sha256(&config_data).to_string();
-        log::trace!("Calculated config digest: {}", config_sha256);
+        log::trace!("Config digest: {}", config_sha256);
         self.transport
             .push_blob(&image, config_data, &config_sha256, transport::no_progress())
             .await?;
@@ -528,13 +593,7 @@ impl Client {
                 urls: None,
                 annotations: None,
             },
-            layers: vec![oci::Descriptor {
-                media_type: package_media_type,
-                digest: package_digest,
-                size: package_data_len as i64,
-                urls: None,
-                annotations: None,
-            }],
+            layers: layer_descriptors,
             annotations: None,
             ..Default::default()
         };
@@ -1480,7 +1539,8 @@ mod tests {
                 platform: "linux/amd64".parse().unwrap(),
             };
 
-            let _ = client.push_package(info, &archive_path).await;
+            let layers = [crate::publisher::LayerRef::File(archive_path)];
+            let _ = client.push_package(info, &layers).await;
             let calls = auth_calls(&data);
             // Must authenticate with Push before any blob/manifest operations.
             assert!(!calls.is_empty(), "push_package must call ensure_auth");
@@ -1554,7 +1614,8 @@ mod tests {
                 platform: "linux/amd64".parse().unwrap(),
             };
 
-            let _ = client.push_package(info, &archive_path).await;
+            let layers = [crate::publisher::LayerRef::File(archive_path)];
+            let _ = client.push_package(info, &layers).await;
 
             // Verify auth happened before any transport method calls.
             let inner = data.read();
@@ -1565,6 +1626,126 @@ mod tests {
                 inner.calls.iter().any(|c| c.starts_with("push_blob:")),
                 "push_blob should follow ensure_auth, calls: {:?}",
                 inner.calls
+            );
+        }
+    }
+
+    // ── Multi-layer digest reuse tests ──────────────────────────────
+    //
+    // Regression test for the fabricated-`tar+gzip` bug on the
+    // `LayerRef::Digest` path. Before this fix, the push code
+    // unconditionally stamped `application/vnd.oci.image.layer.v1.tar+gzip`
+    // on every digest-referenced layer, so reusing a `.tar.xz` or
+    // `.zip` layer produced a manifest that broke every consumer's
+    // `package pull`.
+    //
+    // The fix makes the CLI declare the media type alongside the
+    // digest (see `LayerRef::FromStr`'s `sha256:<hex>.<ext>` syntax)
+    // and threads it straight into the manifest descriptor. These
+    // tests assert the supplied media type round-trips unchanged.
+
+    mod multi_layer_digest_resolve {
+        use super::*;
+        use crate::package::{self, info::Info, metadata};
+        use crate::publisher::LayerRef;
+
+        fn test_identifier(tag: &str) -> Identifier {
+            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        }
+
+        fn stub_with_capture(data: &StubTransportData) -> Client {
+            data.write().capture_pushes = true;
+            Client::with_transport(Box::new(StubTransport::new(data.clone())))
+        }
+
+        fn bundle_metadata() -> metadata::Metadata {
+            metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                version: package::metadata::bundle::Version::V1,
+                strip_components: None,
+                env: Default::default(),
+                dependencies: Default::default(),
+            })
+        }
+
+        fn info(tag: &str) -> Info {
+            Info {
+                identifier: test_identifier(tag),
+                metadata: bundle_metadata(),
+                platform: "linux/amd64".parse().unwrap(),
+            }
+        }
+
+        /// A digest-referenced layer must carry the media type declared
+        /// by the caller, not a fabricated `tar+gzip`. Regression for
+        /// the original Bug 2.
+        #[tokio::test]
+        async fn digest_layer_uses_supplied_media_type_tar_xz() {
+            let layer_digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+            let layer_size: i64 = 4096;
+
+            let data = StubTransportData::new();
+            // The stub's `head_blob` returns the length of whatever
+            // bytes we seed under this digest, so the size in the
+            // resulting manifest descriptor will match.
+            data.write()
+                .blobs
+                .insert(layer_digest.to_string(), vec![0u8; layer_size as usize]);
+            let client = stub_with_capture(&data);
+
+            let layers = [LayerRef::Digest {
+                digest: oci::Digest::try_from(layer_digest).unwrap(),
+                media_type: crate::MEDIA_TYPE_TAR_XZ,
+            }];
+            let (manifest, _bytes, _digest) = client
+                .push_multi_layer_manifest(&info("2.0.0"), &layers)
+                .await
+                .expect("push_multi_layer_manifest must succeed with a live blob and declared media type");
+
+            assert_eq!(manifest.layers.len(), 1);
+            assert_eq!(
+                manifest.layers[0].media_type,
+                crate::MEDIA_TYPE_TAR_XZ,
+                "the manifest must carry the caller-declared media type verbatim — no tar+gzip fabrication"
+            );
+            assert_eq!(manifest.layers[0].size, layer_size);
+            assert_eq!(manifest.layers[0].digest, layer_digest);
+
+            // `head_blob` should still be called — it's the transport-
+            // level contract for fetching the blob's size. The Bug 1
+            // fix ensures its native implementation reads
+            // `Content-Length` from a real HEAD rather than pulling
+            // the whole blob into memory.
+            let inner = data.read();
+            assert!(
+                inner.calls.iter().any(|c| c == &format!("head_blob:{layer_digest}")),
+                "head_blob should be called exactly once to fetch the layer size, calls: {:?}",
+                inner.calls
+            );
+        }
+
+        /// When the requested digest blob does not exist in the
+        /// registry, the push must fail with `BlobNotFound` surfaced by
+        /// `head_blob`.
+        #[tokio::test]
+        async fn digest_layer_not_found_in_registry_errors() {
+            let missing_digest = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+
+            let data = StubTransportData::new();
+            let client = stub_with_capture(&data);
+
+            let layers = [LayerRef::Digest {
+                digest: oci::Digest::try_from(missing_digest).unwrap(),
+                media_type: crate::MEDIA_TYPE_TAR_GZ,
+            }];
+            let err = client
+                .push_multi_layer_manifest(&info("2.0.0"), &layers)
+                .await
+                .expect_err("push must fail when the referenced blob is absent");
+
+            let msg = err.to_string().to_lowercase();
+            assert!(
+                msg.contains("not found") || msg.contains("blob"),
+                "error message should mention not-found / blob, got: {msg}"
             );
         }
     }

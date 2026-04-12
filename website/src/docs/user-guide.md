@@ -82,6 +82,51 @@ When `ocx install cmake:3.28` creates the symlink `symlinks/…/cmake/candidates
 
 *Commands: [`ocx install`][cmd-install] adds packages; [`ocx uninstall --purge`][cmd-uninstall] removes a specific one; [`ocx clean`][cmd-clean] removes all unreferenced packages.*
 
+#### Layers {#file-structure-layers}
+
+A package on disk looks monolithic — one `content/` directory under one digest — but the bytes inside it can come from more than one upstream archive. Each archive is a <Tooltip term="layer">An OCI image layer: a single tar archive (gzip or xz compressed) addressed in the registry by its own SHA-256 digest. The OCI image manifest lists all layers that compose a package; on pull, ocx extracts each layer once into the shared layer store and assembles them into the package's `content/` directory via hardlinks.</Tooltip>, stored once in `~/.ocx/layers/` and shared across every package that references it.
+
+<Tree>
+  <Node name="~/.ocx/layers/" icon="🗂️" open>
+    <Node name="{registry}/" icon="📁" open-icon="📂" open>
+      <Node name="sha256/ab/c123…/" icon="📁" open-icon="📂" open>
+        <Description>one directory per unique layer blob</Description>
+        <Node name="content/" icon="📂">
+          <Description>extracted layer files — hardlink source for assembled packages</Description>
+        </Node>
+      </Node>
+    </Node>
+  </Node>
+</Tree>
+
+The layer store enables a different kind of dedup than the package store. The package store dedups whole builds — two tags pointing at the exact same binary share one directory. The layer store dedups *parts* of builds: a 200 MB shared base layer used by ten packages is downloaded, extracted, and stored exactly once. Each package's `content/` is then assembled by hardlinking files from one or more layer directories, so the package looks complete even though no bytes were copied.
+
+::: info Similar to Docker image layers and pnpm's content store
+[Docker image layers][docker-layers] are the same concept at the registry level: an image is a stack of layers, each addressed by digest, downloaded only when missing from the local cache. ocx applies this to binary packages instead of containers. [pnpm][pnpm] uses a comparable trick on the install side, storing every package version once in a content-addressed store and hardlinking them into individual `node_modules/` trees.
+:::
+
+**Publishing multi-layer packages.** When you call [`ocx package push`][cmd-package-push], every positional argument after the identifier is a layer. Each layer is either a path to a local archive file or a digest reference to a layer that already exists in the target registry:
+
+```shell
+# Two-layer package: shared base + package-specific top
+ocx package push -p linux/amd64 mytool:1.2.3 base.tar.gz tool.tar.gz
+
+# Re-publish with the base layer reused by digest — no re-upload
+ocx package push -p linux/amd64 mytool:1.2.4 sha256:abc123… newtool.tar.gz
+```
+
+The order matters for the manifest descriptor list, but assembled content must not overlap — two layers cannot contain the same file path. Overlap is rejected at install time with a clear error.
+
+::: warning Bring your own archives
+`ocx package push` does **not** bundle a directory for you. Each layer must be a pre-built archive (`.tar.gz`, `.tar.xz`, `.zip`). This is intentional: archive creation is non-deterministic (timestamps, compression entropy, file ordering), so re-bundling the same content yields a different digest and defeats layer reuse. Use [`ocx package create`][cmd-package-create] if you need to bundle a directory — that command produces a stable archive once, which you can then push and reference by digest from any number of subsequent packages.
+:::
+
+::: tip Designing for reuse
+The layer reuse workflow is most valuable when you have many packages that share a large common base — a runtime library, a vendored toolchain, or a fixed dataset. Push the base once, record its digest, and reference it from every dependent package's push command. The registry stores it once; ocx downloads it once; every package gets a fresh `content/` view assembled from the same shared layer.
+:::
+
+*Commands: [`ocx package push`][cmd-package-push] publishes layered packages; [`ocx package create`][cmd-package-create] bundles a directory into a stable archive.*
+
 #### Tags {#file-structure-tags}
 
 When you run `ocx install cmake:3.28`, how does ocx know which binary to fetch? It looks up the tag `3.28` in the local tag store and finds the corresponding <Tooltip term="digest">The content fingerprint stored in the OCI registry manifest. A tag like `3.28` is just a human-readable alias; the digest is the canonical, immutable identifier that pinpoints the exact binary build behind that tag at index-update time.</Tooltip>. The tag store is a local copy of that mapping — no network required.
@@ -683,9 +728,12 @@ digest-derived.
 [terraform-lockfile]: https://developer.hashicorp.com/terraform/language/files/dependency-lock
 [docker-credential]: https://github.com/keirlawson/docker_credential
 [helm-oci]: https://helm.sh/docs/topics/registries/
+[docker-layers]: https://docs.docker.com/get-started/docker-concepts/building-images/understanding-image-layers/
+[pnpm]: https://pnpm.io/motivation#saving-disk-space
 
 <!-- commands -->
 [cmd-clean]: ./reference/command-line.md#clean
+[cmd-package-create]: ./reference/command-line.md#package-create
 [cmd-deselect]: ./reference/command-line.md#deselect
 [cmd-find]: ./reference/command-line.md#find
 [cmd-exec]: ./reference/command-line.md#exec

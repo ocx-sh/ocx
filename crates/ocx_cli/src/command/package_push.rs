@@ -4,7 +4,11 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log, oci, package, prelude::*, publisher::Publisher};
+use ocx_lib::{
+    log, oci, package,
+    prelude::*,
+    publisher::{LayerRef, Publisher},
+};
 
 use crate::options;
 
@@ -19,6 +23,9 @@ pub struct PackagePush {
     #[clap(long = "new", short = 'n')]
     new: bool,
 
+    /// Path to the package metadata JSON file. Defaults to a sibling of the
+    /// first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required
+    /// when all layers are digest references.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
 
@@ -26,20 +33,50 @@ pub struct PackagePush {
     platform: oci::Platform,
 
     identifier: options::Identifier,
-    content: std::path::PathBuf,
+
+    /// Layers to push, in order (base layer first, top layer last).
+    ///
+    /// Each layer is either:
+    ///   - a path to a pre-built archive file (`.tar.gz`, `.tar.xz`), or
+    ///   - a digest reference to a layer already present in the target
+    ///     registry, written as `sha256:<hex>.<ext>` where `<ext>` declares
+    ///     the original archive format — one of `tar.gz`, `tgz`, `tar.xz`,
+    ///     `txz`. The OCI distribution spec does not expose a layer's media
+    ///     type via blob HEAD, so the suffix is required: OCX refuses to
+    ///     guess.
+    ///
+    /// Digest references enable layer reuse: a base layer pushed once can be
+    /// referenced by digest from many packages without re-uploading. At least
+    /// one layer is required.
+    ///
+    /// Examples:
+    ///   ocx package push repo:2.0.0 sha256:abc....tar.gz ./new.tar.gz
+    ///   ocx package push repo:2.0.0 sha256:abc....tar.xz
+    #[clap(required = true)]
+    layers: Vec<LayerRef>,
 }
 
 impl PackagePush {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
+
+        // Infer metadata from the first file layer, or require --metadata for digest-only pushes.
         let metadata_path = match &self.metadata {
             Some(path) => path.clone(),
-            None => crate::conventions::infer_metadata_file(&self.content)?,
+            None => {
+                let first_file = self.layers.iter().find_map(|l| match l {
+                    LayerRef::File(p) => Some(p.as_path()),
+                    LayerRef::Digest { .. } => None,
+                });
+                let file_path = first_file
+                    .ok_or_else(|| anyhow::anyhow!("--metadata is required when all layers are digest references"))?;
+                crate::conventions::infer_metadata_file(file_path)?
+            }
         };
 
         log::info!(
-            "Deploying package from {} with metadata {}",
-            self.content.display(),
+            "Deploying package with {} layer(s) and metadata {}",
+            self.layers.len(),
             metadata_path.display()
         );
         let metadata = package::metadata::Metadata::read_json(&metadata_path).await?;
@@ -69,9 +106,9 @@ impl PackagePush {
             };
 
             let existing_versions = Publisher::parse_versions(&existing_tags);
-            publisher.push_cascade(info, &self.content, existing_versions).await?;
+            publisher.push_cascade(info, &self.layers, existing_versions).await?;
         } else {
-            publisher.push(info, &self.content).await?;
+            publisher.push(info, &self.layers).await?;
         }
 
         Ok(ExitCode::SUCCESS)

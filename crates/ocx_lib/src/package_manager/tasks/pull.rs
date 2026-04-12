@@ -292,19 +292,6 @@ async fn setup_owned(
     if manifest.layers.is_empty() {
         return Err(oci::client::error::ClientError::InvalidManifest("manifest has no layers".to_string()).into());
     }
-    // Multi-layer assembly is deferred to issue #22. Fail fast on the manifest
-    // — the source of truth — so a legitimately multi-layered artifact does
-    // not pay the full download + extraction cost before hitting a typed
-    // error. The walker itself already supports merging multiple layers into
-    // a single `content/` tree (see the multi-layer tests in
-    // `utility/fs/assemble.rs`); the remaining gap is pipeline-level
-    // (dependency ordering across layers, refs/layers/ bookkeeping for N>1).
-    if manifest.layers.len() > 1 {
-        return Err(oci::client::error::ClientError::InvalidManifest(
-            "multi-layer package assembly is not yet supported (#22)".to_string(),
-        )
-        .into());
-    }
 
     // Wrap the temp directory in a PackageDir so all sibling-file accesses
     // use the canonical accessors instead of hardcoded strings.
@@ -343,13 +330,17 @@ async fn setup_owned(
         .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(layers_dir.clone(), e)))?;
     link_layers_in_temp(&pkg, pinned.registry(), &layer_digests, fs)?;
 
-    // Assemble package content/ by hardlinking files from the single layer.
-    // The walker mirrors the layer's directory tree into a real content/
+    // Assemble package content/ by hardlinking files from all layers.
+    // The walker mirrors each layer's directory tree into a single content/
     // directory — regular files become hardlinks; intra-layer symlinks are
-    // preserved verbatim. The multi-layer guard above (`manifest.layers.len()
-    // > 1`) ensures `layer_digests` has exactly one entry here.
-    let layer_content = fs.layers.content(pinned.registry(), &layer_digests[0]);
-    crate::utility::fs::assemble_from_layer(&layer_content, &pkg.content())
+    // preserved verbatim. Layers must not overlap (same file in two layers
+    // is an error).
+    let layer_contents: Vec<std::path::PathBuf> = layer_digests
+        .iter()
+        .map(|d| fs.layers.content(pinned.registry(), d))
+        .collect();
+    let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
+    crate::utility::fs::assemble_from_layers(&sources, &pkg.content())
         .await
         .map_err(PackageErrorKind::Internal)?;
 
