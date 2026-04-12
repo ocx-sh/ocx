@@ -201,7 +201,7 @@ impl OciTransport for NativeTransport {
             Ok(Some(size)) => Ok(size),
             Ok(None) => Err(ClientError::BlobNotFound {
                 registry: image.registry().to_string(),
-                digest: digest.to_string(),
+                digest_str: digest.to_string(),
             }),
             Err(e) => Err(registry_error(e)),
         }
