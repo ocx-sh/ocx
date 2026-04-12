@@ -107,6 +107,8 @@ The tag store is a *snapshot*: it reflects the state of the remote registry at t
 
 `ocx index update <package>` refreshes the tag store for a specific package. The global flag [`--remote`][arg-remote] skips the local tag store entirely and queries the registry directly for a single command — useful for a one-off check without updating the persistent snapshot.
 
+On a fresh machine, you do not need to run [`ocx index update`][cmd-index-update] before the first [`ocx install cmake:3.28`][cmd-install]. When the local tag store has no entry for a requested tag, [`ocx install`][cmd-install] transparently resolves that single tag against the configured remote, persists it to the tag store, and proceeds with the install. Subsequent commands — including [`--offline`][arg-offline] — then work from the cached entry without touching the network. Refreshing a cached tag or discovering every tag for a repository is still the job of [`ocx index update`][cmd-index-update]; the fallback only covers the specific tag being installed.
+
 *Commands: [`ocx index catalog`][cmd-index-catalog], [`ocx index update`][cmd-index-update]; flag: [`--remote`][arg-remote]*
 
 #### Symlinks {#file-structure-symlinks}
