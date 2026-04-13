@@ -18,6 +18,7 @@ Strategy for detecting which registry was resolved:
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -175,6 +176,123 @@ def test_invalid_config_produces_clear_error_with_path(ocx: OcxRunner) -> None:
     combined = result.stdout + result.stderr
     assert str(config_path) in combined or "config.toml" in combined, (
         f"error message should contain the config file path, "
+        f"got stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests: static commands survive malformed ambient config
+# Regression guard for the bug where `ocx version` and `ocx shell completion`
+# (both Context-free commands) were aborted by `Context::try_init` → config
+# parse error before command dispatch. `ocx info` is deliberately excluded:
+# it displays `default_registry()` from the loaded config and must keep its
+# current config-coupled behavior, so users can fall back to `ocx version`
+# as the diagnostic entry point when config is broken.
+# ---------------------------------------------------------------------------
+
+
+def test_version_survives_invalid_ambient_config(ocx: OcxRunner) -> None:
+    """`ocx version` exits 0 and prints a version string even with broken config.
+
+    Regression guard: `ocx version` is the command users run to diagnose a
+    broken install. It must not be aborted by `Context::try_init` failing on
+    a malformed `~/.ocx/config.toml`.
+    """
+    write_home_config(ocx, "this is not valid toml =[[[")
+
+    result = ocx.run("version", format=None, check=False)
+
+    assert result.returncode == 0, (
+        f"`ocx version` should exit 0 even with malformed config, "
+        f"got rc={result.returncode}; stderr={result.stderr!r}"
+    )
+    assert re.match(r"^\d+\.\d+\.\d+", result.stdout.strip()), (
+        f"stdout should be a MAJOR.MINOR.PATCH version string, "
+        f"got {result.stdout!r}"
+    )
+
+
+def test_completion_survives_invalid_ambient_config(ocx: OcxRunner) -> None:
+    """`ocx shell completion` exits 0 even with broken ambient config.
+
+    Regression guard: completion scripts emit static clap output, never touch
+    config, and are typically invoked from shell init files where a broken
+    config must not break shell startup.
+    """
+    write_home_config(ocx, "this is not valid toml =[[[")
+
+    result = ocx.run("shell", "completion", "--shell", "bash", format=None, check=False)
+
+    assert result.returncode == 0, (
+        f"`ocx shell completion --shell bash` should exit 0 even with malformed config, "
+        f"got rc={result.returncode}; stderr={result.stderr!r}"
+    )
+    # clap_complete emits a bash completion function named `_ocx`.
+    assert "_ocx" in result.stdout, (
+        f"stdout should contain bash completion markers, "
+        f"got {result.stdout!r}"
+    )
+
+
+def test_help_survives_invalid_ambient_config(ocx: OcxRunner) -> None:
+    """All `--help` paths exit 0 and print usage even with broken ambient config.
+
+    Today this is guaranteed by clap: `Cli::command().get_matches()` handles
+    `--help` / `-h` / `help` subcommand internally and calls `exit(0)` before
+    `App::run` ever reaches `Context::try_init`. This test locks that in so a
+    future switch to `try_get_matches()` + custom error handling cannot
+    silently regress the property.
+    """
+    write_home_config(ocx, "this is not valid toml =[[[")
+
+    for args in (
+        ("--help",),
+        ("help",),
+        ("help", "install"),
+        ("install", "--help"),
+        ("shell", "--help"),
+        ("shell", "completion", "--help"),
+        ("info", "--help"),
+        ("version", "--help"),
+    ):
+        result = ocx.run(*args, format=None, check=False)
+        assert result.returncode == 0, (
+            f"`ocx {' '.join(args)}` should exit 0 even with malformed config, "
+            f"got rc={result.returncode}; stderr={result.stderr!r}"
+        )
+        assert "Usage:" in result.stdout, (
+            f"`ocx {' '.join(args)}` should print a Usage: section, "
+            f"got stdout={result.stdout!r}"
+        )
+
+
+def test_info_still_requires_valid_config_when_ambient_broken(ocx: OcxRunner) -> None:
+    """`ocx info` intentionally stays config-coupled — fails on broken config.
+
+    Regression guard for the deliberate design decision: `info` reads
+    `context.default_registry()` from the loaded config and will surface more
+    config-derived fields in the future. When ambient config is broken,
+    `info` failing IS the diagnostic — the fallback is `ocx version`.
+
+    If a future change "fixes" this by adding `info` to the static-command
+    bypass list in `app.rs::run`, this test will fail and force the author
+    to revisit both the comment in `app.rs` and the decision rationale.
+    """
+    config_path = write_home_config(ocx, "this is not valid toml =[[[")
+
+    result = ocx.run("info", format=None, check=False)
+
+    assert result.returncode != 0, (
+        f"`ocx info` should fail on malformed ambient config (by design); "
+        f"got rc=0, stdout={result.stdout!r}"
+    )
+    combined = result.stdout + result.stderr
+    assert str(config_path) in combined or "config.toml" in combined, (
+        f"error should mention the config file path, "
+        f"got stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "TOML" in combined or "parse" in combined.lower(), (
+        f"error should mention the parse failure, "
         f"got stdout={result.stdout!r} stderr={result.stderr!r}"
     )
 
