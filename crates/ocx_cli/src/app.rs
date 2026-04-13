@@ -50,6 +50,24 @@ impl App {
             .get_matches();
         let cli = Cli::from_arg_matches(&matches)?;
 
+        // Static commands dispatch without constructing a Context so they
+        // survive a malformed ambient config (`~/.ocx/config.toml`). Both
+        // `Version::execute` and `ShellCompletion::execute` are Context-free
+        // — the entire `Context::try_init` path (which calls `ConfigLoader::load`
+        // and aborts on bad TOML / oversized files) is unnecessary for them.
+        //
+        // `Info` is deliberately NOT in this list: it reads
+        // `context.default_registry()` from the loaded config and is expected
+        // to surface more config-derived fields in the future. When ambient
+        // config is broken, falling back to `ocx version` is the documented
+        // diagnostic path. The regression guard lives at
+        // `test/tests/test_config.py::test_info_still_requires_valid_config_when_ambient_broken`.
+        match &cli.command {
+            Some(command::Command::Version(v)) => return v.execute().await,
+            Some(command::Command::Shell(command::shell::Shell::Completion(c))) => return c.execute().await,
+            _ => {}
+        }
+
         let context = Context::try_init(&cli.context, color_config).await?;
         if should_check_for_update(&cli.command) {
             update_check::check_for_update(&context).await;
