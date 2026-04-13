@@ -695,7 +695,8 @@ Config files are in [TOML][toml] format and live in three locations:
 | Tier | Path |
 |------|------|
 | System | `/etc/ocx/config.toml` |
-| User | [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` or `~/.config/ocx/config.toml` |
+| User (Linux) | [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` or `~/.config/ocx/config.toml` |
+| User (macOS) | `~/Library/Application Support/ocx/config.toml` (`XDG_CONFIG_HOME` is not consulted on macOS) |
 | OCX home | [`$OCX_HOME`][env-ocx-home]`/config.toml` (default: `~/.ocx/config.toml`) |
 
 Files are loaded lowest-to-highest and merged. Missing files are silently skipped. No config file is required.

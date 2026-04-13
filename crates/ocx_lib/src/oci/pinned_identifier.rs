@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Digest, Identifier};
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
 
 /// A validated [`Identifier`] guaranteed to carry a digest.
 ///
@@ -114,6 +116,12 @@ impl schemars::JsonSchema for PinnedIdentifier {
 #[error("pinned identifier requires a digest: {identifier}")]
 pub struct PinnedIdentifierError {
     pub identifier: Identifier,
+}
+
+impl ClassifyExitCode for PinnedIdentifierError {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(ExitCode::DataError)
+    }
 }
 
 #[cfg(test)]

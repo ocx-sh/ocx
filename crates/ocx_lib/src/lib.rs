@@ -4,8 +4,8 @@
 mod config;
 mod media_type;
 
-pub use config::Config;
 pub use config::loader::{ConfigInputs, ConfigLoader};
+pub use config::{Config, RegistryConfig, RegistryDefaults};
 
 #[cfg(test)]
 #[path = "../test/mod.rs"]

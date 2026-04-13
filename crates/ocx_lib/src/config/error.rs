@@ -3,6 +3,9 @@
 
 use std::path::PathBuf;
 
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
+
 /// Errors that can occur during configuration parsing and validation.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -40,4 +43,15 @@ pub enum Error {
         path.display()
     )]
     FileTooLarge { path: PathBuf, size: u64, limit: u64 },
+}
+
+impl ClassifyExitCode for Error {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(match self {
+            Self::FileNotFound { .. } => ExitCode::NotFound,
+            Self::FileTooLarge { .. } | Self::Parse { .. } => ExitCode::ConfigError,
+            Self::Io { .. } => ExitCode::IoError,
+            Self::InvalidBooleanString { .. } => ExitCode::DataError,
+        })
+    }
 }

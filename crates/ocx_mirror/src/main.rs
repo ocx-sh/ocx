@@ -69,7 +69,8 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             ocx_lib::log::error!("{err:#}");
-            err.exit_code()
+            // TODO: Phase 4 — dispatch logic lands inside `MirrorError::kind_exit_code`.
+            err.kind_exit_code().into()
         }
     }
 }

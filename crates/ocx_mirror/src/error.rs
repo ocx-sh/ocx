@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::process::ExitCode;
+use ocx_lib::cli::ExitCode;
 
 #[derive(Debug)]
 pub enum MirrorError {
@@ -16,11 +16,19 @@ pub enum MirrorError {
 }
 
 impl MirrorError {
-    pub fn exit_code(&self) -> ExitCode {
+    /// Map a [`MirrorError`] variant to its [`ExitCode`].
+    ///
+    /// `ExecutionFailed` is intentionally fixed to `Failure (1)` because the
+    /// current variant carries `Vec<String>` (stringified error messages),
+    /// not a structured inner error to delegate to. Refactoring the variant
+    /// to carry `anyhow::Error` is tracked as a follow-up so per-cause exit
+    /// codes can be surfaced through the mirror pipeline.
+    pub fn kind_exit_code(&self) -> ExitCode {
         match self {
-            Self::SpecInvalid(_) | Self::SpecNotFound(_) => ExitCode::from(2),
-            Self::ExecutionFailed(_) => ExitCode::from(3),
-            Self::SourceError(_) => ExitCode::from(4),
+            Self::SpecInvalid(_) => ExitCode::DataError,
+            Self::SpecNotFound(_) => ExitCode::NotFound,
+            Self::ExecutionFailed(_) => ExitCode::Failure,
+            Self::SourceError(_) => ExitCode::Unavailable,
         }
     }
 }
@@ -29,21 +37,21 @@ impl std::fmt::Display for MirrorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SpecInvalid(errors) => {
-                writeln!(f, "Invalid mirror spec:")?;
+                writeln!(f, "invalid mirror spec:")?;
                 for error in errors {
                     writeln!(f, "  - {error}")?;
                 }
                 Ok(())
             }
-            Self::SpecNotFound(path) => write!(f, "Mirror spec not found: {path}"),
+            Self::SpecNotFound(path) => write!(f, "mirror spec not found: {path}"),
             Self::ExecutionFailed(errors) => {
-                writeln!(f, "Mirror execution failed:")?;
+                writeln!(f, "mirror execution failed:")?;
                 for error in errors {
                     writeln!(f, "  - {error}")?;
                 }
                 Ok(())
             }
-            Self::SourceError(msg) => write!(f, "Source error: {msg}"),
+            Self::SourceError(msg) => write!(f, "source error: {msg}"),
         }
     }
 }

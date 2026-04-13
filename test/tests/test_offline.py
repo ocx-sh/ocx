@@ -1,4 +1,7 @@
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from src import OcxRunner, PackageInfo
 from src.helpers import make_package
@@ -148,3 +151,40 @@ def test_deps_flat_offline_shows_topological_order(
     b_idx = next(i for i, x in enumerate(ids) if f"{unique_repo}_b" in x)
     a_idx = next(i for i, x in enumerate(ids) if f"{unique_repo}_a" in x)
     assert c_idx < b_idx < a_idx, f"expected C < B < A order, got indices {c_idx}, {b_idx}, {a_idx}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Exit codes for offline mode (Phase 3 specification tests)
+# NOTE: These tests assert exit code 81 (OfflineBlocked) which will only pass
+# after Phase 4 implements classify_error dispatch in main.rs.
+# ---------------------------------------------------------------------------
+
+
+def test_exit_code_on_offline_blocks_fetch(ocx: OcxRunner) -> None:
+    """--offline install of non-cached package → exit 81 (OfflineBlocked).
+
+    Plan Test 3.2.6: ocx_lib::Error::OfflineMode → OfflineBlocked (81).
+    The package has never been installed so no cached version exists — offline
+    mode must block the fetch and exit with code 81 (distinct from Unavailable=69
+    which signals a network fault rather than a deliberate policy block).
+    """
+    result = subprocess.run(
+        [str(ocx.binary), "--offline", "install", "nonexistent_spec_test_pkg:0"],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 81, (
+        f"offline fetch should exit with code 81 (OfflineBlocked), got {result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+
+
+def test_exit_code_on_auth_failure(ocx: OcxRunner) -> None:
+    """Auth failure simulation deferred — registry fixture does not support 401 responses.
+
+    Plan Test 3.2.7: AuthError → exit 80. The test registry (registry:2) cannot
+    inject 401 responses without a custom auth plugin. Skipped until a fixture
+    supporting auth failure simulation is available.
+    """
+    pytest.skip("auth failure simulation deferred; registry:2 fixture cannot inject 401 responses")

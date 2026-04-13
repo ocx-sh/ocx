@@ -19,10 +19,15 @@ OCX looks for config files in three tiers, each serving a different scope:
 | Tier | Path | Purpose |
 |------|------|---------|
 | System | `/etc/ocx/config.toml` | Machine-wide defaults set by sysadmins, Dockerfiles, or provisioning tools |
-| User | [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` or `~/.config/ocx/config.toml` | Personal defaults, separate from OCX data (`~/.ocx/`) per [XDG convention][xdg-basedir] |
+| User (Linux) | [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` or `~/.config/ocx/config.toml` | Personal defaults, separate from OCX data (`~/.ocx/`) per [XDG convention][xdg-basedir] |
+| User (macOS) | `~/Library/Application Support/ocx/config.toml` | macOS follows [Apple's conventions][apple-dirs]; `XDG_CONFIG_HOME` is not consulted |
 | OCX home | [`$OCX_HOME`][env-ocx-home]`/config.toml` (default: `~/.ocx/config.toml`) | Co-located with the data directory; survives a zip-and-move of [`$OCX_HOME`][env-ocx-home] |
 
 Missing files are silently skipped. None of these files need to exist.
+
+### OCX Home Tier {#config-home-tier}
+
+The OCX home tier — [`$OCX_HOME`][env-ocx-home]`/config.toml` (default `~/.ocx/config.toml`) — is co-located with the OCX data directory. This is the only tier that moves with the data when you relocate [`$OCX_HOME`][env-ocx-home], making it the right home for settings that must survive a zip-and-move of an entire OCX install (for example, a portable OCX bundle carried between machines). The system and user tiers, by contrast, live under OS-specific locations that do not travel with the data.
 
 ### Explicit Additions {#file-locations-explicit}
 
@@ -49,7 +54,7 @@ Settings are resolved lowest-to-highest. Higher-precedence sources override lowe
 |----------|--------|-------|
 | 1 (lowest) | Compiled defaults | Built into the OCX binary |
 | 2 | System config — `/etc/ocx/config.toml` | Discovered tier |
-| 3 | User config — [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` | Discovered tier |
+| 3 | User config — [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` (Linux) or `~/Library/Application Support/ocx/config.toml` (macOS) | Discovered tier |
 | 4 | OCX home config — [`$OCX_HOME`][env-ocx-home]`/config.toml` | Discovered tier |
 | 5 | [`OCX_CONFIG_FILE`][env-config-file] | Layered on top of discovered tiers |
 | 6 | [`--config`][arg-config] `FILE` | Layered on top of [`OCX_CONFIG_FILE`][env-config-file] |
@@ -209,11 +214,14 @@ env:
 
 ## Error Reference {#errors}
 
+Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_CONFIG_SIZE` in the loader source). Angle-bracket placeholders such as `<SIZE>` stand in for runtime values that depend on the offending file.
+
 | Error | Cause | Resolution |
 |-------|-------|-----------|
 | `error: config file not found: /path/to/file.toml (check --config or OCX_CONFIG_FILE)` | [`--config`][arg-config] or [`OCX_CONFIG_FILE`][env-config-file] points to a non-existent file | Check the path; unlike the three discovery tiers, explicit paths must exist. To disable an ambient [`OCX_CONFIG_FILE`][env-config-file] without unsetting it, set it to the empty string. |
-| `error: config file /path/to/file.toml exceeds maximum allowed size (N bytes > 65536 bytes); OCX config files are typically under 1 KiB — did you point at the wrong file?` | A config file is larger than the 64 KiB safety cap | The hint usually explains it — a `--config` flag or `OCX_CONFIG_FILE` env var pointed at a non-config file (e.g. an archive or binary). |
+| `error: config file /path/to/file.toml exceeds maximum allowed size (<SIZE> bytes > 65536 bytes); OCX config files are typically under 1 KiB — did you point at the wrong file?` | A config file is larger than the 64 KiB safety cap | The hint usually explains it — a `--config` flag or `OCX_CONFIG_FILE` env var pointed at a non-config file (e.g. an archive or binary). |
 | `error: invalid TOML at /path/to/file.toml: ...` | TOML syntax error in the config file | Fix the TOML syntax error at the indicated location |
+| `error: failed to read config file /path/to/file.toml: ...` | The file exists but cannot be read — permission denied, the path is a directory, or another I/O failure | Check file permissions; [`--config`][arg-config] and [`OCX_CONFIG_FILE`][env-config-file] must point to a regular, readable file. |
 
 ## Future Config Keys {#future}
 
@@ -251,6 +259,7 @@ A CWD-walk for a project-level `ocx.toml` is planned. The file name is deliberat
 [cargo-config]: https://doc.rust-lang.org/cargo/reference/config.html
 [cargo-registries]: https://doc.rust-lang.org/cargo/reference/registries.html
 [uv-config]: https://docs.astral.sh/uv/configuration/files/
+[apple-dirs]: https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html
 
 <!-- commands -->
 [arg-config]: ./command-line.md#arg-config

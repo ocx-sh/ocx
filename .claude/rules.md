@@ -50,6 +50,8 @@ catalog changes.
 | Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `finalize` |
 | Swarm / multi-agent workflows | [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md), skills `swarm-plan`, `swarm-execute`, `swarm-review` |
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
+| Error type design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md) |
+| CLI exit code design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) |
 | Mirror / bundling | [subsystem-mirror.md](./rules/subsystem-mirror.md) |
 | Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
 | Releases | [workflow-release.md](./rules/workflow-release.md) |
@@ -58,7 +60,7 @@ catalog changes.
 
 | Language | Quality rule | Related |
 |---|---|---|
-| Rust | [quality-rust.md](./rules/quality-rust.md) | [arch-principles.md](./rules/arch-principles.md), [quality-core.md](./rules/quality-core.md), [subsystem-deps.md](./rules/subsystem-deps.md) |
+| Rust | [quality-rust.md](./rules/quality-rust.md) | [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md), [arch-principles.md](./rules/arch-principles.md), [quality-core.md](./rules/quality-core.md), [subsystem-deps.md](./rules/subsystem-deps.md) |
 | Python (acceptance tests) | [quality-python.md](./rules/quality-python.md) | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | TypeScript (website) | [quality-typescript.md](./rules/quality-typescript.md) | [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md) |
 | Bash (tasks, hooks) | [quality-bash.md](./rules/quality-bash.md) | — |
@@ -87,7 +89,7 @@ of truth — `CLAUDE.md` may summarize or reference by pointer.
 
 | Edit path | Rules that auto-load |
 |---|---|
-| `**/*.rs` | [quality-rust.md](./rules/quality-rust.md) (+ [arch-principles.md](./rules/arch-principles.md) under `crates/**`, `external/**`) |
+| `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) (+ [arch-principles.md](./rules/arch-principles.md) under `crates/**`, `external/**`) |
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
 | `Cargo.toml`, `crates/*/Cargo.toml`, `deny.toml`, `.licenserc.toml` | [subsystem-deps.md](./rules/subsystem-deps.md) |
 | `crates/ocx_lib/src/oci/**` | + [subsystem-oci.md](./rules/subsystem-oci.md) |

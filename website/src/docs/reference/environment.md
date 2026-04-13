@@ -88,6 +88,8 @@ If not set, defaults to `~/.ocx`.
 export OCX_HOME="/opt/ocx"
 ```
 
+OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [OCX home tier in the Configuration reference][config-home-tier].
+
 ### `OCX_INDEX` {#ocx-index}
 
 Override the path to the [local index][fs-index] directory.
@@ -139,6 +141,8 @@ Combined with an explicit path, this is the canonical hermetic pattern:
 ```sh
 OCX_NO_CONFIG=1 ocx --config /ci/ocx.toml install cmake:3.28
 ```
+
+`OCX_NO_CONFIG` is available only as an environment variable. A `--no-config` CLI flag would duplicate surface without solving a new problem: the hermetic-CI use case is best expressed via env vars, which are how CI systems already inject policy. A flag would require callers to both export the env var and pass the flag in every per-command invocation — two sources of truth for the same intent.
 
 ### `OCX_NO_UPDATE_CHECK` {#ocx-no-update-check}
 
@@ -213,9 +217,11 @@ The location of the Docker configuration directory. Read by the Docker credentia
 
 ### `XDG_CONFIG_HOME` {#external-xdg-config-home}
 
-User-level configuration base directory, defined by the [XDG Base Directory Specification][xdg-basedir]. OCX uses it to locate the user-tier [configuration file][config-ref]: the user tier is `$XDG_CONFIG_HOME/ocx/config.toml`, falling back to `~/.config/ocx/config.toml` when the variable is unset.
+User-level configuration base directory, defined by the [XDG Base Directory Specification][xdg-basedir]. On Linux, OCX uses it to locate the user-tier [configuration file][config-ref]: the user tier is `$XDG_CONFIG_HOME/ocx/config.toml`, falling back to `~/.config/ocx/config.toml` when the variable is unset.
 
-OCX does not write anything to this directory — it is read-only for the config loader. This follows the XDG convention for CLI tools that need user-level configuration separate from data (`~/.ocx/`).
+On macOS, `XDG_CONFIG_HOME` is not consulted. The user-tier path is `~/Library/Application Support/ocx/config.toml`, following [Apple's directory conventions][apple-dirs-env]. Use the [OCX home tier][config-home-tier] (`$OCX_HOME/config.toml`, default `~/.ocx/config.toml`) if you want a platform-neutral user config path.
+
+OCX does not write anything to these directories — the config loader is read-only. This follows the convention for CLI tools that need user-level configuration separate from data (`~/.ocx/`).
 
 ### `NO_COLOR` {#external-no-color}
 
@@ -246,6 +252,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 [xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/
+[apple-dirs-env]: https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html
 
 <!-- commands -->
 [cmd-ref]: command-line.md
@@ -259,6 +266,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- reference -->
 [config-ref]: ./configuration.md
+[config-home-tier]: ./configuration.md#config-home-tier
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote

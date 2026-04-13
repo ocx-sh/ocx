@@ -85,11 +85,19 @@ color-related environment variables ([`NO_COLOR`][env-no-color],
 
 ### `--config` {#arg-config}
 
-Path to an ocx configuration file.
+Path to an extra [configuration file][config-ref] to load for this invocation.
 
 ```shell
 ocx --config /path/to/config.toml install cmake:3.28
 ```
+
+The file layers **on top of** the discovered tier chain — it does not replace it. Settings in the specified file win over system, user, and `$OCX_HOME/config.toml` values, but the discovered tiers still load first. To suppress the discovered chain entirely, combine with [`OCX_NO_CONFIG`][env-no-config]`=1`.
+
+The specified file **must exist** — a missing path is an error (exit code 79). This is different from the three discovered tiers, which silently skip missing files.
+
+The same override can be set persistently via [`OCX_CONFIG_FILE`][env-config-file]. When both are set, the `--config` file sits at highest file-tier precedence and wins on conflicting scalars.
+
+See the [Configuration reference][config-ref] for the full precedence table, merge rules, and error messages.
 
 ### `--candidate` / `--current` {#path-resolution}
 
@@ -767,6 +775,11 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [env-clicolor]: ./environment.md#external-clicolor
 [env-clicolor-force]: ./environment.md#external-clicolor-force
 [env-ocx-index]: ./environment.md#ocx-index
+[env-no-config]: ./environment.md#ocx-no-config
+[env-config-file]: ./environment.md#ocx-config-file
+
+<!-- reference -->
+[config-ref]: ./configuration.md
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects

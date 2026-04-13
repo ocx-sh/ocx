@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// A network operation was attempted while in offline mode.
-    #[error("A network operation was attempted while in offline mode.")]
+    #[error("network operation attempted in offline mode")]
     OfflineMode,
 
     /// A file I/O error with path context.
-    #[error("Internal file error for '{path}': {source}", path = .0.display(), source = .1)]
+    #[error("internal file error for '{path}': {source}", path = .0.display(), source = .1)]
     InternalFile(std::path::PathBuf, #[source] std::io::Error),
     /// A path has an unexpected structure.
-    #[error("Path '{}' has an unexpected structure", .0.display())]
+    #[error("path '{}' has an unexpected structure", .0.display())]
     InternalPathInvalid(std::path::PathBuf),
 
     /// JSON serialization or deserialization failed.
@@ -20,7 +23,7 @@ pub enum Error {
     SerializationFailure(#[from] serde_json::Error),
 
     /// An unsupported OCI media type was encountered.
-    #[error("Unsupported media type '{media_type}'. Expected media types are: {supported}", media_type = .0, supported = .1.join(", "))]
+    #[error("unsupported media type '{media_type}', expected media types are: {supported}", media_type = .0, supported = .1.join(", "))]
     UnsupportedMediaType(String, &'static [&'static str]),
 
     /// An authentication operation failed.
@@ -122,5 +125,35 @@ impl std::fmt::Display for ArcError {
 impl std::error::Error for ArcError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.0.source()
+    }
+}
+
+impl ClassifyExitCode for Error {
+    fn classify(&self) -> Option<ExitCode> {
+        match self {
+            Self::OfflineMode => Some(ExitCode::OfflineBlocked),
+            Self::InternalFile(_, _) => Some(ExitCode::IoError),
+            Self::InternalPathInvalid(_) => Some(ExitCode::Failure),
+            Self::SerializationFailure(_) | Self::UnsupportedMediaType(_, _) => Some(ExitCode::DataError),
+            // Transparent wrappers delegate to the inner error's classification.
+            Self::Auth(e) => e.classify(),
+            Self::Platform(e) => e.classify(),
+            Self::Profile(e) => e.classify(),
+            Self::PackageManager(e) => e.classify(),
+            Self::OciClient(e) => e.classify(),
+            Self::Identifier(e) => e.classify(),
+            Self::Archive(e) => e.classify(),
+            Self::Compression(e) => e.classify(),
+            Self::Ci(e) => e.classify(),
+            Self::Config(e) => e.classify(),
+            Self::Package(e) => e.classify(),
+            // Shell errors have no specific exit code yet; defer to chain walker.
+            Self::Shell(_) => None,
+            Self::OciIndex(e) => e.classify(),
+            Self::FileStructure(e) => e.classify(),
+            Self::Digest(e) => e.classify(),
+            Self::Dependency(e) => e.classify(),
+            Self::PinnedIdentifier(e) => e.classify(),
+        }
     }
 }

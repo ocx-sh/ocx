@@ -15,6 +15,11 @@ Rust 2024 edition guidance.
 Project-independent and shareable: references to project-specific types or
 modules belong in subsystem rules, not here.
 
+**Sibling rules (deep dives):**
+
+- [`quality-rust-errors.md`](./quality-rust-errors.md) — Rust error design: the canonical API Guidelines message rule, `thiserror`/`anyhow` conventions, three-layer chain patterns, library vs CLI boundary styles.
+- [`quality-rust-exit_codes.md`](./quality-rust-exit_codes.md) — Canonical `ExitCode` enum shape for Rust CLI tools, sysexits.h alignment, error-to-exit-code classification pattern, anti-patterns.
+
 ---
 
 ## Design Patterns
@@ -50,7 +55,9 @@ pub enum Version { V1 = 1 }
 ### Block (must fix before merge)
 
 - **`.unwrap()` / `.expect()` in library code** — panics cross API boundaries without the caller's consent. `clippy::unwrap_used` and `clippy::expect_used` are in the restriction group; enable both as `warn` in `[lints.rust]` for lib crates. `.expect("reason")` is tolerable for invariants proven at compile time or by preceding logic (e.g., regex group guaranteed to capture, length checked before `.next()`). For fallible operations, return `Result`. Tests may use `.unwrap()`.
-- **`anyhow` / erased errors in library APIs** — `anyhow::Error` destroys downstream `match`-ability. Rule: libraries use `thiserror`, binaries use `anyhow`. Using both is fine; mixing the roles is not.
+- **`anyhow` / erased errors in library APIs** — `anyhow::Error` destroys downstream `match`-ability. Rule: libraries use `thiserror`, binaries use `anyhow`. Using both is fine; mixing the roles is not. See [`quality-rust-errors.md`](./quality-rust-errors.md) for the full library/binary boundary rule.
+- **Sentence-case / trailing-punctuation `#[error("...")]` strings** — violates Rust API Guidelines `C-GOOD-ERR` and reads inconsistently in chained error output. Full rule and normalization examples in [`quality-rust-errors.md`](./quality-rust-errors.md).
+- **Magic numeric exit codes or `std::process::exit(N)` with bare literals** — CLI binaries should own a typed `ExitCode` enum aligned with `sysexits.h`. See [`quality-rust-exit_codes.md`](./quality-rust-exit_codes.md) for the canonical shape and classification pattern.
 - **Silent error swallowing** — `let _ = result` or `.ok()` without a comment explaining why the error is deliberately ignored.
 - **`.to_string()` in `map_err()` erasing source errors** — never `map_err(|e| SomeError(e.to_string()))`. Carry the source error structurally via `#[source]` or `Box<dyn Error + Send + Sync>`.
 - **`String` wrapping a structured error's Display output** — if a field holds `error.to_string()`, it should hold the error itself instead.
