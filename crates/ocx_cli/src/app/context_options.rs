@@ -8,7 +8,10 @@ use crate::options;
 
 #[derive(Debug, Parser)]
 pub struct ContextOptions {
-    /// The path to the ocx configuration file
+    /// Path to the ocx configuration file.
+    ///
+    /// Can also be set via the `OCX_CONFIG_FILE` environment variable.
+    /// To disable config discovery entirely, set `OCX_NO_CONFIG=1`.
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<std::path::PathBuf>,
 

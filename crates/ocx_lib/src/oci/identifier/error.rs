@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
+
 /// An error that occurred while parsing an OCI identifier string.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("invalid identifier '{}': {}", .input, .kind)]
@@ -49,4 +52,11 @@ pub enum IdentifierErrorKind {
     /// The identifier resolved to a Docker Hub default domain, which is not supported.
     #[error("Docker Hub default domain is not supported")]
     DockerHubDefault,
+}
+
+impl ClassifyExitCode for IdentifierError {
+    fn classify(&self) -> Option<ExitCode> {
+        // Every identifier parse failure is a malformed-input error.
+        Some(ExitCode::DataError)
+    }
 }

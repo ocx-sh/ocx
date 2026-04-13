@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use console::{Style, Term};
-use ocx_lib::{env, file_structure, oci, shell};
+use ocx_lib::{file_structure, oci, shell};
 
 use crate::api::Printable;
 use crate::app::Context;
@@ -45,7 +45,10 @@ const LOGO_WIDTH: usize = 52;
 impl Info {
     pub async fn execute(&self, context: Context) -> anyhow::Result<ExitCode> {
         let version = env!("CARGO_PKG_VERSION").to_string();
-        let registry = env::string("OCX_DEFAULT_REGISTRY", oci::DEFAULT_REGISTRY.into());
+        // Reflect the same default registry the rest of the CLI resolves —
+        // env var, layered config, then compiled fallback (already merged in
+        // Context::default_registry).
+        let registry = context.default_registry().to_string();
         let platforms: Vec<String> = crate::conventions::supported_platforms()
             .iter()
             .map(oci::Platform::to_string)

@@ -1158,7 +1158,7 @@ mod tests {
         let result = client.pull_metadata(&id, Some(&manifest)).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Invalid manifest"), "got: {}", err_msg);
+        assert!(err_msg.contains("invalid manifest"), "got: {}", err_msg);
     }
 
     // ── verify_blob_digest tests ────────────────────────────────

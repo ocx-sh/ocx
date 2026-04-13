@@ -22,7 +22,7 @@ pub struct Config {
     ///
     /// In v1 contains only `default`, but reserved for future global settings
     /// (timeout, retry policy, default-credential-provider, etc.).
-    pub registry: Option<RegistryGlobals>,
+    pub registry: Option<RegistryDefaults>,
 
     /// `[registries.<name>]` named registry tables — per-registry settings.
     ///
@@ -43,7 +43,7 @@ pub struct Config {
 /// of `deny_unknown_fields` on `Config`.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RegistryGlobals {
+pub struct RegistryDefaults {
     /// Default registry for bare identifiers (e.g., `cmake:3.28` →
     /// `<default>/cmake:3.28`). Overridden by `OCX_DEFAULT_REGISTRY` env var.
     ///
@@ -74,13 +74,14 @@ impl Config {
         }
     }
 
-    /// Resolve [`RegistryGlobals::default`] through the `[registries.<name>]`
+    /// Resolve [`RegistryDefaults::default`] through the `[registries.<name>]`
     /// lookup table.
     ///
     /// If `[registry] default = "name"` and `[registries.name] url = "host"`,
     /// returns `Some("host")`. If the name has no matching entry, returns
     /// the name as-is (treating it as a literal hostname — the v1 behavior).
     /// Returns `None` only when no default is configured at all.
+    #[must_use]
     pub fn resolved_default_registry(&self) -> Option<&str> {
         let name = self.registry.as_ref()?.default.as_deref()?;
         if let Some(entries) = self.registries.as_ref()
@@ -93,10 +94,10 @@ impl Config {
     }
 }
 
-impl RegistryGlobals {
+impl RegistryDefaults {
     /// Merge `other` into `self` field-by-field. `other`'s `Some` values
     /// override `self`'s; `other`'s `None` values do not clobber `self`.
-    pub fn merge(&mut self, other: RegistryGlobals) {
+    pub fn merge(&mut self, other: RegistryDefaults) {
         if other.default.is_some() {
             self.default = other.default;
         }
@@ -196,13 +197,13 @@ mod tests {
     fn merge_higher_precedence_default_wins() {
         // Plan: Step 3.2 — lower has Some(default="a"), higher has Some(default="b") → "b"
         let mut lower = Config {
-            registry: Some(RegistryGlobals {
+            registry: Some(RegistryDefaults {
                 default: Some("a".into()),
             }),
             ..Config::default()
         };
         let higher = Config {
-            registry: Some(RegistryGlobals {
+            registry: Some(RegistryDefaults {
                 default: Some("b".into()),
             }),
             ..Config::default()
@@ -215,13 +216,13 @@ mod tests {
     fn merge_none_in_higher_does_not_clobber_lower() {
         // Plan: Step 3.2 — lower has Some(default="a"), higher has None → preserved as "a"
         let mut lower = Config {
-            registry: Some(RegistryGlobals {
+            registry: Some(RegistryDefaults {
                 default: Some("a".into()),
             }),
             ..Config::default()
         };
         let higher = Config {
-            registry: Some(RegistryGlobals { default: None }),
+            registry: Some(RegistryDefaults { default: None }),
             ..Config::default()
         };
         lower.merge(higher);
@@ -237,7 +238,7 @@ mod tests {
         // Plan: Step 3.2 — lower has None registry, higher has Some(default="b")
         let mut lower = Config::default();
         let higher = Config {
-            registry: Some(RegistryGlobals {
+            registry: Some(RegistryDefaults {
                 default: Some("b".into()),
             }),
             ..Config::default()
@@ -248,17 +249,17 @@ mod tests {
 
     #[test]
     fn merge_both_have_registry_section_with_different_fields() {
-        // Plan: Step 3.2 — both have Some(RegistryGlobals) merged field-by-field
+        // Plan: Step 3.2 — both have Some(RegistryDefaults) merged field-by-field
         // lower has default="lower-default", higher has default=None
         // result: lower's default preserved since higher has None
         let mut lower = Config {
-            registry: Some(RegistryGlobals {
+            registry: Some(RegistryDefaults {
                 default: Some("lower-default".into()),
             }),
             ..Config::default()
         };
         let higher = Config {
-            registry: Some(RegistryGlobals { default: None }),
+            registry: Some(RegistryDefaults { default: None }),
             ..Config::default()
         };
         lower.merge(higher);

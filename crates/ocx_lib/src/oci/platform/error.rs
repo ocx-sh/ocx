@@ -3,6 +3,8 @@
 
 use super::architecture::Architecture;
 use super::operating_system::OperatingSystem;
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
 
 /// An error that occurred while parsing or validating an OCI platform.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -34,4 +36,10 @@ pub enum PlatformErrorKind {
     /// The platform is syntactically valid but not supported by OCX.
     #[error("unsupported platform: {0}")]
     Unsupported(String),
+}
+
+impl ClassifyExitCode for PlatformError {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(ExitCode::DataError)
+    }
 }

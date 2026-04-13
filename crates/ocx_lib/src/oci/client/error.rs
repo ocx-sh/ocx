@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
 use crate::oci::{Digest, Identifier, PinnedIdentifier, native};
 
 /// Errors that can occur during OCI client operations.
@@ -10,20 +12,20 @@ use crate::oci::{Digest, Identifier, PinnedIdentifier, native};
 #[non_exhaustive]
 pub enum ClientError {
     /// Authentication with the registry failed.
-    #[error("Registry authentication failed: {0}")]
+    #[error("registry authentication failed: {0}")]
     Authentication(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Digest mismatch between expected and actual content hash.
     /// Fires for manifest digests and for verified blob digests.
-    #[error("Digest mismatch: expected '{expected}', got '{actual}'")]
+    #[error("digest mismatch: expected '{expected}', got '{actual}'")]
     DigestMismatch { expected: String, actual: String },
     /// Expected an image manifest but got an image index or unknown type.
-    #[error("Expected an image manifest, got an image index")]
+    #[error("expected an image manifest, got an image index")]
     UnexpectedManifestType,
     /// Manifest structure is invalid (e.g. wrong layer count, missing fields).
-    #[error("Invalid manifest: {0}")]
+    #[error("invalid manifest: {0}")]
     InvalidManifest(String),
     /// The requested manifest does not exist in the registry.
-    #[error("Manifest not found: {0}")]
+    #[error("manifest not found: {0}")]
     ManifestNotFound(String),
     /// A referenced blob does not exist in the registry.
     ///
@@ -35,7 +37,7 @@ pub enum ClientError {
     #[error("Blob not found: {0}")]
     BlobNotFound(PinnedIdentifier),
     /// A registry operation failed.
-    #[error("Registry operation failed: {0}")]
+    #[error("registry operation failed: {0}")]
     Registry(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// File I/O error with path context.
     #[error("I/O error for '{}': {source}", path.display())]
@@ -45,10 +47,10 @@ pub enum ClientError {
         source: std::io::Error,
     },
     /// JSON serialization or deserialization failed.
-    #[error("Serialization error: {0}")]
+    #[error("serialization error: {0}")]
     Serialization(#[source] serde_json::Error),
     /// Invalid UTF-8 encoding encountered.
-    #[error("Invalid UTF-8 encoding: {0}")]
+    #[error("invalid UTF-8 encoding: {0}")]
     InvalidEncoding(#[source] std::string::FromUtf8Error),
     /// An internal library error (e.g. codesign, archive processing).
     #[error("{0}")]
@@ -87,5 +89,25 @@ impl ClientError {
                 Self::Registry(Box::new(e))
             }
         }
+    }
+}
+
+impl ClassifyExitCode for ClientError {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(match self {
+            Self::Authentication(_) => ExitCode::AuthError,
+            Self::ManifestNotFound(_) | Self::BlobNotFound(_) => ExitCode::NotFound,
+            Self::Io { .. } => ExitCode::IoError,
+            // TODO: inspect inner source to refine (HTTP 429/503 → TempFail,
+            // 401/403 → AuthError, timeout → TempFail). For v1, treat every
+            // registry operation failure as Unavailable.
+            Self::Registry(_) => ExitCode::Unavailable,
+            Self::DigestMismatch { .. }
+            | Self::UnexpectedManifestType
+            | Self::InvalidManifest(_)
+            | Self::Serialization(_)
+            | Self::InvalidEncoding(_) => ExitCode::DataError,
+            Self::Internal(_) => ExitCode::Failure,
+        })
     }
 }

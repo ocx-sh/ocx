@@ -18,7 +18,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
     /// The registry hostname this entry resolves to. When
-    /// [`super::RegistryGlobals::default`] names this entry, OCX uses `url`
+    /// [`super::RegistryDefaults::default`] names this entry, OCX uses `url`
     /// as the effective default registry hostname for bare identifiers.
     pub url: Option<String>,
 }
@@ -30,5 +30,46 @@ impl RegistryConfig {
         if other.url.is_some() {
             self.url = other.url;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Test 3.1.2: RegistryConfig::merge None-preserves ────────────────────
+    // Plan: unit test gap — lower has Some(url), higher has None → lower preserved.
+
+    #[test]
+    fn registry_config_merge_none_in_higher_does_not_clobber_lower_url() {
+        // Lower config has a URL set; higher config has None for the same field.
+        // After merge, lower's URL must be preserved (None never wins).
+        let mut lower = RegistryConfig {
+            url: Some("ghcr.io".to_string()),
+        };
+        let higher = RegistryConfig { url: None };
+        lower.merge(higher);
+        assert_eq!(
+            lower.url.as_deref(),
+            Some("ghcr.io"),
+            "None in higher should not clobber lower's Some(url)"
+        );
+    }
+
+    #[test]
+    fn registry_config_merge_some_in_higher_overrides_lower_url() {
+        // When higher has Some(url), it wins over lower's value.
+        let mut lower = RegistryConfig {
+            url: Some("old.example".to_string()),
+        };
+        let higher = RegistryConfig {
+            url: Some("new.example".to_string()),
+        };
+        lower.merge(higher);
+        assert_eq!(
+            lower.url.as_deref(),
+            Some("new.example"),
+            "Some in higher should override lower's url"
+        );
     }
 }

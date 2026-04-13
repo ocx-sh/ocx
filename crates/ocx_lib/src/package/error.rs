@@ -3,19 +3,31 @@
 
 use std::path::PathBuf;
 
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
+
 /// Errors specific to package metadata, versioning, and description operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// A package version string could not be parsed.
-    #[error("Invalid package version: {0}")]
+    #[error("invalid package version: {0}")]
     VersionInvalid(String),
 
     /// A logo file has an unsupported image format.
-    #[error("Unsupported logo format: {0}")]
+    #[error("unsupported logo format: {0}")]
     UnsupportedLogoFormat(String),
 
     /// A required path does not exist.
-    #[error("Required path does not exist: {}", .0.display())]
+    #[error("required path does not exist: {}", .0.display())]
     RequiredPathMissing(PathBuf),
+}
+
+impl ClassifyExitCode for Error {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(match self {
+            Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) => ExitCode::DataError,
+            Self::RequiredPathMissing(_) => ExitCode::NotFound,
+        })
+    }
 }

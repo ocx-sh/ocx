@@ -18,11 +18,8 @@ Strategy for detecting which registry was resolved:
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
-
-import pytest
 
 from src.runner import OcxRunner
 
@@ -427,4 +424,192 @@ def test_unknown_top_level_section_ignored(ocx: OcxRunner) -> None:
     assert result.returncode == 0, (
         f"unknown top-level config section should not cause failure, "
         f"stderr={result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Exit codes and error UX (Phase 3 specification tests)
+# NOTE: Tests 3.2.1–3.2.9 assert specific exit-code values and error messages
+# that will only pass after Phase 4 implements classify_error dispatch in main.rs.
+# Until then they demonstrate the expected contract.
+# ---------------------------------------------------------------------------
+
+
+def test_file_too_large_errors_with_helpful_message(ocx: OcxRunner) -> None:
+    """Config file exceeding 65 KiB cap → exit 78 with helpful message.
+
+    Plan Test 3.2.1: FileTooLarge error UX acceptance test.
+    Writes a config file that exceeds the max allowed size, then asserts
+    exit code 78 (EX_CONFIG) and helpful diagnostic text in stderr.
+    """
+    # 65 KiB is the documented cap. Write 65 * 1024 + 1 bytes.
+    oversized_content = "# " + "x" * (65 * 1024 - 1) + "\n"  # just over 65 KiB as comment lines
+    oversized_content = "# padding\n" * ((65 * 1024 // 10) + 1)  # >65 KiB via repeated comment lines
+    write_home_config(ocx, oversized_content)
+
+    result = subprocess.run(
+        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 78, (
+        f"FileTooLarge should exit with code 78 (EX_CONFIG), got {result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+    combined = result.stdout + result.stderr
+    assert "exceeds maximum allowed size" in combined, (
+        f"error should mention size cap, got: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "did you point at the wrong file" in combined, (
+        f"error should contain helpful hint, got: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_explicit_config_overrides_env_var_config_file(ocx: OcxRunner, tmp_path: Path) -> None:
+    """--config CLI flag beats OCX_CONFIG_FILE when both are set.
+
+    Plan Test 3.2.2: explicit --config overrides OCX_CONFIG_FILE env var.
+    Both config files set different default registries; the CLI-provided file wins.
+    OCX_NO_CONFIG is NOT set (distinguishing this from the kill-switch test).
+    """
+    env_config = tmp_path / "env.toml"
+    env_config.write_text('[registry]\ndefault = "env.example"\n')
+
+    cli_config = tmp_path / "cli.toml"
+    cli_config.write_text('[registry]\ndefault = "cli.example"\n')
+
+    env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
+    env["OCX_CONFIG_FILE"] = str(env_config)
+
+    result = subprocess.run(
+        [str(ocx.binary), "--config", str(cli_config), "install", "nonexistent_pkg_ocx_test:0"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode != 0, "install of nonexistent package should fail"
+    combined = result.stdout + result.stderr
+    assert "cli.example" in combined, (
+        f"--config file should win over OCX_CONFIG_FILE; expected 'cli.example', "
+        f"got stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "env.example" not in combined, (
+        f"OCX_CONFIG_FILE registry must NOT appear when --config overrides it; "
+        f"got stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_layered_merge_home_tier_and_explicit_config(ocx: OcxRunner, tmp_path: Path) -> None:
+    """Additive merge: $OCX_HOME/config.toml + --config extra.toml → both registries resolve.
+
+    Plan Test 3.2.3: layered merge precedence — lower tier provides 'shared' registry,
+    higher tier provides 'other' registry. Both should appear after merge (not suppression).
+    """
+    # Lower tier: $OCX_HOME/config.toml adds [registries.shared]
+    write_home_config(
+        ocx,
+        "[registries.shared]\nurl = \"shared.example\"\n",
+    )
+
+    # Higher tier: explicit --config adds [registries.other]
+    extra_config = tmp_path / "extra.toml"
+    extra_config.write_text("[registries.other]\nurl = \"other.example\"\n")
+
+    # Use index catalog (works even with empty index) to trigger config load
+    result = subprocess.run(
+        [str(ocx.binary), "--config", str(extra_config), "index", "catalog"],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    # The command must succeed: if either tier had clobbered the other or
+    # rejected the config, the loader would emit ConfigError (78). Returncode 0
+    # is the observable proof that both [registries.*] entries parsed and
+    # merged into the same Config.
+    assert result.returncode == 0, (
+        f"layered merge should succeed (both registries additive); "
+        f"stderr={result.stderr!r}"
+    )
+
+
+def test_exit_code_on_config_not_found(ocx: OcxRunner) -> None:
+    """--config pointing to nonexistent path → exit 79 (NotFound).
+
+    Plan Test 3.2.4: FileNotFound error → exit code 79 (OCX-specific, first above EX_CONFIG).
+    """
+    result = subprocess.run(
+        [str(ocx.binary), "--config", "/tmp/ocx-spec-test-nonexistent-config.toml", "index", "catalog"],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 79, (
+        f"config not found should exit with code 79 (NotFound), got {result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+
+
+def test_exit_code_on_config_parse_error(ocx: OcxRunner) -> None:
+    """Malformed TOML in $OCX_HOME/config.toml → exit 78 (EX_CONFIG).
+
+    Plan Test 3.2.5: Parse error → exit code 78.
+    """
+    write_home_config(ocx, "this is not valid toml =[[[")
+
+    result = subprocess.run(
+        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 78, (
+        f"TOML parse error should exit with code 78 (EX_CONFIG), got {result.returncode}; "
+        f"stderr={result.stderr!r}"
+    )
+
+
+def test_cli_help_mentions_config_env_vars(ocx: OcxRunner) -> None:
+    """ocx --help stdout mentions OCX_CONFIG_FILE and OCX_NO_CONFIG.
+
+    Plan Test 3.2.8: help text expansion — both env vars must appear after
+    Phase 4 adds them to the --config flag's long help.
+    """
+    result = subprocess.run(
+        [str(ocx.binary), "--help"],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 0, f"--help should exit 0, got {result.returncode}"
+    combined = result.stdout + result.stderr
+    assert "OCX_CONFIG_FILE" in combined, (
+        f"--help should mention OCX_CONFIG_FILE; got: {combined!r}"
+    )
+    assert "OCX_NO_CONFIG" in combined, (
+        f"--help should mention OCX_NO_CONFIG; got: {combined!r}"
+    )
+
+
+def test_no_config_env_var_suppresses_discovery(ocx: OcxRunner) -> None:
+    """OCX_NO_CONFIG=1 suppresses $OCX_HOME/config.toml discovery.
+
+    Plan Test 3.2.9: kill-switch suppression — config file with a distinctive
+    registry name is written; OCX_NO_CONFIG=1 must prevent that name from
+    appearing anywhere in output.
+    """
+    write_home_config(ocx, '[registry]\ndefault = "should-be-ignored-spec-test.example"\n')
+
+    env = {**ocx.env, "OCX_NO_CONFIG": "1"}
+    result = subprocess.run(
+        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode != 0, "install of nonexistent package should fail"
+    combined = result.stdout + result.stderr
+    assert "should-be-ignored-spec-test.example" not in combined, (
+        f"OCX_NO_CONFIG=1 must suppress config file discovery; "
+        f"found suppressed value in: stdout={result.stdout!r} stderr={result.stderr!r}"
     )

@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use futures::future::join_all;
 use tokio::io::AsyncReadExt;
 
 use crate::Result;
@@ -86,10 +87,12 @@ impl ConfigLoader {
     /// path (CWD walk result) before any explicit override.
     ///
     /// Async because it calls [`tokio::fs::try_exists`] per candidate path.
-    /// Permission errors and other I/O failures collapse to "not found"
-    /// here, so unreadable config files are silently skipped during
-    /// discovery. A race between discovery and read surfaces later as
-    /// [`Error::Io`] during [`Self::load_and_merge`].
+    /// `NotFound` candidates are silently skipped. Other I/O errors
+    /// (permission denied, stale NFS handle, EIO) are logged as warnings
+    /// and the candidate is still skipped — discovery never fails the
+    /// whole process, but an unreadable `~/.ocx/config.toml` should at
+    /// least be *diagnosable*. A race between discovery and read surfaces
+    /// later as [`Error::Io`] during [`Self::load_and_merge`].
     pub async fn discover_paths(_inputs: &ConfigInputs<'_>) -> Vec<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         candidates.push(Self::system_path());
@@ -99,13 +102,24 @@ impl ConfigLoader {
         if let Some(home) = Self::home_path() {
             candidates.push(home);
         }
-        let mut existing = Vec::with_capacity(candidates.len());
-        for path in candidates {
-            if matches!(tokio::fs::try_exists(&path).await, Ok(true)) {
-                existing.push(path);
-            }
-        }
-        existing
+        // join_all preserves input order, so the precedence semantics of the
+        // candidate list (system → user → $OCX_HOME) are unchanged. Running
+        // the try_exists calls concurrently shaves two sequential filesystem
+        // round-trips on startup.
+        let checks = join_all(candidates.iter().map(tokio::fs::try_exists)).await;
+        candidates
+            .into_iter()
+            .zip(checks)
+            .filter_map(|(path, result)| match result {
+                Ok(true) => Some(path),
+                Ok(false) => None,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(source) => {
+                    log::warn!("skipping unreadable config candidate {}: {source}", path.display());
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Load and merge an ordered list of config files (lowest precedence
@@ -329,10 +343,21 @@ mod tests {
         let dir_path = dir.path().to_path_buf();
         let result = ConfigLoader::load_and_merge(&[dir_path]).await;
         let err = result.expect_err("directory path should be rejected");
-        let err_str = err.to_string();
+        // Plan Test 3.1.3: assert the exact substring injected at loader.rs:148.
+        // The string "config path is not a regular file" lives in the inner
+        // std::io::Error source, so walk the full source chain manually via
+        // `std::error::Error::source()` and concatenate each Display.
+        use std::error::Error as _;
+        let mut err_str = format!("{err}");
+        let mut cause: Option<&dyn std::error::Error> = err.source();
+        while let Some(c) = cause {
+            err_str.push_str(": ");
+            err_str.push_str(&c.to_string());
+            cause = c.source();
+        }
         assert!(
-            err_str.contains("not a regular file") || err_str.contains("failed to read"),
-            "error should indicate non-regular-file rejection, got: {err_str}"
+            err_str.contains("config path is not a regular file"),
+            "error should contain exact substring 'config path is not a regular file', got: {err_str}"
         );
     }
 
@@ -576,6 +601,48 @@ mod tests {
         assert!(path.is_some(), "home_path() should return Some when OCX_HOME is set");
         let expected = dir.path().join("config.toml");
         assert_eq!(path.unwrap(), expected);
+    }
+
+    // ── discover_paths error handling ────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discover_paths_skips_unreadable_candidate() {
+        // A candidate whose parent directory lacks search permission causes
+        // `try_exists` to return `Err(PermissionDenied)`. The new filter_map
+        // branch must log a warning and drop the candidate rather than either
+        // including it or failing the whole discovery pass.
+        use std::os::unix::fs::PermissionsExt;
+
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let locked_home = dir.path().join("locked-home");
+        std::fs::create_dir(&locked_home).unwrap();
+        let locked_config = locked_home.join("config.toml");
+        std::fs::write(&locked_config, "").unwrap();
+        // Mode 0o000 strips search permission; stat() on the child fails with
+        // PermissionDenied, which is the error kind discover_paths should now
+        // log+skip rather than silently collapse.
+        std::fs::set_permissions(&locked_home, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        env.set("OCX_HOME", locked_home.to_str().unwrap());
+        env.remove("OCX_CONFIG_FILE");
+        env.remove("OCX_NO_CONFIG");
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            cwd: None,
+        };
+        let paths = ConfigLoader::discover_paths(&inputs).await;
+
+        // Restore permissions so TempDir::drop can clean up even if the
+        // assertion below panics.
+        std::fs::set_permissions(&locked_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            !paths.contains(&locked_config),
+            "unreadable candidate must be skipped, got: {paths:?}"
+        );
     }
 
     #[test]

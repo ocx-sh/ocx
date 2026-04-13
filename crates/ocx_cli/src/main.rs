@@ -3,6 +3,7 @@
 
 use std::process::ExitCode;
 
+use ocx_lib::cli::classify_error;
 use ocx_lib::log;
 
 mod api;
@@ -16,10 +17,10 @@ async fn main() -> ExitCode {
     match app::run().await {
         Ok(exit_code) => exit_code,
         Err(err) => {
-            // TODO: Custom error type that can provide more structured information incl. error codes.
             // {err:#} walks the anyhow source chain so causes (e.g. "permission denied") surface to users.
-            log::error!("Error: {err:#}");
-            ExitCode::FAILURE
+            // `log::error!` already categorizes the line, so we omit a redundant "Error: " prefix.
+            log::error!("{err:#}");
+            classify_error(err.as_ref()).into()
         }
     }
 }

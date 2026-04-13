@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
 use crate::{file_structure, oci};
 
 /// Task-level error for package manager operations.
@@ -31,6 +33,15 @@ pub enum Error {
 }
 
 /// An error tied to a specific package.
+///
+/// `kind` deliberately omits `#[source]` — a deviation from the three-layer
+/// error pattern in `quality-rust-errors.md`. Exit-code classification for
+/// package errors does **not** walk the `source()` chain; it dispatches
+/// directly through the [`ClassifyExitCode`] impls on both `PackageError`
+/// and `PackageErrorKind` (see the bottom of this file and
+/// `classify_error` in `crate::cli::classify`). Adding `#[source]` would
+/// duplicate the kind into both the `Display` chain and the `source()`
+/// chain without improving diagnosability.
 #[derive(Debug, thiserror::Error)]
 #[error("{identifier} — {kind}")]
 #[non_exhaustive]
@@ -116,9 +127,9 @@ impl From<crate::oci::client::error::ClientError> for PackageErrorKind {
 fn format_batch(verb: &str, errors: &[PackageError]) -> String {
     use std::fmt::Write as _;
     if errors.len() == 1 {
-        format!("Failed to {verb} package: {}", errors[0])
+        format!("failed to {verb} package: {}", errors[0])
     } else {
-        let mut s = format!("Failed to {verb} {} packages:", errors.len());
+        let mut s = format!("failed to {verb} {} packages:", errors.len());
         for e in errors {
             let _ = write!(s, "\n  {e}");
         }
@@ -131,14 +142,54 @@ fn format_batch(verb: &str, errors: &[PackageError]) -> String {
 #[non_exhaustive]
 pub enum DependencyError {
     /// Two transitive dependencies resolve to different digests for the same repository.
-    #[error("Conflicting digests for {repository}: {}", digests.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))]
+    #[error("conflicting digests for {repository}: {}", digests.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))]
     Conflict {
         repository: String,
         digests: Vec<oci::Digest>,
     },
     /// Dependency setup coordination failed (capacity, timeout, or abandoned leader).
-    #[error("Dependency setup failed: {0}")]
+    #[error("dependency setup failed: {0}")]
     SetupFailed(#[from] crate::utility::singleflight::Error),
+}
+
+impl ClassifyExitCode for Error {
+    fn classify(&self) -> Option<ExitCode> {
+        // Batch variants wrap `Vec<PackageError>` with no `#[source]`, so the
+        // chain walker never reaches the inner `PackageErrorKind`. Classify
+        // the first package error directly — preserves per-package semantics
+        // for single-failure cases.
+        let errors = match self {
+            Self::FindFailed(es)
+            | Self::InstallFailed(es)
+            | Self::UninstallFailed(es)
+            | Self::DeselectFailed(es)
+            | Self::ResolveFailed(es) => es,
+        };
+        errors.first().and_then(|pe| pe.kind.classify())
+    }
+}
+
+impl ClassifyExitCode for PackageErrorKind {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(match self {
+            Self::NotFound | Self::SymlinkNotFound(_) | Self::BlobNotFound(_) => ExitCode::NotFound,
+            Self::OfflineManifestMissing(_) => ExitCode::OfflineBlocked,
+            Self::SelectionAmbiguous(_) | Self::SymlinkRequiresTag | Self::DigestMissing => ExitCode::DataError,
+            Self::TaskPanicked => ExitCode::Failure,
+            // Internal wraps a full `crate::Error` — walk through classify_error
+            // so the inner chain is inspected via the generic entry point.
+            Self::Internal(inner) => return Some(crate::cli::classify::classify_error(inner)),
+        })
+    }
+}
+
+impl ClassifyExitCode for DependencyError {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(match self {
+            Self::Conflict { .. } => ExitCode::DataError,
+            Self::SetupFailed(_) => ExitCode::Failure,
+        })
+    }
 }
 
 #[cfg(test)]

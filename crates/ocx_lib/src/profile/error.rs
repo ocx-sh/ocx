@@ -3,6 +3,9 @@
 
 use std::path::PathBuf;
 
+use crate::cli::ExitCode;
+use crate::cli::classify::ClassifyExitCode;
+
 /// An error that occurred while loading or saving a profile manifest.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -38,4 +41,16 @@ pub enum ProfileError {
     /// Content mode requires a digest on the identifier for direct object store resolution.
     #[error("content mode requires a digest for '{identifier}'")]
     ContentModeRequiresDigest { identifier: String },
+}
+
+impl ClassifyExitCode for ProfileError {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(match self {
+            Self::Io { .. } => ExitCode::IoError,
+            Self::Json { .. } | Self::UnsupportedVersion { .. } | Self::ContentModeRequiresDigest { .. } => {
+                ExitCode::DataError
+            }
+            Self::Locked { .. } => ExitCode::TempFail,
+        })
+    }
 }
