@@ -42,12 +42,12 @@ jobs:
           mkdir -p website/src/public/schemas/metadata
           cargo run -p ocx_schema --release > website/src/public/schemas/metadata/v1.json
       - name: Upload Binary
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-binary
           path: target/release/ocx
       - name: Upload Schema
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: website-schema
           path: website/src/public/schemas/
@@ -81,7 +81,7 @@ jobs:
       - name: Generate recordings
         run: task recordings:build
       - name: Upload Recordings
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: website-recordings
           path: website/src/public/casts/
@@ -111,12 +111,12 @@ jobs:
             --output website/src/docs/reference/dependencies.md \
             --json-output website/src/public/data/dependencies.json
       - name: Upload Dependencies Page
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: website-dependencies-page
           path: website/src/docs/reference/dependencies.md
       - name: Upload Dependencies Data
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: website-dependencies-data
           path: website/src/public/data/dependencies.json
@@ -146,12 +146,12 @@ jobs:
             --registry ocx.sh \
             --remote
       - name: Upload Catalog Data
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: website-catalog-data
           path: website/src/public/data/catalog/
       - name: Upload Catalog Pages
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: website-catalog-pages
           path: website/src/docs/catalog/
@@ -206,7 +206,7 @@ jobs:
         run: bunx vitepress build
         working-directory: website
       - name: Upload site artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: website-dist
           path: website/.vitepress/dist/

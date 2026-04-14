@@ -37,7 +37,7 @@ jobs:
         with:
           submodules: true
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
         with:
           toolchain: stable
           components: clippy,rustfmt
@@ -49,7 +49,7 @@ jobs:
       - name: Setup Task
         uses: go-task/setup-task@3be4020d41929789a01026e0e427a4321ce0ad44 # v2.0.0
       - name: Install nextest
-        uses: taiki-e/install-action@94cb46f8d6e437890146ffbd78a778b78e623fb2 # v2.74.0
+        uses: taiki-e/install-action@85b24a67ef0c632dfefad70b9d5ce8fddb040754 # v2.75.10
         with:
           tool: cargo-nextest
       - name: Check formatting
@@ -67,7 +67,7 @@ jobs:
       - name: Build Mirror
         run: cargo build --release -p ocx_mirror --locked
       - name: Upload Binaries
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-binary
           path: |

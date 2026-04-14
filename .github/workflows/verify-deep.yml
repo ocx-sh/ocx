@@ -29,14 +29,14 @@ jobs:
         with:
           target: ${{ matrix.job.target }}
       - name: Install nextest
-        uses: taiki-e/install-action@94cb46f8d6e437890146ffbd78a778b78e623fb2 # v2.74.0
+        uses: taiki-e/install-action@85b24a67ef0c632dfefad70b9d5ce8fddb040754 # v2.75.10
         with:
           tool: cargo-nextest
       - name: Test
         run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci --locked
       - name: Upload Test Results
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deep-unit-${{ matrix.job.name }}
           path: target/nextest/ci/junit.xml
@@ -67,14 +67,14 @@ jobs:
           cp target/${{ matrix.job.target }}/release/ocx.exe ocx-${{ matrix.job.target }}.exe
           cp target/${{ matrix.job.target }}/release/ocx-mirror.exe ocx-mirror-${{ matrix.job.target }}.exe
       - name: Upload ocx Binary
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-${{ matrix.job.target }}
           path: ocx-${{ matrix.job.target }}.exe
           compression-level: 0
           retention-days: 7
       - name: Upload ocx-mirror Binary
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-mirror-${{ matrix.job.target }}
           path: ocx-mirror-${{ matrix.job.target }}.exe
@@ -144,7 +144,7 @@ jobs:
         run: docker rm -f test-registry 2>/dev/null || true
       - name: Upload Test Results
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deep-acceptance-${{ matrix.job.name }}
           path: test/results/junit.xml
