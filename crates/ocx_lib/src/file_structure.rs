@@ -10,7 +10,7 @@ mod symlink_store;
 mod tag_store;
 mod temp_store;
 
-pub use blob_store::{BlobDir, BlobStore};
+pub use blob_store::{BlobDir, BlobGuard, BlobStore};
 pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, read_digest_file, write_digest_file};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore};

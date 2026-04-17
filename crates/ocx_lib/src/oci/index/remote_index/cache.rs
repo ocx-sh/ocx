@@ -42,4 +42,8 @@ impl Cache {
     }
 }
 
-pub type SharedCache = std::sync::Arc<tokio::sync::RwLock<Cache>>;
+/// Shared handle to the in-memory remote index cache.
+///
+/// Inner fields are independently locked — see
+/// [`super::super::local_index::cache::SharedCache`] for the rationale.
+pub type SharedCache = std::sync::Arc<Cache>;

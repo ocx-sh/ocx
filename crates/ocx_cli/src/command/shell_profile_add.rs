@@ -56,8 +56,7 @@ impl ShellProfileAdd {
         };
 
         let default_registry = context.default_registry();
-        let identifiers =
-            options::Identifier::transform_all(self.packages.clone().into_iter(), default_registry.clone())?;
+        let identifiers = options::Identifier::transform_all(self.packages.clone(), default_registry.clone())?;
 
         // Auto-install: find_or_install_all handles both already-installed and missing packages
         let platforms = platforms_or_default(&self.platforms);

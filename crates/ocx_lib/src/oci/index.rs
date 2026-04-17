@@ -18,7 +18,29 @@ mod index_impl;
 mod local_index;
 mod remote_index;
 
+/// Routing policy for a [`ChainedIndex`](chained_index::ChainedIndex).
+///
+/// Threaded through `Index::from_chained` and on into the chained index so
+/// that callers can pick the right cache/source policy without changing the
+/// `IndexImpl` trait. The parameter is threaded end-to-end; each variant
+/// below documents its own cache/source routing behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChainMode {
+    /// Cache-first for all lookups. Write-through on cache-miss source
+    /// fetches. Used for default (no flag) online operation.
+    Default,
+    /// Mutable lookups (tags, catalog) bypass cache and go straight to
+    /// source. Digest-addressed (immutable) lookups still use cache +
+    /// write-through. Used for `--remote`.
+    Remote,
+    /// Cache only. Source list is empty or never consulted; cache misses
+    /// return `None` from `fetch_manifest`. Used for `--offline`.
+    Offline,
+}
+
 /// The result of a platform-aware package selection.
+#[non_exhaustive]
 pub enum SelectResult {
     /// Exactly one candidate matched.
     Found(oci::Identifier),
@@ -45,12 +67,6 @@ impl Index {
         }
     }
 
-    pub fn from_local(local_index: LocalIndex) -> Self {
-        Self {
-            inner: Box::new(local_index),
-        }
-    }
-
     /// Inject an arbitrary `IndexImpl` implementation.
     ///
     /// Used exclusively in unit tests to wrap `TestIndex` fakes without
@@ -64,16 +80,13 @@ impl Index {
     /// Construct an index that reads from `cache` first, falling through to
     /// `sources` in order on miss. Successful source fetches are persisted
     /// into `cache` via `update_tag`.
-    pub fn from_chained(cache: LocalIndex, sources: Vec<Index>) -> Self {
+    ///
+    /// `mode` controls cache/source routing — see [`ChainMode`] for each
+    /// variant's behaviour.
+    pub fn from_chained(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
-            inner: Box::new(chained_index::ChainedIndex::new(cache, sources)),
+            inner: Box::new(chained_index::ChainedIndex::new(cache, sources, mode)),
         }
-    }
-
-    /// Convenience: cache + single remote source. Equivalent to
-    /// `Index::from_chained(cache, vec![Index::from_remote(remote)])`.
-    pub fn from_cached_remote(cache: LocalIndex, remote: RemoteIndex) -> Self {
-        Self::from_chained(cache, vec![Index::from_remote(remote)])
     }
 
     /// List all repositories available in the given registry.

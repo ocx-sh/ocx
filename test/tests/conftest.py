@@ -14,7 +14,11 @@ from src.runner import OcxRunner, PackageInfo
 def unique_repo(request: pytest.FixtureRequest) -> str:
     """Generate a unique OCI repository name for this test."""
     short_id = uuid4().hex[:8]
-    name = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40]
+    # Truncating to 40 chars can leave a trailing `_`, which makes the resulting
+    # repo name (`t_{8}_..._`) violate the OCI distribution spec component
+    # regex (`[a-z0-9]+(...)*`). registry:2 then rejects pushes with a 404.
+    # Strip trailing underscores so any test name maps to a valid repo.
+    name = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40].rstrip("_")
     return f"t_{short_id}_{name}"
 
 

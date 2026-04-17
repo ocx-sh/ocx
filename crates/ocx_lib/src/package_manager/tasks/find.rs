@@ -34,14 +34,25 @@ impl PackageManager {
     ) -> Result<InstallInfo, PackageErrorKind> {
         log::debug!("Finding package: {}", package);
 
-        let identifier = self.resolve(package, platforms).await?;
+        let resolved = self.resolve(package, platforms).await?;
+        let identifier = resolved.pinned.clone();
 
         log::debug!("Resolved package identifier: {}", &identifier);
 
-        self.find_plain(&identifier).await?.ok_or_else(|| {
+        let info = self.find_plain(&identifier).await?.ok_or_else(|| {
             log::debug!("Package not found locally for '{}'.", identifier);
             PackageErrorKind::NotFound
-        })
+        })?;
+
+        // Upsert the resolution chain into the installed package's `refs/blobs/`
+        // — idempotent, covers legacy installs and alt-tag resolves that walked
+        // through a different image index than the one originally pulled.
+        super::common::reference_manager(self.file_structure())
+            .link_blobs(&info.content, &resolved.chain)
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+
+        Ok(info)
     }
 
     pub async fn find_all(
@@ -111,10 +122,14 @@ mod tests {
     fn setup_manager() -> (tempfile::TempDir, PackageManager, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let fs = FileStructure::with_root(dir.path().to_path_buf());
-        let index = Index::from_local(LocalIndex::new(LocalConfig {
-            tag_store: TagStore::new(dir.path().join("tags")),
-            blob_store: BlobStore::new(dir.path().join("blobs")),
-        }));
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                tag_store: TagStore::new(dir.path().join("tags")),
+                blob_store: BlobStore::new(dir.path().join("blobs")),
+            }),
+            Vec::new(),
+            crate::oci::index::ChainMode::Offline,
+        );
         let mgr = PackageManager::new(fs.clone(), index, None, "example.com");
         let obj_path = fs.packages.path(&test_pinned());
         (dir, mgr, obj_path)

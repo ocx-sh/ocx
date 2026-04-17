@@ -45,30 +45,25 @@ impl IndexList {
     }
 
     async fn resolve_tags(&self, context: &crate::app::Context) -> anyhow::Result<ResolvedTags> {
-        let identifiers =
-            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
+        let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
-        let futures = self
-            .packages
-            .iter()
-            .zip(identifiers.into_iter())
-            .map(|(package, identifier)| {
-                let context = context.clone();
-                async move {
-                    let all_tags = match context.default_index().list_tags(&identifier).await? {
-                        Some(tags) => tags,
-                        None => {
-                            log::warn!("Package '{}' not found in the index.", identifier);
-                            Vec::new()
-                        }
-                    };
-                    let mut tags = all_tags;
-                    if let Some(requested_tag) = identifier.tag() {
-                        tags.retain(|t| t == requested_tag);
+        let futures = self.packages.iter().zip(identifiers).map(|(package, identifier)| {
+            let context = context.clone();
+            async move {
+                let all_tags = match context.default_index().list_tags(&identifier).await? {
+                    Some(tags) => tags,
+                    None => {
+                        log::warn!("Package '{}' not found in the index.", identifier);
+                        Vec::new()
                     }
-                    Ok((package.raw().to_string(), identifier, tags))
+                };
+                let mut tags = all_tags;
+                if let Some(requested_tag) = identifier.tag() {
+                    tags.retain(|t| t == requested_tag);
                 }
-            });
+                Ok((package.raw().to_string(), identifier, tags))
+            }
+        });
 
         futures::future::join_all(futures)
             .await

@@ -69,6 +69,7 @@ impl Identifier {
     /// If the input already contains a registry (detected by a `.` or `:` in the
     /// first path segment, or `"localhost"`), the default is ignored.
     pub fn parse_with_default_registry(s: &str, default_registry: &str) -> Result<Self, IdentifierError> {
+        validate_segments(s)?;
         parse_internal(s, default_registry)
     }
 
@@ -772,6 +773,18 @@ mod tests {
         let id = Identifier::parse_with_default_registry("myorg/cmake", "ocx.sh").unwrap();
         assert_eq!(id.registry(), "ocx.sh");
         assert_eq!(id.repository(), "myorg/cmake");
+    }
+
+    #[test]
+    fn parse_with_default_registry_rejects_dotdot_traversal() {
+        let err = Identifier::parse_with_default_registry("../evil/cmake", "ocx.sh").unwrap_err();
+        assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
+    }
+
+    #[test]
+    fn parse_with_default_registry_rejects_dotdot_segment() {
+        let err = Identifier::parse_with_default_registry("ocx.sh/../evil", "ocx.sh").unwrap_err();
+        assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
     }
 
     #[test]

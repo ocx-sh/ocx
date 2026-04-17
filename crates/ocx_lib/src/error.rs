@@ -82,3 +82,45 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn file_error(path: impl AsRef<std::path::Path>, error: std::io::Error) -> Error {
     Error::InternalFile(path.as_ref().to_path_buf(), error)
 }
+
+/// Clonable, source-preserving wrapper around [`Error`].
+///
+/// `crate::Error` is not `Clone` because several of its variants hold
+/// `io::Error`, which is not `Clone`. That prevents it from flowing through
+/// APIs that must broadcast a single failure to multiple consumers — most
+/// notably [`crate::utility::singleflight`], which clones the leader's error
+/// to every waiter.
+///
+/// `ArcError` wraps the typed error in an `Arc` so cloning is cheap and
+/// preserves the full error chain (`source()` delegates to the inner
+/// `Error`). Callers that need to broadcast a typed `Error` should accept
+/// `ArcError` in the variant that carries the failure so downstream code
+/// can still walk the chain and (where necessary) downcast to the original
+/// variant.
+#[derive(Debug, Clone)]
+pub struct ArcError(std::sync::Arc<Error>);
+
+impl ArcError {
+    /// Returns a reference to the wrapped error.
+    pub fn as_error(&self) -> &Error {
+        &self.0
+    }
+}
+
+impl From<Error> for ArcError {
+    fn from(error: Error) -> Self {
+        Self(std::sync::Arc::new(error))
+    }
+}
+
+impl std::fmt::Display for ArcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&*self.0, f)
+    }
+}
+
+impl std::error::Error for ArcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}

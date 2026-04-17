@@ -261,6 +261,54 @@ impl ReferenceManager {
         }
         Ok(broken)
     }
+
+    /// Idempotently upserts a `refs/blobs/` forward-ref for every entry in
+    /// `chain`. The link name is derived from each entry's digest via
+    /// `cas_ref_name` so concurrent peers producing the same chain produce
+    /// identical symlinks — races resolve to the correct state.
+    ///
+    /// Eventual consistency: this function does not verify that targets
+    /// exist on disk. If a target blob is missing (e.g., a concurrent
+    /// `ocx clean` raced the caller), a dangling symlink is written and
+    /// the next GC pass collects it. Callers don't need to serialize
+    /// against GC — the system converges on its own.
+    pub async fn link_blobs(&self, content_path: &Path, chain: &[crate::oci::PinnedIdentifier]) -> Result<()> {
+        if chain.is_empty() {
+            return Ok(());
+        }
+
+        let refs_blobs = self.file_structure.packages.refs_blobs_dir_for_content(content_path)?;
+        tokio::fs::create_dir_all(&refs_blobs)
+            .await
+            .map_err(|e| Error::InternalFile(refs_blobs.clone(), e))?;
+
+        for pinned in chain {
+            let digest = pinned.digest();
+            let target = self.file_structure.blobs.data(pinned.registry(), &digest);
+            let link_path = refs_blobs.join(cas_ref_name(&digest));
+            if symlink::is_link(&link_path) {
+                if let Ok(existing) = std::fs::read_link(&link_path)
+                    && existing == target
+                {
+                    log::trace!(
+                        "refs/blobs/ forward-ref already current: '{}' → '{}'.",
+                        link_path.display(),
+                        target.display(),
+                    );
+                    continue;
+                }
+                log::trace!("Updating stale refs/blobs/ forward-ref '{}'.", link_path.display());
+            }
+
+            symlink::update(&target, &link_path)?;
+            log::trace!(
+                "Created refs/blobs/ forward-ref '{}' → '{}'.",
+                link_path.display(),
+                target.display(),
+            );
+        }
+        Ok(())
+    }
 }
 
 async fn check_refs_dir(refs_dir: &Path, expected_content: &Path) -> Result<Vec<PathBuf>> {
@@ -589,6 +637,154 @@ mod tests {
         assert_eq!(rm.broken_refs().await.unwrap(), Vec::<PathBuf>::new());
     }
 
+    // ── link_blobs tests (plan_resolution_chain_refs.md tests 39-43) ──
+
+    /// Helper: create a real blob data file at the CAS path for (registry, digest).
+    fn make_blob(root: &Path, registry: &str, digest: &crate::oci::Digest) -> std::path::PathBuf {
+        let store = crate::file_structure::BlobStore::new(root.join("blobs"));
+        let data_path = store.data(registry, digest);
+        std::fs::create_dir_all(data_path.parent().unwrap()).unwrap();
+        std::fs::write(&data_path, b"manifest bytes").unwrap();
+        data_path
+    }
+
+    /// Helper: build a `PinnedIdentifier` from a registry + digest pair using
+    /// a synthetic repository (irrelevant for `link_blobs` semantics).
+    fn make_pinned(registry: &str, digest: &crate::oci::Digest) -> crate::oci::PinnedIdentifier {
+        let id = crate::oci::Identifier::new_registry("repo", registry).clone_with_digest(digest.clone());
+        crate::oci::PinnedIdentifier::try_from(id).unwrap()
+    }
+
+    /// Test 39: link_blobs creates a symlink in refs/blobs/ for each
+    /// chain entry. The symlink must point to blobs/{registry}/.../data.
+    #[tokio::test]
+    async fn link_blobs_creates_symlinks_for_all_chain_entries() {
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, 1);
+
+        let reg = "example.com";
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+        make_blob(&root, reg, &d1);
+        make_blob(&root, reg, &d2);
+
+        let chain = vec![make_pinned(reg, &d1), make_pinned(reg, &d2)];
+        rm.link_blobs(&content, &chain).await.unwrap();
+
+        // Both symlinks must exist in refs/blobs/.
+        let refs_blobs = content.parent().unwrap().join("refs").join("blobs");
+        assert!(refs_blobs.is_dir(), "refs/blobs/ directory must exist");
+        let entries: Vec<_> = std::fs::read_dir(&refs_blobs).unwrap().collect();
+        assert_eq!(
+            entries.len(),
+            2,
+            "two chain entries must produce two refs/blobs/ symlinks"
+        );
+    }
+
+    /// Test 40: link_blobs is idempotent — calling twice produces no
+    /// duplicate entries and no errors.
+    #[tokio::test]
+    async fn link_blobs_idempotent_on_existing_correct_symlinks() {
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, 2);
+
+        let reg = "example.com";
+        let d1 = make_digest(0x03);
+        make_blob(&root, reg, &d1);
+
+        let chain = vec![make_pinned(reg, &d1)];
+        rm.link_blobs(&content, &chain).await.unwrap();
+        rm.link_blobs(&content, &chain).await.unwrap(); // idempotent second call
+
+        let refs_blobs = content.parent().unwrap().join("refs").join("blobs");
+        let count = std::fs::read_dir(&refs_blobs).unwrap().count();
+        assert_eq!(count, 1, "idempotent call must not create duplicate symlinks");
+    }
+
+    /// Test 41: link_blobs tolerates EEXIST when the target already
+    /// matches — a racing peer creating the same symlink concurrently must not
+    /// cause an error.
+    #[tokio::test]
+    async fn link_blobs_tolerates_eexist_when_target_matches() {
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, 3);
+
+        let reg = "example.com";
+        let d1 = make_digest(0x04);
+        let blob_path = make_blob(&root, reg, &d1);
+
+        // Pre-create the symlink with the correct target (simulates a racing peer).
+        let refs_blobs = content.parent().unwrap().join("refs").join("blobs");
+        std::fs::create_dir_all(&refs_blobs).unwrap();
+        let ref_name = crate::file_structure::cas_ref_name(&d1);
+        let link_path = refs_blobs.join(&ref_name);
+        crate::symlink::create(&blob_path, &link_path).unwrap();
+
+        let chain = vec![make_pinned(reg, &d1)];
+        // Must not error even though the symlink already exists with the correct target.
+        rm.link_blobs(&content, &chain).await.unwrap();
+    }
+
+    /// Test 42: link_blobs updates a stale symlink target.
+    /// (Stale targets are structurally impossible by construction — the ref
+    /// name is derived from the digest — but the code must handle them.)
+    #[tokio::test]
+    async fn link_blobs_updates_stale_symlink_target() {
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, 4);
+
+        let reg = "example.com";
+        let d1 = make_digest(0x05);
+        let correct_blob = make_blob(&root, reg, &d1);
+
+        // Pre-create the symlink pointing at an incorrect (stale) target.
+        let refs_blobs = content.parent().unwrap().join("refs").join("blobs");
+        std::fs::create_dir_all(&refs_blobs).unwrap();
+        let ref_name = crate::file_structure::cas_ref_name(&d1);
+        let link_path = refs_blobs.join(&ref_name);
+        let stale_target = root.join("nowhere");
+        crate::symlink::create(&stale_target, &link_path).unwrap();
+
+        let chain = vec![make_pinned(reg, &d1)];
+        rm.link_blobs(&content, &chain).await.unwrap();
+
+        // After the call, the symlink must point at the correct blob.
+        assert_eq!(
+            std::fs::read_link(&link_path).unwrap(),
+            correct_blob,
+            "link_blobs must update a stale symlink target to the correct blob path"
+        );
+    }
+
+    /// Test 43: link_blobs with a missing blob data file still creates the
+    /// forward symlink (a dangling symlink). The eventual-consistency model
+    /// (GC sweeps dangling refs) handles this — the producer no longer needs
+    /// to pre-check for existence, which avoided a TOCTOU race against
+    /// concurrent `ocx clean`.
+    #[tokio::test]
+    async fn link_blobs_missing_blob_file_creates_dangling_symlink() {
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, 5);
+
+        let reg = "example.com";
+        let d1 = make_digest(0x06);
+        // Do NOT create the blob data file — verify the symlink is still made.
+
+        let chain = vec![make_pinned(reg, &d1)];
+        rm.link_blobs(&content, &chain)
+            .await
+            .expect("link_blobs must succeed even when the blob is missing");
+
+        let refs_blobs = content.parent().unwrap().join("refs").join("blobs");
+        let ref_name = crate::file_structure::cas_ref_name(&d1);
+        let link_path = refs_blobs.join(&ref_name);
+        assert!(
+            crate::symlink::is_link(&link_path),
+            "dangling forward-ref symlink must be present"
+        );
+    }
+
     #[tokio::test]
     async fn broken_refs_skips_non_dir_entries_in_packages() {
         let (_dir, root, rm) = setup();
@@ -671,5 +867,108 @@ mod tests {
 
         // Should not error even though no ref was created.
         rm.unlink_dependency(&dependent_content, &dep_digest).unwrap();
+    }
+
+    // ── T5: empty-chain link_blobs is a no-op ────────────────────────────
+
+    /// T5 (plan review): link_blobs with an empty chain slice returns Ok and
+    /// does not create a refs/blobs/ directory. Cheap regression guard.
+    #[tokio::test]
+    async fn link_blobs_empty_chain_is_noop() {
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, 0x10);
+
+        rm.link_blobs(&content, &[]).await.unwrap();
+
+        let refs_blobs = content.parent().unwrap().join("refs").join("blobs");
+        // The directory must either not exist or (if it was created) be empty.
+        if refs_blobs.exists() {
+            let count = std::fs::read_dir(&refs_blobs).unwrap().count();
+            assert_eq!(count, 0, "refs/blobs/ must be empty after link_blobs with empty chain");
+        }
+        // No entry created — the call was a no-op.
+    }
+
+    // ── D1: refs/blobs/ symlinks are path-independent after temp→final rename
+
+    /// D1 (plan review): blob forward-refs written against a temp content
+    /// path continue to resolve correctly after the parent directory is
+    /// atomically renamed to the final location.
+    ///
+    /// This validates the current implementation: symlinks in refs/blobs/ are
+    /// absolute paths into the blob store (e.g.
+    /// `{root}/blobs/reg/sha256/…/data`), which is independent of the
+    /// package's own location. A rename of the package directory from a temp
+    /// path to the final content path does not affect blob target resolution.
+    #[tokio::test]
+    async fn link_blobs_symlinks_are_path_independent_after_temp_to_final_rename() {
+        let (_dir, root, rm) = setup();
+
+        // Step 1: create a "temp" content directory (simulates TempStore layout).
+        let temp_content = root
+            .join("temp")
+            .join("deadbeefdeadbeefdeadbeefdeadbeef")
+            .join("content");
+        std::fs::create_dir_all(&temp_content).unwrap();
+
+        // Step 2: seed two real blob data files in the blob store.
+        let reg = "example.com";
+        let d1 = make_digest(0x11);
+        let d2 = make_digest(0x12);
+        make_blob(&root, reg, &d1);
+        make_blob(&root, reg, &d2);
+
+        // Step 3: call link_blobs against the temp content path.
+        let chain = vec![make_pinned(reg, &d1), make_pinned(reg, &d2)];
+        rm.link_blobs(&temp_content, &chain).await.unwrap();
+
+        // Verify symlinks were created in temp content's refs/blobs/.
+        let temp_refs = temp_content.parent().unwrap().join("refs").join("blobs");
+        assert!(
+            temp_refs.is_dir(),
+            "refs/blobs/ must exist in temp dir after link_blobs"
+        );
+        assert_eq!(
+            std::fs::read_dir(&temp_refs).unwrap().count(),
+            2,
+            "two chain entries must produce two symlinks in temp refs/blobs/"
+        );
+
+        // Step 4: rename temp dir (parent of content) to the final location.
+        let final_parent = root
+            .join("packages")
+            .join("reg")
+            .join("sha256")
+            .join("11")
+            .join("ffffffffffffffffffffffffffff11");
+        std::fs::create_dir_all(final_parent.parent().unwrap()).unwrap();
+        std::fs::rename(temp_content.parent().unwrap(), &final_parent).unwrap();
+        let final_refs_blobs = final_parent.join("refs").join("blobs");
+
+        // Step 5: verify all symlinks in the renamed location still resolve.
+        for entry in std::fs::read_dir(&final_refs_blobs).unwrap() {
+            let entry = entry.unwrap();
+            let link_path = entry.path();
+            assert!(
+                crate::symlink::is_link(&link_path),
+                "{} must be a symlink",
+                link_path.display()
+            );
+            // Symlink target is absolute into blobs/ — it must exist regardless
+            // of where the package directory moved.
+            let target = std::fs::read_link(&link_path).unwrap();
+            assert!(
+                target.is_absolute(),
+                "D1: blob forward-ref target must be absolute; got: {}",
+                target.display()
+            );
+            assert!(
+                target.exists(),
+                "D1: blob forward-ref must resolve after temp→final rename; \
+                 target {} not found (link at {})",
+                target.display(),
+                link_path.display()
+            );
+        }
     }
 }

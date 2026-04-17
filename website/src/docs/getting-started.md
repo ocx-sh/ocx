@@ -21,7 +21,7 @@ ocx --remote exec uv:0.10 -- uv --version
 
 <Terminal src="/casts/exec.cast" title="Running a package" collapsed />
 
-The binary is cached in the [object store][fs-objects], so subsequent calls with the same version skip the download and don't need `--remote`. Nothing else persists: no [candidate symlink][fs-symlinks], no [current pointer][fs-symlinks].
+The binary is cached in the [object store][fs-objects], so subsequent calls with the same version skip the download. Nothing else persists: no [candidate symlink][fs-symlinks], no [current pointer][fs-symlinks].
 
 ::: tip
 Use [`ocx exec`][cmd-exec] for one-off tasks or in CI where you want a reproducible, isolated invocation. For tools you reach for every day, read on.

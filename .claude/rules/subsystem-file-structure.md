@@ -24,6 +24,7 @@ Separating `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `bl
 |------|---------|-----------|
 | `file_structure.rs` | Composite root; `slugify()`, `repository_path()` | `FileStructure` |
 | `blob_store.rs` | Raw OCI blob storage | `BlobStore`, `BlobDir` |
+| `blob_store/blob_guard.rs` | RAII read/write lock on individual blob data files | `BlobGuard` |
 | `layer_store.rs` | Extracted layer storage | `LayerStore`, `LayerDir` |
 | `package_store.rs` | Assembled package storage | `PackageStore`, `PackageDir` |
 | `tag_store.rs` | Local tag→digest index | `TagStore` |
@@ -170,6 +171,10 @@ Blob forward-ref: created by `pull` directly. Symlink in `refs/blobs/` targets `
 ## GC Safety
 
 GC (`garbage_collection/reachability_graph.rs`) builds a `ReachabilityGraph` covering all three CAS tiers in a single BFS pass. Packages with live `refs/symlinks/` entries or profile content-mode references are roots. BFS follows four edge types from each package: `refs/deps/` (dependent packages), `refs/layers/` (extracted layers), `refs/blobs/` (raw blobs). Layers and blobs have no outgoing edges — they are reachable only through package refs. Everything unreachable is collected.
+
+Blobs are first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blob`) is included in the reachability walk. The previous `tier != CasTier::Blob` skip has been removed; blobs are retained only when a live `refs/blobs/` symlink points to them.
+
+`BlobGuard` (`blob_store/blob_guard.rs`) provides RAII shared/exclusive advisory locking for individual blob data files. Acquire a read lock before reading, a write lock before writing. Internals use `file_lock::FileLock` (which wraps `fs2` in `spawn_blocking`) — do not call `BlobStore::data()` directly in concurrent paths; always go through `BlobGuard::acquire_read` / `acquire_write`.
 
 ## symlink Module
 

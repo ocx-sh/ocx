@@ -22,7 +22,7 @@ pub struct ShellProfileRemove {
 impl ShellProfileRemove {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let default_registry = context.default_registry();
-        let identifiers = options::Identifier::transform_all(self.packages.clone().into_iter(), default_registry)?;
+        let identifiers = options::Identifier::transform_all(self.packages.clone(), default_registry)?;
 
         let results = context.manager().profile().remove_all(&identifiers)?;
 

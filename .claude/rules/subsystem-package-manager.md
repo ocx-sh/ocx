@@ -64,6 +64,7 @@ enum Error {
     InstallFailed(Vec<PackageError>),
     UninstallFailed(Vec<PackageError>),
     DeselectFailed(Vec<PackageError>),
+    ResolveFailed(Vec<PackageError>),  // returned by resolve_all()
 }
 
 // Layer 2: Package-specific
@@ -84,12 +85,33 @@ enum PackageErrorKind {
 
 **Convention**: Single-item methods return `Result<T, PackageErrorKind>`. `_all` batch methods return `Result<T, Error>`.
 
+`resolve_all()` returns `Err(Error::ResolveFailed(...))` when one or more packages fail to resolve; it does not reuse `FindFailed`. `find_all()` continues to use `FindFailed` for failures during the install-lookup phase.
+
+## ResolvedChain
+
+`PackageManager::resolve()` returns a `ResolvedChain` struct that carries the full OCI resolution chain traversed for the identifier — image index manifest, platform manifest, and any intermediate manifests — along with their digests. Callers (e.g. `pull`, `find`, `find_symlink`) pass this struct to `ReferenceManager::link_blobs` to populate `refs/blobs/` so GC can trace the complete chain.
+
+## link_blobs Call Pattern
+
+`ReferenceManager::link_blobs(content_path, chain)` is an `async fn`. It creates a symlink in
+`refs/blobs/` for each blob digest in the chain, targeting the corresponding `BlobStore` data file.
+An empty chain is a no-op (returns `Ok(())` without creating the directory).
+
+Called by `pull`, `find`, and `find_symlink` after resolving a package:
+
+```
+let chain = manager.resolve(identifier).await?;
+reference_manager.link_blobs(pkg.content(), chain.blobs()).await?;
+```
+
+The TOCTOU `!target.exists()` pre-check is intentionally absent — eventual consistency handles dangling refs, and the idempotent `symlink::update` makes repeated calls safe.
+
 ## Task Methods
 
 | Method | Auto-Install | Returns | Notes |
 |--------|-------------|---------|-------|
-| `find()` / `find_all()` | No | `InstallInfo` | Resolves locally only |
-| `find_symlink()` / `find_symlink_all()` | No | `InstallInfo` | Via candidate/current symlink |
+| `find()` / `find_all()` | No | `InstallInfo` | Resolves locally only; calls `link_blobs` |
+| `find_symlink()` / `find_symlink_all()` | No | `InstallInfo` | Via candidate/current symlink; calls `link_blobs` |
 | `find_or_install()` / `find_or_install_all()` | **Yes** (if online) | `InstallInfo` | Falls through to install on NotFound |
 | `install()` / `install_all()` | N/A | `InstallInfo` | Downloads; `candidate` flag creates symlink; `select` flag sets current |
 | `uninstall()` / `uninstall_all()` | N/A | `Option<UninstallResult>` | None = candidate was already absent |

@@ -25,8 +25,7 @@ pub struct Install {
 
 impl Install {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let oci_packages =
-            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
+        let oci_packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         log::info!(
             "Installing packages: {}",
             oci_packages

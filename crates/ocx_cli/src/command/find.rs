@@ -37,8 +37,7 @@ pub struct Find {
 
 impl Find {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifiers =
-            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
+        let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();
 
