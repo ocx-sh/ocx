@@ -37,8 +37,7 @@ pub struct Exec {
 impl Exec {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let platforms = platforms_or_default(&self.platforms);
-        let identifier =
-            options::Identifier::transform_all(self.packages.clone().into_iter(), context.default_registry())?;
+        let identifier = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();
         let info = manager.find_or_install_all(identifier, platforms).await?;
@@ -65,7 +64,7 @@ impl Exec {
             })
             .stderr(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .envs(process_env.into_iter())
+            .envs(process_env)
             .spawn()?;
 
         let status = child_process.wait().await?;

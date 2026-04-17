@@ -32,13 +32,24 @@ The available data depends on the command being executed.
 
 ### `--offline` {#arg-offline}
 
-When set, ocx will run in offline mode, which will not attempt to fetch any remote information.
+When set, ocx will run in offline mode and will not attempt to fetch any remote information.
 If any command requires information that is not already available locally, it will fail with an error.
+
+::: warning
+Running `ocx --offline install <pkg>` after a bare `ocx index update <pkg>` (without a prior
+online install) fails with an `OfflineManifestMissing` error that names the missing digest.
+`ocx index update` writes only tag→digest pointers; it does not download manifest or layer blobs.
+Run `ocx install <pkg>` online first to populate the blob cache, then offline installs will work.
+:::
 
 ### `--remote` {#arg-remote}
 
-When set, ocx will use the remote index by default instead of the local index.
-Combining this flag with [`--offline`](#arg-offline) will most likely result in an error.
+When set, tag and catalog lookups query the registry directly, bypassing the local tag store.
+Digest-addressed blob reads (manifests and layers already identified by a content digest) still
+use the local cache and write newly fetched blobs through to `$OCX_HOME/blobs/`.
+Only `$OCX_HOME/tags/` is not updated — the persistent local tag snapshot is left unchanged.
+
+Combining this flag with [`--offline`](#arg-offline) will result in an error.
 
 ### `--index` {#arg-index}
 
@@ -329,9 +340,16 @@ Lists available tags for one or more packages.
 ocx index update <PACKAGE>...
 ```
 
-Updates the local index by fetching the latest information from the remote index for the specified packages.
+Writes tag→digest pointers to `$OCX_HOME/tags/` for the specified packages by querying the
+registry directly. No manifest or layer blobs are written to `$OCX_HOME/blobs/`.
 
-When a tagged identifier is used (e.g., `cmake:3.28`), only that single tag's digest and manifest are fetched — the remote tag listing is skipped entirely. This is ideal for lockfile workflows where the local index should contain only explicitly requested tags. When a bare identifier is used (e.g., `cmake`), all tags are fetched as before.
+When a tagged identifier is used (e.g., `cmake:3.28`), only that single tag's digest pointer is
+recorded — the remote tag listing is skipped entirely. This is ideal for lockfile workflows where
+the local tag store should contain only explicitly requested tags. When a bare identifier is used
+(e.g., `cmake`), digest pointers for all tags are recorded.
+
+After running `ocx index update <pkg>`, an `ocx --offline install <pkg>` will fail with
+`OfflineManifestMissing` until the blob cache is populated by a prior online `ocx install <pkg>`.
 
 **Arguments**
 

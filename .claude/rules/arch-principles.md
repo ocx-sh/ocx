@@ -133,6 +133,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — they se
 | Sorted / dedup a `Vec` fluently | `VecExt::sorted` / `unique_clone` | prelude |
 | Ignore a `Result` deliberately | `ResultExt::ignore` | prelude |
 | Cross-process advisory file lock (shared/exclusive, timeout, RAII) | `file_lock::FileLock` | `crates/ocx_lib/src/file_lock.rs` |
+| Shared/exclusive advisory lock on blob data files with RAII cleanup | `BlobGuard::acquire_read` / `acquire_write` | `crates/ocx_lib/src/file_structure/blob_store/blob_guard.rs` |
 | RAII "delete path on drop" guard | `utility::fs::DropFile` | `utility/fs/drop_file.rs` |
 | Watch-based async singleflight (dedupe in-flight work by key) | `utility::singleflight` | `utility/singleflight.rs` |
 | Parallel directory tree walk with pruning decisions | `utility::fs::{DirWalker, WalkDecision}` | `utility/fs/dir_walker.rs` |

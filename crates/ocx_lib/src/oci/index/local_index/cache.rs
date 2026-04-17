@@ -37,4 +37,15 @@ impl Cache {
     }
 }
 
-pub type SharedCache = std::sync::Arc<tokio::sync::RwLock<Cache>>;
+/// Shared handle to the in-memory index cache.
+///
+/// The inner fields of [`Cache`] are each independently guarded by a
+/// `tokio::sync::RwLock`, so the outer handle is a plain `Arc<Cache>` —
+/// no outer lock. A previous revision wrapped this in an outer `RwLock`,
+/// which caused writers to hold the outer write-guard across the inner
+/// `.await` in `set_tags` / `set_manifest`. Tokio locks allow this in
+/// principle but it blocks every other reader for the entire suspension
+/// window. Moving to `Arc<Cache>` eliminates the contention at the type
+/// level — readers and writers only contend on the specific sub-map they
+/// touch, and no guard is ever held across an `.await` on a foreign lock.
+pub type SharedCache = std::sync::Arc<Cache>;

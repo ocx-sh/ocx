@@ -20,6 +20,12 @@ impl PackageManager {
     /// itself* rather than the resolved object-store path.  This is intentional:
     /// downstream consumers embed this path in their output so it must be stable
     /// across package updates.
+    ///
+    /// Unlike the resolver-backed tasks (`find`, `install`, etc.), this path does
+    /// not walk the OCI resolution chain and therefore does not upsert entries
+    /// into `refs/blobs/`. No resolution happens — the install symlink points
+    /// directly at an already-installed package whose `refs/blobs/` was populated
+    /// at install time.
     pub async fn find_symlink(
         &self,
         package: &oci::Identifier,

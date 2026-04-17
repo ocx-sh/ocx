@@ -6,11 +6,7 @@ mod reachability_graph;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::{
-    file_structure::{CasTier, FileStructure},
-    log,
-    profile::ProfileSnapshot,
-};
+use crate::{file_structure::FileStructure, log, profile::ProfileSnapshot};
 
 use reachability_graph::ReachabilityGraph;
 
@@ -32,20 +28,16 @@ impl GarbageCollector {
 
     /// Returns all entries not reachable from any root.
     ///
-    /// Unreferenced blobs are excluded from `clean` because the local index
-    /// stores cached manifests in `blobs/` — collecting them would break
-    /// subsequent installs that resolve from the local tag→manifest cache.
-    /// Once the index supports fall-through resolution (local → network),
-    /// this skip can be removed. See #35 for policy-based blob eviction.
-    ///
-    /// Referenced blobs (via `refs/blobs/`) ARE collected when their parent
-    /// package is purged via [`orphaned_by_seeds`].
+    /// Blobs are first-class GC participants: any blob reachable from an
+    /// installed package's `refs/blobs/` survives, and any orphan blob is
+    /// collected. Follow-up #50 tracks policy-based retention for users who
+    /// want stricter retention semantics in shared `$OCX_HOME` scenarios.
     pub fn unreachable_objects(&self) -> HashSet<PathBuf> {
         let reachable = self.graph.reachable();
         self.graph
             .all_entries
             .iter()
-            .filter(|(path, tier)| **tier != CasTier::Blob && !reachable.contains(*path))
+            .filter(|(path, _)| !reachable.contains(*path))
             .map(|(path, _)| path.clone())
             .collect()
     }
@@ -143,6 +135,7 @@ mod tests {
 
     use super::reachability_graph::tests::{graph, graph_with_tiers, set};
     use super::*;
+    use crate::file_structure::CasTier;
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(format!("/objects/{name}"))
@@ -196,11 +189,61 @@ mod tests {
         assert_eq!(collector.unreachable_objects(), set(&["L2"]));
     }
 
+    /// Test 44 (plan_resolution_chain_refs.md §44): an unreachable blob
+    /// (not reachable via any package's refs/blobs/) IS collected by clean.
     #[test]
-    fn unreachable_blobs_skipped_by_clean() {
-        // Unreferenced blobs are cache entries — excluded from clean (#35).
+    fn unreachable_blob_is_collected() {
+        // An orphan blob with no root pointing to it must be collected.
         let collector = gc_with_tiers(&["A"], &[], &["orphan_blob"], &[("orphan_blob", CasTier::Blob)]);
-        assert!(collector.unreachable_objects().is_empty());
+        assert!(
+            collector.unreachable_objects().contains(&path("orphan_blob")),
+            "unreachable blob must be collected by ocx clean"
+        );
+    }
+
+    /// Test 45 (plan_resolution_chain_refs.md §45): a blob that IS reachable
+    /// via a root package's refs/blobs/ edge survives GC.
+    ///
+    /// This is the converse of test 44: the GC must distinguish reachable
+    /// blobs (linked from a package) from unreachable orphans.
+    #[test]
+    fn reachable_blob_via_refs_blobs_survives_gc() {
+        // A (root) → B1 (blob via refs/blobs/). B1 is reachable, must not be collected.
+        let collector = gc_with_tiers(&["A"], &[("A", &["B1"])], &[], &[("B1", CasTier::Blob)]);
+        assert!(
+            !collector.unreachable_objects().contains(&path("B1")),
+            "blob reachable via refs/blobs/ from a root package must NOT be collected"
+        );
+        assert!(
+            collector.unreachable_objects().is_empty(),
+            "no unreachable objects when root covers all"
+        );
+    }
+
+    /// Test 46 (plan_resolution_chain_refs.md §46): purge cascades through
+    /// all intermediate chain blobs — both the top-level index blob and the
+    /// platform manifest blob are purged when their parent package is purged.
+    ///
+    /// This generalises the existing purge_cascades_through_blobs test to the
+    /// full two-blob chain scenario (image index + platform manifest).
+    #[test]
+    fn purge_cascades_through_intermediate_chain_blobs() {
+        // Package A → B1 (image index blob) → B2 (platform manifest blob).
+        // Neither B1 nor B2 is a root; both are reachable only via A.
+        // Purging A must cascade to both B1 and B2.
+        let collector = gc_with_tiers(
+            &[],
+            &[("A", &["B1"]), ("B1", &["B2"])],
+            &[],
+            &[("B1", CasTier::Blob), ("B2", CasTier::Blob)],
+        );
+        let orphaned = collector.orphaned_by_seeds(&[path("A")]);
+        assert!(orphaned.contains(&path("A")), "A must be orphaned");
+        assert!(orphaned.contains(&path("B1")), "image index blob B1 must be cascaded");
+        assert!(
+            orphaned.contains(&path("B2")),
+            "platform manifest blob B2 must be cascaded"
+        );
     }
 
     #[test]
@@ -222,8 +265,12 @@ mod tests {
                 ("blob_orphan", CasTier::Blob),
             ],
         );
-        // Packages and layers collected; blobs skipped (cache retention #35).
-        assert_eq!(collector.unreachable_objects(), set(&["pkg_orphan", "layer_orphan"]));
+        // Post-#35: blobs are first-class GC participants, so unreachable
+        // orphans across all three tiers are collected.
+        assert_eq!(
+            collector.unreachable_objects(),
+            set(&["pkg_orphan", "layer_orphan", "blob_orphan"])
+        );
     }
 
     // ── orphaned_by_seeds ───────────────────────────────────────────────

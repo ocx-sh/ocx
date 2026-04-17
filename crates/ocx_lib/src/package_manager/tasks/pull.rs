@@ -174,7 +174,12 @@ async fn setup_impl(
     log::debug!("Pulling package: {}", package);
 
     // Step 1: Resolve via the index (Image Index → platform manifest).
-    let pinned = mgr.resolve(package, platforms.clone()).await?;
+    // The returned `ResolvedChain` carries the full `(registry, digest)` walk
+    // (top-level index + platform child where applicable) and the leaf
+    // `final_manifest` — the pull pipeline no longer re-fetches the manifest
+    // from the client, and the chain is linked into `refs/blobs/` in one shot.
+    let resolved = mgr.resolve(package, platforms.clone()).await?;
+    let pinned = resolved.pinned.clone();
     log::debug!("Resolved package identifier: {}", &pinned);
 
     // Step 2: In-process dedup — check if another task is already setting
@@ -187,6 +192,18 @@ async fn setup_impl(
     {
         singleflight::Acquisition::Resolved(info) => {
             log::debug!("Package '{}' already set up by another task, reusing.", &pinned);
+            // Singleflight key is the final pinned digest, so two concurrent
+            // installs of different alias tags (e.g. `cmake:latest` and
+            // `cmake:3.28`) that land on the same leaf manifest share a
+            // leader — but their resolution chains may differ (different
+            // top-level image indexes). The leader linked only its chain,
+            // so top up the waiter's chain here. `link_blobs` is idempotent,
+            // so overlapping entries are no-ops; only the unique entries
+            // (e.g., the waiter's distinct image-index digest) get linked.
+            super::common::reference_manager(mgr.file_structure())
+                .link_blobs(&info.content, &resolved.chain)
+                .await
+                .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
         }
         singleflight::Acquisition::Leader(handle) => handle,
@@ -196,7 +213,7 @@ async fn setup_impl(
     // to waiters. On error, broadcast the error message so waiters get a
     // meaningful diagnostic instead of a generic "abandoned".
     // If we panic, Drop sends Abandoned as a fallback.
-    match setup_owned(mgr, &pinned, platforms, groups).await {
+    match setup_owned(mgr, &pinned, resolved, platforms, groups).await {
         Ok(info) => {
             handle.complete(info.clone());
             Ok(info)
@@ -213,6 +230,7 @@ async fn setup_impl(
 async fn setup_owned(
     mgr: &PackageManager,
     pinned: &oci::PinnedIdentifier,
+    resolved: super::resolve::ResolvedChain,
     platforms: Vec<oci::Platform>,
     groups: SetupGroups,
 ) -> Result<InstallInfo, PackageErrorKind> {
@@ -221,6 +239,13 @@ async fn setup_owned(
         let install_path = mgr.file_structure().packages.install_status(pinned);
         if tokio::fs::try_exists(&install_path).await.unwrap_or(false) {
             log::debug!("Package '{}' already fully installed, skipping.", pinned);
+            // Top up chain refs in case the already-installed package was
+            // resolved via a different image-index path (alias tag). See
+            // the waiter branch in `setup_impl` for the same invariant.
+            super::common::reference_manager(mgr.file_structure())
+                .link_blobs(&info.content, &resolved.chain)
+                .await
+                .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
         }
         // Content exists but sentinel missing — crash recovery, re-pull.
@@ -247,13 +272,18 @@ async fn setup_owned(
                 "Package '{}' installed by another process while waiting for lock, skipping.",
                 pinned
             );
+            super::common::reference_manager(mgr.file_structure())
+                .link_blobs(&info.content, &resolved.chain)
+                .await
+                .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
         }
     }
 
-    // Pull manifest + metadata (both fast, ~1KB each).
+    // Manifest comes from the resolver — ChainedIndex already persisted it to
+    // `blobs/` via write-through during resolve, so no extra fetch is needed.
     let client = mgr.client().map_err(PackageErrorKind::Internal)?;
-    let manifest = client.pull_manifest(pinned).await?;
+    let manifest = resolved.final_manifest.clone();
     let metadata = client.pull_metadata(pinned, Some(&manifest)).await?;
 
     // Validate manifest before any extraction work.
@@ -288,9 +318,7 @@ async fn setup_owned(
         .await
         .map_err(PackageErrorKind::Internal)?;
 
-    // Cache manifest in blobs/ store for offline resolution and future lock file support.
     let fs = mgr.file_structure();
-    cache_manifest_blob(fs, pinned, &manifest).await?;
 
     // Extract layers to layers/ store and pull dependencies in parallel.
     let (layer_digests, dependencies) = tokio::join!(
@@ -327,14 +355,14 @@ async fn setup_owned(
 
     // Build resolved package and enrich temp dir.
     // Order invariant: setup_dependencies returns results in declaration order.
-    let resolved = ResolvedPackage::new().with_dependencies(
+    let resolved_package = ResolvedPackage::new().with_dependencies(
         metadata
             .dependencies()
             .iter()
             .zip(dependencies.iter())
             .map(|(decl, info)| (info.identifier.clone(), info.resolved.clone(), decl.visibility)),
     );
-    post_download_actions(&pkg, pinned, &resolved).await?;
+    post_download_actions(&pkg, pinned, &resolved_package).await?;
 
     // Create remaining forward-ref symlinks in temp dir BEFORE move — targets
     // are absolute paths already in their respective stores. This ensures the
@@ -347,14 +375,16 @@ async fn setup_owned(
             .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(deps_dir.clone(), e)))?;
     }
     link_dependencies_in_temp(&pkg, &dependencies)?;
-    let blobs_dir = pkg.refs_blobs_dir();
-    tokio::fs::create_dir_all(&blobs_dir)
+    // Forward-ref every blob the resolver touched into `refs/blobs/` so GC
+    // can reach the full resolution chain from the installed package.
+    super::common::reference_manager(fs)
+        .link_blobs(&pkg.content(), &resolved.chain)
         .await
-        .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(blobs_dir.clone(), e)))?;
-    link_blobs_in_temp(&pkg, pinned.registry(), &pinned.digest(), fs)?;
+        .map_err(PackageErrorKind::Internal)?;
 
     // Atomic move temp → object store.
-    let install_info = move_temp_to_object_store(mgr.file_structure(), pinned, &metadata, resolved, temp).await?;
+    let install_info =
+        move_temp_to_object_store(mgr.file_structure(), pinned, &metadata, resolved_package, temp).await?;
 
     log::debug!("Pull succeeded for '{}'.", pinned);
     Ok(install_info)
@@ -482,33 +512,6 @@ async fn move_temp_to_object_store(
         resolved,
         content,
     })
-}
-
-/// Caches the manifest blob in the blobs/ store for offline resolution.
-async fn cache_manifest_blob(
-    fs: &file_structure::FileStructure,
-    pinned: &oci::PinnedIdentifier,
-    manifest: &oci::ImageManifest,
-) -> Result<(), PackageErrorKind> {
-    let blob_path = fs.blobs.path(pinned.registry(), &pinned.digest());
-    if tokio::fs::try_exists(&blob_path).await.unwrap_or(false) {
-        return Ok(());
-    }
-    tokio::fs::create_dir_all(&blob_path)
-        .await
-        .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(blob_path.clone(), e)))?;
-    let data_path = fs.blobs.data(pinned.registry(), &pinned.digest());
-    manifest
-        .write_json(&data_path)
-        .await
-        .map_err(PackageErrorKind::Internal)?;
-    file_structure::write_digest_file(
-        &fs.blobs.digest_file(pinned.registry(), &pinned.digest()),
-        &pinned.digest(),
-    )
-    .await
-    .map_err(PackageErrorKind::Internal)?;
-    Ok(())
 }
 
 /// Extracts all layers referenced by a manifest in parallel, returning their
@@ -747,28 +750,5 @@ fn link_layers_in_temp(
         let link_path = layers_dir.join(name);
         crate::symlink::create(&layer_content, &link_path).map_err(PackageErrorKind::Internal)?;
     }
-    Ok(())
-}
-
-/// Creates blob forward-refs (`refs/blobs/` symlinks) inside the temp directory.
-///
-/// Symlink targets point to `blobs/.../data` — the data file inside
-/// each blob. GC's `read_refs` takes `.parent()` on each target to recover
-/// the blob entry directory, matching the same convention deps use.
-///
-/// The caller is responsible for pre-creating `pkg.refs_blobs_dir()` via an
-/// async `tokio::fs::create_dir_all` — this helper stays sync so it does not
-/// introduce blocking I/O into an async context.
-fn link_blobs_in_temp(
-    pkg: &file_structure::PackageDir,
-    registry: &str,
-    manifest_digest: &oci::Digest,
-    fs: &file_structure::FileStructure,
-) -> Result<(), PackageErrorKind> {
-    let blobs_dir = pkg.refs_blobs_dir();
-    let blob_data = fs.blobs.data(registry, manifest_digest);
-    let name = crate::file_structure::cas_ref_name(manifest_digest);
-    let link_path = blobs_dir.join(name);
-    crate::symlink::create(&blob_data, &link_path).map_err(PackageErrorKind::Internal)?;
     Ok(())
 }

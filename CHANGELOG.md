@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** `--remote` / `OCX_REMOTE` semantics narrowed — tag and catalog lookups now bypass the local tag store and query the registry directly, but digest-addressed blob reads still use the local cache with write-through to `$OCX_HOME/blobs/`. Previously, `--remote` routed all operations to the registry. Only `$OCX_HOME/tags/` is no longer updated under `--remote`. *(oci)*
+- **Breaking:** `ocx index update` no longer pre-fetches manifest or layer blobs. It writes only tag→digest pointers to `$OCX_HOME/tags/`. Run `ocx install <pkg>` online first to populate the blob cache before using `--offline`. *(index)*
+
+### Fixed
+
+- `ocx --offline install <pkg>` after a bare `ocx index update <pkg>` now fails with a clear `OfflineManifestMissing` error naming the missing digest instead of a silent failure. Recovery: run `ocx install <pkg>` online to populate the blob cache. *(oci)*
+
 ## [0.2.1] - 2026-03-24
 
 ### Added

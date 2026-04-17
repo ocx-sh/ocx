@@ -17,10 +17,12 @@ Trait-based dispatch (`IndexImpl`) enables swapping local/remote index implement
 | Path | Purpose |
 |------|---------|
 | `oci.rs` | Root module; re-exports public types |
-| `oci/index.rs` | Public `Index` wrapper; `SelectResult` enum; `fetch_candidates()`, `select()` |
+| `oci/index.rs` | Public `Index` wrapper; `ChainMode` enum; `SelectResult` enum; `fetch_candidates()`, `select()` |
 | `oci/index/index_impl.rs` | Private `IndexImpl` async trait (4 core methods) |
-| `oci/index/local_index.rs` | `LocalIndex`: file-backed snapshot of registry metadata |
+| `oci/index/chained_index.rs` | `ChainedIndex`: cache + ordered sources + `ChainMode` routing |
+| `oci/index/local_index.rs` | `LocalIndex`: file-backed snapshot; high-level entry points `refresh_tags`, `write_chain_and_commit_tag` |
 | `oci/index/local_index/cache.rs` | In-memory shared cache (tags + manifests) |
+| `oci/index/local_index/tag_manager.rs` | Tag read/write helpers used by `LocalIndex` |
 | `oci/index/remote_index.rs` | `RemoteIndex`: wraps `Client`, in-memory cache only |
 | `oci/index/remote_index/cache.rs` | In-memory shared cache (repositories, tags, digests) |
 | `oci/index/snapshot.rs` | `Snapshot` struct: tag → [(digest, platform)] (orphan, not yet wired as IndexImpl) |
@@ -37,6 +39,23 @@ Trait-based dispatch (`IndexImpl`) enables swapping local/remote index implement
 
 ## Key Types
 
+### ChainMode
+
+```rust
+#[non_exhaustive]
+pub enum ChainMode {
+    Default,  // Cache-first; write-through on source fetch. Normal online operation.
+    Remote,   // Tag/catalog bypass cache, go straight to source. Immutable (digest) lookups still cache. Used for `--remote`.
+    Offline,  // Cache only; source never consulted; cache miss returns None. Used for `--offline`.
+}
+```
+
+| Mode | Tag/catalog lookup | Blob/manifest (digest-addressed) | `$OCX_HOME/tags/` updated? |
+|------|-------------------|----------------------------------|---------------------------|
+| `Default` | Local cache first, then source | Cache + write-through | Yes |
+| `Remote` | Source always (bypass cache) | Cache + write-through | No |
+| `Offline` | Cache only | Cache only | No |
+
 ### Identifier
 
 Parsed OCI reference: `registry/repository[:tag][@digest]`.
@@ -51,7 +70,8 @@ Parsed OCI reference: `registry/repository[:tag][@digest]`.
 ### Index (public wrapper)
 
 Type-erased wrapper over `Box<dyn IndexImpl>`. Construction:
-- `from_local(local_index)` or `from_remote(remote_index)`
+- `from_chained(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode)` — the standard constructor; wraps a `ChainedIndex` that orchestrates cache + source routing per `ChainMode`
+- `from_remote(remote_index)` — wraps a bare `RemoteIndex` (no caching)
 - Clone shares in-memory cache (via `Arc<RwLock>`)
 
 Key methods: `list_tags()`, `fetch_manifest()`, `fetch_candidates()`, `select(identifier, platforms) → SelectResult`
@@ -59,6 +79,7 @@ Key methods: `list_tags()`, `fetch_manifest()`, `fetch_candidates()`, `select(id
 ### SelectResult
 
 ```rust
+#[non_exhaustive]
 pub enum SelectResult {
     Found(Identifier),           // Exactly one match
     Ambiguous(Vec<Identifier>),  // Multiple matches
@@ -77,17 +98,26 @@ async fn fetch_manifest_digest(&self, id: &Identifier) -> Result<Option<Digest>>
 
 **Return convention**: `Result<Option<T>>` — `None` = not found (not an error), `Err` = network/IO failure.
 
+### LocalIndex
+
+File-backed snapshot of registry metadata. High-level public entry points:
+
+- `refresh_tags(source, identifier)` — fetch tags from `source`, persist to `$OCX_HOME/tags/`; used by `ChainedIndex` for tag/catalog operations
+- `write_chain_and_commit_tag(source, identifier)` — orchestrate a full chain walk (image index → manifest), persist all blobs to `$OCX_HOME/blobs/`, then commit the tag pointer; called by `ChainedIndex` after a source fetch
+
+Internal helpers `persist_manifest_chain` and `commit_tag` are private — callers always go through these two high-level methods.
+
 ### LocalIndex vs RemoteIndex
 
 | Aspect | LocalIndex | RemoteIndex |
 |--------|-----------|-------------|
 | Storage | Disk JSON + in-memory cache | In-memory cache only |
-| Population | Explicit `update()` call | Lazy on access |
+| Population | Via `ChainedIndex` write-through | Lazy on access |
 | Manifest cache | Yes (disk + memory) | No (re-fetches each time) |
 | Offline support | Yes | No |
 | Clone behavior | Shares in-memory cache | Shares in-memory cache |
 
-**LocalIndex update semantics:**
+**Write-through semantics** (via `ChainedIndex`):
 - Tagged identifier (`cmake:3.28`): fetches only that tag; preserves other tags locally
 - Bare identifier (`cmake`): fetches all tags; does not remove local-only tags
 - Always merges, never overwrites; safe for parallel updates to different tags

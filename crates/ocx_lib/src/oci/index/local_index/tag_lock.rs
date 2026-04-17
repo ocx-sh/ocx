@@ -30,14 +30,14 @@ pub(crate) enum Version {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TagLock {
-    pub version: Version,
-    pub repository: oci::Repository,
-    pub tags: HashMap<String, oci::Digest>,
+    pub(crate) version: Version,
+    pub(crate) repository: oci::Repository,
+    pub(crate) tags: HashMap<String, oci::Digest>,
 }
 
 impl TagLock {
     /// Creates a new tag lock from an identifier and its tags.
-    pub fn new(identifier: &oci::Identifier, tags: HashMap<String, oci::Digest>) -> Self {
+    pub(crate) fn new(identifier: &oci::Identifier, tags: HashMap<String, oci::Digest>) -> Self {
         Self {
             version: Version::V1,
             repository: oci::Repository::from(identifier),
@@ -46,7 +46,11 @@ impl TagLock {
     }
 
     /// Validates the repository, then returns the inner tags map.
-    pub fn into_tags(self, expected: &oci::Identifier, path: &Path) -> crate::Result<HashMap<String, oci::Digest>> {
+    pub(crate) fn into_tags(
+        self,
+        expected: &oci::Identifier,
+        path: &Path,
+    ) -> crate::Result<HashMap<String, oci::Digest>> {
         let expected_repo = oci::Repository::from(expected);
         if self.repository != expected_repo {
             return Err(super::super::error::Error::TagLockRepositoryMismatch {

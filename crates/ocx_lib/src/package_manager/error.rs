@@ -14,13 +14,20 @@ use crate::{file_structure, oci};
 #[non_exhaustive]
 pub enum Error {
     /// A find operation failed for one or more packages.
+    #[error("{}", format_batch("find", _0))]
     FindFailed(Vec<PackageError>),
     /// An install operation failed for one or more packages.
+    #[error("{}", format_batch("install", _0))]
     InstallFailed(Vec<PackageError>),
     /// An uninstall operation failed for one or more packages.
+    #[error("{}", format_batch("uninstall", _0))]
     UninstallFailed(Vec<PackageError>),
     /// A deselect operation failed for one or more packages.
+    #[error("{}", format_batch("deselect", _0))]
     DeselectFailed(Vec<PackageError>),
+    /// A resolve operation failed for one or more packages.
+    #[error("{}", format_batch("resolve", _0))]
+    ResolveFailed(Vec<PackageError>),
 }
 
 /// An error tied to a specific package.
@@ -38,6 +45,15 @@ impl PackageError {
     }
 }
 
+/// Payload for [`PackageErrorKind::OfflineManifestMissing`]. Boxed in the
+/// enum variant to keep `PackageErrorKind` small (avoids the
+/// `clippy::result_large_err` lint).
+#[derive(Debug)]
+pub struct OfflineManifestMissing {
+    pub identifier: oci::Identifier,
+    pub digest: oci::Digest,
+}
+
 /// The cause of a single-package failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -45,6 +61,15 @@ pub enum PackageErrorKind {
     /// The package was not found in the index or object store.
     #[error("package not found")]
     NotFound,
+    /// Offline mode: the tag pointer is cached locally but the manifest
+    /// blob is missing from `blobs/`. The caller needs to re-run the
+    /// command online to populate the blob cache.
+    #[error(
+        "manifest {} is not in the local cache; run `ocx install {}` online to populate it",
+        _0.digest,
+        _0.identifier
+    )]
+    OfflineManifestMissing(Box<OfflineManifestMissing>),
     /// Multiple candidates matched the platform selection.
     #[error("ambiguous selection: {}", _0.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "))]
     SelectionAmbiguous(Vec<oci::Identifier>),
@@ -75,30 +100,19 @@ impl From<crate::oci::client::error::ClientError> for PackageErrorKind {
 }
 
 // ---------------------------------------------------------------------------
-// Display — manual impl because multi-line batch formatting is too complex
-// for thiserror's `#[error(...)]` attribute.
+// Batch formatter — used by `#[error(...)]` attributes on `Error` variants.
 // ---------------------------------------------------------------------------
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::FindFailed(errors) => write_batch(f, "find", errors),
-            Error::InstallFailed(errors) => write_batch(f, "install", errors),
-            Error::UninstallFailed(errors) => write_batch(f, "uninstall", errors),
-            Error::DeselectFailed(errors) => write_batch(f, "deselect", errors),
-        }
-    }
-}
-
-fn write_batch(f: &mut std::fmt::Formatter<'_>, verb: &str, errors: &[PackageError]) -> std::fmt::Result {
+fn format_batch(verb: &str, errors: &[PackageError]) -> String {
+    use std::fmt::Write as _;
     if errors.len() == 1 {
-        write!(f, "Failed to {verb} package: {}", errors[0])
+        format!("Failed to {verb} package: {}", errors[0])
     } else {
-        writeln!(f, "Failed to {verb} {} packages:", errors.len())?;
+        let mut s = format!("Failed to {verb} {} packages:", errors.len());
         for e in errors {
-            writeln!(f, "  {e}")?;
+            let _ = write!(s, "\n  {e}");
         }
-        Ok(())
+        s
     }
 }
 

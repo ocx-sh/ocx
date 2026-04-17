@@ -62,17 +62,26 @@ impl Context {
             blob_store: BlobStore::new(file_structure.blobs.root().to_path_buf()),
         });
 
-        let selected_index = if options.remote {
-            if let Some(remote_index) = &remote_index {
-                index::Index::from_remote(remote_index.clone())
-            } else {
-                return Err(anyhow::anyhow!("Remote index is not available in offline mode."));
+        // Single `Index::from_chained` entry point. `remote_index` is the
+        // authoritative signal: `None` means offline (no network sources);
+        // `Some` means online (wrap it as a chain source). `options.remote`
+        // then selects between `Default` (cache-first) and `Remote`
+        // (mutable lookups bypass cache) for online mode. Deriving mode and
+        // sources from the same value prevents the `(offline=false,
+        // remote_index=None)` unreachable case the older bool-based match
+        // produced.
+        let (mode, sources): (index::ChainMode, Vec<index::Index>) = match &remote_index {
+            None => (index::ChainMode::Offline, Vec::new()),
+            Some(remote) => {
+                let mode = if options.remote {
+                    index::ChainMode::Remote
+                } else {
+                    index::ChainMode::Default
+                };
+                (mode, vec![index::Index::from_remote(remote.clone())])
             }
-        } else if let Some(remote_index) = &remote_index {
-            index::Index::from_cached_remote(local_index.clone(), remote_index.clone())
-        } else {
-            index::Index::from_local(local_index.clone())
         };
+        let selected_index = index::Index::from_chained(local_index.clone(), sources, mode);
 
         let default_registry = env::string("OCX_DEFAULT_REGISTRY", ocx_lib::oci::DEFAULT_REGISTRY.into());
 

@@ -105,7 +105,7 @@ The tag store is a *snapshot*: it reflects the state of the remote registry at t
 `apt-get update` downloads package metadata from configured sources and caches it in `/var/lib/apt/lists/`. All subsequent `apt-get install` calls resolve packages from that local snapshot — the network is only involved during an explicit refresh, not on every install. `ocx index update <package>` is the per-package equivalent: you control when the snapshot changes, and the rest of the time you work from the local cache.
 :::
 
-`ocx index update <package>` refreshes the tag store for a specific package. The global flag [`--remote`][arg-remote] skips the local tag store entirely and queries the registry directly for a single command — useful for a one-off check without updating the persistent snapshot.
+`ocx index update <package>` refreshes the tag store for a specific package. The global flag [`--remote`][arg-remote] forces tag and catalog lookups to query the registry directly for a single command, without updating the persistent local tag snapshot. Blob data fetched under `--remote` still populates `$OCX_HOME/blobs/` via write-through, so subsequent offline installs work for any package that was resolved while online.
 
 On a fresh machine, you do not need to run [`ocx index update`][cmd-index-update] before the first [`ocx install cmake:3.28`][cmd-install]. When the local tag store has no entry for a requested tag, [`ocx install`][cmd-install] transparently resolves that single tag against the configured remote, persists it to the tag store, and proceeds with the install. Subsequent commands — including [`--offline`][arg-offline] — then work from the cached entry without touching the network. Refreshing a cached tag or discovering every tag for a repository is still the job of [`ocx index update`][cmd-index-update]; the fallback only covers the specific tag being installed.
 
@@ -426,7 +426,7 @@ Every command that resolves a package identifier — [`ocx install`][cmd-install
 | Remote | [`--remote`][arg-remote] | OCI registry | Yes |
 | Offline | [`--offline`][arg-offline] | Local snapshot | Never |
 
-**`--remote`** bypasses the local snapshot for a single command and queries the registry directly. The persistent local index is not updated. Use it for a one-off check — seeing current available tags, or resolving the latest digest — without committing the result to the local snapshot.
+**`--remote`** forces tag and catalog lookups to query the registry directly for a single command. The persistent local tag store (`$OCX_HOME/tags/`) is not updated. Blob data fetched under `--remote` still writes through to `$OCX_HOME/blobs/`, so the command populates the blob cache while bypassing the tag snapshot. Use it for a one-off check — seeing current available tags, or resolving the latest digest — without committing the tag resolution result to the local snapshot.
 
 **`--offline`** prevents all network access for that command. If the local index does not have a requested package, the command fails immediately rather than attempting a registry query. Useful to verify that your current index and object store are self-sufficient before a build in a restricted or air-gapped environment.
 

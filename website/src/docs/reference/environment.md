@@ -147,7 +147,11 @@ The command line option [`--offline`](command-line#arg-offline) takes precedence
 
 ### `OCX_REMOTE` {#ocx-remote}
 
-When set to a [truthy value](#truthy-values), OCX will use the remote index by default instead of the local index.
+When set to a [truthy value](#truthy-values), tag and catalog lookups query the registry directly,
+bypassing the local tag store. Digest-addressed blob reads still use the local cache with
+write-through to `$OCX_HOME/blobs/`. Only `$OCX_HOME/tags/` is not updated.
+
+Equivalent to passing the [`--remote`][arg-remote] flag on every invocation.
 
 ## External {#external}
 

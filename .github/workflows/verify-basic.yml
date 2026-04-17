@@ -39,8 +39,6 @@ jobs:
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
         with:
-          toolchain: stable
-          components: clippy,rustfmt
           matcher: true
       - name: Rust Cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
