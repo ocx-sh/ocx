@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::oci::Digest;
+use crate::oci::{Algorithm, Digest};
 
 /// Number of hex characters used as the shard prefix directory name.
 const CAS_SHARD_PREFIX_LEN: usize = 2;
@@ -88,7 +88,7 @@ pub async fn read_digest_file(path: &Path) -> crate::Result<Digest> {
 pub fn cas_ref_name(digest: &Digest) -> String {
     let hex = digest.hex();
     let total = CAS_SHARD_TOTAL_LEN.min(hex.len());
-    format!("{}_{}", digest.algorithm(), &hex[..total])
+    format!("{}_{}", digest.algorithm().prefix(), &hex[..total])
 }
 
 pub fn is_valid_cas_path(dir: &Path) -> bool {
@@ -107,7 +107,7 @@ pub fn is_valid_cas_path(dir: &Path) -> bool {
     let prefix = tail[1];
     let remaining = tail[0];
 
-    Digest::ALGORITHMS.contains(&algorithm)
+    Algorithm::ALL.iter().any(|a| a.prefix() == algorithm)
         && prefix.len() == CAS_SHARD_PREFIX_LEN
         && prefix.bytes().all(|b| b.is_ascii_hexdigit())
         && remaining.len() == CAS_SHARD_SUFFIX_LEN

@@ -206,33 +206,9 @@ pub async fn push_with_cascade(
     )
     .await?;
 
-    log::debug!("Pushing package with identifier {}", package_info.identifier);
-    let (_manifest, manifest_data, manifest_sha256) = client.push_multi_layer_manifest(&package_info, layers).await?;
-    let manifest_size = manifest_data.len() as i64;
-
-    let primary_tag = package_info.identifier.tag_or_latest().to_string();
     client
-        .merge_platform_into_index(
-            &package_info.identifier,
-            primary_tag,
-            &package_info.platform,
-            &manifest_sha256,
-            manifest_size,
-        )
+        .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags)
         .await?;
-
-    for tag in &cascade_tags {
-        log::debug!("Cascading to {tag}");
-        client
-            .merge_platform_into_index(
-                &package_info.identifier,
-                tag.clone(),
-                &package_info.platform,
-                &manifest_sha256,
-                manifest_size,
-            )
-            .await?;
-    }
 
     Ok(())
 }
@@ -606,7 +582,7 @@ mod tests {
                 annotations: None,
             });
             let manifest_data = serde_json::to_vec(&index).unwrap();
-            let digest = oci::Digest::sha256(&manifest_data).to_string();
+            let digest = oci::Algorithm::Sha256.hash(&manifest_data).to_string();
             data.write()
                 .manifests
                 .insert(oci::native::Reference::from(&id).to_string(), (manifest_data, digest));
@@ -684,7 +660,7 @@ mod tests {
             let id = test_identifier().clone_with_tag(blocker.to_string());
             let manifest = oci::Manifest::Image(oci::ImageManifest::default());
             let manifest_data = serde_json::to_vec(&manifest).unwrap();
-            let digest = oci::Digest::sha256(&manifest_data).to_string();
+            let digest = oci::Algorithm::Sha256.hash(&manifest_data).to_string();
             data.write()
                 .manifests
                 .insert(oci::native::Reference::from(&id).to_string(), (manifest_data, digest));

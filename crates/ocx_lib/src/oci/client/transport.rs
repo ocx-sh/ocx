@@ -72,7 +72,7 @@ pub trait OciTransport: Send + Sync {
     ///
     /// Suitable for small blobs (config, metadata) where writing to disk
     /// and reading back would be wasteful.
-    async fn pull_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<Vec<u8>>;
+    async fn pull_blob(&self, image: &oci::native::Reference, digest: &oci::Digest) -> Result<Vec<u8>>;
 
     /// Pulls a blob and writes it to the specified file path.
     ///
@@ -83,7 +83,7 @@ pub trait OciTransport: Send + Sync {
     async fn pull_blob_to_file(
         &self,
         image: &oci::native::Reference,
-        digest: &str,
+        digest: &oci::Digest,
         path: &Path,
         total_size: u64,
         on_progress: ProgressFn,
@@ -92,7 +92,7 @@ pub trait OciTransport: Send + Sync {
     /// HEAD a blob to verify existence and retrieve its content length.
     ///
     /// Returns `Ok(size)` if the blob exists, `Err(ClientError::BlobNotFound)` if not.
-    async fn head_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<u64>;
+    async fn head_blob(&self, image: &oci::native::Reference, digest: &oci::Digest) -> Result<u64>;
 
     // ── Write operations ─────────────────────────────────────────────
 
@@ -117,7 +117,7 @@ pub trait OciTransport: Send + Sync {
         &self,
         image: &oci::native::Reference,
         data: Vec<u8>,
-        digest: &str,
+        digest: &oci::Digest,
         on_progress: ProgressFn,
     ) -> Result<String>;
 

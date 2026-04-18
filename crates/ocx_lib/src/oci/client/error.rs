@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::oci::{Digest, Identifier, PinnedIdentifier, native};
+
 /// Errors that can occur during OCI client operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -10,8 +12,9 @@ pub enum ClientError {
     /// Authentication with the registry failed.
     #[error("Registry authentication failed: {0}")]
     Authentication(#[source] Box<dyn std::error::Error + Send + Sync>),
-    /// Manifest digest mismatch between expected and actual.
-    #[error("Manifest digest mismatch: expected '{expected}', got '{actual}'")]
+    /// Digest mismatch between expected and actual content hash.
+    /// Fires for manifest digests and for verified blob digests.
+    #[error("Digest mismatch: expected '{expected}', got '{actual}'")]
     DigestMismatch { expected: String, actual: String },
     /// Expected an image manifest but got an image index or unknown type.
     #[error("Expected an image manifest, got an image index")]
@@ -24,12 +27,13 @@ pub enum ClientError {
     ManifestNotFound(String),
     /// A referenced blob does not exist in the registry.
     ///
-    /// `digest_str` is the stringified OCI digest (e.g.
-    /// `sha256:<hex>`). It is already flattened from [`crate::oci::Digest`]
-    /// at the call site, so the field name reflects that callers
-    /// cannot assume it is re-parseable back into a structured type.
-    #[error("Blob not found in registry '{registry}': {digest_str}")]
-    BlobNotFound { registry: String, digest_str: String },
+    /// The identifier is the canonical OCX `registry/repository[:tag]@digest`
+    /// form: the registry + repository of the image the lookup was
+    /// issued against, plus the missing blob's digest. The advisory
+    /// tag (when present) is the tag of the image that triggered the
+    /// blob resolution — not the blob itself.
+    #[error("Blob not found: {0}")]
+    BlobNotFound(PinnedIdentifier),
     /// A registry operation failed.
     #[error("Registry operation failed: {0}")]
     Registry(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -55,5 +59,33 @@ impl ClientError {
     /// Wrap any error as a [`ClientError::Internal`].
     pub fn internal(error: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Internal(Box::new(error))
+    }
+
+    /// Builds a [`ClientError::BlobNotFound`] from the image the lookup
+    /// was issued against and the missing blob's digest.
+    ///
+    /// The image's own digest (if any) is dropped — the stored identifier
+    /// carries the *blob* digest, which is what was actually missing.
+    /// Falls back to [`ClientError::Registry`] if the image reference
+    /// cannot produce a well-formed [`PinnedIdentifier`]. This path is
+    /// unreachable after a HEAD succeeded against the registry: the
+    /// transport has already used `image` to issue a real HTTP request,
+    /// so the reference is known-valid by construction. The debug
+    /// assertions fire loudly in dev builds to catch any regression.
+    pub fn blob_not_found(image: &native::Reference, blob_digest: &Digest) -> Self {
+        let identifier = match Identifier::try_from(image.clone()) {
+            Ok(id) => id.clone_with_digest(blob_digest.clone()),
+            Err(e) => {
+                debug_assert!(false, "unreachable after HEAD succeeded: {e}");
+                return Self::Registry(Box::new(e));
+            }
+        };
+        match PinnedIdentifier::try_from(identifier) {
+            Ok(pinned) => Self::BlobNotFound(pinned),
+            Err(e) => {
+                debug_assert!(false, "unreachable after HEAD succeeded: {e}");
+                Self::Registry(Box::new(e))
+            }
+        }
     }
 }
