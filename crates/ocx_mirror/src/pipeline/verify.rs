@@ -4,20 +4,30 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use ocx_lib::oci::Digest as OciDigest;
 use sha2::{Digest, Sha256};
 
 use crate::spec::VerifyConfig;
 
-/// Verify a downloaded file's SHA256 digest against an expected value.
+/// Verify a downloaded file's digest against an expected value.
+///
+/// The `expected` string is parsed as an OCI digest (`sha256:…`,
+/// `sha384:…`, or `sha512:…`) and the file is hashed with the
+/// matching algorithm. Returns an error for an unparseable digest
+/// string or a content mismatch.
 pub async fn verify_digest(file: &Path, expected: &str) -> Result<()> {
-    let data = tokio::fs::read(file).await?;
-    let hash = Sha256::digest(&data);
-    let actual = format!("sha256:{}", hex::encode(hash));
+    let expected_digest =
+        OciDigest::try_from(expected).with_context(|| format!("invalid digest string '{expected}'"))?;
+    let actual = expected_digest
+        .algorithm()
+        .hash_file(file)
+        .await
+        .with_context(|| format!("failed to hash {}", file.display()))?;
 
-    if actual != expected {
+    if actual != expected_digest {
         bail!(
-            "digest mismatch for {}: expected {expected}, got {actual}",
+            "digest mismatch for {}: expected {expected_digest}, got {actual}",
             file.display()
         );
     }
@@ -123,6 +133,33 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("digest mismatch"));
+    }
+
+    #[tokio::test]
+    async fn verify_correct_sha512_digest() {
+        // Regression: before the algorithm-aware fix, the verify path
+        // hashed every file with SHA-256 and compared against the raw
+        // `sha512:…` string, producing a spurious mismatch.
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.bin");
+        let content = b"hello world";
+        tokio::fs::write(&file, content).await.unwrap();
+
+        let hash = sha2::Sha512::digest(content);
+        let expected = format!("sha512:{}", hex::encode(hash));
+
+        verify_digest(&file, &expected).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_unparseable_digest() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.bin");
+        tokio::fs::write(&file, b"hello world").await.unwrap();
+
+        let result = verify_digest(&file, "not-a-digest").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid digest string"));
     }
 
     #[test]
