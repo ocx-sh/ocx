@@ -1,140 +1,185 @@
 ---
 name: swarm-review
-description: Adversarial multi-perspective code reviewer. Use for thorough code review with security, performance, architecture, and SOTA analysis.
+description: Adversarial multi-perspective code reviewer. Tiered dispatch that scales from a single diff-scoped reviewer (low) to a full adversarial panel with architect, SOTA research, and Codex cross-model gate (max). Auto-classifies effort from diff metrics against a configurable baseline (default main). Use for branch/PR/diff review before landing on main.
 user-invocable: true
-argument-hint: "branch-name-or-pr-number"
+argument-hint: "[tier] <branch-or-pr> [--base=<ref>] [--flags]"
 ---
 
-# Adversarial Reviewer
+# Adversarial Reviewer — Tiered
 
-Multi-perspective code review with root cause analysis and OCX-specific pattern verification.
+Thin dispatch layer. Phase plans live in sibling tier files
+(`tier-low.md`, `tier-high.md`, `tier-max.md`); this file parses
+arguments, resolves the baseline, classifies the diff (`classify.md`),
+resolves overlays (`overlays.md`), optionally gates on a meta-plan
+approval, then hands off to the matching tier file. Shared content
+(worker table, adversarial protocol, output format, constraints) stays
+here — perspective-by-perspective execution lives in tier files.
 
-## Review Workflow
+## Argument syntax
 
-1. **Gather** — Get diff and commit history for the branch. Compute changed file list via `git diff main...HEAD --name-only`.
-2. **Analyze** — Launch parallel worker-reviewer agents for each perspective, scoped to changed files only.
-3. **Classify** — Each reviewer classifies findings as **actionable** (can fix without human input) or **deferred** (needs human decision).
-4. **Interrogate** — Apply adversarial questioning
-5. **Root Cause** — Investigate systemic issues with Five Whys
-6. **Verdict** — Approve or request changes
-
-## Review Perspectives
-
-Reviews follow a two-stage order. **Stage 1**: launch correctness perspectives (OCX Pattern Compliance, Test Coverage). If Stage 1 has actionable findings, report them for remediation before Stage 2. **Stage 2**: launch all remaining perspectives in parallel. This prevents wasting quality polish on code that doesn't meet spec.
-
-### Stage 1 — Correctness (run first)
-
-### OCX Pattern Compliance
-- Error model: `PackageErrorKind` used correctly, three layers maintained
-- Symlink safety: `ReferenceManager` used (not raw symlinks)
-- API contract: single table, static headers, enum statuses, actual results
-- Command pattern: args → manager → report (not echoing CLI args)
-
-### Test Coverage
-New code has tests. Bug fixes have regression tests. Edge cases covered.
-
-### Stage 2 — Quality, Security, Performance (run after Stage 1 clean)
-
-### Security
-Per `.claude/rules/quality-security.md`: OWASP Top 10, CWE references, auth flow, input validation, symlink traversal, archive extraction safety.
-
-### Performance
-Per `.claude/rules/quality-core.md`: N+1 patterns, blocking I/O in async paths, memory allocations, pagination, caching opportunities.
-
-### Architecture
-SOLID principles, subsystem boundary respect, dependency direction.
-
-### Rust Quality
-Per `.claude/rules/quality-rust.md`: Block/Warn/Suggest tier items, async correctness (JoinSet order, cancel safety, bounded channels), SOLID compliance in Rust, code duplication detection.
-
-### Pattern Consistency & Reusability
-Per `.claude/rules/arch-principles.md` (Code Style Conventions, Design Principles), `.claude/rules/subsystem-*.md` (per-subsystem patterns), and `.claude/rules/quality-core.md` (Reusability Assessment):
-- Does new code follow established OCX patterns or reinvent them?
-- Is generic logic in the right layer (`ocx_lib` vs `ocx_cli`)?
-- Could a second command reuse this code, or would it need to copy-paste?
-- Are cross-cutting concerns (progress, retry, rate-limiting) in the library?
-
-### Documentation Consistency
-Launch `worker-doc-reviewer` to check code-documentation drift:
-- Cross-reference changed files against the documentation trigger matrix
-- New CLI commands/flags → `reference/command-line.md`
-- New env vars → `reference/environment.md`
-- New schema fields → `reference/metadata.md`
-- Changed behavior → `user-guide.md` accuracy
-- New platforms → `installation.md` + `user-guide.md`
-- Breaking changes → `changelog.md`
-
-### CLI UX Quality
-Use `worker-reviewer` (focus: quality) to evaluate CLI user experience against package manager UX standards:
-- Error messages: actionable (what happened + what to do next), copy-pasteable recovery commands, stderr-only
-- Progress & feedback: indicator within 100ms of any network/disk op, X-of-Y for batch ops, streaming for blobs
-- Output design: stdout-for-data / stderr-for-messages split, `--format json` stability, no ANSI leaks into JSON
-- Command structure: `--help` shows env var overrides, flag naming matches conventions, `--` separator documented with examples
-- Dependency UX: `deps --why` traces, `install` reports what was resolved, re-install distinguishes fresh vs cached
-- Machine/CI UX: meaningful exit codes, `CI=true` suppresses interactive output, `--offline` fails fast with clear error
-Reference: `.claude/artifacts/research_cli_ux.md` for the full checklist and sources (clig.dev, 12 Factor CLI Apps, Evil Martians progress patterns, miette diagnostics).
-
-### Technical Soundness & SOTA
-Use `worker-researcher` to compare the implementation against industry state of the art:
-- How do leading tools (Cargo, npm, pip/uv, Go modules, Helm) solve the same problem?
-- Is the algorithm choice current (e.g., PubGrub, SAT solvers, topological BFS)?
-- Does the data format align with established standards (semver ranges, OCI artifacts)?
-- Are there known pitfalls in the domain that the implementation doesn't address (lock files, supply chain security, dependency confusion)?
-- What emerging patterns or recent publications are relevant?
-
-## Adversarial Questions
-
-- "What if this assumption is wrong?"
-- "Under what conditions would this fail?"
-- "What edge cases weren't considered?"
-- "What happens when [X] fails?"
-- "How does this behave under load?"
-
-## Root Cause Analysis
-
-```markdown
-**Issue**: [Describe the problem]
-**Why 1**: [First-level cause]
-**Why 2**: [Deeper cause]
-...
-**Systemic Fix**: [What prevents recurrence]
+```
+/swarm-review [tier] <target> [--flags]
 ```
 
-## Verdict
+- **tier** (optional): `low | auto | high | max`. Default `auto`.
+- **target** (optional): branch name; PR reference (`<N>` / `#<N>` /
+  `PR <N>` / `pull/<N>` / full GitHub PR URL); empty → current branch `HEAD`.
+- **flags** (OCX convention: flags before positional):
+  - `--base=<git-ref>` — diff baseline; default `main`. When target
+    resolves to a PR, inferred from `gh pr view --json baseRefName`
+    unless the user passes `--base` explicitly.
+  - `--breadth=minimal|full|adversarial` — Stage 2 perspective breadth
+  - `--reviewer=haiku|sonnet|opus` — model for `worker-reviewer`
+  - `--doc-reviewer=haiku|sonnet` — model for `worker-doc-reviewer`
+  - `--rca=on|off` — Five Whys systemic-fix analysis
+  - `--codex` / `--no-codex` — cross-model adversarial pass (code-diff scope)
+  - `--dry-run` — meta-plan preview via `EnterPlanMode`
+  - `--form` — structured `AskUserQuestion` form; implies `--dry-run`
 
-**Approve** when: All Critical/High resolved, tests pass, matches conventions.
-**Request Changes** when: Security vulnerabilities, breaking changes without migration, missing tests, architectural violations.
+**`--base` is a pipeline input, not an axis.** It feeds the classifier
+as the diff baseline for the whole run. Overlays (`breadth`, `rca`,
+`codex`) are single-axis pipeline adjustments on top of the chosen tier.
 
-## Output Format
+## Workflow
+
+### 1. Parse arguments and resolve target
+
+Detect target (ordered, first match wins):
+1. Full GitHub PR URL
+2. `PR <N>` / `pull/<N>` → PR
+3. `#<N>` or bare integer → probe PR via `mcp__github__pull_request_read`
+4. Branch name — verified via `git rev-parse --verify <name>`
+5. Empty → current branch `HEAD`
+
+PR metadata (labels, base ref, title, body) feeds both the baseline
+resolution and the classifier. On fetch failure, fall back to free-text
+treatment (match `/swarm-plan` convention).
+
+### 2. Resolve the baseline
+
+- If user passed `--base=<ref>`, use it verbatim (user wins).
+- Else if target is a PR, use `gh pr view <N> --json baseRefName -q .baseRefName`.
+- Else default to `main`.
+
+Fast-fail when `git rev-parse --verify <base>` fails — print remediation
+(`did you mean origin/main?`) and stop. Empty diff → report "nothing to
+review" and exit cleanly.
+
+### 3. Classify (only when tier=`auto`)
+
+Read `classify.md`. Compute diff metrics once (`git diff <base>...HEAD
+--name-only` for files, `--shortstat` for lines). Apply tier signals
+(size + subsystems + structural markers + PR labels). Produce candidate
+tier + confidence flag + overlay set. When signals split across adjacent
+tiers, mark **low-confidence** — the meta-plan gate in step 5 resolves
+it. No mid-flow `AskUserQuestion`.
+
+### 4. Resolve overlays
+
+Final config = tier defaults (`overlays.md` per-tier table) +
+classifier overlays + user flag overrides. User flags always win.
+
+### 5. Meta-plan gate (single consolidated approval point)
+
+Fire when ANY of: `--dry-run`, `--form`, tier resolved to `max`, or
+low-confidence classification. Only user-prompt point.
+
+Write `.claude/artifacts/meta-plan_review_[target].md` with:
+Classification (tier + rationale + diff metrics snapshot), Baseline
+(source: user-flag / PR-base / default), Overlays (with rationale),
+Workers per perspective, Estimated cost, Not Doing (no auto-fixes, no
+commits).
+
+**Approval UI** (always a single interaction):
+- Default: `EnterPlanMode` with the meta-plan path; resume on approve.
+  *Fall back to `AskUserQuestion` Approve/Edit/Cancel if skill resume
+  after `ExitPlanMode` is unreliable in practice.*
+- `--form`: ONE `AskUserQuestion` call with ≤4 batched axis questions
+  (Tier / Breadth / RCA / Codex), first option "Recommended".
+
+On reject: re-draft with rejection rationale and re-present once.
+
+### 6. Announce final config (always)
+
+```
+Swarm review
+  Tier:       high                             (auto — 8 files, 240 lines, 1 subsystem)
+  Baseline:   main                             (default)
+  Target:     HEAD (branch: soraka)
+  Overlays:   breadth=full, rca=on, codex=off  (tier default)
+  Workers:    Stage 1 (2 parallel), Stage 2 (4 parallel)
+  Codex diff review: off
+  Proceed? (Ctrl+C to abort; re-run with explicit tier to override)
+```
+
+### 7. Dispatch to tier file
+
+`Read` the matching `tier-{low,high,max}.md` and execute its phase plan.
+
+## Worker assignment (shared across tiers)
+
+See `.claude/rules/workflow-swarm.md` for worker types, models, tools,
+focus modes. Tier files select a subset of these perspectives.
+
+| Perspective | Worker / focus | Tier use |
+|---|---|---|
+| Spec-compliance | `worker-reviewer` (spec-compliance, phase: `post-implementation`) | all |
+| Test coverage | `worker-reviewer` (quality, lens: test-coverage) | high, max |
+| Quality | `worker-reviewer` (quality) | all |
+| Security | `worker-reviewer` (security) | high (security paths), max |
+| Performance | `worker-reviewer` (performance) | high (hot paths), max |
+| Architecture | `worker-architect` | max (+ `adversarial`) |
+| Documentation | `worker-doc-reviewer` | high, max |
+| CLI UX | `worker-reviewer` (quality, lens: cli-ux) | max (+ `adversarial`) |
+| SOTA | `worker-researcher` | max (+ `adversarial`) |
+| Cross-model | `codex-adversary` (code-diff) | high (when `--codex` fires), max (mandatory) |
+
+Max concurrent workers: 8 (per `workflow-swarm.md`).
+
+## Adversarial protocol & output format
+
+Adversarial questioning anchors ("What if this assumption is wrong?",
+"Under what conditions would this fail?", "What edge cases weren't
+considered?") apply at every tier. Root-cause Five-Whys analysis is
+tier-gated via the `rca` axis (see `overlays.md`).
+
+**Output skeleton** — tier files add or remove Stage 2 sections per the
+breadth they run. Every tier produces:
 
 ```markdown
-## Code Review: [Branch/PR]
-
+## Code Review: [target]
 ### Summary
-**Verdict**: Approved | Needs Work | Request Changes
-
-### OCX Pattern Violations
-- [ ] [File:Line] [Violation] - [Remediation]
-
-### Security Issues
-### Performance Issues
-### Architecture Issues
-### Test Coverage Gaps
-### CLI UX Issues
-### Technical Soundness & SOTA
+- Verdict: Approved | Needs Work | Request Changes
+- Tier / Baseline / Diff: N files, +L / -L lines, S subsystems
+### Stage 1 — Correctness (spec-compliance, test-coverage)
+### Stage 2 — [perspectives run at this tier]
+### Cross-Model Adversarial (Codex)  # if --codex fired
+### Root-Cause Analysis               # if rca=on
+### Deferred Findings (human judgment required)
 ```
+
+**Verdict**: Approve (Block/High resolved or deferred with reasoning),
+Needs Work (Warn-tier present), Request Changes (unresolved Block-tier /
+security / breaking changes / missing tests / arch violations).
 
 ## Constraints
 
-- NO approving with unresolved Critical/High issues
+- NO auto-fixing — review is read-only; actionable findings reported, not committed
+- NO approving with unresolved Block-tier findings
 - NO nitpicking style when using rustfmt
+- NO mid-flow `AskUserQuestion` during classification
+- NO exceeding 8 parallel workers
 - ALWAYS reference specific files and lines
 - ALWAYS suggest alternatives, not just problems
+- ALWAYS classify every finding as actionable or deferred
+- ALWAYS stay within the diff scope (`<base>...HEAD`)
 
 ## Handoff
 
-- To Builder: With specific remediation tasks
-- To Doc Writer: With gap report from documentation reviewer
-- To Architect: For architectural concerns requiring ADR
+- **To `/swarm-execute`**: when actionable findings exist and the user
+  wants them fixed. `/swarm-execute` runs the Review-Fix Loop.
+- **To `/builder`**: with a remediation task list for a specific finding.
+- **To `/doc-writer`**: with the gap report from `worker-doc-reviewer`.
+- **To `/architect`**: for architectural concerns requiring an ADR.
 
 $ARGUMENTS

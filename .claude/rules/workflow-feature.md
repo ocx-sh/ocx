@@ -14,17 +14,20 @@ Two workflows for implementing features, from planning through quality gates. Us
 The proven approach using subagent orchestration with **contract-first TDD**.
 
 ### Planning Phase
-1. **Plan** — Human describes feature. Invoke `/architect` or `/swarm-plan`.
+1. **Plan** — Human describes feature. Invoke `/architect` or `/swarm-plan`. `/swarm-plan` accepts a tier argument (`low | auto | high | max`) that scales worker count, research depth, and review adversariness to feature scope; `auto` (default) classifies from prompt signals. See `workflow-swarm.md` "Tier & Overlay Vocabulary" for details.
 2. **Research** — Launch `worker-researcher` to scout the technology landscape. Persist findings as `.claude/artifacts/research_[topic].md`.
-3. **Design** — Architect reads subsystem context rules + code + research artifacts, produces plan in `.claude/artifacts/`. Plan must include testable component contracts and user experience scenarios.
+3. **Design** — Architect reads subsystem context rules + code + research artifacts, produces plan in `.claude/artifacts/`. Plan must include testable component contracts and user experience scenarios. At `max` tier (or with `--codex` overlay), `/swarm-plan` runs an optional Codex plan-artifact review as a cross-model final gate on the plan before handoff — see `workflow-swarm.md` "Codex Plan Review".
 4. **Review** — Human reviews and approves plan.
 
 ### Execution Phase (Contract-First TDD)
+
+Run `/swarm-execute` (optionally with tier `low | high | max`; `auto` default reads the plan header). Tier scales stub/impl builder model, Review-Fix Loop rounds, Stage 2 perspective breadth, and whether Codex code-diff review fires. See `workflow-swarm.md` "Tier & Overlay Vocabulary" for details.
+
 5. **Stub** — `worker-builder` (focus: `stubbing`) creates type signatures, traits, function shells with `unimplemented!()` / `raise NotImplementedError`. Gate: `cargo check` passes.
 6. **Verify Architecture** — `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) validates stubs match the design record. Gate: reviewer passes. *Optional for features touching ≤3 files.*
 7. **Specify** — `worker-tester` (focus: `specification`) writes unit + acceptance tests from the design record. Tests fail against stubs. Gate: tests compile and fail with `unimplemented`.
 8. **Implement** — `worker-builder` (focus: `implementation`) fills in stub bodies until all tests pass. Gate: subsystem verify succeeds (e.g., `task rust:verify` for Rust changes — see the Quality Gate section in each `subsystem-*.md` rule).
-9. **Review-Fix Loop** — Diff-scoped, bounded iterative review (max 3 rounds). During the loop, run the **subsystem verify** for the changed area — NOT full `task verify`. Round 1 runs all perspectives; subsequent rounds only re-run perspectives that had actionable findings. Findings classified as actionable (fix automatically) or deferred (needs human). Loop exits when no actionable findings remain. See swarm-execute for full protocol.
+9. **Review-Fix Loop** — Diff-scoped, bounded iterative review (max 3 rounds at tier=high/max; 1 round at tier=low). During the loop, run the **subsystem verify** for the changed area — NOT full `task verify`. Round 1 runs all perspectives; subsequent rounds only re-run perspectives that had actionable findings. Findings classified as actionable (fix automatically) or deferred (needs human). Loop exits when no actionable findings remain. See swarm-execute for full protocol.
 10. **Cross-Model Adversarial Pass** — After the Claude Review-Fix Loop converges, run a single Codex adversarial review against the diff as a final gate. Actionable findings fold into one final builder pass; deferred findings go to the summary. One-shot (no looping — prevents two-family stylistic thrash). Skipped gracefully if Codex is unavailable. Flag: `--no-cross-model` on `/swarm-execute` to opt out. See swarm-execute for the full protocol.
 11. **Commit** — All changes committed on feature branch with conventional commit message. Deferred findings printed as summary.
 12. **Push** — Human decides when to push (CI has real cost).

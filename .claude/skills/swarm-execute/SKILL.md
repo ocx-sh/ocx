@@ -1,178 +1,178 @@
 ---
 name: swarm-execute
-description: Execution orchestrator that implements plans using parallel worker swarms with quality gates. Use to execute implementation plans.
+description: Tiered execution orchestrator that implements plans using parallel worker swarms with contract-first TDD and quality gates. Scales from light (low) to full kitchen sink (max) via a tier argument; overlays mix builder model / loop rounds / review breadth / codex axes on top. Use to execute plan artifacts produced by /swarm-plan, or free-text implementation tasks.
 user-invocable: true
-argument-hint: "plan-artifact-or-task-description"
+argument-hint: "[tier] <plan-artifact-or-task> [--flags]"
 disable-model-invocation: true
 ---
 
-# Execution Orchestrator
+# Execution Orchestrator — Tiered
 
-Execute plans using parallel worker swarms with quality gates.
+Thin dispatch layer. Phase plans live in sibling tier files
+(`tier-low.md`, `tier-high.md`, `tier-max.md`); this file parses
+arguments, classifies the target (`classify.md`), resolves overlays
+(`overlays.md`), optionally gates on a meta-plan approval, then hands
+off to the matching tier file. Shared content (worker table, loop
+design principles, constraints, handoff) stays here — phase-by-phase
+execution lives in the tier files.
 
-## Execution Workflow — Contract-First TDD
-
-Each phase has a gate that must pass before proceeding.
-
-1. **Discover** — Read plan artifact from `.claude/artifacts/`
-2. **Stub** — Launch `worker-builder` (focus: `stubbing`) to create type signatures, trait impls, and function shells with `unimplemented!()` (Rust) or `raise NotImplementedError` (Python). No business logic. Gate: `cargo check` passes (types compile).
-3. **Verify Architecture** — Launch `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) to validate stubs against the design record: API surface matches, module boundaries align, error types cover all failure modes. Gate: reviewer reports pass. *Optional for features touching ≤3 files.*
-4. **Specify** — Launch `worker-tester` (focus: `specification`) to write unit tests and acceptance tests from the design record's contracts and user experience sections — NOT from the stubs. Tests should fail against the stubs. Gate: tests compile/parse and fail with `unimplemented`/`NotImplementedError`.
-5. **Implement** — Launch `worker-builder` (focus: `implementation`) to fill in stub bodies. All specification tests must pass. Gate: `task verify` succeeds.
-6. **Review-Fix Loop** — Iterative review and remediation (see below). Gate: no new actionable findings.
-7. **Cross-Model Adversarial Pass** — Run Codex via the plugin runtime as a final-gate adversarial reviewer against the converged diff. One-shot (no looping). Actionable findings fold into one final builder pass; deferred findings go to the summary. Gate: `task verify` passes. *Flag: `--no-cross-model` to skip; phase is automatically skipped with a warning if Codex is unavailable.*
-8. **Commit** — Commit all changes on the feature branch (NEVER push)
-
-## Review-Fix Loop
-
-After implementation passes `task verify`, enter a bounded review-fix cycle that converges on a clean codebase. The loop is **diff-scoped** and **severity-gated**.
-
-### Design Principles
-
-- **Fresh context**: Every reviewer and builder in the loop is a fresh subagent. Never self-review in the same context that wrote the code (Dunning-Kruger bias).
-- **Diff-scoped**: Findings must relate to changed files only (`git diff main...HEAD --name-only`). No "while you're here" improvements.
-- **Severity-gated**: Only Block-tier and Warn-tier findings drive the loop. Suggest-tier findings go directly to the deferred summary — they never trigger a fix round.
-- **`task verify` is ground truth**: The loop is an efficiency filter. `task verify` is the real gate.
-
-### Loop Protocol
-
-**Round 1 — Stage 1 (spec compliance first):**
-Launch spec-compliance review alone, scoped to changed files:
-- `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) *— optional for ≤3 files; if skipped, proceed directly to Stage 2*
-
-If spec-compliance has actionable findings, fix them (builder pass + subsystem verify) before proceeding to Stage 2. Rationale: polishing code that doesn't meet the design record wastes effort.
-
-**Round 1 — Stage 2 (remaining perspectives in parallel):**
-Launch all other applicable perspectives in parallel, scoped to changed files:
-- `worker-reviewer` (focus: `quality`)
-- `worker-reviewer` (focus: `security`) *— if touching auth, input handling, or external data*
-- `worker-reviewer` (focus: `performance`) *— if touching hot paths or async code*
-- `worker-doc-reviewer` *— if documentation triggers match changed files*
-
-Each reviewer classifies findings into:
-- **Actionable** (Block/Warn) — can be fixed without human input (code quality, missing tests, naming, patterns, security fixes with clear remediation)
-- **Deferred** — requires human decision (design questions, scope changes, trade-offs, external dependencies)
-- **Suggest** — optional improvements, go directly to deferred summary
-
-**Round 2+ (selective re-review):**
-1. `worker-builder` (fresh subagent) fixes all actionable findings from the previous round
-2. Run `task verify` — must pass before re-review
-3. Re-launch **only the perspectives that had actionable findings** in the previous round (not the full battery)
-4. If a perspective now reports no actionable findings, drop it from future rounds
-
-**Termination conditions** (whichever comes first):
-- No actionable findings remain across all perspectives → **converged**
-- Maximum **3 rounds** reached → **budget exhausted** (remaining findings deferred)
-- A round produces the same findings as the previous round → **oscillation detected** (defer remaining)
-
-**On exit:** Run `task verify` once as ground truth. Print deferred findings summary:
+## Argument syntax
 
 ```
-## Deferred Findings
-
-### Auto-fixed (N rounds)
-- [Finding]: [What was changed]
-
-### Deferred: Requires human judgment
-- [Finding]: [Why human judgment is needed]
-
-### Deferred: Oscillation detected
-- [Finding]: [What was tried, why it oscillated]
-
-### Deferred: Budget exhausted
-- [Finding]: [Still unresolved after 3 rounds]
-
-### Suggestions (not actioned)
-- [Finding]: [Optional improvement]
+/swarm-execute [tier] <plan-artifact-or-task> [--flags]
 ```
 
-### Scoping Rules
+- **tier** (optional): `low | auto | high | max`. Default `auto`.
+- **target** (one of): plan artifact path (`.claude/artifacts/plan_*.md`);
+  free-text task description.
+- **flags** (OCX convention: flags before positional):
+  - `--builder=sonnet|opus`
+  - `--tester=sonnet|opus`
+  - `--reviewer=haiku|sonnet|opus`
+  - `--doc-reviewer=haiku|sonnet`
+  - `--loop-rounds=1|2|3`
+  - `--review=minimal|full|adversarial`
+  - `--codex` / `--no-codex`
+  - `--dry-run` / `--form` — meta-plan preview (`--form` uses `AskUserQuestion`; implies `--dry-run`)
 
-- Findings MUST relate to files in `git diff main...HEAD --name-only`
-- Do NOT flag pre-existing issues in unchanged code
-- Do NOT expand scope to unrelated improvements in unchanged files
-- Exception: if a change *introduces* a regression in an unchanged file (e.g., breaks an import), that is in scope
+## Workflow
 
-## Cross-Model Adversarial Pass
+### 1. Parse arguments and detect plan artifact
 
-After the Review-Fix Loop converges (or exits on budget/oscillation), run a single Codex adversarial review against the branch diff as a final quality gate. Claude subagents share training data and architectural priors; a cross-model reviewer (Codex / GPT-5.x family) catches the things Claude's family systematically misses.
+Detect target type:
+1. Path ending `.md` (typically under `.claude/artifacts/`) → plan-artifact mode
+2. Anything else → free-text mode
 
-### Preconditions
+When a plan is present, read it and parse the handoff block for Tier,
+Scope, Reversibility, Overlays; parse phase definitions; extract
+"Subsystems Touched" from the plan body.
 
-- Review-Fix Loop has exited (converged / budget exhausted / oscillation)
-- `task verify` is green
-- Working tree is clean except for the intended diff
-- `--no-cross-model` was not passed to `/swarm-execute`
+### 2. Classify (only when tier=`auto`)
 
-### Invocation
+Read `classify.md`. Apply plan-header signals first (primary); fall
+back to free-text signals (pointer to `/swarm-plan`'s classify.md when
+no plan artifact) only for axes the plan header doesn't cover. Produce
+candidate tier + confidence flag + overlay set.
 
-Run the Codex companion directly — same entry point the plugin's `/codex:adversarial-review` command uses:
+### 3. Resolve overlays
 
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" adversarial-review --wait --base main
+Final config = tier defaults (`overlays.md` per-tier table) +
+classifier overlays + user flag overrides. User flags always win
+(except tier=max's mandatory `--builder=opus`).
+
+### 4. Meta-plan gate (single consolidated approval point)
+
+Fire when ANY of: `--dry-run`, `--form`, tier resolved to `max`, or
+classification marked low-confidence. This is the **only** user-prompt
+point — no mid-flow `AskUserQuestion` during classification.
+
+Write `.claude/artifacts/meta-plan_execute_[feature].md` with:
+Classification (tier + rationale + plan-header source), Overlays
+(+ rationale), Workers per phase, `loop-rounds` budget, Estimated cost,
+Whether Codex fires, Not Doing (push, PR creation).
+
+**Approval UI** (always a single interaction):
+- Default: `EnterPlanMode` with the meta-plan path; resume on approve.
+  *If skill resume after `ExitPlanMode` is unreliable in practice,
+  fall back to `AskUserQuestion` with Approve / Edit / Cancel options.*
+- `--form`: ONE `AskUserQuestion` call with ≤4 batched axis questions
+  (Tier / Builder / Loop-rounds / Codex), first option "Recommended".
+
+On reject: re-draft meta-plan with the rejection rationale and
+re-present once.
+
+### 5. Announce final config (always)
+
+Print before loading the tier file:
+
+```
+Swarm execute
+  Tier:        high                                (from plan header)
+  Target:      .claude/artifacts/plan_foo.md
+  Overlays:    builder=sonnet, loop-rounds=3       (tier default)
+               codex=on                            (signal: plan Reversibility=One-Way Door Medium)
+  Workers:     stub/impl sonnet, 1 arch reviewer,
+               3 review rounds (full breadth)
+  Codex diff review: on (after loop converges)
+  Proceed? (Ctrl+C to abort; re-run with explicit tier to override)
 ```
 
-Codex loads `AGENTS.md` at the repo root automatically, which points back to `CLAUDE.md` and the subsystem rule for the touched paths. Do not inject project context in the prompt — it is already available.
+### 6. Dispatch to tier file
 
-**Unavailable path**: if `CLAUDE_PLUGIN_ROOT` is unset, the companion returns non-zero, or the review output is empty, log a warning (`Cross-model gate skipped: <reason>`) and continue to Commit. This is a **gate, not a blocker** — the pipeline must never fail on Codex unavailability.
+`Read` the matching `tier-{low,high,max}.md` and execute its phase
+plan. No phase content duplicated here.
 
-### Triage
+## Review-Fix Loop — shared design principles
 
-Classify each Codex finding using the same conversational judgment Claude applies to any review output:
+Every tier runs a Review-Fix Loop; the tier file sets rounds and
+perspective breadth (see `overlays.md`). These invariants apply to
+every tier:
 
-- **Actionable Block/Warn** with a clear diff-scoped fix → fold into a one-shot builder pass
-- **Deferred** (design question, architectural concern, scope change) → add to the Deferred Findings report
-- **Stated-convention** (critiques something load-bearing in `CLAUDE.md`, `product-tech-strategy.md`, or `AGENTS.md` — e.g., "consider async-std", "add Co-Authored-By") → drop, mention count only
-- **Trivia** (style, formatting, subjective wording) → drop, mention count only
+- **Fresh context**: Every reviewer and builder is a fresh subagent.
+  Never self-review in the context that wrote the code.
+- **Diff-scoped**: Findings must relate to changed files only
+  (`git diff main...HEAD --name-only`). No drive-by improvements.
+- **Severity-gated**: Only Block-tier and Warn-tier findings drive the
+  loop. Suggest-tier goes directly to the deferred summary.
+- **Subsystem verify during loop**: Run the subsystem verify
+  (e.g., `task rust:verify`), NOT full `task verify` — the latter is
+  ground truth only at loop exit.
+- **Regressions in unchanged files are in scope**: if a change breaks
+  an import or test in an unchanged file, fix it.
+- **Termination**: convergence, `--loop-rounds` budget, or oscillation
+  (same findings as previous round → defer).
 
-### One-shot fix pass
+## Cross-Model Adversarial Pass — shared protocol
 
-If there are actionable findings, launch a **single** `worker-builder` (focus: `implementation`) with the specific findings list. Gate: `task verify` passes after the fix. **Do not re-enter the Review-Fix Loop** — this is one-shot convergence, not a new loop. Preventing the loop here avoids two-family thrash where Claude and Codex disagree stylistically and bounce edits back and forth.
+See `overlays.md` "codex axis" for when this fires per tier. Use the
+`codex-adversary` skill with scope `code-diff` against the branch diff
+after the Claude loop converges.
 
-If the one-shot fix pass fails `task verify`, revert the builder's changes and promote all Codex findings to deferred. Let the human decide.
+- **Preconditions**: loop exited, `task verify` green, working tree
+  clean except intended diff.
+- **Invocation**: delegate to `codex-adversary` with `--scope code-diff
+  --base main`. Codex loads `AGENTS.md` automatically — do not inject
+  project context.
+- **Triage**: Actionable → one-shot `worker-builder` fix pass, gate
+  `task verify`. Deferred → summary. Stated-convention / trivia →
+  dropped with count.
+- **One-shot only**: never re-enter the Review-Fix Loop — prevents
+  two-family thrash. If the one-shot fix fails `task verify`, revert
+  and promote findings to deferred.
+- **Unavailable path**: `CLAUDE_PLUGIN_ROOT` unset / companion
+  non-zero / empty output → log `Cross-model gate skipped: <reason>`
+  and continue. Gate, not blocker (at tier=max, surface the skip
+  prominently).
 
-### Report
+## Worker assignment (shared across tiers)
 
-Add a `## Cross-Model Adversarial` section to the Deferred Findings summary alongside the existing auto-fixed/deferred/suggestion sections:
+See `.claude/rules/workflow-swarm.md` for worker types, models, tools,
+focus modes.
 
-```
-### Cross-Model Adversarial (Codex)
-- Auto-fixed (N): [finding → what was changed]
-- Deferred (M): [finding → why human judgment is needed]
-- Dropped (K trivia, L stated-convention)
-```
+| Phase | Worker | Model |
+|---|---|---|
+| Stub | `worker-builder` (focus: `stubbing`) | sonnet / opus |
+| Verify arch (high/max) | `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) | sonnet |
+| Verify arch (max) | `worker-architect` | opus |
+| Specify | `worker-tester` (focus: `specification`) | sonnet |
+| Implement | `worker-builder` (focus: `implementation`) | sonnet / opus |
+| Review Stage 1 | `worker-reviewer` (spec-compliance + test-coverage) | sonnet |
+| Review Stage 2 | `worker-reviewer` / `worker-doc-reviewer` / `worker-architect` / `worker-researcher` | per role |
+| Cross-model | `codex-adversary` (code-diff) | — |
 
-If the phase was skipped, the section reads `### Cross-Model Adversarial (Codex): skipped — <reason>`.
+Max concurrent workers: 8 (per `workflow-swarm.md`).
 
-## Worker Assignment
+## Quality Gates & Git Protocol
 
-See `.claude/rules/workflow-swarm.md` for worker types, models, tools, and focus modes.
-
-## Task Runner
-
-**Always use `task` commands** — run `task --list` to discover available workflows:
-- `task verify` — full quality gate (format, clippy, lint, license, build, unit tests, acceptance tests)
-- `task test:quick` — acceptance tests without rebuilding
-- `task checkpoint` — save work-in-progress (amends into single commit)
-
-## Quality Gates
-
-Run `task verify` before marking work complete. See `.claude/rules/quality-core.md` for the canonical gate list.
-
-## Git Protocol
-
-1. Stage and commit with descriptive conventional commit message
-2. NEVER push to remote — the human decides when to push (CI has real cost)
-3. Use `task checkpoint` for work-in-progress saves
+- `task --list` to discover workflows; `task verify` is the final gate (subsystem verify runs during the review loop)
+- Stage and commit with conventional commit message; never push
+- Use `task checkpoint` for work-in-progress saves
 
 ## Living Design Records
 
-Plan artifacts are living documents, not frozen specs. When implementation reveals a behavior or edge case not captured in the design record:
-1. Update the plan artifact first
-2. Write the corresponding test
-3. Then implement
-
-This prevents spec drift — the plan always reflects what was actually built and why.
+Plan artifacts are living documents. When implementation reveals a
+behavior or edge case not captured in the design record: update the
+plan artifact first, write the corresponding test, then implement.
 
 ## Constraints
 
@@ -180,15 +180,17 @@ This prevents spec drift — the plan always reflects what was actually built an
 - NO leaving work uncommitted locally
 - NO exceeding 8 parallel workers
 - NO pushing to remote
-- NO running stub and test phases concurrently (sequential only — prevents context contamination)
+- NO running stub and test phases concurrently (sequential only)
+- NO mid-flow `AskUserQuestion` during classification — ambiguity
+  resolves at the meta-plan gate
 - ALWAYS report blockers immediately
-- ALWAYS validate `git status` shows clean
+- ALWAYS validate `git status` shows clean before commit
 - ALWAYS update design record before adding tests for unspecified behaviors
 
 ## Handoff
 
-- To Swarm Review: After implementation complete
-- To QA Engineer: For acceptance testing
+- To `/swarm-review`: after implementation complete, for adversarial review
+- To `/qa-engineer`: for acceptance testing
 
 ### Next Step — copy-paste to continue:
 

@@ -1,9 +1,9 @@
 ---
 name: codex-adversary
-description: Run an adversarial cross-model code review via Codex CLI, auto-triage the findings (filter noise, classify safe-auto-fix vs needs-confirmation), and hand approved fixes to the builder pattern. Use when you want a genuinely different model's perspective on your changes — not another Claude agent. Complements /swarm-review (which is multi-perspective but Claude-intra-family). Use when the user says "codex review", "/codex-adversary", "adversarial review", or asks for a cross-model second opinion.
+description: Run an adversarial cross-model code review via Codex CLI, auto-triage the findings (filter noise, classify safe-auto-fix vs needs-confirmation), and hand approved fixes to the builder pattern. Use when you want a genuinely different model's perspective on your changes — not another Claude agent. Complements /swarm-review (which is multi-perspective but Claude-intra-family). Two scope modes — code diff (default, branch/working-tree) and plan-artifact (invoked by /swarm-plan against a plan/ADR file as a final gate). Use when the user says "codex review", "/codex-adversary", "adversarial review", or asks for a cross-model second opinion.
 user-invocable: true
 disable-model-invocation: true
-argument-hint: "[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [focus text]"
+argument-hint: "[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch|plan-artifact] [--target-file <path>] [focus text]"
 ---
 
 # /codex-adversary — Cross-Model Adversarial Review + Triage
@@ -44,7 +44,16 @@ to a specific concern.
 
 ### 1. Scope detection
 
-Run in parallel:
+Two scope families, selected by the caller:
+
+- **code-diff** (default; scopes `working-tree` / `branch` / `--base`)
+  — reviews a git diff. Used by `/swarm-execute` and direct user
+  invocation.
+- **plan-artifact** (scope `plan-artifact`, `--target-file <path>`) —
+  reviews a plan / ADR / design markdown file. Invoked by
+  `/swarm-plan` after the Claude review panel converges.
+
+For code-diff scopes, run in parallel:
 
 - `git status --porcelain=v1`
 - `git diff --shortstat` and `git diff --shortstat --cached`
@@ -56,6 +65,8 @@ Decide the review scope:
 - **working-tree** (default): unstaged + staged + untracked changes
 - **branch**: `main..HEAD` — everything since branch diverged from main
 - **--base `<ref>`**: user-supplied base
+- **plan-artifact**: the file path passed via `--target-file` is the
+  target; skip git probes.
 
 If the user passed focus text as argument, treat it as intent (e.g.,
 "security review of the new archive extractor") and pass it through to
@@ -176,12 +187,40 @@ read per item, but must not advocate forcefully — these are user decisions.
 - `--background` — run the review as a Claude background Bash task, return
   immediately; user checks `/codex:status` and then asks for triage
 - `--base <ref>` — review `ref..HEAD` instead of working tree
-- `--scope auto|working-tree|branch` — explicit scope
+- `--scope auto|working-tree|branch|plan-artifact` — explicit scope
+- `--target-file <path>` — required when `--scope plan-artifact`; the
+  plan/ADR markdown file to hand to Codex
 - `--no-auto-fix` — skip the auto-fix batch; treat every real finding as
   *needs confirmation*. Use when working on sensitive code or when you
   want to see everything before any change lands.
 - `--review-only` — run the Codex review, dump the raw output, skip triage
   entirely. Equivalent to running `/codex:adversarial-review` directly.
+
+## Plan-artifact scope (invoked by /swarm-plan)
+
+When called with `--scope plan-artifact --target-file
+.claude/artifacts/plan_<feature>.md`, the contract changes:
+
+- **Target**: the plan / ADR / system-design markdown file, not a git
+  diff. Pass the file path to the companion so it sees the full plan
+  contents.
+- **Triage** (simplified — no auto-fix batch; plans are edited, not
+  compiled):
+
+  | Class | Action |
+  |---|---|
+  | **Actionable** | Orchestrator (the caller — `/swarm-plan`) edits the plan artifact, then re-runs a single `worker-reviewer` (focus: `spec-compliance`) pass to validate the edit. |
+  | **Deferred** | Added to Deferred Findings in the `/swarm-plan` handoff summary — requires human design judgment. |
+  | **Stated-convention** | Drop. Mention count only. (Codex critiques a load-bearing project convention fixed in `CLAUDE.md` / `AGENTS.md`.) |
+  | **Trivia** | Drop. Mention count only. (Wording, formatting, markdown style.) |
+
+- **One-shot only** — no looping. Mirrors the "prevent two-family
+  stylistic thrash" rationale from the code-diff pass.
+- **Unavailable path**: if `CLAUDE_PLUGIN_ROOT` is unset or the
+  companion returns non-zero, log `Cross-model plan review skipped:
+  <reason>` and return — the caller (`/swarm-plan`) decides whether
+  to treat the skip as a gate miss (max tier) or a silent default
+  (lower tiers).
 
 ## Failure modes
 

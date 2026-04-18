@@ -846,3 +846,168 @@ class TestTaskfileLint:
             "When no matching files exist, the tool is called with no "
             "arguments and fails."
         )
+
+
+# ---------------------------------------------------------------------------
+# Swarm tier dispatch: progressive disclosure invariants
+# Parametrized across all tiered swarm skills.
+# ---------------------------------------------------------------------------
+
+
+# Skills that use the progressive-disclosure tier dispatch pattern.
+# Each entry: (skill-dir name, flag grammar that must appear verbatim in
+# both SKILL.md and overlays.md). The flag grammar is the subset unique
+# to that skill — `--codex` is shared and always required.
+_TIERED_SWARM_SKILLS = [
+    (
+        "swarm-plan",
+        (
+            "--architect=inline|sonnet|opus",
+            "--research=skip|1|3",
+            "--codex",
+        ),
+    ),
+    (
+        "swarm-execute",
+        (
+            "--builder=sonnet|opus",
+            "--loop-rounds=1|2|3",
+            "--review=minimal|full|adversarial",
+            "--codex",
+        ),
+    ),
+    (
+        "swarm-review",
+        (
+            "--breadth=minimal|full|adversarial",
+            "--rca=on|off",
+            "--codex",
+        ),
+    ),
+]
+
+
+class TestSwarmTiers:
+    """Tiered swarm skills use progressive disclosure — SKILL.md is a
+    thin dispatch layer that reads one of `tier-{low,high,max}.md`. The
+    classifier and overlay axis definitions live in their own files.
+    These tests lock in the structural invariants of that layout across
+    every tiered swarm skill."""
+
+    _TIER_FILES = ("tier-low.md", "tier-high.md", "tier-max.md")
+    _SUPPORT_FILES = ("classify.md", "overlays.md")
+
+    @pytest.mark.parametrize(
+        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
+    )
+    def test_skill_md_under_200_lines(self, skill_name: str) -> None:
+        """SKILL.md must stay under 200 lines — dispatch-only.
+
+        Per meta-ai-config.md, SKILL.md bodies should stay ≤500, but
+        tiered swarm skills adopt a tighter ceiling since phase content
+        has been extracted into tier files. 200 is the hard ceiling.
+        """
+        skill = CLAUDE_DIR / "skills" / skill_name / "SKILL.md"
+        line_count = len(skill.read_text().splitlines())
+        assert line_count < 200, (
+            f"{skill_name}/SKILL.md is {line_count} lines (ceiling: 199). "
+            f"Phase plans belong in tier-*.md; shared content here."
+        )
+
+    @pytest.mark.parametrize(
+        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
+    )
+    def test_tier_files_exist(self, skill_name: str) -> None:
+        """Each tier file referenced by SKILL.md must exist on disk."""
+        skill_dir = CLAUDE_DIR / "skills" / skill_name
+        skill_text = (skill_dir / "SKILL.md").read_text()
+        missing = [t for t in self._TIER_FILES if not (skill_dir / t).exists()]
+        # SKILL.md must reference them by name (dispatch contract)
+        unreferenced = [
+            t for t in self._TIER_FILES
+            if t not in skill_text and t.replace("-", "") not in skill_text
+        ]
+        assert not missing, f"{skill_name} tier files missing from disk: {missing}"
+        assert not unreferenced, (
+            f"{skill_name}/SKILL.md must reference each tier file by name: "
+            f"{unreferenced}"
+        )
+
+    @pytest.mark.parametrize(
+        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
+    )
+    def test_support_files_exist(self, skill_name: str) -> None:
+        """classify.md and overlays.md must exist and be referenced
+        from SKILL.md."""
+        skill_dir = CLAUDE_DIR / "skills" / skill_name
+        skill_text = (skill_dir / "SKILL.md").read_text()
+        for name in self._SUPPORT_FILES:
+            path = skill_dir / name
+            assert path.exists(), f"Missing {skill_name} support file: {name}"
+            assert name in skill_text, (
+                f"{skill_name}/SKILL.md must reference {name} so the "
+                f"dispatch knows to Read it."
+            )
+
+    @pytest.mark.parametrize(
+        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
+    )
+    def test_classify_has_example_per_tier(self, skill_name: str) -> None:
+        """classify.md must show at least one example per tier (low /
+        high / max) so the classifier has concrete anchors."""
+        text = (CLAUDE_DIR / "skills" / skill_name / "classify.md").read_text()
+        missing = [
+            t for t in ("**low**", "**high**", "**max**")
+            if t not in text
+        ]
+        assert not missing, (
+            f"{skill_name}/classify.md missing examples for: {missing}. "
+            f"Each tier needs at least one example signal."
+        )
+
+    @pytest.mark.parametrize(
+        ("skill_name", "required_forms"), _TIERED_SWARM_SKILLS
+    )
+    def test_overlays_match_skill_flag_grammar(
+        self, skill_name: str, required_forms: tuple[str, ...]
+    ) -> None:
+        """overlays.md axis values must match the flag grammar declared
+        in SKILL.md. Drift between the two produces parser bugs."""
+        skill_dir = CLAUDE_DIR / "skills" / skill_name
+        skill_text = (skill_dir / "SKILL.md").read_text()
+        overlays_text = (skill_dir / "overlays.md").read_text()
+
+        drift = []
+        for form in required_forms:
+            if form not in skill_text:
+                drift.append((skill_name, "SKILL.md", form))
+            if form not in overlays_text:
+                drift.append((skill_name, "overlays.md", form))
+        assert not drift, (
+            f"Flag grammar drift between SKILL.md and overlays.md: "
+            f"{drift}. Keep the two in lockstep."
+        )
+
+    @pytest.mark.parametrize(
+        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
+    )
+    def test_tier_files_preserve_contract_first_tdd(
+        self, skill_name: str
+    ) -> None:
+        """Every tier must preserve the contract-first TDD skeleton
+        (Stub → Specify → Implement → Review). Dropping it at any tier
+        breaks the plan→execute handoff contract."""
+        skill_dir = CLAUDE_DIR / "skills" / skill_name
+        skeleton_anchors = ["Stub", "Specify", "Implement", "Review"]
+        violations = []
+        for tier in self._TIER_FILES:
+            text = (skill_dir / tier).read_text()
+            missing = [a for a in skeleton_anchors if a not in text]
+            if missing:
+                violations.append((skill_name, tier, missing))
+        assert not violations, (
+            f"Tier files must keep the contract-first TDD skeleton. "
+            f"Missing anchors: {violations}"
+        )
+
+
