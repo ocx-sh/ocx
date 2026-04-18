@@ -69,10 +69,26 @@ pub enum LayerRefParseError {
     /// type extension suffix. Digest references must spell out the
     /// original archive format because the OCI distribution spec does
     /// not return a usable media type from a blob HEAD.
-    #[error(
-        "'{0}' is a bare layer digest; append an extension suffix to declare the media type, e.g. '{0}.tar.gz' or '{0}.tar.xz'"
-    )]
+    #[error("{}", format_bare_digest(.0))]
     BareDigest(String),
+}
+
+/// Renders the bare-digest error message, enumerating every accepted
+/// extension from [`ArchiveMediaType::ALL`] so adding a new archive
+/// format updates the hint automatically.
+fn format_bare_digest(digest: &str) -> String {
+    let extensions: Vec<String> = ArchiveMediaType::ALL
+        .iter()
+        .flat_map(|mt| mt.extensions().iter().map(|ext| format!("'.{ext}'")))
+        .collect();
+    let canonical = ArchiveMediaType::ALL
+        .first()
+        .expect("ArchiveMediaType::ALL is a non-empty const")
+        .canonical_extension();
+    format!(
+        "'{digest}' is a bare layer digest; append an extension suffix (one of {}) to declare the media type, e.g. '{digest}.{canonical}'",
+        extensions.join(", ")
+    )
 }
 
 /// A reference to a layer in a multi-layer package.
@@ -235,7 +251,15 @@ mod tests {
         let err = input.parse::<LayerRef>().unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("bare layer digest"), "got: {msg}");
-        assert!(msg.contains(".tar.gz") || msg.contains(".tar.xz"), "got: {msg}");
+        // Every canonical + alias extension declared by ArchiveMediaType::ALL
+        // must surface in the hint so callers discover the accepted syntax
+        // without consulting docs.
+        for media_type in ArchiveMediaType::ALL {
+            for ext in media_type.extensions() {
+                let needle = format!(".{ext}");
+                assert!(msg.contains(&needle), "missing extension '{needle}' in: {msg}");
+            }
+        }
     }
 
     #[test]
