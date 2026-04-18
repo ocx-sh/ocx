@@ -30,7 +30,7 @@ Rules for efficient multi-agent swarm execution.
 |--------|-------|-------|-----|
 | `worker-architecture-explorer` | sonnet | Read, Glob, Grep | Architecture discovery |
 | `worker-explorer` | haiku | Read, Glob, Grep | Fast codebase search |
-| `worker-builder` | opus | Read, Write, Edit, Bash, Glob, Grep | Stubbing/implementation/refactoring (see model rationale below) |
+| `worker-builder` | sonnet (opus override for complex implementation) | Read, Write, Edit, Bash, Glob, Grep | Stubbing/implementation/refactoring (see model rationale below) |
 | `worker-tester` | sonnet | Read, Write, Edit, Bash, Glob, Grep | Specification tests and validation |
 | `worker-reviewer` | sonnet | Read, Glob, Grep, Bash | Code review/security/spec-compliance (diff-scoped, Sonnet 4.6 within 1.2pp of Opus on SWE-bench at 5× lower cost) |
 | `worker-researcher` | sonnet | Read, Glob, Grep, WebFetch, WebSearch | External research |
@@ -43,10 +43,10 @@ Rules for efficient multi-agent swarm execution.
 Orchestrators specialize workers by specifying a focus mode in the prompt.
 
 **worker-builder focus modes:**
-- `stubbing`: Create public API surface only — types, traits, signatures with `unimplemented!()`/`NotImplementedError`. Gate: `cargo check` passes
-- `implementation` (default): Fill in stub bodies so specification tests pass. Opus reserved for this mode where reasoning depth matters most.
-- `testing`: Write tests, cover happy path and edge cases, ensure deterministic. Consider `model: sonnet` override for cost control.
-- `refactoring`: Extract patterns, simplify conditionals, apply SOLID/DRY. Follow Two Hats Rule (see quality-core.md). Consider `model: sonnet` override for cost control.
+- `stubbing`: Create public API surface only — types, traits, signatures with `unimplemented!()`/`NotImplementedError`. Gate: `cargo check` passes. Sonnet default.
+- `implementation` (default): Fill in stub bodies so specification tests pass. Sonnet default; orchestrator passes `model: opus` for architecturally complex or cross-subsystem work.
+- `testing`: Write tests, cover happy path and edge cases, ensure deterministic. Sonnet default.
+- `refactoring`: Extract patterns, simplify conditionals, apply SOLID/DRY. Follow Two Hats Rule (see quality-core.md). Sonnet default.
 
 **Model selection rationale:** Sonnet 4.6 is within 1.2pp of Opus 4.6 on SWE-bench at 5× lower cost. Reserve Opus for deep reasoning (architecture, complex implementation). Use Sonnet as default for review, testing, and mechanical refactoring.
 

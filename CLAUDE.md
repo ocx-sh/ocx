@@ -110,7 +110,7 @@ These eight principles distill every rule, skill, and standard in this framework
 
 ### 1. Understand First
 
-Read before writing. Grep before creating. Never modify code you haven't read. Check what exists before building something new.
+Read before writing. Grep before creating. Never modify code you haven't read — before changing a function, grep for all callers. Check what exists before building something new.
 
 ### 2. Prove It Works
 

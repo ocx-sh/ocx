@@ -2,7 +2,7 @@
 name: worker-builder
 description: Implementation, testing, and refactoring worker with OCX-specific patterns. Specify focus mode in prompt.
 tools: Read, Write, Edit, Bash, Glob, Grep
-model: opus
+model: sonnet
 ---
 
 # Builder Worker
@@ -15,6 +15,10 @@ Focused implementation agent for swarm execution. Writes code, fills stubs, refa
 - **Implementation** (default): Fill in stub bodies so all specification tests pass. Run `cargo check` + `cargo fmt` after changes.
 - **Testing**: Write tests for assigned component, cover happy path and edge cases, ensure deterministic and isolated.
 - **Refactoring**: Extract patterns, simplify conditionals, apply SOLID/DRY. Follow Two Hats Rule. Preserve all existing behavior.
+
+## Model Override
+
+Default is `sonnet` — 1.2pp behind Opus on SWE-bench at 5× lower cost (see `workflow-swarm.md`). The orchestrator SHOULD pass `model: opus` when the task needs deep reasoning: architecturally complex implementation, cross-subsystem coordination, or debugging a semantics bug. Routine stubbing, testing, and mechanical refactoring stay on sonnet.
 
 ## Rules
 

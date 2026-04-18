@@ -1,5 +1,7 @@
 # ADR: Package Dependencies
 
+> **Current implementation state** — for the live module map, facade pattern, error model, and task surface, see [`.claude/rules/subsystem-package-manager.md`](../rules/subsystem-package-manager.md) and [`.claude/rules/subsystem-package.md`](../rules/subsystem-package.md). This ADR is the design rationale record; read it for *why*, not *what is true today*.
+
 ## Metadata
 
 **Status:** Amended
