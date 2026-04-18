@@ -93,6 +93,7 @@ Project-wide conventions enforced by the reviewer:
 |------------|------|-----------------|
 | **Type names** | Full descriptive names (`OperatingSystem`, `Architecture`), not abbreviations (`Os`, `Arch`) | Abbreviated type names |
 | **Module structure** | One concept per file, deep nested modules (`platform/operating_system.rs`) — no `mod.rs`, use named module files | Monolithic files, `mod.rs` files |
+| **Internal enum exhaustiveness** | Omit `#[non_exhaustive]` on internal non-error enums so matches stay total across the workspace. The binary is our only consumer — we do not ship a stable library API. Error enums are exempt: they grow routinely and `#[non_exhaustive]` still aids safe expansion. | `#[non_exhaustive]` on a closed internal enum |
 
 ## Where Features Land
 
