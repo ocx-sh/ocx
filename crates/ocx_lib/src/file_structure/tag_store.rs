@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::utility::fs::{DirWalker, WalkDecision};
+use crate::utility::fs::{self, DirWalker, WalkDecision};
 use crate::{Result, oci};
 
 /// Manages the local tag store on the filesystem.
@@ -54,7 +54,7 @@ impl TagStore {
     /// and collects `.json` file stems as repository name fragments.
     pub async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
         let registry_dir = self.root.join(super::slugify(registry));
-        if !tokio::fs::try_exists(&registry_dir).await.unwrap_or(false) {
+        if !fs::path_exists_lossy(&registry_dir).await {
             return Ok(Vec::new());
         }
 

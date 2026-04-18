@@ -16,6 +16,7 @@ use ocx_lib::{
         resolved_package::ResolvedPackage,
     },
     prelude::SerdeExt,
+    utility,
 };
 
 use crate::{api, conventions::platforms_or_default, options};
@@ -220,7 +221,7 @@ async fn resolve_dep_via_metadata(
     // Primary: direct digest lookup (single-platform manifests where
     // the declared digest matches the stored content digest).
     let content = fs.packages.content(id);
-    if tokio::fs::try_exists(&content).await.unwrap_or(false) {
+    if utility::fs::path_exists_lossy(&content).await {
         return load_install_info(id.clone(), content).await;
     }
 

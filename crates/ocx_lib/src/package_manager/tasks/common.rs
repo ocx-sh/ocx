@@ -19,6 +19,7 @@ use crate::{
     package_manager::error::{self, PackageError, PackageErrorKind},
     prelude::SerdeExt,
     reference_manager::ReferenceManager,
+    utility,
 };
 
 /// Finds a package in the object store without index resolution.
@@ -36,9 +37,9 @@ pub async fn find_in_store(
     let content = pkg.content();
     let metadata_path = pkg.metadata();
     let resolve_path = pkg.resolve();
-    if tokio::fs::try_exists(&content).await.unwrap_or(false)
-        && tokio::fs::try_exists(&metadata_path).await.unwrap_or(false)
-        && tokio::fs::try_exists(&resolve_path).await.unwrap_or(false)
+    if utility::fs::path_exists_lossy(&content).await
+        && utility::fs::path_exists_lossy(&metadata_path).await
+        && utility::fs::path_exists_lossy(&resolve_path).await
     {
         let (metadata_result, resolved_result): (crate::Result<metadata::Metadata>, crate::Result<ResolvedPackage>) = tokio::join!(
             metadata::Metadata::read_json(&metadata_path),

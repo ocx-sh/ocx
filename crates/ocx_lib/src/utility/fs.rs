@@ -10,6 +10,25 @@ pub use assemble::{AssemblyError, AssemblyStats, assemble_from_layer, assemble_f
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 
+/// Returns whether `path` exists, swallowing any I/O error as `false`.
+///
+/// Wraps [`tokio::fs::try_exists`] and emits a `debug!` log whenever
+/// the probe fails (permission denied, transient I/O, etc.) so the
+/// swallow is still observable in diagnostic output. Use when the
+/// caller is tolerant of a missing path — either because a follow-up
+/// fallible operation will naturally surface the same error with
+/// better context, or because absence and I/O failure are handled
+/// identically at the call site.
+pub async fn path_exists_lossy(path: &std::path::Path) -> bool {
+    match tokio::fs::try_exists(path).await {
+        Ok(exists) => exists,
+        Err(e) => {
+            crate::log::debug!("path_exists_lossy probe failed for {}: {}", path.display(), e);
+            false
+        }
+    }
+}
+
 /// Moves `src` directory to `dst` via same-filesystem rename.
 ///
 /// Creates parent directories of `dst` if needed. If `dst` already exists
