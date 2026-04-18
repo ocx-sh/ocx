@@ -60,6 +60,7 @@ pub use platform::OperatingSystem;
 pub use platform::Platform;
 
 pub mod digest;
+pub use digest::Algorithm;
 pub use digest::Digest;
 
 pub mod pinned_identifier;

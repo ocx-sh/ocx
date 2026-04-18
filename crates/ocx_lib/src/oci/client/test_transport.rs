@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use super::error::ClientError;
 use super::transport::{OciTransport, Result};
-use crate::oci::{self, Digest, RegistryOperation};
+use crate::oci::{self, Algorithm, RegistryOperation};
 
 /// Test data backing a [`StubTransport`].
 ///
@@ -174,35 +174,35 @@ impl OciTransport for StubTransport {
         }
     }
 
-    async fn head_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<u64> {
-        self.record(&format!("head_blob:{}", digest));
+    async fn head_blob(&self, image: &oci::native::Reference, digest: &oci::Digest) -> Result<u64> {
+        let digest_key = digest.to_string();
+        self.record(&format!("head_blob:{}", digest_key));
         let inner = self.data.read();
-        match inner.blobs.get(digest) {
+        match inner.blobs.get(&digest_key) {
             Some(blob) => Ok(blob.len() as u64),
-            None => Err(ClientError::BlobNotFound {
-                registry: image.registry().to_string(),
-                digest_str: digest.to_string(),
-            }),
+            None => Err(ClientError::blob_not_found(image, digest)),
         }
     }
 
-    async fn pull_blob(&self, _image: &oci::native::Reference, digest: &str) -> Result<Vec<u8>> {
-        self.record(&format!("pull_blob:{}", digest));
+    async fn pull_blob(&self, _image: &oci::native::Reference, digest: &oci::Digest) -> Result<Vec<u8>> {
+        let digest_key = digest.to_string();
+        self.record(&format!("pull_blob:{}", digest_key));
         let inner = self.data.read();
-        Ok(inner.blobs.get(digest).cloned().unwrap_or_default())
+        Ok(inner.blobs.get(&digest_key).cloned().unwrap_or_default())
     }
 
     async fn pull_blob_to_file(
         &self,
         _image: &oci::native::Reference,
-        digest: &str,
+        digest: &oci::Digest,
         path: &std::path::Path,
         total_size: u64,
         on_progress: super::transport::ProgressFn,
     ) -> Result<()> {
-        self.record(&format!("pull_blob_to_file:{}", digest));
+        let digest_key = digest.to_string();
+        self.record(&format!("pull_blob_to_file:{}", digest_key));
         let inner = self.data.read();
-        if let Some(blob) = inner.blobs.get(digest) {
+        if let Some(blob) = inner.blobs.get(&digest_key) {
             let blob = blob.clone();
             drop(inner); // release lock before I/O
             if let Some(parent) = path.parent() {
@@ -233,7 +233,7 @@ impl OciTransport for StubTransport {
         _media_type: &str,
     ) -> Result<String> {
         self.record("push_manifest_raw");
-        let digest = Digest::sha256(&data).to_string();
+        let digest = Algorithm::Sha256.hash(&data).to_string();
         if self.data.read().capture_pushes {
             self.data
                 .write()
@@ -252,7 +252,7 @@ impl OciTransport for StubTransport {
         &self,
         _image: &oci::native::Reference,
         data: Vec<u8>,
-        digest: &str,
+        digest: &oci::Digest,
         on_progress: super::transport::ProgressFn,
     ) -> Result<String> {
         self.record(&format!("push_blob:{}", digest));

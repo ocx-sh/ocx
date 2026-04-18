@@ -159,11 +159,12 @@ impl OciTransport for NativeTransport {
         Ok((data.to_vec(), digest))
     }
 
-    async fn pull_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<Vec<u8>> {
-        log::debug!("Pulling blob {} for image {} into memory", digest, image);
+    async fn pull_blob(&self, image: &oci::native::Reference, digest: &oci::Digest) -> Result<Vec<u8>> {
+        let digest_str = digest.to_string();
+        log::debug!("Pulling blob {} for image {} into memory", digest_str, image);
         let mut buf = Vec::new();
         self.client
-            .pull_blob(image, digest, &mut buf)
+            .pull_blob(image, digest_str.as_str(), &mut buf)
             .await
             .map_err(registry_error)?;
         Ok(buf)
@@ -172,12 +173,13 @@ impl OciTransport for NativeTransport {
     async fn pull_blob_to_file(
         &self,
         image: &oci::native::Reference,
-        digest: &str,
+        digest: &oci::Digest,
         path: &Path,
         total_size: u64,
         on_progress: ProgressFn,
     ) -> Result<()> {
-        log::debug!("Pulling blob {} for image {} to {}", digest, image, path.display());
+        let digest_str = digest.to_string();
+        log::debug!("Pulling blob {} for image {} to {}", digest_str, image, path.display());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
         }
@@ -190,19 +192,17 @@ impl OciTransport for NativeTransport {
             .map_err(|e| io_error(path, e))?;
         let writer = ProgressWriter::new(file, total_size, on_progress);
         self.client
-            .pull_blob(image, digest, writer)
+            .pull_blob(image, digest_str.as_str(), writer)
             .await
             .map_err(registry_error)
     }
 
-    async fn head_blob(&self, image: &oci::native::Reference, digest: &str) -> Result<u64> {
-        log::debug!("HEAD blob {} for image {}", digest, image);
-        match self.client.fetch_blob_size(image, digest).await {
+    async fn head_blob(&self, image: &oci::native::Reference, digest: &oci::Digest) -> Result<u64> {
+        let digest_str = digest.to_string();
+        log::debug!("HEAD blob {} for image {}", digest_str, image);
+        match self.client.fetch_blob_size(image, digest_str.as_str()).await {
             Ok(Some(size)) => Ok(size),
-            Ok(None) => Err(ClientError::BlobNotFound {
-                registry: image.registry().to_string(),
-                digest_str: digest.to_string(),
-            }),
+            Ok(None) => Err(ClientError::blob_not_found(image, digest)),
             Err(e) => Err(registry_error(e)),
         }
     }
@@ -230,7 +230,7 @@ impl OciTransport for NativeTransport {
         &self,
         image: &oci::native::Reference,
         data: Vec<u8>,
-        digest: &str,
+        digest: &oci::Digest,
         on_progress: ProgressFn,
     ) -> Result<String> {
         self.do_push_blob(image, data, digest, on_progress).await
@@ -251,21 +251,26 @@ impl NativeTransport {
         &self,
         image: &oci::native::Reference,
         data: Vec<u8>,
-        digest: &str,
+        digest: &oci::Digest,
         on_progress: ProgressFn,
     ) -> Result<String> {
-        log::debug!("Checking if blob {} already exists in registry", digest);
-        match self.client.blob_exists(image, digest).await {
+        let digest_str = digest.to_string();
+        log::debug!("Checking if blob {} already exists in registry", digest_str);
+        match self.client.blob_exists(image, digest_str.as_str()).await {
             Ok(true) => {
-                log::debug!("Blob {} already exists, skipping upload", digest);
+                log::debug!("Blob {} already exists, skipping upload", digest_str);
                 on_progress(data.len() as u64);
-                return Ok(digest.to_string());
+                return Ok(digest_str);
             }
             Ok(false) => {
-                log::debug!("Blob {} does not exist, uploading", digest);
+                log::debug!("Blob {} does not exist, uploading", digest_str);
             }
             Err(e) => {
-                log::warn!("Failed to check blob {} existence, will attempt upload: {}", digest, e);
+                log::warn!(
+                    "Failed to check blob {} existence, will attempt upload: {}",
+                    digest_str,
+                    e
+                );
             }
         }
 
@@ -295,7 +300,11 @@ impl NativeTransport {
             std::future::ready(Some((Ok(chunk), (index + 1, confirmed))))
         });
 
-        match self.client.push_blob_stream(image, progress_stream, digest).await {
+        match self
+            .client
+            .push_blob_stream(image, progress_stream, digest_str.as_str())
+            .await
+        {
             Ok(url) => {
                 on_progress(total);
                 Ok(url)
@@ -304,7 +313,7 @@ impl NativeTransport {
                 log::warn!("Registry spec violation during chunked push: {}", violation);
                 log::warn!("Falling back to monolithic push (no progress)");
                 self.client
-                    .push_blob(image, fallback_data, digest)
+                    .push_blob(image, fallback_data, digest_str.as_str())
                     .await
                     .map_err(registry_error)
             }

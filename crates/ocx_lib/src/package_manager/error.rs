@@ -71,8 +71,12 @@ pub enum PackageErrorKind {
     )]
     OfflineManifestMissing(Box<OfflineManifestMissing>),
     /// A referenced blob (layer digest) was not present in the registry.
-    #[error("blob {digest_str} not found in registry '{registry}'")]
-    BlobNotFound { registry: String, digest_str: String },
+    ///
+    /// The identifier is `registry/repository[:tag]@<blob-digest>` — see
+    /// [`crate::oci::client::error::ClientError::BlobNotFound`] for the
+    /// canonical construction contract.
+    #[error("blob not found: {0}")]
+    BlobNotFound(oci::PinnedIdentifier),
     /// Multiple candidates matched the platform selection.
     #[error("ambiguous selection: {}", _0.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "))]
     SelectionAmbiguous(Vec<oci::Identifier>),
@@ -99,9 +103,7 @@ pub enum PackageErrorKind {
 impl From<crate::oci::client::error::ClientError> for PackageErrorKind {
     fn from(e: crate::oci::client::error::ClientError) -> Self {
         match e {
-            crate::oci::client::error::ClientError::BlobNotFound { registry, digest_str } => {
-                Self::BlobNotFound { registry, digest_str }
-            }
+            crate::oci::client::error::ClientError::BlobNotFound(pinned) => Self::BlobNotFound(pinned),
             other => Self::Internal(other.into()),
         }
     }
@@ -146,15 +148,17 @@ mod tests {
 
     #[test]
     fn client_blob_not_found_routes_to_typed_kind() {
-        let e = ClientError::BlobNotFound {
-            registry: "example.com".to_string(),
-            digest_str: "sha256:abc".to_string(),
-        };
+        let image: oci::native::Reference = "example.com/foo/bar:1.0".parse().unwrap();
+        let blob_str = format!("sha256:{}", "a".repeat(64));
+        let blob = oci::Digest::try_from(blob_str.as_str()).unwrap();
+        let e = ClientError::blob_not_found(&image, &blob);
         let kind: PackageErrorKind = e.into();
         match kind {
-            PackageErrorKind::BlobNotFound { registry, digest_str } => {
-                assert_eq!(registry, "example.com");
-                assert_eq!(digest_str, "sha256:abc");
+            PackageErrorKind::BlobNotFound(pinned) => {
+                assert_eq!(pinned.registry(), "example.com");
+                assert_eq!(pinned.repository(), "foo/bar");
+                assert_eq!(pinned.tag(), Some("1.0"));
+                assert_eq!(pinned.digest().to_string(), blob_str);
             }
             other => panic!("expected BlobNotFound, got {other:?}"),
         }
