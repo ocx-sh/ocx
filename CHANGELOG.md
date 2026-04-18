@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Multi-layer package push and pull. `ocx package push` now accepts multiple layer arguments, each either a file path or a `sha256:<hex>.tar.gz` digest reference. *(package)*
+
 ### Changed
 
 - **Breaking:** `--remote` / `OCX_REMOTE` semantics narrowed — tag and catalog lookups now bypass the local tag store and query the registry directly, but digest-addressed blob reads still use the local cache with write-through to `$OCX_HOME/blobs/`. Previously, `--remote` routed all operations to the registry. Only `$OCX_HOME/tags/` is no longer updated under `--remote`. *(oci)*
@@ -15,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `ocx --offline install <pkg>` after a bare `ocx index update <pkg>` now fails with a clear `OfflineManifestMissing` error naming the missing digest instead of a silent failure. Recovery: run `ocx install <pkg>` online to populate the blob cache. *(oci)*
+
+### Security
+
+- Pulled layer blobs are verified against the claimed digest before extraction; mismatched blobs are deleted and fail the pull with a clear error. *(oci)*
 
 ## [0.2.1] - 2026-03-24
 
