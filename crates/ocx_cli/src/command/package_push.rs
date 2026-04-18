@@ -25,10 +25,11 @@ pub struct PackagePush {
 
     /// Path to the package metadata JSON file. Defaults to a sibling of the
     /// first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required
-    /// when all layers are digest references.
+    /// when no file layers are provided.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
 
+    /// Target platform (e.g. `linux/amd64`). Required.
     #[clap(short, long, required = true)]
     platform: oci::Platform,
 
@@ -46,13 +47,13 @@ pub struct PackagePush {
     ///     guess.
     ///
     /// Digest references enable layer reuse: a base layer pushed once can be
-    /// referenced by digest from many packages without re-uploading. At least
-    /// one layer is required.
+    /// referenced by digest from many packages without re-uploading. Zero
+    /// layers is valid (produces a config-only OCI artifact) when
+    /// `--metadata` is supplied.
     ///
     /// Examples:
-    ///   ocx package push repo:2.0.0 sha256:abc....tar.gz ./new.tar.gz
-    ///   ocx package push repo:2.0.0 sha256:abc....tar.xz
-    #[clap(required = true)]
+    ///   ocx package push repo:2.0.0 sha256:<hex>.tar.gz ./new.tar.gz
+    ///   ocx package push repo:2.0.0 sha256:<hex>.tar.xz
     layers: Vec<LayerRef>,
 }
 
@@ -69,7 +70,7 @@ impl PackagePush {
                     LayerRef::Digest { .. } => None,
                 });
                 let file_path = first_file
-                    .ok_or_else(|| anyhow::anyhow!("--metadata is required when all layers are digest references"))?;
+                    .ok_or_else(|| anyhow::anyhow!("--metadata is required when no file layers are provided"))?;
                 crate::conventions::infer_metadata_file(file_path)?
             }
         };

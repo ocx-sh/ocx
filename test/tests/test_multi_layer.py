@@ -129,10 +129,12 @@ def test_push_single_layer(
     _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle)], tmp_path)
 
 
-def test_push_no_layer_fails(
+def test_push_zero_layers_succeeds_with_metadata(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """Push with no layers (just the identifier) fails."""
+    """Push with zero layers but explicit `--metadata` is a valid
+    OCI config-only artifact (e.g. referrer-only / description-only
+    manifests). Verify it round-trips via the registry manifest API."""
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
         "type": "bundle", "version": 1,
@@ -140,16 +142,66 @@ def test_push_no_layer_fails(
     }))
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
-    result = ocx.run(
+    ocx.plain(
         "package", "push", "-p", plat, "-m", str(meta), "-n", fq,
+    )
+
+    # Walk the index → per-platform manifest and confirm `layers: []`.
+    index = _fetch_manifest(ocx.registry, unique_repo, "1.0.0")
+    first_manifest_digest = index["manifests"][0]["digest"]
+    image_manifest = _fetch_manifest(ocx.registry, unique_repo, first_manifest_digest)
+    assert image_manifest["layers"] == [], (
+        f"expected empty layers array for config-only artifact, got: {image_manifest['layers']!r}"
+    )
+
+
+def test_push_zero_layers_without_metadata_fails(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """Push with zero layers and no `--metadata` is rejected before any
+    network I/O — the CLI cannot infer a sibling metadata path without
+    a file layer to key off."""
+    plat = current_platform()
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+    result = ocx.run(
+        "package", "push", "-p", plat, "-n", fq,
         check=False, format=None,
     )
     assert result.returncode != 0
+    combined = (result.stderr + result.stdout).lower()
+    assert "--metadata" in combined or "metadata is required" in combined, (
+        f"expected a metadata-required error, got:\n{result.stderr}\n{result.stdout}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Round-trip tests (push + install)
 # ---------------------------------------------------------------------------
+
+
+def test_round_trip_zero_layers(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """Push a config-only package (zero layers + metadata), install it,
+    verify the install succeeds and produces an empty content/ directory."""
+    meta = tmp_path / "meta.json"
+    meta.write_text(json.dumps({
+        "type": "bundle", "version": 1,
+        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+    }))
+    plat = current_platform()
+    short = f"{unique_repo}:1.0.0"
+    fq = f"{ocx.registry}/{short}"
+    ocx.plain("package", "push", "-p", plat, "-m", str(meta), "-n", fq)
+    ocx.plain("index", "update", short)
+
+    result = ocx.json("install", short)
+    content = Path(result[short]["path"])
+
+    assert_dir_exists(content)
+    assert list(content.iterdir()) == [], (
+        f"expected empty content/ for zero-layer package, got: {list(content.iterdir())!r}"
+    )
 
 
 def test_round_trip_multi_layer(
@@ -288,6 +340,21 @@ def test_push_digest_layer_reuse_tar_xz(
     )
     ocx.plain("index", "update", f"{unique_repo}:2.0.0")
 
+    # Walk the pushed v2 manifest and assert the reused layer descriptor
+    # carries the correct media type. Catches the regression at the
+    # manifest layer rather than waiting for install-time extraction to
+    # blow up on a mismatched compression algorithm.
+    index = _fetch_manifest(ocx.registry, unique_repo, "2.0.0")
+    image_manifest = _fetch_manifest(
+        ocx.registry, unique_repo, index["manifests"][0]["digest"]
+    )
+    reused = next(
+        layer for layer in image_manifest["layers"] if layer["digest"] == layer_a_digest
+    )
+    assert reused["mediaType"] == "application/vnd.oci.image.layer.v1.tar+xz", (
+        f"reused layer A should declare tar+xz, got {reused['mediaType']}"
+    )
+
     result = ocx.json("install", f"{unique_repo}:2.0.0")
     content = Path(result[f"{unique_repo}:2.0.0"]["path"])
     assert (content / "lib" / "liba.so").exists(), "xz layer A not extracted on consumer"
@@ -348,7 +415,7 @@ def test_push_digest_layer_not_found(
         check=False, format=None,
     )
     assert result.returncode != 0
-    assert "not found" in result.stderr.lower() or "blob" in result.stderr.lower()
+    assert "blob not found" in result.stderr.lower()
 
 
 def test_push_digest_only_without_metadata_fails(

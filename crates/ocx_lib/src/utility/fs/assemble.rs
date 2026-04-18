@@ -201,11 +201,6 @@ async fn assemble_from_layers_with_cap(
     dest_content: &Path,
     max_entries: usize,
 ) -> Result<AssemblyStats> {
-    // ── Early return: nothing to assemble. ──────────────────────────────────
-    if sources.is_empty() {
-        return Ok(AssemblyStats::default());
-    }
-
     // ── Pre-condition: all sources must be existing directories. ────────────
     for src in sources {
         let meta = tokio::fs::metadata(src)
@@ -220,9 +215,11 @@ async fn assemble_from_layers_with_cap(
     }
 
     // ── Pre-condition: prepare dest_content. ────────────────────────────────
-    if !tokio::fs::try_exists(dest_content).await.unwrap_or(false) {
+    // Always created, even with zero sources — callers rely on `content/`
+    // existing after assembly (e.g. config-only packages with no layers).
+    if !super::path_exists_lossy(dest_content).await {
         if let Some(parent) = dest_content.parent()
-            && !tokio::fs::try_exists(parent).await.unwrap_or(false)
+            && !super::path_exists_lossy(parent).await
         {
             return Err(crate::error::file_error(
                 dest_content,
@@ -232,6 +229,11 @@ async fn assemble_from_layers_with_cap(
         tokio::fs::create_dir(dest_content)
             .await
             .map_err(|e| crate::error::file_error(dest_content, e))?;
+    }
+
+    // ── Early return: no sources to walk, empty content/ is the result. ─────
+    if sources.is_empty() {
+        return Ok(AssemblyStats::default());
     }
 
     // ── Parallel directory-level fan-out (multi-layer). ─────────────────────
@@ -1648,11 +1650,11 @@ mod tests {
 
     // ── 3.1: Boundary / degenerate inputs ───────────────────────────────────
 
-    /// ML-1: Empty sources slice returns AssemblyStats::default() and does NOT
-    /// create dest_content. The no-op contract: if there is nothing to assemble,
-    /// the destination should not be touched at all.
+    /// ML-1: Empty sources slice returns AssemblyStats::default() and creates
+    /// an empty dest_content. Consumers (e.g. the pull pipeline for config-only
+    /// packages with zero layers) rely on `content/` existing after assembly.
     #[tokio::test]
-    async fn ml_empty_sources_is_noop() {
+    async fn ml_empty_sources_creates_empty_dest() {
         let (_dir, root) = setup();
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
@@ -1665,8 +1667,13 @@ mod tests {
             "empty sources must return default stats"
         );
         assert!(
-            !dest.exists(),
-            "empty sources must NOT create dest_content — nothing to assemble"
+            dest.is_dir(),
+            "empty sources must create dest_content as an empty directory"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dest).unwrap().count(),
+            0,
+            "dest_content must contain no entries"
         );
     }
 

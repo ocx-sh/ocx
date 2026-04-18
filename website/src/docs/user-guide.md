@@ -105,7 +105,7 @@ The layer store enables a different kind of dedup than the package store. The pa
 [Docker image layers][docker-layers] are the same concept at the registry level: an image is a stack of layers, each addressed by digest, downloaded only when missing from the local cache. ocx applies this to binary packages instead of containers. [pnpm][pnpm] uses a comparable trick on the install side, storing every package version once in a content-addressed store and hardlinking them into individual `node_modules/` trees.
 :::
 
-**Publishing multi-layer packages.** When you call [`ocx package push`][cmd-package-push], every positional argument after the identifier is a layer. Each layer is either a path to a local archive file or a digest reference to a layer that already exists in the target registry:
+**Publishing multi-layer packages.** When you call [`ocx package push`][cmd-package-push], every positional argument after the identifier is a layer — zero or more. Each layer is either a path to a local archive file or a digest reference to a layer that already exists in the target registry. A push with zero layers is valid too: it produces a config-only OCI artifact (useful for referrer-only / description-only manifests) and requires `--metadata` since there is no file layer to sniff a sibling metadata path from.
 
 ```shell
 # Two-layer package: shared base + package-specific top
@@ -119,6 +119,10 @@ ocx package push -p linux/amd64 mytool:1.2.4 sha256:<hex>.tar.gz newtool.tar.gz
 ```
 
 The order matters for the manifest descriptor list, but assembled content must not overlap — two layers cannot contain the same file path. Overlap is rejected at install time with a clear error.
+
+::: info Digest verification on pull
+Every layer blob downloaded by `ocx install` or `ocx package pull` is streamed through SHA-256 on the way to disk and compared against the digest declared in the manifest before extraction. A mismatch — the registry serving different bytes for the same digest ([CWE-345](https://cwe.mitre.org/data/definitions/345.html)) — deletes the tampered file and fails the command. Zero-layer pulls are valid: a config-only package (produced by `ocx package push` with no file layers and `--metadata`) installs into an empty `content/` directory, which is the expected shape for referrer-only or description-only artifacts.
+:::
 
 ::: warning Bring your own archives
 `ocx package push` does **not** bundle a directory for you. Each layer must be a pre-built archive (`.tar.gz` / `.tgz` or `.tar.xz` / `.txz`). This is intentional: archive creation is non-deterministic (timestamps, compression entropy, file ordering), so re-bundling the same content yields a different digest and defeats layer reuse. Use [`ocx package create`][cmd-package-create] if you need to bundle a directory — that command produces a stable archive once, which you can then push and reference by digest from any number of subsequent packages.

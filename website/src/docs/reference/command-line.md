@@ -668,7 +668,7 @@ digest are safe to run concurrently.
 
 #### `push` {#package-push}
 
-Publishes a package to the registry as one or more layers. Each layer is uploaded as an OCI blob and recorded in a single image manifest, in the order given on the command line.
+Publishes a package to the registry as zero or more layers. Each layer is uploaded as an OCI blob and recorded in a single image manifest, in the order given on the command line. A zero-layer push produces a config-only OCI artifact (referrer-only / description-only manifest) and requires `--metadata`.
 
 **Usage**
 
@@ -679,17 +679,19 @@ ocx package push [OPTIONS] --platform <PLATFORM> <IDENTIFIER> <LAYERS>...
 **Arguments**
 
 - `<IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000`.
-- `<LAYERS>...`: One or more layers, in order (base layer first, top layer last). Each layer is either:
+- `<LAYERS>...`: Zero or more layers, in order (base layer first, top layer last). Each layer is either:
   - a path to a pre-built archive file (`.tar.gz`, `.tgz`, `.tar.xz`, or `.txz`), or
   - a digest reference of the form `sha256:<hex>.<ext>` (e.g. `sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.tar.gz`) pointing at a layer that already exists in the target registry. The `<ext>` suffix is mandatory — OCI blob HEADs do not carry the original media type, so the publisher must declare it. Bare digests are rejected.
+  - Extension aliases: `.tgz` is accepted as an alias for `.tar.gz`, and `.txz` for `.tar.xz`. The canonical forms `tar.gz` / `tar.xz` are what ocx emits internally — aliases are normalized on parse.
   - To force file interpretation of a pathological filename that happens to match the digest shape, prefix it with `./` (e.g. `./sha256:abc….tar.gz`).
+  - Omitting all layers produces a config-only OCI artifact with `layers: []`, valid for referrer-only / description-only manifests. `--metadata` is required in that case.
 
 **Options**
 
 - `-p`, `--platform <PLATFORM>`: Target platform of the package (required).
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
-- `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when all layers are digest references.
+- `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `-h`, `--help`: Print help information.
 
 ::: tip Layer reuse

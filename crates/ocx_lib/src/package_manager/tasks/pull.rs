@@ -13,7 +13,7 @@ use crate::{
     package::{install_info::InstallInfo, install_status::InstallStatus, metadata, resolved_package::ResolvedPackage},
     package_manager::{self, error::PackageError, error::PackageErrorKind},
     prelude::SerdeExt,
-    utility::singleflight,
+    utility::{self, singleflight},
 };
 
 use super::super::PackageManager;
@@ -237,7 +237,7 @@ async fn setup_owned(
     // Defense layer 2 — skip if already fully installed (cross-process).
     if let Some(info) = mgr.find_plain(pinned).await? {
         let install_path = mgr.file_structure().packages.install_status(pinned);
-        if tokio::fs::try_exists(&install_path).await.unwrap_or(false) {
+        if utility::fs::path_exists_lossy(&install_path).await {
             log::debug!("Package '{}' already fully installed, skipping.", pinned);
             // Top up chain refs in case the already-installed package was
             // resolved via a different image-index path (alias tag). See
@@ -267,7 +267,7 @@ async fn setup_owned(
     // lock, it may have already installed the package.
     if let Some(info) = mgr.find_plain(pinned).await? {
         let install_path = mgr.file_structure().packages.install_status(pinned);
-        if tokio::fs::try_exists(&install_path).await.unwrap_or(false) {
+        if utility::fs::path_exists_lossy(&install_path).await {
             log::debug!(
                 "Package '{}' installed by another process while waiting for lock, skipping.",
                 pinned
@@ -286,12 +286,11 @@ async fn setup_owned(
     let manifest = resolved.final_manifest.clone();
     let metadata = client.pull_metadata(pinned, Some(&manifest)).await?;
 
-    // Validate manifest before any extraction work.
+    // Validate manifest before any extraction work. Zero layers is valid —
+    // the package is a config-only artifact whose `content/` is the empty
+    // directory and whose metadata is the only carried payload.
     media_type_select_some(&manifest.artifact_type, &[MEDIA_TYPE_PACKAGE_V1])
         .map_err(|e| PackageErrorKind::from(oci::client::error::ClientError::internal(e)))?;
-    if manifest.layers.is_empty() {
-        return Err(oci::client::error::ClientError::InvalidManifest("manifest has no layers".to_string()).into());
-    }
 
     // Wrap the temp directory in a PackageDir so all sibling-file accesses
     // use the canonical accessors instead of hardcoded strings.
@@ -615,7 +614,7 @@ async fn extract_layer_inner(
 ) -> Result<(), PackageErrorKind> {
     // Step 2: find-plain — skip if already extracted on disk.
     let layer_content = fs.layers.content(pinned.registry(), layer_digest);
-    if tokio::fs::try_exists(&layer_content).await.unwrap_or(false) {
+    if utility::fs::path_exists_lossy(&layer_content).await {
         log::debug!("Layer {} already present on disk, skipping.", layer_digest);
         return Ok(());
     }
@@ -637,7 +636,7 @@ async fn extract_layer_inner(
     };
 
     // Step 4: post-lock recheck.
-    if tokio::fs::try_exists(&layer_content).await.unwrap_or(false) {
+    if utility::fs::path_exists_lossy(&layer_content).await {
         log::debug!(
             "Layer {} installed by another process while waiting for lock, skipping.",
             layer_digest
@@ -665,7 +664,7 @@ async fn extract_layer_inner(
         Ok(()) => {
             log::debug!("Extracted layer {} to {}", layer_digest, layer_path.display());
         }
-        Err(_) if tokio::fs::try_exists(&layer_content).await.unwrap_or(false) => {
+        Err(_) if utility::fs::path_exists_lossy(&layer_content).await => {
             // Another process extracted the same layer — discard our copy.
             log::debug!("Layer {} already exists (race), cleaning up temp.", layer_digest);
             // Best-effort cleanup — stale temps are reclaimed by TempStore::try_acquire.
