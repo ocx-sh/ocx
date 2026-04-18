@@ -139,6 +139,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — they se
 | Parallel directory tree walk with pruning decisions | `utility::fs::{DirWalker, WalkDecision}` | `utility/fs/dir_walker.rs` |
 | Lexical path normalize / containment check (no FS I/O) | `utility::fs::path::{lexical_normalize, escapes_root, validate_symlinks_in_dir}` | `utility/fs/path.rs` |
 | Move a directory (same-filesystem rename, overwrite-safe) | `utility::fs::move_dir` | `utility/fs.rs` |
+| Probe whether a path exists, swallow I/O errors as `false` with debug log | `utility::fs::path_exists_lossy` | `utility/fs.rs` |
 | Hardlink file (dedup layer into package) | `hardlink::create` / `update` | `crates/ocx_lib/src/hardlink.rs` |
 | Create / update / probe a symlink (cross-platform, junction-aware) | `symlink::create` / `update` / `remove` / `is_link` | `crates/ocx_lib/src/symlink.rs` |
 | Assemble a layer's content tree into a package (hardlinks + symlinks) | `utility::fs::assemble_from_layer(s)` | `utility/fs/assemble.rs` |

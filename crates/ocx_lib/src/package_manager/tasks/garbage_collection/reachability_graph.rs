@@ -18,6 +18,7 @@ use crate::{
     file_structure::{CasTier, FileStructure},
     log,
     profile::ProfileSnapshot,
+    utility,
 };
 
 /// Maximum concurrent I/O tasks for graph building.
@@ -196,7 +197,7 @@ async fn has_live_refs(pkg_dir: &Path) -> bool {
         let path = entry.path();
         if crate::symlink::is_link(&path)
             && let Ok(target) = tokio::fs::read_link(&path).await
-            && tokio::fs::try_exists(&target).await.unwrap_or(false)
+            && utility::fs::path_exists_lossy(&target).await
         {
             return true;
         }

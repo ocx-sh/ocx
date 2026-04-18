@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::{Error, Result, file_structure::FileStructure, file_structure::cas_ref_name, log, symlink};
+use crate::{Error, Result, file_structure::FileStructure, file_structure::cas_ref_name, log, symlink, utility};
 
 /// Manages forward symlinks and their back-references inside the object store.
 ///
@@ -236,7 +236,7 @@ impl ReferenceManager {
 
         for obj in &package_dirs {
             let refs_dir = obj.refs_symlinks_dir();
-            if !tokio::fs::try_exists(&refs_dir).await.unwrap_or(false) {
+            if !utility::fs::path_exists_lossy(&refs_dir).await {
                 continue;
             }
             let content = obj.content();
