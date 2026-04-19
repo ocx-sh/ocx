@@ -3,9 +3,18 @@
 
 use std::path::{Path, PathBuf};
 
+use futures::stream::{self, StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 
 use crate::{Error, Result, file_structure::FileStructure, file_structure::cas_ref_name, log, symlink, utility};
+
+/// Maximum concurrent `refs/symlinks/` scans during [`ReferenceManager::broken_refs`].
+///
+/// Each task does cheap directory I/O (one `read_dir` plus a `read_link` per
+/// entry) so we can fan out widely; the cap is the same baseline used elsewhere
+/// for I/O-bound directory walks (see `utility::fs::dir_walker`) and preserves
+/// the historical bound of 50 in-flight scans.
+const BROKEN_REFS_CONCURRENCY: usize = 50;
 
 /// Manages forward symlinks and their back-references inside the object store.
 ///
@@ -231,27 +240,23 @@ impl ReferenceManager {
             return Ok(Vec::new());
         }
 
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(50));
-        let mut tasks = tokio::task::JoinSet::new();
-
+        // Pre-filter sequentially: skipping inside the stream would waste a
+        // concurrency slot on a cheap probe.
+        let mut to_check: Vec<(PathBuf, PathBuf)> = Vec::new();
         for obj in &package_dirs {
             let refs_dir = obj.refs_symlinks_dir();
             if !utility::fs::path_exists_lossy(&refs_dir).await {
                 continue;
             }
-            let content = obj.content();
-            let sem = std::sync::Arc::clone(&sem);
-            tasks.spawn(async move {
-                let _permit = sem.acquire_owned().await.expect("semaphore closed");
-                check_refs_dir(&refs_dir, &content).await
-            });
+            to_check.push((refs_dir, obj.content()));
         }
 
-        let mut broken = Vec::new();
-        while let Some(result) = tasks.join_next().await {
-            broken.extend(result.expect("task panicked")?);
-        }
-
+        let nested: Vec<Vec<PathBuf>> = stream::iter(to_check)
+            .map(|(refs_dir, content)| async move { check_refs_dir(&refs_dir, &content).await })
+            .buffered(BROKEN_REFS_CONCURRENCY)
+            .try_collect()
+            .await?;
+        let mut broken: Vec<PathBuf> = nested.into_iter().flatten().collect();
         broken.sort();
 
         if broken.is_empty() {

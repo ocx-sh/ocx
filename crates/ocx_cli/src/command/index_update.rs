@@ -4,9 +4,19 @@
 use std::process::ExitCode;
 
 use clap::Parser;
+use futures::stream::{self, StreamExt};
 use ocx_lib::{log, oci::index};
 
 use crate::options;
+
+/// Maximum concurrent registry tag refreshes when running `index update`.
+///
+/// Each task hits the remote registry once per identifier. The cap matches
+/// `index catalog --tags` (`CATALOG_TAG_FETCH_CONCURRENCY = 8`) — both are
+/// network-bound interactive commands with the same registry rate-limit
+/// budget. `.buffered` preserves input order, so error logs land in
+/// package-list order instead of arrival order.
+const INDEX_UPDATE_CONCURRENCY: usize = 8;
 
 #[derive(Parser)]
 pub struct IndexUpdate {
@@ -23,19 +33,20 @@ impl IndexUpdate {
         let remote_index = index::Index::from_remote(context.remote_index()?.clone());
         let packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
-        let mut join_set = tokio::task::JoinSet::new();
-        for identifier in &packages {
-            let remote_index = remote_index.clone();
-            let context = context.clone();
-            let identifier = identifier.clone();
-            join_set.spawn(async move { context.local_index().refresh_tags(&identifier, &remote_index).await });
-        }
+        let results = stream::iter(packages.iter())
+            .map(|identifier| {
+                let remote_index = remote_index.clone();
+                let context = context.clone();
+                let identifier = identifier.clone();
+                async move { context.local_index().refresh_tags(&identifier, &remote_index).await }
+            })
+            .buffered(INDEX_UPDATE_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
 
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(Ok(())) => (),
-                Ok(Err(e)) => log::error!("Failed to update index for a package: {e}"),
-                Err(e) => log::error!("Task panicked while updating index for a package: {e}"),
+        for result in results {
+            if let Err(e) = result {
+                log::error!("Failed to update index for a package: {e}");
             }
         }
 

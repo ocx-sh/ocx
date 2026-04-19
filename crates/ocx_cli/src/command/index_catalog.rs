@@ -4,9 +4,19 @@
 use std::process::ExitCode;
 
 use clap::Parser;
+use futures::stream::{self, StreamExt};
 use ocx_lib::{log, oci};
 
 use crate::api;
+
+/// Maximum concurrent registry tag fetches when expanding `index catalog --tags`.
+///
+/// Each fetch hits the registry once per repository. The cap keeps interactive
+/// `ocx index catalog --tags` runs well under typical registry rate-limit
+/// budgets (Docker Hub anonymous pull is 100 req/6h per IP) while still being
+/// large enough that a dev-internal registry catalog of dozens of repos
+/// completes in roughly the same wall time as the previous unbounded fan-out.
+const CATALOG_TAG_FETCH_CONCURRENCY: usize = 8;
 
 #[derive(Parser)]
 pub struct IndexCatalog {
@@ -41,31 +51,34 @@ impl IndexCatalog {
             return Ok(ExitCode::SUCCESS);
         }
 
-        let mut join_set = tokio::task::JoinSet::<anyhow::Result<(String, Vec<String>)>>::new();
-        for repo in &repositories {
-            let identifier = oci::Identifier::new_registry(repo.repository(), repo.registry());
-            let display_name = repo.to_string();
-            let context = context.clone();
-            join_set.spawn(async move {
-                let tags = match context.default_index().list_tags(&identifier).await? {
-                    Some(tags) => tags,
-                    None => {
-                        log::warn!("No tags found for repository '{}'.", identifier);
-                        Vec::new()
-                    }
-                };
-                Ok((display_name, tags))
-            });
-        }
+        // Fetch tags with bounded concurrency. `repositories` was sorted at
+        // line 35 and `.buffered` preserves submission order, so the collected
+        // vec is already in display-name order — no separate reorder step.
+        let collected: Vec<(String, Result<Option<Vec<String>>, _>)> = stream::iter(repositories.iter())
+            .map(|repo| {
+                let identifier = oci::Identifier::new_registry(repo.repository(), repo.registry());
+                let display_name = repo.to_string();
+                let context = context.clone();
+                async move {
+                    let result = context.default_index().list_tags(&identifier).await;
+                    (display_name, result)
+                }
+            })
+            .buffered(CATALOG_TAG_FETCH_CONCURRENCY)
+            .collect()
+            .await;
 
-        let mut tags = std::collections::BTreeMap::new();
-        while let Some(result) = join_set.join_next().await {
-            if let Ok(Ok((repository, repository_tags))) = result {
-                tags.insert(repository, repository_tags);
-            } else if let Ok(Err(e)) = result {
-                log::error!("Error fetching tags for repository: {:?}", e);
-            } else if let Err(e) = result {
-                log::error!("Task panicked while fetching tags for repository: {:?}", e);
+        let mut tags: Vec<(String, Vec<String>)> = Vec::with_capacity(collected.len());
+        for (display_name, result) in collected {
+            match result {
+                Ok(Some(repo_tags)) => tags.push((display_name, repo_tags)),
+                Ok(None) => {
+                    log::warn!("No tags found for repository '{display_name}'.");
+                    tags.push((display_name, Vec::new()));
+                }
+                Err(e) => {
+                    log::error!("Error fetching tags for repository '{display_name}': {e:?}");
+                }
             }
         }
 
