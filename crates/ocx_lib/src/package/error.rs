@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 
 /// Errors specific to package metadata, versioning, and description operations.
 #[derive(Debug, thiserror::Error)]

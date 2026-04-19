@@ -93,11 +93,55 @@ ocx --config /path/to/config.toml install cmake:3.28
 
 The file layers **on top of** the discovered tier chain — it does not replace it. Settings in the specified file win over system, user, and `$OCX_HOME/config.toml` values, but the discovered tiers still load first. To suppress the discovered chain entirely, combine with [`OCX_NO_CONFIG`][env-no-config]`=1`.
 
-The specified file **must exist** — a missing path is an error (exit code 79). This is different from the three discovered tiers, which silently skip missing files.
+The specified file **must exist** — a missing path is an error ([exit code 79 / NotFound][exit-codes]). This is different from the three discovered tiers, which silently skip missing files.
 
 The same override can be set persistently via [`OCX_CONFIG_FILE`][env-config-file]. When both are set, the `--config` file sits at highest file-tier precedence and wins on conflicting scalars.
 
 See the [Configuration reference][config-ref] for the full precedence table, merge rules, and error messages.
+
+## Exit codes {#exit-codes}
+
+OCX exposes a stable, typed exit-code taxonomy so scripts can discriminate failures without parsing stderr.
+
+Most package tools return 0 on success and 1 on any failure. That forces downstream scripts to either ignore the error category or grep stderr — both are fragile. A CI wrapper cannot distinguish "registry unreachable, retry in 30 seconds" from "package not found, fail the build" without parsing error text that can change.
+
+OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–81 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
+
+:::info
+The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–81.
+:::
+
+| Code | Name | Mnemonic | When used | Recovery |
+|------|------|----------|-----------|----------|
+| 0 | Success | — | Successful completion | — |
+| 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
+| 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax | Check the command syntax |
+| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest | Validate identifiers and file contents |
+| 69 | Unavailable | EX_UNAVAILABLE | Required resource unavailable: network down, registry unreachable | Retry; check network and registry URL |
+| 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
+| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network | Retry with backoff |
+| 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM | Refresh credentials or adjust filesystem permissions |
+| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure | Inspect the config file at the printed path |
+| 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent | Pin a different version or correct the path |
+| 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials | Refresh or set registry credentials |
+| 81 | OfflineBlocked | OCX | Offline mode blocked a network operation (deliberate policy, not a fault) | Re-run online, or populate the local cache first |
+
+Scripts can `case $?` on these stable values:
+
+```shell
+ocx install cmake:3.28
+case $? in
+    0)  echo "installed" ;;
+    64) echo "usage error; check flags" ;;
+    69) echo "registry unreachable; retry with backoff" ;;
+    75) echo "temporary failure; retry later" ;;
+    78) echo "bad config; inspect the config file" ;;
+    79) echo "not found; pin a different version" ;;
+    80) echo "auth failed; refresh credentials" ;;
+    81) echo "offline mode active; re-run online" ;;
+    *)  echo "unexpected failure (exit $?)"; exit 1 ;;
+esac
+```
 
 ### `--candidate` / `--current` {#path-resolution}
 
@@ -769,6 +813,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
+[sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
 
 <!-- environment -->
 [env-no-color]: ./environment.md#external-no-color
@@ -782,6 +827,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [config-ref]: ./configuration.md
 
 <!-- internal -->
+[exit-codes]: #exit-codes
 [fs-objects]: ../user-guide.md#file-structure-objects
 [fs-symlinks]: ../user-guide.md#file-structure-symlinks
 [fs-index]: ../user-guide.md#file-structure-index

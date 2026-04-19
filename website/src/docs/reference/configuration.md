@@ -219,7 +219,7 @@ Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_
 | Error | Cause | Resolution |
 |-------|-------|-----------|
 | `error: config file not found: /path/to/file.toml (check --config or OCX_CONFIG_FILE)` | [`--config`][arg-config] or [`OCX_CONFIG_FILE`][env-config-file] points to a non-existent file | Check the path; unlike the three discovery tiers, explicit paths must exist. To disable an ambient [`OCX_CONFIG_FILE`][env-config-file] without unsetting it, set it to the empty string. |
-| `error: config file /path/to/file.toml exceeds maximum allowed size (<SIZE> bytes > 65536 bytes); OCX config files are typically under 1 KiB — did you point at the wrong file?` | A config file is larger than the 64 KiB safety cap | The hint usually explains it — a `--config` flag or `OCX_CONFIG_FILE` env var pointed at a non-config file (e.g. an archive or binary). |
+| `error: config file /path/to/file.toml exceeds maximum allowed size (<SIZE> bytes > 65536 bytes); OCX config files are typically under 1 KiB — did you point at the wrong file` | A config file is larger than the 64 KiB safety cap | The hint usually explains it — a `--config` flag or `OCX_CONFIG_FILE` env var pointed at a non-config file (e.g. an archive or binary). |
 | `error: invalid TOML at /path/to/file.toml: ...` | TOML syntax error in the config file | Fix the TOML syntax error at the indicated location |
 | `error: failed to read config file /path/to/file.toml: ...` | The file exists but cannot be read — permission denied, the path is a directory, or another I/O failure | Check file permissions; [`--config`][arg-config] and [`OCX_CONFIG_FILE`][env-config-file] must point to a regular, readable file. |
 

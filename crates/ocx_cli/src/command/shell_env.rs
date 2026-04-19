@@ -46,7 +46,7 @@ impl ShellEnv {
                 if let Some(shell) = shell::Shell::detect() {
                     shell
                 } else {
-                    anyhow::bail!("Could not detect the current shell. Please specify it using the --shell option.");
+                    anyhow::bail!("could not detect the current shell; specify it using the --shell option");
                 }
             }
         };

@@ -6,7 +6,7 @@
 **Author:** architect (swarm-plan)
 **Date:** 2026-04-12
 **Beads Issue:** Related: #33 (project-level toolchain config), #35 (policy-based retention)
-**Related ADR:** [adr_infrastructure_patches.md](./adr_infrastructure_patches.md) (proposes `$OCX_HOME/config.toml`)
+**Related ADR:** adr_infrastructure_patches.md proposed `$OCX_HOME/config.toml`
 **Research:** [research_configuration_patterns.md](./research_configuration_patterns.md)
 
 ### Classification

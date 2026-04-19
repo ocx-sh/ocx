@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 
 /// Errors specific to file structure operations.
 #[derive(Debug, thiserror::Error)]

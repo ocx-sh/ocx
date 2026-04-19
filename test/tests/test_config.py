@@ -234,6 +234,28 @@ def test_completion_survives_invalid_ambient_config(ocx: OcxRunner) -> None:
     )
 
 
+def test_bare_ocx_survives_malformed_ambient_config(ocx: OcxRunner) -> None:
+    """`ocx` with no arguments exits 0 and prints help even with broken config.
+
+    Regression guard: bare `ocx` (no subcommand) must not fall through to
+    `Context::try_init` and abort on a malformed `~/.ocx/config.toml`. The
+    `None` command arm is handled in the static-command bypass block in
+    `app.rs::run` before any config is loaded.
+    """
+    write_home_config(ocx, "this is not valid toml =[[[")
+
+    result = ocx.run(format=None, check=False)
+
+    assert result.returncode == 0, (
+        f"`ocx` (no args) should exit 0 even with malformed config, "
+        f"got rc={result.returncode}; stderr={result.stderr!r}"
+    )
+    assert "Usage:" in result.stdout, (
+        f"`ocx` (no args) should print a Usage: section, "
+        f"got stdout={result.stdout!r}"
+    )
+
+
 def test_help_survives_invalid_ambient_config(ocx: OcxRunner) -> None:
     """All `--help` paths exit 0 and print usage even with broken ambient config.
 

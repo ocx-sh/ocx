@@ -76,7 +76,7 @@ YAML files in `mirrors/` (e.g., `mirror-cmake.yml`, `mirror-go.yml`). Each defin
 
 ## Error Model
 
-`MirrorError` enum with exit codes: 0 (success), 2 (spec invalid), 3 (execution failed), 4 (source error).
+`MirrorError` enum with exit codes: 0 (success), 65 (spec invalid — DataError), 79 (spec not found — NotFound), 1 (execution failed — Failure), 69 (source error — Unavailable). See `crates/ocx_mirror/src/error.rs::MirrorError::kind_exit_code`.
 
 ## Quality Gate
 

@@ -41,7 +41,7 @@ impl CiExport {
         let flavor = match self.flavor {
             Some(f) => f,
             None => CiFlavor::detect()
-                .ok_or_else(|| anyhow::anyhow!("Could not detect CI environment. Use --flavor to specify."))?,
+                .ok_or_else(|| anyhow::anyhow!("could not detect CI environment; use --flavor to specify"))?,
         };
         log::debug!("Using CI flavor: {}", flavor);
 
