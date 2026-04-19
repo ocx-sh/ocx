@@ -3,6 +3,7 @@
 
 //! Generates JSON Schemas for OCX types and writes them to stdout.
 
+use ocx_lib::Config;
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::profile::ProfileManifest;
 use schemars::generate::SchemaSettings;
@@ -38,8 +39,11 @@ fn main() {
                 generate_schema::<ProfileManifest>("https://ocx.sh/schemas/profile/v1.json")
             );
         }
+        "config" => {
+            println!("{}", generate_schema::<Config>("https://ocx.sh/schemas/config/v1.json"));
+        }
         other => {
-            eprintln!("Unknown schema type: {other}. Available: metadata, profile");
+            eprintln!("Unknown schema type: {other}. Available: metadata, profile, config");
             std::process::exit(1);
         }
     }
