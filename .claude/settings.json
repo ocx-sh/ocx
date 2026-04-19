@@ -124,6 +124,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/user_prompt_router.py\"",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   },
   "enabledPlugins": {

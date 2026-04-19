@@ -1,8 +1,13 @@
 ---
 name: meta-validate-context
-description: Verify subsystem context rules match current codebase state. Use to audit freshness of .claude/rules/subsystem-*.md files.
+description: Use when auditing the freshness of `.claude/rules/subsystem-*.md` files against current codebase state, or when a subsystem has undergone significant change.
 user-invocable: true
 argument-hint: "all | subsystem-name"
+triggers:
+  - "validate context"
+  - "audit subsystem rules"
+  - "check subsystem rules"
+  - "freshness of rules"
 ---
 
 # Validate Context Rules

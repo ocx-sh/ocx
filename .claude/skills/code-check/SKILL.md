@@ -1,8 +1,14 @@
 ---
 name: code-check
-description: Codebase auditor for SOLID, DRY, consistency, and code health. Use for code review, quality audits, or pattern consistency verification.
+description: Use for code review, quality audits, SOLID/DRY consistency checks, pattern audits across the codebase, or verifying anti-pattern compliance across a scope.
 user-invocable: true
 argument-hint: "scope: all | crate | path/to/dir"
+triggers:
+  - "code quality check"
+  - "audit the code"
+  - "quality audit"
+  - "anti-pattern scan"
+  - "solid check"
 ---
 
 # Codebase Health Auditor

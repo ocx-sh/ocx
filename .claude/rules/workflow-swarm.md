@@ -71,6 +71,27 @@ Orchestrators specialize workers by specifying a focus mode in the prompt.
 
 See `.claude/rules/workflow-feature.md` for the canonical contract-first TDD protocol (Stub → Verify → Specify → Implement → Review-Fix Loop). The `/swarm-execute` skill has the full detailed protocol including the review-fix loop specification.
 
+## Review-Fix Loop
+
+The canonical protocol used by `/swarm-execute`, `/swarm-review`, bug-fix workflow Phase 6, and refactor workflow Phase 5. Byte-identical copies ship in `workflow-bugfix.md` and `workflow-refactor.md` so the protocol auto-loads from all three worker-relevant path scopes.
+
+<!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->
+Diff-scoped, bounded iterative review. Tier-scaled: 1 round at `low`, up to 3 rounds at `high`/`max`.
+
+**Round 1** — run every perspective on the diff. Perspectives most likely to find blockers run first (e.g. spec-compliance, correctness, behavior-preservation); if they surface actionable findings, fix before running the remaining perspectives in the same round.
+
+Classify each finding:
+
+- **Actionable** — fix automatically, re-run affected perspectives next round.
+- **Deferred** — needs human judgment; surface in the commit summary with context.
+
+**Subsequent rounds** — re-run only perspectives that had actionable findings in the previous round. Loop exits when no actionable findings remain or the tier's round cap is reached. Oscillating findings (same issue surfaced in two rounds) auto-defer.
+
+**Cross-model adversarial pass** (optional, tier-scaled): after the Claude loop converges, run a single Codex adversarial review against the diff as a final gate. One-shot, no looping — two-family stylistic thrash is the failure mode. Skipped gracefully if Codex is unavailable.
+
+**Gate to exit**: no actionable findings remain, verification passes on the final state, and deferred findings are documented for handoff.
+<!-- REVIEW_FIX_LOOP_CANONICAL_END -->
+
 ## Tier & Overlay Vocabulary (for /swarm-plan, /swarm-execute, /swarm-review)
 
 All three swarm skills (`/swarm-plan`, `/swarm-execute`, `/swarm-review`) take an optional tier argument (`low | auto | high | max`, default `auto`) to scale the pipeline to the scope of the feature or diff. The same pipeline shape runs at every tier — only worker count, model choice, review breadth, and Codex coverage change. Contract-first TDD (Stub → Specify → Implement → Review) is preserved at every tier.
@@ -179,7 +200,7 @@ When a worker completes its assigned task, it MUST follow the full completion pr
 
 - Launch multiple explorers for broad searches
 - Use worker-architect for decisions, worker-builder for execution
-- Parallelize independent tasks (max 8 concurrent workers)
+- Send all Agent calls in a single message with multiple tool invocations so they run concurrently (max 8 workers)
 - Keep worker prompts under 500 tokens for fast startup
 
 ## Anti-Patterns

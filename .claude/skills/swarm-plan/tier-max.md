@@ -36,7 +36,7 @@ in the domain enumerated.
 
 ## Phase 2: Research (parallel, 3 axes — mandatory)
 
-Launch **3** `worker-researcher` agents in parallel, one per axis:
+Launch **3** `worker-researcher` agents **in a single message with multiple Agent tool calls** so they run concurrently, one per axis:
 - **Technology / tools** — trending libraries, competing tools
 - **Design patterns** — emerging approaches, industry best practices,
   known pitfalls
@@ -105,7 +105,7 @@ further decomposition.
 
 ## Phase 6: Review (parallel Claude panel + mandatory Codex)
 
-**Round 1 — full Claude panel (parallel):**
+**Round 1 — full Claude panel (launched in a single message with multiple Agent tool calls so they run concurrently):**
 - `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) —
   Are contracts testable? Do they match the user experience section?
 - `worker-architect` — Are trade-offs honest? Alternatives considered?

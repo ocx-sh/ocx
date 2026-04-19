@@ -2,7 +2,7 @@
 
 <!--
 Implementation Plan
-Filename: artifacts/plan_[task].md
+Filename: .claude/state/plans/plan_[task].md
 Owner: Builder (/builder) or Architect (/architect)
 Handoff to: Builder (/builder), QA Engineer (/qa-engineer)
 Related Skills: builder, qa-engineer

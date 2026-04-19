@@ -43,18 +43,35 @@ def build_reminder(uncommitted: int) -> str:
 
 
 def process(session_id: str, project_dir: str) -> str:
-    """Release locks, remove session, and check for uncommitted changes.
+    """Release locks, remove session, merge learnings, and check for
+    uncommitted changes.
 
-    Returns a reminder string if changes exist, otherwise an empty string.
+    Returns a reminder string composed of the Stage 1 learnings summary
+    (when present) and the uncommitted-changes reminder (when present).
+    Either may be empty; the combined result is joined with a newline.
     """
     state = hook_utils.StateManager(project_dir)
     state.release_session_locks(session_id)
     state.remove_session(session_id)
 
+    # Phase 4 — merge pending learnings under StateManager file-lock
+    # semantics. Failure here must not block the stop.
+    learnings_summary = ""
+    try:
+        store = hook_utils.LearningsStore(project_dir)
+        if store.pending_path.exists() or store.canonical_path.exists():
+            stats = store.merge_pending()
+            learnings_summary = store.stage1_summary(stats)
+    except Exception:
+        learnings_summary = ""
+
     uncommitted = count_uncommitted_changes(project_dir)
+    lines: list[str] = []
+    if learnings_summary:
+        lines.append(learnings_summary)
     if uncommitted > 0:
-        return build_reminder(uncommitted)
-    return ""
+        lines.append(build_reminder(uncommitted))
+    return "\n".join(lines)
 
 
 def main() -> None:

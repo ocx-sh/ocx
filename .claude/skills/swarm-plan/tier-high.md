@@ -11,7 +11,7 @@ announced.
 
 ## Phase 1: Discover (parallel)
 
-Launch in parallel:
+Launch **in a single message with multiple Agent tool calls** so they run concurrently:
 - **1** `worker-architecture-explorer` (sonnet) — maps current
   architecture, traces dependencies, finds reusable code and patterns
 - **2–4** `worker-explorer` agents (haiku) — each scoped to a relevant
@@ -41,7 +41,8 @@ explorer's output so external findings are grounded in local code.
 Findings >1 paragraph MUST be persisted as
 `.claude/artifacts/research_[topic].md` for reuse.
 
-Override: `--research=3` launches all three axes in parallel (tech /
+Override: `--research=3` launches all three axes **in a single message
+with multiple Agent tool calls** so they run concurrently (tech /
 patterns / domain) when the classifier or user requests it.
 
 **Gate**: Research findings persisted (or explicitly marked as "no new

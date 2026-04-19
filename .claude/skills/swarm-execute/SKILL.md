@@ -1,9 +1,15 @@
 ---
 name: swarm-execute
-description: Tiered execution orchestrator that implements plans using parallel worker swarms with contract-first TDD and quality gates. Scales from light (low) to full kitchen sink (max) via a tier argument; overlays mix builder model / loop rounds / review breadth / codex axes on top. Use to execute plan artifacts produced by /swarm-plan, or free-text implementation tasks.
+description: Use to implement a plan artifact from `/swarm-plan`, or a free-text implementation task with contract-first TDD + Review-Fix Loop. Tier (`low | auto | high | max`) scales builder model, loop rounds, review breadth, and Codex code-diff gate. Triggers: "execute this plan", "/swarm-execute", "implement the plan".
 user-invocable: true
 argument-hint: "[tier] <plan-artifact-or-task> [--flags]"
 disable-model-invocation: true
+triggers:
+  - "execute this plan"
+  - "execute the plan"
+  - "implement this plan"
+  - "implement the plan"
+  - "run the plan"
 ---
 
 # Execution Orchestrator — Tiered
@@ -23,7 +29,7 @@ execution lives in the tier files.
 ```
 
 - **tier** (optional): `low | auto | high | max`. Default `auto`.
-- **target** (one of): plan artifact path (`.claude/artifacts/plan_*.md`);
+- **target** (one of): plan artifact path (`.claude/state/plans/plan_*.md`);
   free-text task description.
 - **flags** (OCX convention: flags before positional):
   - `--builder=sonnet|opus`
@@ -40,7 +46,7 @@ execution lives in the tier files.
 ### 1. Parse arguments and detect plan artifact
 
 Detect target type:
-1. Path ending `.md` (typically under `.claude/artifacts/`) → plan-artifact mode
+1. Path ending `.md` (typically under `.claude/state/plans/`) → plan-artifact mode
 2. Anything else → free-text mode
 
 When a plan is present, read it and parse the handoff block for Tier,
@@ -66,7 +72,7 @@ Fire when ANY of: `--dry-run`, `--form`, tier resolved to `max`, or
 classification marked low-confidence. This is the **only** user-prompt
 point — no mid-flow `AskUserQuestion` during classification.
 
-Write `.claude/artifacts/meta-plan_execute_[feature].md` with:
+Write `.claude/state/plans/meta-plan_execute_[feature].md` with:
 Classification (tier + rationale + plan-header source), Overlays
 (+ rationale), Workers per phase, `loop-rounds` budget, Estimated cost,
 Whether Codex fires, Not Doing (push, PR creation).
@@ -88,7 +94,7 @@ Print before loading the tier file:
 ```
 Swarm execute
   Tier:        high                                (from plan header)
-  Target:      .claude/artifacts/plan_foo.md
+  Target:      .claude/state/plans/plan_foo.md
   Overlays:    builder=sonnet, loop-rounds=3       (tier default)
                codex=on                            (signal: plan Reversibility=One-Way Door Medium)
   Workers:     stub/impl sonnet, 1 arch reviewer,
@@ -102,25 +108,9 @@ Swarm execute
 `Read` the matching `tier-{low,high,max}.md` and execute its phase
 plan. No phase content duplicated here.
 
-## Review-Fix Loop — shared design principles
+## Review-Fix Loop
 
-Every tier runs a Review-Fix Loop; the tier file sets rounds and
-perspective breadth (see `overlays.md`). These invariants apply to
-every tier:
-
-- **Fresh context**: Every reviewer and builder is a fresh subagent.
-  Never self-review in the context that wrote the code.
-- **Diff-scoped**: Findings must relate to changed files only
-  (`git diff main...HEAD --name-only`). No drive-by improvements.
-- **Severity-gated**: Only Block-tier and Warn-tier findings drive the
-  loop. Suggest-tier goes directly to the deferred summary.
-- **Subsystem verify during loop**: Run the subsystem verify
-  (e.g., `task rust:verify`), NOT full `task verify` — the latter is
-  ground truth only at loop exit.
-- **Regressions in unchanged files are in scope**: if a change breaks
-  an import or test in an unchanged file, fix it.
-- **Termination**: convergence, `--loop-rounds` budget, or oscillation
-  (same findings as previous round → defer).
+Protocol: see the canonical Review-Fix Loop in [`workflow-swarm.md`](../../rules/workflow-swarm.md#review-fix-loop). The protocol auto-loads for swarm-skill contexts via `workflow-swarm.md` path-scoping. Per-tier loop configuration (rounds, perspectives) is set in each tier file.
 
 ## Cross-Model Adversarial Pass — shared protocol
 

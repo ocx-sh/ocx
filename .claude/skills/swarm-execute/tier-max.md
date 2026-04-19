@@ -42,7 +42,7 @@ touched crate — cross-subsystem implications must surface immediately).
 
 ## Phase 3: Verify Architecture (reviewer + architect)
 
-Launch in parallel:
+Launch **in a single message with multiple Agent tool calls** so they run concurrently:
 - **1** `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`)
 - **1** `worker-architect` — reviews stubs against the ADR: are
   boundaries honored? Are trade-offs implemented as the ADR specified?
@@ -77,66 +77,25 @@ subsystem — max-tier changes often have cross-subsystem implications).
 
 ## Phase 6: Review-Fix Loop (up to 3 rounds, adversarial breadth)
 
-Same loop protocol as tier-high — diff-scoped, severity-gated, up to 3
-rounds, subsystem verify during loop — but with a broader Stage 2
-perspective panel.
+Protocol: see canonical in [`workflow-swarm.md`](../../rules/workflow-swarm.md#review-fix-loop). Tier-max overrides: `loop-rounds=3`; Stage 2 adversarial (+ architect + SOTA + cli-ux); Codex mandatory.
 
 > **Reviewer model**: every `worker-reviewer` launch in this tier uses the resolved `--reviewer` overlay value (tier=max default `sonnet`; escalated to `opus` when `--breadth=adversarial` fires). See `overlays.md` reviewer axis.
 
-### Round 1 — Stage 1 (spec-compliance + test-coverage, parallel)
-
-Same as tier-high: `worker-reviewer` (spec-compliance) +
-`worker-reviewer` (quality, lens: test-coverage).
-
-### Round 1 — Stage 2 (adversarial breadth, parallel)
-
-Full `full` set plus:
-- `worker-reviewer` (focus: `quality`) — including CLI-UX lens when
-  touching command surface
+Stage 1 matches tier-high: `worker-reviewer` (spec-compliance, post-implementation) + `worker-reviewer` (quality, lens: test-coverage). Stage 2 adds to the `full` set:
+- `worker-reviewer` (focus: `quality`) — CLI-UX lens when touching command surface
 - `worker-reviewer` (focus: `security`)
 - `worker-reviewer` (focus: `performance`)
 - `worker-doc-reviewer` — model per resolved `--doc-reviewer` overlay (`sonnet` default; `haiku` when narrow-scope doc trigger fires — see `overlays.md` doc-reviewer axis)
-- **`worker-architect`** — architecture perspective (are we still
-  inside the ADR's walls?)
-- **`worker-researcher`** — SOTA gap check (how do leading tools
-  solve this? Are we missing a known pitfall?)
+- **`worker-architect`** — ADR-compliance perspective
+- **`worker-researcher`** — SOTA gap check
 
-Each reviewer classifies findings (actionable / deferred / suggest).
+Rounds 2–3 follow the canonical selective re-review with oscillation-auto-defer (architect ↔ reviewer oscillation is a known max-tier pattern — both perspectives captured in the deferred entry).
 
-### Rounds 2–3 (selective re-review)
+**Codex code-diff review — mandatory final gate.** After the Claude loop converges, invoke `codex-adversary` with scope `code-diff` on the branch diff. One-shot. Triage per `overlays.md`: Actionable → one-shot `worker-builder` (focus: `implementation`, model: opus) fix pass, gate `task verify`; Deferred → Deferred Findings; Stated-convention / trivia → dropped with counts. If the one-shot fix pass fails `task verify`, revert and promote all Codex findings to deferred.
 
-Same termination logic as tier-high. Oscillation detection remains —
-at max-tier, oscillation between architect and reviewer is especially
-likely, so oscillated findings defer cleanly with both perspectives
-captured.
+Unavailable path: at max-tier this is a **gate, not a blocker** — surface the skip prominently in the commit summary.
 
-### Codex code-diff review — mandatory final gate
-
-After the Claude loop converges, invoke `codex-adversary` with scope
-`code-diff` on the branch diff. One-shot, no loop. Triage per
-`overlays.md`:
-
-- **Actionable** → one-shot `worker-builder` (focus: `implementation`,
-  model: opus) fix pass; gate: `task verify` passes after the fix
-- **Deferred** → added to Deferred Findings in the commit summary
-- **Stated-convention** → dropped, count mentioned
-- **Trivia** → dropped, count mentioned
-
-If the one-shot fix pass fails `task verify`, revert the builder's
-changes and promote all Codex findings to deferred. Let the human
-decide.
-
-Unavailable path: at max-tier this is a **gate, not a blocker** — but
-surface the skip prominently in the commit summary so the user knows
-one layer of review was missed.
-
-### Loop exit
-
-Run `task verify` once as ground truth. Print deferred findings
-summary including the Cross-Model Adversarial section.
-
-**Gate**: `task verify` passes on final state. All deferred findings
-(Claude + Codex) documented.
+**Gate**: `task verify` passes on final state. All deferred findings (Claude + Codex) documented.
 
 ## Phase 7: Commit
 

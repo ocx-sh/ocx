@@ -121,8 +121,9 @@ class TestShareableQualityRules:
         After the reorg, `.claude/skills/{python,rust,typescript,bash,vite}/`
         are gone. Any remaining reference is a broken link.
 
-        Historical artifacts (`.claude/artifacts/`) are exempt — they preserve
-        prior-state references intentionally with header notes.
+        Historical artifacts (`.claude/artifacts/`) and ephemeral plan
+        scratch (`.claude/state/`) are exempt — they preserve prior-state
+        references intentionally with header notes.
         """
         deleted_skills = [
             "skills/python/SKILL.md",
@@ -133,8 +134,8 @@ class TestShareableQualityRules:
         ]
         violations = []
         for rule_file in CLAUDE_DIR.rglob("*.md"):
-            # Skip historical artifacts — they preserve old references
-            if "artifacts" in rule_file.parts:
+            # Skip historical artifacts + ephemeral state — they preserve old references
+            if "artifacts" in rule_file.parts or "state" in rule_file.parts:
                 continue
             text = rule_file.read_text()
             for deleted in deleted_skills:
@@ -692,8 +693,8 @@ class TestRuleCatalog:
 
         targets: list[Path] = [CLAUDE_MD]
         for md in CLAUDE_DIR.rglob("*.md"):
-            if "artifacts" in md.parts:
-                continue  # historical — preserves old references
+            if "artifacts" in md.parts or "state" in md.parts:
+                continue  # historical/ephemeral — preserves old references
             if "tests" in md.parts:
                 continue  # test file itself doesn't reference rule files
             targets.append(md)
@@ -1011,3 +1012,698 @@ class TestSwarmTiers:
         )
 
 
+# ---------------------------------------------------------------------------
+# AI config overhaul — Phase 1 invariants
+# ---------------------------------------------------------------------------
+
+
+class TestAiConfigOverhaulPhase1:
+    """Post-Phase-1 invariants for the AI config overhaul.
+
+    Locks in the path-scope correction (workflow rules scoped, not global),
+    the 3-global enumeration in meta-ai-config.md, and the declared overlap
+    table in rules.md. See .claude/artifacts/plan_ai_config_overhaul.md.
+    """
+
+    def test_workflow_rules_have_paths(self) -> None:
+        """workflow-bugfix.md and workflow-refactor.md must be path-scoped.
+
+        They self-label as catalog-only; without `paths:` frontmatter they load
+        every session and contribute ~230 undocumented lines to the always-loaded
+        baseline. Enforced post-Phase-1 of the AI config overhaul.
+        """
+        missing = []
+        for name in ("workflow-bugfix.md", "workflow-refactor.md"):
+            path = CLAUDE_DIR / "rules" / name
+            assert path.exists(), f"{name} missing"
+            paths = TestRuleGlobs._extract_paths(path)
+            if not paths:
+                missing.append(name)
+        assert not missing, (
+            f"Rules missing `paths:` frontmatter: {missing}. "
+            f"See adr_ai_config_path_scope_correction.md."
+        )
+
+    def test_global_rule_count_matches(self) -> None:
+        """Stated global-rule count in meta-ai-config.md must match actual.
+
+        A global rule is any `.claude/rules/*.md` file without a non-empty
+        `paths:` frontmatter entry. Post Phase 1 of the AI config overhaul,
+        the authoritative count is 3 and the list appears in meta-ai-config.md
+        under `### Current Global Rules`. `rules.md` and `CLAUDE.md` reach
+        Claude by a different mechanism (`@`-import / root instructions) and
+        are not counted here.
+        """
+        rules_dir = CLAUDE_DIR / "rules"
+        globals_found = []
+        for rule in sorted(rules_dir.glob("*.md")):
+            paths = TestRuleGlobs._extract_paths(rule)
+            if not paths:
+                globals_found.append(rule.name)
+        assert len(globals_found) == 3, (
+            f"Expected exactly 3 global rules (no `paths:` frontmatter), "
+            f"got {len(globals_found)}: {globals_found}"
+        )
+        meta_text = (rules_dir / "meta-ai-config.md").read_text()
+        assert "### Current Global Rules" in meta_text, (
+            "meta-ai-config.md must contain `### Current Global Rules` "
+            "enumeration (Phase 1 T3)"
+        )
+        # Every global must be explicitly named in the enumeration
+        for name in globals_found:
+            assert name in meta_text, (
+                f"Global rule {name} is not enumerated in meta-ai-config.md "
+                f"`### Current Global Rules` — stated/actual drift"
+            )
+
+    def test_path_overlaps_declared_or_absent(self) -> None:
+        """Any two rules sharing a `paths:` pattern must be declared in rules.md.
+
+        Exempt rules (intended broad coupling):
+        - `quality-*.md` — language quality rules co-fire with subsystem rules
+          on `**/*.rs`, `**/*.py`, etc. (e.g., quality-rust.md + subsystem-oci.md
+          on `**/*.rs` is intended).
+        - `workflow-bugfix.md`, `workflow-refactor.md` — source-work-surface
+          scope (`crates/**`, `test/**`, `website/**`, `mirrors/**`, `.claude/**`)
+          per adr_ai_config_path_scope_correction.md. Co-firing with subsystem
+          rules on their respective scopes is the intended coupling.
+        """
+        _exempt_prefixes = ("quality-",)
+        _exempt_names = {"workflow-bugfix.md", "workflow-refactor.md"}
+        rules_dir = CLAUDE_DIR / "rules"
+        pattern_owners: dict[str, list[str]] = {}
+        for rule in sorted(rules_dir.glob("*.md")):
+            if rule.name.startswith(_exempt_prefixes):
+                continue
+            if rule.name in _exempt_names:
+                continue
+            for p in TestRuleGlobs._extract_paths(rule):
+                pattern_owners.setdefault(p, []).append(rule.name)
+
+        catalog = (CLAUDE_DIR / "rules.md").read_text()
+        # Extract declared pairs from the overlap table: lines like
+        # `| \`file-a.md\` + \`file-b.md\` | ...`
+        declared_pairs: set[frozenset[str]] = set()
+        for line in catalog.splitlines():
+            if "+" not in line or "`" not in line or not line.startswith("|"):
+                continue
+            files = re.findall(r"`([^`]+\.md)`", line)
+            if len(files) >= 2:
+                # Treat all filenames in the left cell as one declared group
+                declared_pairs.add(frozenset(files))
+
+        undeclared: list[tuple[str, list[str]]] = []
+        for pattern, owners in pattern_owners.items():
+            if len(owners) < 2:
+                continue
+            # Any pair drawn from owners must appear as a subset of a declared group
+            for i in range(len(owners)):
+                for j in range(i + 1, len(owners)):
+                    pair = frozenset({owners[i], owners[j]})
+                    if not any(pair <= group for group in declared_pairs):
+                        undeclared.append((pattern, [owners[i], owners[j]]))
+                        break
+        assert not undeclared, (
+            f"Undeclared path-scope overlaps: {undeclared}. "
+            f"Declare in rules.md `## Declared Path-Scope Overlaps` table or "
+            f"narrow one of the rule's `paths:` patterns."
+        )
+
+
+# ---------------------------------------------------------------------------
+# AI config overhaul — Phase 2 invariants (CSO description audit)
+# ---------------------------------------------------------------------------
+
+
+class TestAiConfigOverhaulPhase2:
+    """Post-Phase-2 invariants for the AI config overhaul.
+
+    Locks in the Contextual Signal Only (CSO) policy for skill descriptions:
+    descriptions describe trigger conditions (what the user says / what the
+    task looks like), never the workflow itself. See
+    `.claude/artifacts/adr_ai_config_skill_description_csopolicy.md`.
+    """
+
+    # Hyphen-aware word boundary: require a whitespace / punctuation boundary
+    # on both sides so hyphen-joined fragments like `dry-runs` or `re-runs`
+    # do not falsely trigger the CSO filter.
+    _FORBIDDEN_VERB_RE = re.compile(
+        r"(?<![\w-])(dispatches|runs|iterates|orchestrates|performs|executes|handles)(?![\w-])",
+        re.IGNORECASE,
+    )
+
+    # Per-skill `disable-model-invocation` intent table. Prevents accidental
+    # flips (action skill losing the flag, or pure-advisory skill gaining it).
+    _EXPECTED_DISABLE_MODEL_INVOCATION = {
+        # Action skills with side effects — must disable auto-invocation
+        "commit": True,
+        "finalize": True,
+        "codex-adversary": True,
+        "meta-maintain-config": True,
+        "ocx-create-mirror": True,
+        "ocx-sync-roadmap": True,
+        "swarm-plan": True,
+        "swarm-execute": True,
+        # Pure analysis / advisory — auto-invocation safe
+        "architect": False,
+        "builder": False,
+        "code-check": False,
+        "deps": False,
+        "docs": False,
+        "meta-validate-context": False,
+        "qa-engineer": False,
+        "security-auditor": False,
+        "swarm-review": False,
+    }
+
+    @staticmethod
+    def _parse_frontmatter(skill_md: Path) -> dict[str, str]:
+        """Parse single-line key: value pairs from the first `---` block.
+
+        Intentionally simple — CSO descriptions are required to be single-line
+        so this parser is sufficient. Multi-line (block-scalar) descriptions
+        would produce a truncated value, which the CSO tests flag.
+        """
+        text = skill_md.read_text()
+        if not text.startswith("---"):
+            return {}
+        _, front, _ = text.split("---", 2)
+        fm: dict[str, str] = {}
+        for line in front.splitlines():
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            fm[key.strip()] = value.strip().strip('"').strip("'")
+        return fm
+
+    def test_skill_descriptions_are_cso_compliant(self) -> None:
+        """Every skill description must describe trigger conditions, not the
+        workflow itself. Forbidden literal verbs: dispatches, runs, iterates,
+        orchestrates, performs, executes, handles (case-insensitive).
+
+        Per meta-ai-config.md budget: each description ≤1024 chars. CSO
+        descriptions are single-line; multi-line (block-scalar) is disallowed
+        because the simple parser above would truncate and the real context
+        loader would concatenate — both paths degrade discoverability.
+        """
+        violations: list[tuple[str, str]] = []
+        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+            name = skill_md.parent.name
+            fm = self._parse_frontmatter(skill_md)
+            desc = fm.get("description", "")
+            if not desc:
+                violations.append((name, "missing or empty description"))
+                continue
+            if len(desc) > 1024:
+                violations.append(
+                    (name, f"description too long: {len(desc)} > 1024 chars")
+                )
+            match = self._FORBIDDEN_VERB_RE.search(desc)
+            if match:
+                violations.append(
+                    (name, f"contains forbidden verb {match.group(0)!r}")
+                )
+        assert not violations, (
+            f"Skill descriptions violate CSO policy: {violations}. "
+            f"See `.claude/artifacts/adr_ai_config_skill_description_csopolicy.md`."
+        )
+
+    def test_skill_description_budget_under_cap(self) -> None:
+        """Sum of all skill description chars must stay under the 4000-char
+        cap (buffer below Anthropic's 1% context-window description budget).
+
+        Pre-Phase-2 baseline was 5004 chars; Phase 2 target is ≤4000, giving
+        ≈20% headroom for future skill growth before hitting the cap.
+        """
+        total = 0
+        per_skill: list[tuple[str, int]] = []
+        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+            fm = self._parse_frontmatter(skill_md)
+            desc = fm.get("description", "")
+            total += len(desc)
+            per_skill.append((skill_md.parent.name, len(desc)))
+        assert total <= 4000, (
+            f"Total skill description budget {total} chars exceeds 4000-char "
+            f"cap. Per-skill lengths: {per_skill}"
+        )
+
+    def test_skill_disable_model_invocation_intent(self) -> None:
+        """Fixture-based stability test: every skill's
+        `disable-model-invocation` flag must match its declared intent.
+
+        Prevents accidental flips — e.g. an action skill losing the flag
+        (silently auto-invoked by Claude), or a pure-advisory skill gaining
+        it (needlessly removed from auto-invocation).
+        """
+        mismatches: list[tuple[str, object, object]] = []
+        unlisted: list[str] = []
+        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+            name = skill_md.parent.name
+            if name not in self._EXPECTED_DISABLE_MODEL_INVOCATION:
+                unlisted.append(name)
+                continue
+            fm = self._parse_frontmatter(skill_md)
+            actual = fm.get("disable-model-invocation", "false").lower() == "true"
+            expected = self._EXPECTED_DISABLE_MODEL_INVOCATION[name]
+            if actual != expected:
+                mismatches.append((name, expected, actual))
+        assert not unlisted, (
+            f"Skills not in `_EXPECTED_DISABLE_MODEL_INVOCATION` intent table: "
+            f"{unlisted}. Add each to the table with the correct expected "
+            f"flag value before it will pass the stability check."
+        )
+        assert not mismatches, (
+            f"Skill `disable-model-invocation` intent mismatches "
+            f"(name, expected, actual): {mismatches}. "
+            f"Update the skill frontmatter or the intent table in this test "
+            f"if the policy has genuinely changed."
+        )
+
+
+# ---------------------------------------------------------------------------
+# AI config overhaul — Phase 4 invariants (cross-session learnings store)
+# ---------------------------------------------------------------------------
+
+
+class TestAiConfigOverhaulPhase4:
+    """Post-Phase-4 invariants for the AI config overhaul.
+
+    Locks in the project-local learnings store location and the
+    `meta-ai-config.md` Cross-Session Learnings section. See
+    `.claude/artifacts/adr_ai_config_cross_session_learnings_store.md`.
+    """
+
+    def test_gitignore_contains_state_dir(self) -> None:
+        """`.gitignore` must ignore `.claude/state/` so the learnings store
+        (and other per-worktree ephemera) is never accidentally committed.
+
+        Phase 3 added the entry; this test locks it in so a future
+        gitignore edit cannot silently drop it.
+        """
+        gitignore = ROOT / ".gitignore"
+        assert gitignore.exists(), "`.gitignore` missing at repo root"
+        text = gitignore.read_text()
+        assert ".claude/state/" in text, (
+            "`.gitignore` must contain `.claude/state/` — per-worktree "
+            "learnings store / context samples must not be committed. "
+            "See `.claude/artifacts/adr_ai_config_cross_session_learnings_store.md`."
+        )
+
+    def test_meta_ai_config_has_cross_session_learnings_section(self) -> None:
+        """`meta-ai-config.md` must document the Cross-Session Learnings
+        Store section and cite the ADR path."""
+        meta = CLAUDE_DIR / "rules" / "meta-ai-config.md"
+        text = meta.read_text()
+        assert "## Cross-Session Learnings Store" in text, (
+            "meta-ai-config.md must contain `## Cross-Session Learnings Store` "
+            "header (Phase 4 T4)"
+        )
+        assert "adr_ai_config_cross_session_learnings_store.md" in text, (
+            "meta-ai-config.md Cross-Session Learnings section must cite "
+            "the ADR path so readers can find the decision record."
+        )
+
+
+# ---------------------------------------------------------------------------
+# AI config overhaul — Phase 5 invariants (Review-Fix Loop parity + skill body budget)
+# ---------------------------------------------------------------------------
+
+
+class TestAiConfigOverhaulPhase5:
+    """Post-Phase-5 invariants for the AI config overhaul.
+
+    Locks in the three-carrier byte-identical Review-Fix Loop parity
+    (`workflow-swarm.md`, `workflow-bugfix.md`, `workflow-refactor.md`)
+    and the 200-line ceiling for every `SKILL.md`. See
+    `.claude/artifacts/adr_ai_config_review_loop_dedup.md` and
+    `.claude/artifacts/plan_ai_config_overhaul.md` (Phase 5).
+    """
+
+    _CANONICAL_CARRIERS = (
+        CLAUDE_DIR / "rules" / "workflow-swarm.md",
+        CLAUDE_DIR / "rules" / "workflow-bugfix.md",
+        CLAUDE_DIR / "rules" / "workflow-refactor.md",
+    )
+
+    # Files that must point at the canonical Review-Fix Loop but NOT contain
+    # the canonical markers themselves. Prevents accidental fourth carrier.
+    _POINTER_ONLY_FILES = (
+        CLAUDE_DIR / "rules" / "workflow-feature.md",
+        CLAUDE_DIR / "skills" / "swarm-execute" / "SKILL.md",
+        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-low.md",
+        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-high.md",
+        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-max.md",
+    )
+
+    _BEGIN_MARKER = "<!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->"
+    _END_MARKER = "<!-- REVIEW_FIX_LOOP_CANONICAL_END -->"
+
+    # Explicit exception list for `test_skill_body_budget`. Every entry needs
+    # a docstring comment (in this class) explaining why it is exempt.
+    # Current state: empty. Every SKILL.md is ≤200 lines after Phase 5.
+    _SKILL_BODY_BUDGET_EXCEPTIONS: tuple[str, ...] = ()
+
+    def test_review_fix_loop_parity(self) -> None:
+        """The three canonical carriers must contain byte-identical
+        Review-Fix Loop blocks between the HTML comment markers.
+
+        Carriers: `workflow-swarm.md`, `workflow-bugfix.md`,
+        `workflow-refactor.md`. Pointer-only files (workflow-feature.md,
+        swarm-execute SKILL + tier files) must NOT contain the markers
+        (they link to the canonical) and MUST contain a pointer to
+        `workflow-swarm.md#review-fix-loop`.
+        """
+        # Every carrier must have exactly one BEGIN and one END marker
+        carrier_blocks: dict[str, str] = {}
+        for carrier in self._CANONICAL_CARRIERS:
+            assert carrier.exists(), f"Canonical carrier missing: {carrier}"
+            text = carrier.read_text()
+            begin_count = text.count(self._BEGIN_MARKER)
+            end_count = text.count(self._END_MARKER)
+            assert begin_count == 1, (
+                f"{carrier.name} must contain exactly one "
+                f"{self._BEGIN_MARKER} marker (got {begin_count})."
+            )
+            assert end_count == 1, (
+                f"{carrier.name} must contain exactly one "
+                f"{self._END_MARKER} marker (got {end_count})."
+            )
+            begin_idx = text.index(self._BEGIN_MARKER)
+            end_idx = text.index(self._END_MARKER) + len(self._END_MARKER)
+            assert begin_idx < end_idx, (
+                f"{carrier.name}: BEGIN marker must precede END marker."
+            )
+            carrier_blocks[carrier.name] = text[begin_idx:end_idx]
+
+        # Byte-identity across all three carriers
+        reference_name, reference_block = next(iter(carrier_blocks.items()))
+        divergent: list[tuple[str, str]] = []
+        for name, block in carrier_blocks.items():
+            if block != reference_block:
+                divergent.append((name, reference_name))
+        assert not divergent, (
+            f"Canonical Review-Fix Loop blocks diverged across carriers. "
+            f"Every carrier must contain byte-identical prose between the "
+            f"markers. Divergent carriers: {divergent}. "
+            f"See `.claude/artifacts/adr_ai_config_review_loop_dedup.md`."
+        )
+
+        # Pointer-only files must NOT contain the markers (no fourth carrier)
+        illegal_carriers: list[str] = []
+        for pointer in self._POINTER_ONLY_FILES:
+            assert pointer.exists(), f"Pointer-only file missing: {pointer}"
+            text = pointer.read_text()
+            if self._BEGIN_MARKER in text or self._END_MARKER in text:
+                illegal_carriers.append(str(pointer.relative_to(ROOT)))
+        assert not illegal_carriers, (
+            f"Pointer-only files contain canonical Review-Fix Loop markers "
+            f"(would create a fourth carrier): {illegal_carriers}. "
+            f"Replace the marker block with a pointer to "
+            f"`workflow-swarm.md#review-fix-loop`."
+        )
+
+        # Pointer-only files must link to the canonical anchor (or equivalent)
+        missing_pointer: list[str] = []
+        for pointer in self._POINTER_ONLY_FILES:
+            text = pointer.read_text()
+            # Accept any reference to the canonical carrier's Review-Fix Loop
+            # section — anchor slug `#review-fix-loop` or direct filename
+            # pointer is sufficient.
+            if "workflow-swarm.md#review-fix-loop" not in text:
+                missing_pointer.append(str(pointer.relative_to(ROOT)))
+        assert not missing_pointer, (
+            f"Pointer-only files missing a link to "
+            f"`workflow-swarm.md#review-fix-loop`: {missing_pointer}."
+        )
+
+    def test_skill_body_budget(self) -> None:
+        """Every `.claude/skills/*/SKILL.md` must be ≤200 lines.
+
+        SKILL.md is loaded only when invoked — per meta-ai-config.md the
+        budget is <500 lines — but post-Phase-5 every SKILL.md in OCX
+        stays ≤200 via progressive disclosure (`references/` subdir for
+        detail material). Exceptions live in
+        `_SKILL_BODY_BUDGET_EXCEPTIONS` with a docstring justification.
+        """
+        violations: list[tuple[str, int]] = []
+        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+            name = skill_md.parent.name
+            if name in self._SKILL_BODY_BUDGET_EXCEPTIONS:
+                continue
+            line_count = len(skill_md.read_text().splitlines())
+            if line_count > 200:
+                violations.append((name, line_count))
+        assert not violations, (
+            f"SKILL.md files exceed the 200-line progressive-disclosure "
+            f"budget: {violations}. Extract detail sections into "
+            f"`<skill-dir>/references/*.md` and replace with pointers, or "
+            f"add the skill to `_SKILL_BODY_BUDGET_EXCEPTIONS` with a "
+            f"justification."
+        )
+
+
+# ---------------------------------------------------------------------------
+# UserPromptSubmit routing hook: triggers contract + hook sanity
+# ---------------------------------------------------------------------------
+
+
+class TestPromptRoutingTriggers:
+    """Enforce the `triggers:` contract for user-invocable skills.
+
+    The `user_prompt_router.py` UserPromptSubmit hook reads the
+    `triggers:` frontmatter field from each skill at runtime. Any
+    user-invocable skill without triggers silently drops out of the
+    matcher, so natural-language prompts never route to it.
+    """
+
+    _ALLOWED_SINGLE_WORD_TRIGGERS = {"deps", "commit", "finalize"}
+    _MIN_TRIGGERS = 3
+    _MAX_TRIGGERS = 7
+
+    @staticmethod
+    def _parse_frontmatter(text: str) -> dict:
+        if not text.startswith("---"):
+            return {}
+        lines = text.splitlines()
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                end = i
+                break
+        if end is None:
+            return {}
+        result: dict = {}
+        current_list_key: str | None = None
+        for raw in lines[1:end]:
+            if not raw.strip():
+                current_list_key = None
+                continue
+            if raw.startswith("  - ") or raw.startswith("- "):
+                if current_list_key is None:
+                    continue
+                item = raw.split("- ", 1)[1].strip()
+                if (item.startswith('"') and item.endswith('"')) or (
+                    item.startswith("'") and item.endswith("'")
+                ):
+                    item = item[1:-1]
+                result.setdefault(current_list_key, []).append(item)
+                continue
+            if ":" in raw and not raw.startswith(" "):
+                key, _, value = raw.partition(":")
+                key = key.strip()
+                value = value.strip()
+                if not value:
+                    current_list_key = key
+                    continue
+                current_list_key = None
+                if (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                ):
+                    value = value[1:-1]
+                result[key] = value
+        return result
+
+    @classmethod
+    def _user_invocable_skills(cls) -> list[tuple[str, dict]]:
+        out: list[tuple[str, dict]] = []
+        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+            fm = cls._parse_frontmatter(skill_md.read_text())
+            if fm.get("user-invocable") == "true":
+                out.append((skill_md.parent.name, fm))
+        return out
+
+    def test_user_invocable_skills_have_triggers(self) -> None:
+        """Every user-invocable skill must declare 3–7 triggers."""
+        violations: list[tuple[str, str]] = []
+        for name, fm in self._user_invocable_skills():
+            triggers = fm.get("triggers")
+            if not isinstance(triggers, list) or not triggers:
+                violations.append((name, "missing or empty triggers: list"))
+                continue
+            if not (self._MIN_TRIGGERS <= len(triggers) <= self._MAX_TRIGGERS):
+                violations.append(
+                    (name, f"has {len(triggers)} triggers (want 3–7)")
+                )
+        assert not violations, (
+            f"User-invocable skills missing or malformed `triggers:` "
+            f"frontmatter: {violations}. The UserPromptSubmit routing hook "
+            f"reads this list at runtime — without it, natural-language "
+            f"prompts never route to the skill. See "
+            f"`.claude/rules/meta-ai-config.md` Anti-Pattern #12."
+        )
+
+    def test_triggers_unique_across_skills(self) -> None:
+        """No trigger phrase may appear in two skills' `triggers:` lists.
+
+        The routing hook uses first-match-wins at runtime, but
+        cross-skill duplicates are ambiguous by design — they silently
+        bias routing on glob order. The structural gate fails loud.
+        """
+        seen: dict[str, str] = {}
+        collisions: list[tuple[str, str, str]] = []
+        for name, fm in self._user_invocable_skills():
+            for trigger in fm.get("triggers") or []:
+                key = trigger.strip().lower()
+                if not key:
+                    continue
+                if key in seen and seen[key] != name:
+                    collisions.append((key, seen[key], name))
+                else:
+                    seen[key] = name
+        assert not collisions, (
+            f"Duplicate triggers across skills "
+            f"(trigger, first-skill, second-skill): {collisions}"
+        )
+
+    def test_triggers_are_discriminating(self) -> None:
+        """Each trigger must be ≥2 words OR an allowed single-word domain token."""
+        violations: list[tuple[str, str]] = []
+        for name, fm in self._user_invocable_skills():
+            for trigger in fm.get("triggers") or []:
+                key = trigger.strip()
+                words = key.split()
+                if len(words) >= 2:
+                    continue
+                if key.lower() in self._ALLOWED_SINGLE_WORD_TRIGGERS:
+                    continue
+                violations.append((name, trigger))
+        assert not violations, (
+            f"Single-word triggers are only allowed from the domain-token "
+            f"set {sorted(self._ALLOWED_SINGLE_WORD_TRIGGERS)}. Violations "
+            f"(skill, trigger): {violations}. Use a 2+ word phrase to reduce "
+            f"false positives."
+        )
+
+
+class TestUserPromptRouter:
+    """Sanity checks on the user_prompt_router.py hook script."""
+
+    _HOOK = CLAUDE_DIR / "hooks" / "user_prompt_router.py"
+
+    def test_user_prompt_router_has_pep723_header(self) -> None:
+        text = self._HOOK.read_text()
+        assert "# /// script" in text, (
+            "user_prompt_router.py must start with a PEP 723 inline "
+            "script header (`# /// script` … `# ///`)."
+        )
+
+    def test_user_prompt_router_uses_project_dir_env(self) -> None:
+        text = self._HOOK.read_text()
+        assert "get_project_dir" in text, (
+            "user_prompt_router.py must resolve the project directory via "
+            "`hook_utils.get_project_dir()` — not `os.getcwd()` / `Path.cwd()`."
+        )
+        assert "os.getcwd()" not in text and "Path.cwd()" not in text, (
+            "user_prompt_router.py must not use `os.getcwd()` or `Path.cwd()`."
+        )
+
+    def test_user_prompt_router_exits_zero(self) -> None:
+        """Every `sys.exit(...)` in the router must pass `0`.
+
+        The hook is advisory; a non-zero exit would make Claude Code
+        treat the prompt as blocked. AST scan to catch future drift.
+        """
+        import ast
+
+        tree = ast.parse(self._HOOK.read_text())
+        bad: list[tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = None
+            if isinstance(func, ast.Attribute) and func.attr == "exit":
+                if isinstance(func.value, ast.Name) and func.value.id == "sys":
+                    name = "sys.exit"
+            elif isinstance(func, ast.Name) and func.id == "exit":
+                name = "exit"
+            if name is None:
+                continue
+            if not node.args:
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and arg.value == 0:
+                continue
+            bad.append((node.lineno, ast.unparse(node)))
+        assert not bad, (
+            f"user_prompt_router.py must only ever `sys.exit(0)` — the hook "
+            f"is advisory, not gating. Non-zero exits found: {bad}"
+        )
+
+    def test_user_prompt_router_registered_in_settings(self) -> None:
+        import json
+
+        settings_path = CLAUDE_DIR / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        hooks = settings.get("hooks", {})
+        ups = hooks.get("UserPromptSubmit") or []
+        commands = [
+            h.get("command", "")
+            for entry in ups
+            for h in entry.get("hooks", [])
+        ]
+        assert any(
+            "user_prompt_router.py" in cmd for cmd in commands
+        ), (
+            "user_prompt_router.py is not registered under "
+            "`hooks.UserPromptSubmit` in `.claude/settings.json`."
+        )
+
+    def test_user_prompt_router_output_is_single_line(self) -> None:
+        """Every `print(...)` call in the router emits a single line.
+
+        AST scan: the printed expression must be a constant or f-string
+        whose literal parts contain no newline. Guards the "zero context
+        bloat" invariant from the item 3 design.
+        """
+        import ast
+
+        tree = ast.parse(self._HOOK.read_text())
+        bad: list[tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Name) and func.id == "print"):
+                continue
+            if not node.args:
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant):
+                if isinstance(arg.value, str) and "\n" in arg.value:
+                    bad.append((node.lineno, repr(arg.value)))
+                continue
+            if isinstance(arg, ast.JoinedStr):
+                for part in arg.values:
+                    if isinstance(part, ast.Constant) and isinstance(
+                        part.value, str
+                    ) and "\n" in part.value:
+                        bad.append((node.lineno, ast.unparse(arg)))
+                        break
+                continue
+            bad.append((node.lineno, ast.unparse(node)))
+        assert not bad, (
+            f"user_prompt_router.py `print(...)` calls must emit a single "
+            f"line with no newlines — zero context bloat is a load-bearing "
+            f"invariant. Violations: {bad}"
+        )

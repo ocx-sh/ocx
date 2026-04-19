@@ -150,7 +150,7 @@ After PRD approval:
 
 3. [ ] **Engineering Estimate**: Effort estimation and decomposition
    - Trigger: `/builder` or `/architect`
-   - Output: Implementation Plan (`artifacts/plan_[task].md`)
+   - Output: Implementation Plan (`.claude/state/plans/plan_[task].md`)
 
 4. [ ] **Create Beads Issues**: Decompose into trackable work items
    - Command: `bd create "Title" -t feature`

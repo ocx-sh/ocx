@@ -11,7 +11,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use futures::stream::{self, StreamExt};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::{
     file_structure::{CasTier, FileStructure},
@@ -64,45 +65,48 @@ impl ReachabilityGraph {
             })
             .collect();
 
-        // Probe refs/ for each package with bounded concurrency. The same
-        // `.buffered` pattern is used by the pull-side `extract_layers` /
-        // `setup_dependencies` and the push-side `push_layers_to_repository`.
+        // Spawn parallel I/O tasks to probe refs/ for each package.
+        let sem = Arc::new(Semaphore::new(BUILD_CONCURRENCY));
+        let mut tasks = JoinSet::new();
+
         let packages_root = Arc::new(canon_packages_root);
         let layers_root = Arc::new(canon_layers_root);
         let blobs_root = Arc::new(canon_blobs_root);
 
-        let collected: Vec<(PathBuf, bool, Vec<PathBuf>)> = stream::iter(package_dirs.iter())
-            .map(|pkg| {
-                let pkg_dir = canonicalize_or_keep(&pkg.dir);
-                let deps_dir = pkg.refs_deps_dir();
-                let layers_dir = pkg.refs_layers_dir();
-                let blobs_dir = pkg.refs_blobs_dir();
-                let pkgs_root = Arc::clone(&packages_root);
-                let lyrs_root = Arc::clone(&layers_root);
-                let blbs_root = Arc::clone(&blobs_root);
-                async move {
-                    let is_root = has_live_refs(&pkg_dir).await;
-                    let dep_refs = read_refs(&deps_dir, &pkgs_root).await;
-                    let layer_refs = read_refs(&layers_dir, &lyrs_root).await;
-                    let blob_refs = read_refs(&blobs_dir, &blbs_root).await;
-                    let mut all_edges = dep_refs;
-                    all_edges.extend(layer_refs);
-                    all_edges.extend(blob_refs);
-                    (pkg_dir, is_root, all_edges)
-                }
-            })
-            .buffered(BUILD_CONCURRENCY)
-            .collect()
-            .await;
+        for pkg in &package_dirs {
+            let pkg_dir = canonicalize_or_keep(&pkg.dir);
+            let deps_dir = pkg.refs_deps_dir();
+            let layers_dir = pkg.refs_layers_dir();
+            let blobs_dir = pkg.refs_blobs_dir();
+            let pkgs_root = Arc::clone(&packages_root);
+            let lyrs_root = Arc::clone(&layers_root);
+            let blbs_root = Arc::clone(&blobs_root);
+            let sem = Arc::clone(&sem);
+
+            tasks.spawn(async move {
+                let _permit = sem.acquire_owned().await.expect("semaphore closed");
+                let is_root = has_live_refs(&pkg_dir).await;
+                let dep_refs = read_refs(&deps_dir, &pkgs_root).await;
+                let layer_refs = read_refs(&layers_dir, &lyrs_root).await;
+                let blob_refs = read_refs(&blobs_dir, &blbs_root).await;
+                let mut all_edges = dep_refs;
+                all_edges.extend(layer_refs);
+                all_edges.extend(blob_refs);
+                (pkg_dir, is_root, all_edges)
+            });
+        }
 
         let mut roots = HashSet::new();
         let mut edges = HashMap::new();
         let mut all_entries = HashMap::new();
 
-        for (pkg_dir, is_root, pkg_edges) in collected {
+        while let Some(result) = tasks.join_next().await {
+            let (pkg_dir, is_root, pkg_edges) = result.expect("task panicked");
+
             if is_root || profile_roots.contains(&pkg_dir) {
                 roots.insert(pkg_dir.clone());
             }
+
             edges.insert(pkg_dir.clone(), pkg_edges);
             all_entries.insert(pkg_dir, CasTier::Package);
         }

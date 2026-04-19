@@ -1,9 +1,16 @@
 ---
 name: meta-maintain-config
-description: Maintain, audit, and update the AI configuration (.claude/ directory). Use when creating/editing skills, rules, agents, hooks, or when project patterns have evolved and AI knowledge needs refreshing. Also use periodically to sync AI artifacts with current codebase state. This skill itself should be refreshed when Claude Code releases new features.
+description: Use when creating or editing skills, rules, agents, or hooks under `.claude/`. Also when AI knowledge has drifted from project patterns, a new Claude Code feature lands, or syncing artifacts to current state. Modes: `create`, `audit`, `refresh`, `review`, `research <topic>`.
 user-invocable: true
 argument-hint: "create | audit | refresh | review | research topic"
 disable-model-invocation: true
+triggers:
+  - "maintain the config"
+  - "update the rules"
+  - "update the skills"
+  - "ai config drift"
+  - "add a skill"
+  - "edit the agent"
 ---
 
 # AI Configuration Maintenance

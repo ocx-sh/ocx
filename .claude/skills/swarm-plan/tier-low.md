@@ -79,7 +79,7 @@ Findings triaged as:
 
 ## Artifacts
 
-- `.claude/artifacts/plan_[feature].md` — required
+- `.claude/state/plans/plan_[feature].md` — required
 
 No PRD, no ADR, no PR-FAQ at this tier. If the classifier inferred any
 of those, it should have picked a higher tier — re-run if needed.

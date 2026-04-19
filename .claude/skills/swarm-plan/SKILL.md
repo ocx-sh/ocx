@@ -1,9 +1,15 @@
 ---
 name: swarm-plan
-description: Tiered planning orchestrator that decomposes features into actionable plans using parallel multi-agent discovery, research, design, and adversarial review. Scales from light (low) to full kitchen sink (max) via a tier argument; overlays mix architect/research/review/codex axes on top. Use for feature planning, task decomposition, or multi-perspective research on architectural decisions. Also reusable as the canonical research primitive for AI config and ADR work.
+description: Use for feature planning, task decomposition, multi-perspective research, or ADR scaffolding. Tier (`low | auto | high | max`) scales research depth, architect model, and review breadth. Canonical research primitive for AI config / ADR work. Triggers: "plan", "/swarm-plan", "research and decide".
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "[tier] <target> [--flags]"
+triggers:
+  - "plan the"
+  - "plan a new"
+  - "research and decide"
+  - "how should we approach"
+  - "decompose the feature"
 ---
 
 # Planning Orchestrator — Tiered
@@ -70,7 +76,7 @@ Fire when ANY of: `--dry-run`, `--form`, tier resolved to `max`, or
 classification marked low-confidence. This is the **only** user-prompt
 point — no mid-flow `AskUserQuestion` during classification.
 
-Write `.claude/artifacts/meta-plan_[feature].md` with:
+Write `.claude/state/plans/meta-plan_[feature].md` with:
 Classification (tier + rationale + overlays), GitHub context, Workers
 I Would Launch (per phase), Artifacts I Would Produce, Estimated Cost
 (parallel worker count, heaviest call, Codex presence), Not Doing
@@ -126,18 +132,9 @@ Max concurrent workers: 8 (per `workflow-swarm.md`).
 
 ## Subsystem context rules (shared)
 
-Identify involved subsystems and read their context rules:
-
-| Subsystem | Rule |
-|---|---|
-| OCI registry/index | `.claude/rules/subsystem-oci.md` |
-| Storage/symlinks | `.claude/rules/subsystem-file-structure.md` |
-| Package metadata | `.claude/rules/subsystem-package.md` |
-| Package manager | `.claude/rules/subsystem-package-manager.md` |
-| CLI commands | `.claude/rules/subsystem-cli.md` |
-| Mirror tool | `.claude/rules/subsystem-mirror.md` |
-| Acceptance tests | `.claude/rules/subsystem-tests.md` |
-| Website/docs | `.claude/rules/subsystem-website.md` |
+Identify involved subsystems and read their matching
+`.claude/rules/subsystem-*.md` context rules — full subsystem → rule
+table lives in `CLAUDE.md` "Subsystem context".
 
 ## Research as a Reusable Primitive
 
@@ -176,7 +173,7 @@ explorer with researchers to ground external findings in local code.
 - **Overlays**: architect=X, research=Y, codex=Z
 
 ### Artifacts
-- `.claude/artifacts/plan_[feature].md`
+- `.claude/state/plans/plan_[feature].md`
 - `.claude/artifacts/research_[topic].md`
 - `.claude/artifacts/adr_[decision].md` (One-Way Door High)
 
@@ -191,7 +188,7 @@ explorer with researchers to ground external findings in local code.
 - Codex plan review: ...
 
 ### Next Step
-    /swarm-execute .claude/artifacts/plan_[feature].md
+    /swarm-execute .claude/state/plans/plan_[feature].md
 ```
 
 Consumers: `/swarm-execute` (plan artifact); Human (deferred findings).

@@ -1,6 +1,6 @@
 ---
 name: ocx-sync-roadmap
-description: Sync the website roadmap page with GitHub issues and PRs. Scans open/closed issues and open/merged PRs, matches them to roadmap features, updates statuses, adds missing links, and proposes new features from unlinked issues.
+description: Use when syncing the website roadmap page against current GitHub issues and PRs. Matches open/closed issues + open/merged PRs to roadmap features, updates statuses, adds links, and flags unlinked issues as candidates. Triggers: "sync roadmap", "/ocx-sync-roadmap".
 disable-model-invocation: true
 ---
 

@@ -1,6 +1,17 @@
+---
+paths:
+  - "crates/**"
+  - "test/**"
+  - "website/**"
+  - "mirrors/**"
+  - ".claude/**"
+  - "Cargo.toml"
+  - "Cargo.lock"
+---
+
 # Bug Fix Workflow
 
-Catalog-only rule. Referenced from [workflow-intent.md](./workflow-intent.md) when work is classified as a bug fix. Enforces root-cause discipline: understand the bug before fixing it.
+Path-scoped rule (auto-loads on source-work surfaces: `crates/**`, `test/**`, `website/**`, `mirrors/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock`). Referenced from [workflow-intent.md](./workflow-intent.md) when work is classified as a bug fix. Enforces root-cause discipline: understand the bug before fixing it.
 
 ## Non-Negotiable Sequence
 
@@ -68,23 +79,28 @@ Confirm the fix works and hasn't introduced regressions.
 
 ## Phase 6: Review-Fix Loop
 
-Diff-scoped, bounded iterative review before committing. Max 3 rounds.
-
-**Round 1** — review the fix diff. Correctness perspectives run first; if they have actionable findings, fix before running quality/security/performance perspectives.
+Apply the canonical Review-Fix Loop to the bug-fix diff. Bug-fix-specific perspectives run first in Round 1:
 - **Correctness**: Does the fix address the root cause (Phase 2), not just the symptom?
 - **Regression risk**: Could this change break other callers or edge cases?
 - **Minimality**: Is every line in the diff necessary for the fix? No drive-by changes?
 - **Test coverage**: Does the regression test (Phase 3) adequately prove the fix?
 
-Classify findings as:
-- **Actionable** — fix automatically, re-run affected perspectives in Round 2
-- **Deferred** — needs human judgment, surfaced in commit summary
+<!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->
+Diff-scoped, bounded iterative review. Tier-scaled: 1 round at `low`, up to 3 rounds at `high`/`max`.
 
-**Subsequent rounds** — re-run only perspectives that had actionable findings. Loop exits when no actionable findings remain or after 3 rounds total.
+**Round 1** — run every perspective on the diff. Perspectives most likely to find blockers run first (e.g. spec-compliance, correctness, behavior-preservation); if they surface actionable findings, fix before running the remaining perspectives in the same round.
 
-**Cross-model adversarial pass** (optional): After the loop converges, run a single Codex adversarial review against the diff. One-shot — no looping. Skipped gracefully if Codex is unavailable.
+Classify each finding:
 
-**Gate**: No actionable findings remain. `task verify` passes on final state. Deferred findings documented.
+- **Actionable** — fix automatically, re-run affected perspectives next round.
+- **Deferred** — needs human judgment; surface in the commit summary with context.
+
+**Subsequent rounds** — re-run only perspectives that had actionable findings in the previous round. Loop exits when no actionable findings remain or the tier's round cap is reached. Oscillating findings (same issue surfaced in two rounds) auto-defer.
+
+**Cross-model adversarial pass** (optional, tier-scaled): after the Claude loop converges, run a single Codex adversarial review against the diff as a final gate. One-shot, no looping — two-family stylistic thrash is the failure mode. Skipped gracefully if Codex is unavailable.
+
+**Gate to exit**: no actionable findings remain, verification passes on the final state, and deferred findings are documented for handoff.
+<!-- REVIEW_FIX_LOOP_CANONICAL_END -->
 
 ## Phase 7: Commit & Document
 
@@ -102,6 +118,17 @@ Close the loop so the fix is traceable.
 | Trivial (obvious cause, < 30 min) | No artifact — follow the phases inline |
 | Non-trivial (unclear cause, multi-file, or high risk) | Create `.claude/artifacts/bugfix_plan_[topic].md` from `bugfix_plan.template.md` |
 | Post-incident (production impact, security) | Create `.claude/artifacts/postmortem_[topic].md` from `postmortem.template.md` |
+
+## Red Flags — Recognize Rationalizations Before Acting on Them
+
+If you find yourself thinking any of the left column, stop and apply the right column. These are the most common ways a bug-fix session goes wrong.
+
+| Rationalization | Red flag | Correct action |
+|---|---|---|
+| "I know what's wrong, I'll just fix it" | No Phase 2 RCA written | Write the root-cause statement first. If you can't, you don't know the cause yet. |
+| "The test will be trivial, I'll add it after the fix" | Planning to write test after fix | Write the failing test first. A test added after the fix doesn't prove the fix works. |
+| "Clippy warns about something nearby — I'll fix it while I'm here" | Diff contains unrelated changes | Commit the fix alone. Open a separate commit for the cleanup. |
+| "Catching the exception is simpler than preventing the state" | Fix is in a `try/except` | That's a symptom fix. Find the condition that produced the bad state. |
 
 ## Anti-Patterns
 

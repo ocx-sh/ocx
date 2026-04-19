@@ -183,7 +183,7 @@ When receiving user feedback or corrections, evaluate whether the insight should
 
 ## Skills & Personas
 
-Persona skills (`/architect`, `/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`, `/swarm-plan`, `/swarm-execute`, `/swarm-review`) and task skills live in `.claude/skills/`. See the "Skills by task topic" table in [[.claude/rules.md](./.claude/rules.md)](.claude/rules.md) for the full map. Skills are auto-suggested via `.claude/skills/skill-rules.json`; check `.claude/skills/` before ad-hoc generation.
+Persona skills (`/architect`, `/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`, `/swarm-plan`, `/swarm-execute`, `/swarm-review`) and task skills live in `.claude/skills/`. See the "Skills by task topic" table in [.claude/rules.md](./.claude/rules.md) for the full map. Check `.claude/skills/` before ad-hoc generation.
 
 ## Starting Work
 

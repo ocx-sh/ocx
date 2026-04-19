@@ -1,8 +1,14 @@
 ---
 name: builder
-description: Implementation agent for coding, debugging, testing, and refactoring. Use when writing code, fixing bugs, implementing features, or improving code structure.
+description: Use when writing code, fixing a bug, implementing a feature, or improving code structure. Invoked for typed implementation work inside `crates/`, `test/`, `website/`, or other source surfaces.
 user-invocable: true
 argument-hint: "task-description"
+triggers:
+  - "fix the bug"
+  - "fix this bug"
+  - "refactor this"
+  - "refactor the"
+  - "write the code"
 ---
 
 # Builder — Senior Implementation Agent

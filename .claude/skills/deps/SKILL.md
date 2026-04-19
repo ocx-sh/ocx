@@ -1,6 +1,6 @@
 ---
 name: deps
-description: Manage Rust dependencies, license compliance, and security auditing for the OCX project. Use when adding, updating, or auditing crate dependencies.
+description: Use when adding a crate, updating dependency versions, auditing licenses, scanning for vulnerabilities, or editing `Cargo.toml` / `deny.toml` / `.licenserc.toml` in the OCX project.
 ---
 
 # Dependency Management

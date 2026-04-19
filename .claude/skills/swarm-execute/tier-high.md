@@ -59,66 +59,15 @@ changes). Run subsystem verify during the loop — NOT full `task verify`.
 
 ## Phase 6: Review-Fix Loop (up to 3 rounds, full breadth)
 
-Bounded review-fix cycle. Diff-scoped (findings must relate to
-`git diff main...HEAD --name-only`), severity-gated (Block/Warn drive
-the loop; Suggest goes directly to deferred).
+Protocol: see canonical in [`workflow-swarm.md`](../../rules/workflow-swarm.md#review-fix-loop). Tier-high overrides: `loop-rounds=3`; Stage 2 full (quality + security + perf + docs); Codex auto-on for One-Way Door plan signals.
 
 > **Reviewer model**: every `worker-reviewer` launch in this tier uses the resolved `--reviewer` overlay value (tier=high default `sonnet`). See `overlays.md` reviewer axis.
 
-### Round 1 — Stage 1 (spec-compliance + test-coverage, scoped to changed files)
+Stage 1 runs `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) and `worker-reviewer` (focus: `quality`, lens: test-coverage) **in a single message with multiple Agent tool calls** so they run concurrently; if actionable, one builder fix pass + subsystem verify before Stage 2. Stage 2 runs `quality`, `security` (if auth/input/crypto/signing touched), `performance` (if hot-path / async touched), and `worker-doc-reviewer` (if doc triggers match) **in a single message with multiple Agent tool calls** so they run concurrently.
 
-Launch in parallel:
-- `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`)
-- `worker-reviewer` (focus: `quality`, lens: test-coverage) — checks that
-  new code has tests, bug fixes have regression tests, edge cases covered
+Rounds 2–3: fresh `worker-builder` fixes actionable findings, subsystem verify, re-launch only perspectives with prior actionable findings. Codex code-diff fires when `--codex` is resolved on (user flag or classifier-inferred from plan `Reversibility: One-Way Door` / `Overlays: codex=on`); triage per `overlays.md`.
 
-If Stage 1 has actionable findings, run **one** builder fix pass +
-subsystem verify before Stage 2. Rationale: polishing code that doesn't
-meet the design record or lacks tests wastes effort.
-
-### Round 1 — Stage 2 (full perspectives, parallel)
-
-Launch in parallel (only applicable perspectives):
-- `worker-reviewer` (focus: `quality`)
-- `worker-reviewer` (focus: `security`) — if touching auth, input
-  handling, crypto, external data, signing
-- `worker-reviewer` (focus: `performance`) — if touching hot paths or
-  async code
-- `worker-doc-reviewer` — if doc triggers match changed files
-
-Each reviewer classifies findings:
-- **Actionable** (Block/Warn) — fixed without human input
-- **Deferred** — requires human judgment
-- **Suggest** — optional improvements → deferred summary directly
-
-### Rounds 2–3 (selective re-review)
-
-1. `worker-builder` (fresh subagent) fixes all actionable findings
-2. Run subsystem verify — must pass
-3. Re-launch **only** perspectives that had actionable findings
-4. Drop perspectives that now report clean
-
-Terminate on: converged (no actionable findings), budget exhausted
-(3 rounds), or oscillation (same findings as previous round → defer).
-
-### Codex code-diff review (optional at this tier)
-
-If `--codex` fires (user flag or classifier-inferred from plan
-`Reversibility: One-Way Door` or `Overlays: codex=on`), run a single
-`codex-adversary` pass in `code-diff` scope against the branch diff
-after the Claude loop converges. One-shot, no loop. Triage per
-`overlays.md`:
-
-- Actionable → one-shot `worker-builder` fix pass; gate: `task verify`
-- Deferred → commit summary
-- Stated-convention / trivia → dropped, counts reported
-
-Unavailable path: log `Cross-model gate skipped: <reason>` and continue.
-
-### Loop exit
-
-Run `task verify` once as ground truth. Print deferred findings
-summary:
+Print deferred findings summary at loop exit:
 
 ```
 ## Deferred Findings
@@ -138,8 +87,7 @@ summary:
 - [Finding]: [Optional improvement]
 ```
 
-**Gate**: `task verify` passes on final state. Deferred findings
-documented.
+**Gate**: `task verify` passes on final state. Deferred findings documented.
 
 ## Phase 7: Commit
 

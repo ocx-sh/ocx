@@ -29,6 +29,18 @@ CLAUDE.local.md
 .claude/hooks/.state/
 
 # =============================================================================
+# Claude State — project-local, per-worktree ephemera (Phase 3 context samples,
+# Phase 4 learnings store). Intentionally gitignored; each worktree accumulates
+# its own data.
+# =============================================================================
+.claude/state/
+
+# =============================================================================
+# Claude Lint Reports — build artifacts from `task claude:lint:links`, etc.
+# =============================================================================
+.claude/reports/
+
+# =============================================================================
 # Swarm Runtime
 # =============================================================================
 .swarm/

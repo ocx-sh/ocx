@@ -36,7 +36,7 @@ Read `.claude/rules/subsystem-*.md` for the relevant subsystem before designing.
 - Identify subsystem boundary violations
 
 ## Output
-Save to `.claude/artifacts/adr_[topic].md` or `.claude/artifacts/plan_[task].md`.
+Save to `.claude/artifacts/adr_[topic].md` (durable) or `.claude/state/plans/plan_[task].md` (ephemeral).
 
 ## Constraints
 - Follow product-tech-strategy.md Golden Paths

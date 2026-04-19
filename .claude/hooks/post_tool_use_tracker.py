@@ -11,7 +11,10 @@ Tracks edited files in .file-tracker.log, checks for context staleness
 for infrastructure files.
 """
 
+import json
+import os
 import sys
+import time
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 
@@ -124,12 +127,65 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "- .claude/rules/arch-principles.md (ADR Index table)",
         "an ADR — update the ADR Index in arch-principles.md",
     ),
+    (
+        ".claude/rules/*.md",
+        (
+            "- .claude/rules.md (catalog — every rule must be listed here)\n"
+            "- .claude/rules/meta-ai-config.md (consistency checklist)"
+        ),
+        "an AI config rule — update the catalog and meta-ai-config if scoping or globals changed",
+    ),
 ]
 
 
 # ---------------------------------------------------------------------------
 # Pure logic functions (testable)
 # ---------------------------------------------------------------------------
+
+
+_AI_CONFIG_MD_PREFIXES = (
+    ".claude/rules/",
+    ".claude/skills/",
+    ".claude/agents/",
+)
+
+
+def _is_ai_config_markdown(rel_path: str) -> bool:
+    """True if rel_path is an AI-config Markdown file that should trigger reminders."""
+    if not rel_path.endswith(".md"):
+        return False
+    return any(rel_path.startswith(p) for p in _AI_CONFIG_MD_PREFIXES)
+
+
+def _sample_context_budget(session_id: str, tool_name: str, project_dir: str) -> None:
+    """Append a context-budget sample to `.claude/state/context-samples.jsonl`.
+
+    Phase 3 measurement instrumentation per
+    `.claude/artifacts/adr_ai_config_context_monitor_hook.md`. Only fires when
+    the `CLAUDECODE_CONTEXT_REMAINING` env var is present and numeric; the
+    full advisory-emitting hook is deferred pending ≥2/10 sessions crossing
+    the 35% remaining threshold.
+
+    Fails open on any exception — PostToolUse contract forbids non-zero exit.
+    """
+    try:
+        raw = os.environ.get("CLAUDECODE_CONTEXT_REMAINING")
+        if raw is None or raw == "":
+            return
+        remaining_pct = float(raw)
+        state_dir = Path(project_dir) / ".claude" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "remaining_percentage": remaining_pct,
+            "ts": int(time.time()),
+        }
+        with (state_dir / "context-samples.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception:
+        # Fail open — measurement must never break the hook contract.
+        return
 
 
 def glob_match(rel_path: str, pattern: str) -> bool:
@@ -196,20 +252,28 @@ def main() -> None:
         data = hook_utils.read_input()
 
         tool_name: str = data.get("tool_name", "")
+        session_id: str = data.get("session_id", "")
         tool_input: dict = data.get("tool_input", {})
         file_path: str = tool_input.get("file_path") or tool_input.get("path") or ""
+
+        project_dir = hook_utils.get_project_dir()
+
+        # Phase 3 measurement instrumentation — runs before the file_path and
+        # Markdown early-exits so we capture samples for every tool call, not
+        # only the ones that pass through to reminder logic.
+        if project_dir:
+            _sample_context_budget(session_id, tool_name, project_dir)
 
         if not file_path:
             sys.exit(0)
 
-        if file_path.endswith(".md"):
-            sys.exit(0)
-
-        project_dir = hook_utils.get_project_dir()
         if not project_dir:
             sys.exit(0)
 
         rel_path = hook_utils.relative_path(file_path, project_dir)
+
+        if rel_path.endswith(".md") and not _is_ai_config_markdown(rel_path):
+            sys.exit(0)
 
         state = hook_utils.StateManager(project_dir)
 

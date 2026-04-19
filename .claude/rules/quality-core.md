@@ -133,6 +133,16 @@ When switching hats, commit first, then switch context.
 
 ---
 
+## Red Flags — Two Hats Rationalizations
+
+| Rationalization | Red flag | Correct action |
+|---|---|---|
+| "I'll optimize this loop while I refactor it" | Hat 1 and Hat 2 mixed in one pass | Commit the refactor first. Then put on Hat 2. |
+| "The benchmark runs fine locally, I'll skip it" | No benchmark output in the commit | Put on Hat 2 = benchmarks are required. Record the before/after. |
+| "This refactor is small, I don't need a test" | No tests cover the changed code | If no safety net exists, write characterization tests first — that's Hat 1 prep, not optional. |
+
+---
+
 ## Verification Honesty
 
 Verification claims must be evidence-backed. Hedging language in review verdicts, commit

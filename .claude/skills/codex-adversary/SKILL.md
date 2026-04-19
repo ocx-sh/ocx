@@ -1,9 +1,15 @@
 ---
 name: codex-adversary
-description: Run an adversarial cross-model code review via Codex CLI, auto-triage the findings (filter noise, classify safe-auto-fix vs needs-confirmation), and hand approved fixes to the builder pattern. Use when you want a genuinely different model's perspective on your changes — not another Claude agent. Complements /swarm-review (which is multi-perspective but Claude-intra-family). Two scope modes — code diff (default, branch/working-tree) and plan-artifact (invoked by /swarm-plan against a plan/ADR file as a final gate). Use when the user says "codex review", "/codex-adversary", "adversarial review", or asks for a cross-model second opinion.
+description: Use when the user says "codex review", "/codex-adversary", "adversarial review", "cross-model review", or asks for a different-model second opinion on a diff or plan artifact. Complements `/swarm-review` via Codex-CLI. Scopes: code-diff (default), plan-artifact (gate for `/swarm-plan`).
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch|plan-artifact] [--target-file <path>] [focus text]"
+triggers:
+  - "codex review"
+  - "adversarial review"
+  - "cross-model review"
+  - "second opinion"
+  - "another model"
 ---
 
 # /codex-adversary — Cross-Model Adversarial Review + Triage
@@ -51,7 +57,8 @@ Two scope families, selected by the caller:
   invocation.
 - **plan-artifact** (scope `plan-artifact`, `--target-file <path>`) —
   reviews a plan / ADR / design markdown file. Invoked by
-  `/swarm-plan` after the Claude review panel converges.
+  `/swarm-plan` after the Claude review panel converges. See
+  [`references/plan-artifact-scope.md`](./references/plan-artifact-scope.md).
 
 For code-diff scopes, run in parallel:
 
@@ -101,55 +108,10 @@ When the review returns, Claude processes Codex's free-text output and
 produces a **triaged report**. Do not passthrough-prompt the user for every
 finding — filter intelligently.
 
-#### Triage classes
-
-| Class | Definition | Action |
-|---|---|---|
-| **Auto-fix** | Clear root cause, small edit, obviously correct, no architectural or security implications, fits existing patterns, covered by test suite | Apply directly via `Edit` / `Write`. Run `task verify`. Report what was done. |
-| **Needs confirmation** | Correct observation but the fix has design implications, touches security/auth, introduces or removes a dependency, changes a public API, affects a large surface | Present the finding + proposed fix + tradeoff. Wait for user decision via `AskUserQuestion` or free-text. |
-| **Discuss** | Codex raises a real design question with no single right answer (e.g., "this approach assumes X — is that intentional?") | Present the question verbatim with Claude's take. Let the user decide. Do not auto-answer. |
-| **Filtered — trivia** | Subjective style, nit-pick formatting (`cargo fmt` handles it), wording in comments | Drop. Mention count only. |
-| **Filtered — stated convention** | Codex critiques something explicitly fixed by `AGENTS.md` / `CLAUDE.md` (e.g., "consider Nix instead of OCI", "consider async-std instead of Tokio", "add Co-Authored-By") | Drop. Mention count only. |
-| **Filtered — false positive** | Codex flags something based on stale or partial context; verify against current code before counting it | Drop. If you are not sure it is false, promote to *needs confirmation* instead. |
-
-**Heuristics for "safe to auto-fix"**:
-
-- The fix is ≤10 lines and affects ≤3 files
-- The fix is entirely inside one subsystem (no cross-crate changes)
-- No security/auth/secrets/crypto code touched
-- No `pub` API surface changed
-- No new dependencies, no version bumps
-- No changes to `.claude/`, `CLAUDE.md`, `AGENTS.md`, or quality gates
-- Tests still pass (verify after)
-
-If in doubt, promote to **needs confirmation**. Better to ask once than to
-apply a wrong "obvious" fix.
-
-#### Report format
-
-Produce a single triaged report back to the user:
-
-```
-## Codex adversarial review — triaged
-
-**Auto-fix** (N): applying directly
-1. <one-line summary> — file:line → brief fix description
-2. ...
-
-**Needs confirmation** (N): proposing, waiting for decision
-1. <finding> → proposed fix → tradeoff
-2. ...
-
-**Discuss** (N): design questions
-1. <question> → Claude's read
-
-**Filtered** (M trivia, K stated-convention, P false-positive)
-```
-
-Then, without further prompting, apply the **Auto-fix** items. If any
-auto-fix has non-trivial implications discovered during implementation
-(unexpected compile errors, cross-cutting changes), abort that item and
-reclassify it as **needs confirmation**.
+See [`references/triage.md`](./references/triage.md) for the full triage
+class table (Auto-fix / Needs confirmation / Discuss / Filtered-trivia /
+Filtered-stated-convention / Filtered-false-positive), the heuristics for
+"safe to auto-fix", and the triaged report format.
 
 ### 4. Implementation (auto-fix items)
 
@@ -199,40 +161,16 @@ read per item, but must not advocate forcefully — these are user decisions.
 ## Plan-artifact scope (invoked by /swarm-plan)
 
 When called with `--scope plan-artifact --target-file
-.claude/artifacts/plan_<feature>.md`, the contract changes:
-
-- **Target**: the plan / ADR / system-design markdown file, not a git
-  diff. Pass the file path to the companion so it sees the full plan
-  contents.
-- **Triage** (simplified — no auto-fix batch; plans are edited, not
-  compiled):
-
-  | Class | Action |
-  |---|---|
-  | **Actionable** | Orchestrator (the caller — `/swarm-plan`) edits the plan artifact, then re-runs a single `worker-reviewer` (focus: `spec-compliance`) pass to validate the edit. |
-  | **Deferred** | Added to Deferred Findings in the `/swarm-plan` handoff summary — requires human design judgment. |
-  | **Stated-convention** | Drop. Mention count only. (Codex critiques a load-bearing project convention fixed in `CLAUDE.md` / `AGENTS.md`.) |
-  | **Trivia** | Drop. Mention count only. (Wording, formatting, markdown style.) |
-
-- **One-shot only** — no looping. Mirrors the "prevent two-family
-  stylistic thrash" rationale from the code-diff pass.
-- **Unavailable path**: if `CLAUDE_PLUGIN_ROOT` is unset or the
-  companion returns non-zero, log `Cross-model plan review skipped:
-  <reason>` and return — the caller (`/swarm-plan`) decides whether
-  to treat the skip as a gate miss (max tier) or a silent default
-  (lower tiers).
+.claude/state/plans/plan_<feature>.md`, the contract changes — triage is
+simplified (no auto-fix batch; plans are edited, not compiled) and the
+pass is one-shot. See [`references/plan-artifact-scope.md`](./references/plan-artifact-scope.md)
+for the full contract.
 
 ## Failure modes
 
-- **Codex unavailable** — companion returns non-zero or reports not ready.
-  Stop with the companion's diagnostic output and suggest `/codex:setup`.
-- **No changes to review** — stop with "nothing to review" after
-  double-checking untracked files (Codex can review untracked work).
-- **Codex output empty or garbled** — return Codex's stdout verbatim and
-  skip triage. Tell the user the review appears empty and ask if they want
-  to rerun.
-- **`task verify` fails after auto-fix** — revert the failing edit, mark
-  that item `⚠️ reverted-and-promoted`, continue with the rest.
+See [`references/failure-modes.md`](./references/failure-modes.md) —
+Codex unavailable, no changes to review, empty/garbled Codex output,
+`task verify` failures after auto-fix.
 
 ## References
 
@@ -244,3 +182,6 @@ When called with `--scope plan-artifact --target-file
   (Block / Warn / Suggest) used in the triaged report
 - `.claude/skills/builder/SKILL.md` — the implementation pattern for
   applying approved fixes
+- [`references/triage.md`](./references/triage.md) — classes, heuristics, report template
+- [`references/plan-artifact-scope.md`](./references/plan-artifact-scope.md) — plan-artifact contract
+- [`references/failure-modes.md`](./references/failure-modes.md) — error paths

@@ -1,9 +1,15 @@
 ---
 name: finalize
-description: Prepare the current branch for fast-forward merge onto main. Rewrites messy working-phase history (Checkpoints, bundled commits, chore noise) into a clean sequence of Conventional Commits — each one a reasonable entry in the main branch changelog. Scans `main..HEAD`, classifies commits, proposes a concrete rebase plan, and executes it non-interactively. Supports "squash everything into one commit" mode when the branch is really one changelog entry. Use when the user says "finalize", "/finalize", "prepare this branch for main", "clean up the history", "squash the branch", or anything about landing the branch on main.
+description: Use when the user says "finalize", "/finalize", "prepare this branch for main", "clean up history", "squash the branch", or landing a branch on `main`. Rewrites Checkpoint working-phase commits into clean Conventional Commits before fast-forward merge. Flags: `--squash-all`, `--dry-run`.
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "[--squash-all | --dry-run]"
+triggers:
+  - "finalize"
+  - "prepare this branch"
+  - "prepare the branch"
+  - "clean up history"
+  - "squash the branch"
 ---
 
 # /finalize — Prepare Branch for Fast-Forward Merge

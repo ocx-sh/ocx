@@ -1,8 +1,14 @@
 ---
 name: swarm-review
-description: Adversarial multi-perspective code reviewer. Tiered dispatch that scales from a single diff-scoped reviewer (low) to a full adversarial panel with architect, SOTA research, and Codex cross-model gate (max). Auto-classifies effort from diff metrics against a configurable baseline (default main). Use for branch/PR/diff review before landing on main.
+description: Use for branch, PR, or diff review before landing on main. Tier (`low | auto | high | max`) scales breadth from a single reviewer to an adversarial panel with architect + SOTA-gap + Codex cross-model gate. Triggers: "review", "/swarm-review", pre-merge checks.
 user-invocable: true
 argument-hint: "[tier] <branch-or-pr> [--base=<ref>] [--flags]"
+triggers:
+  - "review this branch"
+  - "review this pr"
+  - "review this diff"
+  - "pre-merge check"
+  - "before i merge"
 ---
 
 # Adversarial Reviewer — Tiered
@@ -84,7 +90,7 @@ classifier overlays + user flag overrides. User flags always win.
 Fire when ANY of: `--dry-run`, `--form`, tier resolved to `max`, or
 low-confidence classification. Only user-prompt point.
 
-Write `.claude/artifacts/meta-plan_review_[target].md` with:
+Write `.claude/state/plans/meta-plan_review_[target].md` with:
 Classification (tier + rationale + diff metrics snapshot), Baseline
 (source: user-flag / PR-base / default), Overlays (with rationale),
 Workers per perspective, Estimated cost, Not Doing (no auto-fixes, no

@@ -34,7 +34,7 @@ subsystems that might be affected by cross-cutting changes. Read:
 
 > **Reviewer model**: every `worker-reviewer` launch in this tier uses the resolved `--reviewer` overlay value (tier=max default `sonnet`; escalated to `opus` when `--breadth=adversarial` fires). See `overlays.md` reviewer axis.
 
-Same as tier-high — launch in parallel:
+Same as tier-high — launch **in a single message with multiple Agent tool calls** so they run concurrently:
 
 - **1** `worker-reviewer` (focus: `spec-compliance`, phase:
   `post-implementation`) — reviews the **Implement**-phase output
@@ -52,7 +52,7 @@ design-record anchor.
 
 ## Phase 3: Stage 2 — Adversarial breadth (parallel, up to 6 workers)
 
-Launch in parallel:
+Launch **in a single message with multiple Agent tool calls** so they run concurrently:
 
 - `worker-reviewer` (focus: `quality`) — including CLI-UX lens when
   the diff touches command surface
@@ -173,7 +173,7 @@ Standard handoff from `SKILL.md`. Classification line:
 
 If actionable findings exist:
 
-    /swarm-execute max .claude/artifacts/plan_[feature].md
+    /swarm-execute max .claude/state/plans/plan_[feature].md
     /swarm-execute max "apply max-tier review findings"   # no plan yet
 
 If SOTA gaps or architectural concerns need their own ADR, escalate:

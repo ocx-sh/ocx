@@ -1,9 +1,15 @@
 ---
 name: commit
-description: Commit the current working changes on a feature or worktree branch. Opinionated for OCX's working-phase posture — minimise commit count, bundle freely, amend rolling Checkpoints when appropriate, detect stranded Checkpoints in recent history, offer a one-time feature-branch + PR prompt per branch. For rebasing-phase cleanup before landing on main, use `/finalize`. Use when the user says "commit", "/commit", "save progress", or asks to land changes.
+description: Use when the user says "commit", "/commit", "save progress", or asks to land working changes on a feature or worktree branch. OCX working-phase posture — minimises commit count, can amend rolling Checkpoints, offers a one-time PR prompt. For pre-merge cleanup, use `/finalize`.
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "[optional context or --pr | --no-pr | --amend]"
+triggers:
+  - "commit"
+  - "save progress"
+  - "commit my changes"
+  - "commit the changes"
+  - "stage and commit"
 ---
 
 # /commit — Working-Phase Commit Workflow

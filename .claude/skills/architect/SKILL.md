@@ -1,8 +1,14 @@
 ---
 name: architect
-description: Principal architect for system design, ADRs, and architecture decisions. Use for design work, trade-off analysis, or planning where features should land in the OCX codebase.
+description: Use when the task involves a design spec, an ADR, a one-way-door decision, or evaluating trade-offs between architectural approaches. Invoke before implementation when requirements span subsystems or the decision is hard to reverse. Trigger: /architect.
 user-invocable: true
 argument-hint: "design-topic"
+triggers:
+  - "design spec"
+  - "write an adr"
+  - "draft an adr"
+  - "architectural decision"
+  - "one-way door"
 ---
 
 # Principal Architect

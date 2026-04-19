@@ -95,9 +95,9 @@ Defaults per tier (before overlays apply):
 
 ## Examples
 
-1. `/swarm-execute .claude/artifacts/plan_small_flag.md` whose header reads
+1. `/swarm-execute .claude/state/plans/plan_small_flag.md` whose header reads
    `Tier: low` → tier=**low**, no overlays, confident. Plan-header wins.
-2. `/swarm-execute .claude/artifacts/plan_refactor_oci.md` with
+2. `/swarm-execute .claude/state/plans/plan_refactor_oci.md` with
    `Tier: high` + `Reversibility: One-Way Door Medium` → tier=**high**
    + `--codex` (from Reversibility signal), confident.
 3. `/swarm-execute "add --json flag to ocx ls"` (free text) →
@@ -106,6 +106,6 @@ Defaults per tier (before overlays apply):
    no plan) → classifier proposes **max**, but because max requires a
    plan artifact, SKILL.md announces and stops, asking the user to run
    `/swarm-plan max "…"` first.
-5. `/swarm-execute .claude/artifacts/plan_x.md` with a partial header
+5. `/swarm-execute .claude/state/plans/plan_x.md` with a partial header
    (no `Tier:` field) and free-text signals split between `low` and
    `high` → low-confidence → meta-plan gate fires.

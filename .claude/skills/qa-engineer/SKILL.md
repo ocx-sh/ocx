@@ -1,8 +1,14 @@
 ---
 name: qa-engineer
-description: QA engineer for test strategy, writing tests, and validation against specifications. Use when designing test suites, writing acceptance tests, or validating implementations.
+description: Use when designing test suites, writing acceptance tests, validating an implementation against a spec, or planning test coverage before implementation. Trigger: /qa-engineer.
 user-invocable: true
 argument-hint: "component-to-test"
+triggers:
+  - "write tests for"
+  - "design test suite"
+  - "test coverage plan"
+  - "acceptance tests"
+  - "validate against the spec"
 ---
 
 # QA Engineer

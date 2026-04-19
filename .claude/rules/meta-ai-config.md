@@ -19,6 +19,23 @@ Claude Code has three distinct rule-activation mechanisms. Each serves a differe
 
 Path-scoped rules don't fire during planning, research, or architecture work — no file is open yet. Skills require the LLM to already know the skill exists. The catalog (`.claude/rules.md`) closes this gap: it's the authoritative map browsed during plan/research phases. Any change to `.claude/rules/` must be reflected in the catalog in the same commit; structural tests enforce parity.
 
+### Current Global Rules (no `paths:` frontmatter)
+
+Three rules under `.claude/rules/` have no `paths:` frontmatter and therefore load unconditionally every session. They are also listed in `rules.md` "Globals" footer. Any change to this set must update both this enumeration and `rules.md`.
+
+1. `quality-core.md` — universal code quality
+2. `product-tech-strategy.md` — tech golden paths
+3. `workflow-intent.md` — work-type router (must fire at first touch)
+
+Two additional always-loaded files reach Claude by a different mechanism and are *not* counted here because they do not use the path-scope frontmatter layer:
+
+- `.claude/rules.md` — the catalog itself; `@`-imported from `CLAUDE.md`
+- `CLAUDE.md` — the project root instructions; loaded by Claude Code directly
+
+`meta-ai-config.md` is path-scoped to `.claude/**` (not a true global); it loads whenever AI config files are being edited.
+
+If the strict count drifts from 3, `test_global_rule_count_matches` fails.
+
 ## Core Principle: Context Budget
 
 Every rule, skill description, and CLAUDE.md line competes for the same context window. Bloated config causes Claude to ignore instructions.
@@ -74,10 +91,11 @@ See `/swarm-plan` "Research as a Reusable Primitive" for the full pattern contra
 
 ### Skills (`.claude/skills/<name>/SKILL.md` — canonical flat layout)
 
-- `description` is the #1 discovery factor — write as "what it does + when to use it" (max 1024 chars)
+- `description` is the #1 discovery factor — write trigger phrasing (Contextual Signal Only / CSO policy, see `.claude/artifacts/adr_ai_config_skill_description_csopolicy.md`). Forbidden verbs: `dispatches|runs|iterates|orchestrates|performs|executes|handles` — these cause Claude to read the description as the workflow and skip the body. Front-load discriminating keywords (truncation cuts from the end). Max 1024 chars per skill.
 - `argument-hint` must be a quoted string
 - `allowed-tools` is NOT supported in frontmatter
 - `disable-model-invocation: true` for action skills with side effects (commit, deploy, release)
+- `triggers:` (required for `user-invocable: true` skills) — a list of 3–7 literal phrases the UserPromptSubmit routing hook matches against user prompts (case-insensitive substring match). The hook reads this field at runtime from each SKILL.md — do not encode triggers in hook code. Rules: each trigger is ≥2 words OR a clear domain token (`deps`, `commit`, `finalize`); no duplicates across skills. When adding a new user-invocable skill, add `triggers:` in the same commit or `test_user_invocable_skills_have_triggers` will fail.
 - Progressive disclosure: SKILL.md <500 lines, reference files for details
 - `context: fork` to run in isolated subagent (protects main context)
 - **No category subdirectories.** Claude Code discovers skills at `.claude/skills/<name>/SKILL.md` exactly and does not recurse deeper for in-project skills. Nesting for grouping (e.g., `personas/`, `operations/`) silently breaks `/slash-command` discovery. Enforce at the test layer.
@@ -99,6 +117,17 @@ See `/swarm-plan` "Research as a Reusable Primitive" for the full pattern contra
 - Shared utilities in `hook_utils.py` — import via `sys.path` insertion
 - Use `PreToolUse` for blocking, `PostToolUse` for logging/reminders (never exit non-zero)
 
+## Cross-Session Learnings Store
+
+Project-local JSONL store for recurring technical patterns (oci-client quirks, clippy suppressions, test flakiness). Separate from human-authored `MEMORY.md`. Full schema + policy in `.claude/artifacts/adr_ai_config_cross_session_learnings_store.md`.
+
+- **Canonical:** `.claude/state/learnings.jsonl` (per-worktree, gitignored); pending queue at `.claude/hooks/.state/learnings-pending.jsonl`; schema-mismatches quarantined to `learnings-orphan.jsonl`
+- **Capture:** subagent emits `[LEARNING] { ... }` JSON → `subagent_stop_logger.py` parses + redacts secrets + appends → `stop_validator.py` merges at session end with fingerprint dedup, then TTL prune + confidence decay
+- **Schema v1 required fields:** `schema_version=1`, `id` (uuid-v4), `created_at` (ISO-8601 UTC), `source_agent`, `category` ∈ {rust, python, ts, oci, test, clippy, mirror, build, other}, `fingerprint` (sha256(category|normalized_summary)[:16]), `summary` (≤160 chars), `confidence` (0–1), `ttl_days`. Also stored: `source_session`, `evidence_ref`, `confidence_updated_at`, `occurrence_count`
+- **Staged rollout:** Stage 1 (30 days from merge, tracked via `.claude/state/.day30-review-reminder`) is logging-only (`[LEARNINGS] N captured, M unique total`); Stage 2 tunes promotion thresholds and emits `[LEARNING PROMOTION CANDIDATE]` blocks when `occurrence_count ≥ N` AND `confidence ≥ C`. Promotion to `MEMORY.md` is always a human action
+- **Cleanup:** drop past `created_at + ttl_days` (default 90d); drop `confidence < 0.3`; fingerprint dedup replenishes `confidence += 0.15`; decay `−0.02/day` since `confidence_updated_at`
+- **Schema migration:** field additions permitted without migration; renames/removals require a migration script + `schema_version` bump in the same commit
+
 ## Anti-Patterns
 
 1. **Global rule >200 lines** — same problem as bloated CLAUDE.md
@@ -112,6 +141,7 @@ See `/swarm-plan` "Research as a Reusable Primitive" for the full pattern contra
 9. **Category subdirectories under `.claude/skills/`** — breaks slash command discovery. Caught structurally by `test_all_skills_at_flat_layout`.
 10. **Language rules with project-specific content** — `quality-{lang}.md` files are shareable across repos. Any reference to OCX types (`PackageErrorKind`, `ReferenceManager`) or modules (`ocx_lib/`, `crates/ocx_mirror/`) belongs in `arch-principles.md` or `subsystem-*.md`, not in a language rule. Enforced structurally by `test_shareable_rules_no_ocx_leak`.
 11. **Catalog drift** — adding, removing, or renaming a rule in `.claude/rules/` without updating `.claude/rules.md` in the same commit. Enforced by `test_catalog_covers_all_rules` and `test_catalog_references_resolve`.
+12. **Missing `triggers:` on a user-invocable skill** — the UserPromptSubmit routing hook matcher silently excludes the skill, so natural-language prompts never route to it. Enforced structurally by `test_user_invocable_skills_have_triggers`.
 
 ## Consistency Checks
 
@@ -121,7 +151,7 @@ When editing any `.claude/` artifact:
 - [ ] Cross-references point to existing files
 - [ ] New rules reference subsystem context rules where relevant
 - [ ] CLAUDE.md stays under 200 lines
-- [ ] Global rules total is manageable (currently 5 — monitor growth)
+- [ ] Global rules total is manageable (currently 3 — monitor growth; see `### Current Global Rules` above for the strict definition)
 - [ ] AI config structural tests pass: `task claude:tests`
 
 ## Structural Validation Tests

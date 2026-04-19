@@ -1,6 +1,6 @@
 ---
 name: docs
-description: Write OCX documentation (user guide, reference pages, website content). Applies OCX-specific narrative structure, linking conventions, and VitePress component patterns. See subsystem-website.md for full VitePress architecture.
+description: Use when authoring or editing OCX documentation — user guide, reference pages, website content under `website/src/docs/`, VitePress pages, or doc narrative structure.
 ---
 
 # OCX Documentation

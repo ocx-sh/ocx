@@ -1,6 +1,17 @@
+---
+paths:
+  - "crates/**"
+  - "test/**"
+  - "website/**"
+  - "mirrors/**"
+  - ".claude/**"
+  - "Cargo.toml"
+  - "Cargo.lock"
+---
+
 # Refactoring Workflow
 
-Catalog-only rule. Referenced from [workflow-intent.md](./workflow-intent.md) when work is classified as a refactoring. Enforces the Two Hats Rule: change structure without changing behavior.
+Path-scoped rule (auto-loads on source-work surfaces: `crates/**`, `test/**`, `website/**`, `mirrors/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock`). Referenced from [workflow-intent.md](./workflow-intent.md) when work is classified as a refactoring. Enforces the Two Hats Rule: change structure without changing behavior.
 
 ## Core Principle
 
@@ -62,23 +73,28 @@ Confirm behavior is unchanged.
 
 ## Phase 5: Review-Fix Loop
 
-Diff-scoped, bounded iterative review of each transformation. Max 3 rounds.
-
-**Round 1** — review the transformation diff. Behavior-preservation and scope-discipline perspectives run first; if they have actionable findings, fix before running code-quality perspectives.
+Apply the canonical Review-Fix Loop to each transformation's diff. Refactor-specific perspectives run first in Round 1:
 - **Behavior preservation**: Does the diff change only structure, never behavior?
 - **Scope discipline**: Does every line serve the named transformation from Phase 2?
 - **Test integrity**: Were any tests modified? (If so, behavior likely changed — flag it)
 - **Code quality**: Does the transformation improve clarity without introducing new smells?
 
-Classify findings as:
-- **Actionable** — fix automatically, re-run affected perspectives in Round 2
-- **Deferred** — needs human judgment, surfaced in commit summary
+<!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->
+Diff-scoped, bounded iterative review. Tier-scaled: 1 round at `low`, up to 3 rounds at `high`/`max`.
 
-**Subsequent rounds** — re-run only perspectives that had actionable findings. Loop exits when no actionable findings remain or after 3 rounds total.
+**Round 1** — run every perspective on the diff. Perspectives most likely to find blockers run first (e.g. spec-compliance, correctness, behavior-preservation); if they surface actionable findings, fix before running the remaining perspectives in the same round.
 
-**Cross-model adversarial pass** (optional): After the loop converges, run a single Codex adversarial review against the diff. One-shot — no looping. Skipped gracefully if Codex is unavailable.
+Classify each finding:
 
-**Gate**: No actionable findings remain. `task verify` passes on final state. Deferred findings documented.
+- **Actionable** — fix automatically, re-run affected perspectives next round.
+- **Deferred** — needs human judgment; surface in the commit summary with context.
+
+**Subsequent rounds** — re-run only perspectives that had actionable findings in the previous round. Loop exits when no actionable findings remain or the tier's round cap is reached. Oscillating findings (same issue surfaced in two rounds) auto-defer.
+
+**Cross-model adversarial pass** (optional, tier-scaled): after the Claude loop converges, run a single Codex adversarial review against the diff as a final gate. One-shot, no looping — two-family stylistic thrash is the failure mode. Skipped gracefully if Codex is unavailable.
+
+**Gate to exit**: no actionable findings remain, verification passes on the final state, and deferred findings are documented for handoff.
+<!-- REVIEW_FIX_LOOP_CANONICAL_END -->
 
 ## Phase 6: Commit & Repeat
 
@@ -94,8 +110,17 @@ Commit the transformation, then start the next cycle if there are more transform
 | Scope | Artifact |
 |-------|----------|
 | Single transformation | No artifact — follow the phases inline |
-| Multi-step refactoring (3+ transformations) | Create `.claude/artifacts/plan_refactor_[topic].md` from `plan.template.md` — list transformations in order |
+| Multi-step refactoring (3+ transformations) | Create `.claude/state/plans/plan_refactor_[topic].md` from `plan.template.md` — list transformations in order |
 | Cross-subsystem refactoring | Use `/swarm-plan` — multiple subsystem rules may apply |
+
+## Red Flags — Recognize Rationalizations Before Acting on Them
+
+| Rationalization | Red flag | Correct action |
+|---|---|---|
+| "The existing tests cover the general area, we're good" | No explicit check that the specific code path is tested | Write a characterization test for the exact function or branch being transformed. |
+| "I'll do the rename AND extract the helper in one pass" | Diff contains 2+ named transformations | Split. Commit each transformation separately — Two Hats Rule at the transformation level too. |
+| "The test started failing, so I updated it to match" | Test file modified during refactor | Revert the test change. If the transformation is behavior-preserving, tests pass unchanged. |
+| "The cleanup is small, I'll sneak in a bug fix" | Refactor commit fixes a bug | Split. `refactor:` and `fix:` are different commit types — keep them separate. |
 
 ## Anti-Patterns
 

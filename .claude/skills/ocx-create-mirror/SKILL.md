@@ -1,6 +1,6 @@
 ---
 name: ocx-create-mirror
-description: Interactive workflow to create a new ocx-mirror configuration by analyzing GitHub Release assets, detecting platforms, and inspecting archive contents to generate mirror YAML, metadata JSON, description README with frontmatter, and logo.
+description: Use when creating a new ocx-mirror configuration for a GitHub-released tool. Inspects Release assets, detects platforms, examines archive contents, and produces mirror YAML, metadata JSON, README, and logo. Triggers: "create a mirror", "/ocx-create-mirror", "add mirror for <tool>".
 disable-model-invocation: true
 ---
 
@@ -37,20 +37,7 @@ gh api "repos/{owner}/{repo}/releases/tags/{tag}" --jq '.assets[] | {name, size,
 
 6. **Sample multiple releases.** Pick 2-3 releases spread across the version range (recent, middle, oldest above min) to account for naming changes over time. Collect all asset filenames.
 
-7. **Derive platform mappings.** Match asset filenames to platforms using common naming conventions:
-
-   | Platform | Common substrings |
-   |----------|-------------------|
-   | `linux/amd64` | `linux-x86_64`, `linux-amd64`, `linux64`, `Linux-x86_64` |
-   | `linux/arm64` | `linux-aarch64`, `linux-arm64`, `Linux-aarch64` |
-   | `darwin/amd64` | `darwin-x86_64`, `macos-x86_64`, `macOS-x86_64`, `macos-universal`, `Darwin-x86_64`, `apple-darwin` |
-   | `darwin/arm64` | `darwin-arm64`, `macos-arm64`, `darwin-aarch64`, `macos-universal`, `apple-darwin` |
-   | `windows/amd64` | `windows-x86_64`, `win64`, `windows-amd64`, `win-x64`, `pc-windows` |
-   | `windows/arm64` | `windows-arm64`, `win-arm64` |
-
-   - If a `universal` or `any` asset exists for macOS, map it to both `darwin/amd64` and `darwin/arm64`.
-   - Build regex patterns per platform. Use `.*` for version segments, escape dots and special chars.
-   - If asset names changed between versions, add multiple patterns per platform (ordered newest first).
+7. **Derive platform mappings.** Match asset filenames to platforms using common naming conventions. See [`references/platform-detection.md`](./references/platform-detection.md) for the full platform mapping table and musl-vs-glibc decision process.
 
 8. **Present the detected platforms and patterns to the user** for confirmation. Show which assets matched which platforms.
 
@@ -61,199 +48,56 @@ gh api "repos/{owner}/{repo}/releases/tags/{tag}" --jq '.assets[] | {name, size,
    - `.zip` → zip archive
    - No extension or `.exe` → raw binary
 
-   **Mixed asset types across platforms** (e.g. tarballs on Linux/macOS but a raw `.exe` on Windows — common for Rust CLI tools like lychee, ripgrep, fd) require the per-platform `asset_type` form. See step 14.
+   **Mixed asset types across platforms** (e.g. tarballs on Linux/macOS but a raw `.exe` on Windows — common for Rust CLI tools like lychee, ripgrep, fd) require the per-platform `asset_type` form. See [`references/archive-inspection.md`](./references/archive-inspection.md).
 
 10. **For archives: download and inspect samples.** Download one archive per unique platform layout (typically: one Linux, one macOS, one Windows if they differ). Use a temp directory.
 
-```bash
-# Download a sample asset
-curl -fsSL -o /tmp/ocx-mirror-inspect/{filename} "{download_url}"
+    ```bash
+    # Download a sample asset
+    curl -fsSL -o /tmp/ocx-mirror-inspect/{filename} "{download_url}"
 
-# Inspect tarball
-tar tf /tmp/ocx-mirror-inspect/{filename} | head -50
+    # Inspect tarball
+    tar tf /tmp/ocx-mirror-inspect/{filename} | head -50
 
-# Inspect zip
-unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
-```
-
-11. **Analyze directory structure.** Look for:
-    - **Top-level wrapper directory** (e.g. `cmake-3.28.0-linux-x86_64/bin/cmake`) — if ALL entries share a common prefix directory, this needs `strip_components: 1` in the mirror YAML so the rebundling process strips it. Count the depth of the common prefix to determine the correct value (usually 1).
-    - `bin/` directory containing executables → `${installPath}/bin` for PATH
-    - Root-level executable (no `bin/` dir) → `${installPath}` for PATH
-    - Platform-specific layouts (e.g. macOS `.app` bundles → `${installPath}/Foo.app/Contents/bin`)
-    - `man/`, `share/man/` directories → MANPATH entry
-    - `lib/`, `include/` directories → note for the user but don't auto-add env vars
-    - Paths in metadata should be relative to the content root **after stripping** (e.g. if the archive has `cmake-3.28/bin/cmake` and `strip_components: 1`, the metadata PATH should use `${installPath}/bin`).
-
-    **Important:** `strip_components` in the mirror YAML controls rebundling (stripping the wrapper directory before creating the OCX package). This is separate from `strip_components` in metadata JSON, which tells OCX how to extract the package after downloading. Typically, the mirror YAML needs `strip_components` but the metadata does not (since the rebundled archive is already clean).
-
-12. **Inspect macOS zip archives carefully.** macOS zips are a common source of pitfalls:
-    - **`__MACOSX/` directory**: macOS's built-in zip utility often embeds a `__MACOSX/` directory with `._` resource fork files. These end up as junk in the package after rebundling.
-    - **`.app` bundles**: macOS assets sometimes contain `.app` application bundles (e.g. `Foo.app/Contents/MacOS/foo`) instead of flat `bin/foo` layouts. The binary path is completely different — `${installPath}/Foo.app/Contents/MacOS` vs `${installPath}/bin`. This requires a **platform-specific metadata file** (e.g. `metadata-darwin.json`) with the correct PATH.
-    - **`.ad` / auxiliary files**: Some macOS archives include ad-hoc signing files, `.dSYM` debug bundles, or other auxiliary files not present in the Linux/Windows archives. These change the effective layout.
-
-    **Always inspect at least one macOS archive** alongside a Linux one. If the directory structures differ, you need platform-specific metadata in the mirror config:
-    ```yaml
-    metadata:
-      default: metadata.json
-      platforms:
-        darwin/amd64: metadata-darwin.json
-        darwin/arm64: metadata-darwin.json
+    # Inspect zip
+    unzip -l /tmp/ocx-mirror-inspect/{filename} | head -50
     ```
 
-13. **Verify Linux musl binaries are statically linked.** If the chosen Linux asset is a musl variant (non-Rust-triple), extract a binary and run `file <binary>`. If it reports `dynamically linked, interpreter /lib/ld-musl-*`, switch to the gnu/glibc asset variant instead. See the Platform Detection Heuristics section for the full decision process.
+11. **Analyze directory structure.** Detect top-level wrapper directories (→ `strip_components: 1`), `bin/` layouts, `.app` bundles, and `man/` locations. See [`references/archive-inspection.md`](./references/archive-inspection.md) for the full analysis rules, macOS gotchas (`__MACOSX/` junk, `.app` bundles, platform-specific metadata), and per-platform `strip_components` / `asset_type` forms.
 
-14. **Check if layouts differ across platforms.** Beyond macOS, Windows may also have flat layouts while Linux uses `bin/`. If layouts differ, create platform-specific metadata files. Check `strip_components` consistency across platforms — if all platforms have a top-level wrapper directory, a single `strip_components` value works. If some platforms differ (e.g. Windows zips are flat while tarballs have a wrapper), use per-platform `strip_components`:
-    ```yaml
-    # Per-platform strip_components (tarballs have wrapper dir, Windows zip is flat)
-    strip_components:
-      default: 1
-      platforms:
-        windows/amd64: 0
-    ```
-    The simple form `strip_components: 1` still works when all platforms share the same value.
-
-    **Per-platform `asset_type` (archive vs binary mix).** When a tool ships tarballs on Linux/macOS but a raw `.exe` on Windows, the spec must use the full per-platform form — a uniform `asset_type` cannot mix archive and binary:
-    ```yaml
-    asset_type:
-      default:
-        type: archive
-        strip_components: 0
-      platforms:
-        windows/amd64:
-          type: binary
-          name: lychee
-    ```
-    Common for Rust CLI tools. See `mirrors/lychee/mirror.yml` for a worked example.
-
-15. **For raw binaries:** the metadata just needs a PATH entry pointing to `${installPath}` (the binary lands directly in the content root).
+12. **Verify Linux musl binaries are statically linked** when the chosen Linux asset is a non-Rust-triple musl variant. See [`references/platform-detection.md`](./references/platform-detection.md) for the decision process.
 
 ### Phase 4: Generate Configuration Files
 
-16. **Generate metadata JSON files.** Write to `mirrors/{name}/metadata.json` (and platform variants like `metadata-darwin.json` if needed):
+13. **Generate metadata JSON and mirror YAML** using the templates in [`references/yaml-templates.md`](./references/yaml-templates.md). Write to `mirrors/{name}/metadata.json` and `mirrors/{name}/mirror.yml`. Add platform-specific metadata variants (e.g. `metadata-darwin.json`) when Phase 3 detected layout drift.
 
-```json
-{
-  "type": "bundle",
-  "version": 1,
-  "env": [
-    {
-      "key": "PATH",
-      "type": "path",
-      "required": true,
-      "value": "${installPath}/bin"
-    }
-  ]
-}
-```
+14. **Validate the generated spec.** If `ocx-mirror` binary is available:
 
-17. **Generate the mirror YAML.** Write to `mirrors/{name}/mirror.yml`:
-
-```yaml
-name: {name}
-target:
-  registry: {registry}
-  repository: {repository}
-
-source:
-  type: github_release
-  owner: {owner}
-  repo: {repo}
-  tag_pattern: "{pattern}"
-
-assets:
-  {platform}:
-    - "{regex}"
-  # ... per detected platform
-
-# Only include if archives have a top-level wrapper directory
-# strip_components: 1
-
-metadata:
-  default: metadata.json
-  # platforms: ... (only if platform-specific metadata needed)
-
-skip_prereleases: true
-cascade: true
-build_timestamp: none
-
-versions:
-  min: "{min_version}"
-  new_per_run: 10
-
-verify:
-  github_asset_digest: true
-
-concurrency:
-  max_downloads: 8
-  max_bundles: 4
-  max_pushes: 2
-  rate_limit_ms: 100
-  max_retries: 3
-  compression_threads: 0
-```
-
-18. **Validate the generated spec.** If `ocx-mirror` binary is available:
-
-```bash
-cargo run -p ocx_mirror -- validate mirrors/{name}/mirror.yml
-```
+    ```bash
+    cargo run -p ocx_mirror -- validate mirrors/{name}/mirror.yml
+    ```
 
 ### Phase 5: Generate Description Assets
 
-19. **Download a logo.** Look for a logo in these locations (in order):
-    - The GitHub repository's social preview / OpenGraph image: `gh api "repos/{owner}/{repo}" --jq '.owner.avatar_url'` (fallback only)
+15. **Download a logo.** Look for a logo in these locations (in order):
     - The repository's root for common logo files: check if `logo.svg`, `logo.png`, `icon.svg`, or `icon.png` exists at the repo root via `gh api "repos/{owner}/{repo}/contents/" --jq '.[].name'`
     - The project's website (look for an SVG or PNG logo in the HTML `<head>` or hero section)
+    - The GitHub repository's social preview / OpenGraph image: `gh api "repos/{owner}/{repo}" --jq '.owner.avatar_url'` (fallback only)
     - **Prefer SVG over PNG** — SVGs are resolution-independent and typically smaller.
     - **Ask the user** if no logo is found automatically, or if multiple candidates exist. They may provide a URL or local path.
     - Download to `mirrors/{name}/logo.svg` (or `.png`).
 
-```bash
-# Check repo root for logo files
-gh api "repos/{owner}/{repo}/contents/" --jq '[.[] | select(.name | test("^(logo|icon)\\.(svg|png)$"; "i")) | {name, download_url}]'
+    ```bash
+    # Check repo root for logo files
+    gh api "repos/{owner}/{repo}/contents/" --jq '[.[] | select(.name | test("^(logo|icon)\\.(svg|png)$"; "i")) | {name, download_url}]'
 
-# Download a logo
-curl -fsSL -o mirrors/{name}/logo.svg "{download_url}"
-```
+    # Download a logo
+    curl -fsSL -o mirrors/{name}/logo.svg "{download_url}"
+    ```
 
-20. **Write the README with frontmatter.** Generate `mirrors/{name}/README.md`:
+16. **Write the README with frontmatter.** Use the README template in [`references/yaml-templates.md`](./references/yaml-templates.md). Frontmatter `title` / `description` / `keywords` become OCI annotations via `ocx package describe`.
 
-```markdown
----
-title: {display_name}
-description: {one_line_description}
-keywords: {comma_separated_keywords}
----
-
-# {display_name}
-
-{2-3 sentence description of what the tool is and does. Research the project's
-GitHub description and website to write an accurate summary.}
-
-## What's included
-
-{List the main executables or components included in the package. Derive this
-from the archive inspection in Phase 3.}
-
-## Links
-
-- [{display_name} Documentation]({docs_url})
-- [{display_name} on GitHub](https://github.com/{owner}/{repo})
-```
-
-    **Frontmatter fields:**
-    - `title`: Human-readable display name (e.g. "CMake", "Go Task", "Buf")
-    - `description`: One-line summary suitable for catalog display (max ~100 chars)
-    - `keywords`: Comma-separated search terms — include the tool name, language ecosystem, and category (e.g. `cmake,build,cpp,c,build-system,cross-platform`)
-
-    **Body content:**
-    - Research the project by reading its GitHub description (`gh api "repos/{owner}/{repo}" --jq '.description'`) and website
-    - List executables found during archive inspection
-    - Include links to docs and GitHub
-    - Do NOT include a "Usage with OCX" section — the website's DetailView already provides install/exec commands
-
-21. **Present a summary** to the user showing:
+17. **Present a summary** to the user showing:
     - Generated files (mirror YAML, metadata JSON, README, logo)
     - Detected platforms
     - Asset patterns
@@ -265,29 +109,12 @@ from the archive inspection in Phase 3.}
 
 ### Phase 6: Register in Taskfile
 
-22. **Add the mirror to `taskfiles/mirror.taskfile.yml`.** This file includes the shared template (`mirrors/mirror.taskfile.yml`) once per package. Add a new `includes` entry and wire it into `sync-all` / `describe-all`:
-
-```yaml
-# In the includes: block, add:
-  {name}:
-    taskfile: ../mirrors/mirror.taskfile.yml
-    vars:
-      PACKAGE: {name}
-      REPO: {registry}/{repository}
-
-# In tasks.sync-all.cmds, add:
-      - task: {name}:sync
-
-# In tasks.describe-all.cmds, add:
-      - task: {name}:describe
-```
-
-This gives the user `task mirror:{name}:sync` and `task mirror:{name}:describe` automatically via the shared template.
+18. **Add the mirror to `taskfiles/mirror.taskfile.yml`** using the includes + `sync-all` + `describe-all` pattern in [`references/yaml-templates.md`](./references/yaml-templates.md).
 
 ### Phase 7: Cleanup
 
-23. **Remove temp downloads** used for inspection.
-24. **Suggest next steps**: run `task mirror:{name}:sync -- --dry-run` to preview what would be mirrored.
+19. **Remove temp downloads** used for inspection.
+20. **Suggest next steps**: run `task mirror:{name}:sync -- --dry-run` to preview what would be mirrored.
 
 ## Key Rules
 
@@ -304,28 +131,9 @@ This gives the user `task mirror:{name}:sync` and `task mirror:{name}:describe` 
 - **Always generate a README with frontmatter** — the `title`, `description`, and `keywords` in the YAML frontmatter are extracted as OCI annotations by `ocx package describe` and stripped from the pushed README body. This is the primary way to set catalog metadata.
 - **Prefer SVG logos** over PNG — they scale to any resolution and are typically smaller.
 
-## Reference: Platform Detection Heuristics
+## References
 
-Asset filenames encode platform info in various ways. Common patterns ranked by reliability:
-
-1. **Explicit os-arch**: `tool-linux-amd64.tar.gz` — highest confidence
-2. **Explicit os_arch**: `tool-linux_amd64.tar.gz` — high confidence
-3. **Rust triple**: `tool-x86_64-unknown-linux-gnu.tar.gz` — high confidence
-4. **Go-style**: `tool_Linux_x86_64.tar.gz` — high confidence (note capital L)
-5. **Loose match**: `tool-linux64.tar.gz` — medium confidence, confirm with user
-
-When multiple assets could match the same platform (e.g. both `-gnu` and `-musl` variants for Linux), prefer **statically linked musl** variants — they work on both glibc-based distros (Ubuntu, Fedora) and musl-based distros (Alpine). However, **not all musl binaries are statically linked**. Some tools (e.g. Bun) produce dynamically linked musl binaries that require `/lib/ld-musl-*.so.1` at runtime and fail on glibc systems with a misleading "No such file or directory" error.
-
-**Decision process:**
-1. **Rust triple** (`*-unknown-linux-musl`): safe to prefer musl — Rust's musl target produces statically linked binaries by convention.
-2. **Non-Rust musl variants**: download the musl asset during Phase 3 inspection and verify with `file <binary>`. If it says `statically linked`, use musl. If it says `dynamically linked, interpreter /lib/ld-musl-*`, use the **gnu/glibc variant** instead.
-3. **When in doubt**, prefer gnu/glibc — it works on the vast majority of Linux systems (all major distros, CI runners, WSL, containers except Alpine).
-
-## Reference: Common Environment Variables by Tool Type
-
-| Tool Type | Env Vars |
-|-----------|----------|
-| CLI tool (single binary) | `PATH` |
-| SDK/toolchain | `PATH`, `{TOOL}_HOME` (e.g. `JAVA_HOME`, `GOROOT`) |
-| Library | `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`, `PKG_CONFIG_PATH` |
-| Tool with man pages | `PATH`, `MANPATH` |
+- [`references/platform-detection.md`](./references/platform-detection.md) — platform mapping table, musl vs glibc
+- [`references/archive-inspection.md`](./references/archive-inspection.md) — directory-layout analysis, macOS gotchas, per-platform forms
+- [`references/yaml-templates.md`](./references/yaml-templates.md) — metadata.json, mirror.yml, README, Taskfile templates
+- [`references/env-vars.md`](./references/env-vars.md) — common env var sets by tool type

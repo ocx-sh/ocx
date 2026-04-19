@@ -119,6 +119,24 @@ Scoped workflow rules (loaded by path match and consumed by skills on demand):
 [workflow-github.md](./rules/workflow-github.md) (`.github/ISSUE_TEMPLATE/**`),
 [workflow-git.md](./rules/workflow-git.md) (`CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml`).
 
+## Declared Path-Scope Overlaps
+
+Every pair of rules sharing a `paths:` pattern must be covered by a declared group. Undeclared overlaps fail `test_path_overlaps_declared_or_absent`.
+
+Exempt from overlap detection (intended broad coupling):
+
+- Shareable `quality-*.md` — language quality rules co-fire with subsystem rules on language globs.
+- `workflow-bugfix.md` / `workflow-refactor.md` — source-work-surface scope per `adr_ai_config_path_scope_correction.md`; co-firing with subsystem rules is the intended coupling.
+
+| Declared group | Shared scope |
+|---|---|
+| `quality-security.md` + `subsystem-ci.md` | `.github/workflows/**`, `.github/actions/**` |
+| `workflow-git.md` + `workflow-release.md` | `CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml` |
+| `docs-style.md` + `subsystem-website.md` + `product-context.md` | `website/**` |
+| `product-context.md` + `workflow-feature.md` | `.claude/artifacts/**` |
+| `subsystem-cli-api.md` + `subsystem-cli-commands.md` | `crates/ocx_cli/src/command/**` |
+| `workflow-feature.md` + `workflow-swarm.md` | `.claude/agents/**`, `.claude/skills/swarm-*/**` |
+
 ## Skills by task topic
 
 | Task topic | Skill |

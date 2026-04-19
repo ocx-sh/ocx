@@ -24,7 +24,7 @@ languages.
 
 > **Reviewer model**: every `worker-reviewer` launch in this tier uses the resolved `--reviewer` overlay value (tier=high default `sonnet`). See `overlays.md` reviewer axis.
 
-Launch in parallel:
+Launch **in a single message with multiple Agent tool calls** so they run concurrently:
 
 - **1** `worker-reviewer` (focus: `spec-compliance`, phase:
   `post-implementation`) — reviews the full Stub → Specify → Implement
@@ -46,7 +46,7 @@ but Stage 1 actionable findings dominate the verdict.
 
 ## Phase 3: Stage 2 — Quality / Security / Performance / Docs (parallel)
 
-Launch in parallel (only applicable perspectives fire):
+Launch **in a single message with multiple Agent tool calls** so they run concurrently (only applicable perspectives fire):
 
 - `worker-reviewer` (focus: `quality`) — naming, SOLID, duplication,
   language-specific quality rule violations
@@ -159,5 +159,5 @@ Standard handoff from `SKILL.md`. Classification line:
 
 If actionable findings exist:
 
-    /swarm-execute .claude/artifacts/plan_[feature].md   # if a plan exists
+    /swarm-execute .claude/state/plans/plan_[feature].md   # if a plan exists
     /swarm-execute "apply high-tier review findings"     # otherwise
