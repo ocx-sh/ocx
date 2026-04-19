@@ -59,7 +59,7 @@ def test_ci_export_no_ci_env_fails(ocx: OcxRunner, published_package: PackageInf
 
     result = ocx.plain("ci", "export", published_package.short, check=False)
     assert result.returncode != 0
-    assert "Could not detect CI environment" in result.stderr
+    assert "could not detect CI environment" in result.stderr
 
 
 def test_ci_export_path_accumulation(ocx: OcxRunner, unique_repo: str, tmp_path) -> None:

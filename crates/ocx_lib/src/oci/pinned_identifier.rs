@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Digest, Identifier};
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 
 /// A validated [`Identifier`] guaranteed to carry a digest.
 ///

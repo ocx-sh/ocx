@@ -86,13 +86,20 @@ impl ConfigLoader {
     /// `None` and nonexistent files. Future #33 will append the project
     /// path (CWD walk result) before any explicit override.
     ///
-    /// Async because it calls [`tokio::fs::try_exists`] per candidate path.
-    /// `NotFound` candidates are silently skipped. Other I/O errors
-    /// (permission denied, stale NFS handle, EIO) are logged as warnings
-    /// and the candidate is still skipped — discovery never fails the
-    /// whole process, but an unreadable `~/.ocx/config.toml` should at
-    /// least be *diagnosable*. A race between discovery and read surfaces
-    /// later as [`Error::Io`] during [`Self::load_and_merge`].
+    /// Async because it calls [`tokio::fs::symlink_metadata`] per candidate
+    /// path. `NotFound` candidates are silently skipped. Symlinked candidates
+    /// are rejected with a warning — an attacker who can write to a
+    /// discovered-tier location (`/etc/ocx/config.toml`,
+    /// `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml`) could otherwise
+    /// point the link at any readable file and surface its contents via a
+    /// parse-error message or provoke unexpected side effects on load.
+    /// Explicit paths (`--config`, `OCX_CONFIG_FILE`) are trusted caller
+    /// input and are not subject to this check. Other I/O errors (permission
+    /// denied, stale NFS handle, EIO) are logged as warnings and the
+    /// candidate is still skipped — discovery never fails the whole process,
+    /// but an unreadable `~/.ocx/config.toml` should at least be
+    /// *diagnosable*. A race between discovery and read surfaces later as
+    /// [`Error::Io`] during [`Self::load_and_merge`].
     pub async fn discover_paths(_inputs: &ConfigInputs<'_>) -> Vec<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         candidates.push(Self::system_path());
@@ -104,15 +111,23 @@ impl ConfigLoader {
         }
         // join_all preserves input order, so the precedence semantics of the
         // candidate list (system → user → $OCX_HOME) are unchanged. Running
-        // the try_exists calls concurrently shaves two sequential filesystem
-        // round-trips on startup.
-        let checks = join_all(candidates.iter().map(tokio::fs::try_exists)).await;
+        // the symlink_metadata calls concurrently shaves two sequential
+        // filesystem round-trips on startup. We use `symlink_metadata` rather
+        // than `try_exists` (which follows symlinks) so the symlink-rejection
+        // branch can observe the link itself without dereferencing it.
+        let checks = join_all(candidates.iter().map(tokio::fs::symlink_metadata)).await;
         candidates
             .into_iter()
             .zip(checks)
             .filter_map(|(path, result)| match result {
-                Ok(true) => Some(path),
-                Ok(false) => None,
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    log::warn!(
+                        "skipping symlinked config candidate {} (discovered-tier config files must not be symlinks)",
+                        path.display()
+                    );
+                    None
+                }
+                Ok(_) => Some(path),
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
                 Err(source) => {
                     log::warn!("skipping unreadable config candidate {}: {source}", path.display());
@@ -642,6 +657,40 @@ mod tests {
         assert!(
             !paths.contains(&locked_config),
             "unreadable candidate must be skipped, got: {paths:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discover_paths_rejects_symlinked_candidate() {
+        // Security: a discovered-tier `config.toml` that is a symlink is
+        // rejected to prevent a writer with control over one of the
+        // tier directories from aiming the link at an arbitrary readable
+        // file. Explicit paths (--config, OCX_CONFIG_FILE) are out of scope
+        // for this check — those are trusted caller input.
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("ocx-home");
+        std::fs::create_dir(&home).unwrap();
+        // Create a real target file, then symlink `config.toml` → target.
+        let target = dir.path().join("target.toml");
+        std::fs::write(&target, "[registry]\ndefault = \"symlinked.example\"").unwrap();
+        let symlink_path = home.join("config.toml");
+        std::os::unix::fs::symlink(&target, &symlink_path).expect("create symlink");
+
+        env.set("OCX_HOME", home.to_str().unwrap());
+        env.remove("OCX_CONFIG_FILE");
+        env.remove("OCX_NO_CONFIG");
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            cwd: None,
+        };
+        let paths = ConfigLoader::discover_paths(&inputs).await;
+
+        assert!(
+            !paths.contains(&symlink_path),
+            "symlinked candidate must be skipped, got: {paths:?}"
         );
     }
 

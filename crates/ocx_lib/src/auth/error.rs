@@ -2,8 +2,8 @@
 // Copyright 2026 The OCX Authors
 
 use super::auth_type::AuthType;
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 
 /// Errors that can occur during authentication.
 #[derive(Debug, thiserror::Error)]

@@ -63,9 +63,9 @@ impl IndexCatalog {
             if let Ok(Ok((repository, repository_tags))) = result {
                 tags.insert(repository, repository_tags);
             } else if let Ok(Err(e)) = result {
-                log::error!("Error fetching tags for repository: {:?}", e);
+                log::error!("fetching tags for repository failed: {e:?}");
             } else if let Err(e) = result {
-                log::error!("Task panicked while fetching tags for repository: {:?}", e);
+                log::error!("task panicked while fetching tags for repository: {e:?}");
             }
         }
 

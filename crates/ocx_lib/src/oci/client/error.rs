@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 use crate::oci::{Digest, Identifier, PinnedIdentifier, native};
 
 /// Errors that can occur during OCI client operations.
@@ -34,7 +34,7 @@ pub enum ClientError {
     /// issued against, plus the missing blob's digest. The advisory
     /// tag (when present) is the tag of the image that triggered the
     /// blob resolution — not the blob itself.
-    #[error("Blob not found: {0}")]
+    #[error("blob not found: {0}")]
     BlobNotFound(PinnedIdentifier),
     /// A registry operation failed.
     #[error("registry operation failed: {0}")]

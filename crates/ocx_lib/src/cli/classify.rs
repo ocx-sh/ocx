@@ -137,6 +137,8 @@ mod tests {
 
     use super::*;
     use crate::config::error::Error as ConfigError;
+    use crate::oci::client::error::ClientError;
+    use crate::package_manager::error::{DependencyError, PackageError, PackageErrorKind};
 
     // Helper: wrap any error into a `Box<dyn std::error::Error + 'static>` and
     // call classify_error. The turbofish helps when the compiler can't infer
@@ -204,6 +206,138 @@ mod tests {
         // Plan taxonomy: std::io::ErrorKind::PermissionDenied → PermissionDenied (77)
         let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "EPERM");
         assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    // ── PackageManager three-layer chain ────────────────────────────────────
+
+    #[test]
+    fn lib_package_manager_find_failed_maps_to_not_found() {
+        // Plan taxonomy: three-layer chain — first error wins.
+        // crate::Error::PackageManager(Error::FindFailed([PackageError{NotFound}]))
+        // → ExitCode::NotFound (79). Locks in "first error wins" behavior
+        // across the three-layer chain.
+        let identifier = crate::oci::Identifier::new_registry("pkg", "example.com");
+        let inner = PackageError::new(identifier, PackageErrorKind::NotFound);
+        let pm_err = crate::package_manager::error::Error::FindFailed(vec![inner]);
+        let err = crate::Error::PackageManager(pm_err);
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    // ── ClientError variants ─────────────────────────────────────────────────
+
+    #[test]
+    fn client_authentication_maps_to_auth_error() {
+        // Plan taxonomy: ClientError::Authentication → AuthError (80)
+        let err = ClientError::Authentication(Box::new(std::io::Error::other("bad creds")));
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    #[test]
+    fn client_manifest_not_found_maps_to_not_found() {
+        // Plan taxonomy: ClientError::ManifestNotFound → NotFound (79)
+        let err = ClientError::ManifestNotFound("x/y".into());
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn client_invalid_manifest_maps_to_data_error() {
+        // Plan taxonomy: ClientError::InvalidManifest → DataError (65)
+        // (BlobNotFound omitted: requires full PinnedIdentifier construction)
+        let err = ClientError::InvalidManifest("m".into());
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn client_registry_maps_to_unavailable() {
+        // Plan taxonomy: ClientError::Registry → Unavailable (69)
+        let err = ClientError::Registry(Box::new(std::io::Error::other("503")));
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    #[test]
+    fn client_io_maps_to_io_error() {
+        // Plan taxonomy: ClientError::Io → IoError (74)
+        let err = ClientError::Io {
+            path: PathBuf::from("/x"),
+            source: std::io::Error::other("eio"),
+        };
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    // ── DataError variants across subtypes ───────────────────────────────────
+
+    #[test]
+    fn digest_invalid_maps_to_data_error() {
+        // Plan taxonomy: DigestError::Invalid → DataError (65)
+        let err = crate::oci::digest::error::DigestError::Invalid("not-a-digest".into());
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn identifier_error_maps_to_data_error() {
+        // Plan taxonomy: IdentifierError (any kind) → DataError (65)
+        let err = crate::oci::identifier::error::IdentifierError::new(
+            "bad-input",
+            crate::oci::identifier::error::IdentifierErrorKind::InvalidFormat,
+        );
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn platform_error_maps_to_data_error() {
+        // Plan taxonomy: PlatformError → DataError (65)
+        let err = crate::oci::platform::error::PlatformError {
+            input: "bad/os/arch".into(),
+            kind: crate::oci::platform::error::PlatformErrorKind::InvalidFormat,
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn file_structure_missing_digest_maps_to_data_error() {
+        // Plan taxonomy: file_structure::Error::MissingDigest → DataError (65)
+        let err = crate::file_structure::error::Error::MissingDigest("some/pkg:1.0".into());
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn archive_unsupported_format_maps_to_data_error() {
+        // Plan taxonomy: archive::Error::UnsupportedFormat → DataError (65)
+        let err = crate::archive::Error::UnsupportedFormat(".rar".into());
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    // ── DependencyError variants ─────────────────────────────────────────────
+
+    #[test]
+    fn dependency_conflict_maps_to_data_error() {
+        // Plan taxonomy: DependencyError::Conflict → DataError (65)
+        let err = DependencyError::Conflict {
+            repository: "pkg".into(),
+            digests: vec![],
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    // SetupFailed omitted: singleflight::Error has no public test constructor.
+
+    // ── OciIndex chain-walk delegation ───────────────────────────────────────
+
+    #[test]
+    fn oci_index_source_walk_failed_delegates_to_inner_auth_error() {
+        // Plan: `OciIndexError::SourceWalkFailed` returns `None` from its own
+        // `classify()` so the chain walker continues via `source()`. The
+        // `#[source]` attribute on the `ArcError` payload surfaces the wrapped
+        // `crate::Error`, letting the generic `try_classify` ladder downcast
+        // and resolve the inner cause — here a `ClientError::Authentication`
+        // → `ExitCode::AuthError`. Before the fix, `SourceWalkFailed` called
+        // `arc.as_error().classify()` directly, which resolves only one hop
+        // and misses any deeper nesting.
+        let client_err = ClientError::Authentication(Box::new(std::io::Error::other("bad creds")));
+        let inner: crate::Error = client_err.into();
+        let arc: crate::error::ArcError = inner.into();
+        let err = crate::oci::index::error::Error::SourceWalkFailed(arc);
+        assert_eq!(classify(err), ExitCode::AuthError);
     }
 
     // ── Fall-through lock-in ─────────────────────────────────────────────────

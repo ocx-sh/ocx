@@ -51,10 +51,11 @@ impl App {
         let cli = Cli::from_arg_matches(&matches)?;
 
         // Static commands dispatch without constructing a Context so they
-        // survive a malformed ambient config (`~/.ocx/config.toml`). Both
-        // `Version::execute` and `ShellCompletion::execute` are Context-free
-        // — the entire `Context::try_init` path (which calls `ConfigLoader::load`
-        // and aborts on bad TOML / oversized files) is unnecessary for them.
+        // survive a malformed ambient config (`~/.ocx/config.toml`).
+        // `Version::execute`, `ShellCompletion::execute`, and bare `ocx` (None)
+        // are Context-free — the entire `Context::try_init` path (which calls
+        // `ConfigLoader::load` and aborts on bad TOML / oversized files) is
+        // unnecessary for them.
         //
         // `Info` is deliberately NOT in this list: it reads
         // `context.default_registry()` from the loaded config and is expected
@@ -65,6 +66,10 @@ impl App {
         match &cli.command {
             Some(command::Command::Version(v)) => return v.execute().await,
             Some(command::Command::Shell(command::shell::Shell::Completion(c))) => return c.execute().await,
+            None => {
+                Cli::command().color(color_mode.into()).styles(styles).print_help()?;
+                return Ok(ExitCode::SUCCESS);
+            }
             _ => {}
         }
 
@@ -72,13 +77,10 @@ impl App {
         if should_check_for_update(&cli.command) {
             update_check::check_for_update(&context).await;
         }
-        match &cli.command {
-            Some(command) => command.execute(context).await,
-            None => {
-                Cli::command().color(color_mode.into()).styles(styles).print_help()?;
-                Ok(ExitCode::SUCCESS)
-            }
-        }
+        let Some(command) = &cli.command else {
+            unreachable!("None handled in static-command bypass above");
+        };
+        command.execute(context).await
     }
 }
 

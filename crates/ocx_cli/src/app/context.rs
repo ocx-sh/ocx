@@ -155,8 +155,3 @@ impl Context {
         &self.manager
     }
 }
-
-#[allow(dead_code)]
-fn default_offline_mode() -> bool {
-    ocx_lib::env::flag("OCX_OFFLINE", false)
-}

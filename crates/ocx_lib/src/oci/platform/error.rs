@@ -3,8 +3,8 @@
 
 use super::architecture::Architecture;
 use super::operating_system::OperatingSystem;
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 
 /// An error that occurred while parsing or validating an OCI platform.
 #[derive(Debug, Clone, thiserror::Error)]

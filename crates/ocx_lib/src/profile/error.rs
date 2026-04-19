@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 
 /// An error that occurred while loading or saving a profile manifest.
 #[derive(Debug, thiserror::Error)]
@@ -26,8 +26,8 @@ pub enum ProfileError {
     },
     /// The manifest version is not supported by this version of ocx.
     #[error(
-        "unsupported profile manifest version {version} in '{}' (supported: {supported}). \
-         A newer version of ocx may be required.",
+        "unsupported profile manifest version {version} in '{}' (supported: {supported}); \
+         a newer version of ocx may be required",
         path.display()
     )]
     UnsupportedVersion {

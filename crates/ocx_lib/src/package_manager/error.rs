@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 use crate::{file_structure, oci};
 
 /// Task-level error for package manager operations.
@@ -12,6 +12,18 @@ use crate::{file_structure, oci};
 ///
 /// This type does **not** wrap [`crate::Error`] directly — library errors are
 /// always attached to a specific package via [`PackageErrorKind::Internal`].
+///
+/// # Exit code classification
+///
+/// Batch classification uses **first error wins**: when a batch variant
+/// carries multiple [`PackageError`]s, the process exit code is derived from
+/// the first element's [`PackageError::kind`]. This makes the exit code for
+/// multi-package operations input-order-dependent — running
+/// `ocx install a b c` where `a` fails with `NotFound` and `b` fails with
+/// `SelectionAmbiguous` exits with `NotFound`'s code, regardless of how many
+/// `SelectionAmbiguous` entries follow. This is the v1 contract; a future
+/// priority function (e.g. "worst code wins") may upgrade the policy without
+/// touching variant data.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -178,7 +190,7 @@ impl ClassifyExitCode for PackageErrorKind {
             Self::TaskPanicked => ExitCode::Failure,
             // Internal wraps a full `crate::Error` — walk through classify_error
             // so the inner chain is inspected via the generic entry point.
-            Self::Internal(inner) => return Some(crate::cli::classify::classify_error(inner)),
+            Self::Internal(inner) => return Some(crate::cli::classify_error(inner)),
         })
     }
 }

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
-use crate::cli::classify::ClassifyExitCode;
 
 /// Errors specific to OCI index operations.
 #[derive(Debug, thiserror::Error)]
@@ -24,13 +24,13 @@ pub enum Error {
     /// inside an [`ArcError`] so it can be cloned for singleflight broadcast
     /// to waiters while preserving the full error chain. The leader and
     /// every waiter see the same underlying `crate::Error`.
-    #[error("Chained index source walk failed: {0}")]
+    #[error("chained index source walk failed: {0}")]
     SourceWalkFailed(#[source] crate::error::ArcError),
 
     /// A singleflight coordination primitive failed (capacity exceeded,
     /// timeout, or abandoned leader) while walking the chain. Distinct
     /// from [`Self::SourceWalkFailed`], which reports a source-side failure.
-    #[error("Chained index singleflight failed")]
+    #[error("chained index singleflight failed")]
     SingleflightFailed(#[source] crate::utility::singleflight::Error),
 
     /// A nested image index was encountered while persisting a manifest
@@ -46,8 +46,12 @@ impl ClassifyExitCode for Error {
         Some(match self {
             Self::RemoteManifestNotFound(_) => ExitCode::NotFound,
             Self::TagLockRepositoryMismatch { .. } | Self::NestedImageIndex { .. } => ExitCode::DataError,
-            // Delegate to the wrapped typed error's classification.
-            Self::SourceWalkFailed(arc) => return arc.as_error().classify(),
+            // Delegate to the full chain walker on the wrapped typed error,
+            // not just a single-hop `classify()` on the inner `Error`. Mirrors
+            // the `PackageErrorKind::Internal(inner)` pattern so nested causes
+            // (e.g. a `ClientError::Authentication` inside a `crate::Error`)
+            // are resolved via the generic `try_classify` ladder.
+            Self::SourceWalkFailed(arc) => return Some(crate::cli::classify_error(arc.as_error())),
             Self::SingleflightFailed(_) => ExitCode::Failure,
         })
     }
