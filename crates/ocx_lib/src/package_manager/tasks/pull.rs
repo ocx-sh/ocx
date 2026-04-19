@@ -460,6 +460,13 @@ async fn post_download_actions(
     pinned: &oci::PinnedIdentifier,
     resolved: &ResolvedPackage,
 ) -> Result<(), PackageErrorKind> {
+    // Tag-preservation policy: `resolve.json` deliberately keeps each
+    // dependency's advisory tag (the form that won the install-time race).
+    // `ocx.lock` strips it via `PinnedIdentifier::strip_advisory()` because
+    // a project lock is the canonical pinned record and a tag-only churn
+    // would bust `generated_at` preservation. The two files have different
+    // jobs: install-time audit trail vs. canonical project pin. Do not
+    // harmonise without revisiting plan_project_toolchain.md §7.4.
     resolved
         .write_json(pkg.resolve())
         .await

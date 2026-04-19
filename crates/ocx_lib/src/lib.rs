@@ -29,6 +29,7 @@ pub mod oci;
 pub mod package;
 pub mod package_manager;
 pub mod profile;
+pub mod project;
 pub mod publisher;
 pub mod reference_manager;
 pub mod shell;

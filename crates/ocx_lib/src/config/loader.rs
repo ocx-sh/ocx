@@ -16,7 +16,7 @@ use futures::future::join_all;
 use tokio::io::AsyncReadExt;
 
 use crate::Result;
-use crate::config::{Config, error::Error};
+use crate::config::{Config, error::ConfigSource, error::Error};
 use crate::log;
 
 /// Upper bound for a single config file. Config files are expected to be
@@ -29,7 +29,9 @@ const MAX_CONFIG_SIZE: u64 = 64 * 1024;
 pub struct ConfigInputs<'a> {
     /// `--config FILE` CLI flag (highest priority among explicit paths).
     pub explicit_path: Option<&'a Path>,
-    /// CWD for the future project-tier walk (#33). Pass `None` in v1.
+    /// `--project <FILE>` CLI flag (highest priority among project-tier sources).
+    pub explicit_project_path: Option<&'a Path>,
+    /// CWD for the project-tier walk (#33). Pass `None` to disable the walk.
     pub cwd: Option<&'a Path>,
 }
 
@@ -65,10 +67,17 @@ impl ConfigLoader {
         }
         let env_config_file = raw_env_config_file.filter(|s| !s.is_empty());
 
+        // Resolve the project-tier path first so a missing `--project` or
+        // `OCX_PROJECT_FILE` surfaces as `FileNotFound` (exit 79) before we
+        // read anything else. Phase 1 only wires error propagation — the
+        // returned path itself is consumed in later phases once the
+        // project-config schema lands.
+        let _project_path = Self::project_path(inputs.cwd, inputs.explicit_project_path).await?;
+
         let mut paths: Vec<PathBuf> = if no_config {
             Vec::new()
         } else {
-            Self::discover_paths(&inputs).await
+            Self::discover_paths().await
         };
         if let Some(env_path) = env_config_file {
             paths.push(PathBuf::from(env_path));
@@ -82,9 +91,10 @@ impl ConfigLoader {
     /// Discover the ordered list of config files to load (lowest precedence
     /// first).
     ///
-    /// v1 returns: `[system_path, user_path, home_path]` filtering out
-    /// `None` and nonexistent files. Future #33 will append the project
-    /// path (CWD walk result) before any explicit override.
+    /// Returns `[system_path, user_path, home_path]` filtering out `None`
+    /// and nonexistent files. The project-tier path is resolved separately
+    /// by [`Self::project_path`] because it returns a single
+    /// `Option<PathBuf>` rather than joining the tier chain.
     ///
     /// Async because it calls [`tokio::fs::symlink_metadata`] per candidate
     /// path. `NotFound` candidates are silently skipped. Symlinked candidates
@@ -100,7 +110,7 @@ impl ConfigLoader {
     /// but an unreadable `~/.ocx/config.toml` should at least be
     /// *diagnosable*. A race between discovery and read surfaces later as
     /// [`Error::Io`] during [`Self::load_and_merge`].
-    pub async fn discover_paths(_inputs: &ConfigInputs<'_>) -> Vec<PathBuf> {
+    pub async fn discover_paths() -> Vec<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         candidates.push(Self::system_path());
         if let Some(user) = Self::user_path() {
@@ -137,6 +147,194 @@ impl ConfigLoader {
             .collect()
     }
 
+    /// Resolve the project-tier `ocx.toml` path.
+    ///
+    /// Precedence: `explicit` (from `--project`) > `OCX_PROJECT_FILE` env
+    /// var > CWD walk. `OCX_NO_PROJECT=1` prunes the walk and the env var
+    /// but does NOT prune the explicit flag (trusted caller intent, per
+    /// ADR `adr_project_toolchain_config.md` Amendment G3). Empty
+    /// `OCX_PROJECT_FILE=""` is treated as unset (escape hatch, matches
+    /// `OCX_CONFIG_FILE=""`).
+    ///
+    /// The CWD walk stops at the first `ocx.toml`, any `.git/` boundary,
+    /// or `OCX_CEILING_PATH`. Discovered (walked) paths reject symlinks;
+    /// explicit paths (flag / env) follow symlinks (trusted caller).
+    ///
+    /// # Errors
+    /// Returns [`Error::FileNotFound`] when an explicit source (`--project`
+    /// or `OCX_PROJECT_FILE`) names a path that does not exist (exit 79).
+    /// CWD-walk misses return `Ok(None)` — the walk treats absence as a
+    /// non-event, unlike explicit caller intent.
+    pub async fn project_path(
+        cwd: Option<&Path>,
+        explicit: Option<&Path>,
+    ) -> std::result::Result<Option<PathBuf>, crate::config::error::Error> {
+        // Tier 1: explicit `--project` flag — highest priority. Follows
+        // symlinks (trusted caller intent). Missing file → FileNotFound.
+        // Not gated by `OCX_NO_PROJECT` (Amendment G3).
+        if let Some(path) = explicit {
+            return Self::resolve_explicit_project_path(path).await;
+        }
+
+        // `OCX_NO_PROJECT=1` prunes BOTH env-var and CWD-walk lookups
+        // (Amendment G3). This diverges from `OCX_NO_CONFIG` + explicit
+        // env-var tier-config behavior deliberately: the project file is
+        // a single, unique source, not a composed tier chain — so "turn
+        // project discovery off entirely" is the useful kill switch.
+        let no_project = crate::env::flag("OCX_NO_PROJECT", false);
+        if no_project {
+            return Ok(None);
+        }
+
+        // Tier 2: `OCX_PROJECT_FILE` env var. Empty string is the escape
+        // hatch (matches `OCX_CONFIG_FILE=""` pattern in `load()` above).
+        let raw_env = crate::env::var("OCX_PROJECT_FILE");
+        if raw_env.as_deref() == Some("") {
+            log::debug!("OCX_PROJECT_FILE is set to empty string — skipped via escape hatch");
+        }
+        if let Some(env_path) = raw_env.filter(|s| !s.is_empty()) {
+            return Self::resolve_explicit_project_path(Path::new(&env_path)).await;
+        }
+
+        // Tier 3: CWD walk.
+        let Some(start) = cwd else {
+            return Ok(None);
+        };
+        let ceiling = crate::env::var("OCX_CEILING_PATH").map(PathBuf::from);
+        Ok(Self::walk_for_project_file(start, ceiling.as_deref()).await)
+    }
+
+    /// Resolve an explicit project-tier path (from `--project` or
+    /// `OCX_PROJECT_FILE`). Explicit paths follow symlinks and must resolve
+    /// to a regular file.
+    async fn resolve_explicit_project_path(
+        path: &Path,
+    ) -> std::result::Result<Option<PathBuf>, crate::config::error::Error> {
+        // `tokio::fs::metadata` follows symlinks (trusted caller intent, G5).
+        match tokio::fs::metadata(path).await {
+            Ok(meta) if meta.file_type().is_file() => Ok(Some(path.to_path_buf())),
+            Ok(_) => {
+                // Path exists but is not a regular file (directory, device,
+                // FIFO). Phase 1 discards the resolved path, so if we
+                // returned `Ok(Some(path))` here the defect would silently
+                // slip through discovery and surface only at parse time.
+                // Surface now as `Error::Io` (exit 74, ADR G9).
+                Err(Error::Io {
+                    path: path.to_path_buf(),
+                    tier: ConfigSource::Project,
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+                })
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Err(Error::FileNotFound {
+                path: path.to_path_buf(),
+                tier: ConfigSource::Project,
+            }),
+            // Other I/O errors (permission denied, stale NFS handle, EIO).
+            // Phase 1 discards the resolved path, so if we returned
+            // `Ok(Some(path))` here the error would silently vanish. Surface
+            // as `Error::Io` (exit 74) so an explicit caller gets a
+            // diagnosable failure instead of a phantom success (ADR G9).
+            Err(source) => Err(Error::Io {
+                path: path.to_path_buf(),
+                tier: ConfigSource::Project,
+                source,
+            }),
+        }
+    }
+
+    /// Walk up from `start`, looking for `ocx.toml`. Stops at the first hit,
+    /// any `.git/` boundary, or `ceiling` (if set). Returns `None` if the
+    /// walk exhausts the filesystem root without finding a project file.
+    ///
+    /// Symlinks discovered at the walk step are rejected (G5): the candidate
+    /// is skipped and the walk continues upward. `.git/` detection uses
+    /// `symlink_metadata` as well so a `.git` symlink does not silently
+    /// weaken the boundary check. A `.git` file (git worktree linkfile) also
+    /// counts as a boundary — we match git's own "any `.git` entry" rule.
+    async fn walk_for_project_file(start: &Path, ceiling: Option<&Path>) -> Option<PathBuf> {
+        let mut current = start;
+        loop {
+            // Probe `.git/` and `ocx.toml` concurrently; `tokio::join!` just
+            // overlaps the two stat round-trips. Precedence at each level
+            // (Amendment F): a valid `ocx.toml` at the current level wins
+            // over the `.git/` boundary — the boundary only prevents walking
+            // UP past the repo root, not accepting a project file AT the
+            // repo root. The `.git/` gate therefore fires AFTER the
+            // candidate-hit check but before ascending.
+            let candidate = current.join("ocx.toml");
+            let (git_present, candidate_meta) =
+                tokio::join!(Self::has_git_dir(current), tokio::fs::symlink_metadata(&candidate),);
+
+            match &candidate_meta {
+                Ok(meta) if meta.file_type().is_file() => {
+                    return Some(candidate);
+                }
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    log::warn!(
+                        "skipping symlinked project candidate {} (CWD walk rejects symlinks; use --project or OCX_PROJECT_FILE to opt in)",
+                        candidate.display()
+                    );
+                }
+                Ok(_) => {
+                    // Directory or other non-regular file named `ocx.toml` —
+                    // treat as absent. A weird mount point shouldn't derail
+                    // discovery or cause silent success.
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    log::warn!(
+                        "skipping unreadable project candidate {}: {source}",
+                        candidate.display()
+                    );
+                }
+            }
+
+            // No valid hit at this level — respect the repo boundary before
+            // ascending so we don't walk into a parent repository.
+            if git_present {
+                return None;
+            }
+
+            // Ceiling check runs AFTER probing the current directory so a
+            // ceiling that points exactly at a workspace containing
+            // `ocx.toml` still discovers it. The ceiling bounds the walk
+            // from going ABOVE it, not from reading AT it.
+            if let Some(ceiling) = ceiling
+                && current == ceiling
+            {
+                return None;
+            }
+
+            match current.parent() {
+                Some(parent) => current = parent,
+                // Reached the filesystem root without a hit.
+                None => return None,
+            }
+        }
+    }
+
+    /// Returns `true` if `dir/.git` exists as any filesystem entry (directory,
+    /// file — the git worktree "linkfile" case — or symlink).
+    ///
+    /// Fail-closed on non-`NotFound` I/O errors: if the filesystem reports
+    /// `PermissionDenied` or `EIO` for `.git`, we cannot *disprove* the
+    /// presence of a repository boundary, and silently letting the walk
+    /// cross into the parent would weaken the boundary check. The safer
+    /// default is to assume the boundary exists.
+    async fn has_git_dir(dir: &Path) -> bool {
+        match tokio::fs::symlink_metadata(dir.join(".git")).await {
+            Ok(_) => true,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
+            Err(source) => {
+                log::warn!(
+                    "treating {}/.git as a repository boundary due to I/O error: {source}",
+                    dir.display()
+                );
+                true
+            }
+        }
+    }
+
     /// Load and merge an ordered list of config files (lowest precedence
     /// first). Missing files at this stage are an error — discovery should
     /// have filtered them. Async I/O via [`tokio::fs`] + parse + merge.
@@ -156,12 +354,14 @@ impl ConfigLoader {
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                     return Err(Error::FileNotFound {
                         path: path.to_path_buf(),
+                        tier: ConfigSource::Config,
                     }
                     .into());
                 }
                 Err(source) => {
                     return Err(Error::Io {
                         path: path.to_path_buf(),
+                        tier: ConfigSource::Config,
                         source,
                     }
                     .into());
@@ -169,11 +369,13 @@ impl ConfigLoader {
             };
             let metadata = file.metadata().await.map_err(|source| Error::Io {
                 path: path.to_path_buf(),
+                tier: ConfigSource::Config,
                 source,
             })?;
             if !metadata.file_type().is_file() {
                 return Err(Error::Io {
                     path: path.to_path_buf(),
+                    tier: ConfigSource::Config,
                     source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "config path is not a regular file"),
                 }
                 .into());
@@ -194,6 +396,7 @@ impl ConfigLoader {
             let mut taken = file.take(MAX_CONFIG_SIZE + 1);
             taken.read_to_string(&mut contents).await.map_err(|source| Error::Io {
                 path: path.to_path_buf(),
+                tier: ConfigSource::Config,
                 source,
             })?;
             if contents.len() as u64 > MAX_CONFIG_SIZE {
@@ -438,6 +641,7 @@ mod tests {
         env.remove("OCX_CONFIG_FILE");
         let inputs = ConfigInputs {
             explicit_path: None,
+            explicit_project_path: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -459,6 +663,7 @@ mod tests {
         env.remove("OCX_CONFIG_FILE");
         let inputs = ConfigInputs {
             explicit_path: Some(&path),
+            explicit_project_path: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -485,6 +690,7 @@ mod tests {
         env.set("OCX_CONFIG_FILE", path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
+            explicit_project_path: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -505,6 +711,7 @@ mod tests {
         env.set("OCX_CONFIG_FILE", "");
         let inputs = ConfigInputs {
             explicit_path: None,
+            explicit_project_path: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -524,6 +731,7 @@ mod tests {
         let nonexistent = PathBuf::from("/tmp/ocx-test-nonexistent-config-99999.toml");
         let inputs = ConfigInputs {
             explicit_path: Some(&nonexistent),
+            explicit_project_path: None,
             cwd: None,
         };
         let result = ConfigLoader::load(inputs).await;
@@ -544,6 +752,7 @@ mod tests {
         env.set("OCX_CONFIG_FILE", path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
+            explicit_project_path: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -567,6 +776,7 @@ mod tests {
         env.set("OCX_CONFIG_FILE", env_file.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: Some(&explicit_file),
+            explicit_project_path: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -644,11 +854,7 @@ mod tests {
         env.remove("OCX_CONFIG_FILE");
         env.remove("OCX_NO_CONFIG");
 
-        let inputs = ConfigInputs {
-            explicit_path: None,
-            cwd: None,
-        };
-        let paths = ConfigLoader::discover_paths(&inputs).await;
+        let paths = ConfigLoader::discover_paths().await;
 
         // Restore permissions so TempDir::drop can clean up even if the
         // assertion below panics.
@@ -682,11 +888,7 @@ mod tests {
         env.remove("OCX_CONFIG_FILE");
         env.remove("OCX_NO_CONFIG");
 
-        let inputs = ConfigInputs {
-            explicit_path: None,
-            cwd: None,
-        };
-        let paths = ConfigLoader::discover_paths(&inputs).await;
+        let paths = ConfigLoader::discover_paths().await;
 
         assert!(
             !paths.contains(&symlink_path),
@@ -709,5 +911,622 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    // ── project_path tests ──────────────────────────────────────────────────
+    //
+    // Plan Phase 1 (plan_project_toolchain.md, lines 77–93) defines the
+    // resolver contract:
+    //
+    //   Precedence: --project > OCX_PROJECT_FILE > CWD walk
+    //   OCX_NO_PROJECT=1 prunes CWD walk + env var, NOT the explicit flag
+    //   OCX_PROJECT_FILE="" treated as unset (escape hatch)
+    //   Explicit paths follow symlinks; CWD-walk paths reject symlinks
+    //   Any basename accepted via flag/env; CWD walk looks for literal `ocx.toml`
+    //   CWD walk stops at first ocx.toml, .git/ boundary, or OCX_CEILING_PATH
+    //   CWD walk does NOT stop at filesystem root if .git/ is absent
+    //   Explicit path escapes OCX_CEILING_PATH
+    //   --project <missing> / OCX_PROJECT_FILE=<missing> → NotFound (79)
+    //
+    // Every test below names one plan bullet or one `max`-tier edge case. In
+    // Phase 1 (stub), every test fails with the `unimplemented!()` panic on
+    // `project_path`; Phase 4 impl flips them to pass.
+    //
+    // All env-touching tests acquire `crate::test::env::lock()` — the same
+    // process-wide mutex used by the `load()` tests above.
+
+    /// Helper: write a file at `path` with the given content.
+    fn write_file(path: &std::path::Path, content: &str) {
+        std::fs::write(path, content).expect("write test fixture");
+    }
+
+    /// Plan bullet: `--project <valid>` → loads the file.
+    #[tokio::test]
+    async fn project_path_explicit_flag_loads_valid_file() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ocx.toml");
+        write_file(&path, "");
+        let resolved = ConfigLoader::project_path(None, Some(&path))
+            .await
+            .expect("valid explicit path should resolve");
+        assert_eq!(resolved, Some(path));
+    }
+
+    /// Plan bullet: `--project <missing>` → `NotFound` (79).
+    #[tokio::test]
+    async fn project_path_explicit_flag_missing_returns_not_found() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let missing = PathBuf::from("/tmp/ocx-project-path-test-missing-explicit.toml");
+        let err = ConfigLoader::project_path(None, Some(&missing))
+            .await
+            .expect_err("missing explicit path should be FileNotFound");
+        assert!(
+            matches!(
+                err,
+                crate::config::error::Error::FileNotFound {
+                    ref path,
+                    tier: crate::config::error::ConfigSource::Project,
+                } if path == &missing,
+            ),
+            "expected FileNotFound(Project) for missing --project path, got: {err:?}"
+        );
+    }
+
+    /// Non-`NotFound` I/O error on an explicit path surfaces as `Error::Io`
+    /// (exit 74) rather than silently succeeding. `/dev/null/...` returns
+    /// `ENOTDIR` on Unix because `/dev/null` is a character device, not a
+    /// directory — a stable way to provoke a non-`NotFound` kind without
+    /// platform-specific permission gymnastics.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_explicit_io_error_surfaces_as_io() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let bad = PathBuf::from("/dev/null/not-a-real-file.toml");
+        let err = ConfigLoader::project_path(None, Some(&bad))
+            .await
+            .expect_err("non-NotFound I/O error on explicit path must surface");
+        assert!(
+            matches!(
+                err,
+                crate::config::error::Error::Io {
+                    ref path,
+                    tier: crate::config::error::ConfigSource::Project,
+                    ..
+                } if path == &bad,
+            ),
+            "expected Error::Io(Project) for ENOTDIR on explicit --project path, got: {err:?}"
+        );
+    }
+
+    /// Plan bullet: `OCX_PROJECT_FILE=<valid>` → loads the file.
+    #[tokio::test]
+    async fn project_path_env_var_loads_valid_file() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("custom-name.toml");
+        write_file(&path, "");
+        env.set("OCX_PROJECT_FILE", path.to_str().unwrap());
+        let resolved = ConfigLoader::project_path(None, None)
+            .await
+            .expect("env-var path should resolve");
+        assert_eq!(resolved, Some(path));
+    }
+
+    /// Plan bullet: `OCX_PROJECT_FILE=""` → treated as unset.
+    ///
+    /// With env var treated as unset, and no explicit flag, and a cwd that
+    /// has no `ocx.toml` above it up to the ceiling → returns `None`.
+    #[tokio::test]
+    async fn project_path_empty_env_var_treated_as_unset() {
+        let env = crate::test::env::lock();
+        env.set("OCX_PROJECT_FILE", "");
+        env.remove("OCX_NO_PROJECT");
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        let resolved = ConfigLoader::project_path(Some(dir.path()), None)
+            .await
+            .expect("empty env var should be treated as unset, not an error");
+        assert_eq!(
+            resolved, None,
+            "empty OCX_PROJECT_FILE must fall through; with no cwd hit, result should be None"
+        );
+    }
+
+    /// Plan bullet: `OCX_NO_PROJECT=1` → skips CWD walk + env-var path; returns `None`.
+    #[tokio::test]
+    async fn project_path_no_project_returns_none() {
+        let env = crate::test::env::lock();
+        env.set("OCX_NO_PROJECT", "1");
+        let dir = TempDir::new().unwrap();
+        // Even placing a valid ocx.toml at cwd must not be discovered.
+        let cwd_project = dir.path().join("ocx.toml");
+        write_file(&cwd_project, "");
+        // And a valid env-var path must also be ignored.
+        let env_path = dir.path().join("env.toml");
+        write_file(&env_path, "");
+        env.set("OCX_PROJECT_FILE", env_path.to_str().unwrap());
+        let resolved = ConfigLoader::project_path(Some(dir.path()), None)
+            .await
+            .expect("OCX_NO_PROJECT=1 with no explicit flag must return Ok(None)");
+        assert_eq!(
+            resolved, None,
+            "OCX_NO_PROJECT=1 must prune both CWD walk and env-var path"
+        );
+    }
+
+    /// Plan bullet: `OCX_NO_PROJECT=1` + `--project <valid>` → still loads.
+    #[tokio::test]
+    async fn project_path_no_project_does_not_block_explicit_flag() {
+        let env = crate::test::env::lock();
+        env.set("OCX_NO_PROJECT", "1");
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("flag.toml");
+        write_file(&path, "");
+        let resolved = ConfigLoader::project_path(None, Some(&path))
+            .await
+            .expect("OCX_NO_PROJECT=1 must not block --project");
+        assert_eq!(resolved, Some(path));
+    }
+
+    /// ADR G3: `OCX_NO_PROJECT=1` prunes `OCX_PROJECT_FILE` (stricter than
+    /// `OCX_NO_CONFIG`, which leaves `OCX_CONFIG_FILE` intact). Only `--project`
+    /// escapes the kill switch — the env var does not.
+    #[tokio::test]
+    async fn project_path_no_project_prunes_env_var() {
+        let env = crate::test::env::lock();
+        env.set("OCX_NO_PROJECT", "1");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("env-hermetic.toml");
+        write_file(&path, "");
+        env.set("OCX_PROJECT_FILE", path.to_str().unwrap());
+        let resolved = ConfigLoader::project_path(None, None)
+            .await
+            .expect("OCX_NO_PROJECT=1 must prune the env-var path per ADR G3");
+        assert_eq!(resolved, None, "OCX_NO_PROJECT=1 must prune OCX_PROJECT_FILE (ADR G3)");
+    }
+
+    /// Plan bullet: Precedence `--project` > `OCX_PROJECT_FILE` > CWD walk.
+    ///
+    /// Three files are materialized, one per tier. A single resolver call
+    /// that sees all three must return the highest-precedence one.
+    #[tokio::test]
+    async fn project_path_flag_beats_env_beats_walk_precedence() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+
+        // CWD-walk candidate at the root of a throw-away workspace.
+        let walk_dir = dir.path().join("workspace");
+        std::fs::create_dir(&walk_dir).unwrap();
+        let walk_path = walk_dir.join("ocx.toml");
+        write_file(&walk_path, "");
+
+        // Env-var candidate.
+        let env_path = dir.path().join("env.toml");
+        write_file(&env_path, "");
+        env.set("OCX_PROJECT_FILE", env_path.to_str().unwrap());
+
+        // Explicit-flag candidate (highest).
+        let flag_path = dir.path().join("flag.toml");
+        write_file(&flag_path, "");
+
+        let resolved = ConfigLoader::project_path(Some(&walk_dir), Some(&flag_path))
+            .await
+            .expect("all three tiers present should resolve");
+        assert_eq!(
+            resolved,
+            Some(flag_path),
+            "--project must beat OCX_PROJECT_FILE and CWD walk"
+        );
+    }
+
+    /// Max-tier edge case: `--project` takes precedence over `OCX_PROJECT_FILE`
+    /// when both are set (focused assertion separate from the three-tier test).
+    #[tokio::test]
+    async fn project_path_explicit_takes_precedence_over_env_when_both_set() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let file_a = dir.path().join("a.toml");
+        let file_b = dir.path().join("b.toml");
+        write_file(&file_a, "");
+        write_file(&file_b, "");
+        env.set("OCX_PROJECT_FILE", file_b.to_str().unwrap());
+        let resolved = ConfigLoader::project_path(None, Some(&file_a))
+            .await
+            .expect("both explicit sources should resolve");
+        assert_eq!(resolved, Some(file_a), "--project must beat OCX_PROJECT_FILE");
+    }
+
+    /// Plan bullet: Explicit path escapes `OCX_CEILING_PATH`.
+    ///
+    /// Ceiling is set above the target file; the explicit path must still
+    /// resolve because the ceiling only bounds the CWD walk.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_explicit_escapes_ceiling() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        let ceiling = dir.path().join("ceiling");
+        std::fs::create_dir(&ceiling).unwrap();
+        env.set("OCX_CEILING_PATH", ceiling.to_str().unwrap());
+        // File lives OUTSIDE the ceiling — must still resolve via --project.
+        let outside = dir.path().join("outside.toml");
+        write_file(&outside, "");
+        let resolved = ConfigLoader::project_path(None, Some(&outside))
+            .await
+            .expect("explicit path must escape ceiling");
+        assert_eq!(resolved, Some(outside));
+    }
+
+    /// Plan bullet: Symlink via `--project` → accepted.
+    ///
+    /// Explicit paths follow symlinks — trusted caller intent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_explicit_follows_symlink() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("real.toml");
+        write_file(&target, "");
+        let link = dir.path().join("link.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let resolved = ConfigLoader::project_path(None, Some(&link))
+            .await
+            .expect("symlink via --project must be accepted");
+        // Either the link path itself or the resolved target is acceptable —
+        // the spec says "accepted" without pinning which is returned. Assert
+        // that we got a Some and it points at a real file.
+        let returned = resolved.expect("should be Some");
+        assert!(
+            returned == link || returned == target,
+            "returned path should be the link or its target, got: {}",
+            returned.display()
+        );
+    }
+
+    /// Plan bullet: Symlink discovered via CWD walk → rejected.
+    ///
+    /// CWD walk rejects symlinks (matches tier-config discovery symmetry).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_rejects_symlink() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        // .git/ absent, ceiling bounds the walk to the temp dir.
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+
+        // Put the real ocx.toml outside the walk, then symlink into workspace.
+        let target = dir.path().join("real.toml");
+        write_file(&target, "");
+        let link = workspace.join("ocx.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let resolved = ConfigLoader::project_path(Some(&workspace), None)
+            .await
+            .expect("symlinked walk hit should be skipped, not error");
+        assert_eq!(
+            resolved, None,
+            "CWD walk must reject symlinks and return None when only the symlink is found"
+        );
+    }
+
+    /// Plan bullet: Non-`ocx.toml` basename via `--project` → accepted.
+    ///
+    /// Matches Cargo `--manifest-path` semantics.
+    #[tokio::test]
+    async fn project_path_explicit_accepts_any_basename() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("fixture-manifest.project");
+        write_file(&path, "");
+        let resolved = ConfigLoader::project_path(None, Some(&path))
+            .await
+            .expect("any basename should be accepted via --project");
+        assert_eq!(resolved, Some(path));
+    }
+
+    /// Plan bullet: CWD walk with `ocx.toml` at repo root + nested cwd → finds root file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_finds_root_ocx_toml_from_nested_cwd() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let nested = root.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project = root.join("ocx.toml");
+        write_file(&project, "");
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&nested), None)
+            .await
+            .expect("walk from nested cwd should succeed");
+        assert_eq!(resolved, Some(project), "walk should locate root ocx.toml");
+    }
+
+    /// Plan bullet: CWD walk stops at `.git/` boundary.
+    ///
+    /// A parent `ocx.toml` exists above a `.git/` directory; the walk must
+    /// stop at the `.git/` boundary and NOT cross into the parent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_stops_at_git_boundary() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        // Parent workspace holds an ocx.toml — this must NOT be returned.
+        let parent_project = dir.path().join("ocx.toml");
+        write_file(&parent_project, "");
+        // Inner workspace with a .git/ boundary and a nested cwd.
+        let inner = dir.path().join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        std::fs::create_dir(inner.join(".git")).unwrap();
+        let nested = inner.join("src");
+        std::fs::create_dir(&nested).unwrap();
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&nested), None)
+            .await
+            .expect("walk must stop at .git/ boundary");
+        assert_eq!(
+            resolved, None,
+            ".git/ boundary must prevent discovery of parent ocx.toml"
+        );
+    }
+
+    /// Git worktree `.git` is a *file* (linkfile) pointing at the real git
+    /// directory under `worktrees/<name>/`, not a directory. The walk must
+    /// still treat the worktree root as a repository boundary — matching
+    /// git's own `git-check-ref-format` rule of "any `.git` entry counts".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_stops_at_git_worktree_linkfile() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        // Parent workspace holds an ocx.toml — this must NOT be returned.
+        let parent_project = dir.path().join("ocx.toml");
+        write_file(&parent_project, "");
+        // Worktree layout: `.git` is a regular file, not a directory.
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: /some/path/.git/worktrees/wt\n").unwrap();
+        let nested = worktree.join("src");
+        std::fs::create_dir(&nested).unwrap();
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&nested), None)
+            .await
+            .expect("walk must stop at .git linkfile boundary");
+        assert_eq!(
+            resolved, None,
+            ".git file (worktree linkfile) must also act as a repo boundary"
+        );
+    }
+
+    /// Amendment F precedence: `ocx.toml` at the repo root (alongside
+    /// `.git/`) must be returned — the `.git/` boundary only prevents
+    /// walking UP past the repo root, it does not disqualify a project
+    /// file AT that level. Regression guard for the common case.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_finds_ocx_toml_at_git_root_level() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let project = repo.join("ocx.toml");
+        write_file(&project, "");
+        let nested = repo.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&nested), None)
+            .await
+            .expect("walk from nested cwd must find ocx.toml at repo root");
+        assert_eq!(
+            resolved,
+            Some(project),
+            "a repo root with both .git/ and ocx.toml must resolve to the ocx.toml"
+        );
+    }
+
+    /// Explicit `--project <dir>` must not silently succeed — non-file
+    /// targets surface as `Error::Io` (exit 74, ADR G9) rather than being
+    /// accepted as a valid project-file path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_explicit_directory_rejected_as_io() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().to_path_buf();
+        let err = ConfigLoader::project_path(None, Some(&target))
+            .await
+            .expect_err("explicit --project pointing at a directory must error");
+        assert!(
+            matches!(
+                err,
+                crate::config::error::Error::Io {
+                    ref path,
+                    tier: crate::config::error::ConfigSource::Project,
+                    ..
+                } if path == &target,
+            ),
+            "expected Error::Io(Project) for directory on explicit --project path, got: {err:?}"
+        );
+    }
+
+    /// Plan bullet: No `ocx.toml`, no explicit path → returns `None`.
+    #[tokio::test]
+    async fn project_path_returns_none_when_no_source() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        let resolved = ConfigLoader::project_path(Some(dir.path()), None)
+            .await
+            .expect("no sources should resolve to None, not error");
+        assert_eq!(resolved, None);
+    }
+
+    /// Max-tier edge case: `OCX_PROJECT_FILE=<missing>` → `NotFound`.
+    ///
+    /// Plan line 69 + Amendment G7 — symmetry with `--project <missing>`.
+    /// Plan bullets only test the valid env-var path explicitly.
+    #[tokio::test]
+    async fn project_path_env_var_missing_file_returns_not_found() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let missing = PathBuf::from("/tmp/ocx-project-path-test-missing-env.toml");
+        env.set("OCX_PROJECT_FILE", missing.to_str().unwrap());
+        let err = ConfigLoader::project_path(None, None)
+            .await
+            .expect_err("missing env-var path should be FileNotFound");
+        assert!(
+            matches!(
+                err,
+                crate::config::error::Error::FileNotFound {
+                    ref path,
+                    tier: crate::config::error::ConfigSource::Project,
+                } if path == &missing,
+            ),
+            "expected FileNotFound(Project) for missing OCX_PROJECT_FILE path, got: {err:?}"
+        );
+    }
+
+    /// Max-tier edge case: CWD walk with no `.git/`, no `OCX_CEILING_PATH`, no
+    /// `ocx.toml` → returns `None` without hanging or erroring.
+    ///
+    /// Plan line 40 ("Does NOT stop at filesystem root if .git/ is absent")
+    /// requires the walk to continue past the common stopping conditions;
+    /// this test guards against an infinite loop.
+    #[tokio::test]
+    async fn project_path_walk_without_git_or_ceiling_returns_none() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_CEILING_PATH");
+        // Use a temp dir far inside /tmp; no ocx.toml anywhere on the path
+        // to `/`. The resolver must terminate at the filesystem root and
+        // return None — never hang, never error.
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ConfigLoader::project_path(Some(&nested), None),
+        )
+        .await
+        .expect("walk must terminate within 5s when no .git/ and no ceiling")
+        .expect("walk should resolve to None when nothing is found, not error");
+        assert_eq!(resolved, None);
+    }
+
+    /// Max-tier edge case: `OCX_CEILING_PATH` set above the `ocx.toml` → returns `None`.
+    ///
+    /// Amendment F — ceiling is the paired bound for the walk. When the
+    /// ceiling sits between cwd and the `ocx.toml`, discovery must stop.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_stops_at_ceiling() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        // ocx.toml at the OUTERMOST level (above the ceiling).
+        let outer_project = dir.path().join("ocx.toml");
+        write_file(&outer_project, "");
+        // Ceiling sits inside the tempdir; walk starts below the ceiling.
+        let ceiling = dir.path().join("ceiling");
+        std::fs::create_dir(&ceiling).unwrap();
+        env.set("OCX_CEILING_PATH", ceiling.to_str().unwrap());
+        let cwd = ceiling.join("project");
+        std::fs::create_dir(&cwd).unwrap();
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("ceiling-bounded walk should resolve, not error");
+        assert_eq!(
+            resolved, None,
+            "OCX_CEILING_PATH must bound the walk before reaching outer ocx.toml"
+        );
+    }
+
+    /// Max-tier edge case: no ceiling, no `.git/`, deeply nested cwd, `ocx.toml`
+    /// many levels up → found.
+    ///
+    /// Stresses the loop-termination logic: we expect the walk to actually
+    /// traverse several levels rather than short-circuiting at one or two.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_no_ceiling_no_git_finds_ocx_toml_many_levels_up() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT_FILE");
+        let dir = TempDir::new().unwrap();
+        // Set the ceiling at the tempdir so the test cannot accidentally walk
+        // past it into the real filesystem; the `ocx.toml` is placed just
+        // below the ceiling so the walk has work to do without leaving the
+        // sandbox. This still stresses five levels of parent traversal, which
+        // is the point of the test.
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        let root = dir.path().join("r");
+        std::fs::create_dir(&root).unwrap();
+        let project = root.join("ocx.toml");
+        write_file(&project, "");
+        let deep = root.join("a").join("b").join("c").join("d").join("e");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let resolved = ConfigLoader::project_path(Some(&deep), None)
+            .await
+            .expect("deep walk should resolve");
+        assert_eq!(
+            resolved,
+            Some(project),
+            "walk must traverse multiple parent levels to find ocx.toml"
+        );
     }
 }

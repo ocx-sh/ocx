@@ -42,9 +42,11 @@ impl Context {
 
         log::debug!("Creating context with options: {:?}", options);
 
+        let cwd = env::current_dir()?;
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: options.config.as_deref(),
-            cwd: None,
+            explicit_project_path: options.project.as_deref(),
+            cwd: Some(&cwd),
         })
         .await?;
 

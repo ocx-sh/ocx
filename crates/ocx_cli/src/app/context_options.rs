@@ -15,6 +15,21 @@ pub struct ContextOptions {
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<std::path::PathBuf>,
 
+    /// Path to the project-level `ocx.toml` (project-tier toolchain config).
+    ///
+    /// Can also be set via the `OCX_PROJECT_FILE` environment variable.
+    /// To disable project discovery entirely, set `OCX_NO_PROJECT=1`.
+    /// Any filename is accepted via this flag (matches Cargo `--manifest-path`);
+    /// the CWD walk still looks for the literal name `ocx.toml`.
+    ///
+    /// Symlink policy: paths given via this flag (and `OCX_PROJECT_FILE`) are
+    /// trusted and followed through symlinks. Paths discovered by the CWD walk
+    /// reject symlinks and continue upward to avoid a writer with control
+    /// over an intermediate directory redirecting discovery to arbitrary
+    /// files.
+    #[arg(long, value_name = "FILE")]
+    pub project: Option<std::path::PathBuf>,
+
     /// Use the remote index by default instead of the local index.
     #[arg(long, default_value_t = env::flag("OCX_REMOTE", false))]
     pub remote: bool,

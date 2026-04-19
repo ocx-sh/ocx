@@ -155,6 +155,20 @@ The update check is also automatically suppressed when:
 - stderr is not a terminal (e.g., piped or redirected)
 - the command is `version`, `info`, or `shell completion`
 
+### `OCX_NO_PROJECT` {#ocx-no-project}
+
+When set to a [truthy value](#truthy-values), OCX skips project-tier discovery — the CWD walk for `ocx.toml` is pruned and [`OCX_PROJECT_FILE`](#ocx-project-file) is ignored. Explicit paths supplied via [`--project`][arg-project] still load, because they represent deliberate intent rather than ambient environment.
+
+Use this for CI reproducibility when you want to run `ocx` inside a repository without the project-tier toolchain influencing the invocation.
+
+Combined with an explicit path, this mirrors the hermetic pattern used for [`OCX_NO_CONFIG`](#ocx-no-config):
+
+```sh
+OCX_NO_PROJECT=1 ocx --project /ci/ocx.toml exec -- cmake --version
+```
+
+`OCX_NO_PROJECT` is available only as an environment variable. A `--no-project` CLI flag would duplicate surface without solving a new problem — the hermetic-CI use case is best expressed via env vars, matching the [`OCX_NO_CONFIG`](#ocx-no-config) pattern.
+
 ### `OCX_NO_MODIFY_PATH` {#ocx-no-modify-path}
 
 When set to a [truthy value](#truthy-values), the install scripts (`install.sh` and `install.ps1`) will skip modifying shell profile files.
@@ -175,6 +189,22 @@ This variable has no effect on non-macOS systems.
 
 When set to a [truthy value](#truthy-values), OCX will run in offline mode, which will not attempt to fetch any remote information.
 The command line option [`--offline`][arg-offline] takes precedence over this variable.
+
+### `OCX_PROJECT_FILE` {#ocx-project-file}
+
+Path to a project-tier `ocx.toml` to load. Bypasses the CWD walk — the named file is used directly. Not part of the ambient configuration chain: the project tier is a separate API surface from the ambient config tier loaded via [`OCX_CONFIG_FILE`](#ocx-config-file).
+
+Equivalent to the `--project` CLI flag, but injectable via environment — the intended use is CI and Docker setups where the env is controlled but the command line is not.
+
+```sh
+export OCX_PROJECT_FILE=/workspace/ocx.toml
+```
+
+Precedence: `--project` > `OCX_PROJECT_FILE` > CWD walk. [`OCX_NO_PROJECT=1`](#ocx-no-project) prunes both the CWD walk and this env var, but does not block an explicit `--project` flag. Missing files produce a clear error with the path.
+
+**Escape hatch**: setting this to the empty string (`OCX_PROJECT_FILE=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
+
+**Symlink policy**: explicit paths (this variable and `--project`) follow symlinks. The CWD walk rejects symlinked `ocx.toml` candidates — use `--project` or `OCX_PROJECT_FILE` to opt in.
 
 ### `OCX_REMOTE` {#ocx-remote}
 
@@ -262,6 +292,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-index]: command-line.md#arg-index
 [arg-log-level]: command-line.md#arg-log-level
 [arg-offline]: command-line.md#arg-offline
+[arg-project]: command-line.md#arg-project
 [arg-remote]: command-line.md#arg-remote
 
 <!-- reference -->
