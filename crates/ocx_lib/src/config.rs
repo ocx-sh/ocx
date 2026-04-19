@@ -16,40 +16,41 @@ pub use self::registry::RegistryConfig;
 /// No `deny_unknown_fields` — unknown top-level sections are silently ignored
 /// for forward compatibility (future sections like `[patches]`, `[clean]`,
 /// `[toolchain]` should not break existing configs).
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct Config {
-    /// `[registry]` section — global registry-subsystem settings.
+    /// Global registry-subsystem settings (`[registry]` section).
     ///
     /// In v1 contains only `default`, but reserved for future global settings
     /// (timeout, retry policy, default-credential-provider, etc.).
     pub registry: Option<RegistryDefaults>,
 
-    /// `[registries.<name>]` named registry tables — per-registry settings.
+    /// Named per-registry configuration tables (`[registries.<name>]`).
     ///
     /// The plural name is deliberate: it matches Cargo's convention and avoids
     /// a TOML collision with the singular `[registry]` global-settings section.
     ///
     /// In v1 each entry only has a `url` field, giving `[registry] default`
     /// a lookup target. Future extensions (per-registry insecure flag,
-    /// location rewrite, timeout, auth) drop into the same [`RegistryConfig`]
-    /// struct without breaking existing configs.
+    /// location rewrite, timeout, auth) drop into the same entry struct
+    /// without breaking existing configs.
     pub registries: Option<HashMap<String, RegistryConfig>>,
 }
 
-/// `[registry]` section — global registry-subsystem settings.
+/// Global registry-subsystem settings (`[registry]` section).
 ///
 /// `deny_unknown_fields` is enforced here so typos inside a known section
 /// fail fast. Forward compatibility is preserved at the root via the absence
 /// of `deny_unknown_fields` on `Config`.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryDefaults {
-    /// Default registry for bare identifiers (e.g., `cmake:3.28` →
-    /// `<default>/cmake:3.28`). Overridden by `OCX_DEFAULT_REGISTRY` env var.
+    /// Default registry for bare identifiers (e.g. `cmake:3.28` expands to
+    /// `<default>/cmake:3.28`). Overridden by the `OCX_DEFAULT_REGISTRY`
+    /// environment variable.
     ///
-    /// May be either a literal hostname (`"ghcr.io"`) or the name of a
+    /// May be a literal hostname (`"ghcr.io"`) or the name of a
     /// `[registries.<name>]` entry — the latter is resolved to its `url`
-    /// by [`Config::resolved_default_registry`].
+    /// field at runtime.
     pub default: Option<String>,
 }
 

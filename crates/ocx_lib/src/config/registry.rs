@@ -14,12 +14,13 @@ use serde::Deserialize;
 ///
 /// Re-exported from [`crate::config`] as `RegistryConfig`. `deny_unknown_fields`
 /// is enforced so typos inside a known section fail fast.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
-    /// The registry hostname this entry resolves to. When
-    /// [`super::RegistryDefaults::default`] names this entry, OCX uses `url`
-    /// as the effective default registry hostname for bare identifiers.
+    /// The registry hostname this entry resolves to (e.g. `"ghcr.io"`,
+    /// `"registry.company.example"`). When `[registry] default` names this
+    /// entry, OCX uses this value as the effective default registry hostname
+    /// for bare package identifiers.
     pub url: Option<String>,
 }
 
