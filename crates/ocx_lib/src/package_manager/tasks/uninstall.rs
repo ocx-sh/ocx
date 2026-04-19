@@ -28,7 +28,9 @@ pub struct UninstallResult {
 /// Intermediate result from symlink removal (before purge).
 struct SymlinkRemoval {
     candidate: Option<PathBuf>,
-    content: Option<PathBuf>,
+    /// Read-link target of the candidate symlink — the package root after the
+    /// post-flatten layout change.
+    pkg_root: Option<PathBuf>,
 }
 
 impl PackageManager {
@@ -45,24 +47,24 @@ impl PackageManager {
         profile: &ProfileSnapshot,
     ) -> Result<Option<UninstallResult>, PackageErrorKind> {
         let result = uninstall_symlinks(self.file_structure(), package, deselect).await?;
-        let Some((candidate, content_path)) = result else {
+        let Some((candidate, pkg_root)) = result else {
             return Ok(None);
         };
 
         let mut purged = None;
-        if purge
-            && let Some(ref content) = content_path
-            && let Some(obj_dir) = content.parent()
-        {
+        // `pkg_root` is the candidate symlink's read-link target, which the
+        // post-flatten layout points at the package root directly (no further
+        // `.parent()` needed).
+        if purge && let Some(ref obj_dir) = pkg_root {
             let gc = GarbageCollector::build(self.file_structure(), profile)
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             let removed = gc
-                .purge(&[obj_dir.to_path_buf()])
+                .purge(std::slice::from_ref(obj_dir))
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             if removed.iter().any(|p| p == obj_dir) {
-                purged = Some(obj_dir.to_path_buf());
+                purged = Some(obj_dir.clone());
             }
         }
 
@@ -90,13 +92,13 @@ impl PackageManager {
 
         for package in packages {
             match uninstall_symlinks(self.file_structure(), package, deselect).await {
-                Ok(Some((candidate, content))) => removals.push(SymlinkRemoval {
+                Ok(Some((candidate, pkg_root))) => removals.push(SymlinkRemoval {
                     candidate: Some(candidate),
-                    content,
+                    pkg_root,
                 }),
                 Ok(None) => removals.push(SymlinkRemoval {
                     candidate: None,
-                    content: None,
+                    pkg_root: None,
                 }),
                 Err(kind) => errors.push(PackageError::new(package.clone(), kind)),
             }
@@ -108,13 +110,7 @@ impl PackageManager {
 
         // Phase 2: Batch purge — collect all object dirs, purge once.
         let purge_seeds: Vec<PathBuf> = if purge {
-            removals
-                .iter()
-                .filter_map(|r| {
-                    let content = r.content.as_ref()?;
-                    content.parent().map(|p| p.to_path_buf())
-                })
-                .collect()
+            removals.iter().filter_map(|r| r.pkg_root.clone()).collect()
         } else {
             Vec::new()
         };
@@ -148,11 +144,10 @@ impl PackageManager {
             .map(|r| {
                 let candidate = r.candidate?;
                 let purged = r
-                    .content
+                    .pkg_root
                     .as_ref()
-                    .and_then(|c| c.parent())
-                    .filter(|obj_dir| purged_set.contains(*obj_dir))
-                    .map(|obj_dir| obj_dir.to_path_buf());
+                    .filter(|obj_dir| purged_set.contains(obj_dir.as_path()))
+                    .cloned();
                 Some(UninstallResult { candidate, purged })
             })
             .collect();
@@ -179,7 +174,7 @@ async fn uninstall_symlinks(
     let candidate_path = fs.symlinks.candidate(package);
 
     let content_path = if crate::symlink::is_link(&candidate_path) {
-        let path = std::fs::read_link(&candidate_path).ok();
+        let path = tokio::fs::read_link(&candidate_path).await.ok();
         log::trace!("Candidate content path: {:?}", path);
         rm.unlink(&candidate_path).map_err(PackageErrorKind::Internal)?;
         path
@@ -193,15 +188,54 @@ async fn uninstall_symlinks(
     };
 
     if deselect {
+        // Hold both selection locks (index → select, in that order) for the
+        // entire teardown so it serializes with concurrent install --select
+        // and the index update + `current` unlink form a single critical
+        // section. Symmetric with tasks/deselect.rs.
+        let _locks = super::common::acquire_selection_locks(fs, package).await?;
+
         let current_path = fs.symlinks.current(package);
-        if crate::symlink::is_link(&current_path) {
-            rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
-        } else {
-            log::debug!(
-                "Package '{}' has no current symlink at '{}' — skipping deselect.",
-                package,
-                current_path.display(),
-            );
+
+        // Snapshot the pre-mutation index file so a unlink failure can roll
+        // the registry-scoped ownership map back to its prior state. Without
+        // the snapshot, a clear-then-fail-to-unlink ordering would free a
+        // launcher name in the index while the old `current` symlink still
+        // resolved on disk — a missed-collision shape future selects could
+        // walk into.
+        let index_path = fs.symlinks.entrypoints_index(package.registry());
+        let prior_index_bytes: Option<Vec<u8>> = match tokio::fs::read(&index_path).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(PackageErrorKind::Internal(crate::error::file_error(&index_path, e)));
+            }
+        };
+
+        // Unlink `current` FIRST — same rationale as `deselect`. The unlink
+        // is idempotent when the symlink is already absent.
+        let teardown_result: Result<(), crate::Error> = (|| {
+            if crate::symlink::is_link(&current_path) {
+                rm.unlink(&current_path)?;
+            } else {
+                log::debug!(
+                    "Package '{}' has no current symlink at '{}' — skipping deselect.",
+                    package,
+                    current_path.display(),
+                );
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = teardown_result {
+            super::common::restore_index_snapshot(&index_path, prior_index_bytes.as_deref()).await;
+            return Err(PackageErrorKind::Internal(e));
+        }
+
+        // Symlinks gone — now drop launcher ownership in the index. If the
+        // index write fails, restore the snapshot before surfacing the error.
+        if let Err(e) = super::common::clear_index_owner(fs, package).await {
+            super::common::restore_index_snapshot(&index_path, prior_index_bytes.as_deref()).await;
+            return Err(e);
         }
     }
 

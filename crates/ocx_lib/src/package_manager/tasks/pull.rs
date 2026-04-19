@@ -285,6 +285,12 @@ async fn setup_owned(
     let client = mgr.client().map_err(PackageErrorKind::Internal)?;
     let manifest = resolved.final_manifest.clone();
     let metadata = client.pull_metadata(pinned, Some(&manifest)).await?;
+    // Reject malformed metadata at the ingress boundary — refuse to write
+    // unvalidated metadata to disk so the consumption-side `load_object_data`
+    // validation never has to deal with publisher-side bugs after the fact.
+    let metadata: metadata::Metadata = metadata::ValidMetadata::try_from(metadata)
+        .map_err(PackageErrorKind::Internal)?
+        .into();
 
     // Validate manifest before any extraction work. Zero layers is valid —
     // the package is a config-only artifact whose `content/` is the empty
@@ -342,6 +348,36 @@ async fn setup_owned(
     crate::utility::fs::assemble_from_layers(&sources, &pkg.content())
         .await
         .map_err(PackageErrorKind::Internal)?;
+
+    // Entry point launcher generation.
+    // Launchers are written into pkg.entrypoints() — the temp dir's entrypoints/ sibling —
+    // BEFORE post_download_actions so they are carried by the existing atomic move.
+    // The launcher BAKES THE FINAL packages/<digest>/ package-root path (resolved via
+    // `fs.packages.path(pinned)`), NOT the temp staging path: the launcher file
+    // moves atomically with the package, but the path it bakes must reference the
+    // post-move location to remain valid after the move.
+    if let Some(entry_points) = metadata.bundle_entry_points()
+        && !entry_points.is_empty()
+    {
+        use crate::package::metadata::env::accumulator::DependencyContext;
+        let dep_contexts: std::collections::HashMap<String, DependencyContext> = metadata
+            .dependencies()
+            .iter()
+            .zip(dependencies.iter())
+            .map(|(decl, info)| {
+                let name = decl.name().to_string();
+                let ctx = DependencyContext::new(info.identifier.clone(), info.content.clone());
+                (name, ctx)
+            })
+            .collect();
+        let dest = pkg.entrypoints();
+        // Bake the post-move package-root path into the launcher so it remains
+        // valid after the temp→final atomic rename.
+        let final_pkg_root = fs.packages.path(pinned);
+        crate::package_manager::entry_points::generate(&final_pkg_root, entry_points, &dep_contexts, &dest)
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+    }
 
     // Build resolved package and enrich temp dir.
     // Order invariant: setup_dependencies returns results in declaration order.
@@ -695,6 +731,7 @@ async fn extract_layer_inner(
 /// The caller is responsible for pre-creating `pkg.refs_deps_dir()` via an
 /// async `tokio::fs::create_dir_all` — this helper stays sync so it does not
 /// introduce blocking I/O into an async context.
+#[allow(clippy::result_large_err)]
 fn link_dependencies_in_temp(
     pkg: &file_structure::PackageDir,
     dep_infos: &[InstallInfo],
@@ -724,6 +761,7 @@ fn link_dependencies_in_temp(
 /// The caller is responsible for pre-creating `pkg.refs_layers_dir()` via an
 /// async `tokio::fs::create_dir_all` — this helper stays sync so it does not
 /// introduce blocking I/O into an async context.
+#[allow(clippy::result_large_err)]
 fn link_layers_in_temp(
     pkg: &file_structure::PackageDir,
     registry: &str,

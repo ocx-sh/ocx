@@ -157,9 +157,11 @@ should survive package updates.
 
 | Mode | Flag | Path |
 |------|------|------|
-| Object store (default) | _(none)_ | `~/.ocx/objects/…/{digest}/content` |
+| Object store (default) | _(none)_ | `~/.ocx/packages/…/{digest}/content` |
 | Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/{tag}/content` |
 | Current symlink | `--current` | `~/.ocx/symlinks/…/current/content` |
+
+`candidates/{tag}` and `current` target the **package root** (the parent of `content/`); the resolved path you see above is the same anchor with `/content` appended. Consumers that need launcher scripts traverse `…/current/entrypoints` from the same anchor, and metadata readers traverse `…/current/metadata.json`.
 
 **Constraints**
 
@@ -252,6 +254,8 @@ Removes the current-version symlink for one or more packages.
 
 The package is deselected but not uninstalled: its [candidate symlink](../user-guide.md#path-resolution) and object-store content remain intact. To also remove the installed files, use [`uninstall`](#uninstall).
 
+When the deselected package declares [entry points](../guide/entry-points.md), the per-registry `.entrypoints-index.json` ownership row is dropped at the same time. The symlink removal is idempotent — an already-absent link is not an error.
+
 **Usage**
 
 ```shell
@@ -297,17 +301,24 @@ ocx env [OPTIONS] <PACKAGE>...
 ### `exec` {#exec}
 
 Executes a command within the environment of one or more packages.
-Packages are auto-installed if not already available locally (unless [`--offline`](#arg-offline) is set). If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables.
+
+Each positional accepts a package reference in one of three forms:
+
+- A bare OCI identifier (`node:20`) — equivalent to the explicit `oci://node:20`.
+- An explicit `oci://<identifier>` URI — resolved through the index and auto-installed when missing (unless [`--offline`](#arg-offline) is set).
+- A `file://<absolute-package-root>` URI — points at an already-installed package directory under `$OCX_HOME/packages/...`, skipping identifier resolution and the index. This is the form generated [entry point][entry-points] launchers bake; it is also the contract that lets the launcher survive an `ocx select` to a different version (the symlink target moves, the URI does not).
+
+If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables. Refs of either scheme can be mixed in one invocation; env entries layer in the order refs appear on the command line.
 
 **Usage**
 
 ```shell
-ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
+ocx exec [OPTIONS] <REF>... -- <COMMAND> [ARGS...]
 ```
 
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to run within.
+- `<REF>`: Package references — bare identifier, `oci://<identifier>`, or `file://<absolute-package-root>`.
 - `<COMMAND>`: The command to execute within the package environment.
 - `[ARGS...]`: Arguments to pass to the command.
 
@@ -317,6 +328,10 @@ ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
 - `-i`, `--interactive`: Run in interactive mode, forwarding stdin to the child process.
 - `--clean`: Start with a clean environment containing only the package-defined variables, instead of inheriting the current shell environment.
 - `-h`, `--help`: Print help information.
+
+::: warning Contract stability
+The `file://` URI scheme and `ocx exec` argument shape are load-bearing for every generated launcher on disk. Changing either invalidates existing installs; both are kept stable across releases.
+:::
 
 ### `find` {#find}
 
@@ -467,6 +482,10 @@ ocx select [OPTIONS] <PACKAGE>...
 
 See [path resolution modes](../user-guide.md#path-resolution) for how the `current` symlink is used downstream.
 
+#### Entry-point name collisions {#select-entry-point-collision}
+
+If the package being selected declares [entry points](../guide/entry-points.md) and one of the declared names is already contributed to `$PATH` by another currently-selected package, `select` (and `install --select`) refuses to flip `entrypoints-current` and exits with a structured `EntryPointNameCollision` error reporting the conflicting name and the package that already owns it. The exit code is `65` (`DataError`); see [Exit codes](#exit-codes) for the full taxonomy. Resolve the conflict by deselecting the other package — the collision is detected before any state changes, so a failed select leaves the existing `current` and `entrypoints-current` symlinks intact.
+
 ### `shell` {#shell}
 
 #### `env` {#shell-env}
@@ -588,6 +607,8 @@ Reads `$OCX_HOME/profile.json` and emits shell-specific export lines for each pa
 eval "$(ocx --offline shell profile load)"
 ```
 
+For each profile entry whose package declares a non-empty `entry_points` array and whose `entrypoints-current` symlink exists under `$OCX_HOME/symlinks/{registry}/{repo}/`, an additional `PATH` export line is emitted that prepends the symlinked entry-point directory. Entries without `entry_points` produce only their declared environment variables; entries that have not yet been selected (no `entrypoints-current` symlink) are silently skipped, so profile load never points `$PATH` at a missing directory. See the [entry points guide](../guide/entry-points.md#path) for the full PATH-integration model.
+
 ### `uninstall` {#uninstall}
 
 Removes the installed candidate for one or more packages.
@@ -606,7 +627,7 @@ ocx uninstall [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution). Equivalent to running `ocx deselect` after uninstall.
+- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution) and the `entrypoints-current` symlink (when present). Equivalent to running `ocx deselect` after uninstall — see [`deselect`](#deselect) for the full cleanup behavior.
 - `--purge`: Delete the object from the store when no other references remain after uninstall.
 - `-h`, `--help`: Print help information.
 
@@ -827,6 +848,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [config-ref]: ./configuration.md
 
 <!-- internal -->
+[entry-points]: ./metadata.md#entry-points
 [exit-codes]: #exit-codes
 [fs-objects]: ../user-guide.md#file-structure-objects
 [fs-symlinks]: ../user-guide.md#file-structure-symlinks

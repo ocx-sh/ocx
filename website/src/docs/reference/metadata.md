@@ -35,6 +35,7 @@ The metadata file is a JSON object with a `type` discriminator. Currently only t
 | `strip_components` | integer | No | Leading path components to strip during extraction. |
 | `env` | array | No | [Environment variable declarations](#env). |
 | `dependencies` | array | No | [Package dependencies](#dependencies) pinned by digest. |
+| `entry_points` | array | No | Named entry points for generating launcher scripts. |
 
 ::: details Why a type discriminator?
 The `type` field allows future metadata formats (e.g. `"manifest"`, `"virtual"`) without
@@ -56,7 +57,7 @@ A package with no environment variables and no extraction options:
 
 ### Full Example {#format-full}
 
-A language runtime with multiple environment variables, archive stripping, and a dependency:
+A language runtime with multiple environment variables, archive stripping, a dependency, and named entry points:
 
 ```json
 {
@@ -87,6 +88,12 @@ A language runtime with multiple environment variables, archive stripping, and a
     {
       "identifier": "ocx.sh/gcc:13@sha256:a1b2c3d4e5f6..."
     }
+  ],
+  "entry_points": [
+    {
+      "name": "cmake",
+      "target": "${installPath}/bin/cmake"
+    }
   ]
 }
 ```
@@ -97,8 +104,12 @@ The `env` array declares environment variables that OCX exposes when running
 commands with the package (via [`ocx exec`][cmd-exec] or [`ocx env`][cmd-env]).
 
 Each entry is an object with a `key`, a `type` (`path` or `constant`), and a `value`
-template. The `${installPath}` placeholder is replaced with the absolute path to the
-package content directory at resolution time.
+template. Two placeholders are available in `value`:
+
+- **`${installPath}`** — replaced with the absolute path to this package's content directory.
+- **`${deps.NAME.installPath}`** — replaced with the absolute path to a declared dependency's content directory, where `NAME` is the dependency's repository basename (or its `alias` if one is declared). Useful for pointing consumers at a dependency's installation directory.
+
+`${installPath}` and `${deps.NAME.installPath}` may appear multiple times and can be combined in the same value (e.g. `${installPath}/bin:${deps.cmake.installPath}/bin`). OCX validates at publish time that every `${deps.*}` reference names a declared dependency.
 
 ### Path Variables {#env-path}
 
@@ -110,7 +121,7 @@ separated by the platform path delimiter.
 | `key` | string | Yes | Environment variable name. |
 | `type` | string | Yes | Must be `"path"`. |
 | `required` | boolean | No | If `true`, the resolved path must exist on disk. Defaults to `false`. |
-| `value` | string | Yes | Value template with `${installPath}` substitution. |
+| `value` | string | Yes | Value template. Supports `${installPath}` and `${deps.NAME.installPath}`. |
 
 ```json
 {
@@ -133,7 +144,7 @@ Constant variables **replace** any existing value of the environment variable.
 |---|---|---|---|
 | `key` | string | Yes | Environment variable name. |
 | `type` | string | Yes | Must be `"constant"`. |
-| `value` | string | Yes | Value template with `${installPath}` substitution. |
+| `value` | string | Yes | Value template. Supports `${installPath}` and `${deps.NAME.installPath}`. |
 
 ```json
 {
@@ -159,6 +170,7 @@ on every machine regardless of the current registry state.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `identifier` | string | Yes | Fully qualified pinned OCX identifier including the registry and an inline OCI digest (`@sha256:…`). The tag is advisory; only the digest is authoritative. The digest may reference an Image Index (platform resolution at install time) or a single manifest. e.g. `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`, `ghcr.io/myorg/tool@sha256:...`. |
+| `alias` | string | No | Short name used to reference this dependency in `${deps.ALIAS.installPath}` templates. When set, the alias is used instead of the repository basename. Useful when two dependencies share the same basename (e.g. `myorg/cmake` and `upstream/cmake`) or when the basename is long. |
 | `visibility` | string | No | Controls how the dependency's environment variables propagate. Default: `sealed`. See [Visibility](#dependencies-visibility). |
 
 ```json
@@ -167,7 +179,8 @@ on every machine regardless of the current registry state.
   "type": "bundle",
   "version": 1,
   "env": [
-    { "key": "PATH", "type": "path", "required": true, "value": "${installPath}/bin" }
+    { "key": "PATH", "type": "path", "required": true, "value": "${installPath}/bin" },
+    { "key": "JDK_HOME", "type": "constant", "value": "${deps.java.installPath}" }
   ],
   "dependencies": [
     {
@@ -175,7 +188,8 @@ on every machine regardless of the current registry state.
       "visibility": "private"
     },
     {
-      "identifier": "ocx.sh/cmake:3.28@sha256:f6e5d4c3b2a1..."
+      "identifier": "ocx.sh/cmake:3.28@sha256:f6e5d4c3b2a1...",
+      "alias": "cmake"
     }
   ]
 }
@@ -236,6 +250,56 @@ tooling, but is never used for resolution.
 
 See [Dependencies][ug-dependencies] in the user guide for how dependencies affect
 installation, environment composition, and garbage collection from a user's perspective.
+
+## Entry Points {#entry-points}
+
+The `entry_points` array declares named launchers that `ocx install` generates at install time. Each
+launcher is a small shell script (or `.cmd` on Windows) placed in an `entrypoints/` directory inside
+the package directory. When the package is selected with `--select`, the per-repo `current` symlink
+is flipped to the package root and consumers traverse `current/entrypoints` from the same anchor to
+add the launchers to `PATH`.
+
+Each launcher calls [`ocx exec`][cmd-exec] with a `file://<package-root>` URI baked at install time,
+preserving clean-environment execution semantics on every invocation.
+
+### Entry Point Fields {#entry-points-fields}
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | The launcher name. Must match `^[a-z0-9][a-z0-9_-]*$`. Used as the script filename and the command users invoke. |
+| `target` | string | Yes | Template string for the binary to execute. Supports the same placeholders as [`env`](#env) values. |
+
+### Template Substitution {#entry-points-template}
+
+The `target` field supports the same placeholders as [environment variable values](#env):
+
+- **`${installPath}`** — replaced with the absolute path to this package's content directory.
+- **`${deps.NAME.installPath}`** — replaced with a declared dependency's content directory, where `NAME` is the repository basename or `alias`.
+
+### Disk Layout {#entry-points-disk-layout}
+
+Generated launchers land in `entrypoints/` inside the package directory (a sibling of `content/`).
+When the package is selected with `ocx install --select` or `ocx select`, the per-repo `current`
+symlink is flipped to that package root, and consumers reach the launchers via
+`{registry}/{repo}/current/entrypoints`. Packages with no entry points produce no `entrypoints/`
+directory, so the same `current/entrypoints` path simply does not exist for them.
+
+### Uniqueness {#entry-points-uniqueness}
+
+Duplicate `name` values within the same `entry_points` array are rejected at deserialization with
+a descriptive error. Name collisions across different currently-selected packages are detected at
+select time.
+
+### Example {#entry-points-example}
+
+```json
+{
+  "entry_points": [
+    { "name": "cmake", "target": "${installPath}/bin/cmake" },
+    { "name": "ctest", "target": "${installPath}/bin/ctest" }
+  ]
+}
+```
 
 ## Extraction {#extraction}
 

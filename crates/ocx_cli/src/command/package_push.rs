@@ -80,10 +80,11 @@ impl PackagePush {
             self.layers.len(),
             metadata_path.display()
         );
-        let metadata = package::metadata::Metadata::read_json(&metadata_path).await?;
+        let metadata =
+            package::metadata::ValidMetadata::try_from(package::metadata::Metadata::read_json(&metadata_path).await?)?;
         let info = package::info::Info {
             identifier: identifier.clone(),
-            metadata,
+            metadata: metadata.into(),
             platform: self.platform.clone(),
         };
 

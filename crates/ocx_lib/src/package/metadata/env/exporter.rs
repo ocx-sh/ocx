@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use super::{accumulator::Accumulator, modifier::ModifierKind, var::Var};
+use std::collections::HashMap;
+
+use super::{
+    accumulator::{Accumulator, DependencyContext},
+    modifier::ModifierKind,
+    var::Var,
+};
 
 /// A resolved environment variable entry produced by [`Exporter`].
 pub struct Entry {
@@ -21,20 +27,22 @@ pub struct Entry {
 /// `Exporter` returns the entries as structured data so callers can decide how to apply them.
 pub struct Exporter {
     content: std::path::PathBuf,
+    dep_contexts: HashMap<String, DependencyContext>,
     entries: Vec<Entry>,
 }
 
 impl Exporter {
-    pub fn new(content: impl AsRef<std::path::Path>) -> Self {
+    pub fn new(content: impl AsRef<std::path::Path>, dep_contexts: HashMap<String, DependencyContext>) -> Self {
         Self {
             content: content.as_ref().to_path_buf(),
+            dep_contexts,
             entries: Vec::new(),
         }
     }
 
     pub fn add(&mut self, var: &Var) -> crate::Result<()> {
         let mut dummy = crate::env::Env::clean();
-        let acc = Accumulator::new(&self.content, &mut dummy);
+        let acc = Accumulator::new(&self.content, &self.dep_contexts, &mut dummy);
         if let Some(value) = acc.resolve_var(var)? {
             self.entries.push(Entry {
                 key: var.key.clone(),

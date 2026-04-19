@@ -4,15 +4,20 @@
 use std::{collections::HashMap, process::ExitCode};
 
 use clap::Parser;
-use ocx_lib::{oci, reference_manager::ReferenceManager};
+use ocx_lib::oci;
 
 use crate::{api, conventions::platforms_or_default, options};
 
 /// Set the current version of one or more packages.
 ///
 /// Resolves each package via the index and verifies that its content is present
-/// in the local object store, then updates the `current` symlink to point
-/// directly to that content.  No downloading is performed.
+/// in the local object store, then updates the per-repo `current` symlink to
+/// point at the package root (consumers traverse `<current>/content/`,
+/// `<current>/entrypoints/`, or `<current>/metadata.json`). The same
+/// per-registry collision check, per-repo `.select.lock`, and
+/// `entrypoints-index.json` ownership write that `install --select` runs are
+/// applied here — `install --select` and `select` share a single code path.
+/// No downloading is performed.
 #[derive(Parser)]
 pub struct Select {
     /// Platforms to consider when resolving the package. Defaults to the current platform.
@@ -28,24 +33,24 @@ impl Select {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
-        let fs = context.file_structure().clone();
-        let rm = ReferenceManager::new(fs.clone());
         let platforms = platforms_or_default(&self.platforms);
 
-        let package_infos = context.manager().find_all(identifiers, platforms).await?;
+        let package_infos = context.manager().find_all(identifiers.clone(), platforms).await?;
 
         let mut packages = HashMap::with_capacity(package_infos.len());
 
-        for (raw, info) in self.packages.iter().zip(package_infos) {
-            let current_path = fs.symlinks.current(&info.identifier);
-            rm.link(&current_path, &info.content)?;
+        for ((raw, identifier), info) in self.packages.iter().zip(identifiers.iter()).zip(package_infos.iter()) {
+            // Drive the same wire-selection pipeline as `install --select`:
+            // collision check + atomic pair update + index publish under a
+            // shared per-registry lock.
+            let outcome = context.manager().wire_selection(identifier, info, false, true).await?;
 
             packages.insert(
                 raw.raw().to_string(),
                 api::data::install::InstallEntry {
-                    identifier: info.identifier.into(),
-                    metadata: info.metadata,
-                    path: current_path,
+                    identifier: info.identifier.clone().into(),
+                    metadata: info.metadata.clone(),
+                    path: outcome.current,
                 },
             );
         }

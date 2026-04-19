@@ -12,10 +12,11 @@ def test_find_returns_content_path(
     candidate = Path(install_result[pkg.short]["path"])
 
     find_result = ocx.json("find", pkg.short)
-    # find (default) returns the package-store content path;
-    # the candidate symlink points to the same content path.
+    # find (default) returns the package-store content path; the candidate
+    # symlink points at the package root, so traversing into `/content`
+    # lands at the same content tree.
     find_path = Path(find_result[pkg.short])
-    assert find_path == candidate.resolve()
+    assert find_path == candidate.resolve() / "content"
 
 
 def test_find_candidate_returns_candidate_symlink(

@@ -210,12 +210,55 @@ impl PackageManager {
         &self,
         packages: &[InstallInfo],
     ) -> crate::Result<Vec<crate::package::metadata::env::exporter::Entry>> {
+        use crate::package::metadata::env::accumulator::DependencyContext;
         let objects = &self.file_structure().packages;
         let mut seen_digests = HashSet::new();
         let mut seen_repos: HashMap<oci::Repository, oci::Digest> = HashMap::new();
         let mut entries = Vec::new();
 
         for pkg in packages {
+            // Build a (registry, repository) → resolved identifier map for content path lookups.
+            // Metadata dep identifiers may carry image-index digests; resolved identifiers carry
+            // the platform-manifest digest at which the package is actually installed on disk.
+            let resolved_id_map: std::collections::HashMap<(String, String), &oci::PinnedIdentifier> = pkg
+                .resolved
+                .dependencies
+                .iter()
+                .map(|dep| {
+                    let key = (
+                        dep.identifier.registry().to_string(),
+                        dep.identifier.repository().to_string(),
+                    );
+                    (key, &dep.identifier)
+                })
+                .collect();
+
+            // Build dep_contexts for this root package: all direct deps (no visibility filter).
+            // Visibility controls env propagation (is_visible() below); interpolation scope
+            // includes all declared deps — these two filters are independent.
+            //
+            // Collision (two deps sharing the same .name()) is detected at publish time by
+            // validate_env_dep_refs and prevents publishing. At runtime, packages with colliding
+            // basenames and ${deps.*} tokens cannot exist; packages without such tokens never
+            // trigger the interpolation path. So last-writer-wins from .collect() is safe.
+            let dep_contexts: std::collections::HashMap<String, DependencyContext> = pkg
+                .metadata
+                .dependencies()
+                .iter()
+                .map(|dep| {
+                    let name = dep.name().to_string();
+                    // Use the resolved identifier (platform-manifest digest) when available so
+                    // objects.content() points to the actual on-disk location.
+                    let key = (
+                        dep.identifier.registry().to_string(),
+                        dep.identifier.repository().to_string(),
+                    );
+                    let install_id = resolved_id_map.get(&key).copied().unwrap_or(&dep.identifier);
+                    let install_path = objects.content(install_id);
+                    (name, DependencyContext::new(install_id.clone(), install_path))
+                })
+                .collect();
+
             // Visible transitive deps first (topological order preserved).
             // Root packages are direct exec targets — include self-visible
             // (Private, Public) and consumer-visible (Public, Interface) deps.
@@ -227,12 +270,42 @@ impl PackageManager {
                     continue;
                 }
                 let content = objects.content(&dep.identifier);
-                let (dep_metadata, _) = super::common::load_object_data(objects, &content).await?;
-                super::common::export_env(&content, &dep_metadata, &mut entries)?;
+                let (dep_metadata, dep_resolved) = super::common::load_object_data(objects, &content).await?;
+                // Build dep's own direct-dep context map (scoped to dep's declared deps, not root's).
+                // Each package's interpolation surface is only its own direct deps.
+                // Use dep's OWN resolved closure for digest translation (metadata deps carry
+                // image-index digests; dep's resolve.json carries platform-manifest digests).
+                let dep_resolved_id_map: std::collections::HashMap<(String, String), &oci::PinnedIdentifier> =
+                    dep_resolved
+                        .dependencies
+                        .iter()
+                        .map(|d| {
+                            let key = (
+                                d.identifier.registry().to_string(),
+                                d.identifier.repository().to_string(),
+                            );
+                            (key, &d.identifier)
+                        })
+                        .collect();
+                let dep_dep_contexts: std::collections::HashMap<String, DependencyContext> = dep_metadata
+                    .dependencies()
+                    .iter()
+                    .map(|d| {
+                        let n = d.name().to_string();
+                        let key = (
+                            d.identifier.registry().to_string(),
+                            d.identifier.repository().to_string(),
+                        );
+                        let install_id = dep_resolved_id_map.get(&key).copied().unwrap_or(&d.identifier);
+                        let p = objects.content(install_id);
+                        (n, DependencyContext::new(install_id.clone(), p))
+                    })
+                    .collect();
+                super::common::export_env(&content, &dep_metadata, dep_dep_contexts, &mut entries)?;
             }
-            // Then the root package itself.
+            // Then the root package itself, using root's direct dep contexts.
             if check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)? {
-                super::common::export_env(&pkg.content, &pkg.metadata, &mut entries)?;
+                super::common::export_env(&pkg.content, &pkg.metadata, dep_contexts, &mut entries)?;
             }
         }
         Ok(entries)

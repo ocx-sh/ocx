@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{compression, log, oci, package};
+use ocx_lib::{compression, log, oci, package, prelude::*};
 
 use crate::options;
 
@@ -75,6 +75,8 @@ impl PackageCreate {
         );
 
         if let Some(metadata_source) = &self.metadata {
+            let metadata = package::metadata::Metadata::read_json(metadata_source.as_path()).await?;
+            package::metadata::ValidMetadata::try_from(metadata)?;
             let metadata_target = crate::conventions::infer_metadata_file(&output)?;
             std::fs::copy(metadata_source, &metadata_target)?;
         }
@@ -85,11 +87,7 @@ impl PackageCreate {
     /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
     fn infer_filename(&self, identifier: &Option<oci::Identifier>) -> String {
         let mut name = match identifier {
-            Some(identifier) => format!(
-                "{}-{}",
-                identifier.name().unwrap_or("package".to_string()),
-                identifier.tag_or_latest()
-            ),
+            Some(identifier) => format!("{}-{}", identifier.name(), identifier.tag_or_latest()),
             None => self
                 .path
                 .file_prefix()

@@ -42,6 +42,9 @@ includes:
   recordings:
     taskfile: ./website/recordings.taskfile.yml
     dir: ./test
+  schema:
+    taskfile: ./website/schema.taskfile.yml
+    dir: ./website
   website:
     taskfile: ./website/taskfile.yml
     dir: ./website

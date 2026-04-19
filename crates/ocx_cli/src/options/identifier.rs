@@ -3,7 +3,7 @@
 
 use ocx_lib::{Result, oci};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Identifier {
     raw: String,
 }

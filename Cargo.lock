@@ -1557,6 +1557,7 @@ dependencies = [
  "ocx_lib",
  "serde",
  "tar",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-log",

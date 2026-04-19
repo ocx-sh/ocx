@@ -60,12 +60,22 @@ def _tags_dir(ocx: OcxRunner) -> Path:
 
 
 def _refs_blobs_dir(content_path: Path) -> Path:
-    """Given a package content path, return its refs/blobs/ directory."""
-    return content_path.parent / "refs" / "blobs"
+    """Given a package content path, return its refs/blobs/ directory.
+
+    Post-flatten: candidate symlinks target the package root directly, and
+    `_install_content` returns that root, so `refs/blobs/` is a direct child
+    rather than `content/.parent/refs/blobs/`.
+    """
+    return content_path / "refs" / "blobs"
 
 
 def _install_content(ocx: OcxRunner, pkg: PackageInfo) -> Path:
-    """Install pkg and return the resolved content/ path."""
+    """Install pkg and return the resolved package-root path.
+
+    Post-flatten: the candidate symlink targets the package root (parent of
+    `content/`), so `candidate.resolve()` yields the root. Helpers that need
+    the actual content tree should append `/content`.
+    """
     result = ocx.json("install", pkg.short)
     candidate = Path(result[pkg.short]["path"])
     return candidate.resolve()

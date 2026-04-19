@@ -196,7 +196,7 @@ def test_round_trip_zero_layers(
     ocx.plain("index", "update", short)
 
     result = ocx.json("install", short)
-    content = Path(result[short]["path"])
+    content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)
     assert list(content.iterdir()) == [], (
@@ -217,7 +217,7 @@ def test_round_trip_multi_layer(
     _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a), str(bundle_b)], tmp_path)
     ocx.plain("index", "update", short)
     result = ocx.json("install", short)
-    content = Path(result[short]["path"])
+    content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)
     assert (content / "lib" / "liba.so").exists(), "File from layer A missing"
@@ -238,7 +238,7 @@ def test_round_trip_shared_directory(
     _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a), str(bundle_b)], tmp_path)
     ocx.plain("index", "update", short)
     result = ocx.json("install", short)
-    content = Path(result[short]["path"])
+    content = Path(result[short]["path"]) / "content"
 
     assert (content / "bin" / "tool_a").exists(), "File from layer A missing in shared dir"
     assert (content / "bin" / "tool_b").exists(), "File from layer B missing in shared dir"
@@ -305,7 +305,7 @@ def test_push_digest_layer_reuse(
     ocx.plain("index", "update", f"{unique_repo}:2.0.0")
 
     result = ocx.json("install", f"{unique_repo}:2.0.0")
-    content = Path(result[f"{unique_repo}:2.0.0"]["path"])
+    content = Path(result[f"{unique_repo}:2.0.0"]["path"]) / "content"
     assert (content / "lib" / "shared.so").exists(), "Digest-referenced layer A missing"
     assert (content / "bin" / "new_tool").exists(), "File layer B missing"
 
@@ -356,7 +356,7 @@ def test_push_digest_layer_reuse_tar_xz(
     )
 
     result = ocx.json("install", f"{unique_repo}:2.0.0")
-    content = Path(result[f"{unique_repo}:2.0.0"]["path"])
+    content = Path(result[f"{unique_repo}:2.0.0"]["path"]) / "content"
     assert (content / "lib" / "liba.so").exists(), "xz layer A not extracted on consumer"
     assert (content / "lib" / "liba.so").read_text() == "xz-shared"
     assert (content / "bin" / "tool").exists(), "File layer B missing"

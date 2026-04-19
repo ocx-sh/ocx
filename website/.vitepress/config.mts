@@ -49,6 +49,13 @@ export default defineConfig({
           link: "/docs/user-guide",
         },
         {
+          text: "Guides",
+          collapsed: true,
+          items: [
+            { text: "Entry Points", link: "/docs/guide/entry-points" },
+          ],
+        },
+        {
           text: "FAQ",
           link: "/docs/faq",
         },

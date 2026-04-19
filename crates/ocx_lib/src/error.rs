@@ -58,7 +58,7 @@ pub enum Error {
     Config(#[from] crate::config::error::Error),
     /// A package operation failed.
     #[error(transparent)]
-    Package(#[from] crate::package::error::Error),
+    Package(Box<crate::package::error::Error>),
     /// A shell operation failed.
     #[error(transparent)]
     Shell(#[from] crate::shell::error::Error),
@@ -78,6 +78,26 @@ pub enum Error {
     /// A pinned identifier validation failed.
     #[error(transparent)]
     PinnedIdentifier(#[from] crate::oci::pinned_identifier::PinnedIdentifierError),
+
+    /// An entry point's `target` template could not be resolved at install time.
+    #[error("entry point '{name}' has invalid target: {source}")]
+    EntryPointTargetInvalid {
+        name: String,
+        #[source]
+        source: Box<crate::package::metadata::template::TemplateError>,
+    },
+
+    /// A string baked into an install-time launcher contains a character that
+    /// cannot be safely embedded in either the Unix `.sh` or Windows `.cmd`
+    /// template (single-quote, percent, double-quote, NUL, CR, LF).
+    #[error("launcher-unsafe character {character:?} in {value:?}")]
+    LauncherUnsafeCharacter { value: String, character: char },
+}
+
+impl From<crate::package::error::Error> for Error {
+    fn from(e: crate::package::error::Error) -> Self {
+        Error::Package(Box::new(e))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -146,7 +166,7 @@ impl ClassifyExitCode for Error {
             Self::Compression(e) => e.classify(),
             Self::Ci(e) => e.classify(),
             Self::Config(e) => e.classify(),
-            Self::Package(e) => e.classify(),
+            Self::Package(e) => e.as_ref().classify(),
             // Shell errors have no specific exit code yet; defer to chain walker.
             Self::Shell(_) => None,
             Self::OciIndex(e) => e.classify(),
@@ -154,6 +174,8 @@ impl ClassifyExitCode for Error {
             Self::Digest(e) => e.classify(),
             Self::Dependency(e) => e.classify(),
             Self::PinnedIdentifier(e) => e.classify(),
+            Self::EntryPointTargetInvalid { source, .. } => source.classify(),
+            Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
         }
     }
 }

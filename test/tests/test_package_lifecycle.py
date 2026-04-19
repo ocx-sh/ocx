@@ -65,5 +65,8 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     assert candidate.is_dir()
 
     # --- Find ---
+    # `find` (default) returns the content tree path; `install` reports the
+    # candidate symlink which targets the package root, so the content tree
+    # lives one level deeper.
     find_result = ocx.json("find", short)
-    assert Path(find_result[short]) == candidate.resolve()
+    assert Path(find_result[short]) == candidate.resolve() / "content"

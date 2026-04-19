@@ -18,18 +18,22 @@ pub enum SymlinkKind {
 
 /// Manages symlinks for installed packages.
 ///
-/// Symlink store provides stable, human-readable paths to package content
+/// Symlink store provides stable, human-readable paths to package roots
 /// that remain constant across version upgrades, making them safe to embed in
-/// shell profiles or toolchain configurations.
+/// shell profiles or toolchain configurations. Both `current` and
+/// `candidates/{tag}` target the **package root** (not `content/`) so a single
+/// per-repo symlink covers every consumer: tools that need files traverse
+/// `<symlink>/content`, shell PATH integrations traverse `<symlink>/entrypoints`,
+/// and metadata consumers read `<symlink>/metadata.json`.
 ///
 /// Layout:
 /// ```text
 /// {root}/
 ///   {registry}/
 ///     {repository}/
-///       current               — symlink (written by `ocx select`)
+///       current               — symlink → packages/{...}/        (package root)
 ///       candidates/
-///         {tag}               — symlink (written by `ocx install`)
+///         {tag}               — symlink → packages/{...}/        (package root)
 /// ```
 #[derive(Debug, Clone)]
 pub struct SymlinkStore {
@@ -53,6 +57,10 @@ impl SymlinkStore {
     }
 
     /// Returns the `current` symlink path for the given identifier.
+    ///
+    /// Targets the package root: `packages/{registry}/{algorithm}/{2hex}/{30hex}`.
+    /// Consumers traverse into `<current>/content/`, `<current>/entrypoints/`,
+    /// or `<current>/metadata.json` as needed.
     pub fn current(&self, identifier: &oci::Identifier) -> PathBuf {
         self.base(identifier).join("current")
     }
@@ -73,6 +81,45 @@ impl SymlinkStore {
             SymlinkKind::Candidate => self.candidate(identifier),
             SymlinkKind::Current => self.current(identifier),
         }
+    }
+
+    /// Returns the per-repo selection lock path: `{base}/.select.lock`.
+    ///
+    /// Serializes `current` symlink updates across `install --select`,
+    /// `deselect`, `uninstall --deselect`, and the standalone `select`
+    /// command so concurrent invocations cannot interleave a symlink
+    /// rewrite with the per-registry entry-points index update.
+    pub fn select_lock(&self, identifier: &oci::Identifier) -> PathBuf {
+        self.base(identifier).join(".select.lock")
+    }
+
+    /// Returns the per-registry directory: `{root}/{registry_slug}/`.
+    ///
+    /// Used by the entry-points index file and lock, which live one level
+    /// above the per-repo `current` symlinks.
+    pub fn registry_dir(&self, registry: &str) -> PathBuf {
+        self.root.join(super::slugify(registry))
+    }
+
+    /// Returns the per-registry entry-points index file path:
+    /// `{root}/{registry_slug}/.entrypoints-index.json`.
+    ///
+    /// The index is the canonical source of truth for "which currently-selected
+    /// package owns launcher name X across all repos under this registry."
+    /// Mediates collision detection across repos under a single registry.
+    pub fn entrypoints_index(&self, registry: &str) -> PathBuf {
+        self.registry_dir(registry).join(".entrypoints-index.json")
+    }
+
+    /// Returns the per-registry entry-points index lock path:
+    /// `{root}/{registry_slug}/.entrypoints-index.lock`.
+    ///
+    /// The index lock is a coarser lock than `.select.lock`: it serializes the
+    /// full read → collision-check → atomic-pair-update → index-write sequence
+    /// across all repos in a registry. Lock order MUST be `index_lock` →
+    /// `select_lock`; the reverse risks deadlock under concurrent installs.
+    pub fn entrypoints_index_lock(&self, registry: &str) -> PathBuf {
+        self.registry_dir(registry).join(".entrypoints-index.lock")
     }
 }
 
@@ -185,4 +232,8 @@ mod tests {
         let store = SymlinkStore::new("/symlinks");
         assert_eq!(store.root(), Path::new("/symlinks"));
     }
+
+    // ── collision check — drives check_entry_point_collisions stub ────────
+    // Tests for select-time collision check live in tasks/install.rs tests.
+    // The collision-check function is in tasks/install.rs (check_entry_point_collisions).
 }

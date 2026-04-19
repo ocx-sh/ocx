@@ -178,10 +178,14 @@ async fn resolve_symlink_entry(
                         return ProfileEntryResolution::broken(entry, Some(symlink_path.to_path_buf()), e.to_string());
                     }
                 };
+            // Install symlinks target the package root (post-flatten layout);
+            // env resolution expects `content_path` to point at the content
+            // tree. Append `/content` so traversal stays stable through the
+            // symlink while landing in the right subdir.
             ProfileEntryResolution::Resolved(ResolvedProfileEntry {
                 identifier,
                 mode: entry.mode,
-                content_path: symlink_path.to_path_buf(),
+                content_path: symlink_path.join("content"),
                 metadata,
                 resolved,
             })

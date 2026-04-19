@@ -64,11 +64,18 @@ impl PackageManager {
             symlink_path.display()
         );
 
+        // Install symlinks target the package root (post-flatten layout); the
+        // env-resolution layer expects `info.content` to point at the content
+        // tree where `${installPath}` should resolve. Append `/content` to keep
+        // the path traversal stable through the symlink while landing in the
+        // right subdir.
+        let content = symlink_path.join("content");
+
         Ok(InstallInfo {
             identifier,
             metadata,
             resolved,
-            content: symlink_path,
+            content,
         })
     }
 

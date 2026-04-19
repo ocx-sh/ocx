@@ -26,7 +26,8 @@ impl Env {
         install_path: impl AsRef<std::path::Path>,
         env: &mut crate::env::Env,
     ) -> crate::Result<()> {
-        let mut resolver = accumulator::Accumulator::new(install_path, env);
+        let empty_ctx = std::collections::HashMap::new();
+        let mut resolver = accumulator::Accumulator::new(install_path, &empty_ctx, env);
         for var in &self.variables {
             resolver.add(var)?;
         }

@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-layer package push and pull. `ocx package push` now accepts multiple layer arguments, each either a file path or a `sha256:<hex>.tar.gz` digest reference. *(package)*
 - Layered configuration from `/etc/ocx/config.toml`, `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml` with `--config` / `OCX_CONFIG_FILE` overrides and `OCX_NO_CONFIG` kill-switch. *(config)*
 - Typed `ExitCode` taxonomy aligned with BSD sysexits (64/65/69/74/75/77/78/79/80/81). Scripts can now `case $?` reliably. *(cli)*
+- `entry_points` field in package metadata. Publishers declare named launchers (e.g. `cmake`, `ctest`); `ocx install` generates per-platform launchers under `<package>/entrypoints/<name>` (POSIX) and `<package>/entrypoints/<name>.cmd` (Windows) that delegate to `ocx exec --install-dir=<path>`. *(package)*
+- `${deps.NAME.installPath}` template interpolation in env-var values. Entry-point `target` strings and env modifier values can now reference dependency install paths. Unrecognized `${...}` tokens are rejected at publish time. *(package)*
+- `alias` field on `Dependency`. Lets a package import a dependency under a different name, disambiguating basename collisions when two deps would otherwise resolve to the same launcher slot. *(package)*
+- `ocx exec --install-dir=<absolute-path>` flag. Generated entry-point launchers invoke `ocx exec` with the package's content path, preserving clean-env execution semantics. *(cli)*
+- `entrypoints-current` symlink alongside `current` in the symlink store. Tracks the active entry-point set for the selected version; cleaned up on `deselect` and `uninstall --deselect`. *(file-structure)*
+- `ValidMetadata` typestate on package metadata. Publish-time validation rejects bundles with malformed entry points, undeclared dep references, or duplicate launcher names; downstream code consumes only validated metadata. *(package)*
+- `EntryPointNameCollision` structured error at `install --select` / `select` when two installed packages would write the same launcher into the active entry-point set. Surfaces with exit code 65 (`DataError`). *(package-manager)*
 
 ### Changed
 

@@ -77,6 +77,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::archive::Error as ArchiveError;
     use crate::auth::error::AuthError;
     use crate::ci::error::Error as CiError;
+    use crate::cli::error::UsageError;
     use crate::compression::error::Error as CompressionError;
     use crate::config::error::Error as ConfigError;
     use crate::file_structure::error::Error as FileStructureError;
@@ -100,6 +101,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
         };
     }
 
+    try_downcast!(UsageError);
     try_downcast!(crate::Error);
     try_downcast!(ConfigError);
     try_downcast!(ClientError);
