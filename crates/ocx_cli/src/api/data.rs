@@ -13,4 +13,6 @@ pub mod package_description;
 pub mod paths;
 pub mod pull_dry_run;
 pub mod removed;
+pub mod signature;
 pub mod tag;
+pub mod verification;

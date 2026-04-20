@@ -49,6 +49,23 @@ pub trait ClassifyExitCode {
     }
 }
 
+/// Infallible variant of [`ClassifyExitCode`] for leaf "kind" enums.
+///
+/// "Kind" enums (e.g. `SignErrorKind`, `VerifyErrorKind`) are pure
+/// discriminants — every variant has a well-defined exit code by construction.
+/// Using a separate trait with a non-`Option` return value forces each impl to
+/// be exhaustive: adding a new variant produces a match-exhaustiveness compile
+/// error in the impl body, keeping the exit-code contract in lockstep with the
+/// enum without a separate table that can silently drift.
+///
+/// Wrapping error types (e.g. `SignError { identifier, kind }`) still implement
+/// [`ClassifyExitCode`] and delegate to `self.kind.exit_code()` wrapped in
+/// `Some(_)`.
+pub trait ClassifyErrorKind {
+    /// Return the exit code this kind maps to.
+    fn exit_code(&self) -> ExitCode;
+}
+
 /// Classify a [`std::error::Error`] chain into an [`ExitCode`].
 ///
 /// Walks the error chain via [`std::error::Error::source`] and downcasts each
@@ -87,6 +104,8 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::oci::index::error::Error as OciIndexError;
     use crate::oci::pinned_identifier::PinnedIdentifierError;
     use crate::oci::platform::error::PlatformError;
+    use crate::oci::sign::SignError;
+    use crate::oci::verify::VerifyError;
     use crate::package::error::Error as PackageError;
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::project::error::Error as ProjectError;
@@ -125,6 +144,8 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(CiError);
     try_downcast!(PackageError);
     try_downcast!(ProjectError);
+    try_downcast!(SignError);
+    try_downcast!(VerifyError);
 
     // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
     // for it (orphan rule). Only `PermissionDenied` maps to a specific code;

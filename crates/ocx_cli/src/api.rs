@@ -57,6 +57,23 @@ impl Api {
         Ok(())
     }
 
+    /// Convenience alias for reporting a [`data::signature::SignatureReport`].
+    ///
+    /// The generic [`Self::report`] works for any [`Printable`] — this method
+    /// exists so `package sign` call sites read as `api.report_signature(&r)?`
+    /// rather than `api.report(&r)?`, mirroring the per-type convention used
+    /// elsewhere in this API layer.
+    #[allow(dead_code)] // Consumed by `command/package_sign.rs` in Phase 5.
+    pub fn report_signature(&self, item: &data::signature::SignatureReport) -> anyhow::Result<()> {
+        self.report(item)
+    }
+
+    /// Convenience alias for reporting a [`data::verification::VerificationReport`].
+    #[allow(dead_code)] // Consumed by `command/verify.rs` in Phase 5.
+    pub fn report_verification(&self, item: &data::verification::VerificationReport) -> anyhow::Result<()> {
+        self.report(item)
+    }
+
     pub fn is_json(&self) -> bool {
         matches!(self.format, options::Format::Json)
     }

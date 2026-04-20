@@ -236,6 +236,24 @@ impl OciTransport for NativeTransport {
         self.do_push_blob(image, data, digest, on_progress).await
     }
 
+    async fn push_referrer_manifest(
+        &self,
+        _image: &oci::native::Reference,
+        _subject_digest: &oci::Digest,
+        _manifest_bytes: &[u8],
+        _media_type: &str,
+    ) -> Result<oci::Descriptor> {
+        unimplemented!("push_referrer_manifest — Phase 5 implements OCI 1.1 referrer push")
+    }
+
+    async fn list_referrers(
+        &self,
+        _image: &oci::native::Reference,
+        _subject_digest: &oci::Digest,
+    ) -> Result<Vec<oci::Descriptor>> {
+        unimplemented!("list_referrers — Phase 5 implements GET /v2/<name>/referrers/<digest>")
+    }
+
     fn box_clone(&self) -> Box<dyn OciTransport> {
         Box::new(self.clone())
     }

@@ -52,6 +52,20 @@ pub enum ExitCode {
     /// Offline mode blocked a network operation.
     /// Distinct from `Unavailable`: the failure is deliberate policy, not a fault.
     OfflineBlocked = 81,
+    /// Rekor transparency log service unavailable.
+    ///
+    /// Used by the sign path (Rekor upload failure) AND the verify path
+    /// (Rekor-required verification cannot complete: SET absent + TSA absent,
+    /// Rekor SET verification fails against known Rekor public key, or Rekor
+    /// lookup returns 5xx/timeout). OCX-specific; distinct from `Unavailable`
+    /// to let operators distinguish "registry down" (retry likely helps) from
+    /// "Rekor down" (sign cannot complete, verify of existing v0.3 bundles
+    /// fails if Rekor is needed for SET verification).
+    RekorUnavailable = 82,
+    /// Registry does not implement the OCI Referrers API and has no fallback-tag
+    /// referrers index. The operation cannot proceed — discovery fails hard rather
+    /// than silently returning empty results. OCX-specific.
+    ReferrersUnsupported = 83,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
