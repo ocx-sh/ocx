@@ -120,3 +120,130 @@ impl ClassifyErrorKind for SignErrorKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! ADR §"SignErrorKind — variant inventory" contract tests.
+    //!
+    //! Exit-code mapping is part of the public CLI contract: backend consumers
+    //! switch on `$?` to distinguish retryable from terminal failures. Any
+    //! change to these assertions is a user-visible contract change — review
+    //! carefully.
+    use super::*;
+
+    fn id() -> Identifier {
+        Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
+    }
+
+    #[test]
+    fn fulcio_bad_request_maps_to_config_error() {
+        assert_eq!(SignErrorKind::FulcioBadRequest.exit_code(), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn oidc_token_rejected_maps_to_auth_error() {
+        assert_eq!(SignErrorKind::OidcTokenRejected.exit_code(), ExitCode::AuthError);
+    }
+
+    #[test]
+    fn rekor_unavailable_maps_to_rekor_unavailable() {
+        assert_eq!(SignErrorKind::RekorUnavailable.exit_code(), ExitCode::RekorUnavailable);
+    }
+
+    #[test]
+    fn rekor_set_malformed_maps_to_data_error() {
+        assert_eq!(SignErrorKind::RekorSetMalformed.exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn referrers_unsupported_maps_to_referrers_unsupported() {
+        assert_eq!(
+            SignErrorKind::ReferrersUnsupported.exit_code(),
+            ExitCode::ReferrersUnsupported,
+        );
+    }
+
+    #[test]
+    fn oidc_precheck_failed_maps_to_permission_denied() {
+        let kind = SignErrorKind::OidcPreCheckFailed {
+            reason: "missing_gha_permission".into(),
+        };
+        assert_eq!(kind.exit_code(), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn offline_sign_refused_maps_to_permission_denied() {
+        // Policy rejection of the *action*, not a passive network access.
+        assert_eq!(
+            SignErrorKind::OfflineSignRefused.exit_code(),
+            ExitCode::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn signing_pipeline_internal_maps_to_failure() {
+        // Unclassified errors fall through to Failure (generic).
+        let inner: Box<dyn std::error::Error + Send + Sync> = "kaboom".into();
+        let kind = SignErrorKind::SigningPipelineInternal(inner);
+        assert_eq!(kind.exit_code(), ExitCode::Failure);
+    }
+
+    #[test]
+    fn sign_error_display_prefixes_identifier() {
+        // Outer Display format: "{identifier}: {kind}".
+        let err = SignError::new(id(), SignErrorKind::OidcTokenRejected);
+        let msg = format!("{err}");
+        assert!(msg.starts_with("registry.example/pkg:1.0:"), "got: {msg}");
+        assert!(msg.contains("Fulcio rejected OIDC token"), "got: {msg}");
+    }
+
+    #[test]
+    fn sign_error_kind_display_rules() {
+        // API Guidelines C-GOOD-ERR: lowercase when starting with English word,
+        // no trailing punctuation. Acronyms retain canonical case.
+        assert_eq!(
+            format!("{}", SignErrorKind::FulcioBadRequest),
+            "Fulcio rejected the CSR as malformed"
+        );
+        assert_eq!(
+            format!("{}", SignErrorKind::OidcTokenRejected),
+            "Fulcio rejected OIDC token"
+        );
+        assert_eq!(
+            format!("{}", SignErrorKind::RekorUnavailable),
+            "Rekor transparency log unavailable"
+        );
+        // No trailing periods on any variant.
+        for kind in [
+            SignErrorKind::FulcioBadRequest,
+            SignErrorKind::OidcTokenRejected,
+            SignErrorKind::RekorUnavailable,
+            SignErrorKind::RekorSetMalformed,
+            SignErrorKind::ReferrersUnsupported,
+            SignErrorKind::OfflineSignRefused,
+        ] {
+            let msg = format!("{kind}");
+            assert!(!msg.ends_with('.'), "trailing period on: {msg}");
+        }
+    }
+
+    #[test]
+    fn sign_error_classify_delegates_to_kind() {
+        let err = SignError::new(id(), SignErrorKind::RekorUnavailable);
+        assert_eq!(err.classify(), Some(ExitCode::RekorUnavailable));
+    }
+
+    #[test]
+    fn sign_error_source_chain_preserves_inner_error() {
+        // `SigningPipelineInternal` carries the inner error via #[source].
+        // Chain walking must surface it for diagnostics.
+        use std::error::Error;
+        let inner: Box<dyn std::error::Error + Send + Sync> = "inner boom".into();
+        let kind = SignErrorKind::SigningPipelineInternal(inner);
+        let err = SignError::new(id(), kind);
+        // SignError → SignErrorKind → inner error.
+        let source_kind = err.source().expect("SignError has source");
+        let source_inner = source_kind.source().expect("SignErrorKind has inner source");
+        assert_eq!(format!("{source_inner}"), "inner boom");
+    }
+}

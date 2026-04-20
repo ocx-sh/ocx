@@ -428,6 +428,96 @@ mod tests {
         assert_eq!(classify(err), ExitCode::AuthError);
     }
 
+    // ── SignError (Slice 1 — referrers signing) ─────────────────────────────
+
+    #[test]
+    fn sign_error_oidc_token_rejected_maps_to_auth_error() {
+        // Slice 1 C-S1-1: SignError delegates to SignErrorKind; OidcTokenRejected → 80
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::OidcTokenRejected);
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    #[test]
+    fn sign_error_rekor_unavailable_maps_to_rekor_unavailable() {
+        // Slice 1: distinct exit code 82 so operators can distinguish Rekor
+        // outage from registry outage.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::RekorUnavailable);
+        assert_eq!(classify(err), ExitCode::RekorUnavailable);
+    }
+
+    #[test]
+    fn sign_error_referrers_unsupported_maps_to_referrers_unsupported() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::ReferrersUnsupported);
+        assert_eq!(classify(err), ExitCode::ReferrersUnsupported);
+    }
+
+    #[test]
+    fn sign_error_offline_sign_refused_maps_to_permission_denied() {
+        // Slice 1 policy: `ocx package sign --offline` is rejected at the CLI.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::OfflineSignRefused);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    // ── VerifyError (Slice 1 — referrers verify) ────────────────────────────
+
+    #[test]
+    fn verify_error_no_signatures_found_maps_to_not_found() {
+        // Slice 1 C-S1-2: "not signed" must exit 79 so scripts can distinguish
+        // "no signature" from "bad signature" without stderr parsing.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::NoSignaturesFound);
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn verify_error_identity_mismatch_maps_to_permission_denied() {
+        // Slice 1: "verified, but not by the signer you expected" = 77.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::IdentityMismatch);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn verify_error_issuer_mismatch_maps_to_permission_denied() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::IssuerMismatch);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn verify_error_bundle_parse_failed_maps_to_data_error() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::BundleParseFailed);
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn verify_error_rekor_set_invalid_maps_to_rekor_unavailable() {
+        // Slice 1: Rekor-family failures coalesce onto 82 so CI can retry or
+        // route to the operator consistently.
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::RekorSetInvalid);
+        assert_eq!(classify(err), ExitCode::RekorUnavailable);
+    }
+
+    #[test]
+    fn verify_error_referrers_unsupported_maps_to_referrers_unsupported() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::ReferrersUnsupported);
+        assert_eq!(classify(err), ExitCode::ReferrersUnsupported);
+    }
+
+    #[test]
+    fn verify_error_trust_root_unavailable_maps_to_config_error() {
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::TrustRootUnavailable);
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
     // ── Fall-through lock-in ─────────────────────────────────────────────────
 
     #[test]

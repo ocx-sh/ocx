@@ -37,3 +37,41 @@ impl TrustRoot {
         unimplemented!("TrustRoot::load_from_pem — Phase 5 parses PEM and builds trust material")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Skeleton tests for the TrustRoot loaders.
+    //!
+    //! Both constructors are Phase 1 stubs (`unimplemented!()`). The tests
+    //! below lock in the *error type contract* — the functions must return
+    //! `Result<Self, VerifyErrorKind>` — and act as executable TODO markers
+    //! that flip to real assertions once Phase 5 ships.
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn load_embedded_is_phase_1_stub() {
+        // Phase 5 will return Ok(_) for the stock Sigstore root; until then,
+        // the stub panics. When Phase 5 lands, convert this to
+        //   let tr = TrustRoot::load_embedded().expect("embedded root loads");
+        let _ = TrustRoot::load_embedded();
+    }
+
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn load_from_pem_is_phase_1_stub() {
+        // Phase 5 parses PEM and builds trust material. Stub panics today.
+        let dummy_pem = b"-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n";
+        let _ = TrustRoot::load_from_pem(dummy_pem);
+    }
+
+    #[test]
+    fn load_from_pem_signature_returns_verify_error_kind() {
+        // Type-level check: the error channel must be VerifyErrorKind so
+        // `ClassifyErrorKind::exit_code()` is reachable when the TrustRoot
+        // loader fails. Captures the Result type at compile time via
+        // assignment to a variable of the declared shape.
+        let _fn: fn(&[u8]) -> Result<TrustRoot, VerifyErrorKind> = TrustRoot::load_from_pem;
+        let _fn2: fn() -> Result<TrustRoot, VerifyErrorKind> = TrustRoot::load_embedded;
+    }
+}

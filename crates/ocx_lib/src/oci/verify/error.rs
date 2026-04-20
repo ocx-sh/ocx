@@ -159,3 +159,134 @@ impl ClassifyErrorKind for VerifyErrorKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! ADR §C-S1-2 canonical VerifyErrorKind contract tests.
+    //!
+    //! Variant names and their exit-code mappings are frozen — consumers switch
+    //! on `$?` (79 = not signed, 77 = wrong signer, 82 = Rekor down, 83 = no
+    //! referrers API). Any change to these tests is a user-visible contract
+    //! change.
+    use super::*;
+
+    fn id() -> Identifier {
+        Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
+    }
+
+    #[test]
+    fn not_found_family_maps_to_not_found_exit() {
+        // "not signed" signal — publisher never signed or signed a different platform.
+        for kind in [
+            VerifyErrorKind::NoSignaturesFound,
+            VerifyErrorKind::NoUsableBundle,
+            VerifyErrorKind::BundleNotFound,
+        ] {
+            assert_eq!(kind.exit_code(), ExitCode::NotFound, "variant: {kind:?}");
+        }
+    }
+
+    #[test]
+    fn identity_family_maps_to_permission_denied() {
+        // 77 = "you verified, but not by the signer you expected".
+        assert_eq!(
+            VerifyErrorKind::IdentityMismatch.exit_code(),
+            ExitCode::PermissionDenied
+        );
+        assert_eq!(VerifyErrorKind::IssuerMismatch.exit_code(), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn data_error_family_maps_to_data_error() {
+        // 65 = "something in the bundle doesn't verify or doesn't parse".
+        for kind in [
+            VerifyErrorKind::CertChainInvalid,
+            VerifyErrorKind::SignatureInvalid,
+            VerifyErrorKind::BundleParseFailed,
+            VerifyErrorKind::CertificateExpired,
+            VerifyErrorKind::CertificateRevoked,
+        ] {
+            assert_eq!(kind.exit_code(), ExitCode::DataError, "variant: {kind:?}");
+        }
+    }
+
+    #[test]
+    fn rekor_family_maps_to_rekor_unavailable() {
+        // 82 = "Rekor says no (or can't say)" — includes invalid SET and TSA transition.
+        for kind in [
+            VerifyErrorKind::RekorSetInvalid,
+            VerifyErrorKind::RekorSetAbsentTsaPresent,
+            VerifyErrorKind::RekorUnavailable,
+            VerifyErrorKind::RekorLookupFailed,
+        ] {
+            assert_eq!(kind.exit_code(), ExitCode::RekorUnavailable, "variant: {kind:?}");
+        }
+    }
+
+    #[test]
+    fn referrers_unsupported_maps_to_referrers_unsupported() {
+        assert_eq!(
+            VerifyErrorKind::ReferrersUnsupported.exit_code(),
+            ExitCode::ReferrersUnsupported,
+        );
+    }
+
+    #[test]
+    fn trust_root_unavailable_maps_to_config_error() {
+        assert_eq!(VerifyErrorKind::TrustRootUnavailable.exit_code(), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn verify_error_display_prefixes_identifier() {
+        let err = VerifyError::new(id(), VerifyErrorKind::IdentityMismatch);
+        let msg = format!("{err}");
+        assert!(msg.starts_with("registry.example/pkg:1.0:"), "got: {msg}");
+        assert!(msg.contains("certificate identity mismatch"), "got: {msg}");
+    }
+
+    #[test]
+    fn verify_error_kind_display_rules() {
+        // C-GOOD-ERR: lowercase leading word, no trailing period (acronyms canonical).
+        assert_eq!(
+            format!("{}", VerifyErrorKind::NoSignaturesFound),
+            "no signatures found for target"
+        );
+        assert_eq!(
+            format!("{}", VerifyErrorKind::IdentityMismatch),
+            "certificate identity mismatch"
+        );
+        assert_eq!(
+            format!("{}", VerifyErrorKind::RekorUnavailable),
+            "Rekor transparency log unavailable"
+        );
+        for kind in [
+            VerifyErrorKind::NoSignaturesFound,
+            VerifyErrorKind::IdentityMismatch,
+            VerifyErrorKind::IssuerMismatch,
+            VerifyErrorKind::CertChainInvalid,
+            VerifyErrorKind::SignatureInvalid,
+            VerifyErrorKind::RekorSetInvalid,
+            VerifyErrorKind::ReferrersUnsupported,
+            VerifyErrorKind::BundleParseFailed,
+            VerifyErrorKind::TrustRootUnavailable,
+            VerifyErrorKind::BundleNotFound,
+        ] {
+            let msg = format!("{kind}");
+            assert!(!msg.ends_with('.'), "trailing period on: {msg}");
+        }
+    }
+
+    #[test]
+    fn verify_error_classify_delegates_to_kind() {
+        let err = VerifyError::new(id(), VerifyErrorKind::IssuerMismatch);
+        assert_eq!(err.classify(), Some(ExitCode::PermissionDenied));
+    }
+
+    #[test]
+    fn verify_error_source_chain_exposes_kind() {
+        use std::error::Error;
+        let err = VerifyError::new(id(), VerifyErrorKind::BundleParseFailed);
+        let source = err.source().expect("VerifyError has source");
+        assert_eq!(format!("{source}"), "bundle parse failed");
+    }
+}

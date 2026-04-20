@@ -83,3 +83,53 @@ impl ReferrersApiCapability {
         unimplemented!("ReferrersApiCapability::is_fresh — Phase 5 implementation")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Serde shape contract for [`ReferrersSupport`].
+    //!
+    //! The serialized form appears in the on-disk capabilities cache AND in the
+    //! JSON error envelope's `context.referrers_supported` field, so the wire
+    //! format is part of the public contract.
+    use super::*;
+
+    #[test]
+    fn referrers_support_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ReferrersSupport::Supported).unwrap(),
+            "\"supported\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReferrersSupport::Unsupported).unwrap(),
+            "\"unsupported\"",
+        );
+    }
+
+    #[test]
+    fn referrers_support_deserializes_snake_case() {
+        let supported: ReferrersSupport = serde_json::from_str("\"supported\"").unwrap();
+        assert_eq!(supported, ReferrersSupport::Supported);
+        let unsupported: ReferrersSupport = serde_json::from_str("\"unsupported\"").unwrap();
+        assert_eq!(unsupported, ReferrersSupport::Unsupported);
+    }
+
+    #[test]
+    fn referrers_support_rejects_unknown_variant() {
+        // Typo/unknown values must fail — no silent Default fallback.
+        let result: Result<ReferrersSupport, _> = serde_json::from_str("\"probing\"");
+        assert!(result.is_err(), "unknown variant should be rejected");
+    }
+
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn is_fresh_is_phase_1_stub() {
+        let cap = ReferrersApiCapability {
+            registry: "ghcr.io".into(),
+            supported: ReferrersSupport::Supported,
+            probed_at: SystemTime::UNIX_EPOCH,
+            ttl_seconds: 3600,
+        };
+        // Phase 5 fills this in; today the call panics by design.
+        let _ = cap.is_fresh();
+    }
+}
