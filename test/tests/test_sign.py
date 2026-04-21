@@ -239,11 +239,6 @@ def test_sign_reads_stdin_token(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 5: `ocx package sign --offline` must exit 77 (permission_denied); "
-    "stub currently panics with unimplemented!()",
-)
 def test_sign_offline_refused(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
@@ -252,6 +247,9 @@ def test_sign_offline_refused(
     Per ADR Risks: offline signing is unsupported in v1 because Fulcio + Rekor
     are hard dependencies. The rejection is a deliberate policy, not a network
     failure — hence ``PermissionDenied`` (77) not ``OfflineBlocked`` (81).
+
+    Phase 5a wired the ``OfflineSignRefused`` early-exit in ``package_sign.rs``;
+    this test pins that contract and will fail if the offline check regresses.
     """
     pkg = published_package
     result = subprocess.run(

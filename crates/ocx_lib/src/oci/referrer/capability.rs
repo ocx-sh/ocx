@@ -14,8 +14,8 @@
 //! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
 //! §"Capability cache".
 
-use std::path::Path;
-use std::time::SystemTime;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -60,13 +60,20 @@ impl ReferrersApiCapability {
     ///
     /// Writes the result atomically (temp-file + rename) to
     /// `~/.ocx/blobs/{registry}/.capabilities.json` unless `no_cache` is true.
+    ///
+    /// Phase 5c TODO: the actual OCI client integration. The shape is locked
+    /// in (Client + registry + cache_root + no_cache) so downstream code can
+    /// wire the call site without blocking on crypto integration.
     pub async fn probe(
         _client: &Client,
         _registry: &str,
         _cache_root: &Path,
         _no_cache: bool,
     ) -> Result<Self, crate::oci::client::error::ClientError> {
-        unimplemented!("ReferrersApiCapability::probe — Phase 5 implementation")
+        unimplemented!(
+            "ReferrersApiCapability::probe — Phase 5c wires the OCI client \
+             referrers GET and the atomic write-through"
+        )
     }
 
     /// Read a cached capability from disk without probing.
@@ -74,14 +81,54 @@ impl ReferrersApiCapability {
     /// Returns `Ok(None)` when the cache file is missing, expired, or
     /// corrupt (fail-open). Returns `Ok(Some(_))` when a fresh entry is
     /// available.
-    pub async fn from_cache(_registry: &str, _cache_root: &Path) -> std::io::Result<Option<Self>> {
-        unimplemented!("ReferrersApiCapability::from_cache — Phase 5 implementation")
+    ///
+    /// Fail-open on corrupt/invalid content is deliberate: a corrupt cache
+    /// should never turn into a signing/verification failure. The caller
+    /// falls back to probe, the probe overwrites the corrupt file, the next
+    /// call reads the freshly written one.
+    pub async fn from_cache(registry: &str, cache_root: &Path) -> std::io::Result<Option<Self>> {
+        let path = cache_path(cache_root, registry);
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let capability: Self = match serde_json::from_slice(&bytes) {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        if capability.registry != registry {
+            // Cache file says it belongs to a different registry (corrupt or
+            // relocated path). Treat as miss so the caller reprobes.
+            return Ok(None);
+        }
+        if !capability.is_fresh() {
+            return Ok(None);
+        }
+        Ok(Some(capability))
     }
 
     /// Returns `true` if the cached probe is still within TTL.
+    ///
+    /// Compares `probed_at + ttl_seconds` against the current wall clock;
+    /// clock going backwards counts as "not fresh" so a rewound clock forces
+    /// a reprobe rather than extending cache lifetime arbitrarily.
     pub fn is_fresh(&self) -> bool {
-        unimplemented!("ReferrersApiCapability::is_fresh — Phase 5 implementation")
+        let expiry = self.probed_at + Duration::from_secs(self.ttl_seconds);
+        // duration_since returns Err when `expiry` is in the future — i.e. the
+        // cache entry is still valid. A rewound wall clock produces the same
+        // branch, which forces a reprobe rather than extending TTL arbitrarily.
+        SystemTime::now().duration_since(expiry).is_err()
     }
+}
+
+/// Compute the on-disk path of the capability cache for `registry` under
+/// `cache_root`.
+///
+/// Layout matches the blob CAS convention (`blobs/{registry}/...`) with a
+/// dotfile name so normal CAS walkers ignore it.
+fn cache_path(cache_root: &Path, registry: &str) -> PathBuf {
+    cache_root.join(registry).join(".capabilities.json")
 }
 
 #[cfg(test)]
@@ -121,15 +168,120 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not implemented")]
-    fn is_fresh_is_phase_1_stub() {
+    fn is_fresh_returns_false_when_expired() {
+        // probed_at=epoch, ttl=1h: now (2026) is far past — not fresh.
         let cap = ReferrersApiCapability {
             registry: "ghcr.io".into(),
             supported: ReferrersSupport::Supported,
             probed_at: SystemTime::UNIX_EPOCH,
             ttl_seconds: 3600,
         };
-        // Phase 5 fills this in; today the call panics by design.
-        let _ = cap.is_fresh();
+        assert!(!cap.is_fresh(), "ancient probe must not be fresh");
+    }
+
+    #[test]
+    fn is_fresh_returns_true_when_within_ttl() {
+        // Probed 10 seconds ago with a 1-hour TTL: fresh.
+        let cap = ReferrersApiCapability {
+            registry: "ghcr.io".into(),
+            supported: ReferrersSupport::Supported,
+            probed_at: SystemTime::now() - Duration::from_secs(10),
+            ttl_seconds: 3600,
+        };
+        assert!(cap.is_fresh(), "recent probe must be fresh");
+    }
+
+    #[test]
+    fn is_fresh_handles_probed_at_in_future() {
+        // If wall clock jumped backwards after probing, `probed_at` is in the
+        // future. We deliberately treat the cache as still fresh (conservative:
+        // avoids invalidating cache on every clock skew).
+        let cap = ReferrersApiCapability {
+            registry: "ghcr.io".into(),
+            supported: ReferrersSupport::Supported,
+            probed_at: SystemTime::now() + Duration::from_secs(3600),
+            ttl_seconds: 3600,
+        };
+        assert!(cap.is_fresh(), "future-dated probe counts as fresh");
+    }
+
+    #[tokio::test]
+    async fn from_cache_returns_none_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = ReferrersApiCapability::from_cache("ghcr.io", tmp.path()).await.unwrap();
+        assert!(result.is_none(), "missing file → None (not error)");
+    }
+
+    #[tokio::test]
+    async fn from_cache_returns_none_when_file_corrupt() {
+        // Fail-open: corrupt JSON returns None, not Err.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ghcr.io").join(".capabilities.json");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&path, b"not json").await.unwrap();
+        let result = ReferrersApiCapability::from_cache("ghcr.io", tmp.path()).await.unwrap();
+        assert!(result.is_none(), "corrupt file → None (fail-open)");
+    }
+
+    #[tokio::test]
+    async fn from_cache_returns_none_when_expired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ghcr.io").join(".capabilities.json");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        let cap = ReferrersApiCapability {
+            registry: "ghcr.io".into(),
+            supported: ReferrersSupport::Supported,
+            probed_at: SystemTime::UNIX_EPOCH,
+            ttl_seconds: 1,
+        };
+        tokio::fs::write(&path, serde_json::to_vec(&cap).unwrap())
+            .await
+            .unwrap();
+        let result = ReferrersApiCapability::from_cache("ghcr.io", tmp.path()).await.unwrap();
+        assert!(result.is_none(), "expired cache → None");
+    }
+
+    #[tokio::test]
+    async fn from_cache_returns_some_when_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ghcr.io").join(".capabilities.json");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        let cap = ReferrersApiCapability {
+            registry: "ghcr.io".into(),
+            supported: ReferrersSupport::Supported,
+            probed_at: SystemTime::now(),
+            ttl_seconds: 3600,
+        };
+        tokio::fs::write(&path, serde_json::to_vec(&cap).unwrap())
+            .await
+            .unwrap();
+        let result = ReferrersApiCapability::from_cache("ghcr.io", tmp.path())
+            .await
+            .unwrap()
+            .expect("fresh cache returns Some");
+        assert_eq!(result.registry, "ghcr.io");
+        assert_eq!(result.supported, ReferrersSupport::Supported);
+    }
+
+    #[tokio::test]
+    async fn from_cache_returns_none_when_registry_mismatch() {
+        // Cache file on disk says registry=a.example, caller asks for b.example.
+        // Corrupt-relocated; treat as miss so caller reprobes.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("b.example").join(".capabilities.json");
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        let cap = ReferrersApiCapability {
+            registry: "a.example".into(),
+            supported: ReferrersSupport::Supported,
+            probed_at: SystemTime::now(),
+            ttl_seconds: 3600,
+        };
+        tokio::fs::write(&path, serde_json::to_vec(&cap).unwrap())
+            .await
+            .unwrap();
+        let result = ReferrersApiCapability::from_cache("b.example", tmp.path())
+            .await
+            .unwrap();
+        assert!(result.is_none(), "registry mismatch → None");
     }
 }

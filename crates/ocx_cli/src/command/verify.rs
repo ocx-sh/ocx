@@ -15,13 +15,18 @@
 //! values — keyless verification is meaningless without knowing whose
 //! signature you trust.
 //!
-//! Phase 1 stub — body uses `unimplemented!()`.
+//! Phase 5a wires the non-network plumbing: flag parsing, identifier
+//! resolution, and a scoped `VerifyErrorKind::TrustRootUnavailable` /
+//! `BundleNotFound` surface. The full verify state machine
+//! (`VerifyPipeline::run`) is Phase 5c, blocked on sigstore-rs integration
+//! and a public `Client::transport()` accessor.
 
 use std::process::ExitCode;
 
 use clap::Parser;
 
 use ocx_lib::oci;
+use ocx_lib::oci::verify::{VerifyError, VerifyErrorKind};
 
 use crate::options;
 
@@ -59,10 +64,23 @@ pub struct Verify {
 }
 
 impl Verify {
-    pub async fn execute(&self, _context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        unimplemented!(
-            "Verify::execute — Phase 5 calls PackageManager::verify_one and \
-             reports via api.report_verification"
-        )
+    pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        let identifier = self.identifier.with_domain(context.default_registry())?;
+
+        // Online-only: verify needs the registry to fetch referrers (and Rekor
+        // to verify the SET). Offline mode → exit 81 via `OfflineMode` classifier.
+        let (_index, _client) = context.online_context()?;
+
+        // Phase 5c blocker: `VerifyPipeline::run` requires a `&dyn OciTransport`
+        // (see `oci::verify::VerifyContext::transport`) plus a populated
+        // `TrustRoot` (`TrustRoot::load_embedded` is also Phase 5c, blocked on
+        // the `sigstore-trust-root` crate). Until both land we surface
+        // `VerifyErrorKind::TrustRootUnavailable` so the exit-code classifier
+        // produces `ConfigError` (78) — a readable "the verify path isn't
+        // wired yet" signal rather than a panic.
+        Err(anyhow::Error::from(VerifyError::new(
+            identifier,
+            VerifyErrorKind::TrustRootUnavailable,
+        )))
     }
 }

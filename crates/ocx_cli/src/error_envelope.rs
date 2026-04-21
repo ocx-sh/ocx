@@ -31,10 +31,11 @@
 //!
 //! Phase 1 stub — body of [`render_error_envelope`] uses `unimplemented!()`.
 
-// Stubs are consumed by `main.rs` in Phase 5 once error-routing dispatch
-// branches on `--format json`. Silence `dead_code` until then.
+// Stubs are consumed by `main.rs` once error-routing dispatch branches on
+// `--format json`. Silence `dead_code` until every consumer is wired.
 #![allow(dead_code)]
 
+use ocx_lib::cli::{ExitCode, classify_error};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -63,6 +64,38 @@ pub enum ErrorCategory {
     ReferrersUnsupported,
     IoError,
     Internal,
+}
+
+impl ErrorCategory {
+    /// Total function mapping every [`ExitCode`] to an [`ErrorCategory`].
+    ///
+    /// `ExitCode` is `#[non_exhaustive]` — the trailing wildcard arm is required
+    /// and maps any future variant to [`Self::Internal`] as a safe fallback.
+    /// When a new `ExitCode` variant is added to `ocx_lib`, an explicit arm
+    /// here is the correct follow-up; falling through to `Internal` is a bug
+    /// signal in that case, not a stable contract. Internal success codes
+    /// (`Success = 0`) are nonsensical for an error envelope and map to
+    /// [`Self::Internal`] as a fail-safe: emitting an error envelope on
+    /// exit-code 0 would itself be a bug, and an envelope with `kind=internal`
+    /// is a readable trap.
+    pub fn from_exit_code(code: ExitCode) -> Self {
+        match code {
+            ExitCode::Success | ExitCode::Failure => Self::Internal,
+            ExitCode::UsageError => Self::UsageError,
+            ExitCode::DataError => Self::DataError,
+            ExitCode::Unavailable => Self::Unavailable,
+            ExitCode::IoError => Self::IoError,
+            ExitCode::TempFail => Self::TempFail,
+            ExitCode::PermissionDenied => Self::PermissionDenied,
+            ExitCode::ConfigError => Self::ConfigError,
+            ExitCode::NotFound => Self::NotFound,
+            ExitCode::AuthError => Self::AuthError,
+            ExitCode::OfflineBlocked => Self::PermissionDenied,
+            ExitCode::RekorUnavailable => Self::RekorUnavailable,
+            ExitCode::ReferrersUnsupported => Self::ReferrersUnsupported,
+            _ => Self::Internal,
+        }
+    }
 }
 
 /// Error-branch JSON envelope.
@@ -127,20 +160,83 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
     }
 }
 
-/// Render an `anyhow::Error` as a JSON error envelope on stderr (or stdout
-/// if `--format json` directs success payloads there; callers decide).
+/// Render an `anyhow::Error` as a JSON error envelope (emitted on stdout by
+/// `main.rs` when `--format json` is active).
 ///
-/// Walks the `anyhow::Error::chain()` to pick the most specific known kind,
-/// classifies the exit code via [`ocx_lib::cli::classify_error`], and
-/// collects identifier context. The `message` is `{err:#}` (full chain),
-/// matching the plain-format output.
+/// Classifies the exit code via [`ocx_lib::cli::classify_error`] (walks the
+/// error chain via `source()`), maps that to an [`ErrorCategory`], collects
+/// identifier context from the chain, and serializes a byte-stable JSON
+/// envelope matching the v1 contract (see [`ENVELOPE_SCHEMA_VERSION`]).
 ///
-/// Phase 1 stub.
-pub fn render_error_envelope(_command: &str, _err: &anyhow::Error) -> anyhow::Result<String> {
-    unimplemented!(
-        "render_error_envelope — Phase 5 classifies the error chain, collects \
-         identifier context, and returns the serialized envelope"
-    )
+/// The `message` field is `{err:#}` (the full chain), matching the
+/// plain-format `tracing::error!` line. Because the `tracing` line goes to
+/// stderr and the envelope goes to stdout, consumers can parse stdout via
+/// `json.loads()` without stripping logs.
+///
+/// # Errors
+///
+/// Returns an error only if `serde_json::to_string` fails. In practice, the
+/// envelope shape is `Serialize`-infallible, so this is defensive — we
+/// propagate rather than panicking to keep the error path robust.
+pub fn render_error_envelope(command: &str, err: &anyhow::Error) -> anyhow::Result<String> {
+    let err_ref: &(dyn std::error::Error + 'static) = err.as_ref();
+    let exit_code = classify_error(err_ref);
+    let kind = ErrorCategory::from_exit_code(exit_code);
+    let message = format!("{err:#}");
+    let context = collect_context(err_ref);
+    let envelope = ErrorEnvelope {
+        schema_version: ENVELOPE_SCHEMA_VERSION,
+        command,
+        exit_code: exit_code as u8,
+        error: EnvelopeError {
+            kind,
+            detail: None,
+            message,
+            remediation: None,
+            context,
+        },
+    };
+    Ok(serde_json::to_string(&envelope)?)
+}
+
+/// Walk the error chain via `std::iter::successors` and collect structured
+/// context (identifier, etc.) for the envelope's `context` map.
+///
+/// Currently pulls the identifier from `SignError` / `VerifyError` — the only
+/// two subsystems that carry a user-visible identifier in their Slice 1 error
+/// surface. Additional subsystems attach their own context as they gain
+/// envelope-relevant metadata.
+fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static str, serde_json::Value> {
+    use ocx_lib::oci::sign::SignError;
+    use ocx_lib::oci::verify::VerifyError;
+
+    let mut context = BTreeMap::new();
+    for cause in std::iter::successors(Some(err), |e| e.source()) {
+        if let Some(sign_err) = cause.downcast_ref::<SignError>() {
+            context.insert("identifier", serde_json::Value::String(sign_err.identifier.to_string()));
+            return context;
+        }
+        if let Some(verify_err) = cause.downcast_ref::<VerifyError>() {
+            context.insert(
+                "identifier",
+                serde_json::Value::String(verify_err.identifier.to_string()),
+            );
+            return context;
+        }
+    }
+    context
+}
+
+/// Render the success-path JSON envelope, serializing `data` under the
+/// `data` top-level key.
+///
+/// Success envelopes hard-code `exit_code = 0` — any command that wants to
+/// exit with a non-zero "success-ish" code (e.g. "nothing to do" for an idle
+/// operation) should return that code directly through [`ExitCode`] rather
+/// than layering a success envelope on top.
+pub fn render_success_envelope<T: Serialize>(command: &str, data: &T) -> anyhow::Result<String> {
+    let envelope = SuccessEnvelope::new(command, data);
+    Ok(serde_json::to_string(&envelope)?)
 }
 
 #[cfg(test)]
@@ -307,11 +403,87 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not implemented")]
-    fn render_error_envelope_is_phase_1_stub() {
-        // Phase 5 will implement this; the test proves the stub panics today
-        // and flips to pass automatically once Phase 5 fills the body.
-        let err = anyhow::anyhow!("synthetic error for stub probe");
-        let _ = render_error_envelope("package sign", &err);
+    fn render_error_envelope_produces_v1_shape_for_synthetic_error() {
+        // A synthetic anyhow error classifies to `Failure` (1) → Internal category.
+        let err = anyhow::anyhow!("synthetic error for envelope probe");
+        let json = render_error_envelope("package sign", &err).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["command"], "package sign");
+        assert_eq!(parsed["exit_code"], 1);
+        assert_eq!(parsed["error"]["kind"], "internal");
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("synthetic error")),
+            "message missing from {json}",
+        );
+        assert!(
+            parsed["error"]["context"].is_object(),
+            "context must always be an object",
+        );
+    }
+
+    #[test]
+    fn render_error_envelope_classifies_verify_not_found() {
+        // A `VerifyError(NoSignaturesFound)` surfaces as `kind=not_found`,
+        // exit 79 — matches the frozen contract test in `test_verify.py`.
+        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let inner =
+            ocx_lib::oci::verify::VerifyError::new(id, ocx_lib::oci::verify::VerifyErrorKind::NoSignaturesFound);
+        let err = anyhow::Error::from(inner);
+        let json = render_error_envelope("verify", &err).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["command"], "verify");
+        assert_eq!(parsed["exit_code"], 79);
+        assert_eq!(parsed["error"]["kind"], "not_found");
+        // Identifier surfaces in context from the SignError/VerifyError chain walk.
+        assert_eq!(parsed["error"]["context"]["identifier"], "registry.example/pkg:1.0");
+    }
+
+    #[test]
+    fn render_error_envelope_classifies_sign_auth_error() {
+        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let inner = ocx_lib::oci::sign::SignError::new(id, ocx_lib::oci::sign::SignErrorKind::OidcTokenRejected);
+        let err = anyhow::Error::from(inner);
+        let json = render_error_envelope("package sign", &err).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["command"], "package sign");
+        assert_eq!(parsed["exit_code"], 80);
+        assert_eq!(parsed["error"]["kind"], "auth_error");
+        assert_eq!(parsed["error"]["context"]["identifier"], "registry.example/pkg:1.0");
+    }
+
+    #[test]
+    fn error_category_total_over_exit_codes() {
+        // Spot-check representative values; the match is exhaustive so drift
+        // will fail at compile time in `ErrorCategory::from_exit_code`.
+        assert!(matches!(
+            ErrorCategory::from_exit_code(ExitCode::NotFound),
+            ErrorCategory::NotFound
+        ));
+        assert!(matches!(
+            ErrorCategory::from_exit_code(ExitCode::OfflineBlocked),
+            ErrorCategory::PermissionDenied,
+        ));
+        assert!(matches!(
+            ErrorCategory::from_exit_code(ExitCode::ReferrersUnsupported),
+            ErrorCategory::ReferrersUnsupported,
+        ));
+        assert!(matches!(
+            ErrorCategory::from_exit_code(ExitCode::Failure),
+            ErrorCategory::Internal,
+        ));
+    }
+
+    #[test]
+    fn render_success_envelope_golden_shape() {
+        #[derive(Serialize)]
+        struct D {
+            a: u32,
+        }
+        let json = render_success_envelope("verify", &D { a: 7 }).expect("render ok");
+        let expected = r#"{"schema_version":1,"command":"verify","exit_code":0,"data":{"a":7}}"#;
+        assert_eq!(json, expected);
     }
 }

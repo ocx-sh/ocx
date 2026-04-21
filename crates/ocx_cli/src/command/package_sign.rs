@@ -13,14 +13,14 @@
 //! `--identity-token-stdin` > `OCX_IDENTITY_TOKEN` env *before* calling the
 //! sign pipeline. There is deliberately NO `--identity-token <VALUE>` flag —
 //! raw tokens on the command line would leak into shell history.
-//!
-//! Phase 1 stub — body uses `unimplemented!()`.
 
+use std::io::Read;
 use std::process::ExitCode;
 
 use clap::Parser;
 
 use ocx_lib::oci;
+use ocx_lib::oci::sign::{SignError, SignErrorKind};
 
 use crate::options;
 
@@ -83,10 +83,76 @@ pub struct PackageSign {
 }
 
 impl PackageSign {
-    pub async fn execute(&self, _context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        unimplemented!(
-            "PackageSign::execute — Phase 5 resolves override token, calls \
-             PackageManager::sign_one, and reports via api.report_signature"
-        )
+    pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        let identifier = self.identifier.with_domain(context.default_registry())?;
+
+        // S1-E policy: offline sign is a deliberate rejection, NOT a passive
+        // network-access failure. Route through `SignErrorKind::OfflineSignRefused`
+        // so the exit-code classifier returns 77 (PermissionDenied). This
+        // short-circuits before we touch the token-resolution path: the
+        // acceptance test `test_sign_offline_refused` drives this contract.
+        if context.is_offline() {
+            return Err(anyhow::Error::from(SignError::new(
+                identifier,
+                SignErrorKind::OfflineSignRefused,
+            )));
+        }
+
+        // C-S1-4 token precedence: file > stdin > env. The resolved token is
+        // a plain String; never log, never surface in error context.
+        // Resolution itself is safe to run (no network, no crypto) — the token
+        // will be consumed by Phase 5c's pipeline integration.
+        let _override_token = self.resolve_override_token()?;
+
+        // Phase 5c blocker: `SignPipeline::run` requires a `&dyn OciTransport`
+        // (see `oci::sign::SignContext::transport`) but `oci::Client` keeps
+        // its transport as a private field with no public accessor. Wiring
+        // the pipeline call needs either a `Client::transport()` accessor or
+        // a `SignContext::new_from_client()` helper — both are
+        // design-change-shaped and belong to Phase 5c alongside the
+        // sigstore-rs integration (the pipeline body itself is still
+        // `unimplemented!()`). Until then we surface
+        // `SignErrorKind::SigningPipelineInternal` so the exit-code classifier
+        // produces `Failure` (1) rather than a panic.
+        let blocker: Box<dyn std::error::Error + Send + Sync> =
+            "SignPipeline::run is Phase 5c blocked on sigstore-rs integration + transport accessor".into();
+        Err(anyhow::Error::from(SignError::new(
+            identifier,
+            SignErrorKind::SigningPipelineInternal(blocker),
+        )))
+    }
+
+    /// Resolve the override OIDC token per C-S1-4 precedence.
+    ///
+    /// Precedence: `--identity-token-file` > `--identity-token-stdin` >
+    /// `OCX_IDENTITY_TOKEN`. Returns `Ok(None)` when no override source
+    /// supplies a token — the dispatcher then falls through to ambient
+    /// detection or the browser path.
+    ///
+    /// The file and stdin paths trim trailing whitespace so a trailing newline
+    /// written by `echo $TOKEN > tokenfile` doesn't poison the JWT.
+    fn resolve_override_token(&self) -> anyhow::Result<Option<String>> {
+        if let Some(path) = &self.identity_token_file {
+            // Sync `std::fs::read_to_string` is fine here: tokens are small and
+            // this is a CLI entry-path, not an async hot loop. Trim trailing
+            // whitespace/newlines so `echo $TOKEN > tokenfile` doesn't poison
+            // the JWT.
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("failed to read --identity-token-file {}: {e}", path.display()))?;
+            return Ok(Some(raw.trim().to_string()));
+        }
+        if self.identity_token_stdin {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| anyhow::anyhow!("failed to read identity token from stdin: {e}"))?;
+            return Ok(Some(buf.trim().to_string()));
+        }
+        if let Ok(token) = std::env::var("OCX_IDENTITY_TOKEN")
+            && !token.is_empty()
+        {
+            return Ok(Some(token));
+        }
+        Ok(None)
     }
 }

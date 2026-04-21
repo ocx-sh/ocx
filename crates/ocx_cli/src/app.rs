@@ -4,9 +4,11 @@
 use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ocx_lib::cli;
+use ocx_lib::{cli, log};
 
 use crate::command;
+use crate::error_envelope::render_error_envelope;
+use crate::options::Format;
 
 mod context;
 pub use context::Context;
@@ -87,7 +89,84 @@ impl App {
         let Some(command) = &cli.command else {
             unreachable!("None handled in static-command bypass above");
         };
-        command.execute(context).await
+
+        // Capture format + canonical command name so JSON mode can render an
+        // error envelope on stdout before `main.rs` returns the exit code.
+        // Error branch only: success envelopes are owned by each command's
+        // `api().report(...)` call, which already honors `--format json`.
+        let format = cli.context.format;
+        let command_name = canonical_command_name(command);
+        match command.execute(context).await {
+            Ok(code) => Ok(code),
+            Err(err) if matches!(format, Format::Json) => {
+                match render_error_envelope(command_name, &err) {
+                    Ok(rendered) => println!("{rendered}"),
+                    Err(render_err) => {
+                        // Envelope rendering is infallible-by-design, but if serde
+                        // ever fails we surface both causes rather than swallowing
+                        // either one — the operator gets the underlying failure AND
+                        // a diagnostic about the broken envelope path.
+                        log::error!("error envelope render failed: {render_err:#}");
+                    }
+                }
+                Err(err)
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+/// Map a parsed `Command` to the canonical space-separated string consumers
+/// match on (e.g., `"package sign"`, `"verify"`, `"index update"`).
+///
+/// Frozen per ADR C-S1-1 §"`command` field". Any change to an existing mapping
+/// is a v1 → v2 schema bump.
+fn canonical_command_name(command: &command::Command) -> &'static str {
+    use command::Command;
+    use command::ci::Ci as CiCmd;
+    use command::index::Index as IndexCmd;
+    use command::package::Package as PackageCmd;
+    use command::shell::Shell as ShellCmd;
+    use command::shell_profile::ShellProfile as ShellProfileCmd;
+    match command {
+        Command::Ci(sub) => match sub {
+            CiCmd::Export(_) => "ci export",
+        },
+        Command::Clean(_) => "clean",
+        Command::Deps(_) => "deps",
+        Command::Deselect(_) => "deselect",
+        Command::Find(_) => "find",
+        Command::Index(sub) => match sub {
+            IndexCmd::Catalog(_) => "index catalog",
+            IndexCmd::List(_) => "index list",
+            IndexCmd::Update(_) => "index update",
+        },
+        Command::Info(_) => "info",
+        Command::Install(_) => "install",
+        Command::Uninstall(_) => "uninstall",
+        Command::Verify(_) => "verify",
+        Command::Exec(_) => "exec",
+        Command::Env(_) => "env",
+        Command::Package(sub) => match sub {
+            PackageCmd::Create(_) => "package create",
+            PackageCmd::Describe(_) => "package describe",
+            PackageCmd::Info(_) => "package info",
+            PackageCmd::Pull(_) => "package pull",
+            PackageCmd::Push(_) => "package push",
+            PackageCmd::Sign(_) => "package sign",
+        },
+        Command::Select(_) => "select",
+        Command::Shell(sub) => match sub {
+            ShellCmd::Completion(_) => "shell completion",
+            ShellCmd::Env(_) => "shell env",
+            ShellCmd::Profile(profile) => match profile {
+                ShellProfileCmd::Add(_) => "shell profile add",
+                ShellProfileCmd::List(_) => "shell profile list",
+                ShellProfileCmd::Load(_) => "shell profile load",
+                ShellProfileCmd::Remove(_) => "shell profile remove",
+            },
+        },
+        Command::Version(_) => "version",
     }
 }
 
