@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use super::error::{ProjectError, ProjectErrorKind};
+use crate::file_lock::FileLock;
 use crate::oci::PinnedIdentifier;
 
 /// Lock file version discriminant.
@@ -136,6 +137,46 @@ impl ProjectLock {
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// Acquire an exclusive sidecar advisory lock and load the lock
+    /// file in one step.
+    ///
+    /// The lock is held on a sibling file at `<path>.lock` (e.g.
+    /// `ocx.lock.lock`); the data file itself is never opened with a
+    /// lock so concurrent readers stay unblocked. Returns the parsed
+    /// [`ProjectLock`] (or `None` when the file does not yet exist) and
+    /// a [`FileLock`] guard whose drop releases the advisory lock.
+    ///
+    /// Mirrors the
+    /// [`crate::profile::ProfileManifest::load_exclusive`] pattern used
+    /// for shell-profile manifests, providing the same single-writer
+    /// guarantee for `ocx.lock` writes.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProjectErrorKind::Locked`] when another process currently
+    ///   holds the sidecar lock — `try_exclusive` does not block.
+    /// - [`ProjectErrorKind::Io`] on directory creation, sidecar
+    ///   creation, or data-file read failure.
+    /// - [`ProjectErrorKind::TomlParse`] /
+    ///   [`ProjectErrorKind::UnsupportedDeclarationHashVersion`] when
+    ///   the existing lock is malformed.
+    pub async fn load_exclusive(path: &Path) -> Result<(Option<Self>, FileLock), super::Error> {
+        let lock_path = path.with_extension("lock.lock");
+        if let Some(parent) = lock_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
+        }
+        let lock_file = std::fs::File::create(&lock_path)
+            .map_err(|e| ProjectError::new(lock_path.clone(), ProjectErrorKind::Io(e)))?;
+        let lock =
+            FileLock::try_exclusive(lock_file).map_err(|_| ProjectError::new(lock_path, ProjectErrorKind::Locked))?;
+        let existing = Self::from_path(path).await?;
+        Ok((existing, lock))
     }
 
     fn from_str_with_path(s: &str, path: PathBuf) -> Result<Self, super::Error> {
@@ -960,5 +1001,31 @@ generated_at = "2099-01-01T00:00:00Z"
 
         assert!(tools_content_equal(&lhs, &rhs));
         assert!(tools_content_equal(&rhs, &lhs));
+    }
+
+    /// `load_exclusive` must reject a second concurrent acquire while
+    /// the first guard is alive, then succeed once the first guard is
+    /// dropped. Proves the sidecar advisory lock actually serialises
+    /// writers (not just a no-op file create).
+    #[tokio::test]
+    async fn load_exclusive_blocks_second_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ocx.lock");
+
+        let (_first_lock, first_guard) = ProjectLock::load_exclusive(&path)
+            .await
+            .expect("first acquire on a fresh file succeeds");
+
+        let err = match ProjectLock::load_exclusive(&path).await {
+            Ok(_) => panic!("second acquire must fail while first guard is held"),
+            Err(e) => e,
+        };
+        assert_kind!(err, ProjectErrorKind::Locked);
+
+        drop(first_guard);
+
+        ProjectLock::load_exclusive(&path)
+            .await
+            .expect("acquire after release succeeds");
     }
 }

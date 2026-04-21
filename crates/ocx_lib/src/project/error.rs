@@ -95,6 +95,14 @@ pub enum ProjectErrorKind {
     #[error("file too large: {size} bytes exceeds limit of {limit} bytes")]
     FileTooLarge { size: u64, limit: u64 },
 
+    /// The sidecar advisory lock for `ocx.lock` is held by another
+    /// writer. Surfaced from [`crate::project::ProjectLock::load_exclusive`]
+    /// when the exclusive `try_lock` fails immediately. Distinct from
+    /// [`Self::Io`] so callers can retry-with-backoff or surface a
+    /// human-readable "another OCX process is writing the lock" message.
+    #[error("ocx.lock sidecar is locked by another process")]
+    Locked,
+
     /// A `[tools]` or `[group.*]` value is missing an explicit registry.
     ///
     /// Bare-tag values like `cmake = "3.28"` are rejected: the project-tier
@@ -132,6 +140,7 @@ impl ClassifyExitCode for Error {
                 | ProjectErrorKind::FileTooLarge { .. }
                 | ProjectErrorKind::ToolValueMissingRegistry { .. }
                 | ProjectErrorKind::ToolValueInvalid { .. } => ExitCode::ConfigError,
+                ProjectErrorKind::Locked => ExitCode::TempFail,
             },
         })
     }
