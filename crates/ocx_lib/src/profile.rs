@@ -151,7 +151,12 @@ impl ProfileManifest {
             path: lock_path.clone(),
             source: e,
         })?;
-        let lock = FileLock::try_exclusive(lock_file).map_err(|_| ProfileError::Locked { path: lock_path })?;
+        let lock = FileLock::try_exclusive(lock_file)
+            .map_err(|e| ProfileError::Io {
+                path: lock_path.clone(),
+                source: e,
+            })?
+            .ok_or(ProfileError::Locked { path: lock_path })?;
         let manifest = Self::load(path)?;
         Ok((manifest, lock))
     }

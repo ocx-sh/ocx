@@ -18,6 +18,15 @@ mod index_impl;
 mod local_index;
 mod remote_index;
 
+/// Re-export the private `IndexImpl` trait for sibling-module tests.
+///
+/// Sibling modules (e.g. `project::resolve` unit tests) that need to
+/// construct an `Index` from a hand-rolled mock must implement
+/// `IndexImpl`. Production code reaches `Index` only via
+/// [`Index::from_chained`] / [`Index::from_remote`].
+#[cfg(test)]
+pub(crate) use index_impl::IndexImpl;
+
 /// Routing policy for a [`ChainedIndex`](chained_index::ChainedIndex).
 ///
 /// Threaded through `Index::from_chained` and on into the chained index so
@@ -72,8 +81,13 @@ impl Index {
     /// Used exclusively in unit tests to wrap `TestIndex` fakes without
     /// exposing `IndexImpl` as a public trait.  Not available in production
     /// builds.
+    ///
+    /// Visibility is `pub(crate)` under `#[cfg(test)]` so sibling modules
+    /// (e.g. `project::resolve`) can inject their own mock index
+    /// implementations without going through the heavier `from_chained`
+    /// construction path.
     #[cfg(test)]
-    pub(super) fn from_impl(inner: impl index_impl::IndexImpl + 'static) -> Self {
+    pub(crate) fn from_impl(inner: impl index_impl::IndexImpl + 'static) -> Self {
         Self { inner: Box::new(inner) }
     }
 

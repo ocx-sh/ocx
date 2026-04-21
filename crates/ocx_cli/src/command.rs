@@ -19,12 +19,14 @@ pub mod index_list;
 pub mod index_update;
 pub mod info;
 pub mod install;
+pub mod lock;
 pub mod package;
 pub mod package_create;
 pub mod package_describe;
 pub mod package_info;
 pub mod package_pull;
 pub mod package_push;
+pub mod pull;
 pub mod select;
 pub mod shell;
 pub mod shell_completion;
@@ -35,6 +37,7 @@ pub mod shell_profile_list;
 pub mod shell_profile_load;
 pub mod shell_profile_remove;
 pub mod uninstall;
+pub mod update;
 pub mod version;
 
 #[derive(Subcommand)]
@@ -57,8 +60,12 @@ pub enum Command {
     Info(info::Info),
     /// Install packages from a local or remote index.
     Install(install::Install),
+    /// Resolve tool tags to digests and write ocx.lock.
+    Lock(lock::Lock),
     /// Remove an installed candidate for one or more packages.
     Uninstall(uninstall::Uninstall),
+    /// Re-resolve advisory tags and rewrite ocx.lock for one or more tools.
+    Update(update::Update),
     /// Runs installed packages.
     Exec(exec::Exec),
     /// Print resolved environment variables for one or more packages.
@@ -66,6 +73,8 @@ pub enum Command {
     /// Operations related to packages (e.g. bundling or deploying)
     #[command(subcommand)]
     Package(package::Package),
+    /// Pre-warm the object store from the project ocx.lock without creating symlinks.
+    Pull(pull::Pull),
     /// Set the current version of one or more packages.
     Select(select::Select),
     #[command(subcommand)]
@@ -85,10 +94,13 @@ impl Command {
             Command::Index(index) => index.execute(context).await,
             Command::Info(info) => info.execute(context).await,
             Command::Install(install) => install.execute(context).await,
+            Command::Lock(lock) => lock.execute(context).await,
             Command::Uninstall(uninstall) => uninstall.execute(context).await,
+            Command::Update(update) => update.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,
             Command::Env(env) => env.execute(context).await,
             Command::Package(package) => package.execute(context).await,
+            Command::Pull(pull) => pull.execute(context).await,
             Command::Select(select) => select.execute(context).await,
             Command::Shell(shell) => shell.execute(context).await,
             Command::Version(version) => version.execute().await,

@@ -44,6 +44,26 @@ pub struct ContextOptions {
     #[arg(long, value_enum, value_name = "FORMAT", default_value_t = Default::default())]
     pub format: options::Format,
 
+    /// Suppress stdout report output (errors and progress on stderr remain).
+    ///
+    /// When set, the CLI's structured report (table or JSON) is not printed.
+    /// Equivalent env var: `OCX_QUIET`.
+    #[arg(short = 'q', long, default_value_t = env::flag("OCX_QUIET", false))]
+    pub quiet: bool,
+
+    /// Maximum number of root packages to pull concurrently.
+    ///
+    /// `0` means "use all logical cores" (GNU Parallel convention). Omitting
+    /// the flag falls back to the `OCX_JOBS` environment variable; when
+    /// neither is set, pulls run unbounded (legacy behavior). Negative values
+    /// are rejected at parse time.
+    ///
+    /// Caps only the outer dispatch — transitive dependency and layer
+    /// extraction stay unbounded so they cannot deadlock against an
+    /// ancestor's permit.
+    #[arg(long, value_name = "N")]
+    pub jobs: Option<usize>,
+
     /// Alternative path to the local index directory (ignored if --remote is set).
     ///
     /// Can also be set via the OCX_INDEX environment variable.

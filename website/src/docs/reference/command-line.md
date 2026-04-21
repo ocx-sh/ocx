@@ -70,6 +70,56 @@ The flag has no effect when [`--remote`](#arg-remote) is set.
 The same override can be set persistently via the [`OCX_INDEX`][env-ocx-index] environment
 variable. The `--index` flag takes precedence when both are set.
 
+### `--quiet` {#arg-quiet}
+
+Alias: `-q`.
+
+Suppresses the structured stdout report that every command emits — tables in plain
+mode, the JSON document in `--format json` mode. Errors, warnings, and progress
+spinners continue to surface on stderr.
+
+Quiet is opt-in and orthogonal to [`--format`](#arg-format). Use it when calling
+ocx as a step in a larger pipeline that only cares about the exit code, or when
+chaining commands where intermediate output would clutter logs.
+
+```shell
+# Pre-warm the project store in CI without dumping a table per package.
+ocx --quiet pull
+```
+
+The same toggle is available via the [`OCX_QUIET`][env-ocx-quiet] environment
+variable; the flag wins when both are set.
+
+### `--jobs` {#arg-jobs}
+
+Caps the number of root packages pulled in parallel. Applies to every command
+that fans out through `pull_all` — `install`, `pull`, `package pull`, `exec`
+(when it auto-installs missing tools), and the env-composition path of `env`.
+
+The cap acts on the **outer dispatch only**: transitive dependencies and OCI
+layer extraction stay unbounded so a child pull never deadlocks waiting for a
+permit held by its own ancestor. Singleflight dedup and per-package file locks
+already protect the registry against duplicate work.
+
+| Value | Meaning |
+|-------|---------|
+| (unset) | Unbounded. Every root package spawns immediately — legacy behavior. |
+| `0` | Use all logical cores (matches [GNU `parallel -j 0`][gnu-parallel-j0]). |
+| `N > 0` | Cap at `N` concurrent root pulls. |
+| Negative | Rejected at parse time. |
+
+OCX intentionally diverges from Cargo on `--jobs 0`: GNU Parallel's "saturate
+this machine" convention is more useful in CI matrices where the runner has a
+variable CPU count and the user wants the cap computed for them.
+
+The same value can be set persistently via [`OCX_JOBS`][env-ocx-jobs]. The CLI
+flag wins when both are set.
+
+```shell
+# Cap parallelism on a constrained runner.
+ocx --jobs 2 install cmake:3.28 ripgrep:14
+```
+
 ### `--color` {#arg-color}
 
 Controls when to use <Tooltip term="ANSI colors">Escape sequences defined by ECMA-48 / ISO 6429, supported by virtually all modern terminals.</Tooltip> in output.
@@ -82,6 +132,18 @@ Controls when to use <Tooltip term="ANSI colors">Escape sequences defined by ECM
 The `--color` flag takes the highest precedence over all
 color-related environment variables ([`NO_COLOR`][env-no-color],
 [`CLICOLOR`][env-clicolor], [`CLICOLOR_FORCE`][env-clicolor-force]).
+
+### `--project` {#arg-project}
+
+Path to the project-level `ocx.toml` (project-tier toolchain config).
+
+When set, OCX reads this file as the project tier and skips the CWD walk entirely. Any filename is accepted (not just `ocx.toml`), which is useful for fixtures and integration tests.
+
+The same override can be set persistently via the [`OCX_PROJECT_FILE`][env-project-file] environment variable. To disable project-file discovery entirely — including the `OCX_PROJECT_FILE` variable but not an explicit `--project` flag — set [`OCX_NO_PROJECT`][env-no-project]`=1`.
+
+**Symlink policy:** Paths supplied via `--project` or `OCX_PROJECT_FILE` are trusted and followed through symlinks. Paths discovered by the CWD walk reject symlinks to prevent directory-traversal redirection.
+
+**Error cases:** A missing explicit path exits with code 79 ([`NotFound`][exit-codes]). A path that exists but cannot be read (permission denied, not a regular file) exits with code 74 ([`IoError`][exit-codes]).
 
 ### `--config` {#arg-config}
 
@@ -439,6 +501,59 @@ ocx install [OPTIONS] <PACKAGE>...
 - `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
 - `-h`, `--help`: Print help information.
 
+### `pull` {#pull}
+
+Pre-warms the [object store][fs-objects] from the project `ocx.lock` without
+creating [install symlinks][fs-symlinks]. Distinct from
+[`package pull`](#package-pull): this is the **project-tier** entry point — every
+tool comes from the digest-pinned lock, never from the index — making it the
+recommended primitive for reproducible CI setups.
+
+`ocx pull` is read-only on `ocx.lock`. Re-resolution lives in `ocx update`;
+rewriting from the config lives in `ocx lock`.
+
+**Usage**
+
+```shell
+ocx pull [OPTIONS]
+```
+
+**Options**
+
+- `-g`, `--group <NAME>`: Restrict the pull to one or more named groups. Repeatable
+  and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects
+  the top-level `[tools]` table. When omitted, every entry from the lock is pulled.
+- `--dry-run`: Print which locked tools are already cached vs. would be fetched,
+  then exit without writing to the store.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (or empty group filter — nothing to pull). |
+| 64 | Missing `ocx.toml`, unknown `--group` name, or empty comma segment. |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
+| 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. |
+
+#### Dry-run preview {#pull-dry-run}
+
+`ocx pull --dry-run` resolves each locked tool through the local index
+(cache-first, like the real pull does) and reports whether it is already in the
+store. The store is never modified. Combine with [`--offline`](#arg-offline) to
+forbid the cache-miss network probe entirely.
+
+```shell
+$ ocx pull --dry-run
+Package                         Status       Path
+localhost:5000/cmake@sha256:... cached       /home/me/.ocx/packages/.../content
+localhost:5000/ripgrep@sha256:..would-fetch  -
+```
+
+The staleness gate fires ahead of the dry-run branch, so a stale lock still
+exits 65 — the preview is not a way to bypass `declaration_hash` validation.
+The output respects [`--format json`](#arg-format) and [`--quiet`](#arg-quiet).
+
 ### `select` {#select}
 
 Selects one or more packages as the current version by updating the [current symlink](../user-guide.md#path-resolution).
@@ -716,6 +831,9 @@ ocx package pull [OPTIONS] <PACKAGE>...
 `package pull` reports the content-addressed object store path for each package — the same
 digest-derived path that [`find`](#find) and [`exec`](#exec) resolve to. Two pulls of the same
 digest are safe to run concurrently.
+
+For project-tier setups driven by `ocx.lock`, use [`pull`](#pull) instead — it consumes the
+lockfile directly and ignores the index.
 :::
 
 #### `push` {#package-push}
@@ -814,6 +932,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
+[gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
 
 <!-- environment -->
 [env-no-color]: ./environment.md#external-no-color
@@ -822,6 +941,10 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [env-ocx-index]: ./environment.md#ocx-index
 [env-no-config]: ./environment.md#ocx-no-config
 [env-config-file]: ./environment.md#ocx-config-file
+[env-project-file]: ./environment.md#ocx-project-file
+[env-no-project]: ./environment.md#ocx-no-project
+[env-ocx-quiet]: ./environment.md#ocx-quiet
+[env-ocx-jobs]: ./environment.md#ocx-jobs
 
 <!-- reference -->
 [config-ref]: ./configuration.md

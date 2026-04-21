@@ -3,13 +3,17 @@
 
 //! Project-tier toolchain configuration (`ocx.toml`) and lock (`ocx.lock`).
 
+pub mod compose;
 pub mod config;
 pub mod error;
 pub mod hash;
 mod internal;
 pub mod lock;
+pub mod resolve;
 
+pub use compose::{Origin, PositionalPackage, ResolvedTool, compose_tool_set, parse_positional};
 pub use config::ProjectConfig;
 pub use error::{Error, ProjectError, ProjectErrorKind};
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use lock::{LockMetadata, LockVersion, LockedTool, ProjectLock};
+pub use resolve::{ResolveLockOptions, resolve_lock, resolve_lock_partial};

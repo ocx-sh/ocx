@@ -44,6 +44,7 @@ Concise index of all `ocx` CLI commands. User-facing per-command docs live in [`
 | `index catalog` | List known repositories | No | `--with-tags` |
 | `index list PKGS...` | List tags for packages | No | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote | No | — |
+| `lock` | Resolve project tool tags to digests and write `ocx.lock` | No | `-g/--group` |
 | `package pull PKGS...` | Download to object store only | N/A (is pull) | `-p` |
 | `package create PATH` | Bundle directory into archive | No | `-o`, `-m`, `-l`, `-j`, `--force` |
 | `package push ID CONTENT` | Publish archive to registry | No | `-c/--cascade`, `-n`, `-m`, `-p` |

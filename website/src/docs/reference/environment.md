@@ -106,6 +106,23 @@ rather than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub A
 The command line option [`--index`][arg-index] takes precedence over this variable.
 This variable has no effect when [`--remote`][arg-remote] or [`OCX_REMOTE`][env-ocx-remote] is set.
 
+### `OCX_JOBS` {#ocx-jobs}
+
+Caps the number of root packages pulled in parallel — applies to every command
+that fans out through the package manager (`install`, `pull`, `package pull`,
+`exec`, `env`).
+
+```sh
+export OCX_JOBS=4
+```
+
+`0` means "use all logical cores" (matches [GNU `parallel -j 0`][gnu-parallel-j0])
+and diverges from Cargo's `--jobs 0`, which errors. Negative or non-numeric
+values are ignored with a warning. Unset = unbounded (legacy default).
+
+The command line option [`--jobs`][arg-jobs] takes precedence over this
+variable.
+
 ### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
 
 A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
@@ -184,6 +201,16 @@ which is required for execution on Apple Silicon.
 See the [FAQ][faq-codesign] for details on why this is necessary and how it works.
 
 This variable has no effect on non-macOS systems.
+
+### `OCX_QUIET` {#ocx-quiet}
+
+When set to a [truthy value](#truthy-values), OCX suppresses the structured
+stdout report that every command emits — tables in plain mode, the JSON
+document in `--format json` mode. Errors, warnings, and progress on stderr are
+unaffected.
+
+The command line option [`--quiet`][arg-quiet] takes precedence over this
+variable.
 
 ### `OCX_OFFLINE` {#ocx-offline}
 
@@ -283,6 +310,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [devcontainer-features]: https://containers.dev/implementors/features/
 [xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/
 [apple-dirs-env]: https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html
+[gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
 
 <!-- commands -->
 [cmd-ref]: command-line.md
@@ -290,9 +318,11 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-index]: command-line.md#arg-index
+[arg-jobs]: command-line.md#arg-jobs
 [arg-log-level]: command-line.md#arg-log-level
 [arg-offline]: command-line.md#arg-offline
 [arg-project]: command-line.md#arg-project
+[arg-quiet]: command-line.md#arg-quiet
 [arg-remote]: command-line.md#arg-remote
 
 <!-- reference -->

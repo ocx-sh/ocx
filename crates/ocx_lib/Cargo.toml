@@ -27,7 +27,7 @@ serde_repr = "0.1.20"
 serde_yaml_ng = { workspace = true }
 bytes = "1"
 futures = "0.3.31"
-fs2 = "0.4.3"
+fs4 = { version = "0.13", features = ["sync"] }
 chrono = "0.4.43"
 regex = "1.12.3"
 lazy_static = "1.5.0"
@@ -50,6 +50,9 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 indicatif = { version = "0.18.3", features = ["tokio"] }
 thiserror = "2"
 tracing-indicatif = { version = "0.3.14" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2.0"

@@ -821,6 +821,18 @@ The CLI flag name intentionally drops the `-file` suffix to match `--config` (no
 
 ---
 
+### Amendment H — Rescind B1: platforms removed from lockfile schema (2026-04-21)
+
+Amendment B1 is rescinded.
+
+B1 required that the `platforms = [...]` field in `ocx.toml` be included in the canonical declaration hash. That field no longer exists: the `platforms` field was removed from the lockfile schema during the Phase 2.1 identifier/pinned/resolve redesign (see commit `ee27ec8 refactor(project)!: redesign ocx.toml/ocx.lock schema for full identifiers`). Platform resolution is now encoded directly in the per-tool `[[tool]]` entries via per-platform `manifest_digest` fields, so a separate top-level `platforms` list is redundant.
+
+**Effect on canonicalization (Amendment B3).** The JSON object used for the declaration hash no longer includes a `"platforms"` key. Only the `"default"` group and named `"group.<name>"` keys are hashed. Amendments B2, B3, and B4 are otherwise unchanged.
+
+**Effect on Amendment D.** The `unavailable = true` field in per-platform entries remains the mechanism for recording that a publisher does not ship a manifest for a given platform. No change to D.
+
+---
+
 ### Minor Amendments
 
 **Profile deprecation timeline (Arch Finding 5):** Decision 6B's two-release cycle is retained, but the rationale is now explicit: `profile.json` users are interactive developers who have chosen the `shell profile add` workflow and have tool lists they maintain manually. A one-command migration (`ocx profile export`) exists, but forcing it in the same release that introduces `ocx.toml` risks alienating the interactive-shell user segment that OCX's interactive dev story depends on. The exception to Constraint 7 is justified by "interactive user data vs CI/automation contracts."

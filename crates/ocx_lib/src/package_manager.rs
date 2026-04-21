@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod concurrency;
 pub mod error;
 
 mod tasks;
 
 // Re-export types needed by other modules and CLI commands.
+pub use concurrency::Concurrency;
 pub use error::DependencyError;
 pub use tasks::profile_resolve::{ProfileEntryResolution, ResolvedProfileEntry};
 

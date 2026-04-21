@@ -59,12 +59,12 @@ pub struct ProjectConfig {
 /// alone can't access the key.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RawProjectConfig {
+struct RawProjectConfig {
     #[serde(default)]
-    pub(super) tools: BTreeMap<String, String>,
+    tools: BTreeMap<String, String>,
 
     #[serde(default, rename = "group")]
-    pub(super) groups: BTreeMap<String, BTreeMap<String, String>>,
+    groups: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl ProjectConfig {
@@ -75,7 +75,8 @@ impl ProjectConfig {
     /// source produces a path or `OCX_NO_PROJECT=1` is set (kill switch
     /// beats the home fallback per plan §3 step 3).
     ///
-    /// Lock path is derived as `config_path.with_extension("lock")`.
+    /// Lock path is derived via [`super::lock::lock_path_for`] as
+    /// `<parent>/ocx.lock`, independent of the config file's extension.
     ///
     /// # Errors
     /// Propagates [`crate::config::error::Error`] from the underlying
@@ -90,7 +91,7 @@ impl ProjectConfig {
         let walk_result = crate::config::loader::ConfigLoader::project_path(cwd, explicit).await?;
 
         if let Some(p) = walk_result {
-            let lock = p.with_extension("lock");
+            let lock = super::lock::lock_path_for(&p);
             return Ok(Some((p, lock)));
         }
 
@@ -111,7 +112,7 @@ impl ProjectConfig {
         // "Symlink-at-home policy: symlinks are followed").
         match tokio::fs::metadata(&candidate).await {
             Ok(meta) if meta.file_type().is_file() => {
-                let lock = candidate.with_extension("lock");
+                let lock = super::lock::lock_path_for(&candidate);
                 Ok(Some((candidate, lock)))
             }
             Ok(_) => {
@@ -151,27 +152,48 @@ impl ProjectConfig {
     /// before reading; oversized files surface as a structured
     /// [`super::error::ProjectErrorKind::FileTooLarge`].
     pub async fn from_path(path: &Path) -> Result<Self, super::Error> {
-        // Size-cap check before read: mirrors the ambient config loader's
-        // 64 KiB cap. A project `ocx.toml` larger than 64 KiB is a sanity
-        // failure, not a meaningful input.
-        let metadata = tokio::fs::metadata(path)
+        use tokio::io::AsyncReadExt;
+        let limit = super::internal::FILE_SIZE_LIMIT_BYTES;
+
+        let file = tokio::fs::File::open(path)
             .await
             .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e)))?;
-        let size = metadata.len();
-        if size > super::internal::FILE_SIZE_LIMIT_BYTES {
+        // `metadata.len()` fast-paths normal oversized files without reading
+        // any bytes; the bounded `take(limit + 1)` below guards synthetic
+        // files (e.g. procfs, pipes) whose metadata reports 0 but whose read
+        // is unbounded. Mirrors the ambient config loader's
+        // `ConfigLoader::load_and_merge` pattern.
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e)))?;
+        if metadata.len() > limit {
             return Err(ProjectError::new(
                 path.to_path_buf(),
                 ProjectErrorKind::FileTooLarge {
-                    size,
-                    limit: super::internal::FILE_SIZE_LIMIT_BYTES,
+                    size: metadata.len(),
+                    limit,
                 },
             )
             .into());
         }
 
-        let content = tokio::fs::read_to_string(path)
+        let mut content = String::new();
+        let mut taken = file.take(limit + 1);
+        taken
+            .read_to_string(&mut content)
             .await
             .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e)))?;
+        if content.len() as u64 > limit {
+            return Err(ProjectError::new(
+                path.to_path_buf(),
+                ProjectErrorKind::FileTooLarge {
+                    size: content.len() as u64,
+                    limit,
+                },
+            )
+            .into());
+        }
         Self::from_str_with_path(&content, path.to_path_buf())
     }
 
