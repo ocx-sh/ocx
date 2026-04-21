@@ -33,6 +33,10 @@ from tests.fixtures.fake_sigstore import FakeFulcio, FakeRekor
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: SignPipeline::run and VerifyPipeline::run not yet implemented",
+)
 def test_verify_unknown_signer_fails_identity_mismatch(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -46,6 +50,7 @@ def test_verify_unknown_signer_fails_identity_mismatch(
     expected" signal. Distinct from ``NoSignaturesFound`` (79) — the bundle
     exists and cryptographically verifies, but the cert SAN doesn't match the
     caller's ``--certificate-identity``.
+    Xfails until Phase 5c wires both Rust pipelines.
     """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
@@ -86,6 +91,10 @@ def test_verify_unknown_signer_fails_identity_mismatch(
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: SignPipeline::run and VerifyPipeline::run not yet implemented",
+)
 def test_verify_issuer_mismatch_exits_77(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -93,7 +102,10 @@ def test_verify_issuer_mismatch_exits_77(
     fake_rekor: FakeRekor,
     fake_oidc_token: str,
 ) -> None:
-    """Cert-issuer mismatch → exit 77. Distinct variant, same code as identity."""
+    """Cert-issuer mismatch → exit 77. Distinct variant, same code as identity.
+
+    Xfails until Phase 5c wires both Rust pipelines.
+    """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
     sign = subprocess.run(

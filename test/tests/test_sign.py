@@ -30,6 +30,10 @@ from tests.fixtures.fake_sigstore import FakeFulcio, FakeRekor
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: SignPipeline::run not yet implemented; Rust binary exits non-zero",
+)
 def test_sign_then_verify_happy_path(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -39,8 +43,9 @@ def test_sign_then_verify_happy_path(
 ) -> None:
     """`sign` produces a referrer; `verify` accepts it — round-trip contract.
 
-    This is the canonical happy path per ADR §"Target architecture". It
-    xfails today because the fake fixtures aren't wired; Phase 5 flips it.
+    This is the canonical happy path per ADR §"Target architecture". The fake
+    Sigstore services (Phase 5b) are live; this xfails until Phase 5c wires
+    the Rust SignPipeline and VerifyPipeline implementations.
     """
     pkg = published_package
     env = {
@@ -171,6 +176,10 @@ def test_sign_identity_token_file_and_stdin_are_mutually_exclusive(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: SignPipeline::run not yet implemented",
+)
 def test_sign_reads_env_token(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -182,6 +191,7 @@ def test_sign_reads_env_token(
 
     Precedence (lowest to highest): ambient provider → env → stdin → file.
     env overrides ambient; this test confirms env is consumed when present.
+    Xfails until Phase 5c wires the Rust sign pipeline.
     """
     pkg = published_package
     env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
@@ -204,6 +214,10 @@ def test_sign_reads_env_token(
     assert envelope["data"]["bundle_digest"].startswith("sha256:")
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: SignPipeline::run not yet implemented",
+)
 def test_sign_reads_stdin_token(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -211,7 +225,10 @@ def test_sign_reads_stdin_token(
     fake_rekor: FakeRekor,
     fake_oidc_token: str,
 ) -> None:
-    """``--identity-token-stdin`` reads the token from stdin without shell exposure."""
+    """``--identity-token-stdin`` reads the token from stdin without shell exposure.
+
+    Xfails until Phase 5c wires the Rust sign pipeline.
+    """
     pkg = published_package
     result = subprocess.run(
         [
