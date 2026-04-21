@@ -74,6 +74,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | 6 | Language-agnostic, toolchain-free | One binary install any binary |
 | 7 | Private distribution first-class | Internal tools simple as `docker push` |
 | 8 | Declarative env metadata | Multi-package env composition without shell scripts |
+| 9 | Supply-chain-ready out of the box | Keyless Sigstore sign + verify via OCI Referrers — standards-based, no separate signing server |
 
 ## Competitive Positioning
 
@@ -115,6 +116,10 @@ ocx exec cmake:3.28 -- cmake --version   # Run with clean environment
 ocx env cmake:3.28                  # Print resolved environment variables
 ocx select cmake:3.28               # Set "current" to this version
 ocx package push my/cmake:3.28 cmake.tar.xz --cascade  # Publish
+ocx package sign -p linux/amd64 my/cmake:3.28            # Keyless Sigstore sign via OCI Referrers
+ocx verify -p linux/amd64 my/cmake:3.28 \                # Keyless Sigstore verify
+  --certificate-identity you@example.com \
+  --certificate-oidc-issuer https://github.com/login/oauth
 ocx clean                           # GC all unreferenced objects
 ocx index catalog                   # List known repositories
 ```

@@ -78,7 +78,11 @@ pub enum VerifyErrorKind {
 
     /// Rekor SET does not verify against Rekor public key.
     ///
-    /// Exit 82 (`RekorUnavailable`).
+    /// Exit 65 (`DataError`). A cryptographically invalid SET is a data integrity
+    /// failure — the bundle has been tampered with. This is distinct from
+    /// [`Self::RekorUnavailable`] (service down, retry may help): no amount of
+    /// retrying will fix a tampered SET, and callers must not treat this as a
+    /// transient failure.
     #[error("Rekor SET does not verify")]
     RekorSetInvalid,
 
@@ -107,55 +111,33 @@ pub enum VerifyErrorKind {
     #[error("bundle parse failed")]
     BundleParseFailed,
 
-    /// Rekor Rekor lookup failed (HTTP 4xx/5xx from Rekor other than 200).
-    ///
-    /// Exit 82.
-    #[error("Rekor lookup failed")]
-    RekorLookupFailed,
-
-    /// Certificate has expired and no valid Rekor SET is available to witness pre-expiry signing.
-    ///
-    /// Exit 65. Note: expired cert + valid SET is the success path (tlog witnesses
-    /// that signing happened pre-expiry); this variant fires only when expiry
-    /// cannot be reconciled.
-    #[error("certificate expired and no valid Rekor SET witnesses pre-expiry signing")]
-    CertificateExpired,
-
-    /// Certificate has been revoked per Fulcio's CRL.
-    ///
-    /// Exit 65.
-    #[error("certificate revoked")]
-    CertificateRevoked,
-
     /// Trust root could not be loaded (embedded asset missing, TUF fetch failed).
     ///
     /// Exit 78 (`ConfigError`).
     #[error("trust root unavailable")]
     TrustRootUnavailable,
 
-    /// Bundle referenced but not found in the registry (404 on blob).
+    /// Trust root PEM failed to parse (malformed PEM, no certificate blocks, bad UTF-8).
     ///
-    /// Exit 79 (`NotFound`).
-    #[error("bundle blob not found in registry")]
-    BundleNotFound,
+    /// Exit 78 (`ConfigError`).
+    #[error("trust root load failed: {reason}")]
+    TrustRootLoad { reason: String },
 }
 
 impl ClassifyErrorKind for VerifyErrorKind {
     fn exit_code(&self) -> ExitCode {
         match self {
-            Self::NoSignaturesFound | Self::NoUsableBundle | Self::BundleNotFound => ExitCode::NotFound,
+            Self::NoSignaturesFound | Self::NoUsableBundle => ExitCode::NotFound,
             Self::IdentityMismatch | Self::IssuerMismatch => ExitCode::PermissionDenied,
             Self::CertChainInvalid
             | Self::SignatureInvalid
             | Self::BundleParseFailed
-            | Self::CertificateExpired
-            | Self::CertificateRevoked => ExitCode::DataError,
-            Self::RekorSetInvalid
-            | Self::RekorSetAbsentTsaPresent
-            | Self::RekorUnavailable
-            | Self::RekorLookupFailed => ExitCode::RekorUnavailable,
+            // RekorSetInvalid is a data integrity failure (tampered bundle), not a
+            // service-unavailability signal. Exit 65 so retry logic does not fire.
+            | Self::RekorSetInvalid => ExitCode::DataError,
+            Self::RekorSetAbsentTsaPresent | Self::RekorUnavailable => ExitCode::RekorUnavailable,
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
-            Self::TrustRootUnavailable => ExitCode::ConfigError,
+            Self::TrustRootUnavailable | Self::TrustRootLoad { .. } => ExitCode::ConfigError,
         }
     }
 }
@@ -177,11 +159,7 @@ mod tests {
     #[test]
     fn not_found_family_maps_to_not_found_exit() {
         // "not signed" signal — publisher never signed or signed a different platform.
-        for kind in [
-            VerifyErrorKind::NoSignaturesFound,
-            VerifyErrorKind::NoUsableBundle,
-            VerifyErrorKind::BundleNotFound,
-        ] {
+        for kind in [VerifyErrorKind::NoSignaturesFound, VerifyErrorKind::NoUsableBundle] {
             assert_eq!(kind.exit_code(), ExitCode::NotFound, "variant: {kind:?}");
         }
     }
@@ -203,21 +181,25 @@ mod tests {
             VerifyErrorKind::CertChainInvalid,
             VerifyErrorKind::SignatureInvalid,
             VerifyErrorKind::BundleParseFailed,
-            VerifyErrorKind::CertificateExpired,
-            VerifyErrorKind::CertificateRevoked,
         ] {
             assert_eq!(kind.exit_code(), ExitCode::DataError, "variant: {kind:?}");
         }
     }
 
     #[test]
-    fn rekor_family_maps_to_rekor_unavailable() {
-        // 82 = "Rekor says no (or can't say)" — includes invalid SET and TSA transition.
+    fn rekor_set_invalid_maps_to_data_error() {
+        // RekorSetInvalid is a tampered-bundle / crypto failure — exit 65 (DataError),
+        // NOT exit 82 (RekorUnavailable). A `case $? in 82) retry` handler must not
+        // retry a tampered SET.
+        assert_eq!(VerifyErrorKind::RekorSetInvalid.exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn rekor_unavailable_family_maps_to_rekor_unavailable() {
+        // 82 = "Rekor service unreachable or TSA transition" — retry may help.
         for kind in [
-            VerifyErrorKind::RekorSetInvalid,
             VerifyErrorKind::RekorSetAbsentTsaPresent,
             VerifyErrorKind::RekorUnavailable,
-            VerifyErrorKind::RekorLookupFailed,
         ] {
             assert_eq!(kind.exit_code(), ExitCode::RekorUnavailable, "variant: {kind:?}");
         }
@@ -269,7 +251,6 @@ mod tests {
             VerifyErrorKind::ReferrersUnsupported,
             VerifyErrorKind::BundleParseFailed,
             VerifyErrorKind::TrustRootUnavailable,
-            VerifyErrorKind::BundleNotFound,
         ] {
             let msg = format!("{kind}");
             assert!(!msg.ends_with('.'), "trailing period on: {msg}");

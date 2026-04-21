@@ -1564,6 +1564,7 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -1591,6 +1592,7 @@ dependencies = [
  "libc",
  "lzma-rust2",
  "oci-client",
+ "pem",
  "regex",
  "schemars",
  "serde",

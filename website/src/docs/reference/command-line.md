@@ -194,10 +194,10 @@ OCX exposes a stable, typed exit-code taxonomy so scripts can discriminate failu
 
 Most package tools return 0 on success and 1 on any failure. That forces downstream scripts to either ignore the error category or grep stderr — both are fragile. A CI wrapper cannot distinguish "registry unreachable, retry in 30 seconds" from "package not found, fail the build" without parsing error text that can change.
 
-OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–81 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
+OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–83 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
 
 :::info
-The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–81.
+The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–83.
 :::
 
 | Code | Name | Mnemonic | When used | Recovery |
@@ -205,15 +205,17 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 0 | Success | — | Successful completion | — |
 | 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
 | 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax | Check the command syntax |
-| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest | Validate identifiers and file contents |
+| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle | Validate identifiers and file contents |
 | 69 | Unavailable | EX_UNAVAILABLE | Required resource unavailable: network down, registry unreachable | Retry; check network and registry URL |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
 | 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network | Retry with backoff |
-| 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM | Refresh credentials or adjust filesystem permissions |
-| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure | Inspect the config file at the printed path |
-| 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent | Pin a different version or correct the path |
-| 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials | Refresh or set registry credentials |
+| 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM, offline sign refused, OIDC pre-check failed | Refresh credentials or adjust filesystem permissions |
+| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable | Inspect the config file at the printed path |
+| 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent, no signatures found for target | Pin a different version or correct the path |
+| 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials, Fulcio OIDC token rejected | Refresh or set registry credentials |
 | 81 | OfflineBlocked | OCX | Offline mode blocked a network operation (deliberate policy, not a fault) | Re-run online, or populate the local cache first |
+| 82 | RekorUnavailable | OCX | Rekor transparency log unreachable during sign or verify (5xx/timeout, or SET absent with only TSA present) | Retry later; check Rekor endpoint |
+| 83 | ReferrersUnsupported | OCX | Registry does not implement the OCI Referrers API — sign and verify require OCI 1.1 referrers support | Use a registry with OCI 1.1 referrers support |
 
 Scripts can `case $?` on these stable values:
 
@@ -228,6 +230,8 @@ case $? in
     79) echo "not found; pin a different version" ;;
     80) echo "auth failed; refresh credentials" ;;
     81) echo "offline mode active; re-run online" ;;
+    82) echo "Rekor unavailable; retry signing or verification later" ;;
+    83) echo "registry lacks OCI referrers support; use a compatible registry" ;;
     *)  echo "unexpected failure (exit $?)"; exit 1 ;;
 esac
 ```
@@ -1241,6 +1245,66 @@ Prints the ocx version number.
 ocx version
 ```
 
+### `verify` {#verify}
+
+Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against the embedded [TUF][sigstore-tuf] trust root, verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the values you supply. All five checks must pass for the command to exit 0.
+
+There are no default values for `--certificate-identity` and `--certificate-oidc-issuer` — keyless verification is meaningless without specifying whose signature you trust.
+
+**Usage**
+
+```shell
+ocx verify [OPTIONS] --platform <PLATFORM> \
+  --certificate-identity <IDENTITY> \
+  --certificate-oidc-issuer <URL> \
+  <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier to verify (`registry/repo:tag[@digest]`).
+
+**Options**
+
+| Name | Short | Default | Purpose |
+|------|-------|---------|---------|
+| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index |
+| `--certificate-identity` | — | *(required)* | Expected certificate SAN (Subject Alternative Name). Exact match only in Slice 1. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
+| `--certificate-oidc-issuer` | — | *(required)* | Expected OIDC issuer URL. Exact match only in Slice 1. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
+| `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
+| `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+
+:::warning Preview / not yet fully implemented
+The `package verify` command is currently in preview. Verification of signatures fetched from a registry's referrers index requires the sigstore-rs integration that ships in Slice 2. Exit codes documented below describe intended Slice 1 behavior; today only the referrers-discovery + trust-root loader paths are wired.
+:::
+
+**Exit codes**
+
+| Code | Condition |
+|------|-----------|
+| 0 | Signature verified — identity and issuer match, bundle cryptographically valid |
+| 65 | Data integrity failure: signature invalid, certificate chain invalid, Rekor SET invalid (bundle tampered), bundle parse failed |
+| 77 | Certificate identity or OIDC issuer mismatch |
+| 78 | Trust root unavailable or failed to load |
+| 79 | No signatures found for target, or no usable Sigstore bundle among referrers |
+| 80 | Fulcio rejected the OIDC token |
+| 82 | Rekor unavailable, or SET absent with only TSA timestamp present (Rekor v2 transition) |
+| 83 | Registry does not support the OCI Referrers API |
+
+::: warning No auto-verify during install
+`ocx verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx verify` explicitly before using a package in security-sensitive contexts.
+:::
+
+**Example — verify a package signed in CI**
+
+```shell
+ocx verify \
+  -p linux/amd64 \
+  --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  registry.example/pkg:1.0
+```
+
 ### `ci` {#ci}
 
 #### `export` {#ci-export}
@@ -1479,6 +1543,73 @@ ocx package describe [OPTIONS] <IDENTIFIER>
 
 At least one of the above metadata options must be provided.
 
+#### `sign` {#package-sign}
+
+Publishes a [Sigstore][sigstore] keyless signature for a package manifest as an [OCI Referrers][oci-referrers-spec] artifact. The signing flow uses an ephemeral ECDSA P-256 keypair: [Fulcio][fulcio] issues a short-lived certificate binding the key to your OIDC identity, the manifest digest is signed, and the entry is logged to [Rekor][rekor]. The resulting [Sigstore bundle v0.3][sigstore-bundle] is pushed to the registry as a referrer of the target manifest, where it can be discovered and verified by `ocx verify` and by [`cosign verify`][cosign].
+
+Signing requires network access — `--offline` is rejected with exit 77.
+
+**Usage**
+
+```shell
+ocx package sign [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier to sign (`registry/repo:tag[@digest]`).
+
+**Options**
+
+| Name | Short | Default | Purpose |
+|------|-------|---------|---------|
+| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index to sign |
+| `--fulcio-url` | — | `https://fulcio.sigstore.dev` | [Fulcio][fulcio] CA endpoint (override for private deployments) |
+| `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
+| `--identity-token-file` | — | — | Read the OIDC identity token from this file (highest precedence). File must be owner-readable only (`chmod 600`); world- or group-readable files are rejected with exit 77. **Windows:** permission validation is not implemented; use `--identity-token-stdin` or [`OCX_IDENTITY_TOKEN`][env-identity-token] instead (the command exits 77 if `--identity-token-file` is used on Windows). |
+| `--identity-token-stdin` | — | — | Read the OIDC identity token from stdin (second precedence). Mutually exclusive with `--identity-token-file` |
+| `--no-tty` | — | `false` | Suppress the interactive browser OAuth fallback; ambient token detection must succeed or an override flag must supply a token |
+| `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+
+**Token precedence**
+
+`ocx package sign` resolves an OIDC identity token from the following sources, in order:
+
+1. `--identity-token-file <PATH>` — read from file (highest precedence)
+2. `--identity-token-stdin` — read from stdin
+3. [`OCX_IDENTITY_TOKEN`][env-identity-token] environment variable
+4. Ambient CI detection (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, `GOOGLE_OAUTH_TOKEN`, etc.)
+5. Interactive browser OAuth (suppressed when `--no-tty` is set)
+
+Never pass a raw token on the command line — it would appear in shell history and process listings.
+
+:::warning Preview / not yet fully implemented
+The `package sign` command is currently in preview. The signing pipeline will fail with `unimplemented!()` until the sigstore-rs integration completes in Slice 2. Exit codes documented below describe the intended Slice 1 behavior; only flag-validation, identity-token file permission checks, and capability probing are wired today.
+:::
+
+**Exit codes**
+
+| Code | Condition |
+|------|-----------|
+| 0 | Signature published successfully |
+| 77 | Offline mode active; OIDC pre-check failed; token file has permissive permissions |
+| 78 | Fulcio rejected the certificate signing request as malformed |
+| 80 | Fulcio rejected the OIDC token (issuer mismatch, expired, wrong audience) |
+| 82 | Rekor transparency log unavailable at time of signing |
+| 83 | Registry does not support the OCI Referrers API |
+
+**Example — CI keyless signing with GitHub Actions ambient OIDC**
+
+```yaml
+- name: Sign package
+  run: |
+    ocx package sign \
+      -p linux/amd64 \
+      registry.example/pkg:1.0
+```
+
+In GitHub Actions, the `ACTIONS_ID_TOKEN_REQUEST_TOKEN` variable is present automatically (requires `id-token: write` permission). No `--identity-token-*` flag is needed.
+
 #### `info` {#package-info}
 
 Displays description metadata for a package from the registry.
@@ -1505,6 +1636,13 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [devcontainer-features]: https://containers.dev/implementors/features/
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
 [gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
+[sigstore]: https://www.sigstore.dev/
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[cosign]: https://github.com/sigstore/cosign
+[sigstore-bundle]: https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_bundle.proto
+[sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
+[oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views
@@ -1522,6 +1660,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [env-no-project]: ./environment.md#ocx-no-project
 [env-ocx-quiet]: ./environment.md#ocx-quiet
 [env-ocx-jobs]: ./environment.md#ocx-jobs
+[env-identity-token]: ./environment.md#ocx-identity-token
 
 <!-- reference -->
 [config-ref]: ./configuration.md

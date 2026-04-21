@@ -154,6 +154,19 @@ mod tests {
     }
 
     #[test]
+    fn exit_code_rekor_unavailable_is_82() {
+        // Tool-specific; distinct from Unavailable — Rekor is a separate,
+        // non-retryable supply-chain dependency (vs registry transient faults).
+        assert_eq!(ExitCode::RekorUnavailable as u8, 82);
+    }
+
+    #[test]
+    fn exit_code_referrers_unsupported_is_83() {
+        // Tool-specific; registry lacks OCI 1.1 referrers — no fallback.
+        assert_eq!(ExitCode::ReferrersUnsupported as u8, 83);
+    }
+
+    #[test]
     fn exit_code_converts_to_process_exit_code() {
         // Smoke test: proves the From impl compiles and is callable.
         // Correctness of the numeric value is covered by the `as u8` tests above.

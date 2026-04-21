@@ -69,15 +69,18 @@ pub enum ErrorCategory {
 impl ErrorCategory {
     /// Total function mapping every [`ExitCode`] to an [`ErrorCategory`].
     ///
-    /// `ExitCode` is `#[non_exhaustive]` — the trailing wildcard arm is required
-    /// and maps any future variant to [`Self::Internal`] as a safe fallback.
-    /// When a new `ExitCode` variant is added to `ocx_lib`, an explicit arm
-    /// here is the correct follow-up; falling through to `Internal` is a bug
-    /// signal in that case, not a stable contract. Internal success codes
-    /// (`Success = 0`) are nonsensical for an error envelope and map to
-    /// [`Self::Internal`] as a fail-safe: emitting an error envelope on
-    /// exit-code 0 would itself be a bug, and an envelope with `kind=internal`
-    /// is a readable trap.
+    /// All current variants of [`ExitCode`] are listed explicitly so that
+    /// adding a new variant to the enum causes a dead-code or unreachable-pattern
+    /// warning here, prompting the author to assign a category. The `_` wildcard
+    /// is required only because `ExitCode` is `#[non_exhaustive]` (it lives in
+    /// `ocx_lib`, a separate crate); it covers only genuinely unknown future
+    /// variants and maps them to [`Self::Internal`] as a safe fallback.
+    ///
+    /// Success codes (`Success = 0`, `Failure = 1`) are nonsensical for an error
+    /// envelope and map to [`Self::Internal`] as a fail-safe: emitting an error
+    /// envelope on exit-code 0 would itself be a bug, and an envelope with
+    /// `kind=internal` is a readable trap. `OfflineBlocked` maps to
+    /// `PermissionDenied` — it is a deliberate policy rejection, not a network fault.
     pub fn from_exit_code(code: ExitCode) -> Self {
         match code {
             ExitCode::Success | ExitCode::Failure => Self::Internal,
@@ -93,6 +96,9 @@ impl ErrorCategory {
             ExitCode::OfflineBlocked => Self::PermissionDenied,
             ExitCode::RekorUnavailable => Self::RekorUnavailable,
             ExitCode::ReferrersUnsupported => Self::ReferrersUnsupported,
+            // Wildcard required by `#[non_exhaustive]` on ExitCode (cross-crate match).
+            // Any future variant added to ExitCode should get an explicit arm above;
+            // falling through here is a bug signal, not a stable contract.
             _ => Self::Internal,
         }
     }

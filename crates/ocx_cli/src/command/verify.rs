@@ -28,6 +28,7 @@ use clap::Parser;
 use ocx_lib::oci;
 use ocx_lib::oci::verify::{VerifyError, VerifyErrorKind};
 
+use crate::command::sigstore_url::validate_sigstore_url;
 use crate::options;
 
 /// Default public Rekor transparency-log endpoint (overridable via `--rekor-url`).
@@ -66,6 +67,10 @@ pub struct Verify {
 impl Verify {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
+
+        // SSRF hardening (CWE-918): validate user-supplied endpoint URL at the
+        // boundary before it becomes an HTTP client target.
+        let _rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url")?;
 
         // Online-only: verify needs the registry to fetch referrers (and Rekor
         // to verify the SET). Offline mode → exit 81 via `OfflineMode` classifier.

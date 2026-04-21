@@ -181,7 +181,9 @@ impl OciTransport for NativeTransport {
         let digest_str = digest.to_string();
         log::debug!("Pulling blob {} for image {} to {}", digest_str, image, path.display());
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| io_error(parent, e))?;
         }
         let file = tokio::fs::OpenOptions::new()
             .write(true)

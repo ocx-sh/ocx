@@ -9,7 +9,6 @@
 //! "cert expired yet SET witnesses pre-expiry signing" success path.
 
 // Consumed by `command/verify.rs` in Phase 5.
-#![allow(dead_code)]
 
 use ocx_lib::oci;
 use serde::Serialize;
@@ -44,7 +43,7 @@ pub struct VerificationReport {
 }
 
 impl VerificationReport {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Phase 5c consumer
     pub fn new(
         identifier: String,
         subject_digest: oci::Digest,
@@ -83,5 +82,59 @@ impl Printable for VerificationReport {
             rows[1].push(value);
         }
         printer.print_table(&["Field", "Value"], &rows);
+    }
+
+    /// Emit a C-S1-1 success envelope:
+    /// `{"schema_version":1,"command":"verify","exit_code":0,"data":{...}}`.
+    fn print_json(&self, printer: &ocx_lib::cli::Printer) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        let json = crate::error_envelope::render_success_envelope("verify", self)?;
+        let parsed: serde_json::Value = serde_json::from_str(&json)?;
+        Ok(printer.print_json(&parsed)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_report() -> VerificationReport {
+        VerificationReport::new(
+            "registry.example/pkg:1.0".into(),
+            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
+            ocx_lib::oci::Digest::Sha256("c".repeat(64)),
+            "signer@example.com".into(),
+            "https://accounts.google.com".into(),
+            1_700_000_000,
+            false,
+        )
+    }
+
+    #[test]
+    fn json_output_contains_c_s1_1_envelope() {
+        // Validate that print_json routes through render_success_envelope and
+        // produces the C-S1-1 frozen envelope shape.
+        let report = sample_report();
+        let json = crate::error_envelope::render_success_envelope("verify", &report).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["command"], "verify");
+        assert_eq!(parsed["exit_code"], 0);
+        let data = &parsed["data"];
+        assert_eq!(data["identifier"], "registry.example/pkg:1.0");
+        assert!(
+            data["subject_digest"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("sha256:"))
+        );
+        assert!(
+            data["referrer_digest"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("sha256:"))
+        );
+        assert_eq!(data["signed_at"], 1_700_000_000);
+        assert_eq!(data["cert_expired_but_tlog_valid"], false);
     }
 }

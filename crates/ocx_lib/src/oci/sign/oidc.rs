@@ -85,26 +85,24 @@ pub trait AmbientProvider: Send + Sync {
 /// Implements the ADR S1-C state machine: override → ambient chain → browser.
 /// Constructed once per `ocx package sign` invocation by the CLI layer after
 /// resolving the override token per C-S1-4 precedence.
-pub struct DispatchingTokenProvider {
-    #[allow(dead_code)]
-    override_token: Option<String>,
-    #[allow(dead_code)]
-    no_tty: bool,
-}
+///
+/// Phase 1 stub. Phase 5c will re-add `override_token` and `no_tty` fields
+/// alongside the real dispatch state machine.
+pub struct DispatchingTokenProvider;
 
 impl DispatchingTokenProvider {
-    /// Construct a dispatcher with an optional resolved override token and TTY policy.
+    /// Construct a dispatcher.
     ///
-    /// `override_token` is the **resolved** token from one of
-    /// `--identity-token-file`, `--identity-token-stdin`, or
-    /// `OCX_IDENTITY_TOKEN` (per C-S1-4 precedence). The CLI layer resolves
-    /// before constructing the provider so the provider never sees raw argv.
-    ///
-    /// `no_tty=true` skips the interactive browser path even when no ambient
-    /// provider matches — used in CI to fail fast with
-    /// [`SignErrorKind::OidcPreCheckFailed`].
-    pub fn new(override_token: Option<String>, no_tty: bool) -> Self {
-        Self { override_token, no_tty }
+    /// Phase 5c will re-introduce `override_token: Option<String>` and
+    /// `no_tty: bool` parameters alongside the real ADR S1-C implementation.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for DispatchingTokenProvider {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

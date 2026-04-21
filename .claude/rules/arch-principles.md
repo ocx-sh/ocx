@@ -77,6 +77,8 @@ CLI command (clap parse)
 | `adr_custom_oci_identifier.md` | Custom identifier parser replace `oci_spec::Reference` |
 | `adr_mirror_source_generators.md` | Generator-based URL index for mirror sources |
 | `adr_oci_artifact_enrichment.md` | Signatures, SBOMs, descriptive metadata on OCI artifacts |
+| `adr_oci_referrers_discovery.md` | OCI Referrers API for signature + SBOM discovery (superseded by v2) |
+| `adr_oci_referrers_signing_v1.md` | Keyless Sigstore signing via OCI Referrers (Slice 1 — sign + verify) |
 | `adr_ocx_mirror.md` | Standalone binary mirroring tool design |
 | `adr_release_install_strategy.md` | Release + install phased strategy |
 | `adr_sbom_strategy.md` | SBOM gen approach |

@@ -147,6 +147,24 @@ values are ignored with a warning. Unset = unbounded (legacy default).
 The command line option [`--jobs`][arg-jobs] takes precedence over this
 variable.
 
+### `OCX_IDENTITY_TOKEN` {#ocx-identity-token}
+
+OIDC identity token for [`ocx package sign`][cmd-package-sign]. Provides the lowest-precedence token source when no explicit override is given — used only if `--identity-token-file` and `--identity-token-stdin` are both absent.
+
+The value must be a short-lived JWT issued by a supported OIDC provider (GitHub Actions, Google Cloud, etc.). The token is consumed once and never logged or written to disk.
+
+Token precedence for `ocx package sign` (highest to lowest):
+
+1. `--identity-token-file <PATH>` — file must have mode `0600` or tighter
+2. `--identity-token-stdin`
+3. `OCX_IDENTITY_TOKEN`
+4. Ambient CI detection (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, `GOOGLE_OAUTH_TOKEN`, etc.)
+5. Interactive browser OAuth (suppressed with `--no-tty`)
+
+::: warning Short-lived tokens only
+OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a token in a long-lived environment or secret manager entry — fetch a fresh token immediately before calling `ocx package sign`.
+:::
+
 ### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
 
 A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
@@ -339,6 +357,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-ref]: command-line.md
 [cmd-ci-export]: command-line.md#ci-export
 [cmd-shell-hook]: command-line.md#shell-hook
+[cmd-package-sign]: command-line.md#package-sign
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-index]: command-line.md#arg-index

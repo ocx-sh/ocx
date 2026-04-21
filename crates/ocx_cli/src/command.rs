@@ -43,6 +43,7 @@ pub mod shell_direnv;
 pub mod shell_env;
 pub mod shell_hook;
 pub mod shell_init;
+pub mod sigstore_url;
 pub mod uninstall;
 pub mod update;
 pub mod verify;

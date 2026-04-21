@@ -37,8 +37,12 @@ tracing-subscriber = { version = "0.3.22", features = [
 tracing-log = "0.2.0"
 serde = "1.0.228"
 serde_json = "1"
+url = { workspace = true }
 console = "0.16.2"
 thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3.25.0"
 
 [lints]
 workspace = true

@@ -14,14 +14,16 @@
 //! sign pipeline. There is deliberately NO `--identity-token <VALUE>` flag —
 //! raw tokens on the command line would leak into shell history.
 
-use std::io::Read;
 use std::process::ExitCode;
 
+use anyhow::Context as _;
 use clap::Parser;
+use tokio::io::AsyncReadExt;
 
 use ocx_lib::oci;
 use ocx_lib::oci::sign::{SignError, SignErrorKind};
 
+use crate::command::sigstore_url::validate_sigstore_url;
 use crate::options;
 
 /// Default public Fulcio CA endpoint (overridable via `--fulcio-url`).
@@ -86,6 +88,11 @@ impl PackageSign {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
+        // SSRF hardening (CWE-918): validate user-supplied endpoint URLs at the
+        // boundary before they become HTTP client targets.
+        let _fulcio_url = validate_sigstore_url(&self.fulcio_url, "--fulcio-url")?;
+        let _rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url")?;
+
         // S1-E policy: offline sign is a deliberate rejection, NOT a passive
         // network-access failure. Route through `SignErrorKind::OfflineSignRefused`
         // so the exit-code classifier returns 77 (PermissionDenied). This
@@ -102,7 +109,7 @@ impl PackageSign {
         // a plain String; never log, never surface in error context.
         // Resolution itself is safe to run (no network, no crypto) — the token
         // will be consumed by Phase 5c's pipeline integration.
-        let _override_token = self.resolve_override_token()?;
+        let _override_token = self.resolve_override_token(&identifier).await?;
 
         // Phase 5c blocker: `SignPipeline::run` requires a `&dyn OciTransport`
         // (see `oci::sign::SignContext::transport`) but `oci::Client` keeps
@@ -112,13 +119,13 @@ impl PackageSign {
         // design-change-shaped and belong to Phase 5c alongside the
         // sigstore-rs integration (the pipeline body itself is still
         // `unimplemented!()`). Until then we surface
-        // `SignErrorKind::SigningPipelineInternal` so the exit-code classifier
+        // `SignErrorKind::Internal` so the exit-code classifier
         // produces `Failure` (1) rather than a panic.
         let blocker: Box<dyn std::error::Error + Send + Sync> =
             "SignPipeline::run is Phase 5c blocked on sigstore-rs integration + transport accessor".into();
         Err(anyhow::Error::from(SignError::new(
             identifier,
-            SignErrorKind::SigningPipelineInternal(blocker),
+            SignErrorKind::Internal(blocker),
         )))
     }
 
@@ -131,21 +138,68 @@ impl PackageSign {
     ///
     /// The file and stdin paths trim trailing whitespace so a trailing newline
     /// written by `echo $TOKEN > tokenfile` doesn't poison the JWT.
-    fn resolve_override_token(&self) -> anyhow::Result<Option<String>> {
+    ///
+    /// On Unix, the token file is rejected if any group or other permission
+    /// bit is set (`mode & 0o077 != 0`). This enforces `chmod 600` hygiene:
+    /// a world- or group-readable token file is a security misconfiguration
+    /// and surfaces as [`SignErrorKind::IdentityTokenFilePermissive`] (exit 77).
+    async fn resolve_override_token(&self, identifier: &oci::Identifier) -> anyhow::Result<Option<String>> {
         if let Some(path) = &self.identity_token_file {
-            // Sync `std::fs::read_to_string` is fine here: tokens are small and
-            // this is a CLI entry-path, not an async hot loop. Trim trailing
-            // whitespace/newlines so `echo $TOKEN > tokenfile` doesn't poison
-            // the JWT.
-            let raw = std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("failed to read --identity-token-file {}: {e}", path.display()))?;
-            return Ok(Some(raw.trim().to_string()));
+            // On Windows, ACL-based permission validation is not implemented for
+            // Slice 1 (windows-acl integration is out of scope). Refuse explicitly
+            // rather than silently skipping the check — a readable-by-others token
+            // file is a security misconfiguration and must not be accepted silently.
+            #[cfg(windows)]
+            {
+                return Err(anyhow::Error::from(SignError::new(
+                    identifier.clone(),
+                    SignErrorKind::OidcPreCheckFailed {
+                        reason: "identity-token-file permission validation is not supported on Windows; \
+                                 use --identity-token-stdin or OCX_IDENTITY_TOKEN instead"
+                            .into(),
+                    },
+                )));
+            }
+            // C-S1-4 permission gate (Unix only): open the file once, validate
+            // permissions on the open handle, then read from the same handle to
+            // eliminate the TOCTOU race between stat and read.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let mut file = tokio::fs::File::open(path)
+                    .await
+                    .with_context(|| format!("failed to open --identity-token-file {}", path.display()))?;
+                let meta = file
+                    .metadata()
+                    .await
+                    .with_context(|| format!("failed to stat --identity-token-file {}", path.display()))?;
+                let mode = meta.mode();
+                if mode & 0o077 != 0 {
+                    return Err(anyhow::Error::from(SignError::new(
+                        identifier.clone(),
+                        SignErrorKind::IdentityTokenFilePermissive {
+                            path: path.clone(),
+                            mode,
+                        },
+                    )));
+                }
+                let mut raw = String::new();
+                file.read_to_string(&mut raw)
+                    .await
+                    .with_context(|| format!("failed to read --identity-token-file {}", path.display()))?;
+                return Ok(Some(raw.trim().to_string()));
+            }
+            // Unreachable on non-unix, non-windows platforms (none currently supported).
+            #[allow(unreachable_code)]
+            return Ok(None);
         }
         if self.identity_token_stdin {
+            // Use tokio's async stdin to avoid blocking the runtime thread.
             let mut buf = String::new();
-            std::io::stdin()
+            tokio::io::stdin()
                 .read_to_string(&mut buf)
-                .map_err(|e| anyhow::anyhow!("failed to read identity token from stdin: {e}"))?;
+                .await
+                .context("failed to read identity token from stdin")?;
             return Ok(Some(buf.trim().to_string()));
         }
         if let Ok(token) = std::env::var("OCX_IDENTITY_TOKEN")
@@ -154,5 +208,71 @@ impl PackageSign {
             return Ok(Some(token));
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for [`PackageSign::resolve_override_token`] — C-S1-4 contract.
+
+    use std::str::FromStr;
+
+    use super::*;
+    use crate::options;
+
+    fn test_identifier() -> oci::Identifier {
+        oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse")
+    }
+
+    fn make_sign_cmd(identity_token_file: Option<std::path::PathBuf>, identity_token_stdin: bool) -> PackageSign {
+        PackageSign {
+            platform: "linux/amd64".parse().expect("platform"),
+            fulcio_url: "https://fulcio.sigstore.dev".into(),
+            rekor_url: "https://rekor.sigstore.dev".into(),
+            identity_token_file,
+            identity_token_stdin,
+            no_tty: false,
+            no_cache: false,
+            identifier: options::Identifier::from_str("registry.example/pkg:1.0").expect("ident"),
+        }
+    }
+
+    /// Write `contents` to a new file in `dir` and set the given Unix mode.
+    #[cfg(unix)]
+    fn write_with_mode(dir: &std::path::Path, name: &str, contents: &str, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, contents).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn token_file_0644_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_with_mode(tmp.path(), "token", "tok123\n", 0o644);
+        let cmd = make_sign_cmd(Some(path), false);
+        let id = test_identifier();
+        let result = cmd.resolve_override_token(&id).await;
+        let err = result.expect_err("0644 token file must be rejected");
+        // Must classify as IdentityTokenFilePermissive via the error chain.
+        let sign_err = err.downcast_ref::<SignError>().expect("SignError in chain");
+        assert!(
+            matches!(sign_err.kind, SignErrorKind::IdentityTokenFilePermissive { .. }),
+            "expected IdentityTokenFilePermissive, got {:?}",
+            sign_err.kind
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn token_file_0600_is_accepted() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_with_mode(tmp.path(), "token", "my-token\n", 0o600);
+        let cmd = make_sign_cmd(Some(path), false);
+        let id = test_identifier();
+        let token = cmd.resolve_override_token(&id).await.expect("0600 must succeed");
+        assert_eq!(token, Some("my-token".to_string()));
     }
 }

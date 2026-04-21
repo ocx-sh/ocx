@@ -496,12 +496,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_error_rekor_set_invalid_maps_to_rekor_unavailable() {
-        // Slice 1: Rekor-family failures coalesce onto 82 so CI can retry or
-        // route to the operator consistently.
+    fn verify_error_rekor_set_invalid_maps_to_data_error() {
+        // RekorSetInvalid is a crypto / data integrity failure (tampered bundle),
+        // not a service-unavailability signal. Exit 65 (DataError) so retry
+        // handlers do not retry a tampered SET.
         let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
         let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::RekorSetInvalid);
-        assert_eq!(classify(err), ExitCode::RekorUnavailable);
+        assert_eq!(classify(err), ExitCode::DataError);
     }
 
     #[test]
@@ -516,6 +517,60 @@ mod tests {
         let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
         let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::TrustRootUnavailable);
         assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    // ── SignError: IdentityTokenFilePermissive walks the full chain ──────────
+
+    #[test]
+    fn sign_error_identity_token_file_permissive_maps_to_permission_denied() {
+        // B-T1: `classify_error` must walk the full `source()` chain and return
+        // `ExitCode::PermissionDenied` (77) when `SignErrorKind::IdentityTokenFilePermissive`
+        // is buried one level deep under a context wrapper error.
+        //
+        // Motivation: `classify_error` uses `std::iter::successors(Some(err), |e| e.source())`
+        // to walk the chain. This test proves the walker does NOT stop at the outer
+        // wrapper (which has no `ClassifyExitCode` impl) and continues to the `SignError`
+        // carried via `source()`.
+
+        // A minimal wrapper that simulates an `anyhow::context()` layer: it has
+        // a human-readable message and carries its cause via `source()`.
+        #[derive(Debug)]
+        struct ContextWrapper {
+            msg: &'static str,
+            source: crate::oci::sign::SignError,
+        }
+
+        impl std::fmt::Display for ContextWrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.msg)
+            }
+        }
+
+        impl std::error::Error for ContextWrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let sign_err = crate::oci::sign::SignError::new(
+            id,
+            crate::oci::sign::SignErrorKind::IdentityTokenFilePermissive {
+                path: std::path::PathBuf::from("/tmp/token"),
+                mode: 0o644,
+            },
+        );
+        // Wrap in a context layer — the outer error has no ClassifyExitCode impl,
+        // so the classifier must descend via source() to find the SignError.
+        let wrapped = ContextWrapper {
+            msg: "reading identity token file for sign operation",
+            source: sign_err,
+        };
+
+        assert_eq!(
+            classify_error(&wrapped as &(dyn std::error::Error + 'static)),
+            ExitCode::PermissionDenied,
+        );
     }
 
     // ── Fall-through lock-in ─────────────────────────────────────────────────

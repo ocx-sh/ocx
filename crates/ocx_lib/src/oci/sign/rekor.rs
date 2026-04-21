@@ -10,39 +10,35 @@
 //! `integrated_time: 0` AND missing `set`, the error path is
 //! [`SignErrorKind::RekorSetMalformed`] (v1 signing does not accept v2 entries).
 //!
-//! Phase 1 stub — bodies use `unimplemented!()`.
+//! Phase 1 stub — bodies use `unimplemented!()`. Dead-code lint suppressed
+//! because this module is private; Phase 5c wires the call sites.
+#![allow(dead_code)]
 
 use super::error::SignErrorKind;
 
 /// Rekor log entry with Signed Entry Timestamp.
-pub struct RekorEntry {
-    /// Integer log index (unique entry identifier).
-    pub log_index: u64,
-    /// Wall-clock time the entry was integrated into the log (UTC epoch seconds).
-    pub integrated_time: u64,
-    /// Stable log identifier (public key hash).
-    pub log_id: String,
-    /// Signed Entry Timestamp as raw bytes.
-    pub signed_entry_timestamp: Vec<u8>,
+///
+/// Used by [`super::bundle::BundleBuilder`] in Phase 5c.
+pub(super) struct RekorEntry {
+    pub(super) log_index: u64,
+    pub(super) integrated_time: u64,
+    pub(super) log_id: String,
+    pub(super) signed_entry_timestamp: Vec<u8>,
 }
 
-/// Rekor v1 client.
-pub struct RekorClient {
-    #[allow(dead_code)]
+/// Rekor v1 client — Phase 5c implements the log upload.
+struct RekorClient {
+    /// C-S1-3 injection seam: `https://rekor.sigstore.dev` in production;
+    /// `http://127.0.0.1:<port>` in tests.
     url: String,
 }
 
 impl RekorClient {
-    /// Construct a Rekor client targeting the given URL.
-    ///
-    /// Production: `https://rekor.sigstore.dev`.
-    /// Tests: `http://127.0.0.1:<fake_rekor port>` (C-S1-3 seam).
-    pub fn new(url: String) -> Self {
+    fn new(url: String) -> Self {
         Self { url }
     }
 
-    /// Upload a signature entry and return the integrated log entry.
-    pub async fn upload_entry(
+    async fn upload_entry(
         &self,
         _signature: &[u8],
         _cert_leaf_pem: &[u8],

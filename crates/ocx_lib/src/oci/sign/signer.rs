@@ -14,7 +14,6 @@ use async_trait::async_trait;
 
 use super::bundle::SignedBundle;
 use super::error::SignErrorKind;
-use super::oidc::TokenProvider;
 use crate::oci::Digest;
 
 /// Signer trait — produces a Sigstore bundle for a target digest.
@@ -36,29 +35,24 @@ pub trait Signer: Send + Sync {
 
 /// Keyless signer composing a [`TokenProvider`] + Fulcio + Rekor.
 ///
-/// The reference implementation of [`Signer`] for Slice 1. Phase 1 stub —
-/// fields + constructor only.
-pub struct KeylessSigner {
-    #[allow(dead_code)]
-    token_provider: Box<dyn TokenProvider>,
-    #[allow(dead_code)]
-    fulcio_url: String,
-    #[allow(dead_code)]
-    rekor_url: String,
-}
+/// The reference implementation of [`Signer`] for Slice 1. Phase 1 stub.
+/// Phase 5c will re-add the token provider and URL fields alongside the real
+/// Fulcio/Rekor call sites.
+pub struct KeylessSigner;
 
 impl KeylessSigner {
-    /// Construct a keyless signer with the given token provider and service URLs.
+    /// Construct a keyless signer.
     ///
-    /// `fulcio_url` and `rekor_url` are the injection seams per C-S1-3:
-    /// production callers pass `https://fulcio.sigstore.dev/api/v2/signingCert`
-    /// and `https://rekor.sigstore.dev`; tests inject fake-service URLs.
-    pub fn new(token_provider: Box<dyn TokenProvider>, fulcio_url: String, rekor_url: String) -> Self {
-        Self {
-            token_provider,
-            fulcio_url,
-            rekor_url,
-        }
+    /// Phase 5c will re-introduce `token_provider`, `fulcio_url`, and
+    /// `rekor_url` parameters alongside the real signing implementation.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for KeylessSigner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

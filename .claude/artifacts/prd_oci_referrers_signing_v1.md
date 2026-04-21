@@ -325,7 +325,7 @@ error: no signatures found for ocx.sh/cmake:3.28 (linux/amd64)
 | # | Requirement | Acceptance Test |
 |---|---|---|
 | FR-1 | `ocx package sign <REFERENCE> -p <PLATFORM>` writes a Sigstore bundle v0.3 referrer on a Referrers-API-supporting registry | `test_sign_writes_v0_3_referrer` |
-| FR-2 | On GHCR or similar (no Referrers API), `ocx package sign` exits 69 with `ReferrersUnsupported` — no fallback tag written | `test_sign_fails_69_on_no_referrers_api` |
+| FR-2 | On GHCR or similar (no Referrers API), `ocx package sign` exits 83 with `ReferrersUnsupported` — no fallback tag written | `test_sign_fails_83_on_no_referrers_api` |
 | FR-3 | Ambient OIDC (GHA, GitLab, CircleCI, Buildkite, GCP) is detected via `ambient-id` + inline fallback without requiring any identity-token override | `test_sign_ambient_detection_gha` (per-platform matrix) |
 | FR-4 | Missing GHA `id-token: write` permission produces exit 77 with `oidc_missing_gha_permission` detail | `test_sign_gha_missing_id_token_permission_exits_77` |
 | FR-5 | Laptop TTY flow opens browser PKCE when no ambient and no identity-token override (`--identity-token-file`, `--identity-token-stdin`, `OCX_IDENTITY_TOKEN`) | `test_sign_browser_pkce_opens_browser` (manual; gated by a `--no-tty` in auto tests) |

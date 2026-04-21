@@ -24,16 +24,20 @@
 //! | [`pipeline`] | 15-step push state machine; implements [`Signer`] |
 //! | [`error`] | [`SignErrorKind`] variant inventory |
 
-pub mod bundle;
+// Public modules: consumed by CLI layer or re-exported as stable API surface.
 pub mod error;
-pub mod fulcio;
 pub mod oidc;
 pub mod oidc_ambient;
 pub mod oidc_ambient_inline;
 pub mod oidc_browser;
 pub mod pipeline;
-pub mod rekor;
-pub mod signer;
+
+// Private modules: stub-only, no current callers outside this module.
+// Phase 5c will promote these to `pub` when real call sites are wired.
+mod bundle;
+mod fulcio;
+mod rekor;
+mod signer;
 
 pub use bundle::SignedBundle;
 pub use error::{SignError, SignErrorKind};

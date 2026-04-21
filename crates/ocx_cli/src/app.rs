@@ -127,8 +127,8 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
     use command::index::Index as IndexCmd;
     use command::package::Package as PackageCmd;
     use command::shell::Shell as ShellCmd;
-    use command::shell_profile::ShellProfile as ShellProfileCmd;
     match command {
+        Command::Add(_) => "add",
         Command::Ci(sub) => match sub {
             CiCmd::Export(_) => "ci export",
         },
@@ -136,14 +136,19 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         Command::Deps(_) => "deps",
         Command::Deselect(_) => "deselect",
         Command::Find(_) => "find",
+        Command::Generate(_) => "generate",
         Command::Index(sub) => match sub {
             IndexCmd::Catalog(_) => "index catalog",
             IndexCmd::List(_) => "index list",
             IndexCmd::Update(_) => "index update",
         },
         Command::Info(_) => "info",
+        Command::Init(_) => "init",
         Command::Install(_) => "install",
+        Command::Launcher(_) => "launcher",
+        Command::Lock(_) => "lock",
         Command::Uninstall(_) => "uninstall",
+        Command::Update(_) => "update",
         Command::Verify(_) => "verify",
         Command::Exec(_) => "exec",
         Command::Env(_) => "env",
@@ -154,17 +159,18 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
             PackageCmd::Pull(_) => "package pull",
             PackageCmd::Push(_) => "package push",
             PackageCmd::Sign(_) => "package sign",
+            PackageCmd::Test(_) => "package test",
         },
+        Command::Pull(_) => "pull",
+        Command::Remove(_) => "remove",
+        Command::Run(_) => "run",
         Command::Select(_) => "select",
         Command::Shell(sub) => match sub {
             ShellCmd::Completion(_) => "shell completion",
             ShellCmd::Env(_) => "shell env",
-            ShellCmd::Profile(profile) => match profile {
-                ShellProfileCmd::Add(_) => "shell profile add",
-                ShellProfileCmd::List(_) => "shell profile list",
-                ShellProfileCmd::Load(_) => "shell profile load",
-                ShellProfileCmd::Remove(_) => "shell profile remove",
-            },
+            ShellCmd::Hook(_) => "shell hook",
+            ShellCmd::Direnv(_) => "shell direnv",
+            ShellCmd::Init(_) => "shell init",
         },
         Command::Version(_) => "version",
     }

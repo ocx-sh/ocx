@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::oci::Descriptor;
+use crate::oci::sign::error::SignErrorKind;
 
 /// OCI 1.1 image manifest carrying a `subject` descriptor.
 ///
@@ -54,7 +55,11 @@ impl ReferrerManifest {
     }
 
     /// Serialize the manifest to canonical JSON bytes for push.
-    pub fn to_canonical_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SignErrorKind::Internal`] when JSON serialization fails.
+    pub fn to_canonical_json(&self) -> Result<Vec<u8>, SignErrorKind> {
         unimplemented!("ReferrerManifest::to_canonical_json — Phase 5 implementation")
     }
 }

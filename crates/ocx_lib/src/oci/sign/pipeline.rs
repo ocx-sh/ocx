@@ -60,7 +60,15 @@ pub struct SignResult {
     pub subject_digest: crate::oci::Digest,
     /// Digest of the pushed Sigstore bundle blob.
     pub bundle_digest: crate::oci::Digest,
-    /// Descriptor of the pushed referrer manifest.
+    /// Typed digest of the pushed referrer manifest.
+    ///
+    /// This is the canonical typed field consumed by the CLI layer (e.g.,
+    /// `SignatureReport::new`). The full [`Descriptor`] is retained in
+    /// `referrer_descriptor` for cases that need size / media-type metadata.
+    pub referrer_digest: crate::oci::Digest,
+    /// Full OCI descriptor of the pushed referrer manifest (includes digest,
+    /// size, and media-type). Kept for callers that need the complete descriptor;
+    /// prefer `referrer_digest` when only the digest is required.
     pub referrer_descriptor: Descriptor,
     /// Cert SAN (identity) that signed the target.
     pub certificate_identity: String,

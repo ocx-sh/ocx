@@ -98,13 +98,25 @@ pub enum SignErrorKind {
     #[error("offline signing is not supported")]
     OfflineSignRefused,
 
+    /// `--identity-token-file` was readable by group or other (mode bits in
+    /// `mode & 0o077` were non-zero). Secrets must be owner-readable only.
+    ///
+    /// Exit 77 (`PermissionDenied`). Remediation: `chmod 600 <path>`.
+    #[error("identity token file {path} has permissive permissions (mode {mode:#o}); expected 0600 or tighter")]
+    IdentityTokenFilePermissive {
+        /// Path to the token file that failed the permission check.
+        path: std::path::PathBuf,
+        /// Raw Unix mode bits (lower 12 bits: setuid/setgid/sticky + rwxrwxrwx).
+        mode: u32,
+    },
+
     /// Catch-all for Fulcio/Rekor HTTP errors outside the codes above.
     ///
     /// Exit 1 (`Failure`). Carries the underlying error via `#[source]` so
     /// `classify_error` chain-walking and `{err:#}` diagnostics preserve the
     /// cause — never erase it with `.to_string()`.
-    #[error("signing pipeline internal error")]
-    SigningPipelineInternal(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("internal signing error")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl ClassifyErrorKind for SignErrorKind {
@@ -115,8 +127,10 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::RekorUnavailable => ExitCode::RekorUnavailable,
             Self::RekorSetMalformed => ExitCode::DataError,
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
-            Self::OidcPreCheckFailed { .. } | Self::OfflineSignRefused => ExitCode::PermissionDenied,
-            Self::SigningPipelineInternal(_) => ExitCode::Failure,
+            Self::OidcPreCheckFailed { .. } | Self::OfflineSignRefused | Self::IdentityTokenFilePermissive { .. } => {
+                ExitCode::PermissionDenied
+            }
+            Self::Internal(_) => ExitCode::Failure,
         }
     }
 }
@@ -181,10 +195,20 @@ mod tests {
     }
 
     #[test]
-    fn signing_pipeline_internal_maps_to_failure() {
+    fn identity_token_file_permissive_maps_to_permission_denied() {
+        // World-readable token file is a security policy violation.
+        let kind = SignErrorKind::IdentityTokenFilePermissive {
+            path: std::path::PathBuf::from("/tmp/tok"),
+            mode: 0o644,
+        };
+        assert_eq!(kind.exit_code(), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn internal_maps_to_failure() {
         // Unclassified errors fall through to Failure (generic).
         let inner: Box<dyn std::error::Error + Send + Sync> = "kaboom".into();
-        let kind = SignErrorKind::SigningPipelineInternal(inner);
+        let kind = SignErrorKind::Internal(inner);
         assert_eq!(kind.exit_code(), ExitCode::Failure);
     }
 
@@ -221,6 +245,10 @@ mod tests {
             SignErrorKind::RekorSetMalformed,
             SignErrorKind::ReferrersUnsupported,
             SignErrorKind::OfflineSignRefused,
+            SignErrorKind::IdentityTokenFilePermissive {
+                path: std::path::PathBuf::from("/tmp/tok"),
+                mode: 0o644,
+            },
         ] {
             let msg = format!("{kind}");
             assert!(!msg.ends_with('.'), "trailing period on: {msg}");
@@ -235,11 +263,11 @@ mod tests {
 
     #[test]
     fn sign_error_source_chain_preserves_inner_error() {
-        // `SigningPipelineInternal` carries the inner error via #[source].
+        // `Internal` carries the inner error via #[source].
         // Chain walking must surface it for diagnostics.
         use std::error::Error;
         let inner: Box<dyn std::error::Error + Send + Sync> = "inner boom".into();
-        let kind = SignErrorKind::SigningPipelineInternal(inner);
+        let kind = SignErrorKind::Internal(inner);
         let err = SignError::new(id(), kind);
         // SignError → SignErrorKind → inner error.
         let source_kind = err.source().expect("SignError has source");

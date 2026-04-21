@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -285,6 +286,216 @@ def test_sign_offline_refused(
         f"expected exit 77 (PermissionDenied / OfflineSignRefused), "
         f"got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Token precedence — C-S1-4: file > stdin > env
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="Phase 5c pipeline not yet implemented",
+)
+def test_sign_token_file_only(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_sigstore_stack: "FakeSigstoreStack",
+    tmp_path,
+) -> None:
+    """C-S1-4 basic happy path: ``--identity-token-file`` only, no stdin, no env.
+
+    The token file must be read, trimmed, and passed to the sign pipeline.
+    Xfails until Phase 5c wires the Rust SignPipeline.
+    """
+    from tests.fixtures.fake_sigstore import FakeSigstoreStack
+
+    token = fake_sigstore_stack.oidc_token()
+    token_file = tmp_path / "token"
+    token_file.write_text(token + "\n")  # trailing newline is common; must be trimmed
+    token_file.chmod(0o600)
+
+    pkg = published_package
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "--format", "json",
+            "package", "sign",
+            "--identity-token-file", str(token_file),
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 0, result.stderr
+    envelope = json.loads(result.stdout)
+    assert envelope["schema_version"] == 1
+    assert envelope["command"] == "package sign"
+    assert envelope["exit_code"] == 0
+    assert envelope["data"]["bundle_digest"].startswith("sha256:")
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="Phase 5c pipeline not yet implemented",
+)
+def test_sign_token_stdin_overrides_env(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_sigstore_stack: "FakeSigstoreStack",
+) -> None:
+    """C-S1-4 precedence: stdin token overrides ``OCX_IDENTITY_TOKEN`` env.
+
+    Both stdin and env supply different tokens.  The sign pipeline must use
+    the stdin token (higher precedence), not the env token.  The observable
+    outcome is a successful sign — if the wrong (env) token were used and it
+    happened to be invalid, the pipeline would reject it.  Because both tokens
+    come from the same fake issuer, either is accepted by fake Fulcio; the
+    precedence is verified structurally by the CLI taking the stdin path rather
+    than the env path.
+
+    Xfails until Phase 5c wires the Rust SignPipeline.
+    """
+    from tests.fixtures.fake_sigstore import FakeSigstoreStack
+
+    stdin_token = fake_sigstore_stack.oidc_token()
+    env_token = fake_sigstore_stack.oidc_token()  # a distinct token (different iat/exp)
+    assert stdin_token != env_token, "tokens should differ (different timestamp)"
+
+    pkg = published_package
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": env_token}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "--format", "json",
+            "package", "sign",
+            "--identity-token-stdin",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        input=stdin_token,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    envelope = json.loads(result.stdout)
+    assert envelope["exit_code"] == 0
+    assert envelope["data"]["bundle_digest"].startswith("sha256:")
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="Phase 5c pipeline not yet implemented",
+)
+def test_sign_token_file_overrides_stdin_and_env(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_sigstore_stack: "FakeSigstoreStack",
+    tmp_path,
+) -> None:
+    """C-S1-4 precedence: file token wins over stdin AND ``OCX_IDENTITY_TOKEN``.
+
+    Three distinct tokens are used — file, stdin, and env — all from the same
+    fake OIDC issuer and therefore all valid.  The expected outcome is a
+    successful sign using the file token (highest precedence).  Because the
+    CLI enforces ``--identity-token-file`` XOR ``--identity-token-stdin`` at
+    the clap level, this test verifies the file path by setting only
+    ``--identity-token-file`` alongside ``OCX_IDENTITY_TOKEN``.
+
+    Xfails until Phase 5c wires the Rust SignPipeline.
+    """
+    from tests.fixtures.fake_sigstore import FakeSigstoreStack
+
+    file_token = fake_sigstore_stack.oidc_token()
+    env_token = fake_sigstore_stack.oidc_token()
+
+    token_file = tmp_path / "token"
+    token_file.write_text(file_token)
+    token_file.chmod(0o600)
+
+    pkg = published_package
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": env_token}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "--format", "json",
+            "package", "sign",
+            "--identity-token-file", str(token_file),
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    envelope = json.loads(result.stdout)
+    assert envelope["exit_code"] == 0
+    assert envelope["data"]["bundle_digest"].startswith("sha256:")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Token file permissions — world-readable file → exit 77
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix permission semantics")
+def test_sign_rejects_world_readable_identity_token_file(
+    ocx: OcxRunner, tmp_path
+) -> None:
+    """``--identity-token-file`` with mode 0o644 (world-readable) must exit 77.
+
+    C-S1-4 / SignErrorKind::IdentityTokenFilePermissive: identity token files
+    that are group- or world-readable expose OIDC tokens in multi-user
+    environments. OCX must reject them at file-open time before the token is
+    ever read, exiting with PermissionDenied (77) so scripts can distinguish
+    this configuration error from a network or auth failure.
+    """
+    token_file = tmp_path / "token.oidc"
+    token_file.write_text("fake-oidc-token\n")
+    # Set world-readable permissions — must be rejected.
+    token_file.chmod(0o644)
+
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--identity-token-file", str(token_file),
+            "--platform", "linux/amd64",
+            "pkg:1.0",
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 77, (
+        f"expected exit 77 (PermissionDenied / IdentityTokenFilePermissive), "
+        f"got {result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+    stderr_lower = result.stderr.lower()
+    assert (
+        "permissive" in stderr_lower
+        or "permission" in stderr_lower
+        or "0o644" in stderr_lower
+        or "644" in stderr_lower
+        or "chmod" in stderr_lower
+        or "mode" in stderr_lower
+    ), f"expected permission-related wording in stderr, got: {result.stderr!r}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

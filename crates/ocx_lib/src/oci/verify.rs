@@ -12,10 +12,14 @@
 //! [`adr_oci_referrers_signing_v1.md`](../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
 //! for the full verify state machine.
 
+// Public modules: consumed by CLI layer or re-exported as stable API surface.
 pub mod error;
-pub mod identity;
 pub mod pipeline;
 pub mod trust_root;
+
+// Private module: stub-only, no current callers outside this module.
+// Phase 5c will promote this to `pub` when the verification pipeline is wired.
+mod identity;
 
 pub use error::{VerifyError, VerifyErrorKind};
 pub use identity::{IdentityMatcher, IssuerMatcher};

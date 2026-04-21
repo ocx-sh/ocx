@@ -548,9 +548,21 @@ def _make_rekor_handler(rekor_key: _RekorKeyMaterial) -> type:
             entry_uuid = uuid.uuid4().hex
             integrated_time = int(time.time())
 
-            # Build the canonical payload that gets signed (simplified Rekor SET).
-            # Real Rekor signs a JSON-encoded "LogEntry" including the body, log index, etc.
-            # We sign a stable deterministic payload so the verify path can reproduce it.
+            # TODO(phase-5c-verify): this SET payload is simplified for slice-1 scaffolding.
+            # Rekor v1 signs a canonicalized JSON payload describing the log entry (not a
+            # protobuf — sigstore_rekor.proto describes the entry schema, not the signing
+            # payload). Phase 5c must either (a) align this payload with the real Rekor v1
+            # signing format, or (b) route the Rust verify pipeline through a fake-aware
+            # SET verifier shim.
+            #
+            # SOTA NOTE (2026-04-21): Rekor v2 went GA on 2025-10-10, dropping SET entirely
+            # in favour of RFC 3161 Timestamp Authority responses. The VerifyErrorKind
+            # `RekorSetAbsentTsaPresent` safety valve already accommodates that transition.
+            # Phase 5c must handle both v1 (SET) and v2 (TSA) verification paths.
+            # Refs: https://blog.sigstore.dev/rekor-v2-ga/
+            #       https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_rekor.proto
+            #
+            # Build a stable deterministic payload so the verify path can reproduce it.
             canonical = json.dumps(
                 {
                     "body": base64.b64encode(body_raw).decode(),

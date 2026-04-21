@@ -8,36 +8,34 @@
 //! typed errors on HTTP failures — 401/403 map to
 //! [`SignErrorKind::OidcTokenRejected`] / [`SignErrorKind::FulcioBadRequest`].
 //!
-//! Phase 1 stub — bodies use `unimplemented!()`.
+//! Phase 1 stub — bodies use `unimplemented!()`. Dead-code lint suppressed
+//! because this module is private; Phase 5c wires the call sites.
+#![allow(dead_code)]
 
 use super::error::SignErrorKind;
 use super::oidc::OidcToken;
 
 /// Fulcio-issued signing certificate with chain.
-pub struct FulcioCertificate {
-    /// Leaf certificate (PEM-encoded).
-    pub leaf: Vec<u8>,
-    /// Intermediate + root chain (PEM-encoded).
-    pub chain: Vec<Vec<u8>>,
+///
+/// Used by [`super::bundle::BundleBuilder`] in Phase 5c.
+pub(super) struct FulcioCertificate {
+    pub(super) leaf: Vec<u8>,
+    pub(super) chain: Vec<Vec<u8>>,
 }
 
-/// Fulcio client.
-pub struct FulcioClient {
-    #[allow(dead_code)]
+/// Fulcio client — Phase 5c implements the CSR round-trip.
+struct FulcioClient {
+    /// C-S1-3 injection seam: `https://fulcio.sigstore.dev/api/v2/signingCert`
+    /// in production; `http://127.0.0.1:<port>` in tests.
     url: String,
 }
 
 impl FulcioClient {
-    /// Construct a Fulcio client targeting the given URL.
-    ///
-    /// Production: `https://fulcio.sigstore.dev/api/v2/signingCert`.
-    /// Tests: `http://127.0.0.1:<fake_fulcio port>` (C-S1-3 seam).
-    pub fn new(url: String) -> Self {
+    fn new(url: String) -> Self {
         Self { url }
     }
 
-    /// POST a CSR to Fulcio's `/api/v2/signingCert` and return the signed cert.
-    pub async fn request_certificate(
+    async fn request_certificate(
         &self,
         _token: &OidcToken,
         _public_key_der: &[u8],
