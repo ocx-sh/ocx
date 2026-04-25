@@ -4,7 +4,9 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ProjectConfig, ProjectLock, ResolveLockOptions, resolve_lock, resolve_lock_partial};
+use ocx_lib::project::{
+    DEFAULT_GROUP, ProjectConfig, ProjectLock, ResolveLockOptions, resolve_lock, resolve_lock_partial,
+};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 
@@ -34,11 +36,6 @@ pub struct Update {
     #[arg(value_name = "BINDING")]
     pub packages: Vec<String>,
 }
-
-/// CLI-layer sentinel for the reserved default group name. Mirrors the
-/// constant in `command/lock.rs` and `command/exec.rs` — duplicating one
-/// literal is cheaper than punching a hole in `project::internal`.
-const DEFAULT_GROUP: &str = "default";
 
 impl Update {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {

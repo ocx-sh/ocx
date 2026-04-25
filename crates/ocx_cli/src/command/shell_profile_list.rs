@@ -17,6 +17,7 @@ pub struct ShellProfileList {}
 
 impl ShellProfileList {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        super::shell_profile::emit_deprecation_note();
         let manifest = context.manager().profile().load()?;
 
         let resolutions = context.manager().resolve_profile_all(&manifest.packages).await;

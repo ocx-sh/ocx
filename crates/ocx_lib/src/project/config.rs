@@ -30,7 +30,7 @@ use crate::oci::identifier::error::IdentifierErrorKind;
 /// The effective platform set is sourced ambient from the project tier
 /// (currently the canonical five-platform set) until ADR-driven
 /// per-tool platform overrides land.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     /// Tools in the reserved `default` group (the top-level `[tools]`

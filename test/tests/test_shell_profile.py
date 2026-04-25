@@ -1069,3 +1069,181 @@ def test_clean_protects_profiled_content_objects(
     result = ocx.json("shell", "profile", "list")
     assert len(result) == 1
     assert result[0]["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# Deprecation notices (Phase 9)
+#
+# Plan plan_project_toolchain.md Phase 9 (lines 845–847): each shell-profile
+# subcommand emits a one-line deprecation note to stderr suggesting the new
+# project-toolchain (`ocx shell init`) or file-based (`ocx shell profile
+# generate`) workflow. Exit codes are unchanged from current behavior.
+#
+# These tests assert on load-bearing fragments ("Note:", "shell init",
+# "shell profile generate"); the exact wording may change in Phase 5 and
+# is not pinned here.
+# ---------------------------------------------------------------------------
+
+
+def _assert_deprecation_note(stderr: str) -> None:
+    """Common assertion: every deprecation note carries these markers."""
+    assert "Note:" in stderr, (
+        f"deprecation note must start with 'Note:'; got: {stderr!r}"
+    )
+    assert "shell init" in stderr, (
+        f"deprecation note must mention 'shell init'; got: {stderr!r}"
+    )
+    assert "shell profile generate" in stderr, (
+        f"deprecation note must mention 'shell profile generate'; "
+        f"got: {stderr!r}"
+    )
+
+
+def _assert_no_deprecation_note(stream: str) -> None:
+    """Negative assertion: stream must NOT carry deprecation markers.
+
+    Critical for ``shell profile load``: the command is consumed by
+    ``eval "$(ocx shell profile load)"`` — leaking the note onto stdout
+    would inject ``Note: ...`` into the shell evaluator and break
+    every shell init.  None of the four legacy commands (load, add,
+    remove, list) reference ``shell init`` or ``shell profile
+    generate`` on stdout in legitimate output, so finding either
+    marker on stdout means the deprecation note has leaked.
+    """
+    assert "Note:" not in stream, (
+        f"deprecation note must NOT appear on this stream "
+        f"(would break `eval $(ocx shell profile load)`); "
+        f"got: {stream!r}"
+    )
+    assert "shell init" not in stream, (
+        f"'shell init' marker must NOT appear on this stream; "
+        f"got: {stream!r}"
+    )
+    assert "shell profile generate" not in stream, (
+        f"'shell profile generate' marker must NOT appear on this "
+        f"stream; got: {stream!r}"
+    )
+
+
+def test_shell_profile_load_does_not_emit_deprecation_note(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """`ocx shell profile load` must NOT emit the deprecation note.
+
+    Why: `load` is consumed by ``eval "$(ocx --offline shell profile
+    load)"`` in shell init — emitting a note on stderr would spam
+    every new terminal. The note still emits from the interactive
+    legacy subcommands (`add`, `remove`, `list`); see those tests.
+
+    stdout must still contain the export lines (exports are the
+    command's contract); only the deprecation note is suppressed."""
+    pkg = published_package
+    ocx.json("install", pkg.short)
+    ocx.json("shell", "profile", "add", pkg.short)
+
+    result = ocx.run(
+        "shell", "profile", "load", "--shell", "bash", format=None
+    )
+    assert result.returncode == 0, (
+        f"load must succeed; rc={result.returncode} "
+        f"stderr={result.stderr!r}"
+    )
+    # The note must NOT be on stderr — `eval`-consumed paths must
+    # not spam every shell startup with deprecation noise.
+    _assert_no_deprecation_note(result.stderr)
+    # The note must still NOT be on stdout (would inject `Note: ...`
+    # into the shell evaluator).
+    _assert_no_deprecation_note(result.stdout)
+    # stdout must still carry the export lines — that's the command's
+    # contract (consumers run `eval` over it).
+    assert "export" in result.stdout, (
+        f"load stdout must still emit exports; got: {result.stdout!r}"
+    )
+
+
+def test_shell_profile_add_emits_deprecation_note(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """`ocx shell profile add <pkg>` emits a deprecation note on stderr;
+    exit code stays at 0 (success); stdout remains clean."""
+    pkg = published_package
+    ocx.json("install", pkg.short)
+
+    result = ocx.run(
+        "shell", "profile", "add", pkg.short, format=None
+    )
+    assert result.returncode == 0, (
+        f"add must succeed even with deprecation note; rc={result.returncode} "
+        f"stderr={result.stderr!r}"
+    )
+    _assert_deprecation_note(result.stderr)
+    _assert_no_deprecation_note(result.stdout)
+
+
+def test_shell_profile_remove_emits_deprecation_note(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """`ocx shell profile remove <pkg>` emits a deprecation note on
+    stderr; exit code stays at 0 (success); stdout remains clean."""
+    pkg = published_package
+    ocx.json("install", pkg.short)
+    ocx.json("shell", "profile", "add", pkg.short)
+
+    result = ocx.run(
+        "shell", "profile", "remove", pkg.short, format=None
+    )
+    assert result.returncode == 0, (
+        f"remove must succeed even with deprecation note; "
+        f"rc={result.returncode} stderr={result.stderr!r}"
+    )
+    _assert_deprecation_note(result.stderr)
+    _assert_no_deprecation_note(result.stdout)
+
+
+def test_shell_profile_list_emits_deprecation_note(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """`ocx shell profile list` emits a deprecation note on stderr;
+    exit code stays at 0 (success); stdout remains clean."""
+    pkg = published_package
+    ocx.json("install", pkg.short)
+    ocx.json("shell", "profile", "add", pkg.short)
+
+    result = ocx.run(
+        "shell", "profile", "list", format=None
+    )
+    assert result.returncode == 0, (
+        f"list must succeed even with deprecation note; "
+        f"rc={result.returncode} stderr={result.stderr!r}"
+    )
+    _assert_deprecation_note(result.stderr)
+    _assert_no_deprecation_note(result.stdout)
+
+
+def test_shell_profile_add_emits_deprecation_note_on_failure(
+    ocx: OcxRunner,
+):
+    """Even on failure-path invocations the deprecation note still
+    emits on stderr, stdout stays clean, and the original non-zero
+    exit code is preserved.
+
+    Mirrors `test_profile_add_nonexistent_fails` (line 142): adding a
+    package the registry does not host fails (rc != 0). The
+    deprecation note is informational and must surface independently
+    of command outcome — and must not leak onto stdout."""
+    result = ocx.run(
+        "shell",
+        "profile",
+        "add",
+        "nonexistent/pkg:1.0.0",
+        check=False,
+        format=None,
+    )
+    # Original failure exit code preserved.
+    assert result.returncode != 0, (
+        f"adding nonexistent pkg must fail; rc={result.returncode} "
+        f"stderr={result.stderr!r}"
+    )
+    # Note still emitted on the failure path.
+    _assert_deprecation_note(result.stderr)
+    _assert_no_deprecation_note(result.stdout)

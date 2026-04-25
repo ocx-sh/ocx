@@ -2,18 +2,23 @@
 
 version: '3'
 
+x-shared:
+  schema-sources: &schema-sources
+    - '{{.ROOT_DIR}}/crates/ocx_schema/src/**/*.rs'
+    - '{{.ROOT_DIR}}/crates/ocx_lib/src/**/*.rs'
+    - '{{.ROOT_DIR}}/Cargo.lock'
+
 vars:
   METADATA_SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/metadata"
   PROFILE_SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/profile"
   CONFIG_SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/config"
+  PROJECT_SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/project"
+  PROJECT_LOCK_SCHEMA_DIR: "{{.ROOT_DIR}}/website/src/public/schemas/project-lock"
 
 tasks:
   generate:
     desc: Generate JSON Schema for metadata.json
-    sources:
-      - '{{.ROOT_DIR}}/crates/ocx_schema/src/**/*.rs'
-      - '{{.ROOT_DIR}}/crates/ocx_lib/src/**/*.rs'
-      - '{{.ROOT_DIR}}/Cargo.lock'
+    sources: *schema-sources
     status:
       - test -f {{.METADATA_SCHEMA_DIR}}/v1.json
     cmds:
@@ -22,10 +27,7 @@ tasks:
 
   generate-profile:
     desc: Generate JSON Schema for profile.json
-    sources:
-      - '{{.ROOT_DIR}}/crates/ocx_schema/src/**/*.rs'
-      - '{{.ROOT_DIR}}/crates/ocx_lib/src/**/*.rs'
-      - '{{.ROOT_DIR}}/Cargo.lock'
+    sources: *schema-sources
     status:
       - test -f {{.PROFILE_SCHEMA_DIR}}/v1.json
     cmds:
@@ -34,15 +36,30 @@ tasks:
 
   generate-config:
     desc: Generate JSON Schema for config.toml
-    sources:
-      - '{{.ROOT_DIR}}/crates/ocx_schema/src/**/*.rs'
-      - '{{.ROOT_DIR}}/crates/ocx_lib/src/**/*.rs'
-      - '{{.ROOT_DIR}}/Cargo.lock'
+    sources: *schema-sources
     status:
       - test -f {{.CONFIG_SCHEMA_DIR}}/v1.json
     cmds:
       - mkdir -p {{.CONFIG_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- config > {{.CONFIG_SCHEMA_DIR}}/v1.json
+
+  generate-project:
+    desc: Generate JSON Schema for ocx.toml
+    sources: *schema-sources
+    status:
+      - test -f {{.PROJECT_SCHEMA_DIR}}/v1.json
+    cmds:
+      - mkdir -p {{.PROJECT_SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release -- project > {{.PROJECT_SCHEMA_DIR}}/v1.json
+
+  generate-project-lock:
+    desc: Generate JSON Schema for ocx.lock
+    sources: *schema-sources
+    status:
+      - test -f {{.PROJECT_LOCK_SCHEMA_DIR}}/v1.json
+    cmds:
+      - mkdir -p {{.PROJECT_LOCK_SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v1.json
 
   default:
     desc: Generate all schemas
@@ -50,3 +67,5 @@ tasks:
       - task: generate
       - task: generate-profile
       - task: generate-config
+      - task: generate-project
+      - task: generate-project-lock

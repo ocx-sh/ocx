@@ -46,6 +46,7 @@ pub struct ShellProfileAdd {
 
 impl ShellProfileAdd {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        super::shell_profile::emit_deprecation_note();
         let mode = if self.current {
             profile::ProfileMode::Current
         } else if self.content {

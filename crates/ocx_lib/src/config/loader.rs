@@ -197,11 +197,21 @@ impl ConfigLoader {
         }
 
         // Tier 3: CWD walk.
-        let Some(start) = cwd else {
-            return Ok(None);
+        let walk_result = match cwd {
+            Some(start) => {
+                let ceiling = crate::env::var("OCX_CEILING_PATH").map(PathBuf::from);
+                Self::walk_for_project_file(start, ceiling.as_deref()).await
+            }
+            None => None,
         };
-        let ceiling = crate::env::var("OCX_CEILING_PATH").map(PathBuf::from);
-        Ok(Self::walk_for_project_file(start, ceiling.as_deref()).await)
+        if walk_result.is_some() {
+            return Ok(walk_result);
+        }
+        // Tier 4: `$OCX_HOME/ocx.toml` fallback. Amendment C: mutual
+        // exclusion — never reached when the CWD walk hit, so the home
+        // tier wholesale-replaces project tier rather than composing.
+        // See plan_project_toolchain.md Phase 9.
+        Ok(Self::home_project_path().await)
     }
 
     /// Resolve an explicit project-tier path (from `--project` or
@@ -427,12 +437,86 @@ impl ConfigLoader {
         dirs::config_dir().map(|d| d.join("ocx").join("config.toml"))
     }
 
+    /// `$OCX_HOME` directory, falling back to `~/.ocx`.
+    ///
+    /// Single resolver shared by [`Self::home_path`] (returns
+    /// `<dir>/config.toml`), [`Self::home_project_path`] (returns
+    /// `<dir>/ocx.toml`), and [`Self::home_init_path`] (returns the
+    /// per-shell init file). Returns `None` when `OCX_HOME` is unset and
+    /// `dirs::home_dir()` cannot resolve a home directory (e.g., a service
+    /// account with no `$HOME`).
+    ///
+    /// Kept private: callers compose well-known children through one of
+    /// the named `home_*_path()` accessors above so `$OCX_HOME` path math
+    /// stays in this module. External code that needs a `$OCX_HOME`-rooted
+    /// path should add (or extend) such an accessor rather than reach for
+    /// the bare directory.
+    fn home_dir() -> Option<PathBuf> {
+        if let Some(ocx_home) = crate::env::var("OCX_HOME") {
+            return Some(PathBuf::from(ocx_home));
+        }
+        dirs::home_dir().map(|h| h.join(".ocx"))
+    }
+
     /// `$OCX_HOME/config.toml`, falling back to `~/.ocx/config.toml`.
     pub fn home_path() -> Option<PathBuf> {
-        if let Some(ocx_home) = crate::env::var("OCX_HOME") {
-            return Some(PathBuf::from(ocx_home).join("config.toml"));
+        Self::home_dir().map(|d| d.join("config.toml"))
+    }
+
+    /// `$OCX_HOME/init.<shell>` — the default output target for
+    /// `ocx shell profile generate`.
+    ///
+    /// Single sanctioned API for "where does the home-default init file
+    /// land for shell `S`". Composes [`Self::home_dir`] (kept private) with
+    /// [`crate::shell::Shell::default_init_filename`] so the per-shell
+    /// basename table lives on `Shell` itself.
+    ///
+    /// Returns `None` when `$OCX_HOME` cannot be resolved and there is no
+    /// home directory to fall back to (rare; surfaces as a CLI error in
+    /// [`crates/ocx_cli/src/command/shell_profile_generate.rs`]).
+    pub fn home_init_path(shell: crate::shell::Shell) -> Option<PathBuf> {
+        Self::home_dir().map(|d| d.join(shell.default_init_filename()))
+    }
+
+    /// `$OCX_HOME/ocx.toml` fallback for project-tier discovery (Amendment C).
+    ///
+    /// Returns `Some(path)` only when the file exists as a regular file.
+    /// Symlinks are followed (G5: explicit-trust location, matching how the
+    /// ambient loader treats `$OCX_HOME/config.toml`). Used only when the
+    /// CWD walk returned `None` — never composes with a project-tier hit
+    /// (Amendment C: wholesale replacement).
+    async fn home_project_path() -> Option<PathBuf> {
+        let home = Self::home_dir()?;
+        let candidate = home.join("ocx.toml");
+        // G5-style trust: $OCX_HOME is caller-chosen, so follow symlinks
+        // here (matches how home_path() treats $OCX_HOME/config.toml).
+        // Distinct from walk_for_project_file which rejects symlinks
+        // (untrusted ancestor dirs). Amendment C: this fallback is
+        // wholesale-replacement only — never composes with a project-tier hit.
+        match tokio::fs::metadata(&candidate).await {
+            Ok(meta) if meta.file_type().is_file() => Some(candidate),
+            Ok(_) => {
+                // Path exists but isn't a regular file (directory, device,
+                // FIFO). Skip rather than treat the home-tier as available.
+                log::warn!(
+                    "skipping home-tier project candidate {} (not a regular file)",
+                    candidate.display()
+                );
+                None
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => {
+                // Permission denied, EIO, stale NFS handle, etc. We cannot
+                // load the file, but discovery shouldn't abort the whole
+                // process. Mirror discover_paths behavior: warn so it's at
+                // least diagnosable, then skip.
+                log::warn!(
+                    "skipping unreadable home-tier project candidate {}: {source}",
+                    candidate.display()
+                );
+                None
+            }
         }
-        dirs::home_dir().map(|h| h.join(".ocx").join("config.toml"))
     }
 }
 
@@ -1528,5 +1612,250 @@ mod tests {
             Some(project),
             "walk must traverse multiple parent levels to find ocx.toml"
         );
+    }
+
+    // ── Phase 9: home-tier $OCX_HOME/ocx.toml fallback ──────────────────────
+    //
+    // Plan plan_project_toolchain.md Phase 9 (lines 830–855). Activates only
+    // when the explicit flag, OCX_PROJECT_FILE, and the CWD walk all return
+    // None and OCX_NO_PROJECT is unset. Amendment C: the home tier is a
+    // wholesale replacement — never composed when a project-tier hit exists.
+    //
+    // Bodies depend on the `home_project_path` helper that today calls
+    // `unimplemented!()`; every test below should panic at the stub until
+    // Phase 5 fills the body in.
+
+    /// Plan bullet (Phase 9): empty CWD + `$OCX_HOME/ocx.toml` exists →
+    /// returns the home file. Use a sibling tmp dir as cwd so the walk
+    /// cannot accidentally rediscover the home file from above.
+    #[tokio::test]
+    async fn project_path_home_tier_fallback_when_walk_returns_none() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let home_toml = home.join("ocx.toml");
+        write_file(&home_toml, "");
+        // Sibling dir for cwd so the upward walk never sees `home`.
+        let cwd = dir.path().join("sibling");
+        std::fs::create_dir(&cwd).unwrap();
+        env.set("OCX_HOME", home.to_str().unwrap());
+        // Bound the walk so it terminates inside the tempdir without hitting
+        // the real filesystem.
+        env.set("OCX_CEILING_PATH", cwd.to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("home-tier fallback should resolve to Some");
+        assert_eq!(
+            resolved,
+            Some(home_toml),
+            "empty walk + $OCX_HOME/ocx.toml present must resolve to the home file"
+        );
+    }
+
+    /// Plan bullet (Phase 9, Amendment C): project ocx.toml at cwd AND home
+    /// ocx.toml both exist → walk wins; home tier is wholesale replacement,
+    /// never composed.
+    #[tokio::test]
+    async fn project_path_home_tier_skipped_when_walk_finds_project() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let home_toml = home.join("ocx.toml");
+        write_file(&home_toml, "");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let project_toml = cwd.join("ocx.toml");
+        write_file(&project_toml, "");
+        env.set("OCX_HOME", home.to_str().unwrap());
+        env.set("OCX_CEILING_PATH", cwd.to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("walk + home both present should resolve");
+        assert_eq!(
+            resolved,
+            Some(project_toml),
+            "Amendment C: project file at cwd must beat $OCX_HOME/ocx.toml"
+        );
+    }
+
+    /// Plan bullet (Phase 9): `OCX_NO_PROJECT=1` prunes the home tier too —
+    /// the kill switch is total, not just walk + env-var.
+    #[tokio::test]
+    async fn project_path_home_tier_skipped_when_no_project_set() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.set("OCX_NO_PROJECT", "1");
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let home_toml = home.join("ocx.toml");
+        write_file(&home_toml, "");
+        let cwd = dir.path().join("sibling");
+        std::fs::create_dir(&cwd).unwrap();
+        env.set("OCX_HOME", home.to_str().unwrap());
+        env.set("OCX_CEILING_PATH", cwd.to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("OCX_NO_PROJECT=1 with home file must succeed with None");
+        assert_eq!(
+            resolved, None,
+            "OCX_NO_PROJECT=1 must prune the home tier as well as walk + env"
+        );
+    }
+
+    /// Plan bullet (Phase 9): explicit `--project <path>` always beats the
+    /// home tier — explicit wins regardless of the home file.
+    #[tokio::test]
+    async fn project_path_home_tier_skipped_when_explicit_flag_used() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let home_toml = home.join("ocx.toml");
+        write_file(&home_toml, "");
+        let explicit = dir.path().join("explicit.toml");
+        write_file(&explicit, "");
+        env.set("OCX_HOME", home.to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(None, Some(&explicit))
+            .await
+            .expect("explicit + home should resolve to explicit");
+        assert_eq!(
+            resolved,
+            Some(explicit),
+            "--project must always beat the home-tier fallback"
+        );
+    }
+
+    /// Plan bullet (Phase 9): `OCX_HOME` directory present but no `ocx.toml`
+    /// inside → returns `Ok(None)`, not an error.
+    #[tokio::test]
+    async fn project_path_home_tier_returns_none_when_home_file_absent() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        // Note: no ocx.toml inside home/.
+        let cwd = dir.path().join("sibling");
+        std::fs::create_dir(&cwd).unwrap();
+        env.set("OCX_HOME", home.to_str().unwrap());
+        env.set("OCX_CEILING_PATH", cwd.to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("absent home ocx.toml should resolve to None, not error");
+        assert_eq!(resolved, None, "$OCX_HOME without an ocx.toml must produce Ok(None)");
+    }
+
+    /// Plan bullet (Phase 9): home-tier symlinks are followed (matches the
+    /// `home_path()` policy for `$OCX_HOME/config.toml` — explicit-trust
+    /// location). The CWD-walk symlink-rejection rule does NOT apply here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_home_tier_follows_symlink() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let target = dir.path().join("real.toml");
+        write_file(&target, "");
+        let link = home.join("ocx.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let cwd = dir.path().join("sibling");
+        std::fs::create_dir(&cwd).unwrap();
+        env.set("OCX_HOME", home.to_str().unwrap());
+        env.set("OCX_CEILING_PATH", cwd.to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("home-tier symlink must resolve, not error");
+        let returned = resolved.expect("home symlink must produce Some");
+        assert!(
+            returned == link || returned == target,
+            "home-tier symlink should resolve to link or target, got: {}",
+            returned.display()
+        );
+    }
+
+    /// Codex follow-up: a permission-denied home-tier file must skip cleanly
+    /// (warn-and-skip), mirroring `discover_paths_skips_unreadable_candidate`.
+    /// Previously all `tokio::fs::metadata` failures collapsed to `None`,
+    /// making EIO / EACCES on `$OCX_HOME/ocx.toml` non-diagnosable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_home_tier_skips_unreadable_with_warning() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let locked_home = dir.path().join("locked-home");
+        std::fs::create_dir(&locked_home).unwrap();
+        let candidate = locked_home.join("ocx.toml");
+        std::fs::write(&candidate, "").unwrap();
+        // Strip search permission on parent dir → metadata() returns
+        // PermissionDenied. The home-tier fallback must skip cleanly.
+        std::fs::set_permissions(&locked_home, std::fs::Permissions::from_mode(0o000)).unwrap();
+        env.set("OCX_HOME", locked_home.to_str().unwrap());
+        let cwd_dir = TempDir::new().unwrap();
+        let result = ConfigLoader::project_path(Some(cwd_dir.path()), None).await;
+        // Restore permissions so TempDir cleanup works.
+        std::fs::set_permissions(&locked_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resolved = result.expect("home-tier failure should not abort discovery");
+        assert!(
+            resolved.is_none(),
+            "unreadable home-tier candidate must be skipped, got: {resolved:?}"
+        );
+    }
+
+    /// Plan bullet (Phase 9): `OCX_HOME` unset → fall back to
+    /// `dirs::home_dir()/.ocx/ocx.toml` (mirrors the `home_path()` policy).
+    /// The behavior is platform-dependent; without a real file at
+    /// `~/.ocx/ocx.toml` we assert the resolver returns `None` cleanly
+    /// rather than panicking or erroring.
+    #[tokio::test]
+    async fn project_path_home_tier_when_ocx_home_unset_uses_home_dir_fallback() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT_FILE");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_HOME");
+        // Bound the walk inside a sandbox so we never accidentally hit a
+        // real `ocx.toml` somewhere on disk while exercising this branch.
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("sibling");
+        std::fs::create_dir(&cwd).unwrap();
+        env.set("OCX_CEILING_PATH", cwd.to_str().unwrap());
+
+        // The result depends on whether `~/.ocx/ocx.toml` happens to exist
+        // on the host. Both `Ok(None)` and `Ok(Some(_))` are acceptable —
+        // what we want to lock in is that the resolver tolerates an unset
+        // `OCX_HOME` without panicking or returning an error.
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("unset OCX_HOME must not produce an error");
+        if let Some(path) = resolved {
+            assert!(
+                path.ends_with(".ocx/ocx.toml"),
+                "fallback path should end with .ocx/ocx.toml, got: {}",
+                path.display()
+            );
+        }
     }
 }

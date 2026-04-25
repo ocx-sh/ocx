@@ -330,10 +330,12 @@ A three-tier activation stack:
 **Security boundary (explicit):**
 
 - The hook **WILL** read `ocx.toml` and `ocx.lock` within the current `OCX_CEILING_PATH` walk.
-- The hook **WILL** read the object store to produce export lines for tools already pulled.
+- The hook **WILL** read the object store to produce export lines for tools already pulled (uses `find_plain` — bare object-store probe — not `find`).
 - The hook **WILL NOT** contact any registry.
-- The hook **WILL NOT** install, pull, or mutate any filesystem state.
-- The hook **WILL NOT** modify symlinks under `symlinks/`.
+- The hook **WILL NOT** install, pull, or download any new content.
+- The hook **WILL NOT** mutate any reference back-links — `refs/blobs/`, `refs/deps/`, `refs/layers/`, `refs/symlinks/` are read-only on the hook path. The full `find` / `link_blobs` write-through path is reserved for state-changing commands (`pull`, `find`, `find_symlink`).
+- The hook **WILL NOT** mutate any user-visible filesystem state — no symlinks under `symlinks/`, no new packages, no new layers, no new blobs.
+- The hook **WILL** validate every env-var key against the POSIX `[A-Za-z_][A-Za-z0-9_]*` grammar and skip (with a stderr note) any entry whose key fails validation — preventing key-slot injection from malformed package metadata.
 - The hook **WILL** print a one-line stderr note when the lock is stale or tools are missing; the note is the only way a user learns they need to run a state-changing command.
 
 | Pros | Cons |

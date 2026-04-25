@@ -64,9 +64,16 @@ impl ShellEnv {
         println!("{}", shell.comment("ocx env"));
         let entries = manager.resolve_env(&package_infos).await?;
         for entry in &entries {
-            match entry.kind {
-                ModifierKind::Path => println!("{}", shell.export_path(&entry.key, &entry.value)),
-                ModifierKind::Constant => println!("{}", shell.export_constant(&entry.key, &entry.value)),
+            // `export_path` / `export_constant` return `None` when the
+            // env-var key fails POSIX validation — surface a stderr note
+            // and skip rather than abort the whole shell-env render.
+            let line = match entry.kind {
+                ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
+                ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
+            };
+            match line {
+                Some(line) => println!("{line}"),
+                None => eprintln!("# ocx: skipping invalid env-var key {:?}", entry.key),
             }
         }
 

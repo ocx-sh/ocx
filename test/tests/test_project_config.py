@@ -329,3 +329,105 @@ def test_bare_tag_in_project_config_exits_78(
         f"diagnostic should name the offending key and value, got: "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Home-tier fallback (Phase 9)
+#
+# Plan plan_project_toolchain.md Phase 9 (lines 830–855).  When the CWD walk
+# finds nothing, the resolver falls back to ``$OCX_HOME/ocx.toml``.  When a
+# project ``ocx.toml`` exists in the walk, the home tier MUST NOT compose
+# (Amendment C — wholesale replacement).
+#
+# These tests are observable at the CLI boundary through ``ocx lock``: a
+# project-tier file makes ``ocx lock`` succeed (exit 0); absence of any
+# project-tier file makes ``ocx lock`` exit 64 ("no ocx.toml found").
+# Sub-process invocations cd into a sibling dir so the CWD walk cannot
+# rediscover the home file from above.
+#
+# ``ocx lock`` against a real registry needs published packages in the
+# fixture; that infrastructure is in test_lock.py.  Here we only need the
+# *path discovery* surface to fire — an empty ``[tools]`` table is enough
+# to drive ``project_path()``'s home-tier branch.  If the empty-tools case
+# turns out to require a tool entry (Phase 5 may tighten this), the test
+# is marked ``xfail`` so Phase 5 implementation can flip it.
+# ---------------------------------------------------------------------------
+
+
+def _run_lock_in(
+    ocx: OcxRunner,
+    cwd: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``ocx lock`` from ``cwd`` so the resolver's CWD walk fires.
+
+    Mirrors test_lock.py::_run_lock but takes optional ``extra_env`` so we
+    can override ``OCX_HOME`` for the home-tier tests.
+    """
+    env = {**ocx.env}
+    if extra_env:
+        env.update(extra_env)
+    cmd = [str(ocx.binary), "lock"]
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env)
+
+
+def test_home_tier_ocx_toml_loads_when_no_project(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``$OCX_HOME/ocx.toml`` is consumed when CWD has no project file.
+
+    ``ocx lock`` exits 0 when the home tier provides a valid (empty)
+    ``[tools]`` table; without the fallback it would exit 64 ("no
+    ocx.toml found").  This pins down the project-tier observability of
+    the home-tier branch.
+    """
+    cwd = tmp_path / "sibling"
+    cwd.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "ocx.toml").write_text("[tools]\n")
+
+    result = _run_lock_in(ocx, cwd, extra_env={"OCX_HOME": str(home)})
+
+    assert result.returncode == 0, (
+        f"home-tier ocx.toml should drive `ocx lock` to success; "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    # The lock writes next to the home file, not the cwd.
+    assert (home / "ocx.lock").is_file(), (
+        f"ocx.lock should be written to $OCX_HOME, not cwd; "
+        f"home contents: {sorted(p.name for p in home.iterdir())}"
+    )
+
+
+def test_home_tier_ocx_toml_skipped_when_project_present(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Project ``ocx.toml`` at cwd beats ``$OCX_HOME/ocx.toml``.
+
+    Both files exist and parse cleanly. The lock must be written next to
+    the project file, not the home file (proves the walk hit was
+    consumed; Amendment C — the home tier is never composed).
+    """
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    (cwd / "ocx.toml").write_text("[tools]\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "ocx.toml").write_text("[tools]\n")
+
+    result = _run_lock_in(ocx, cwd, extra_env={"OCX_HOME": str(home)})
+
+    assert result.returncode == 0, (
+        f"`ocx lock` should succeed against project file; "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert (cwd / "ocx.lock").is_file(), (
+        "lock must be written next to the project file (walk wins per "
+        "Amendment C)"
+    )
+    assert not (home / "ocx.lock").exists(), (
+        f"home-tier lock must NOT be written when a project file is "
+        f"present; home contents: "
+        f"{sorted(p.name for p in home.iterdir())}"
+    )

@@ -37,10 +37,11 @@ Concise index of all `ocx` CLI commands. User-facing per-command docs live in [`
 | `exec PKGS... -- CMD` | Run command with package env | **Yes** | `-i`, `--clean`, `-p` |
 | `shell env PKGS...` | Shell-specific export lines | No | `-s/--shell`, `-p`, `--candidate/--current` |
 | `shell completion` | Generate completions | No | `--shell` |
-| `shell profile add PKGS...` | Add to shell profile manifest | No | `--candidate`, `--current` |
-| `shell profile remove PKGS...` | Remove from shell profile | No | — |
-| `shell profile list` | List profiled packages | No | — |
-| `shell profile load` | Output profile export lines | No | `-s/--shell` |
+| `shell profile add PKGS...` | Add to shell profile manifest *(deprecated — see `shell profile generate` / `shell init`)* | No | `--candidate`, `--current` |
+| `shell profile remove PKGS...` | Remove from shell profile *(deprecated — see `shell profile generate` / `shell init`)* | No | — |
+| `shell profile list` | List profiled packages *(deprecated — see `shell profile generate` / `shell init`)* | No | — |
+| `shell profile load` | Output profile export lines *(deprecated — see `shell profile generate` / `shell init`)* | No | `-s/--shell` |
+| `shell profile generate` | Generate shell init file from profile | No | `-s/--shell`, `-o/--output` |
 | `index catalog` | List known repositories | No | `--with-tags` |
 | `index list PKGS...` | List tags for packages | No | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote | No | — |

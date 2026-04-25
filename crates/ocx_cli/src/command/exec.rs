@@ -4,15 +4,12 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ProjectConfig, ProjectLock, compose_tool_set, declaration_hash, parse_positional};
+use ocx_lib::project::{
+    DEFAULT_GROUP, ProjectConfig, ProjectLock, compose_tool_set, declaration_hash, parse_positional,
+};
 use ocx_lib::{cli, env, oci};
 
 use crate::conventions::*;
-
-/// Reserved group name that resolves to the top-level `[tools]` table in
-/// `ocx.toml`. Mirrors the constant in `command/lock.rs` — duplicating one
-/// literal is cheaper than punching a hole in `project::internal`.
-const DEFAULT_GROUP: &str = "default";
 
 /// Runs a command with a composed tool environment.
 ///

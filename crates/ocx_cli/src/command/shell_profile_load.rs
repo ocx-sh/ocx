@@ -23,6 +23,11 @@ pub struct ShellProfileLoad {
 
 impl ShellProfileLoad {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // No deprecation note here: `load` is consumed by
+        // `eval "$(ocx --offline shell profile load)"` in shell init —
+        // a stderr note would spam every new terminal. The note still
+        // emits from the interactive subcommands (`add`, `remove`,
+        // `list`).
         let detected_shell = match self.shell {
             Some(s) => s,
             None => {
@@ -51,9 +56,16 @@ impl ShellProfileLoad {
         println!("{}", detected_shell.comment("ocx profile"));
         let entries = manager.resolve_env(&install_infos).await?;
         for entry in &entries {
-            match entry.kind {
-                ModifierKind::Path => println!("{}", detected_shell.export_path(&entry.key, &entry.value)),
-                ModifierKind::Constant => println!("{}", detected_shell.export_constant(&entry.key, &entry.value)),
+            // `export_path` / `export_constant` return `None` when the
+            // env-var key fails POSIX validation; skip the line and emit
+            // a stderr note rather than abort the whole profile load.
+            let line = match entry.kind {
+                ModifierKind::Path => detected_shell.export_path(&entry.key, &entry.value),
+                ModifierKind::Constant => detected_shell.export_constant(&entry.key, &entry.value),
+            };
+            match line {
+                Some(line) => println!("{line}"),
+                None => eprintln!("# ocx: skipping invalid env-var key {:?}", entry.key),
             }
         }
 

@@ -361,15 +361,17 @@ ocx env [OPTIONS] <PACKAGE>...
 Executes a command within the environment of one or more packages.
 Packages are auto-installed if not already available locally (unless [`--offline`](#arg-offline) is set). If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables.
 
+The command composes its tool set from two sources: project-tier groups selected with `--group` (resolved via the digest-pinned `ocx.lock`) and explicit positional packages (resolved via the index, tag-style). Right-most positional binding wins over both group entries and earlier positionals. At least one of `--group` or a positional `<PACKAGE>` must be supplied.
+
 **Usage**
 
 ```shell
-ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
+ocx exec [OPTIONS] [[name=]PACKAGE...] -- <COMMAND> [ARGS...]
 ```
 
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to run within.
+- `[name=]PACKAGE`: Package identifier (zero or more). The optional `name=` prefix overrides the binding name targeted by the override; without it, the binding name is inferred from the identifier's repository basename (`cmake:3.29` → `cmake`, `ghcr.io/acme/foo:1` → `foo`). Optional when `--group` is supplied; otherwise required.
 - `<COMMAND>`: The command to execute within the package environment.
 - `[ARGS...]`: Arguments to pass to the command.
 
@@ -378,7 +380,18 @@ ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
 - `-p`, `--platform`: Specify the platforms to use.
 - `-i`, `--interactive`: Run in interactive mode, forwarding stdin to the child process.
 - `--clean`: Start with a clean environment containing only the package-defined variables, instead of inheriting the current shell environment.
+- `-g`, `--group <NAME>`: Select tool group(s) from the project [`ocx.lock`](../user-guide.md#project-toolchain-lock). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. Requires an `ocx.toml` in the working directory or its parents; when supplied, the lock-staleness gate fires and a stale lock exits 65.
 - `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Command exited successfully (`exec` propagates the wrapped command's exit code). |
+| _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
+| 64 | Usage error: empty `--group` segment, no group or package supplied, unknown group name, or `--group` without an `ocx.toml` in scope. |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch with `ocx.toml`); run [`ocx lock`](#lock). |
+| 78 | `--group` was selected but `ocx.lock` was not found at the expected path; run [`ocx lock`](#lock) to create it. |
 
 ### `find` {#find}
 
@@ -411,6 +424,73 @@ Use `--format json` with `jq` to embed the path in a script:
 cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 ```
 :::
+
+### `generate` {#generate}
+
+Parent command for project-tier generators. Each subcommand writes a single configuration file in the current directory based on the project's `ocx.toml`.
+
+**Usage**
+
+```shell
+ocx generate <SUBCOMMAND> [OPTIONS]
+```
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+The only subcommand today is [`direnv`](#generate-direnv); additional generators (e.g. `gitignore`, `editorconfig`) may land in future releases.
+
+#### `direnv` {#generate-direnv}
+
+Writes a `.envrc` file in the current directory that wires [`ocx shell-hook`](#shell-hook) into [direnv](https://direnv.net/). After running `ocx generate direnv`, run `direnv allow` in the same directory to activate the hook. The generated `.envrc` watches `ocx.toml` and `ocx.lock`, so direnv re-runs the hook whenever either file changes.
+
+**Usage**
+
+```shell
+ocx generate direnv [OPTIONS]
+```
+
+**Options**
+
+- `--force`: Overwrite an existing `.envrc` in the current directory. Without this flag, an existing file causes the command to exit with a `ConfigError` (78) and leave the file untouched.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | `.envrc` written successfully. |
+| 74 | I/O error writing `.envrc`. |
+| 78 | `.envrc` already exists and `--force` was not given. |
+
+### `hook-env` {#hook-env}
+
+Kept at the top level (not under `ocx shell …`) for minimal invocation cost — the prompt-hook runs `hook-env` on every prompt, where startup latency adds up.
+
+Stateful prompt-hook entry point. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, walks the actually-installed default-group tools, and emits shell export lines only when the resolved set has changed since the last invocation. The fingerprint that drives the fast path lives in the `_OCX_APPLIED` environment variable (a `v1:<sha256-hex>` token); when the fingerprint matches the previous invocation's value, the command exits 0 with no output.
+
+The command is invoked from the shell's prompt-hook mechanism — see [`ocx shell init`](#shell-init) for the per-shell wiring snippet. It never contacts the network and never installs missing tools; tools that are declared in the lock but not present in the object store produce a one-line stderr note ("# ocx: cmake not installed; run `ocx pull` to fetch") and are skipped.
+
+**Usage**
+
+```shell
+ocx hook-env [OPTIONS]
+```
+
+**Options**
+
+- `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (no project, fast path, or fresh export emitted). |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
+| 74 | I/O error during resolution. |
+| 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
 
 ### `index` {#index}
 
@@ -501,6 +581,37 @@ ocx install [OPTIONS] <PACKAGE>...
 - `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
 - `-h`, `--help`: Print help information.
 
+### `lock` {#lock}
+
+Resolves every tool tag in the nearest `ocx.toml` to a pinned OCI manifest digest and writes the result to `ocx.lock` next to it. The command is fully transactional — either every tool resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
+
+The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) of `ocx.toml`. Downstream commands ([`ocx pull`](#pull), [`ocx exec`](#exec)) consult this hash to detect when the lock is stale relative to the source declaration. When the resolved content of every tool is unchanged between two `ocx lock` runs, the file's `generated_at` timestamp is preserved verbatim — the byte-stable output keeps version-control diffs minimal.
+
+After a successful write, the command checks whether the project's `.gitattributes` declares `ocx.lock merge=union` and emits a one-line stderr advisory when it does not, helping prevent merge conflicts on team projects.
+
+**Usage**
+
+```shell
+ocx lock [OPTIONS]
+```
+
+**Options**
+
+- `-g`, `--group <NAME>`: Restrict resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every `[tools]` and `[group.*]` entry is resolved.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | `ocx.lock` written (or preserved if content was unchanged). |
+| 64 | Missing `ocx.toml`, unknown `--group` name, or empty comma segment. |
+| 69 | Registry unreachable while resolving advisory tags. |
+| 74 | I/O error writing `ocx.lock`. |
+| 78 | Existing `ocx.lock` is malformed (parse error) or `ocx.toml` schema-invalid. |
+| 79 | Tag unresolvable during resolution (package not found in registry after retries). |
+| 80 | Authentication failure against the registry. |
+
 ### `pull` {#pull}
 
 Pre-warms the [object store][fs-objects] from the project `ocx.lock` without
@@ -582,6 +693,34 @@ ocx select [OPTIONS] <PACKAGE>...
 
 See [path resolution modes](../user-guide.md#path-resolution) for how the `current` symlink is used downstream.
 
+### `shell-hook` {#shell-hook}
+
+Kept at the top level (not under `ocx shell …`) for minimal invocation cost — direnv runs `shell-hook` on every directory change, where startup latency adds up.
+
+Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints shell-specific export lines for the resolved environment. Unlike [`hook-env`](#hook-env), this command does not consult or update `_OCX_APPLIED` — it emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)).
+
+The command never contacts the network and never installs missing tools. Tools missing from the object store produce a one-line stderr note and are skipped; a stale lock produces a stderr warning but the stale digests are still used. When no project `ocx.toml` is found in scope, the command exits 0 with no output.
+
+**Usage**
+
+```shell
+ocx shell-hook [OPTIONS]
+```
+
+**Options**
+
+- `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (no project, or exports emitted). |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
+| 74 | I/O error during resolution. |
+| 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
+
 ### `shell` {#shell}
 
 #### `env` {#shell-env}
@@ -627,13 +766,47 @@ ocx shell completion [OPTIONS]
 - `--shell <SHELL>`: The shell to generate the completions for (e.g., `bash`, `zsh`, `fish`).
   By default, ocx will attempt to auto-detect the shell and generate the appropriate completions.
 
+#### `init` {#shell-init}
+
+Prints a shell-specific init snippet that wires [`ocx hook-env`](#hook-env) into the shell's prompt cycle. The snippet is a pure code generator — it never reads the project, never touches disk, and never contacts the network. Source the output once from your shell rc (or pipe directly via `>>`), and every subsequent prompt re-evaluates the project toolchain.
+
+The exact mechanism differs per shell: Bash inserts into `PROMPT_COMMAND`, Zsh registers a `precmd` hook via `add-zsh-hook`, Fish defines a function `--on-event fish_prompt`, and Nushell writes a closure into `$env.config.hooks.pre_prompt` (saved to `$env.NU_VENDOR_AUTOLOAD_DIR/ocx.nu`). All four are idempotent — sourcing the snippet repeatedly does not duplicate the hook.
+
+**Usage**
+
+```shell
+ocx shell init <SHELL>
+```
+
+**Arguments**
+
+- `<SHELL>`: Target shell. Required. Accepts `bash`, `zsh`, `fish`, `nushell`. Other recognized shells (`ash`, `ksh`, `dash`, `elvish`, `powershell`, `batch`) print a `# ocx shell init does not yet ship a prompt-hook snippet for this shell` placeholder.
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Snippet printed (or placeholder comment for unsupported shells — always 0; the command is pure code generation). |
+
 #### `profile` {#shell-profile}
 
 Manage the shell profile — packages whose environment variables are loaded into every new shell session.
 
 The profile is stored in `$OCX_HOME/profile.json`. The env file (sourced by your shell profile) calls `ocx --offline shell profile load` at startup to resolve all profiled packages and emit shell exports.
 
+::: warning Deprecated in v1; removed in v2
+The `shell profile add`, `remove`, `list`, and `load` subcommands are deprecated in this release and will be removed in v2. Use the project-tier `ocx.toml` plus [`ocx shell init`](#shell-init) instead — see the [project toolchain user guide](../user-guide.md#project-toolchain) for the migration path. [`shell profile generate`](#shell-profile-generate) survives v2 as a one-shot file generator.
+:::
+
 ##### `add` {#shell-profile-add}
+
+::: warning Deprecated
+Use [`ocx.toml`](../user-guide.md#project-toolchain-toml) plus [`ocx shell init`](#shell-init) (project-level) or [`shell profile generate`](#shell-profile-generate) (file-based). Removed in v2.
+:::
 
 Add one or more packages to the shell profile.
 
@@ -657,6 +830,10 @@ Packages that are not yet installed will be auto-installed. For `--current` mode
 
 ##### `remove` {#shell-profile-remove}
 
+::: warning Deprecated
+Use [`ocx.toml`](../user-guide.md#project-toolchain-toml) plus [`ocx shell init`](#shell-init) (project-level) or [`shell profile generate`](#shell-profile-generate) (file-based). Removed in v2.
+:::
+
 Remove one or more packages from the shell profile.
 
 **Usage**
@@ -673,6 +850,10 @@ This does not uninstall the package — it only removes it from the profile mani
 
 ##### `list` {#shell-profile-list}
 
+::: warning Deprecated
+Use [`ocx.toml`](../user-guide.md#project-toolchain-toml) plus [`ocx shell init`](#shell-init) (project-level) or [`shell profile generate`](#shell-profile-generate) (file-based). Removed in v2.
+:::
+
 List all packages in the shell profile with their status.
 
 **Usage**
@@ -684,6 +865,12 @@ ocx shell profile list
 Shows each profiled package with its resolution mode (`candidate`, `current`, or `content`), status (`active` or `broken`), and resolved path.
 
 ##### `load` {#shell-profile-load}
+
+::: warning Deprecated
+Use [`ocx.toml`](../user-guide.md#project-toolchain-toml) plus [`ocx shell init`](#shell-init) (project-level) or [`shell profile generate`](#shell-profile-generate) (file-based). Removed in v2.
+
+Unlike `add`, `remove`, and `list`, this subcommand does not emit a runtime deprecation warning — it is invoked from shell init files where stderr output would appear on every new prompt.
+:::
 
 Output shell export statements for all profiled packages.
 
@@ -702,6 +889,31 @@ Reads `$OCX_HOME/profile.json` and emits shell-specific export lines for each pa
 ```shell
 eval "$(ocx --offline shell profile load)"
 ```
+
+##### `generate` {#shell-profile-generate}
+
+File-generating variant of [`shell profile load`](#shell-profile-load). Emits the same export lines but writes them to a file the user sources once from their shell rc, rather than re-running `eval` on every shell startup. Defaults to `$OCX_HOME/init.<shell>` (e.g. `init.bash`); pass `--output <PATH>` to override or `--output -` to write to stdout.
+
+This is the only `shell profile` subcommand that survives the v2 breaking release — `add`, `remove`, `list`, and `load` are removed in v2 in favor of the project-tier toolchain (see [`ocx shell init`](#shell-init) and the [project toolchain user guide](../user-guide.md#project-toolchain)).
+
+**Usage**
+
+```shell
+ocx shell profile generate [OPTIONS]
+```
+
+**Options**
+
+- `-s`, `--shell <SHELL>`: Shell to generate exports for. Auto-detected if not specified.
+- `-o`, `--output <PATH>`: Output path. Defaults to `$OCX_HOME/init.<shell>`. Use `-` to write to stdout.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Init file written (or printed to stdout when `-o -`). |
+| 74 | I/O error writing the init file. |
 
 ### `uninstall` {#uninstall}
 

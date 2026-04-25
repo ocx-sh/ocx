@@ -12,6 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-layer package push and pull. `ocx package push` now accepts multiple layer arguments, each either a file path or a `sha256:<hex>.tar.gz` digest reference. *(package)*
 - Layered configuration from `/etc/ocx/config.toml`, `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml` with `--config` / `OCX_CONFIG_FILE` overrides and `OCX_NO_CONFIG` kill-switch. *(config)*
 - Typed `ExitCode` taxonomy aligned with BSD sysexits (64/65/69/74/75/77/78/79/80/81). Scripts can now `case $?` reliably. *(cli)*
+- Project-tier toolchain: declare a repository's tools in `ocx.toml` and lock them to digests in `ocx.lock`. The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 8785][rfc-8785]) so downstream commands refuse to run with stale digests. *(project)*
+- `ocx lock` resolves every advisory tag in `ocx.toml` to an immutable digest and writes `ocx.lock`. Repeatable `--group` flag scopes resolution to one or more named groups (`ci`, `release`, …). *(cli)*
+- `ocx update [PKG]` re-resolves tags in the lock — opt-in upgrade flow distinct from `ocx lock`'s "freeze whatever the registry surfaces today" semantics. *(cli)*
+- `ocx pull` (project tier, distinct from `ocx package pull`) pre-warms the package store from `ocx.lock` without creating install symlinks — ideal for CI matrix builds and direnv-driven workstations. *(cli)*
+- `ocx hook-env` (stateful prompt-hook entry point) and `ocx shell-hook` (stateless direnv-style export generator) emit shell exports for the resolved project toolchain. The fingerprint env var `_OCX_APPLIED` keeps the prompt cheap by skipping unchanged invocations. *(shell)*
+- `ocx shell init <SHELL>` prints a per-shell init snippet that wires `hook-env` into Bash `PROMPT_COMMAND`, Zsh `precmd`, Fish `fish_prompt`, and Nushell `pre_prompt` hooks. *(shell)*
+- `ocx generate direnv` writes a `.envrc` file wiring `ocx shell-hook` into [direnv](https://direnv.net/), watching `ocx.toml` and `ocx.lock` for re-evaluation. *(cli)*
+- `ocx shell profile generate` emits the same exports as `shell profile load` to a file the user sources once from their shell rc. This is the only `shell profile` subcommand that survives v2. *(shell)*
+- Home-tier `ocx.toml` at `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) serves as a fallback when no project file is in scope, so user-wide tools surface in scratch directories and system shells. *(project)*
+- JSON Schema for `ocx.toml` (`https://ocx.sh/schemas/project/v1.json`) and `ocx.lock` (`https://ocx.sh/schemas/project-lock/v1.json`); both wired through [taplo][taplo] for editor auto-completion. The `project-lock` schema carries a top-level `$comment` flagging the format as machine-generated. *(schema)*
+
+### Deprecated
+
+- `ocx shell profile add`, `shell profile remove`, `shell profile list`, and `shell profile load` are deprecated in v1 and will be removed in v2. Use the project-tier `ocx.toml` plus `ocx shell init` (or `ocx generate direnv`) instead — see the [migration guide](https://ocx.sh/docs/user-guide.html#project-toolchain-migration). `shell profile generate` survives v2 as a one-shot file-generating convenience. *(shell)*
 
 ### Changed
 
@@ -203,6 +217,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove push-to-main Discord notifications *(ci)*
 
 <!-- Links -->
+[rfc-8785]: https://www.rfc-editor.org/rfc/rfc8785
+[taplo]: https://taplo.tamasfe.dev/
 [0.2.1]: https://github.com/ocx-sh/ocx/compare/v0.2.0..v0.2.1
 [0.2.0]: https://github.com/ocx-sh/ocx/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/ocx-sh/ocx/tree/v0.1.0

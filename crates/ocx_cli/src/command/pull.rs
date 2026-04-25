@@ -4,18 +4,11 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ProjectConfig, ProjectLock, declaration_hash};
+use ocx_lib::project::{DEFAULT_GROUP, ProjectConfig, ProjectLock, declaration_hash};
 use ocx_lib::{cli, env, oci};
 
 use crate::api;
 use crate::conventions::platforms_or_default;
-
-/// CLI-layer sentinel for the reserved default group name. The library
-/// keeps its copy private in `project::internal`; duplicating a single
-/// literal across the project-tier CLI commands is cheaper than punching
-/// a hole in that encapsulation. Mirrors the constant in `command/lock.rs`
-/// and `command/exec.rs`.
-const DEFAULT_GROUP: &str = "default";
 
 /// Pre-warm the object store from the project `ocx.lock` without creating symlinks.
 ///

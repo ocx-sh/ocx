@@ -21,6 +21,7 @@ pub struct ShellProfileRemove {
 
 impl ShellProfileRemove {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        super::shell_profile::emit_deprecation_note();
         let default_registry = context.default_registry();
         let identifiers = options::Identifier::transform_all(self.packages.clone(), default_registry)?;
 

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ProjectConfig, ProjectLock, ResolveLockOptions, resolve_lock};
+use ocx_lib::project::{DEFAULT_GROUP, ProjectConfig, ProjectLock, ResolveLockOptions, resolve_lock};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 
@@ -25,11 +25,6 @@ pub struct Lock {
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
     pub groups: Vec<String>,
 }
-
-/// CLI-layer sentinel for the reserved default group name. The library
-/// keeps its copy private in `project::internal`; duplicating a single
-/// literal is cheaper than punching a hole in that encapsulation.
-const DEFAULT_GROUP: &str = "default";
 
 impl Lock {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {

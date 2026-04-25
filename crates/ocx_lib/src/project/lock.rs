@@ -51,8 +51,25 @@ pub enum LockVersion {
     V1 = 1,
 }
 
+// `serde_repr` integer enums need a hand-written `JsonSchema` impl because
+// the derive cannot peek into the repr. Mirrors the manual impl on
+// `crate::package::metadata::bundle::Version`.
+impl schemars::JsonSchema for LockVersion {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("LockVersion")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "description": "OCX lock format version (lock-format version 1). Currently always 1.",
+            "enum": [1]
+        })
+    }
+}
+
 /// Top-level `ocx.lock` document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectLock {
     /// Lock metadata header (version, declaration hash, generator, etc.).
@@ -65,7 +82,7 @@ pub struct ProjectLock {
 }
 
 /// Lock metadata header.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockMetadata {
     /// On-disk schema version (currently always [`LockVersion::V1`]).
@@ -96,7 +113,7 @@ pub struct LockMetadata {
 /// advisory tag inside `pinned` is stripped by the writer (see
 /// [`PinnedIdentifier::strip_advisory`]) so the on-disk form is the
 /// canonical `registry/repo@digest`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockedTool {
     /// Local binding name (TOML key from `ocx.toml`, e.g. `cmake`).

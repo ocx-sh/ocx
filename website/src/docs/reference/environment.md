@@ -30,6 +30,16 @@ for disabling an option.
 
 ## Internal
 
+### `_OCX_APPLIED` {#ocx-applied}
+
+Internal fingerprint set by [`ocx hook-env`][cmd-hook-env] on each successful prompt-cycle invocation and read by the next one. The value is a `v1:<sha256-hex>` token — `v1:` is a forward-compatibility prefix so future hook revisions can rotate the fingerprint format without confusing older shells, and the hex segment hashes the resolved tool set (digests, env entries, lock metadata) `hook-env` computed on its previous run.
+
+When the next `hook-env` invocation recomputes the fingerprint and finds it identical to `$_OCX_APPLIED`, it exits zero with no output — the prompt stays cheap because no exports are re-emitted. When the fingerprint differs (lock changed, group selection changed, tool set drifted on disk), the command prints fresh export lines and updates the variable.
+
+This variable is machine-managed: never set it by hand. The only legitimate user touch is the **escape hatch** — `unset _OCX_APPLIED` forces a full re-export on the next prompt, useful when debugging hook output or after manually editing `ocx.lock`.
+
+The leading underscore signals that the variable is a private contract between `ocx hook-env` invocations, following the convention used by other tool-managed shell variables (e.g. direnv's `DIRENV_*` family).
+
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 
 The authentication type for the registry.
@@ -315,6 +325,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- commands -->
 [cmd-ref]: command-line.md
 [cmd-ci-export]: command-line.md#ci-export
+[cmd-hook-env]: command-line.md#hook-env
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-index]: command-line.md#arg-index
