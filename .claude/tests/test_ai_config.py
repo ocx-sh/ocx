@@ -1171,6 +1171,7 @@ class TestAiConfigOverhaulPhase2:
         "deps": False,
         "docs": False,
         "meta-validate-context": False,
+        "next": True,
         "qa-engineer": False,
         "security-auditor": False,
         "swarm-review": False,

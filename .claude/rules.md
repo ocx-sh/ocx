@@ -159,3 +159,4 @@ Exempt from overlap detection (intended broad coupling):
 | Roadmap sync | `ocx-sync-roadmap` |
 | Commits (working phase) | `commit` |
 | Finalize branch for merge onto main | `finalize` |
+| Suggest the next slash command from current state | `next` |
