@@ -14,27 +14,27 @@ triggers:
 
 # /next — Suggest the Next Slash Command
 
-Looks at the current state (branch, working tree, plans, recent commits, open PR) and prints exactly **one** slash command the user can copy-paste to continue. The state inspection is delegated to a **sonnet subagent** so the output stays compact and the main session's context is not flooded with `git log` / `gh pr view` / plan-file output.
+Look at current state (branch, working tree, plans, recent commits, open PR). Print exactly **one** slash command user copy-paste to continue. State inspection delegated to **sonnet subagent** so output stay compact, main session context not flooded with `git log` / `gh pr view` / plan-file output.
 
-This is a **read-only advisory skill**. It never edits code, never commits, never pushes.
+**Read-only advisory skill**. Never edit code, never commit, never push.
 
 ## Flags
 
-- `--clear` — instruct the subagent to make the suggested command **fully self-contained** (absolute paths, no "the work we just did" references), and prepend `/clear` so a future session with no memory can run it cleanly.
-- `--list` — ask the subagent to return the top 3 candidates with one-line rationale each.
-- (no flag) — one self-contained command + a one-line "why" + a one-line "what was checked".
+- `--clear` — tell subagent make suggested command **fully self-contained** (absolute paths, no "the work we just did" refs), prepend `/clear` so future session with no memory run cleanly.
+- `--list` — subagent return top 3 candidates with one-line rationale each.
+- (no flag) — one self-contained command + one-line "why" + one-line "what was checked".
 
 ## Workflow
 
 ### 1. Parse flags
 
-Strip `--clear` and `--list` from the argument string. Anything left is free-text intent (rare; e.g. `/next --clear after fixing the bug`).
+Strip `--clear` and `--list` from argument string. Leftover = free-text intent (rare; e.g. `/next --clear after fixing the bug`).
 
 ### 2. Delegate to sonnet subagent
 
-Spawn **one** subagent (`Agent` tool, `subagent_type: general-purpose`, `model: sonnet`) with the prompt below. Do NOT run any of the inspection commands yourself — the whole point of delegation is to keep the main context clean.
+Spawn **one** subagent (`Agent` tool, `subagent_type: general-purpose`, `model: sonnet`) with prompt below. Do NOT run inspection commands yourself — point of delegation = keep main context clean.
 
-**Subagent prompt template** (fill the `{flags}` and `{intent}` placeholders):
+**Subagent prompt template** (fill `{flags}` and `{intent}` placeholders):
 
 ```
 You are inspecting OCX project state to suggest exactly ONE next slash command for the user to type. You are read-only — never edit, commit, or push.
@@ -135,22 +135,22 @@ Candidates:
 Keep your reply under 12 lines. The user will copy-paste from your output directly.
 ```
 
-### 3. Print the subagent's output verbatim
+### 3. Print subagent's output verbatim
 
-The subagent already formatted the output. Do not rewrap, summarise, or comment. Print exactly what it returned. If `--clear` was set, the subagent's output already includes the `/clear` line — do not add another.
+Subagent already formatted output. Do not rewrap, summarise, comment. Print exactly what returned. If `--clear` set, subagent output already include `/clear` line — do not add another.
 
-If the subagent reported a hard error (no git repo, detached HEAD, etc.), print that message and stop.
+If subagent report hard error (no git repo, detached HEAD, etc.), print message and stop.
 
 ## Constraints
 
-- NEVER write files, edit code, commit, or push. Read-only.
-- NEVER run the inspection commands in the main session — that's the subagent's job. Skipping delegation defeats the context-isolation purpose.
-- NEVER suggest a slash command that does not exist in `.claude/skills/`. The subagent cross-checks `.claude/rules.md`; the main session should not second-guess.
-- ALWAYS spawn exactly one subagent. No parallelism — there's only one question being asked.
+- NEVER write files, edit code, commit, push. Read-only.
+- NEVER run inspection commands in main session — subagent's job. Skip delegation = defeat context-isolation.
+- NEVER suggest slash command not in `.claude/skills/`. Subagent cross-checks `.claude/rules.md`; main session no second-guess.
+- ALWAYS spawn exactly one subagent. No parallelism — only one question asked.
 
 ## References
 
-- `.claude/rules.md` — "Skills by task topic" table (authoritative skill list — the subagent reads it)
+- `.claude/rules.md` — "Skills by task topic" table (authoritative skill list — subagent reads it)
 - `.claude/rules/workflow-intent.md` — work-type router
 - `.claude/rules/workflow-git.md` — branching model, two-phase commit/finalize split
 - `.claude/skills/swarm-execute/SKILL.md` "Next Step — copy-paste to continue" — handoff pattern this skill emulates

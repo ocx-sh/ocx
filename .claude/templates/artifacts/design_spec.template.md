@@ -42,7 +42,7 @@ Design Principles:
 
 ### [Component 1]
 
-**Purpose:** [What this component does]
+**Purpose:** [What component do]
 
 **States:**
 | State | Description | Visual |
@@ -111,7 +111,7 @@ Design Principles:
 
 ## Spacing
 
-Using 8px grid system:
+8px grid:
 - xs: 4px
 - sm: 8px
 - md: 16px

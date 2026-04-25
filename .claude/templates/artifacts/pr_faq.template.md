@@ -7,19 +7,18 @@ Owner: Architect (/architect)
 Handoff to: Architect (/architect) for feasibility, then PRD creation
 Related Skills: writing-pr-faqs, brainstorming, requirements-analysis
 
-This document comes BEFORE the PRD in the planning process.
-Uses Amazon's "Working Backwards" methodology.
+Doc come BEFORE PRD in planning. Use Amazon "Working Backwards" method.
 
 Best Practices:
-- Write as if the product is already launched (future tense → past tense)
-- Keep total length to 5-6 pages maximum
-- Focus on customer benefits, not features or technical details
-- Problem paragraph must demonstrate deep customer understanding
-- Most PR-FAQs don't get approved — this is a feature, not a bug
-- Iterate multiple times before presenting for approval
+- Write as if product launched (future tense → past tense)
+- Max 5-6 pages total
+- Focus customer benefits, not features/tech detail
+- Problem para must show deep customer understanding
+- Most PR-FAQs not approved — feature, not bug
+- Iterate many times before approval
 
-Reading process: Everyone reads the document in silence at the start of review meetings
-(typically 20 minutes for 6 pages). Do not send as pre-read.
+Reading process: All read in silence at review meeting start
+(~20 min for 6 pages). No pre-read send.
 -->
 
 ## Overview
@@ -40,11 +39,11 @@ Reading process: Everyone reads the document in silence at the start of review m
 ### The Problem
 
 <!--
-This is the most critical paragraph. Write from the CUSTOMER'S point of view.
-- Be specific about pain points and emotional impact
-- Describe current workarounds customers use
-- Explain why existing solutions fall short
-- Identify a problem with a large TAM (customers × willingness to pay)
+Most critical para. Write from CUSTOMER POV.
+- Specific pain points + emotional impact
+- Describe current workarounds
+- Why existing solutions fall short
+- Problem with big TAM (customers × willingness to pay)
 -->
 
 [2-3 sentences describing the customer problem. Be specific about pain points, current workarounds, and why existing solutions fall short.]

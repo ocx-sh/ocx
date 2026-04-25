@@ -19,7 +19,7 @@ Related Skills: builder, qa-engineer
 
 ## Objective
 
-[Clear, concise statement of what this plan will accomplish]
+[What plan accomplish, concise]
 
 ## Scope
 
@@ -37,7 +37,7 @@ Related Skills: builder, qa-engineer
 
 **Research artifact:** [`.claude/artifacts/research_[topic].md`](./research_[topic].md) or N/A
 
-[Summary of technology landscape research. What trending tools, design patterns, or industry signals informed this plan? What alternatives were considered based on current adoption trends?]
+[Tech landscape research summary. Trending tools, design patterns, industry signals informing plan? Alternatives considered from current adoption trends?]
 
 ## Technical Approach
 
@@ -57,48 +57,47 @@ Related Skills: builder, qa-engineer
 ## Implementation Steps
 
 > **Contract-First TDD**: Every feature follows Stub → Verify → Specify → Implement → Review.
-> Tests are written from the design record *before* implementation, ensuring they validate the
-> contract — not the implementation details.
+> Tests written from design record *before* implementation. Validate contract — not implementation details.
 
 ### Phase 1: Stubs
 
-Create type signatures, trait definitions, and function shells. All bodies use `unimplemented!()` (Rust) or `raise NotImplementedError` (Python). The goal is to establish the public API surface and architectural shape without any business logic.
+Make type signatures, trait definitions, function shells. Bodies use `unimplemented!()` (Rust) or `raise NotImplementedError` (Python). Goal: set public API surface + architectural shape, no business logic.
 
 - [ ] **Step 1.1:** [Stub description — types, traits, function signatures]
   - Files: `path/to/file.rs`
-  - Public API: [Signatures and types this introduces]
+  - Public API: [Signatures + types introduced]
 
 - [ ] **Step 1.2:** [Stub description]
   - Files: `path/to/file.rs`
-  - Public API: [Signatures and types this introduces]
+  - Public API: [Signatures + types introduced]
 
 ### Phase 2: Architecture Review
 
-Review stubs against this design record (`worker-reviewer`, focus: `spec-compliance`, phase: `post-stub`). Verify:
-- Type signatures match the documented API contract
-- Module boundaries align with the architecture section above
+Review stubs against design record (`worker-reviewer`, focus: `spec-compliance`, phase: `post-stub`). Verify:
+- Type signatures match documented API contract
+- Module boundaries align with architecture section above
 - Error types cover all documented failure modes
-- No missing public surface area compared to the design
+- No missing public surface vs design
 
-Gate: Architecture review passes before proceeding. *Optional for features touching ≤3 files.*
+Gate: Architecture review pass before proceed. *Optional for features touching ≤3 files.*
 
 ### Phase 3: Specification Tests
 
-Write tests from the design record, NOT from the stubs. Tests encode the expected behavior, edge cases, and acceptance criteria documented above. Tests should fail against the stubs (since bodies are `unimplemented!()`).
+Write tests from design record, NOT stubs. Tests encode expected behavior, edge cases, acceptance criteria above. Tests must fail against stubs (bodies `unimplemented!()`).
 
-- [ ] **Step 3.1:** Unit tests (from design record's component contracts)
+- [ ] **Step 3.1:** Unit tests (from design record component contracts)
   - Files: `path/to/file.rs` (inline `#[cfg(test)]` modules)
   - Cases: [Happy path, error cases, edge cases from design]
 
-- [ ] **Step 3.2:** Acceptance tests (from design record's user experience)
+- [ ] **Step 3.2:** Acceptance tests (from design record user experience)
   - Files: `test/tests/test_*.py`
   - Scenarios: [User-facing behaviors from design]
 
-Gate: Tests compile (or parse) and fail with `unimplemented`/`NotImplementedError`.
+Gate: Tests compile (or parse) + fail with `unimplemented`/`NotImplementedError`.
 
 ### Phase 4: Implementation
 
-Fill in the stub bodies so all specification tests pass. No new tests should be needed — if they are, the design record was incomplete (update it).
+Fill stub bodies so all spec tests pass. No new tests needed — if needed, design record incomplete (update it).
 
 - [ ] **Step 4.1:** [Implementation description]
   - Files: `path/to/file.rs`
@@ -108,7 +107,7 @@ Fill in the stub bodies so all specification tests pass. No new tests should be 
   - Files: `path/to/file.rs`
   - Details: [Additional context]
 
-Gate: All unit tests and acceptance tests pass. `task verify` succeeds.
+Gate: All unit + acceptance tests pass. `task verify` succeeds.
 
 ### Phase 5: Review & Documentation
 
@@ -141,8 +140,7 @@ Gate: All unit tests and acceptance tests pass. `task verify` succeeds.
 
 ## Testing Strategy
 
-> Tests are the executable specification. They are written from this design record in Phase 3,
-> before implementation begins in Phase 4. Each test case must trace back to a requirement here.
+> Tests = executable spec. Written from design record in Phase 3, before implementation in Phase 4. Each test case trace back to requirement here.
 
 ### Unit Tests (from component contracts)
 
@@ -165,8 +163,8 @@ Gate: All unit tests and acceptance tests pass. `task verify` succeeds.
 
 ## Rollback Plan
 
-1. [Step to revert if issues arise]
-2. [Step to restore previous state]
+1. [Step revert if issues]
+2. [Step restore previous state]
 3. [Verification steps]
 
 ## Risks
@@ -199,7 +197,7 @@ Gate: All unit tests and acceptance tests pass. `task verify` succeeds.
 
 ## Notes
 
-[Any additional context, considerations, or comments]
+[Extra context, considerations, comments]
 
 ---
 

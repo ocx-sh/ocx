@@ -1,23 +1,22 @@
 # Classification Signals — /swarm-execute
 
-Signal-to-tier mapping used when `/swarm-execute` runs with tier=`auto`.
-Also defines overlay triggers that stack on top of the chosen tier.
+Signal-to-tier map for `/swarm-execute` with tier=`auto`.
+Also defines overlay triggers stack on top of chosen tier.
 
-**Primary signal: plan-artifact header.** Plans produced by tiered
-`/swarm-plan` carry their classification in the handoff block. That is the
-#1 classifier input — read it first, apply it verbatim, fall back to text
-signals only when the target is a free-text task description.
+**Primary signal: plan-artifact header.** Plans from tiered
+`/swarm-plan` carry classification in handoff block. #1 classifier
+input — read first, apply verbatim, fall back to text signals only
+when target is free-text task description.
 
-When signals are genuinely split across adjacent tiers, or the overlay mix
-is unusual, mark the classification **low-confidence** — this forces the
-meta-plan gate in SKILL.md. Do **not** fire a mid-flow `AskUserQuestion`;
-ambiguity is always resolved at the single approval gate.
+When signals split across adjacent tiers, or overlay mix unusual,
+mark classification **low-confidence** — forces meta-plan gate in
+SKILL.md. Do **not** fire mid-flow `AskUserQuestion`; ambiguity
+resolved at single approval gate.
 
 ## Primary: plan-artifact header
 
-When the target is a file path ending `.md` (typically under
-`.claude/artifacts/`), grep the plan for the handoff block emitted by
-`/swarm-plan`:
+When target is file path ending `.md` (typically under
+`.claude/artifacts/`), grep plan for handoff block from `/swarm-plan`:
 
 | Field | Mapping |
 |---|---|
@@ -30,44 +29,44 @@ When the target is a file path ending `.md` (typically under
 | `Overlays: codex=on` / `codex=off` | adopt verbatim |
 | `Overlays: architect=opus` | suggest `--builder=opus` (novel architecture → complex implementation) |
 
-If the plan header is missing any field, fall back to free-text
-classification for just that axis — don't guess.
+If plan header missing any field, fall back to free-text
+classification for that axis only — no guess.
 
 ## Fallback: free-text targets
 
-When no plan file is passed (the argument is a free-text task description),
-apply the same signal table as `/swarm-plan`'s classify.md — same target
+When no plan file passed (argument = free-text task description),
+apply same signal table as `/swarm-plan`'s classify.md — same target
 language, same scope cues.
 
 > **Read `.claude/skills/swarm-plan/classify.md` "Tier signal table" section
-> directly** when classifying a free-text execute target. This file does
-> not duplicate that table — sibling skills cross-read to stay in lockstep.
+> directly** when classifying free-text execute target. This file no
+> duplicate that table — sibling skills cross-read to stay lockstep.
 
-Execute-specific deltas from the plan-side table:
+Execute-specific deltas from plan-side table:
 
-- Execute's `low` tier still requires at least one concrete file/test to
-  change. A pure doc edit on its own is not an execute target — point
-  the user to `/commit` instead.
-- Execute's `max` tier requires an existing plan artifact at the target.
-  Free-text `max` targets should be re-routed through `/swarm-plan max`
-  first to produce the plan — announce this and stop.
+- Execute's `low` tier still needs ≥1 concrete file/test to
+  change. Pure doc edit alone not execute target — point
+  user to `/commit`.
+- Execute's `max` tier needs existing plan artifact at target.
+  Free-text `max` targets re-route through `/swarm-plan max`
+  first to produce plan — announce, stop.
 
 ## Confidence rules
 
 - **Confident**: plan-header `Tier:` set, or free-text target has ≥2
-  matching signals with no competing signal from an adjacent tier.
-  Proceed without the meta-plan gate.
+  matching signals, no competing signal from adjacent tier.
+  Proceed, skip meta-plan gate.
 - **Low-confidence**: plan header partial/absent AND free-text signals
-  split across adjacent tiers. Flag; SKILL.md routes it into the
+  split across adjacent tiers. Flag; SKILL.md routes to
   meta-plan gate.
 
-Never manufacture a question when confident. *Announce and proceed*, or
-*let the meta-plan gate handle it*.
+Never manufacture question when confident. *Announce and proceed*, or
+*let meta-plan gate handle*.
 
 ## Overlay triggers
 
-Overlays adjust a single axis on top of the chosen tier. They stack —
-multiple triggers may fire. Axis definitions live in `overlays.md`.
+Overlays adjust single axis on top of chosen tier. Stack —
+multiple triggers may fire. Axis defs in `overlays.md`.
 
 | Overlay | Triggered by |
 |---|---|
@@ -81,7 +80,7 @@ multiple triggers may fire. Axis definitions live in `overlays.md`.
 | `--review=adversarial` | Security-sensitive paths (`oci/`, `auth`, `crypto/`, `signing/`); plan labels `security`; diff touches `package_manager/` |
 | `--codex` | Plan header `Reversibility: One-Way Door` (Medium or High); breaking-change signals in plan or prompt; `Overlays: codex=on` |
 
-Defaults per tier (before overlays apply):
+Defaults per tier (before overlays):
 
 | Axis | low | high | max |
 |---|---|---|---|
@@ -95,7 +94,7 @@ Defaults per tier (before overlays apply):
 
 ## Examples
 
-1. `/swarm-execute .claude/state/plans/plan_small_flag.md` whose header reads
+1. `/swarm-execute .claude/state/plans/plan_small_flag.md` header reads
    `Tier: low` → tier=**low**, no overlays, confident. Plan-header wins.
 2. `/swarm-execute .claude/state/plans/plan_refactor_oci.md` with
    `Tier: high` + `Reversibility: One-Way Door Medium` → tier=**high**
@@ -103,9 +102,9 @@ Defaults per tier (before overlays apply):
 3. `/swarm-execute "add --json flag to ocx ls"` (free text) →
    fall back to `/swarm-plan`'s low-tier signal; tier=**low**, confident.
 4. `/swarm-execute "refactor the entire OCI pull pipeline"` (free text,
-   no plan) → classifier proposes **max**, but because max requires a
-   plan artifact, SKILL.md announces and stops, asking the user to run
+   no plan) → classifier proposes **max**, but max needs
+   plan artifact, SKILL.md announces and stops, ask user to run
    `/swarm-plan max "…"` first.
-5. `/swarm-execute .claude/state/plans/plan_x.md` with a partial header
-   (no `Tier:` field) and free-text signals split between `low` and
+5. `/swarm-execute .claude/state/plans/plan_x.md` partial header
+   (no `Tier:` field) + free-text signals split between `low` and
    `high` → low-confidence → meta-plan gate fires.

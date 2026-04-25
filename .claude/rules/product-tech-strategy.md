@@ -1,12 +1,12 @@
 # Tech Strategy - Golden Paths
 
-This is the **SINGLE SOURCE OF TRUTH** for technology choices in this project.
+**SINGLE SOURCE OF TRUTH** for tech choices this project.
 
 ## Compliance
 
-1. **Follow This File**: Use the technologies listed below
-2. **No Deviations**: Do not suggest alternatives unless explicitly instructed
-3. **Latest Stable**: Always use the latest stable version unless pinned
+1. **Follow This File**: Use tech listed below
+2. **No Deviations**: No alternatives unless told
+3. **Latest Stable**: Latest stable version unless pinned
 
 ## Language Golden Paths
 

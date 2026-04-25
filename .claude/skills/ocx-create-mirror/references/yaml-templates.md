@@ -1,6 +1,6 @@
 # YAML / JSON Templates
 
-Reference templates for the files generated in Phase 4 of the mirror creation workflow.
+Reference templates for files generated in Phase 4 of mirror creation workflow.
 
 ## metadata.json
 
@@ -99,19 +99,19 @@ from the archive inspection in Phase 3.}
 **Frontmatter fields:**
 
 - `title`: Human-readable display name (e.g. "CMake", "Go Task", "Buf")
-- `description`: One-line summary suitable for catalog display (max ~100 chars)
-- `keywords`: Comma-separated search terms — include the tool name, language ecosystem, and category (e.g. `cmake,build,cpp,c,build-system,cross-platform`)
+- `description`: One-line catalog summary (max ~100 chars)
+- `keywords`: Comma-separated search terms — tool name, language ecosystem, category (e.g. `cmake,build,cpp,c,build-system,cross-platform`)
 
 **Body content:**
 
-- Research the project by reading its GitHub description (`gh api "repos/{owner}/{repo}" --jq '.description'`) and website
-- List executables found during archive inspection
-- Include links to docs and GitHub
-- Do NOT include a "Usage with OCX" section — the website's DetailView already provides install/exec commands
+- Research project via GitHub description (`gh api "repos/{owner}/{repo}" --jq '.description'`) and website
+- List executables found in archive inspection
+- Link docs and GitHub
+- No "Usage with OCX" section — website DetailView already shows install/exec commands
 
 ## Taskfile registration
 
-Add the mirror to `taskfiles/mirror.taskfile.yml`. This file includes the shared template (`mirrors/mirror.taskfile.yml`) once per package. Add a new `includes` entry and wire it into `sync-all` / `describe-all`:
+Add mirror to `taskfiles/mirror.taskfile.yml`. File includes shared template (`mirrors/mirror.taskfile.yml`) once per package. Add new `includes` entry, wire into `sync-all` / `describe-all`:
 
 ```yaml
 # In the includes: block, add:
@@ -128,4 +128,4 @@ Add the mirror to `taskfiles/mirror.taskfile.yml`. This file includes the shared
       - task: {name}:describe
 ```
 
-This gives the user `task mirror:{name}:sync` and `task mirror:{name}:describe` automatically via the shared template.
+Gives user `task mirror:{name}:sync` and `task mirror:{name}:describe` via shared template.

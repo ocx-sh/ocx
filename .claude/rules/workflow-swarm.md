@@ -10,19 +10,19 @@ Rules for efficient multi-agent swarm execution.
 
 ## Context Efficiency
 
-1. **Workers inherit session context** - CLAUDE.md and rules are loaded, but workers use focused tool sets
-2. **Narrow scope** - Each worker focuses on one task
-3. **Minimal tools** - Only tools needed for the task
-4. **Right-sized models** - Haiku for exploration, Sonnet for implementation, Opus for architecture
+1. **Workers inherit session context** - CLAUDE.md and rules loaded, workers use focused tool sets
+2. **Narrow scope** - Each worker one task
+3. **Minimal tools** - Only tools needed
+4. **Right-sized models** - Haiku exploration, Sonnet implementation, Opus architecture
 
 ## Universal Worker Protocol (Critical Steps for Every Build/Test/Review Worker)
 
-1. **Read relevant quality rules FIRST, before any writes.** These are path-scoped and auto-load based on file type: `.claude/rules/quality-core.md` (universal, always loaded), plus the language leaf (`quality-rust.md`, `quality-python.md`, `quality-typescript.md`, `quality-bash.md`, `quality-vite.md`) that matches the files you're editing. For Python acceptance tests also read `.claude/rules/subsystem-tests.md`. Post-completion self-review is not a substitute.
+1. **Read relevant quality rules FIRST, before any writes.** Path-scoped, auto-load by file type: `.claude/rules/quality-core.md` (universal, always loaded), plus language leaf (`quality-rust.md`, `quality-python.md`, `quality-typescript.md`, `quality-bash.md`, `quality-vite.md`) matching files edited. Python acceptance tests also read `.claude/rules/subsystem-tests.md`. Post-completion self-review no substitute.
 2. **Grep for existing utilities before writing new code.** OCX has `DirWalker`, `PackageDir`, `ReferenceManager`, `DIGEST_FILENAME`, etc. Check `crates/ocx_lib/src/utility/` and related modules with Grep.
-3. **If an existing utility doesn't fit the use case, extend it — don't work around it.** Workarounds are the #1 source of over-engineered iteration loops in prior sessions.
-4. **Report deferred findings instead of oscillating.** When a fix requires human judgment or introduces a regression on re-attempt, stop and report deferred.
-5. **Never auto-commit.** All commits are Michael's explicit decision. Workers report `git status` only.
-6. **Flag product-level insights.** If research, architecture work, or implementation uncovers something that shifts OCX's positioning, differentiators, target users, competitive landscape, or product principles, update `.claude/rules/product-context.md` in the same commit (or flag it in the completion report if a human decision is needed). See the "Update Protocol" section at the bottom of that file for the full trigger list. This applies especially to `worker-researcher`, `worker-architect`, and `worker-doc-writer` — researchers evaluating competitors, architects making scope decisions, and doc writers framing narratives are the most likely to surface positioning shifts.
+3. **If existing utility doesn't fit, extend it — don't work around it.** Workarounds = #1 source of over-engineered iteration loops in prior sessions.
+4. **Report deferred findings instead of oscillating.** Fix needs human judgment or causes regression on re-attempt → stop, report deferred.
+5. **Never auto-commit.** All commits Michael's explicit decision. Workers report `git status` only.
+6. **Flag product-level insights.** Research/architecture/implementation uncovers shift in OCX positioning, differentiators, target users, competitive landscape, product principles → update `.claude/rules/product-context.md` same commit (or flag in completion report if human decision needed). See "Update Protocol" section at bottom of that file for full trigger list. Applies especially to `worker-researcher`, `worker-architect`, `worker-doc-writer` — researchers eval competitors, architects make scope decisions, doc writers frame narratives most likely surface positioning shifts.
 
 ## Worker Types
 
@@ -40,27 +40,27 @@ Rules for efficient multi-agent swarm execution.
 
 ## Worker Focus Modes
 
-Orchestrators specialize workers by specifying a focus mode in the prompt.
+Orchestrators specialize workers via focus mode in prompt.
 
 **worker-builder focus modes:**
-- `stubbing`: Create public API surface only — types, traits, signatures with `unimplemented!()`/`NotImplementedError`. Gate: `cargo check` passes. Sonnet default.
-- `implementation` (default): Fill in stub bodies so specification tests pass. Sonnet default; orchestrator passes `model: opus` for architecturally complex or cross-subsystem work.
-- `testing`: Write tests, cover happy path and edge cases, ensure deterministic. Sonnet default.
+- `stubbing`: Public API surface only — types, traits, signatures with `unimplemented!()`/`NotImplementedError`. Gate: `cargo check` passes. Sonnet default.
+- `implementation` (default): Fill stub bodies so spec tests pass. Sonnet default; orchestrator passes `model: opus` for architecturally complex / cross-subsystem work.
+- `testing`: Write tests, cover happy path + edge cases, ensure deterministic. Sonnet default.
 - `refactoring`: Extract patterns, simplify conditionals, apply SOLID/DRY. Follow Two Hats Rule (see quality-core.md). Sonnet default.
 
-**Model selection rationale:** Opus 4.7 leads Sonnet 4.6 by 8.0pp on SWE-bench Verified at 1.67× higher input cost and lower throughput. The gap materializes on multi-step agentic chains and novel-reasoning work; it narrows to near-parity on single-pass review. OCX's policy: Opus for one-way-door architecture and max-tier complex implementation; Sonnet for standard review / testing / implementation; Haiku only for read-only exploration and narrow single-pass tasks. Per-tier overrides live in `.claude/artifacts/adr_tier_model_correlation.md` and the per-skill `overlays.md` files. Source benchmark data: `.claude/artifacts/research_model_capability_matrix.md`.
+**Model selection rationale:** Opus 4.7 leads Sonnet 4.6 by 8.0pp on SWE-bench Verified at 1.67× input cost, lower throughput. Gap shows on multi-step agentic chains and novel-reasoning; narrows to near-parity on single-pass review. OCX policy: Opus for one-way-door architecture and max-tier complex implementation; Sonnet for standard review / testing / implementation; Haiku only for read-only exploration and narrow single-pass tasks. Per-tier overrides in `.claude/artifacts/adr_tier_model_correlation.md` and per-skill `overlays.md` files. Source benchmark data: `.claude/artifacts/research_model_capability_matrix.md`.
 
 **worker-tester focus modes:**
 - `specification`: Write tests from design record BEFORE implementation. Tests encode expected behavior as executable spec. Must fail against stubs.
-- `validation` (default): Write tests to validate existing implementation and improve coverage
+- `validation` (default): Write tests to validate existing implementation, improve coverage
 
 **worker-reviewer focus modes:**
 - `quality` (default): Code review checklist — naming, style, tests, patterns
 - `security`: OWASP Top 10 scan, hardcoded secrets, auth/authz flows, input validation. Reference CWE IDs. See `quality-security.md`
 - `performance`: N+1 queries, blocking I/O, allocations, pagination, caching. See `quality-core.md`
-- `spec-compliance`: Phase-aware design record consistency review. Orchestrator specifies phase: `post-stub` (stubs ↔ design), `post-specification` (tests ↔ design), or `post-implementation` (full traceability). Knows that in early phases no implementation exists yet.
+- `spec-compliance`: Phase-aware design record consistency review. Orchestrator specifies phase: `post-stub` (stubs ↔ design), `post-specification` (tests ↔ design), `post-implementation` (full traceability). Knows early phases have no implementation yet.
 
-**worker-doc-reviewer**: No focus modes — always runs the full trigger matrix audit (CLI, env vars, metadata, user guide, installation, changelog).
+**worker-doc-reviewer**: No focus modes — always runs full trigger matrix audit (CLI, env vars, metadata, user guide, installation, changelog).
 
 **worker-doc-writer focus modes:**
 - `reference`: Flag tables, env var entries, schema fields — facts only, no narrative
@@ -69,32 +69,32 @@ Orchestrators specialize workers by specifying a focus mode in the prompt.
 
 ## Swarm Patterns
 
-See `.claude/rules/workflow-feature.md` for the canonical contract-first TDD protocol (Stub → Verify → Specify → Implement → Review-Fix Loop). The `/swarm-execute` skill has the full detailed protocol including the review-fix loop specification.
+See `.claude/rules/workflow-feature.md` for canonical contract-first TDD protocol (Stub → Verify → Specify → Implement → Review-Fix Loop). `/swarm-execute` skill has full detailed protocol incl. review-fix loop spec.
 
 ## Review-Fix Loop
 
-The canonical protocol used by `/swarm-execute`, `/swarm-review`, bug-fix workflow Phase 6, and refactor workflow Phase 5. Byte-identical copies ship in `workflow-bugfix.md` and `workflow-refactor.md` so the protocol auto-loads from all three worker-relevant path scopes.
+Canonical protocol used by `/swarm-execute`, `/swarm-review`, bug-fix workflow Phase 6, refactor workflow Phase 5. Byte-identical copies ship in `workflow-bugfix.md` and `workflow-refactor.md` so protocol auto-loads from all three worker-relevant path scopes.
 
 <!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->
 Diff-scoped, bounded iterative review. Tier-scaled: 1 round at `low`, up to 3 rounds at `high`/`max`.
 
-**Round 1** — run every perspective on the diff. Perspectives most likely to find blockers run first (e.g. spec-compliance, correctness, behavior-preservation); if they surface actionable findings, fix before running the remaining perspectives in the same round.
+**Round 1** — run every perspective on diff. Perspectives most likely find blockers run first (e.g. spec-compliance, correctness, behavior-preservation); if surface actionable findings, fix before remaining perspectives in same round.
 
 Classify each finding:
 
 - **Actionable** — fix automatically, re-run affected perspectives next round.
-- **Deferred** — needs human judgment; surface in the commit summary with context.
+- **Deferred** — needs human judgment; surface in commit summary with context.
 
-**Subsequent rounds** — re-run only perspectives that had actionable findings in the previous round. Loop exits when no actionable findings remain or the tier's round cap is reached. Oscillating findings (same issue surfaced in two rounds) auto-defer.
+**Subsequent rounds** — re-run only perspectives with actionable findings prior round. Loop exits when no actionable findings remain or tier's round cap hit. Oscillating findings (same issue surfaced two rounds) auto-defer.
 
-**Cross-model adversarial pass** (optional, tier-scaled): after the Claude loop converges, run a single Codex adversarial review against the diff as a final gate. One-shot, no looping — two-family stylistic thrash is the failure mode. Skipped gracefully if Codex is unavailable.
+**Cross-model adversarial pass** (optional, tier-scaled): after Claude loop converges, run single Codex adversarial review against diff as final gate. One-shot, no looping — two-family stylistic thrash = failure mode. Skipped gracefully if Codex unavailable.
 
-**Gate to exit**: no actionable findings remain, verification passes on the final state, and deferred findings are documented for handoff.
+**Gate to exit**: no actionable findings remain, verification passes on final state, deferred findings documented for handoff.
 <!-- REVIEW_FIX_LOOP_CANONICAL_END -->
 
 ## Tier & Overlay Vocabulary (for /swarm-plan, /swarm-execute, /swarm-review)
 
-All three swarm skills (`/swarm-plan`, `/swarm-execute`, `/swarm-review`) take an optional tier argument (`low | auto | high | max`, default `auto`) to scale the pipeline to the scope of the feature or diff. The same pipeline shape runs at every tier — only worker count, model choice, review breadth, and Codex coverage change. Contract-first TDD (Stub → Specify → Implement → Review) is preserved at every tier.
+All three swarm skills (`/swarm-plan`, `/swarm-execute`, `/swarm-review`) take optional tier arg (`low | auto | high | max`, default `auto`) to scale pipeline to scope of feature/diff. Same pipeline shape every tier — only worker count, model choice, review breadth, Codex coverage change. Contract-first TDD (Stub → Specify → Implement → Review) preserved every tier.
 
 ### /swarm-plan tiers
 
@@ -107,7 +107,7 @@ All three swarm skills (`/swarm-plan`, `/swarm-execute`, `/swarm-review`) take a
 
 ### /swarm-execute tiers
 
-Execute reads classification from the plan artifact header when present (primary signal); falls back to free-text signals otherwise. Loop rounds, builder model, and review breadth scale per tier.
+Execute reads classification from plan artifact header when present (primary signal); falls back to free-text signals otherwise. Loop rounds, builder model, review breadth scale per tier.
 
 | Tier | Intent | Defaults |
 |---|---|---|
@@ -118,7 +118,7 @@ Execute reads classification from the plan artifact header when present (primary
 
 ### /swarm-review tiers
 
-Review classifies from the **diff against the configured baseline** (`--base=<ref>`, default `main`). Baseline is a pipeline input, not an overlay axis — a tight baseline produces small diffs (tier=low), a wide baseline produces large diffs (tier=high/max). Breadth, RCA, and Codex scale per tier.
+Review classifies from **diff against configured baseline** (`--base=<ref>`, default `main`). Baseline = pipeline input, not overlay axis — tight baseline → small diffs (tier=low), wide baseline → large diffs (tier=high/max). Breadth, RCA, Codex scale per tier.
 
 | Tier | Intent | Defaults |
 |---|---|---|
@@ -127,16 +127,16 @@ Review classifies from the **diff against the configured baseline** (`--base=<re
 | `high` | ≤15 files, ≤500 lines, 1–2 subsystems, no One-Way Door High signals | Stage 1 (spec-compliance + test-coverage) + Stage 2 full (quality / security / perf / docs), RCA for Block/High, Codex off (auto-on for One-Way Door signals) |
 | `max` | >15 files, or cross-subsystem, or new crate, or breaking/protocol/security signals | Adversarial breadth (+ architect + SOTA + CLI-UX), RCA for all >Suggest, mandatory Codex code-diff gate |
 
-### Overlays (stackable, single-axis adjustments on top of the chosen tier)
+### Overlays (stackable, single-axis adjustments on top of chosen tier)
 
 **Plan overlays:**
 
 | Flag | Axis | Effect |
 |---|---|---|
 | `--architect=inline\|sonnet\|opus` | Architect model in Design phase | inline = orchestrator drafts design; sonnet/opus = `worker-architect` with named model |
-| `--research=skip\|1\|3` | Research worker count | skip / 1 axis / 3 axes in parallel (tech / patterns / domain) |
+| `--research=skip\|1\|3` | Research worker count | skip / 1 axis / 3 axes parallel (tech / patterns / domain) |
 | `--codex` / `--no-codex` | Plan-artifact Codex pass | Force on/off regardless of tier default |
-| `--dry-run` / `--form` | Meta-plan preview UI | Gate the orchestrator behind a single approval interaction |
+| `--dry-run` / `--form` | Meta-plan preview UI | Gate orchestrator behind single approval interaction |
 
 **Execute overlays:**
 
@@ -152,55 +152,55 @@ Review classifies from the **diff against the configured baseline** (`--base=<re
 
 | Flag | Axis | Effect |
 |---|---|---|
-| `--base=<git-ref>` | Diff baseline (pipeline input, not an axis) | Default `main`; PR targets auto-resolve via `gh pr view --json baseRefName`; user flag wins |
+| `--base=<git-ref>` | Diff baseline (pipeline input, not axis) | Default `main`; PR targets auto-resolve via `gh pr view --json baseRefName`; user flag wins |
 | `--breadth=minimal\|full\|adversarial` | Stage 2 perspective breadth | quality only / + security/perf/docs / + architect + SOTA + CLI-UX |
 | `--rca=on\|off` | Five Whys root-cause analysis depth | off at low; on for Block/High at high; on for >Suggest at max |
 | `--codex` / `--no-codex` | Cross-model Codex code-diff pass | Force on/off regardless of tier default |
 | `--dry-run` / `--form` | Meta-plan preview UI | Same semantics as plan/execute |
 
-User-supplied flags always override classifier-inferred overlays (except tier=max's mandatory `--builder=opus` in `/swarm-execute`). Ambiguous classifications are resolved at the meta-plan gate (single approval point), never via mid-flow questions.
+User-supplied flags always override classifier-inferred overlays (except tier=max's mandatory `--builder=opus` in `/swarm-execute`). Ambiguous classifications resolved at meta-plan gate (single approval point), never via mid-flow questions.
 
 ## Codex Plan Review (cross-model, plan-artifact scope)
 
-Extends the cross-model adversarial pass up the lifecycle. Same entry point (`/codex-adversary`), different scope:
+Extends cross-model adversarial pass up lifecycle. Same entry point (`/codex-adversary`), different scope:
 
 | Scope | When fires | Target |
 |---|---|---|
 | `code-diff` (default) | `/swarm-execute` final gate after Claude review loop converges; `/swarm-review` cross-model pass after Claude panel converges | Git diff (`working-tree` / `branch` / `--base`) |
 | `plan-artifact` | `/swarm-plan` Phase 6 after Claude panel converges | Plan / ADR markdown file (via `--target-file`) |
 
-Both are one-shot (no looping — prevents two-family stylistic thrash). Gating by tier:
+Both one-shot (no looping — prevents two-family stylistic thrash). Gating by tier:
 
 - `low`: skipped (Two-Way Door — cost > value)
 - `high`: off by default; auto-on when classifier detects One-Way Door signals (public API change, breaking change, novel algorithm); explicit via `--codex`
 - `max`: mandatory final gate
 
-Triage for plan-artifact scope mirrors the code-diff pass: Actionable → orchestrator edits plan, re-runs one `worker-reviewer` (spec-compliance) pass; Deferred → handoff; Stated-convention / Trivia → dropped with count. Unavailable path (CLAUDE_PLUGIN_ROOT unset or companion non-zero): log `Cross-model plan review skipped: <reason>` and continue.
+Triage for plan-artifact scope mirrors code-diff pass: Actionable → orchestrator edits plan, re-runs one `worker-reviewer` (spec-compliance) pass; Deferred → handoff; Stated-convention / Trivia → dropped with count. Unavailable path (CLAUDE_PLUGIN_ROOT unset or companion non-zero): log `Cross-model plan review skipped: <reason>` and continue.
 
 ## Coordination Protocol
 
 1. **Orchestrator** decomposes task into clear assignments
-2. **Workers** pick up assigned tasks and begin execution
+2. **Workers** pick up assigned tasks, begin execution
 3. **Workers** complete task following AGENTS.md "Session Completion" workflow
 4. **Workers** report completion to orchestrator
 5. **Orchestrator** integrates and verifies
 
 ### Worker Completion Requirements
 
-When a worker completes its assigned task, it MUST follow the full completion protocol from AGENTS.md:
+When worker completes assigned task, MUST follow full completion protocol from AGENTS.md:
 
 1. File issues for remaining work
 2. Run quality gates via `task verify` (if code changed) — run `task --list` to discover available commands
-3. **Commit all changes** on the feature branch
+3. **Commit all changes** on feature branch
 4. Report completion to orchestrator
 
-**Critical**: NEVER push to remote — the human decides when to push (CI has real cost).
+**Critical**: NEVER push to remote — human decides when to push (CI has real cost).
 
 ## Performance Tips
 
 - Launch multiple explorers for broad searches
 - Use worker-architect for decisions, worker-builder for execution
-- Send all Agent calls in a single message with multiple tool invocations so they run concurrently (max 8 workers)
+- Send all Agent calls in single message with multiple tool invocations → run concurrently (max 8 workers)
 - Keep worker prompts under 500 tokens for fast startup
 
 ## Anti-Patterns

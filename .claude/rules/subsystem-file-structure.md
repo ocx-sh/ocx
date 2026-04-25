@@ -10,13 +10,13 @@ paths:
 
 ## Design Rationale
 
-The old `objects/` tree conflated three concerns: raw OCI blobs, extracted layer files, and assembled packages. That conflation broke cross-repo dedup (repository was part of the CAS path), made shared layers impossible (one layer per package assumed), and had no place for non-extracted blobs (signatures, SBOMs). The three-tier split solves each problem with a clear lifecycle per tier:
+Old `objects/` tree mix three concerns: raw OCI blobs, extracted layer files, assembled packages. Mix break cross-repo dedup (repo in CAS path), block shared layers (one layer per package), no spot for non-extracted blobs (signatures, SBOMs). Three-tier split fix each problem, clear lifecycle per tier:
 
-- **`blobs/`** — raw OCI content (manifests, compressed layer archives); keyed by registry + digest; never extracted
-- **`layers/`** — extracted layer trees shared across packages; keyed by registry + digest; content deduplication unit for multi-layer packages
-- **`packages/`** — assembled packages; keyed by registry + digest only (no repo in path, enabling cross-repo dedup); contains hardlinked content assembled from one or more layers
+- **`blobs/`** — raw OCI content (manifests, compressed layer archives); key by registry + digest; never extracted
+- **`layers/`** — extracted layer trees shared across packages; key by registry + digest; dedup unit for multi-layer packages
+- **`packages/`** — assembled packages; key by registry + digest only (no repo in path → cross-repo dedup); hardlinked content from one or more layers
 
-Separating `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`) gives GC a single BFS pass over all three tiers. Only packages can be roots or have outgoing edges; layers and blobs are reachable only through package `refs/layers/` and `refs/blobs/` links.
+Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`) → GC do single BFS pass over all three tiers. Only packages can be roots or have outgoing edges; layers and blobs reachable only via package `refs/layers/` and `refs/blobs/` links.
 
 ## Module Map
 
@@ -35,7 +35,7 @@ Separating `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `bl
 
 ### Cross-cutting link primitives
 
-These modules live at `crates/ocx_lib/src/` root because they are consumed across subsystems.
+These modules sit at `crates/ocx_lib/src/` root — consumed across subsystems.
 
 | Module | Purpose | Used by |
 |--------|---------|---------|
@@ -56,7 +56,7 @@ pub struct FileStructure {
 }
 ```
 
-One instance per session. Sub-stores are public fields. `root()` returns the OCX home path. `profile_manifest()` returns `$OCX_HOME/profile.json`.
+One instance per session. Sub-stores public fields. `root()` return OCX home path. `profile_manifest()` return `$OCX_HOME/profile.json`.
 
 ## Six Stores
 
@@ -64,7 +64,7 @@ One instance per session. Sub-stores are public fields. `root()` returns the OCX
 
 Layout: `{root}/blobs/{registry_slug}/{algorithm}/{2hex}/{30hex}/data`
 
-Each blob directory contains: `data` (raw blob bytes), `digest` (full digest string for recovery).
+Each blob dir contain: `data` (raw blob bytes), `digest` (full digest string for recovery).
 
 Key methods: `path(registry, digest)`, `data(registry, digest)`, `digest_file(registry, digest)`, `list_all() → Vec<BlobDir>`.
 
@@ -74,7 +74,7 @@ Key methods: `path(registry, digest)`, `data(registry, digest)`, `digest_file(re
 
 Layout: `{root}/layers/{registry_slug}/{algorithm}/{2hex}/{30hex}/content/`
 
-Each layer directory contains: `content/` (extracted files), `digest`.
+Each layer dir contain: `content/` (extracted files), `digest`.
 
 Key methods: `path(registry, digest)`, `content(registry, digest)`, `digest_file(registry, digest)`, `list_all() → Vec<LayerDir>`.
 
@@ -84,15 +84,15 @@ Key methods: `path(registry, digest)`, `content(registry, digest)`, `digest_file
 
 Layout: `{root}/packages/{registry_slug}/{algorithm}/{2hex}/{30hex}/`
 
-**Repository is NOT part of the path.** Only registry + digest determine location, enabling cross-repo dedup.
+**Repository NOT in path.** Only registry + digest set location → cross-repo dedup.
 
-Each package directory contains: `content/`, `metadata.json`, `manifest.json`, `resolve.json`, `install.json`, `digest`, `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`.
+Each package dir contain: `content/`, `metadata.json`, `manifest.json`, `resolve.json`, `install.json`, `digest`, `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`.
 
 Key store methods: `path(pinned_id)`, `content(pinned_id)`, `metadata(pinned_id)`, `manifest(pinned_id)`, `resolve(pinned_id)`, `install_status(pinned_id)`, `digest_file(pinned_id)`, `metadata_for_content(content_path)`, `refs_symlinks_dir_for_content(content_path)`, `refs_deps_dir_for_content(content_path)`, `refs_layers_dir_for_content(content_path)`, `refs_blobs_dir_for_content(content_path)`, `resolve_for_content(content_path)`, `list_all() → Vec<PackageDir>`.
 
 `PackageDir` accessors: `content()`, `metadata()`, `manifest()`, `resolve()`, `install_status()`, `digest_file()`, `refs_symlinks_dir()`, `refs_deps_dir()`, `refs_layers_dir()`, `refs_blobs_dir()`.
 
-`*_for_content()` methods canonicalize the path (following install symlinks) then navigate to the sibling file/dir.
+`*_for_content()` methods canonicalize path (follow install symlinks), navigate to sibling file/dir.
 
 ### TagStore — Local tag index
 
@@ -110,23 +110,23 @@ pub enum SymlinkKind { Candidate, Current }
 
 Key methods: `candidate(identifier)`, `current(identifier)`, `candidates(identifier)`, `symlink(identifier, kind)`.
 
-`candidate()` uses `identifier.tag_or_latest()` (falls back to `"latest"` if no tag).
+`candidate()` use `identifier.tag_or_latest()` (fall back to `"latest"` if no tag).
 
 ### TempStore — Download staging
 
-Layout: `{root}/temp/{32-hex-hash}/` — deterministic SHA-256 hash of the full identifier string.
+Layout: `{root}/temp/{32-hex-hash}/` — deterministic SHA-256 hash of full identifier string.
 
-Lock file lives as a sibling: `{32-hex-hash}.lock`. `try_acquire()` is non-blocking; stale artifacts cleaned on acquire. The temp dir is atomically renamed into `packages/` on completion.
+Lock file sits as sibling: `{32-hex-hash}.lock`. `try_acquire()` non-blocking; stale artifacts cleaned on acquire. Temp dir atomically renamed into `packages/` on completion.
 
 ## Path Construction
 
 ### Slugification
 
-All OCI identifier components are slugified via `to_relaxed_slug()`: preserves `[a-zA-Z0-9._-]`, replaces everything else with `_`. Example: `localhost:5000` → `localhost_5000`.
+All OCI identifier parts slugified via `to_relaxed_slug()`: keep `[a-zA-Z0-9._-]`, replace rest with `_`. Example: `localhost:5000` → `localhost_5000`.
 
 ### Repository Path Splitting
 
-**Never use `.join("org/project/tool")`** — embeds literal `/`, causing mixed separators on Windows. Use `repository_path()` which splits on `/`:
+**Never use `.join("org/project/tool")`** — embed literal `/`, cause mixed separators on Windows. Use `repository_path()` — split on `/`:
 
 ```rust
 pub(crate) fn repository_path(repository: &str) -> PathBuf {
@@ -136,15 +136,15 @@ pub(crate) fn repository_path(repository: &str) -> PathBuf {
 
 ### Digest Sharding (`cas_path.rs`)
 
-`cas_shard_path(digest)` produces `{algorithm}/{hex[0..2]}/{hex[2..32]}` — a 2-level shard with 32 total hex chars encoded in the path. The full digest is NOT recoverable from the path alone; it is written to the sibling `digest` file by `write_digest_file()`.
+`cas_shard_path(digest)` produce `{algorithm}/{hex[0..2]}/{hex[2..32]}` — 2-level shard, 32 hex chars total in path. Full digest NOT recoverable from path alone; written to sibling `digest` file by `write_digest_file()`.
 
-`CAS_SHARD_DEPTH = 3` (algorithm + prefix + suffix). Store walkers set `max_depth` to `1 + CAS_SHARD_DEPTH` (the extra 1 is the registry slug level).
+`CAS_SHARD_DEPTH = 3` (algorithm + prefix + suffix). Store walkers set `max_depth` to `1 + CAS_SHARD_DEPTH` (extra 1 = registry slug level).
 
 `CasTier` enum: `Package`, `Layer`, `Blob` — used by GC and reporting.
 
 ## ReferenceManager
 
-Manages install symlinks and cross-tier forward-refs for safe GC. **Always use this for install symlinks, never raw `symlink::update/create`.**
+Manage install symlinks and cross-tier forward-refs for safe GC. **Always use this for install symlinks, never raw `symlink::update/create`.**
 
 ```rust
 pub fn link(&self, forward_path: &Path, content_path: &Path) -> Result<()>
@@ -154,44 +154,44 @@ pub fn unlink_dependency(&self, dependent_content: &Path, dependency_digest: &oc
 pub fn broken_refs(&self) -> Result<Vec<PathBuf>>
 ```
 
-**Arg order for `link()` is `(link, target)` — opposite of `symlink::update(target, link)`.** This is a common source of confusion.
+**Arg order for `link()` is `(link, target)` — opposite of `symlink::update(target, link)`.** Common confusion source.
 
-Install back-reference: `packages/.../refs/symlinks/{16_hex}` → forward symlink path. Name derived via `name_for_path(forward_path)` = first 16 hex chars of SHA-256(path bytes).
+Install back-reference: `packages/.../refs/symlinks/{16_hex}` → forward symlink path. Name from `name_for_path(forward_path)` = first 16 hex chars of SHA-256(path bytes).
 
-Dependency forward-ref: `packages/.../refs/deps/{algorithm}_{32_hex}` → dependency's `content/`. Name derived via `cas_ref_name(digest)` (in `cas_path` module, re-exported from `file_structure`) = `"{algorithm}_{first_32_hex}"`. No back-ref in the dependency's `refs/symlinks/`.
+Dependency forward-ref: `packages/.../refs/deps/{algorithm}_{32_hex}` → dependency's `content/`. Name from `cas_ref_name(digest)` (in `cas_path` module, re-exported from `file_structure`) = `"{algorithm}_{first_32_hex}"`. No back-ref in dependency's `refs/symlinks/`.
 
-Layer forward-ref: created by `pull` directly (not via `ReferenceManager`). Symlink in `refs/layers/` targets `layers/.../content/`. GC recovers the layer entry dir via `.parent()` on the target.
+Layer forward-ref: created by `pull` directly (not via `ReferenceManager`). Symlink in `refs/layers/` target `layers/.../content/`. GC recover layer entry dir via `.parent()` on target.
 
-Blob forward-ref: created by `pull` directly. Symlink in `refs/blobs/` targets `blobs/.../data`. GC recovers the blob entry dir via `.parent()` on the target.
+Blob forward-ref: created by `pull` directly. Symlink in `refs/blobs/` target `blobs/.../data`. GC recover blob entry dir via `.parent()` on target.
 
-`broken_refs()` checks only `refs/symlinks/` — not `refs/deps/`, `refs/layers/`, or `refs/blobs/`.
+`broken_refs()` check only `refs/symlinks/` — not `refs/deps/`, `refs/layers/`, `refs/blobs/`.
 
-**Idempotent**: `link()` is no-op if forward already points to content. `unlink()` is no-op if forward does not exist.
+**Idempotent**: `link()` no-op if forward already points to content. `unlink()` no-op if forward absent.
 
 ## GC Safety
 
-GC (`garbage_collection/reachability_graph.rs`) builds a `ReachabilityGraph` covering all three CAS tiers in a single BFS pass. Packages with live `refs/symlinks/` entries or profile content-mode references are roots. BFS follows four edge types from each package: `refs/deps/` (dependent packages), `refs/layers/` (extracted layers), `refs/blobs/` (raw blobs). Layers and blobs have no outgoing edges — they are reachable only through package refs. Everything unreachable is collected.
+GC (`garbage_collection/reachability_graph.rs`) build `ReachabilityGraph` covering all three CAS tiers in single BFS pass. Packages with live `refs/symlinks/` entries or profile content-mode refs = roots. BFS follow four edge types from each package: `refs/deps/` (dependent packages), `refs/layers/` (extracted layers), `refs/blobs/` (raw blobs). Layers and blobs no outgoing edges — reachable only via package refs. Unreachable = collected.
 
-Blobs are first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blob`) is included in the reachability walk. The previous `tier != CasTier::Blob` skip has been removed; blobs are retained only when a live `refs/blobs/` symlink points to them.
+Blobs first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blob`) included in reachability walk. Previous `tier != CasTier::Blob` skip removed; blobs retained only when live `refs/blobs/` symlink points to them.
 
-`BlobGuard` (`blob_store/blob_guard.rs`) provides RAII shared/exclusive advisory locking for individual blob data files. Acquire a read lock before reading, a write lock before writing. Internals use `file_lock::FileLock` (which wraps `fs2` in `spawn_blocking`) — do not call `BlobStore::data()` directly in concurrent paths; always go through `BlobGuard::acquire_read` / `acquire_write`.
+`BlobGuard` (`blob_store/blob_guard.rs`) provide RAII shared/exclusive advisory locking for individual blob data files. Acquire read lock before read, write lock before write. Internals use `file_lock::FileLock` (wraps `fs2` in `spawn_blocking`) — do not call `BlobStore::data()` directly in concurrent paths; always go through `BlobGuard::acquire_read` / `acquire_write`.
 
 ## symlink Module
 
-Low-level primitives. Use only for non-package symlinks or within `ReferenceManager`:
+Low-level primitives. Use only for non-package symlinks or inside `ReferenceManager`:
 - `create(target, link)` — create symlink + parent dirs
 - `update(target, link)` — create or replace
 - `remove(link)` — remove; no-op if absent
-- `is_link(path)` — use instead of `is_symlink()` — handles Windows NTFS junctions
+- `is_link(path)` — use instead of `is_symlink()` — handle Windows NTFS junctions
 
-Windows: uses NTFS junction points (no privilege escalation needed).
+Windows: use NTFS junction points (no privilege escalation needed).
 
 ## hardlink Module
 
 Low-level primitives for file-level dedup during layer assembly:
-- `create(source, link)` — hardlink; creates parent dirs; fails if link exists or cross-device
+- `create(source, link)` — hardlink; create parent dirs; fail if link exists or cross-device
 - `update(source, link)` — create or replace
 
-Cross-device hardlinks fail with `io::ErrorKind::CrossesDevices`. `$OCX_HOME` must live on a single volume — required by the `temp → packages/` atomic rename.
+Cross-device hardlinks fail with `io::ErrorKind::CrossesDevices`. `$OCX_HOME` must sit on single volume — required by `temp → packages/` atomic rename.
 
-**Assembly walker**: `utility/fs/assemble_from_layer(source_content, dest_content)` mirrors a layer's `content/` tree into a package's `content/` directory — hardlinking regular files via `hardlink::create`, creating real subdirectories, recreating intra-layer symlinks verbatim. `packages/{P}/content/` is a real directory, not a symlink into `layers/`. The walker fans out directory-level tasks through a semaphore-bounded `JoinSet`; per-task stats are return-and-summed (no shared mutex). Windows layer symlinks return `io::ErrorKind::Unsupported`.
+**Assembly walker**: `utility/fs/assemble_from_layer(source_content, dest_content)` mirror layer's `content/` tree into package's `content/` dir — hardlink regular files via `hardlink::create`, create real subdirs, recreate intra-layer symlinks verbatim. `packages/{P}/content/` is real dir, not symlink into `layers/`. Walker fan out dir-level tasks through semaphore-bounded `JoinSet`; per-task stats return-and-summed (no shared mutex). Windows layer symlinks return `io::ErrorKind::Unsupported`.

@@ -15,12 +15,12 @@ triggers:
 # Planning Orchestrator — Tiered
 
 Thin dispatch layer. Phase plans live in sibling tier files
-(`tier-low.md`, `tier-high.md`, `tier-max.md`); this file parses
-arguments, classifies the target (`classify.md`), resolves overlays
-(`overlays.md`), optionally gates on a meta-plan approval, then hands
-off to the matching tier file. Shared content (worker assignment,
-subsystem context, constraints, handoff format, research-primitive
-contract) stays here — never duplicated across tier files.
+(`tier-low.md`, `tier-high.md`, `tier-max.md`). This file parse args,
+classify target (`classify.md`), resolve overlays (`overlays.md`),
+optional gate on meta-plan approval, then hand off to matching tier
+file. Shared content (worker assignment, subsystem context,
+constraints, handoff format, research-primitive contract) stay here —
+never duplicated across tier files.
 
 ## Argument syntax
 
@@ -38,13 +38,13 @@ contract) stays here — never duplicated across tier files.
   - `--research=skip|1|3`
   - `--researcher=haiku|sonnet`
   - `--codex` / `--no-codex` — force plan-artifact Codex pass on/off
-  - `--dry-run` / `--form` — meta-plan preview (`--form` uses `AskUserQuestion`; implies `--dry-run`)
+  - `--dry-run` / `--form` — meta-plan preview (`--form` use `AskUserQuestion`; imply `--dry-run`)
 
 ## Workflow
 
 ### 1. Parse arguments and detect GitHub target
 
-Detect GitHub refs (ordered, first match wins):
+Detect GitHub refs (ordered, first match win):
 1. Full `https://github.com/<owner>/<repo>/(pull|issues)/<N>` URL
 2. `PR <N>` / `pull/<N>` / `pulls/<N>` → PR
 3. `issue <N>` / `issues/<N>` → issue
@@ -53,16 +53,16 @@ Detect GitHub refs (ordered, first match wins):
 Fetch via `mcp__github__pull_request_read` /
 `mcp__github__issue_read` (preferred); `gh pr view` / `gh issue view`
 with `--json title,body,comments,labels,files` as fallback. PRs and
-issues are equal-class targets — probe order is implementation detail.
-On fetch failure, treat input as free text (ask via `AskUserQuestion`
-only if disambiguation is actually required).
+issues equal-class targets — probe order implementation detail.
+On fetch fail, treat input as free text (ask via `AskUserQuestion`
+only if disambiguation needed).
 
 ### 2. Classify (only when tier=`auto`)
 
-Read `classify.md`. Apply tier signals + overlay triggers to the prompt
+Read `classify.md`. Apply tier signals + overlay triggers to prompt
 plus any fetched GitHub body/labels. Produce candidate tier +
-confidence flag + overlay set. Labels map directly (e.g.,
-`breaking-change` → `--codex`). PR file list feeds Discover scope (not
+confidence flag + overlay set. Labels map direct (e.g.,
+`breaking-change` → `--codex`). PR file list feed Discover scope (not
 classification).
 
 ### 3. Resolve overlays
@@ -72,9 +72,9 @@ classifier overlays + user flag overrides. User flags always win.
 
 ### 4. Meta-plan gate (single consolidated approval point)
 
-Fire when ANY of: `--dry-run`, `--form`, tier resolved to `max`, or
-classification marked low-confidence. This is the **only** user-prompt
-point — no mid-flow `AskUserQuestion` during classification.
+Fire when ANY of: `--dry-run`, `--form`, tier resolve to `max`, or
+classification marked low-confidence. **Only** user-prompt point — no
+mid-flow `AskUserQuestion` during classification.
 
 Write `.claude/state/plans/meta-plan_[feature].md` with:
 Classification (tier + rationale + overlays), GitHub context, Workers
@@ -82,21 +82,21 @@ I Would Launch (per phase), Artifacts I Would Produce, Estimated Cost
 (parallel worker count, heaviest call, Codex presence), Not Doing
 (implementation, PR creation).
 
-**Approval UI** (always a single interaction):
-- Default: `EnterPlanMode` with the meta-plan path; resume on approve.
-  *If skill resume after `ExitPlanMode` is unreliable in practice,
+**Approval UI** (always single interaction):
+- Default: `EnterPlanMode` with meta-plan path; resume on approve.
+  *If skill resume after `ExitPlanMode` unreliable in practice,
   fall back to `AskUserQuestion` with Approve / Edit / Cancel options.*
 - `--form`: ONE `AskUserQuestion` call with ≤4 batched axis questions
   (Tier / Architect / Research / Codex), first option "Recommended".
-  Never sequential prompts. The form IS the preview — do not also
-  fire the markdown gate.
+  Never sequential prompts. Form IS preview — do not also
+  fire markdown gate.
 
-On reject: re-draft meta-plan with the rejection rationale (free-text
-or explicit axis answers) and re-present once.
+On reject: re-draft meta-plan with rejection rationale (free-text
+or explicit axis answers), re-present once.
 
 ### 5. Announce final config (always)
 
-Print before loading the tier file:
+Print before loading tier file:
 
 ```
 Swarm plan
@@ -110,8 +110,8 @@ Swarm plan
 
 ### 6. Dispatch to tier file
 
-`Read` the matching `tier-{low,high,max}.md` and execute its phase
-plan. No phase content duplicated here.
+`Read` matching `tier-{low,high,max}.md`, execute its phase plan. No
+phase content duplicated here.
 
 ## Worker assignment (shared across tiers)
 
@@ -132,34 +132,34 @@ Max concurrent workers: 8 (per `workflow-swarm.md`).
 
 ## Subsystem context rules (shared)
 
-Identify involved subsystems and read their matching
+Identify involved subsystems, read matching
 `.claude/rules/subsystem-*.md` context rules — full subsystem → rule
-table lives in `CLAUDE.md` "Subsystem context".
+table live in `CLAUDE.md` "Subsystem context".
 
 ## Research as a Reusable Primitive
 
-Discover + Research phases are the canonical multi-agent research
-pattern for the project. Reused by `/architect`,
-`/meta-maintain-config` (`create`/`research` modes), and `/swarm-plan`.
-Consumers SHOULD: launch workers in parallel; split researchers by
-axis (tech / patterns / domain) when research is non-trivial; persist
-substantial findings as `research_[topic].md`; pair at least one
-explorer with researchers to ground external findings in local code.
-`meta-ai-config.md` "Research Protocol" references this contract.
+Discover + Research phases = canonical multi-agent research pattern
+for project. Reused by `/architect`, `/meta-maintain-config`
+(`create`/`research` modes), `/swarm-plan`. Consumers SHOULD: launch
+workers in parallel; split researchers by axis (tech / patterns /
+domain) when research non-trivial; persist substantial findings as
+`research_[topic].md`; pair at least one explorer with researchers to
+ground external findings in local code. `meta-ai-config.md`
+"Research Protocol" references this contract.
 
 ## Constraints
 
 - NO tasks without testable acceptance criteria; NO vague behaviors
-- NO assuming context — Discover runs on every tier
+- NO assuming context — Discover run every tier
 - NO skipping Review; NO >8 parallel workers
 - NO mid-flow `AskUserQuestion` during classification — ambiguity
-  always resolves at the meta-plan gate
+  always resolve at meta-plan gate
 - ALWAYS store artifacts in `.claude/artifacts/`; ALWAYS persist
   substantial research as `research_[topic].md`
 - ALWAYS include component contracts (with expected behavior and edge
   cases) and user experience scenarios (with error cases)
-- ALWAYS announce final config, even post-approval, and hand off to
-  `/swarm-execute` with an explicit next-step
+- ALWAYS announce final config, even post-approval, hand off to
+  `/swarm-execute` with explicit next-step
 
 ## Handoff format
 

@@ -23,7 +23,7 @@ NOTE: Commands use "allowed-tools:" not "tools:" (unlike agents)
 
 # You are now the [Persona Name]
 
-[Clear identity statement describing who this persona is and their primary focus. 2-3 sentences.]
+[Identity statement: who persona is, primary focus. 2-3 sentences.]
 
 ## Responsibilities
 
@@ -35,11 +35,11 @@ NOTE: Commands use "allowed-tools:" not "tools:" (unlike agents)
 
 ### [Method Category 1]
 
-[Description of approach or methodology]
+[Approach or methodology]
 
 ### [Method Category 2]
 
-[Description of approach or methodology]
+[Approach or methodology]
 
 ## Quality Standards
 

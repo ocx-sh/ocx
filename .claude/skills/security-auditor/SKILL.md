@@ -17,7 +17,7 @@ Role: security compliance, threat modeling, vulnerability assessment for OCX.
 
 ## Workflow
 
-1. **Map surface** — Grep/Glob for entry points and data flows
+1. **Map surface** — Grep/Glob for entry points + data flows
 2. **Enumerate threats** — STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, DoS, Elevation)
 3. **Trace data** — follow flow through handlers
 4. **Document** — findings with severity + CWE IDs
@@ -26,26 +26,26 @@ Role: security compliance, threat modeling, vulnerability assessment for OCX.
 
 ## Relevant Rules (load explicitly for planning)
 
-- `.claude/rules/quality-security.md` — OWASP Top 10, severity classification, OCX-specific attack surfaces (registry auth, symlink safety, archive extraction, codesign, env injection), OCX audit checklist
+- `.claude/rules/quality-security.md` — OWASP Top 10, severity class, OCX attack surfaces (registry auth, symlink safety, archive extraction, codesign, env injection), OCX audit checklist
 - `.claude/rules/quality-core.md` — universal block-tier anti-patterns
-- `.claude/rules/subsystem-oci.md` — registry communication details
-- `.claude/rules/subsystem-file-structure.md` — symlink and GC semantics
+- `.claude/rules/subsystem-oci.md` — registry comms
+- `.claude/rules/subsystem-file-structure.md` — symlink + GC semantics
 
 ## Tool Preferences
 
 - **Sequential Thinking MCP** — walk each STRIDE category in order
-- **`trivy`** — dependency vulnerability scanning
+- **`trivy`** — dep vulnerability scan
 
 ## Constraints
 
-- NO approving code with critical vulnerabilities
-- NO custom crypto implementations
-- ALWAYS reference CWE IDs in findings
+- NO approve code with critical vulns
+- NO custom crypto
+- ALWAYS cite CWE IDs in findings
 - ALWAYS create issues for Critical/High findings
 
 ## Handoff
 
-- To Builder — for remediation
-- To Architect — for design changes
+- To Builder — remediation
+- To Architect — design changes
 
 $ARGUMENTS

@@ -11,14 +11,14 @@ Methodology:
 - STRIDE threat modeling (Spoofing, Tampering, Repudiation, Information Disclosure, DoS, Elevation)
 - OWASP Top 10 (2021) - https://owasp.org/Top10/
 - MITRE ATT&CK framework for advanced threat mapping - https://attack.mitre.org/
-- CWE (Common Weakness Enumeration) for vulnerability classification
-- Dependency scanning (Trivy, Snyk, or equivalent)
+- CWE (Common Weakness Enumeration) for vuln classification
+- Dependency scanning (Trivy, Snyk, equivalent)
 
-For cloud-native systems, also consider:
-- Shared responsibility model (what's provider-managed vs customer-managed)
-- IAM policies, roles, and service accounts
+Cloud-native systems, also consider:
+- Shared responsibility model (provider-managed vs customer-managed)
+- IAM policies, roles, service accounts
 - Network segmentation (VPCs, security groups)
-- Managed service configurations
+- Managed service configs
 -->
 
 ## Executive Summary
@@ -26,7 +26,7 @@ For cloud-native systems, also consider:
 **Audit Date:** [YYYY-MM-DD]
 **Auditor:** [Name]
 **Beads Issue:** [bd://issue-id or N/A]
-**Scope:** [What was audited]
+**Scope:** [What audited]
 **Overall Risk Level:** Critical | High | Medium | Low
 
 ### Summary of Findings
@@ -50,14 +50,14 @@ For cloud-native systems, also consider:
 
 ### Out of Scope
 
-- [Explicitly excluded items]
+- [Excluded items]
 
 ### Methodology
 
 - [ ] Static code analysis
 - [ ] Dynamic testing
 - [ ] Dependency scanning
-- [ ] Configuration review
+- [ ] Config review
 - [ ] Threat modeling (STRIDE)
 
 ### Pre-Audit Checklist
@@ -67,7 +67,7 @@ From `/security-auditor` persona requirements:
 - [ ] Authentication/Authorization reviewed
 - [ ] Input validation verified
 - [ ] Secrets management audited
-- [ ] Dependency vulnerabilities scanned
+- [ ] Dependency vulns scanned
 - [ ] Data encryption confirmed
 - [ ] Audit logging verified
 
@@ -94,14 +94,14 @@ From `/security-auditor` persona requirements:
 **CVSS:** [Score]
 
 **Description:**
-[Detailed description of the vulnerability]
+[Vuln description]
 
 **Location:**
 - File: `path/to/file.ts:123`
 - Endpoint: `POST /api/vulnerable`
 
 **Impact:**
-[What could happen if exploited]
+[What happens if exploited]
 
 **Proof of Concept:**
 ```
@@ -179,7 +179,7 @@ From `/security-auditor` persona requirements:
 
 ## Cloud-Native Security Assessment
 
-*Skip this section if not applicable to your architecture.*
+*Skip if not applicable to architecture.*
 
 ### Shared Responsibility Model
 
@@ -236,7 +236,7 @@ From `/security-auditor` persona requirements:
 ### Secrets Management
 
 - [ ] No hardcoded secrets in code
-- [ ] Environment variables properly configured
+- [ ] Env vars properly configured
 - [ ] Secrets rotation policy in place
 
 ### Authentication
@@ -247,8 +247,8 @@ From `/security-auditor` persona requirements:
 
 ### Authorization
 
-- [ ] Principle of least privilege applied
-- [ ] Role-based access control implemented
+- [ ] Least privilege applied
+- [ ] RBAC implemented
 - [ ] API authorization consistent
 
 ### Data Protection
@@ -283,7 +283,7 @@ From `/security-auditor` persona requirements:
 
 ## MITRE ATT&CK Mapping
 
-*For advanced persistent threat (APT) analysis. Skip for basic audits.*
+*For APT analysis. Skip for basic audits.*
 
 | Tactic | Technique ID | Technique Name | Mitigated | Notes |
 |--------|--------------|----------------|-----------|-------|
@@ -308,7 +308,7 @@ From `/security-auditor` persona requirements:
 
 ### Test Cases
 
-[Detailed test cases if applicable]
+[Test cases if applicable]
 
 ---
 

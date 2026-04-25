@@ -5,11 +5,11 @@ paths:
 
 # CLI Subsystem
 
-Thin CLI shell using clap at `crates/ocx_cli/src/`. One file per subcommand, output formatting via `Printable` trait.
+Thin CLI shell. Use clap at `crates/ocx_cli/src/`. One file per subcommand. Output format via `Printable` trait.
 
 ## Design Rationale
 
-The CLI is intentionally thin — all business logic lives in `ocx_lib` so it can be reused by other consumers (mirror tool, future SDK). Single `Context` struct with lazy init avoids constructing unused clients/indices. The `Printable` trait gives each report type ownership of its own formatting (plain + JSON), enforcing the single-table rule without a central formatter. See `arch-principles.md` for the full pattern catalog.
+CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse (mirror tool, future SDK). Single `Context` struct with lazy init. No build unused client/index. `Printable` trait give each report type own formatting (plain + JSON). Enforce single-table rule without central formatter. See `arch-principles.md` for full pattern catalog.
 
 ## Module Map
 
@@ -29,7 +29,7 @@ The CLI is intentionally thin — all business logic lives in `ocx_lib` so it ca
 
 ## Context Struct
 
-Created once per command invocation via `Context::try_init(options, color_config)`:
+Made once per command invocation via `Context::try_init(options, color_config)`:
 
 ```rust
 pub struct Context {
@@ -48,7 +48,7 @@ Accessors: `manager()`, `api()`, `file_structure()`, `default_index()`, `local_i
 
 ## Command Pattern
 
-Every command follows the same flow:
+Every command same flow:
 
 1. **Transform identifiers** — `options::Identifier::transform_all(packages, default_registry)`
 2. **Call manager task** — `context.manager().task_all(identifiers, ...)`
@@ -68,7 +68,7 @@ pub trait Printable: serde::Serialize {
 
 ### Rules
 
-- **Single table**: Each `print_plain()` produces exactly one `print_table()` call
+- **Single table**: Each `print_plain()` make exactly one `print_table()` call
 - **Static headers**: Use `&str` array, never `format!()` for dynamic headers
 - **Typed enums**: Status values are enums with `Display` + `Serialize`, not raw strings
 - **Report actual results**: Build data from task return values, not echoed CLI args
@@ -76,14 +76,14 @@ pub trait Printable: serde::Serialize {
 
 ### Adding a New Report Type
 
-1. Create `api/data/{name}.rs` with struct + doc comments + `Printable` impl
+1. Make `api/data/{name}.rs` with struct + doc comments + `Printable` impl
 2. Add `pub mod {name};` to `api/data.rs`
-3. Add `report_{name}()` method to `Api` (delegates to `self.report()`)
+3. Add `report_{name}()` method to `Api` (delegate to `self.report()`)
 4. Call from `command/{name}.rs` with data built from task results
 
-See `subsystem-cli-api.md` for the full contract and `subsystem-cli-commands.md` for the quick reference. User-facing per-command docs live at `website/src/docs/reference/command-line.md`.
+See `subsystem-cli-api.md` for full contract. `subsystem-cli-commands.md` for quick reference. User-facing per-command docs at `website/src/docs/reference/command-line.md`.
 
 ## Quality Gate
 
-During review-fix loops, run `task rust:verify` — not full `task verify`.
-Full `task verify` is the final gate before commit.
+During review-fix loop, run `task rust:verify` — not full `task verify`.
+Full `task verify` = final gate before commit.

@@ -1,33 +1,33 @@
 # Triage — Classes, Heuristics, Report Format
 
-Reference for Step 3 of `/codex-adversary`: how to classify Codex's free-text output into auto-fix / needs-confirmation / discuss / filtered classes, and how to render the triaged report.
+Reference for Step 3 of `/codex-adversary`: classify Codex free-text output into auto-fix / needs-confirmation / discuss / filtered classes, render triaged report.
 
 ## Triage classes
 
 | Class | Definition | Action |
 |---|---|---|
-| **Auto-fix** | Clear root cause, small edit, obviously correct, no architectural or security implications, fits existing patterns, covered by test suite | Apply directly via `Edit` / `Write`. Run `task verify`. Report what was done. |
-| **Needs confirmation** | Correct observation but the fix has design implications, touches security/auth, introduces or removes a dependency, changes a public API, affects a large surface | Present the finding + proposed fix + tradeoff. Wait for user decision via `AskUserQuestion` or free-text. |
-| **Discuss** | Codex raises a real design question with no single right answer (e.g., "this approach assumes X — is that intentional?") | Present the question verbatim with Claude's take. Let the user decide. Do not auto-answer. |
-| **Filtered — trivia** | Subjective style, nit-pick formatting (`cargo fmt` handles it), wording in comments | Drop. Mention count only. |
-| **Filtered — stated convention** | Codex critiques something explicitly fixed by `AGENTS.md` / `CLAUDE.md` (e.g., "consider Nix instead of OCI", "consider async-std instead of Tokio", "add Co-Authored-By") | Drop. Mention count only. |
-| **Filtered — false positive** | Codex flags something based on stale or partial context; verify against current code before counting it | Drop. If you are not sure it is false, promote to *needs confirmation* instead. |
+| **Auto-fix** | Clear root cause, small edit, obviously correct, no architectural/security implications, fits existing patterns, covered by tests | Apply via `Edit` / `Write`. Run `task verify`. Report done. |
+| **Needs confirmation** | Correct observation but fix has design implications, touches security/auth, adds/removes dependency, changes public API, affects large surface | Present finding + proposed fix + tradeoff. Wait for user via `AskUserQuestion` or free-text. |
+| **Discuss** | Codex raises real design question, no single right answer (e.g., "this approach assumes X — is that intentional?") | Present question verbatim with Claude take. User decides. No auto-answer. |
+| **Filtered — trivia** | Subjective style, nit-pick formatting (`cargo fmt` handles it), comment wording | Drop. Mention count only. |
+| **Filtered — stated convention** | Codex critiques thing explicitly fixed by `AGENTS.md` / `CLAUDE.md` (e.g., "consider Nix instead of OCI", "consider async-std instead of Tokio", "add Co-Authored-By") | Drop. Mention count only. |
+| **Filtered — false positive** | Codex flags from stale/partial context; verify against current code before counting | Drop. If unsure, promote to *needs confirmation*. |
 
 ## Heuristics for "safe to auto-fix"
 
-- The fix is ≤10 lines and affects ≤3 files
-- The fix is entirely inside one subsystem (no cross-crate changes)
+- Fix ≤10 lines, ≤3 files
+- Fix entirely inside one subsystem (no cross-crate changes)
 - No security/auth/secrets/crypto code touched
 - No `pub` API surface changed
 - No new dependencies, no version bumps
-- No changes to `.claude/`, `CLAUDE.md`, `AGENTS.md`, or quality gates
+- No changes to `.claude/`, `CLAUDE.md`, `AGENTS.md`, quality gates
 - Tests still pass (verify after)
 
-If in doubt, promote to **needs confirmation**. Better to ask once than to apply a wrong "obvious" fix.
+If doubt, promote to **needs confirmation**. Better ask once than apply wrong "obvious" fix.
 
 ## Report format
 
-Produce a single triaged report back to the user:
+Produce single triaged report:
 
 ```
 ## Codex adversarial review — triaged
@@ -46,4 +46,4 @@ Produce a single triaged report back to the user:
 **Filtered** (M trivia, K stated-convention, P false-positive)
 ```
 
-Then, without further prompting, apply the **Auto-fix** items. If any auto-fix has non-trivial implications discovered during implementation (unexpected compile errors, cross-cutting changes), abort that item and reclassify it as **needs confirmation**.
+Then, no further prompting, apply **Auto-fix** items. If any auto-fix has non-trivial implications during implementation (unexpected compile errors, cross-cutting changes), abort and reclassify as **needs confirmation**.

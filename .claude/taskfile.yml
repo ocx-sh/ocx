@@ -44,6 +44,12 @@ tasks:
     generates:
       - '{{.REPORTS_DIR}}/tests.junit.xml'
 
+  fix:canonical-block:
+    desc: Re-sync canonical Review-Fix Loop block from workflow-swarm.md to bugfix.md/refactor.md
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - python3 scripts/sync-canonical-blocks.py
+
   lint:links:
     desc: Check markdown cross-references in .claude/, CLAUDE.md, and AGENTS.md (offline)
     dir: '{{.TASKFILE_DIR}}'

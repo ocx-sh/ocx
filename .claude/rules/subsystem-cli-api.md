@@ -6,13 +6,13 @@ paths:
 
 # CLI API Data Layer Patterns
 
-Standards for the `ocx_cli` API reporting layer (`api/data/`, `api.rs`). These rules ensure consistent output formatting across all commands.
+Standards for `ocx_cli` API reporting layer (`api/data/`, `api.rs`). Rules ensure consistent output format across all commands.
 
 ## Data Type Structure
 
-Every file in `api/data/` must follow this structure:
+Every file in `api/data/` follow this structure:
 
-1. **Doc comments** on all public types — describe purpose, plain format, and JSON format:
+1. **Doc comments** on all public types — describe purpose, plain format, JSON format:
    ```rust
    /// Short description of what this represents.
    ///
@@ -21,14 +21,14 @@ Every file in `api/data/` must follow this structure:
    /// JSON format: shape description (array of objects, keyed object, etc.).
    ```
 2. **`new()` constructor** (or named constructors for polymorphic types like `without_tags` / `with_tags`)
-3. **`Printable` impl** with a single `print_table` call — no conditional empty-checks, no multiple tables
-4. **Static `&str` headers** in `print_table` — never use `format!()` for dynamic headers; add data columns instead
+3. **`Printable` impl** with single `print_table` call — no conditional empty-checks, no multiple tables
+4. **Static `&str` headers** in `print_table` — never `format!()` for dynamic headers; add data columns instead
 
-Reference implementations: `api/data/paths.rs`, `api/data/env.rs`.
+Reference impls: `api/data/paths.rs`, `api/data/env.rs`.
 
 ## Single-Table Rule
 
-Each `Printable::print_plain()` implementation must produce exactly one table. If a report has multiple dimensions (e.g., type + path, or status + content), encode them as columns — not as separate tables with dynamic headers.
+Each `Printable::print_plain()` impl produce exactly one table. Multiple dimensions (e.g., type + path, status + content) → encode as columns, not separate tables with dynamic headers.
 
 **Wrong:**
 ```rust
@@ -48,15 +48,15 @@ print_table(&["Type", "Dry Run", "Path"], &rows);
 
 ## Report Actual Results
 
-Commands must report what actually happened, not echo back input. Task methods must return enough data for the command to build accurate output.
+Commands report what happened, not echo input. Task methods return enough data for command to build accurate output.
 
-- **Task return values drive the report.** If a task can be a no-op (resource already absent), the return type must encode this (e.g., `Option<PathBuf>` where `None` = no-op).
-- **Never build report data from `self.packages` (CLI args) alone.** Always use the task's return value to determine status.
-- **Preserve input order.** `_all` methods must return results in the same order as the input `packages` slice, so the caller can zip them with the original identifiers.
+- **Task return values drive report.** Task can be no-op (resource already absent) → return type must encode this (e.g., `Option<PathBuf>` where `None` = no-op).
+- **Never build report data from `self.packages` (CLI args) alone.** Use task return value for status.
+- **Preserve input order.** `_all` methods return results in same order as input `packages` slice, so caller zip with original identifiers.
 
 ## Typed Enums Over Strings
 
-Status values, category tags, and other bounded sets must be enums with `Display` and `Serialize` impls — never raw `String` fields.
+Status values, category tags, bounded sets = enums with `Display` and `Serialize` impls — never raw `String` fields.
 
 ```rust
 #[derive(Serialize, Clone, Copy)]
@@ -69,8 +69,8 @@ pub enum RemovedStatus {
 
 ## JSON Serialization
 
-- Types wrapping a `Vec<Entry>` should implement custom `Serialize` to flatten to the inner array (no wrapper object).
-- Types using `HashMap` with `#[serde(flatten)]` produce top-level keyed objects — this is the correct pattern for package-keyed results.
+- Types wrapping `Vec<Entry>` implement custom `Serialize` to flatten to inner array (no wrapper object).
+- Types using `HashMap` with `#[serde(flatten)]` produce top-level keyed objects — correct pattern for package-keyed results.
 - Polymorphic types use `#[serde(untagged)]` to produce different JSON shapes per variant.
 
 ## Adding a New Report Type

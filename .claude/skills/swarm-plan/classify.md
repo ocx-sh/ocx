@@ -1,15 +1,8 @@
 # Classification Signals
 
-Signal-to-tier mapping used when `/swarm-plan` runs with tier=`auto`. Also
-defines overlay triggers that stack on top of the chosen tier.
+Signal-to-tier map for `/swarm-plan` with tier=`auto`. Also defines overlay triggers stack on chosen tier.
 
-The classifier reads the free-text target and any GitHub context (PR/issue
-title, body, labels) and picks a tier plus zero or more overlays. When
-signals are genuinely split across adjacent tiers, or the overlay mix is
-unusual, mark the classification **low-confidence** — this forces the
-meta-plan gate in SKILL.md step 5. Do **not** fire a mid-flow
-`AskUserQuestion`; ambiguity is always resolved at the single approval
-gate.
+Classifier reads free-text target + GitHub context (PR/issue title, body, labels), picks tier + zero or more overlays. When signals split across adjacent tiers, or overlay mix unusual, mark **low-confidence** — forces meta-plan gate in SKILL.md step 5. Do **not** fire mid-flow `AskUserQuestion`; ambiguity resolved at single approval gate.
 
 ## Tier signal table
 
@@ -19,34 +12,25 @@ gate.
 | **high** | One-Way Door Medium; new subcommand; new index format; new storage layout; 1–2 subsystems; label `enhancement`, `feature` | `new ocx env composition command`, `add referrers API`, `introduce tag lock cache` |
 | **max** | One-Way Door High; new crate; breaking API; cross-subsystem refactor; protocol change; label `breaking-change`, `epic` | `metadata-first pull pipeline`, `new mirror backend`, `refactor reference manager to event-sourced model` |
 
-A prompt may match multiple rows — pick the **highest** tier for which at
-least one clear signal fires. A single `low` keyword does not demote a
-feature whose body clearly describes a high-effort change.
+Prompt may match multiple rows — pick **highest** tier with ≥1 clear signal. Single `low` keyword no demote feature whose body describes high-effort change.
 
 ## Confidence rules
 
-- **Confident**: one tier has ≥2 matching signals and no competing
-  signals from an adjacent tier. Proceed without the meta-plan gate.
-- **Low-confidence**: signals split across adjacent tiers (e.g., one
-  `low` and one `high` signal), or the target is terse and provides no
-  discriminating cues. Flag the classification; SKILL.md routes it into
-  the meta-plan gate.
+- **Confident**: one tier ≥2 matching signals, no competing signals from adjacent tier. Proceed without meta-plan gate.
+- **Low-confidence**: signals split across adjacent tiers (e.g., one `low` + one `high`), or target terse with no discriminating cues. Flag classification; SKILL.md routes into meta-plan gate.
 
-Never manufacture a question when you are confident. The rule is:
-*announce and proceed*, or *let the meta-plan gate handle it*.
+Never manufacture question when confident. Rule: *announce and proceed*, or *let meta-plan gate handle it*.
 
 ## Overlay triggers
 
-Overlays adjust a single axis on top of the chosen tier. They stack —
-multiple triggers may fire. Axis definitions and their effects live in
-`overlays.md`.
+Overlays adjust single axis on top of chosen tier. Stack — multiple triggers may fire. Axis definitions + effects in `overlays.md`.
 
 | Overlay | Triggered by signals |
 |---|---|
 | `--architect=opus` | "new trait hierarchy", "novel algorithm", "cross-subsystem", "protocol change", "content-addressed storage layout change" |
 | `--research=3` | "new dependency category", "SOTA comparison", "compliance requirement", "security-sensitive area", "cryptographic primitive" |
-| `--researcher=haiku` | `--research=1` (single-axis) AND prompt is a narrow single-concept factual lookup (e.g., "check if crate X has a CVE", "find the current version of tool Y", "does library Z support feature W"); NO cross-subsystem keywords; NO multi-source synthesis signal. Context-cap guard: if projected research prompt + sources exceeds 150k tokens, stay `sonnet`. |
-| `--codex` (plan review) | One-Way Door Medium/High; "public API change"; "breaking change"; "security-sensitive"; "novel algorithm"; label `breaking-change`; label `security`; any One-Way Door that would be costly to reverse |
+| `--researcher=haiku` | `--research=1` (single-axis) AND prompt is narrow single-concept factual lookup (e.g., "check if crate X has a CVE", "find the current version of tool Y", "does library Z support feature W"); NO cross-subsystem keywords; NO multi-source synthesis signal. Context-cap guard: if projected research prompt + sources exceeds 150k tokens, stay `sonnet`. |
+| `--codex` (plan review) | One-Way Door Medium/High; "public API change"; "breaking change"; "security-sensitive"; "novel algorithm"; label `breaking-change`; label `security`; any One-Way Door costly to reverse |
 
 Defaults per tier (before overlays apply):
 
@@ -59,25 +43,15 @@ Defaults per tier (before overlays apply):
 
 ## GitHub context as a classification input
 
-When `/swarm-plan <N>` resolves to a PR or issue, feed the following into
-the signal matcher alongside the free-text prompt:
+When `/swarm-plan <N>` resolves to PR or issue, feed into signal matcher alongside free-text prompt:
 
-- Title + body (treat as the prompt)
-- Labels (map directly to signals — `breaking-change` → `--codex`,
-  `small` → hint toward `low`, `epic` → hint toward `max`)
+- Title + body (treat as prompt)
+- Labels (map directly to signals — `breaking-change` → `--codex`, `small` → hint toward `low`, `epic` → hint toward `max`)
 - For PRs: file list (feeds Discover scope, not classification)
 
 ## Examples
 
-1. `/swarm-plan "add --json flag to ocx ls"` → tier=**low**, no overlays,
-   confident.
-2. `/swarm-plan "refactor the OCI pull pipeline"` → tier=**high** +
-   overlays `--architect=opus` (cross-subsystem), `--codex` (public API).
-   Likely promoted to `max` by the `--architect=opus` + cross-subsystem
-   combo — depends on prompt details.
-3. `/swarm-plan "extend index caching"` → low-confidence (split between
-   `low` — "extend" — and `high` — "caching layer change"). Meta-plan
-   gate fires.
-4. `/swarm-plan 143` where PR #143 has label `breaking-change` +
-   `enhancement` → tier=**high** + `--codex` overlay (from
-   `breaking-change` label).
+1. `/swarm-plan "add --json flag to ocx ls"` → tier=**low**, no overlays, confident.
+2. `/swarm-plan "refactor the OCI pull pipeline"` → tier=**high** + overlays `--architect=opus` (cross-subsystem), `--codex` (public API). Likely promoted to `max` by `--architect=opus` + cross-subsystem combo — depends on prompt details.
+3. `/swarm-plan "extend index caching"` → low-confidence (split between `low` — "extend" — and `high` — "caching layer change"). Meta-plan gate fires.
+4. `/swarm-plan 143` where PR #143 has label `breaking-change` + `enhancement` → tier=**high** + `--codex` overlay (from `breaking-change` label).

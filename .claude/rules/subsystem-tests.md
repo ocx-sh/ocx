@@ -9,7 +9,7 @@ Pytest acceptance tests with Docker Compose registry at `test/`.
 
 ## Design Rationale
 
-Pytest (not Rust integration tests) because acceptance tests exercise the real compiled binary against a real OCI registry — catching issues that unit tests with mocked transports miss. Session-scoped registry (started once in `pytest_sessionstart`) enables fast parallel runs with pytest-xdist. UUID-prefixed repo names provide test isolation on a shared registry without per-test cleanup. See `arch-principles.md` for the full pattern catalog.
+Pytest (not Rust integration tests) because acceptance tests exercise real compiled binary against real OCI registry — catch issues mocked unit tests miss. Session-scoped registry (started once in `pytest_sessionstart`) enables fast parallel runs with pytest-xdist. UUID-prefixed repo names provide isolation on shared registry, no per-test cleanup. See `arch-principles.md` for full pattern catalog.
 
 ## Structure
 
@@ -29,10 +29,10 @@ Pytest (not Rust integration tests) because acceptance tests exercise the real c
 |---------|-------|---------|
 | `registry` | session | localhost:5000 registry:2 (auto-started via docker-compose) |
 | `ocx_binary` | session | Path to compiled `ocx` binary |
-| `ocx_home` | function | Isolated temp directory for `OCX_HOME` |
+| `ocx_home` | function | Isolated temp dir for `OCX_HOME` |
 | `ocx` | function | `OcxRunner` instance with test isolation |
 | `unique_repo` | function | UUID-prefixed repo name (e.g., `t_a1b2c3d4_test`) |
-| `published_package` | function | Pre-built and pre-pushed test package (v1.0.0) → `PackageInfo` |
+| `published_package` | function | Pre-built + pre-pushed test package (v1.0.0) → `PackageInfo` |
 | `published_two_versions` | function | Two versions (v1.0.0, v2.0.0) → `tuple[PackageInfo, PackageInfo]` |
 
 ## OcxRunner API
@@ -44,7 +44,7 @@ runner.json(*args)                             # Run + parse JSON stdout
 runner.plain(*args)                            # Run without --format flag
 ```
 
-Environment: `OCX_HOME`, `OCX_DEFAULT_REGISTRY`, `OCX_INSECURE_REGISTRIES` set per instance.
+Env: `OCX_HOME`, `OCX_DEFAULT_REGISTRY`, `OCX_INSECURE_REGISTRIES` set per instance.
 
 ## PackageInfo
 
@@ -60,7 +60,7 @@ Returned by `published_package` / `published_two_versions`:
 
 ## make_package()
 
-Creates, bundles, pushes, and indexes a test package:
+Creates, bundles, pushes, indexes test package:
 
 ```python
 pkg = make_package(ocx, repo, tag, tmp_path,
@@ -74,18 +74,18 @@ pkg = make_package(ocx, repo, tag, tmp_path,
 ## Assertion Helpers
 
 - `assert_path_exists(path)` — exists (file, dir, or symlink)
-- `assert_dir_exists(path)` — is a directory
-- `assert_symlink_exists(path)` — is a symlink or Windows junction
-- `assert_not_exists(path)` — does not exist and is not a symlink
+- `assert_dir_exists(path)` — is directory
+- `assert_symlink_exists(path)` — is symlink or Windows junction
+- `assert_not_exists(path)` — not exist and not symlink
 
-**Always use `assert_symlink_exists()` instead of `path.is_symlink()`** for Windows junction compatibility.
+**Always use `assert_symlink_exists()` instead of `path.is_symlink()`** for Windows junction compat.
 
 ## Test Isolation
 
-- **Per-test OCX_HOME**: Each test gets isolated `tmp_path` as `OCX_HOME`
+- **Per-test OCX_HOME**: each test gets isolated `tmp_path` as `OCX_HOME`
 - **UUID repo names**: `unique_repo` fixture prevents collisions in shared registry
-- **Shared registry**: Session-scoped; all tests push/pull from same instance
-- **Minimal env**: OcxRunner strips ambient environment; only PATH, HOME, and OCX vars
+- **Shared registry**: session-scoped; all tests push/pull same instance
+- **Minimal env**: OcxRunner strips ambient env; only PATH, HOME, OCX vars
 
 ## Running Tests
 
@@ -103,14 +103,13 @@ cd test && uv run pytest tests/test_install.py::test_name -v --no-build
 1. Create function in appropriate `test/tests/test_*.py` (or new file)
 2. Use `ocx: OcxRunner` and `published_package: PackageInfo` fixtures
 3. Call `ocx.json("command", pkg.short)` and assert results
-4. For custom packages, use `make_package()` with `unique_repo` and `tmp_path`
+4. Custom packages: use `make_package()` with `unique_repo` and `tmp_path`
 5. Run: `cd test && uv run pytest tests/test_file.py::test_name -v --no-build`
 
 ## Test Files
 
-19 test files covering: install, find, select, uninstall, purge, clean, offline, env, exec, package lifecycle, cascade, package pull, describe, package info, index, color, mirror, CI export, shell profile.
+19 test files cover: install, find, select, uninstall, purge, clean, offline, env, exec, package lifecycle, cascade, package pull, describe, package info, index, color, mirror, CI export, shell profile.
 
 ## Quality Gate
 
-During review-fix loops, run `task test:parallel` — not full `task verify`.
-Acceptance tests only; no Rust rebuild needed when using `--no-build`.
+During review-fix loops, run `task test:parallel` — not full `task verify`. Acceptance tests only; no Rust rebuild needed with `--no-build`.

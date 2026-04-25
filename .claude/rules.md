@@ -1,33 +1,27 @@
 # OCX Rule Catalog
 
-This file is the entry point for `.claude/rules/`. It exists because path-scoped
-rules only fire when you edit a matching file, which is not enough when you are
-planning, researching, or making architectural decisions before any code exists.
+Entry point for `.claude/rules/`. Path-scoped rules fire only on file edit match — not enough during planning, research, or architecture before code exists.
 
 ## When to consult this catalog
 
-- Plan or architecture phase — scan "By concern" before drafting
-- Research phase — find quality criteria for the topic you are evaluating
-- Onboarding to a new area — scan "By subsystem" / "By language"
-- Writing ADRs, RFCs, research artifacts — find the rules relevant to the topic
+- Plan/architecture phase — scan "By concern" before drafting
+- Research phase — find quality criteria for topic
+- Onboarding new area — scan "By subsystem" / "By language"
+- Writing ADRs, RFCs, research artifacts — find relevant rules
 - Updating AI config — see "AI config changes" row in "By concern"
 
-If you are editing code and the relevant rule already auto-loaded via its
-`paths:` glob, you do not need to re-read it from the catalog. The catalog is
-for cases where path-scoping cannot fire.
+Editing code + relevant rule auto-loaded via `paths:` glob → no need re-read from catalog. Catalog for cases where path-scoping cannot fire.
 
 ## How to update this catalog
 
-Any change to `.claude/rules/` must be reflected here in the same commit:
+Any change to `.claude/rules/` must reflect here in same commit:
 
-- New rule → add row in the relevant tables below
+- New rule → add row in relevant tables below
 - Deleted rule → remove all references
 - Changed `paths:` glob → update "By auto-load path" table
 - New skill → add entry in "Skills by task topic"
 
-The structural tests in `.claude/tests/test_ai_config.py` fail when the catalog
-drifts from reality. Run `task claude:tests` locally before committing
-catalog changes.
+Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts from reality. Run `task claude:tests` locally before committing catalog changes.
 
 ## By concern — "if you care about X, consult these"
 
@@ -68,8 +62,7 @@ catalog changes.
 
 ## By subsystem
 
-Mirrors the subsystem table in `CLAUDE.md`. This catalog is the single source
-of truth — `CLAUDE.md` may summarize or reference by pointer.
+Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CLAUDE.md` may summarize or reference by pointer.
 
 | Subsystem | Rule | Path scope |
 |---|---|---|
@@ -116,19 +109,19 @@ of truth — `CLAUDE.md` may summarize or reference by pointer.
 Globals (always loaded or imported into `CLAUDE.md`): [quality-core.md](./rules/quality-core.md),
 [product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md), this catalog.
 
-Scoped workflow rules (loaded by path match and consumed by skills on demand):
+Scoped workflow rules (loaded by path match, consumed by skills on demand):
 [quality-security.md](./rules/quality-security.md) (`.github/workflows/**`, `.github/actions/**`),
 [workflow-github.md](./rules/workflow-github.md) (`.github/ISSUE_TEMPLATE/**`),
 [workflow-git.md](./rules/workflow-git.md) (`CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml`).
 
 ## Declared Path-Scope Overlaps
 
-Every pair of rules sharing a `paths:` pattern must be covered by a declared group. Undeclared overlaps fail `test_path_overlaps_declared_or_absent`.
+Every pair of rules sharing `paths:` pattern must be covered by declared group. Undeclared overlaps fail `test_path_overlaps_declared_or_absent`.
 
 Exempt from overlap detection (intended broad coupling):
 
 - Shareable `quality-*.md` — language quality rules co-fire with subsystem rules on language globs.
-- `workflow-bugfix.md` / `workflow-refactor.md` — source-work-surface scope per `adr_ai_config_path_scope_correction.md`; co-firing with subsystem rules is the intended coupling.
+- `workflow-bugfix.md` / `workflow-refactor.md` — source-work-surface scope per `adr_ai_config_path_scope_correction.md`; co-firing with subsystem rules = intended coupling.
 
 | Declared group | Shared scope |
 |---|---|
@@ -159,4 +152,4 @@ Exempt from overlap detection (intended broad coupling):
 | Roadmap sync | `ocx-sync-roadmap` |
 | Commits (working phase) | `commit` |
 | Finalize branch for merge onto main | `finalize` |
-| Suggest the next slash command from current state | `next` |
+| Suggest next slash command from current state | `next` |

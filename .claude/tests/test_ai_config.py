@@ -342,9 +342,11 @@ class TestClaudeMd:
         Bug captured: Says 'seven principles' but there are eight headings
         (### 1 through ### 8).
         """
-        # Find the stated count
-        match = re.search(r"These (\w+) principles", claude_md_text)
-        assert match, "Could not find 'These N principles' in CLAUDE.md"
+        # Find the stated count. Match both "These eight principles distill ..."
+        # (canonical form) and "Eight principles distill ..." (caveman-compressed
+        # form, with the leading "These" filler dropped).
+        match = re.search(r"(?:These\s+)?(\w+) principles distill\b", claude_md_text)
+        assert match, "Could not find 'N principles distill' in CLAUDE.md"
         stated = match.group(1)
 
         # Count actual principle headings (### N.)
@@ -1406,7 +1408,9 @@ class TestAiConfigOverhaulPhase5:
             f"Canonical Review-Fix Loop blocks diverged across carriers. "
             f"Every carrier must contain byte-identical prose between the "
             f"markers. Divergent carriers: {divergent}. "
-            f"See `.claude/artifacts/adr_ai_config_review_loop_dedup.md`."
+            f"See `.claude/artifacts/adr_ai_config_review_loop_dedup.md`. "
+            f"Quick fix: `task claude:fix:canonical-block` (re-syncs from "
+            f"workflow-swarm.md into the other two carriers)."
         )
 
         # Pointer-only files must NOT contain the markers (no fourth carrier)

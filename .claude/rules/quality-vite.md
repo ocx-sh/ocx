@@ -7,12 +7,9 @@ paths:
 
 # Vite Build Tool Quality
 
-Vite-specific opinions for Vite 7/8 (2026). Not a cookbook — for config
-examples and API reference, read [vite.dev](https://vite.dev/). This file
-captures the **opinions** (what to avoid, what to prefer) that a senior
-developer would insist on in code review.
+Vite opinions for Vite 7/8 (2026). Not cookbook — config examples + API ref at [vite.dev](https://vite.dev/). This file = **opinions** (avoid/prefer) senior dev insist on in review.
 
-Project-independent and shareable.
+Project-independent, shareable.
 
 ---
 
@@ -20,32 +17,32 @@ Project-independent and shareable.
 
 ### Block (must fix before merge)
 
-1. **Hardcoded credentials or secrets** in `vite.config.*` — use environment variables, never commit.
-2. **`VITE_` prefix on server-only env vars** — exposes them to the client bundle at build time. Never prefix secrets with `VITE_`.
-3. **Browser API at module scope** in components used in VitePress/SSR — `window`, `document`, `localStorage` accessed at import time crashes the pre-render. Guard with `import.meta.env.SSR` or use `<ClientOnly>` wrapper.
-4. **`vite.config.ts` at root alongside `.vitepress/config.ts`** — VitePress ignores the root config; the split causes silent override bugs.
-5. **`build.target: "es5"`** with Rolldown (Vite 8) — not supported. Rolldown targets modern JS only.
-6. **Mixing SSR and client globals** in shared modules — pre-render crashes.
-7. **Missing env var validation** at config load — validate with `zod` or `valibot`; fail the build on invalid env.
+1. **Hardcoded credentials or secrets** in `vite.config.*` — use env vars, never commit.
+2. **`VITE_` prefix on server-only env vars** — exposes to client bundle at build. Never prefix secrets `VITE_`.
+3. **Browser API at module scope** in components used in VitePress/SSR — `window`, `document`, `localStorage` at import time crash pre-render. Guard `import.meta.env.SSR` or `<ClientOnly>` wrapper.
+4. **`vite.config.ts` at root alongside `.vitepress/config.ts`** — VitePress ignores root config; split = silent override bugs.
+5. **`build.target: "es5"`** with Rolldown (Vite 8) — not supported. Rolldown = modern JS only.
+6. **Mixing SSR and client globals** in shared modules — pre-render crash.
+7. **Missing env var validation** at config load — validate `zod`/`valibot`; fail build on invalid env.
 
 ### Warn (should fix)
 
 - Missing `base` option for non-root deployments
-- `optimizeDeps.include` as a workaround instead of fixing the underlying ESM incompatibility
-- Using `vite-plugin-*` wrappers that duplicate Vite 8 built-ins (e.g., `vite-tsconfig-paths` is now built-in)
+- `optimizeDeps.include` as workaround instead of fixing underlying ESM incompat
+- `vite-plugin-*` wrappers duplicating Vite 8 built-ins (e.g., `vite-tsconfig-paths` now built-in)
 - Missing `.vitepress/cache` in `.gitignore`
-- Enabling experimental `fullBundleMode` in production — not stable
-- Not specifying `build.outDir` explicitly — defaults differ between app mode and library mode
+- Experimental `fullBundleMode` in production — not stable
+- No explicit `build.outDir` — defaults differ between app mode and library mode
 - `resolve.alias` with absolute paths — use `fileURLToPath(new URL(..., import.meta.url))` for portability
 
 ---
 
 ## Env Var Discipline
 
-- **`VITE_*` prefix is the client-exposure switch** — anything with this prefix ends up in the browser bundle at build time
-- **`.env.local` gitignored**; `.env` committed (NO secrets, only public defaults)
-- **Validate env vars at config load** with `zod`/`valibot`; fail fast on missing/invalid values
-- **Never read `process.env` at module scope in client code** — it's resolved at build time, not runtime
+- **`VITE_*` prefix = client-exposure switch** — prefix → browser bundle at build
+- **`.env.local` gitignored**; `.env` committed (NO secrets, public defaults only)
+- **Validate env vars at config load** with `zod`/`valibot`; fail fast on missing/invalid
+- **Never read `process.env` at module scope in client code** — resolved at build, not runtime
 
 ```ts
 // Good: validate at config load
@@ -60,23 +57,23 @@ const env = z.object({
 
 ## Vite 7 → Vite 8 Migration (2026)
 
-- **Rolldown replaces Rollup** for production builds in Vite 8 — 10-30x faster
-- Internal plugins (`alias`, `resolve`) are now Rust-native via `nativePlugins: 'v1'`
-- **`resolve.tsconfigPaths: true`** built-in — drop the `vite-tsconfig-paths` plugin
-- **Node.js baseline**: 20.19+ / 22.12+ (Vite 7+); Node 18 is EOL for Vite — upgrade base images
+- **Rolldown replaces Rollup** for prod builds in Vite 8 — 10-30x faster
+- Internal plugins (`alias`, `resolve`) now Rust-native via `nativePlugins: 'v1'`
+- **`resolve.tsconfigPaths: true`** built-in — drop `vite-tsconfig-paths` plugin
+- **Node.js baseline**: 20.19+ / 22.12+ (Vite 7+); Node 18 EOL for Vite — upgrade base images
 - Default browser target changed: `'baseline-widely-available'` instead of `'modules'`
 - `build.rollupOptions` maps directly to Rolldown options — same API surface
-- Plugin API is Rollup-compatible — existing plugins work without modification
+- Plugin API Rollup-compatible — existing plugins work unchanged
 
 ---
 
 ## VitePress-Specific Gotchas
 
-1. **SSR compatibility is mandatory** — VitePress pre-renders in Node at build time. Any browser API accessed at import time crashes the build. Pattern: guard with `import.meta.env.SSR` or use dynamic imports in `mounted()` hooks.
-2. **`<ClientOnly>` wrapper** for components that cannot be made SSR-safe (third-party charting libs, etc.).
-3. **`defineClientComponent`**: VitePress helper for importing Vue components that use browser APIs — avoids dynamic-import boilerplate.
-4. **Vite config lives in `.vitepress/config.ts`**, not at root. The `vite` key inside VitePress config accepts the same `UserConfig` shape. Do not create a separate `vite.config.ts` at root — VitePress ignores it.
-5. **Full typing**: use `defineConfig` from `vitepress` — it catches malformed nav/sidebar/theme configs at author time.
+1. **SSR compat mandatory** — VitePress pre-renders in Node at build. Any browser API at import time crashes build. Pattern: guard `import.meta.env.SSR` or dynamic imports in `mounted()` hooks.
+2. **`<ClientOnly>` wrapper** for components that can't be SSR-safe (third-party charting libs, etc.).
+3. **`defineClientComponent`**: VitePress helper for importing Vue components using browser APIs — avoids dynamic-import boilerplate.
+4. **Vite config lives in `.vitepress/config.ts`**, not root. `vite` key inside VitePress config accepts same `UserConfig` shape. Don't create separate `vite.config.ts` at root — VitePress ignores.
+5. **Full typing**: use `defineConfig` from `vitepress` — catches malformed nav/sidebar/theme configs at author time.
 
 ---
 
@@ -93,15 +90,15 @@ export default defineConfig(({ command, isSsrBuild }) => ({
 }));
 ```
 
-- Use the function form of `defineConfig` only when config needs to branch on `command` or `isSsrBuild`
-- **Library mode**: set `build.lib` with `entry`, `formats`, `fileName`. App-mode config for libraries is wrong — tree-shaking and externalization behave differently
-- **Extract reusable plugin arrays** to a local helper — do not duplicate between `vitest.config.ts` and `vite.config.ts`
+- Use function form of `defineConfig` only when config branches on `command` or `isSsrBuild`
+- **Library mode**: set `build.lib` with `entry`, `formats`, `fileName`. App-mode config for libraries wrong — tree-shaking + externalization differ
+- **Extract reusable plugin arrays** to local helper — don't duplicate between `vitest.config.ts` and `vite.config.ts`
 
 ---
 
 ## Code Review Checklist (Vite-Specific)
 
-See `quality-core.md` for the universal review checklist. Vite-specific additions:
+See `quality-core.md` for universal checklist. Vite-specific additions:
 
 - [ ] No secrets or credentials in `vite.config.*`
 - [ ] No `VITE_` prefix on server-only env vars
@@ -117,7 +114,7 @@ See `quality-core.md` for the universal review checklist. Vite-specific addition
 
 ## Sources
 
-Authoritative references used in this rule:
+Authoritative refs used in this rule:
 
 - [Vite 8.0 announcement](https://vite.dev/blog/announcing-vite8)
 - [Vite 7.0 announcement](https://vite.dev/blog/announcing-vite7)

@@ -7,28 +7,28 @@ paths:
 
 # Rust CLI Exit Code Design
 
-Shareable, project-independent guide to designing exit codes for Rust CLI tools. Auto-loads on `main.rs` or `exit_code.rs` edits; the `**/*.rs` glob is for search-by-name discovery across broad Rust work.
+Shareable, project-independent guide for Rust CLI exit codes. Auto-loads on `main.rs` or `exit_code.rs` edits; `**/*.rs` glob for search-by-name discovery across broad Rust work.
 
-Complements [`quality-rust.md`](./quality-rust.md) and [`quality-rust-errors.md`](./quality-rust-errors.md) — the error-message rule and the exit-code taxonomy are co-design concerns.
+Complements [`quality-rust.md`](./quality-rust.md) and [`quality-rust-errors.md`](./quality-rust-errors.md) — error-message rule and exit-code taxonomy co-design.
 
 ---
 
 ## The Canonical Reference
 
-**BSD `sysexits.h`** (codes 64–78) is the de-facto standard for CLI exit codes on Unix-family systems. Though formally deprecated as a C header for portability reasons, its numeric values remain canonical and the Rust CLI Book endorses them via the `exitcode`/`sysexits` crates.
+**BSD `sysexits.h`** (codes 64–78) = de-facto standard for CLI exit codes on Unix. Formally deprecated as C header for portability, but numeric values stay canonical. Rust CLI Book endorses via `exitcode`/`sysexits` crates.
 
-Values 1 and 2 are shell-reserved (1 = generic error, 2 = misuse of builtins by Bash convention). Values 128+ are signal-derived (`128 + N` where N is the signal number). Using 64+ for semantic codes avoids collision with both.
+Values 1, 2 shell-reserved (1 = generic error, 2 = Bash builtin misuse). 128+ signal-derived (`128 + N` where N = signal number). 64+ for semantic codes avoids both collisions.
 
 ---
 
 ## Design Principles
 
-- **Own the enum** — define a `#[repr(u8)]` enum in the library crate's `cli` submodule (`<lib>::cli::ExitCode`) rather than depending on `sysexits` or `exitcode` crates. The values are stable POSIX conventions; owning them decouples your binaries from an external dependency.
-- **Align with `sysexits.h`** — 64 for usage errors, 65 for data errors, 69 for unavailable services, 74 for I/O errors, 77 for permission, 78 for config. This is the established convention backend tools and shell scripts expect.
-- **Reserve a private range above 78** — 79–127 is free (below shell-reserved 128+ and above `EX__MAX = 78`). Use it for tool-specific codes that sysexits doesn't cover (e.g., "auth failure", "offline-blocked").
-- **`#[non_exhaustive]` required** — adding a variant must not be a semver break.
-- **`From<ExitCode> for std::process::ExitCode`** — lets `main()` return the code directly without explicit casting at every call site.
-- **One enum per workspace, shared by all binaries** — both the primary CLI and sibling tools (e.g., a mirror/publisher tool) consume the same enum. Prevents drift.
+- **Own the enum** — define `#[repr(u8)]` enum in library crate's `cli` submodule (`<lib>::cli::ExitCode`) instead of depending on `sysexits` or `exitcode` crates. Values = stable POSIX conventions; ownership decouples binaries from external dep.
+- **Align with `sysexits.h`** — 64 usage, 65 data, 69 unavailable, 74 I/O, 77 permission, 78 config. Convention backend tools and shell scripts expect.
+- **Reserve private range above 78** — 79–127 free (below shell-reserved 128+, above `EX__MAX = 78`). Use for tool-specific codes sysexits skip (e.g., "auth failure", "offline-blocked").
+- **`#[non_exhaustive]` required** — adding variant must not break semver.
+- **`From<ExitCode> for std::process::ExitCode`** — lets `main()` return code directly, no explicit cast at call sites.
+- **One enum per workspace, shared by all binaries** — primary CLI and sibling tools (e.g., mirror/publisher) consume same enum. Prevents drift.
 
 ---
 
@@ -90,7 +90,7 @@ impl From<ExitCode> for std::process::ExitCode {
 
 ## Error → Exit Code Classification
 
-Use a free function, not a trait method. Trait methods couple every error type to the exit-code taxonomy, creating a circular dependency (errors → `ExitCode` → `main.rs` → errors). A free function that walks the `anyhow::Error::chain()` and downcasts to each known subtree keeps the dependency direction clean.
+Use free function, not trait method. Trait methods couple every error type to exit-code taxonomy → circular dep (errors → `ExitCode` → `main.rs` → errors). Free function walks `anyhow::Error::chain()` and downcasts each known subtree, keeping dep direction clean.
 
 ```rust
 pub fn classify_error(err: &anyhow::Error) -> ExitCode {
@@ -120,9 +120,9 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
 }
 ```
 
-**Three-layer error pattern.** If your library uses the `Error → PackageError → PackageErrorKind` pattern (outer enum, context-bearing middle struct, discriminant-only inner enum), the `classify_error` function downcasts the *outermost* `Error` first, then pattern-matches through to the inner `kind`. You cannot `downcast_ref::<PackageErrorKind>()` directly unless the kind was attached as its own `anyhow::context` — which is unusual.
+**Three-layer error pattern.** If library uses `Error → PackageError → PackageErrorKind` pattern (outer enum, context-bearing middle struct, discriminant-only inner enum), `classify_error` downcasts *outermost* `Error` first, then pattern-matches to inner `kind`. Cannot `downcast_ref::<PackageErrorKind>()` directly unless kind attached as own `anyhow::context` — unusual.
 
-**Default fall-through.** Any subtree not explicitly classified falls through to `ExitCode::Failure`. This is acceptable v1 behavior as long as a test locks in the fall-through so it cannot silently change later.
+**Default fall-through.** Any subtree not classified falls through to `ExitCode::Failure`. Acceptable v1 behavior if test locks in fall-through so it cannot silently change later.
 
 ---
 
@@ -130,27 +130,27 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
 
 ### Block
 
-- **Single-digit numeric codes for semantic categories** (e.g., `exit 3` for "network error"). Collides with shell-reserved 1/2 and has no discoverable meaning.
-- **Bash `exit $?` chains with magic numbers** inside the CLI itself — use the enum, not literals.
-- **Different binaries in the same workspace using different exit-code taxonomies** — prevents shared error handling in CI scripts. One enum, shared.
-- **Trait-based error-to-exit-code mapping on each error type** — creates circular dependency lib → cli → lib. Use a free function that walks the error chain.
-- **`std::process::exit(N)` from inside library code** — libraries never exit; they return `Result`. Exits happen at `main.rs`.
+- **Single-digit numeric codes for semantic categories** (e.g., `exit 3` for "network error"). Collides with shell-reserved 1/2, no discoverable meaning.
+- **Bash `exit $?` chains with magic numbers** inside the CLI itself — use enum, not literals.
+- **Different binaries in same workspace using different exit-code taxonomies** — blocks shared error handling in CI scripts. One enum, shared.
+- **Trait-based error-to-exit-code mapping per error type** — circular dep lib → cli → lib. Use free function walking error chain.
+- **`std::process::exit(N)` from inside library code** — libraries never exit; return `Result`. Exits at `main.rs`.
 
 ### Warn
 
-- **Hard-coded `ExitCode::from(N)` at call sites** — route through the typed enum so the numeric value is a single source of truth.
-- **More than one canonical success code** (e.g., `0` for "installed" and `99` for "already installed"). Use `Success = 0` and communicate the "already installed" status via stdout or stderr, not exit code.
-- **Missing `#[non_exhaustive]`** — adding a variant silently becomes a semver break.
+- **Hard-coded `ExitCode::from(N)` at call sites** — route through typed enum so numeric value = single source of truth.
+- **More than one canonical success code** (e.g., `0` for "installed", `99` for "already installed"). Use `Success = 0`; communicate "already installed" via stdout/stderr, not exit code.
+- **Missing `#[non_exhaustive]`** — adding variant silently breaks semver.
 
 ### Suggest
 
-- **`match` with a wildcard arm `_ => Failure`** — prefer exhaustive matches so new error variants compile-error until classified, then explicitly map the unclassified to `Failure` if that's the intended behavior. Locks in the choice.
+- **`match` with wildcard arm `_ => Failure`** — prefer exhaustive matches so new error variants compile-error until classified, then explicitly map unclassified to `Failure` if intended. Locks choice.
 
 ---
 
 ## Wiring the Enum into `main()`
 
-The end-state `main.rs` is short:
+End-state `main.rs` short:
 
 ```rust
 use <lib>::cli::{classify_error, ExitCode};
@@ -168,15 +168,15 @@ async fn main() -> std::process::ExitCode {
 ```
 
 - `app::run()` returns `anyhow::Result<ExitCode>`.
-- Success path: the app's own `ExitCode` (e.g., `ExitCode::Success` or `ExitCode::NotFound` for a "nothing matched" query).
-- Error path: log the full chain with `{err:#}`, classify via the free function, return the numeric code.
-- Never prefix the error log with `"Error: "` — the `tracing`/`log` level already categorizes the line.
+- Success path: app's own `ExitCode` (e.g., `ExitCode::Success` or `ExitCode::NotFound` for "nothing matched" query).
+- Error path: log full chain with `{err:#}`, classify via free function, return numeric code.
+- Never prefix error log with `"Error: "` — `tracing`/`log` level already categorizes line.
 
 ---
 
 ## Scripts Consuming the Exit Codes
 
-Scripts can `case $?` on the stable numeric values:
+Scripts `case $?` on stable numeric values:
 
 ```sh
 mytool install foo:1.0
@@ -192,7 +192,7 @@ case $? in
 esac
 ```
 
-This is the primary value proposition of the enum for backend/automation tools: programmatic failure discrimination without parsing stderr.
+Primary value of enum for backend/automation tools: programmatic failure discrimination without parsing stderr.
 
 ---
 
@@ -200,7 +200,7 @@ This is the primary value proposition of the enum for backend/automation tools: 
 
 - [FreeBSD `sysexits.h` manpage](https://man.freebsd.org/cgi/man.cgi?sysexits) — canonical numeric table
 - [Rust CLI Book — Exit Codes](https://rust-cli.github.io/book/in-depth/exit-code.html) — endorses sysexits-aligned codes
-- [`sysexits` crate](https://crates.io/crates/sysexits) — Rust enum with `Termination` impl; reference shape if you prefer a dependency over owning the enum
+- [`sysexits` crate](https://crates.io/crates/sysexits) — Rust enum with `Termination` impl; reference shape if prefer dep over owning enum
 - [`std::process::ExitCode` docs](https://doc.rust-lang.org/stable/std/process/struct.ExitCode.html) — `From<u8>` contract
 - [clig.dev — Exit Codes](https://clig.dev/#exit-codes) — "0 success, non-zero failure" (no numeric prescription; defers to tool conventions)
-- [npm exit codes](https://docs.npmjs.com/cli/v10/using-npm/scripts#exit-codes) — example of semantic differentiation in practice
+- [npm exit codes](https://docs.npmjs.com/cli/v10/using-npm/scripts#exit-codes) — semantic differentiation example in practice

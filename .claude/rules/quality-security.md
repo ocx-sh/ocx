@@ -7,17 +7,17 @@ paths:
 
 # Security Standards
 
-Deep-dive reference for security reviews. See Core Principle 3 ("Keep It Safe") in CLAUDE.md for the essentials.
+Deep-dive reference for security reviews. See Core Principle 3 ("Keep It Safe") in CLAUDE.md for essentials.
 
 ## Security Checklist
 
 - [ ] No hardcoded secrets or credentials
-- [ ] All user input is validated and sanitized
+- [ ] All user input validated + sanitized
 - [ ] SQL queries use parameterized statements
-- [ ] Authentication and authorization are properly implemented
-- [ ] Sensitive data is encrypted at rest and in transit
-- [ ] Error messages don't expose internal details
-- [ ] Dependencies are up to date and vulnerability-free
+- [ ] Auth + authorization properly implemented
+- [ ] Sensitive data encrypted at rest + in transit
+- [ ] Error messages no expose internal details
+- [ ] Dependencies up to date + vuln-free
 
 ## OWASP Top 10 2021
 
@@ -45,30 +45,30 @@ Deep-dive reference for security reviews. See Core Principle 3 ("Keep It Safe") 
 
 ## CWE References
 
-When reporting findings, reference CWE (Common Weakness Enumeration) IDs for standardized vulnerability classification. Example: `CWE-89` for SQL Injection, `CWE-798` for hardcoded credentials.
+Reference CWE (Common Weakness Enumeration) IDs for standardized vuln classification. Example: `CWE-89` for SQL Injection, `CWE-798` for hardcoded credentials.
 
 ## Dependency Safety
 
-- Warn about deprecated or vulnerable dependencies
-- Audit new dependencies before adding
-- Keep dependencies updated
+- Warn on deprecated/vulnerable deps
+- Audit new deps before adding
+- Keep deps updated
 - Use automated scanning (Trivy, Snyk, Dependabot)
 
 ## Output Guidelines
 
 - Never expose actual secrets in analysis output
-- Provide specific file locations and line numbers
+- Give specific file locations + line numbers
 - Include concrete remediation steps
-- Check both code AND configuration files
+- Check code AND config files
 
 ## OCX-Specific Attack Surfaces
 
-These are the recurring attack surfaces in the OCX codebase. Use them as the STRIDE scoping checklist for any OCX audit.
+Recurring attack surfaces in OCX codebase. Use as STRIDE scoping checklist for any OCX audit.
 
 ### Registry Authentication
 - Auth chain: `OCX_AUTH_<REGISTRY>_*` env vars → Docker credentials (`~/.docker/config.json`)
-- Credentials must never be logged or included in error messages
-- `OCX_INSECURE_REGISTRIES` (HTTP-only) should only be used for localhost/test registries
+- Credentials never logged or in error messages
+- `OCX_INSECURE_REGISTRIES` (HTTP-only) only for localhost/test registries
 
 ### Registry Communication
 - TLS verification for all registry connections (except insecure registries)
@@ -76,9 +76,9 @@ These are the recurring attack surfaces in the OCX codebase. Use them as the STR
 - Manifest signature validation
 
 ### Symlink Safety
-- Install symlinks must not escape `OCX_HOME` via traversal
-- Windows junction point handling (NTFS junctions, no privilege escalation)
-- Back-reference integrity — cannot be manipulated to prevent GC or cause spurious deletion
+- Install symlinks no escape `OCX_HOME` via traversal
+- Windows junction point handling (NTFS junctions, no priv escalation)
+- Back-reference integrity — no manipulation to prevent GC or cause spurious deletion
 
 ### Archive Extraction
 - Path traversal in tar archives (zip slip)
@@ -87,8 +87,8 @@ These are the recurring attack surfaces in the OCX codebase. Use them as the STR
 - Decompression bombs (xz/gz resource limits)
 
 ### Code Signing (macOS)
-- Ad-hoc signing applied to Mach-O binaries after extraction
-- Signing must not mask malicious binaries
+- Ad-hoc signing on Mach-O binaries after extraction
+- Signing no mask malicious binaries
 
 ### Environment Variable Injection
 - `${installPath}` template expansion in `metadata.json` env vars
@@ -96,10 +96,10 @@ These are the recurring attack surfaces in the OCX codebase. Use them as the STR
 
 ## OCX Audit Checklist
 
-- [ ] Authentication/authorization flow
+- [ ] Auth/authorization flow
 - [ ] Input validation (identifiers, tags, paths)
 - [ ] Secrets management (no credentials in logs/errors)
 - [ ] Dependency vulnerabilities (`trivy` scan)
 - [ ] Archive extraction safety
 - [ ] Symlink traversal prevention
-- [ ] Environment variable injection
+- [ ] Env var injection

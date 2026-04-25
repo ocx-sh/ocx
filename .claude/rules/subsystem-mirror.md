@@ -6,11 +6,11 @@ paths:
 
 # Mirror Subsystem
 
-Separate crate (`ocx_mirror`) for mirroring upstream tool releases to OCI registries. YAML-configured, two-phase pipeline.
+Separate crate (`ocx_mirror`) mirror upstream tool releases to OCI registries. YAML-configured, two-phase pipeline.
 
 ## Design Rationale
 
-Separate crate because the mirror tool is a standalone binary with its own CLI, not part of the `ocx` package manager. Two-phase pipeline (prepare concurrently, push sequentially) ensures cascade tag ordering correctness — tags must be pushed in semver order so `latest` always points to the highest version. See `arch-principles.md` for the full pattern catalog.
+Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` package manager. Two-phase pipeline (prepare concurrent, push sequential) ensure cascade tag order correct — tags push in semver order so `latest` always point to highest version. See `arch-principles.md` for full pattern catalog.
 
 ## Module Map
 
@@ -25,17 +25,17 @@ Separate crate because the mirror tool is a standalone binary with its own CLI, 
 | `spec/target.rs` | `Target` (registry + repository) |
 | `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping) |
 | `spec/asset_type.rs` | `AssetTypeConfig` (Archive vs Binary) |
-| `spec/versions_config.rs` | Version filtering (min/max bounds, new_per_run, backfill order) |
-| `spec/verify_config.rs` | Checksum verification options |
-| `spec/metadata_config.rs` | Metadata.json path configuration |
+| `spec/versions_config.rs` | Version filter (min/max bounds, new_per_run, backfill order) |
+| `spec/verify_config.rs` | Checksum verify options |
+| `spec/metadata_config.rs` | Metadata.json path config |
 | `spec/concurrency_config.rs` | Parallel download/push limits |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
-| `source/url_index.rs` | JSON index fetching (remote, inline, generator) |
+| `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
 | `pipeline/orchestrator.rs` | `execute_mirror()`: prepare (concurrent) + push (sequential) |
 | `pipeline/download.rs` | HTTP download with resumption |
-| `pipeline/verify.rs` | Checksum verification |
+| `pipeline/verify.rs` | Checksum verify |
 | `pipeline/package.rs` | Extract archive, apply metadata, rebundle |
-| `pipeline/push.rs` | Push to registry + cascade tag computation |
+| `pipeline/push.rs` | Push to registry + cascade tag compute |
 | `pipeline/mirror_task.rs` | `MirrorTask`: self-contained work unit |
 | `pipeline/mirror_result.rs` | `MirrorResult`: Pushed/Skipped/Failed |
 | `resolver.rs` | `resolve_assets()`: apply regex patterns to asset names |
@@ -50,7 +50,7 @@ Separate crate because the mirror tool is a standalone binary with its own CLI, 
 ### Phase 1: Prepare (concurrent)
 
 1. Fetch upstream versions (GitHub API or URL index)
-2. Resolve assets per platform (regex matching)
+2. Resolve assets per platform (regex match)
 3. Filter versions (min/max, prerelease, backfill cap)
 4. Parallel: download → verify → bundle (two independent semaphores: I/O vs CPU)
 
@@ -68,11 +68,11 @@ Source types:
 - `github_release`: `{owner, repo, tag_pattern}` — regex with `(?P<version>...)` capture
 - `url_index`: Remote URL, inline versions, or generator command
 
-Spec inheritance via `extends:` (shallow merge, child overrides parent).
+Spec inheritance via `extends:` (shallow merge, child override parent).
 
 ## Mirror Configs
 
-YAML files in `mirrors/` (e.g., `mirror-cmake.yml`, `mirror-go.yml`). Each defines one tool to mirror.
+YAML files in `mirrors/` (e.g., `mirror-cmake.yml`, `mirror-go.yml`). Each define one tool to mirror.
 
 ## Error Model
 
@@ -81,4 +81,4 @@ YAML files in `mirrors/` (e.g., `mirror-cmake.yml`, `mirror-go.yml`). Each defin
 ## Quality Gate
 
 During review-fix loops, run `task rust:verify` — not full `task verify`.
-Full `task verify` is the final gate before commit.
+Full `task verify` = final gate before commit.

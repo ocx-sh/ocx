@@ -7,7 +7,7 @@ paths:
 
 # Taskfiles Subsystem
 
-[Taskfile](https://taskfile.dev) v3 is the primary task runner for OCX. The root taskfile includes per-subsystem taskfiles and reusable templates under `taskfiles/`. Each subsystem owns its own pipeline and exposes a contract back to the root.
+[Taskfile](https://taskfile.dev) v3 = primary task runner for OCX. Root taskfile includes per-subsystem taskfiles + reusable templates under `taskfiles/`. Each subsystem own pipeline, expose contract back to root.
 
 ## File Layout
 
@@ -33,37 +33,37 @@ paths:
 
 ## Two-Phase Verify
 
-`task verify` runs as a two-phase pipeline via internal `.verify:lint` and `.verify:build-test` tasks:
+`task verify` run as two-phase pipeline via internal `.verify:lint` + `.verify:build-test` tasks:
 
 1. **Phase 1 (parallel `deps:`)**: `rust:format:check`, `rust:clippy:check`, `shell:verify`, `claude:verify`
 2. **Phase 2 (sequential `cmds:`)**: `rust:license:check`, `rust:license:deps`, `rust:build`, `rust:test:unit`, `test:parallel`
 
 ## AI Quality Gate Pattern
 
-Each subsystem rule has a Quality Gate section specifying which verify task to run during review-fix loops. Full `task verify` runs only as the final gate before commit. This prevents expensive acceptance tests from running during every iteration.
+Each subsystem rule has Quality Gate section specifying which verify task to run during review-fix loops. Full `task verify` runs only as final gate before commit. Stop expensive acceptance tests running every iteration.
 
 ## Taskfile Features in Use
 
 | Feature | Purpose |
 |---|---|
-| `output: group` + `error_only: true` | Clean verify output; only shows failures |
+| `output: group` + `error_only: true` | Clean verify output; only show failures |
 | `.taskrc.yml` | Project-wide `failfast: true` (abort on first failure) |
 | Include-with-vars templates | `ocx.taskfile.yml` included as `shellcheck:` and `shfmt:` with different vars; uses `requires:` for mandatory vars |
 | `internal: true` on includes | Template includes hidden from `task --list` |
 | `:` prefix cross-references | Child taskfiles call root helpers like `:.ensure-cargo-tool` |
-| `--force` | Bypasses all caching for one run (replaces `rm -rf .task/`) |
+| `--force` | Bypass all caching for one run (replaces `rm -rf .task/`) |
 | `--status` | Check freshness without running |
 | `--summary` | Show task detail (e.g., `task --summary verify`) |
-| `aliases:` | Backward compatibility after renames |
+| `aliases:` | Backward compat after renames |
 | `for:` loops | Iteration in cmds/deps |
 
 ## OCX Conventions
 
-1. **`verify` is a subsystem contract.** Every subsystem taskfile exposes a `verify` task. The root `verify` calls `<subsystem>:verify` rather than inlining individual subtasks.
-2. **Composite tasks aggregate subtasks.** Each linter/formatter has its own subtask so it is independently runnable. `verify` references composite tasks only -- one entry per concern.
-3. **Helpers use dot-prefix + `internal: true`.** Internal tasks are named with a dot prefix (e.g., `.ensure-cargo-tool`, `.verify:lint`) -- like GitLab CI hidden jobs. This makes them visually distinct and hidden from `task --list`.
-4. **Tool installs use `status:` for idempotency.** `status: - cargo nextest --version` skips the install when the tool is already present. This is the cross-include deduplication pattern -- `run: once` does **not** work reliably across namespaced includes (go-task issue #852).
-5. **Subsystem env overrides go on the task, not the include.** The root sets `OCX_INDEX` globally; subsystem tasks that need a different value override with per-task `env:`.
+1. **`verify` is a subsystem contract.** Every subsystem taskfile expose `verify` task. Root `verify` calls `<subsystem>:verify` instead of inlining subtasks.
+2. **Composite tasks aggregate subtasks.** Each linter/formatter has own subtask so independently runnable. `verify` references composite tasks only -- one entry per concern.
+3. **Helpers use dot-prefix + `internal: true`.** Internal tasks named with dot prefix (e.g., `.ensure-cargo-tool`, `.verify:lint`) -- like GitLab CI hidden jobs. Visually distinct + hidden from `task --list`.
+4. **Tool installs use `status:` for idempotency.** `status: - cargo nextest --version` skips install when tool already present. Cross-include dedup pattern -- `run: once` does **not** work reliably across namespaced includes (go-task issue #852).
+5. **Subsystem env overrides go on task, not include.** Root sets `OCX_INDEX` globally; subsystem tasks needing different value override with per-task `env:`.
 
 ## Caching Contract
 
@@ -71,12 +71,12 @@ Each subsystem rule has a Quality Gate section specifying which verify task to r
 
 | Field | Purpose | Recommendation |
 |---|---|---|
-| `sources:` | Files that force re-run when changed | Broad include + targeted excludes. Survives new file types. |
+| `sources:` | Files that force re-run when changed | Broad include + targeted excludes. Survive new file types. |
 | `status:` | Exit 0 = up-to-date, skip | **Load-bearing for cache.** Use for output file checks. |
-| `generates:` | Output declaration (documentation only) | **Not load-bearing** (go-task #2181). Declare for discoverability; add `status:` if skip-on-present is needed. |
-| `method:` | `checksum` (default), `timestamp`, `none` | Only specify `timestamp` for tools with their own incremental build (e.g. `cargo build`). |
+| `generates:` | Output declaration (docs only) | **Not load-bearing** (go-task #2181). Declare for discoverability; add `status:` if skip-on-present needed. |
+| `method:` | `checksum` (default), `timestamp`, `none` | Only specify `timestamp` for tools with own incremental build (e.g. `cargo build`). |
 
-**Sources are relative to the task's `dir:`.** Set `dir: '{{.TASKFILE_DIR}}'` or rely on the include's `dir:` so globs use plain `**/*`.
+**Sources relative to task's `dir:`.** Set `dir: '{{.TASKFILE_DIR}}'` or rely on include's `dir:` so globs use plain `**/*`.
 
 **Two canonical patterns:**
 
@@ -97,7 +97,7 @@ build:
 
 ### Sharing source lists: `x-shared:` anchors
 
-When multiple tasks validate the same input set, define the source list once as a YAML anchor under `x-shared:` (the JSON-Schema extension convention), then reference with `*alias`. Do not anchor under a consuming task -- that implies ownership the data structure does not have.
+Multiple tasks validate same input set → define source list once as YAML anchor under `x-shared:` (JSON-Schema extension convention), reference with `*alias`. Do not anchor under consuming task -- implies ownership data structure does not have.
 
 ```yaml
 x-shared:
@@ -124,39 +124,39 @@ Tasks that validate or check should emit machine-readable reports.
 
 - **Location**: `target/reports/<subsystem>/` (already gitignored under `target/`).
 - **Root var**: `REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'` in root taskfile.
-- **Subsystem var**: Each subsystem resolves its own `REPORTS_DIR` with `{{if/else}}` so standalone invocation works:
+- **Subsystem var**: Each subsystem resolves own `REPORTS_DIR` with `{{if/else}}` so standalone invocation works:
 
   ```yaml
   vars:
     REPORTS_DIR: '{{if .REPORTS_ROOT}}{{.REPORTS_ROOT}}/claude{{else}}{{.TASKFILE_DIR}}/reports{{end}}'
   ```
 
-  Parent and child vars must have **different names** (`REPORTS_ROOT` vs `REPORTS_DIR`) to avoid double-suffixing.
+  Parent + child vars must have **different names** (`REPORTS_ROOT` vs `REPORTS_DIR`) to avoid double-suffixing.
 - **Format**: JUnit XML (preferred) or JSON. Create dir with `mkdir -p {{.REPORTS_DIR}}` as first command.
-- **Declare `generates:`** for documentation even though it is not load-bearing.
+- **Declare `generates:`** for docs even though not load-bearing.
 
 ## Includes and `dir:` Scoping
 
 | Variable | Resolves to |
 |---|---|
-| `{{.ROOT_DIR}}` | Directory of the entry-point (root) taskfile |
-| `{{.TASKFILE_DIR}}` | Directory of the currently executing taskfile |
+| `{{.ROOT_DIR}}` | Directory of entry-point (root) taskfile |
+| `{{.TASKFILE_DIR}}` | Directory of currently executing taskfile |
 | `{{.USER_WORKING_DIR}}` | Directory from which `task` was invoked |
 
-Set `dir:` on the include block when all tasks should run relative to the sub-taskfile's directory (`.claude/`, `test/`, `website/`). Override per-task only when needed.
+Set `dir:` on include block when all tasks should run relative to sub-taskfile's directory (`.claude/`, `test/`, `website/`). Override per-task only when needed.
 
-**Gotchas:** `${{.TASKFILE_DIR}}` is wrong (becomes a shell var). When the root sets a global `env:`, included tasks inherit it -- override per-task if needed.
+**Gotchas:** `${{.TASKFILE_DIR}}` wrong (becomes shell var). When root sets global `env:`, included tasks inherit -- override per-task if needed.
 
 ## Preconditions vs Status
 
 | Field | Use | Semantics |
 |---|---|---|
-| `preconditions:` + `msg:` | Guard -- abort if not ready | Failure aborts; downstream tasks do not run |
+| `preconditions:` + `msg:` | Guard -- abort if not ready | Failure aborts; downstream tasks don't run |
 | `status:` | Cache -- skip if done | Exit 0 = up-to-date, skip silently |
 
 ## OCX-Specific Task Contracts
 
-- **Generation tasks** (`schema:generate`, `recordings:*`, `catalog:generate`) should depend on the compiled binary via `deps: [build]` + `sources: [target/release/ocx_schema]`, NOT on Rust source file lists. Cargo already tracks source dependencies — duplicating that in Taskfile is maintenance overhead.
+- **Generation tasks** (`schema:generate`, `recordings:*`, `catalog:generate`) should depend on compiled binary via `deps: [build]` + `sources: [target/release/ocx_schema]`, NOT on Rust source file lists. Cargo already tracks source deps — duplicating in Taskfile = maintenance overhead.
 
 ## Sources
 

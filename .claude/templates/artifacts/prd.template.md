@@ -20,18 +20,18 @@ Related Skills: writing-prds, decomposing-tasks, requirements-analysis
 
 ## Problem Statement
 
-[What problem are we solving? Who has this problem? Why does it matter?]
+[What problem solve? Who got problem? Why matter?]
 
 ### Evidence
 
-Great PRDs prove problems exist with evidence. Include both types:
+Good PRD prove problem with evidence. Include both:
 
-**Quantitative Evidence** (numbers that demonstrate impact):
+**Quantitative Evidence** (numbers show impact):
 - [Financial metric: e.g., "$X lost per month due to..."]
 - [Behavioral data: e.g., "Y% of users abandon at step Z"]
 - [Volume indicator: e.g., "N support tickets/week about..."]
 
-**Qualitative Evidence** (insights that explain the human side):
+**Qualitative Evidence** (human side):
 - [User quote: "Direct feedback from user research..."]
 - [Support insight: "Common complaint pattern..."]
 - [Observation: "During usability testing, we saw..."]
@@ -138,21 +138,21 @@ Use INVEST criteria for all stories:
 
 ## Next Steps & Handoffs
 
-After PRD approval:
+After PRD approved:
 
-1. [ ] **Architect Review**: Technical feasibility assessment
+1. [ ] **Architect Review**: Technical feasibility check
    - Trigger: `/architect`
    - Output: ADR (`artifacts/adr_[topic].md`)
 
-2. [ ] **Design Spec**: Visual design and wireframes
+2. [ ] **Design Spec**: Visual design + wireframes
    - Trigger: `/architect`
    - Output: Design Spec (`artifacts/design_spec_[component].md`)
 
-3. [ ] **Engineering Estimate**: Effort estimation and decomposition
+3. [ ] **Engineering Estimate**: Effort sizing + decomposition
    - Trigger: `/builder` or `/architect`
    - Output: Implementation Plan (`.claude/state/plans/plan_[task].md`)
 
-4. [ ] **Create Beads Issues**: Decompose into trackable work items
+4. [ ] **Create Beads Issues**: Decompose to trackable work items
    - Command: `bd create "Title" -t feature`
 
 **Related Artifacts**:
@@ -170,6 +170,6 @@ After PRD approval:
 | | | | |
 
 <!--
-Track major requirement changes here. This helps stakeholders understand
-how requirements have evolved and provides context for future reference.
+Track major requirement changes here. Helps stakeholders see
+requirement evolution + give context for future reference.
 -->

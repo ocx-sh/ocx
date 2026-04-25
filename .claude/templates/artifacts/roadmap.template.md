@@ -18,7 +18,7 @@ Related Skills: execution-roadmaps, decomposing-tasks, estimating-work, agile-me
 
 ## Vision
 
-[One paragraph describing the end-state vision for this project]
+[One paragraph end-state vision]
 
 ## Goals
 
@@ -103,8 +103,7 @@ Related Skills: execution-roadmaps, decomposing-tasks, estimating-work, agile-me
 ### Dependency Diagram
 
 <!--
-Use Mermaid for complex dependency visualization.
-ASCII diagram provided for quick reference.
+Mermaid for complex dep viz. ASCII for quick ref.
 -->
 
 ```
@@ -157,10 +156,10 @@ Risk Score = Probability × Impact (L=1, M=2, H=3)
 
 ### Launch Readiness
 
-- [ ] All Phase 1-3 deliverables complete
-- [ ] Performance benchmarks met
+- [ ] Phase 1-3 deliverables done
+- [ ] Perf benchmarks met
 - [ ] Security review passed
-- [ ] Documentation complete
+- [ ] Docs complete
 - [ ] Support team trained
 
 ### Post-Launch

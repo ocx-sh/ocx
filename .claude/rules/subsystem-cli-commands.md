@@ -5,7 +5,7 @@ paths:
 
 # OCX CLI Commands — Quick Reference
 
-Concise index of all `ocx` CLI commands. User-facing per-command documentation lives in [`website/src/docs/reference/command-line.md`](../../website/src/docs/reference/command-line.md). Implementation lives under `crates/ocx_cli/src/command/` — read the source for return types, internal call sites, and report column formats.
+Concise index of all `ocx` CLI commands. User-facing per-command docs live in [`website/src/docs/reference/command-line.md`](../../website/src/docs/reference/command-line.md). Implementation under `crates/ocx_cli/src/command/` — read source for return types, internal call sites, report column formats.
 
 ---
 
@@ -85,11 +85,11 @@ Use `--candidate` or `--current` when embedding paths in configs, IDE settings, 
 
 ## Semantics & Gotchas
 
-Design intent that isn't visible from a flag table — read this before changing CLI behavior in these areas.
+Design intent not visible from flag table — read before changing CLI behavior here.
 
-- **`index update <pkg>`**: a tagged identifier (`cmake:3.28`) fetches only that tag's digest and manifest and merges into the existing `tags/{repo}.json`. A bare identifier (`cmake`) fetches all tags. The two modes are intentional — tagged mode keeps offline indexes minimal and reproducible.
-- **`deps`**: tree view marks repeated subtrees with `(*)` and does not re-expand them. Flat view (`--flat`) emits topological evaluation order — the same order `exec` and `env` use to layer environment variables. Why view (`--why`) traces all paths from roots to a target by registry/repository (tag is ignored when matching).
-- **`package push -p/--platform` is required.** Multi-platform manifests are assembled by repeated single-platform pushes; there is no auto-detect path here on purpose.
-- **`package describe` / `package info`**: identifier is repository only, tag is ignored. `describe` requires at least one of `--readme`, `--logo`, `--title`, `--description`, `--keywords` — no-op invocation is rejected, not silently accepted.
-- **`shell profile load`**: silently skips broken entries (no error output). It is designed to be invoked from a shell init file as `eval "$(ocx --offline shell profile load)"` — `--offline` is essential because the env file runs on every shell startup and must not touch the network.
-- **`env` vs `shell env`**: `env` auto-installs missing packages (`find_or_install_all`); `shell env` does not (`find_all`). The split exists because `shell env` is wired into shell init paths where surprise downloads would be hostile.
+- **`index update <pkg>`**: tagged identifier (`cmake:3.28`) fetches only that tag's digest + manifest, merges into existing `tags/{repo}.json`. Bare identifier (`cmake`) fetches all tags. Two modes intentional — tagged mode keep offline indexes minimal + reproducible.
+- **`deps`**: tree view marks repeated subtrees with `(*)`, no re-expand. Flat view (`--flat`) emits topological evaluation order — same order `exec` and `env` use to layer env vars. Why view (`--why`) traces all paths from roots to target by registry/repository (tag ignored when matching).
+- **`package push -p/--platform` required.** Multi-platform manifests assembled by repeated single-platform pushes; no auto-detect path on purpose.
+- **`package describe` / `package info`**: identifier is repository only, tag ignored. `describe` requires at least one of `--readme`, `--logo`, `--title`, `--description`, `--keywords` — no-op invocation rejected, not silently accepted.
+- **`shell profile load`**: silently skips broken entries (no error output). Designed for shell init file as `eval "$(ocx --offline shell profile load)"` — `--offline` essential because env file runs every shell startup, must not touch network.
+- **`env` vs `shell env`**: `env` auto-installs missing packages (`find_or_install_all`); `shell env` does not (`find_all`). Split exists because `shell env` wired into shell init paths where surprise downloads hostile.

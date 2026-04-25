@@ -5,7 +5,7 @@ allowed-tools: Read, Glob, Grep
 ---
 
 <!--
-Skills are model-invoked workflows discovered via description matching.
+Skills = model-invoked workflows. Discovered via description match.
 
 Required fields:
   - name: lowercase, hyphens only, max 64 chars, must match directory name
@@ -18,9 +18,9 @@ Description best practices:
   GOOD: "API design skill. Use when designing REST APIs, GraphQL schemas, or gRPC services."
   BAD:  "Helps with APIs"
 
-Supporting files: place sibling .md files next to SKILL.md for progressive
-disclosure (e.g. commit_reference.md). No subdirectories — Claude Code only
-discovers skills at .claude/skills/<name>/SKILL.md exactly.
+Supporting files: drop sibling .md next to SKILL.md for progressive
+disclosure (e.g. commit_reference.md). No subdirs — Claude Code only
+finds skills at .claude/skills/<name>/SKILL.md exact.
 
 Location: .claude/skills/[skill-name]/SKILL.md
 -->
@@ -29,7 +29,7 @@ Location: .claude/skills/[skill-name]/SKILL.md
 
 ## Overview
 
-[Brief description of this skill's purpose and scope]
+[Skill purpose + scope, brief]
 
 ## Workflows
 
@@ -42,7 +42,7 @@ Location: .claude/skills/[skill-name]/SKILL.md
 1. [Action]
 2. [Validation]
 3. If [condition], [correction]
-4. Repeat until [success criteria]
+4. Repeat til [success criteria]
 
 ## Reference Implementation
 
@@ -63,5 +63,5 @@ Location: .claude/skills/[skill-name]/SKILL.md
 
 ## Resources
 
-- `[Sibling Reference](./[skill-name]_reference.md)` — optional progressive-disclosure file alongside SKILL.md
+- `[Sibling Reference](./[skill-name]_reference.md)` — optional progressive-disclosure file beside SKILL.md
 - `[External Link](https://example.com)`

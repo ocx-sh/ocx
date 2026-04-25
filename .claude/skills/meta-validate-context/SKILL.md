@@ -12,16 +12,16 @@ triggers:
 
 # Validate Context Rules
 
-Checks that `.claude/rules/subsystem-*.md` files accurately describe the current codebase.
+Check `.claude/rules/subsystem-*.md` files match current codebase.
 
 ## Workflow
 
 For each `subsystem-*.md` rule file:
 
-1. **Read the rule** — Extract mentioned type names, module paths, function names, error variants
-2. **Grep the codebase** — Verify each reference still exists
-3. **Check for new additions** — Look for new public types/modules not mentioned in the rule
-4. **Report** — List stale references and missing additions
+1. **Read the rule** — Extract type names, module paths, function names, error variants
+2. **Grep the codebase** — Verify each reference exists
+3. **Check for new additions** — Find new public types/modules not in rule
+4. **Report** — List stale references + missing additions
 
 ## Subsystem Rules to Check
 
@@ -66,7 +66,7 @@ grep -rn "^pub struct\|^pub enum\|^pub trait" crates/ocx_lib/src/subsystem/ | gr
 
 ## When to Run
 
-- After large refactors
+- After big refactors
 - Before major feature branches
-- As part of `/code-check` audits
-- Periodically (monthly)
+- Part of `/code-check` audits
+- Monthly

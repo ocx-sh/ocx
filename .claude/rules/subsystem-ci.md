@@ -7,13 +7,13 @@ paths:
 
 # CI Subsystem
 
-GitHub Actions workflows for OCX build, test, lint, license, and release.
+GitHub Actions workflows for OCX build, test, lint, license, release.
 
 ## Design Principles
 
 ### 1. Taskfile is the single source of truth
 
-Every check a developer can run locally MUST be defined as a Taskfile task. CI calls the task, not the raw command. Eliminates drift between local and CI.
+Every check dev run locally MUST be Taskfile task. CI call task, not raw command. Kill drift between local + CI.
 
 ```yaml
 # CORRECT
@@ -25,9 +25,9 @@ Every check a developer can run locally MUST be defined as a Taskfile task. CI c
   run: cargo clippy --workspace --locked -- -D warnings
 ```
 
-Raw commands in CI are acceptable only for CI-only glue (artifact paths, GitHub annotations, `${{ steps.*.outcome }}`).
+Raw commands in CI OK only for CI-only glue (artifact paths, GitHub annotations, `${{ steps.*.outcome }}`).
 
-**Merge rule**: when CI and Taskfile diverge, adopt the stricter flags in the Taskfile and have CI call the task.
+**Merge rule**: CI + Taskfile diverge → adopt stricter flags in Taskfile, CI call task.
 
 ### 2. Minimize duplication via composite actions
 
@@ -39,7 +39,7 @@ Raw commands in CI are acceptable only for CI-only glue (artifact paths, GitHub 
 
 ### 3. Never let lint block test results
 
-Test results are more valuable than lint results. Pattern: `continue-on-error: true` on linters + a final gate step.
+Test results > lint results. Pattern: `continue-on-error: true` on linters + final gate step.
 
 ```yaml
 - name: Check formatting
@@ -75,13 +75,13 @@ Test results are more valuable than lint results. Pattern: `continue-on-error: t
 
 ### 4. Share artifacts, don't rebuild
 
-Build the binary **once** in the smoke job, upload with `compression-level: 0` and `retention-days: 1`. Downstream jobs `download-artifact` instead of rebuilding.
+Build binary **once** in smoke job, upload with `compression-level: 0` and `retention-days: 1`. Downstream jobs `download-artifact` not rebuild.
 
 ### 5. Security
 
 - **SHA-pin every action** — `uses: owner/action@<full-sha>  # vX.Y.Z`
 - **Minimal permissions** — declare at workflow level, elevate per-job
-- **No secrets in `run:` steps** — use `env:` intermediary to prevent script injection
+- **No secrets in `run:` steps** — use `env:` intermediary to block script injection
 - **OIDC for cloud auth** — not static credentials
 - **No self-hosted runners for public repos**
 
@@ -106,7 +106,7 @@ concurrency:
 | **Duplicate builds** | A full Rust release build = 5-15 min | Share binaries via upload/download-artifact |
 | **Matrix breadth** | N entries = N x job cost | `fail-fast: true` default |
 
-Rust env to reduce build time:
+Rust env to cut build time:
 
 ```yaml
 env:
@@ -165,12 +165,12 @@ No deprecated v3 artifact/cache actions. No `actions-rs/*`. Require Node 24+ run
 
 ## Authoring Workflow
 
-When creating, modifying, or auditing a GitHub Actions workflow, follow this sequence:
+Creating, modifying, auditing GitHub Actions workflow → follow sequence:
 
-1. **Research** — Glob `.github/workflows/*.yml` and read existing structure. Read the Taskfile to identify which checks already have task definitions. Check action versions for deprecation; verify Node 24+ runtime.
-2. **Cost analysis** — Evaluate per-run cost using the Cost Factors table above. Document the estimate in the PR description.
-3. **Design** — Apply the Design Principles (Taskfile wrapping, composite actions, lint doesn't block tests, artifact sharing, SHA pinning, minimal permissions, concurrency).
-4. **Review** — Walk the Review Checklist before merging.
+1. **Research** — Glob `.github/workflows/*.yml`, read existing structure. Read Taskfile to find which checks already have task definitions. Check action versions for deprecation; verify Node 24+ runtime.
+2. **Cost analysis** — Estimate per-run cost via Cost Factors table above. Document estimate in PR description.
+3. **Design** — Apply Design Principles (Taskfile wrapping, composite actions, lint doesn't block tests, artifact sharing, SHA pinning, minimal permissions, concurrency).
+4. **Review** — Walk Review Checklist before merge.
 
 ### Tool Preferences
 
@@ -180,8 +180,8 @@ When creating, modifying, or auditing a GitHub Actions workflow, follow this seq
 
 ### Handoffs
 
-- To Builder — for Taskfile changes needed by CI (keep Taskfile as the source of truth)
-- To Security Auditor — for supply chain or permission review on new workflows
+- To Builder — Taskfile changes needed by CI (Taskfile = source of truth)
+- To Security Auditor — supply chain or permission review on new workflows
 
 ## Anti-Patterns
 

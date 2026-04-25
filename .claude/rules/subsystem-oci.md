@@ -6,11 +6,11 @@ paths:
 
 # OCI Subsystem
 
-OCI registry client, index management, identifiers, and platform matching at `crates/ocx_lib/src/oci/`.
+OCI registry client, index management, identifiers, platform matching at `crates/ocx_lib/src/oci/`.
 
 ## Design Rationale
 
-Trait-based dispatch (`IndexImpl`) enables swapping local/remote index implementations and injecting test transports without changing callers. `RemoteIndex` caches aggressively (RwLock per clone) to avoid redundant registry calls in batch operations. `IndexImpl` methods return `Option` (None = not found) because absence is a normal query result at the index layer, not an error. See `arch-principles.md` for the full pattern catalog.
+Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transports without changing callers. `RemoteIndex` cache aggressive (RwLock per clone) avoid redundant registry calls in batch ops. `IndexImpl` methods return `Option` (None = not found) — absence normal query result at index layer, not error. See `arch-principles.md` for full pattern catalog.
 
 ## Module Map
 
@@ -62,7 +62,7 @@ Parsed OCI reference: `registry/repository[:tag][@digest]`.
 
 - `parse_with_default_registry(s, default)` — main entry point
 - `tag()` returns `Option<&str>` — does NOT inject "latest" (unlike `oci_spec::Reference`)
-- `tag_or_latest()` — returns tag or "latest" as fallback
+- `tag_or_latest()` — returns tag or "latest" fallback
 - `clone_with_tag(tag)` — new identifier with tag, drops digest (tag change invalidates digest)
 - Tags with `+` normalized to `_` on parse (OCI spec forbids `+`)
 - Repository must be lowercase (validated on parse)
@@ -70,8 +70,8 @@ Parsed OCI reference: `registry/repository[:tag][@digest]`.
 ### Index (public wrapper)
 
 Type-erased wrapper over `Box<dyn IndexImpl>`. Construction:
-- `from_chained(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode)` — the standard constructor; wraps a `ChainedIndex` that orchestrates cache + source routing per `ChainMode`
-- `from_remote(remote_index)` — wraps a bare `RemoteIndex` (no caching)
+- `from_chained(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode)` — standard constructor; wraps `ChainedIndex` orchestrating cache + source routing per `ChainMode`
+- `from_remote(remote_index)` — wraps bare `RemoteIndex` (no caching)
 - Clone shares in-memory cache (via `Arc<RwLock>`)
 
 Key methods: `list_tags()`, `fetch_manifest()`, `fetch_candidates()`, `select(identifier, platforms) → SelectResult`
@@ -96,16 +96,16 @@ async fn fetch_manifest(&self, id: &Identifier) -> Result<Option<(Digest, Manife
 async fn fetch_manifest_digest(&self, id: &Identifier) -> Result<Option<Digest>>;
 ```
 
-**Return convention**: `Result<Option<T>>` — `None` = not found (not an error), `Err` = network/IO failure.
+**Return convention**: `Result<Option<T>>` — `None` = not found (not error), `Err` = network/IO failure.
 
 ### LocalIndex
 
 File-backed snapshot of registry metadata. High-level public entry points:
 
-- `refresh_tags(source, identifier)` — fetch tags from `source`, persist to `$OCX_HOME/tags/`; used by `ChainedIndex` for tag/catalog operations
-- `write_chain_and_commit_tag(source, identifier)` — orchestrate a full chain walk (image index → manifest), persist all blobs to `$OCX_HOME/blobs/`, then commit the tag pointer; called by `ChainedIndex` after a source fetch
+- `refresh_tags(source, identifier)` — fetch tags from `source`, persist to `$OCX_HOME/tags/`; used by `ChainedIndex` for tag/catalog ops
+- `write_chain_and_commit_tag(source, identifier)` — orchestrate full chain walk (image index → manifest), persist all blobs to `$OCX_HOME/blobs/`, then commit tag pointer; called by `ChainedIndex` after source fetch
 
-Internal helpers `persist_manifest_chain` and `commit_tag` are private — callers always go through these two high-level methods.
+Internal helpers `persist_manifest_chain` and `commit_tag` private — callers always go through these two high-level methods.
 
 ### LocalIndex vs RemoteIndex
 
@@ -136,20 +136,20 @@ Internal helpers `persist_manifest_chain` and `commit_tag` are private — calle
 
 ## Invariants
 
-1. **Cache never invalidated** — both index types cache aggressively in memory. For fresh data, create new instance or call `update()`.
-2. **Internal tags filtered** — tags prefixed `__ocx.` are stripped by every `IndexImpl::list_tags()` automatically.
-3. **Digest overrides tag** — when identifier has both, `fetch_manifest()` uses digest directly.
-4. **Auth at Client level** — index implementations don't handle auth; `Client::ensure_auth()` is called before operations.
+1. **Cache never invalidated** — both index types cache aggressive in memory. For fresh data, create new instance or call `update()`.
+2. **Internal tags filtered** — tags prefixed `__ocx.` stripped by every `IndexImpl::list_tags()` auto.
+3. **Digest overrides tag** — when identifier has both, `fetch_manifest()` uses digest direct.
+4. **Auth at Client level** — index impls don't handle auth; `Client::ensure_auth()` called before operations.
 
 ## Gotchas
 
-- **OCI tags are mutable.** Never assume a tag is "frozen" or "pinned." Only digests are immutable.
-- **Cache coherence issue**: Some commands call `context.remote_client()` directly instead of going through `default_index`. This bypasses cache and can produce inconsistent results. All index operations should route through `default_index`.
-- **`oci-client` flush audit**: `pull_blob` was missing `out.flush().await?` causing truncated files. Fixed in `pull_blob`, but audit other `AsyncWrite` methods.
-- **Submodule at `external/rust-oci-client/`** is a patched fork. Changes need upstream PRs. Only format new code (upstream uses 100-char rustfmt).
-- **When unsure about the current `oci-client` API**, query Context7 MCP (`mcp__context7__resolve-library-id` → `mcp__context7__get-library-docs`) before guessing. The upstream crate evolves independently of our patched fork, and training-data knowledge of its API shape decays quickly.
+- **OCI tags mutable.** Never assume tag "frozen" or "pinned." Only digests immutable.
+- **Cache coherence issue**: Some commands call `context.remote_client()` directly instead of going through `default_index`. Bypasses cache, produces inconsistent results. All index ops should route through `default_index`.
+- **`oci-client` flush audit**: `pull_blob` missing `out.flush().await?` caused truncated files. Fixed in `pull_blob`, but audit other `AsyncWrite` methods.
+- **Submodule at `external/rust-oci-client/`** patched fork. Changes need upstream PRs. Only format new code (upstream uses 100-char rustfmt).
+- **When unsure about current `oci-client` API**, query Context7 MCP (`mcp__context7__resolve-library-id` → `mcp__context7__get-library-docs`) before guessing. Upstream crate evolves independently of patched fork; training-data knowledge of API shape decays fast.
 
 ## Quality Gate
 
 During review-fix loops, run `task rust:verify` — not full `task verify`.
-Full `task verify` is the final gate before commit.
+Full `task verify` is final gate before commit.

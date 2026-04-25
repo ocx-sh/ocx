@@ -8,7 +8,7 @@ model: haiku
 ---
 
 <!--
-Agents are lightweight swarm workers spawned via Task tool.
+Agents = lightweight swarm workers spawned via Task tool.
 
 Required fields:
   - name: lowercase, hyphens only, max 64 chars
@@ -49,4 +49,4 @@ NOTE: Agents use "tools:" not "allowed-tools:" (unlike commands)
 
 ## On Completion
 
-Report: [what to report back to orchestrator]
+Report: [what report back to orchestrator]

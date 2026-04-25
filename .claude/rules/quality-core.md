@@ -1,8 +1,6 @@
 # Code Quality Standards
 
-Canonical design principles applicable to **all languages**. This is the shareable,
-project-independent root rule. For language-specific applications, see the leaf rules
-listed in **See Also** at the bottom.
+Canonical design principles for **all languages**. Shareable, project-independent root rule. Language-specific applications: see leaf rules in **See Also** below.
 
 ---
 
@@ -20,39 +18,36 @@ listed in **See Also** at the bottom.
 
 ### DRY
 
-- Extract shared logic only when **2+ genuinely different callers** exist — incidental similarity is not duplication
-- Prefer the language's zero-cost abstraction mechanism (generics, protocols, type parameters) over runtime indirection
-- Single source of truth for business logic — if a rule exists in two places, one will go stale
-- **When NOT to DRY** (prefer DAMP — Descriptive And Meaningful Phrases): test code should be self-contained and readable in isolation, even at the cost of repetition. Also: similar error handling representing distinct situations, coupling risk outweighs deduplication
+- Extract shared logic only when **2+ genuinely different callers** exist — incidental similarity not duplication
+- Prefer language's zero-cost abstraction (generics, protocols, type parameters) over runtime indirection
+- Single source of truth for business logic — rule in two places, one go stale
+- **When NOT to DRY** (prefer DAMP — Descriptive And Meaningful Phrases): test code self-contained, readable in isolation, even at cost of repetition. Also: similar error handling for distinct situations, coupling risk outweighs dedup
 
 ### KISS (Keep It Simple, Stupid)
 
-Simplicity is a prerequisite for reliability. Every line of code, every abstraction, every
-indirection is a liability until proven otherwise.
+Simplicity = prerequisite for reliability. Every line, abstraction, indirection = liability until proven otherwise.
 
-- Prefer straightforward code that a newcomer can read over clever code that impresses peers
-- If the design needs a diagram to explain, it may be too complex for the problem
-- Complexity is not a badge of thoroughness — it is a cost that compounds over time
-- When in doubt, write the naive solution first; optimize only when measurement demands it
+- Prefer straightforward code newcomer can read over clever code that impresses peers
+- Design needs diagram to explain → too complex for problem
+- Complexity not badge of thoroughness — cost that compounds
+- Doubt? Write naive solution first; optimize only when measurement demands
 
 ### Choose Boring Technology
 
-Teams have a finite budget of "innovation tokens" (Dan McKinley, 2015). Boring technology
-is mature, battle-tested, and has *known* failure modes — novel technology introduces
-unknown unknowns that compound operational cost.
+Teams have finite "innovation tokens" (Dan McKinley, 2015). Boring tech mature, battle-tested, *known* failure modes — novel tech introduces unknown unknowns that compound operational cost.
 
-- Default to the established option; save novelty for where it genuinely differentiates
-- "Best tool for the job" is a local optimization — the actual job is keeping the system running
-- Each novel dependency/framework/language spends an innovation token; budget ~3 total
-- When evaluating alternatives, weigh operational maturity and team familiarity, not just features
+- Default to established option; save novelty for genuine differentiation
+- "Best tool for job" = local optimization — actual job is keeping system running
+- Each novel dependency/framework/language spends innovation token; budget ~3 total
+- Evaluate alternatives by operational maturity and team familiarity, not just features
 
 ### YAGNI
 
-- **Start concrete.** Extract abstractions only when a second genuinely different use case appears
-- **No premature generics.** A function that only handles one type doesn't need type parameters until called with something else
-- **Don't over-engineer error types.** If callers distinguish 2 cases, don't create 20 variants/subclasses
+- **Start concrete.** Extract abstractions only when second genuinely different use case appears
+- **No premature generics.** Function handling one type needs no type parameters until called with another
+- **Don't over-engineer error types.** Callers distinguish 2 cases? Don't create 20 variants/subclasses
 - **No feature flags or compatibility shims** when you can just change the code
-- Three similar lines of code beat a premature abstraction
+- Three similar lines beat premature abstraction
 
 ---
 
@@ -67,27 +62,27 @@ unknown unknowns that compound operational cost.
 ### Universal Block-tier Anti-Patterns
 - Hardcoded secrets or credentials
 - Unvalidated external input at system boundaries
-- Catching/swallowing errors silently (no logging, no re-raise)
+- Catching/swallowing errors silently (no log, no re-raise)
 - God objects/modules with 15+ fields/methods spanning unrelated concerns
 
 ### Universal Warn-tier Anti-Patterns
-- Boolean parameters where an enum/literal type would be clearer
+- Boolean parameters where enum/literal type clearer
 - Stringly-typed APIs where structured types prevent typos at compile/type-check time
 - Unnecessary copies/clones in hot paths
-- Missing error context (bare re-raise without adding information)
+- Missing error context (bare re-raise without adding info)
 
 ---
 
 ## Reusability Assessment
 
 Before writing new code, ask:
-- "Could a second caller use this, or would it need to copy-paste?"
-- "Is this in the right layer?" (generic utility vs. domain logic vs. command-specific glue)
-- "Is this a generic capability dressed up as a specific feature?"
+- "Could second caller use this, or copy-paste?"
+- "Right layer?" (generic utility vs. domain logic vs. command-specific glue)
+- "Generic capability dressed up as specific feature?"
 
 **Signals of misplaced code:**
-- Cross-cutting concern implemented inline (progress, retry, rate-limiting, path sanitization)
-- Platform-specific logic in a library instead of the application layer
+- Cross-cutting concern inline (progress, retry, rate-limiting, path sanitization)
+- Platform-specific logic in library instead of application layer
 - Generic utility mixed into command-specific code
 
 ---
@@ -95,7 +90,7 @@ Before writing new code, ask:
 ## Code Review Checklist (All Languages)
 
 - [ ] Errors propagated with context, not swallowed; logged once at boundary
-- [ ] No god objects — each module/class has a single responsibility
+- [ ] No god objects — each module/class single responsibility
 - [ ] Follows existing codebase patterns (grep before inventing)
 - [ ] Generic logic in library layer, command-specific in application layer
 - [ ] No premature abstractions — extraction justified by real duplication
@@ -118,18 +113,18 @@ Before writing new code, ask:
 
 ## Refactoring Tooling
 
-Before starting refactoring work, check available tools via `ToolSearch` — capabilities like LSP may be available as deferred tools that aren't loaded by default. Prefer semantic tooling (LSP `findReferences`, `workspaceSymbol`, `goToDefinition`) over text-based search (Grep) for symbol-level operations like renames and reference lookups. Fall back to Grep for non-code searches (comments, docs, config files).
+Before refactoring, check available tools via `ToolSearch` — capabilities like LSP may be deferred tools not loaded by default. Prefer semantic tooling (LSP `findReferences`, `workspaceSymbol`, `goToDefinition`) over text search (Grep) for symbol-level ops like renames and reference lookups. Fall back to Grep for non-code searches (comments, docs, config).
 
 ---
 
 ## Refactoring Discipline
 
-**Two Hats Rule**: Never mix refactoring and optimization in the same session.
+**Two Hats Rule**: Never mix refactoring and optimization in same session.
 
-- **Hat 1: Refactoring** — Change structure, NOT behavior. Tests must pass unchanged.
+- **Hat 1: Refactoring** — Change structure, NOT behavior. Tests pass unchanged.
 - **Hat 2: Optimization** — Improve performance, NOT behavior. Benchmarks required.
 
-When switching hats, commit first, then switch context.
+Switching hats? Commit first, then switch context.
 
 ---
 
@@ -145,8 +140,7 @@ When switching hats, commit first, then switch context.
 
 ## Verification Honesty
 
-Verification claims must be evidence-backed. Hedging language in review verdicts, commit
-messages, and completion reports masks uncertainty and degrades trust in quality gates.
+Verification claims must be evidence-backed. Hedging in review verdicts, commit messages, completion reports masks uncertainty, degrades trust in quality gates.
 
 ### Banned Phrases
 
@@ -159,7 +153,7 @@ messages, and completion reports masks uncertainty and degrades trust in quality
 
 ### Classification
 
-- Hedging in a review verdict or completion report: **Warn-tier**
+- Hedging in review verdict or completion report: **Warn-tier**
 - Premature celebration before verification evidence: **Warn-tier**
 - Stating "verified" without citing evidence: **Block-tier** (false verification)
 
@@ -167,7 +161,7 @@ messages, and completion reports masks uncertainty and degrades trust in quality
 
 ## See Also — Language-Specific Quality Rules
 
-Each of these is path-scoped — it loads automatically when you edit files of that language:
+Each path-scoped — loads automatically when editing files of that language:
 
 - `quality-rust.md` — Rust-specific quality (ownership, async/Tokio, error handling, edition 2024)
 - `quality-python.md` — Python-specific quality (type hints, async, modern tooling)

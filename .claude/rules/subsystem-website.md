@@ -5,11 +5,11 @@ paths:
 
 # Website Subsystem
 
-VitePress 2.0 documentation site at `website/`. Bun runtime, 15 custom Vue components, auto-generated content from CI.
+VitePress 2.0 docs site at `website/`. Bun runtime, 15 custom Vue components, auto-gen content from CI.
 
 ## Design Rationale
 
-VitePress (not Docusaurus/Astro) because it leverages the Vue ecosystem, provides excellent code block support, and generates a fast static site. Custom Vue components enable interactive documentation (file trees, tooltips, tabs) without heavy JS frameworks. Generated content pipeline (schema, recordings, SBOM, catalog) ensures single source of truth — docs are derived from code, not maintained separately.
+VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast static site. Custom Vue components = interactive docs (trees, tooltips, tabs) without heavy JS frameworks. Generated pipeline (schema, recordings, SBOM, catalog) = single source of truth. Docs derived from code, not hand-maintained.
 
 ## File Structure
 
@@ -37,9 +37,9 @@ task website:build     # Full build (generates schema, recordings, sbom, catalog
 task website:deploy    # rsync to production (requires DEPLOY_HOST)
 ```
 
-The build task chains: `schema:generate` → `recordings:build` → `sbom:generate:page` → `catalog:generate` → `vitepress build`.
+Build chain: `schema:generate` → `recordings:build` → `sbom:generate:page` → `catalog:generate` → `vitepress build`.
 
-**Never edit generated files** — they are overwritten by the build pipeline.
+**Never edit generated files** — build pipeline overwrites.
 
 ## VitePress Configuration
 
@@ -51,7 +51,7 @@ The build task chains: `schema:generate` → `recordings:build` → `sbom:genera
 
 ## Custom Vue Components
 
-All globally registered in `theme/index.mts` — use directly in `.md` files without imports.
+All registered globally in `theme/index.mts` — use in `.md` files, no imports.
 
 ### Content Components (use in documentation)
 
@@ -77,7 +77,7 @@ All globally registered in `theme/index.mts` — use directly in `.md` files wit
 
 ### VNode Introspection Pattern
 
-`Tree`, `Steps`, and `Terminal` (without `src`) use a **declarative marker pattern**: they don't render child slots directly. Instead, they introspect child VNodes (`<Node>`, `<Step>`, `<Frame>`) to extract props and build internal data structures. `<Description>` is a marker component whose content is read by parent introspection but never rendered by itself.
+`Tree`, `Steps`, `Terminal` (no `src`) use **declarative marker pattern**: don't render slots directly. Introspect child VNodes (`<Node>`, `<Step>`, `<Frame>`) to extract props, build internal data. `<Description>` = marker — content read by parent introspection, never rendered alone.
 
 ### Usage Examples
 
@@ -120,11 +120,11 @@ All globally registered in `theme/index.mts` — use directly in `.md` files wit
 ## Styling Patterns
 
 - **CSS variables**: Use VitePress theme vars (`--vp-c-text-1`, `--vp-c-brand`, `--vp-c-divider`, `--vp-c-bg`, `--vp-c-bg-soft`, `--vp-font-family-mono`)
-- **Dark mode**: Handled automatically by VitePress variable switching — never hardcode colors
-- **Scoped styles**: Use `<style scoped>` in components (except Tooltip which uses portal)
-- **Terminal colors**: `--term-color-0` through `--term-color-15` map ANSI colors to VitePress semantic colors
+- **Dark mode**: VitePress var switching handles auto — never hardcode colors
+- **Scoped styles**: `<style scoped>` in components (except Tooltip — uses portal)
+- **Terminal colors**: `--term-color-0` through `--term-color-15` map ANSI to VitePress semantic colors
 - **Responsive**: Components handle mobile via CSS media queries
-- **Transitions**: Every element that pops, expands, collapses, or moves must animate both entry and exit. Use CSS animations or transitions with matching open/closed states — never show without a fade-in or hide without a fade-out
+- **Transitions**: Every element that pops, expands, collapses, moves must animate entry + exit. CSS animations or transitions with matching open/closed states — never show without fade-in, never hide without fade-out
 
 ## VitePress Markdown Features
 
@@ -139,11 +139,11 @@ All globally registered in `theme/index.mts` — use directly in `.md` files wit
 
 - **Homepage**: `layout: home` + `hero` (name, text, tagline, actions) + `features` array
 - **Content pages**: `outline: deep` for full heading outline
-- **Catalog pages**: `title`, `description`, `head` meta, `prev`/`next` navigation (generated)
+- **Catalog pages**: `title`, `description`, `head` meta, `prev`/`next` nav (generated)
 
 ## Icons (Licensed Assets)
 
-All icons are **Icons8 outline/line style**, black SVG on transparent background, licensed for OCX use.
+All icons = **Icons8 outline/line style**, black SVG on transparent bg, licensed for OCX use.
 
 ### Directory Structure
 
@@ -156,9 +156,9 @@ All icons are **Icons8 outline/line style**, black SVG on transparent background
 ### Workflow for New Icons
 
 1. Download outline-style black SVG from Icons8
-2. Place original in `licensed/source/icons/{name}.svg`
+2. Put original in `licensed/source/icons/{name}.svg`
 3. Copy to `licensed/icons/{context}-{purpose}.svg` (e.g. `cta-roadmap.svg`, `roadmap-interop.svg`, `feature-oci.svg`)
-4. Update `CATALOG.md` — add to the appropriate category table and "Currently In Use" section
+4. Update `CATALOG.md` — add to right category table + "Currently In Use" section
 5. Tint with CSS filters (see below)
 
 ### Naming Convention
@@ -171,7 +171,7 @@ All icons are **Icons8 outline/line style**, black SVG on transparent background
 
 ### Icon Tinting
 
-Icons are tinted using CSS `filter` chains. Never hardcode colors — always derive from VitePress CSS variables or use the filter technique for consistent light/dark mode.
+Tint via CSS `filter` chains. Never hardcode colors — derive from VitePress CSS vars or use filter technique for consistent light/dark mode.
 
 **For `<img>` tags** (CTA cards, feature cards): CSS filter chains per icon class.
 
@@ -186,7 +186,7 @@ Icons are tinted using CSS `filter` chains. Never hardcode colors — always der
 }
 ```
 
-**For dynamic accent colors** (roadmap nodes): CSS `mask-image` with `background-color` set to a CSS variable.
+**For dynamic accent colors** (roadmap nodes): CSS `mask-image` + `background-color` set to CSS variable.
 
 ```vue
 <span
@@ -210,11 +210,11 @@ Icons are tinted using CSS `filter` chains. Never hardcode colors — always der
 }
 ```
 
-This renders the icon shape filled with the accent color — works in both light and dark mode automatically.
+Renders icon shape filled with accent color — works light + dark mode auto.
 
 ## Writing Guidelines
 
-See `.claude/rules/docs-style.md` for narrative structure, link conventions, callout usage, tooltip patterns, and precision rules.
+See `.claude/rules/docs-style.md` for narrative structure, link conventions, callout usage, tooltip patterns, precision rules.
 
 ## Generated Content Pipeline
 
@@ -227,5 +227,4 @@ See `.claude/rules/docs-style.md` for narrative structure, link conventions, cal
 
 ## Quality Gate
 
-During review-fix loops, run `task website:build` — not full `task verify`.
-Full website build pipeline validates generated content, schema, and VitePress output.
+In review-fix loops, run `task website:build` — not full `task verify`. Full website build validates generated content, schema, VitePress output.

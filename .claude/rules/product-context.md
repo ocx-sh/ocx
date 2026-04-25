@@ -19,48 +19,48 @@ paths:
 
 # OCX Product Context
 
-> First general-purpose binary package manager built on the OCI distribution spec.
+> First general-purpose binary package manager built on OCI distribution spec.
 
-OCX turns any Docker/OCI registry — Docker Hub, GHCR, ECR, ACR, Harbor, or a private instance — into a cross-platform binary distribution platform. Every organization already runs OCI registries for container images; OCX adds a package manager experience on top of that existing infrastructure at zero additional cost.
+OCX turn any Docker/OCI registry — Docker Hub, GHCR, ECR, ACR, Harbor, or private instance — into cross-platform binary distribution platform. Every org already run OCI registries for container images; OCX add package manager UX on top of existing infra at zero extra cost.
 
-This rule is the canonical product identity. Read it when reasoning about project direction, trade-offs, ADR motivation, research framing, doc narratives, or competitive positioning.
+This rule = canonical product identity. Read when reasoning about project direction, trade-offs, ADR motivation, research framing, doc narratives, competitive positioning.
 
 ## The Problem
 
-Distributing pre-built binaries across platforms and teams is fragmented:
+Distributing pre-built binaries across platforms and teams fragmented:
 
-- **System PMs** (apt, dnf, pacman) — OS-locked, require root, separate packaging per distro
-- **Language PMs** (cargo, npm, pip) — only serve their own ecosystem
+- **System PMs** (apt, dnf, pacman) — OS-locked, need root, separate packaging per distro
+- **Language PMs** (cargo, npm, pip) — only own ecosystem
 - **Homebrew** — no private binaries, bottles tied to specific OS versions
 - **GitHub Releases** — file hosting only; no install, no version switching, no env management
-- **Version managers** (mise, asdf) — consume binaries but can't publish them; each tool needs a plugin
-- **Nix** — content-addressed storage, but demands learning a functional language
-- **Enterprise servers** (Artifactory, Nexus) — thousands per year and still lack client-side tooling
-- **Raw OCI tools** (ORAS, docker pull) — move blobs but offer no package management UX
+- **Version managers** (mise, asdf) — consume binaries but can't publish; each tool need plugin
+- **Nix** — content-addressed storage, but demand learning functional language
+- **Enterprise servers** (Artifactory, Nexus) — thousands per year, still lack client-side tooling
+- **Raw OCI tools** (ORAS, docker pull) — move blobs but no package management UX
 
 ## Why OCI
 
-- **Zero infrastructure cost** — reuse the registry you already run for containers
-- **Auth/RBAC/TLS for free** — inherit registry's security model
-- **Ecosystem tooling** — vulnerability scanning, geo-replication, GC come built-in
-- **Multi-platform manifests** — OCI image indexes provide native OS/arch resolution
+- **Zero infrastructure cost** — reuse registry already run for containers
+- **Auth/RBAC/TLS for free** — inherit registry security model
+- **Ecosystem tooling** — vulnerability scanning, geo-replication, GC built-in
+- **Multi-platform manifests** — OCI image indexes give native OS/arch resolution
 - **Standards-based** — stable, widely adopted, vendor-neutral
 
 ## Target Users
 
 - **Primary**: Automation tools — GitHub Actions, Bazel rules, devcontainer features, CI scripts
-- **Secondary**: Platform/infrastructure engineers managing internal tool distribution
-- **Non-target**: End users typing interactive commands — OCX is a backend tool, not a user-facing PM
+- **Secondary**: Platform/infra engineers managing internal tool distribution
+- **Non-target**: End users typing interactive commands — OCX = backend tool, not user-facing PM
 
 ## Product Principles
 
-1. **Backend-first** — JSON output, composable commands, clean exit codes, designed for machine consumption
-2. **Offline-first** — local index never auto-updates; populated index + cached object = zero network needed
+1. **Backend-first** — JSON output, composable commands, clean exit codes, made for machine consumption
+2. **Offline-first** — local index never auto-update; populated index + cached object = zero network
 3. **Content-addressed** — Nix-like dedup and immutability without Nix-like complexity
-4. **Clean-env execution** — `ocx exec` runs with package-declared vars only, no ambient PATH pollution
+4. **Clean-env execution** — `ocx exec` run with package-declared vars only, no ambient PATH pollution
 5. **Zero infrastructure cost** — BYO OCI registry; no Homebrew tap, no Artifactory license
-6. **Language-agnostic** — single standalone binary, no runtime deps, distributes any pre-built binary
-7. **Private-first** — registry auth as first-class, internal tools as easy as public ones
+6. **Language-agnostic** — single standalone binary, no runtime deps, distribute any pre-built binary
+7. **Private-first** — registry auth first-class, internal tools easy as public ones
 
 ## Key Differentiators
 
@@ -71,8 +71,8 @@ Distributing pre-built binaries across platforms and teams is fragmented:
 | 3 | Clean environment execution | CI/CD reproducibility, no "works on my machine" |
 | 4 | Offline-first indexing | Deterministic builds without network fragility |
 | 5 | Backend-first design | Machine-consumable output for Actions/Bazel/scripts |
-| 6 | Language-agnostic, toolchain-free | One binary installs any binary |
-| 7 | Private distribution first-class | Internal tools as simple as `docker push` |
+| 6 | Language-agnostic, toolchain-free | One binary install any binary |
+| 7 | Private distribution first-class | Internal tools simple as `docker push` |
 | 8 | Declarative env metadata | Multi-package env composition without shell scripts |
 
 ## Competitive Positioning
@@ -91,19 +91,19 @@ Distributing pre-built binaries across platforms and teams is fragmented:
 
 ### "Why Not Just..." Rebuttals
 
-- **"Why not Homebrew?"** — macOS-only bottles, no private binary support, requires maintaining formulas
+- **"Why not Homebrew?"** — macOS-only bottles, no private binary support, need maintain formulas
 - **"Why not just `docker pull`?"** — no version management, no env composition, no install store, no offline mode
-- **"Why not Nix?"** — requires learning a functional language; OCX works with any binary and has a flat learning curve
-- **"Why not mise/asdf?"** — they consume binaries but can't publish them; each tool needs a maintained plugin
-- **"Why not ORAS?"** — push/pull only; no install, no version switching, no environment management
+- **"Why not Nix?"** — need learn functional language; OCX work with any binary, flat learning curve
+- **"Why not mise/asdf?"** — consume binaries but can't publish; each tool need maintained plugin
+- **"Why not ORAS?"** — push/pull only; no install, no version switching, no env management
 
 ## Use Cases
 
 1. **CI/CD tool setup** — pinned index snapshots guarantee deterministic tool versions across runners
-2. **GitHub Actions** — action bundles an index snapshot; `ocx install` resolves the right binary per runner
+2. **GitHub Actions** — action bundle index snapshot; `ocx install` resolve right binary per runner
 3. **Bazel rules** — one rule version = fixed binary; no URL matrix maintenance per platform
-4. **Devcontainer features** — tools resolved at build time without per-architecture conditionals
-5. **Polyglot teams** — install Go, Python, Node, Rust, CMake, etc. with one tool and one command pattern
+4. **Devcontainer features** — tools resolved at build time without per-arch conditionals
+5. **Polyglot teams** — install Go, Python, Node, Rust, CMake, etc. with one tool, one command pattern
 6. **Internal tool distribution** — push proprietary CLI tools to private registry; `ocx install` from any team
 
 ## CLI at a Glance
@@ -143,18 +143,18 @@ Global flags: `--offline`, `--remote`, `--format json`.
 
 ## Update Protocol
 
-This file is the single source of truth for OCX product identity. Stale positioning degrades every downstream decision (ADRs, research framing, doc narratives, competitive rebuttals). Keep it current.
+This file = single source of truth for OCX product identity. Stale positioning degrade every downstream decision (ADRs, research framing, doc narratives, competitive rebuttals). Keep current.
 
-**When to update** — any of the following triggers an edit in the same commit:
+**When to update** — any of these trigger edit in same commit:
 
-1. New differentiator discovered (add row to Key Differentiators)
-2. Competitive landscape shifts (matrix row changes, "why not" rebuttal goes stale)
-3. Target user shift (primary/secondary/non-target list changes)
+1. New differentiator found (add row to Key Differentiators)
+2. Competitive landscape shift (matrix row change, "why not" rebuttal stale)
+3. Target user shift (primary/secondary/non-target list change)
 4. Product principle added, dropped, or reworded
-5. Scope decision reframes positioning (ADR or plan implies a different product story)
+5. Scope decision reframe positioning (ADR or plan imply different product story)
 6. CLI-level UX change visible to positioning (new flagship command, removed subcommand)
 7. Use case validated or invalidated
 
-**Who must check** — every agent working at product level re-reads this file when its work could shift positioning: `worker-researcher` after evaluating a library/tool/competitor; `worker-architect` after an ADR or design spec; `worker-doc-writer` after user-guide / getting-started edits; `worker-builder` / `worker-reviewer` if an implementation exposes a capability gap or breaks a stated principle.
+**Who must check** — every agent at product level re-read this file when work could shift positioning: `worker-researcher` after evaluating library/tool/competitor; `worker-architect` after ADR or design spec; `worker-doc-writer` after user-guide / getting-started edits; `worker-builder` / `worker-reviewer` if implementation expose capability gap or break stated principle.
 
-**Validation** — `/meta-maintain-config refresh` spot-checks this file against current CLI help, source code, and recent ADRs. Run it quarterly or after any scope-shifting merge.
+**Validation** — `/meta-maintain-config refresh` spot-check this file against current CLI help, source code, recent ADRs. Run quarterly or after any scope-shifting merge.

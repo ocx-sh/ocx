@@ -1,49 +1,49 @@
 # Classification Signals — /swarm-review
 
-Signal-to-tier mapping used when `/swarm-review` runs with tier=`auto`.
-Also defines overlay triggers that stack on top of the chosen tier.
+Signal-to-tier map for `/swarm-review` tier=`auto`.
+Also defines overlay triggers stack on chosen tier.
 
-**Primary signals: diff metrics.** Unlike `/swarm-plan` (which classifies
-from a prompt) and `/swarm-execute` (which reads the plan header), review
-classifies from the **actual diff against the configured baseline**.
-`--base=<ref>` is the single biggest lever on auto tier selection — a
-tight baseline (recent commit, sibling branch) produces a small diff and
-lands on `low`; a wide baseline (`main` on a long-lived branch, an older
-tag) produces a large diff and lands on `high` or `max`.
+**Primary signals: diff metrics.** Unlike `/swarm-plan` (classify
+from prompt) and `/swarm-execute` (read plan header), review
+classify from **actual diff vs configured baseline**.
+`--base=<ref>` = biggest lever on auto tier — tight baseline
+(recent commit, sibling branch) → small diff → `low`; wide
+baseline (`main` on long-lived branch, old tag) → big diff →
+`high` or `max`.
 
-When signals split across adjacent tiers, or the overlay mix is unusual,
-mark the classification **low-confidence** — this forces the meta-plan
-gate in SKILL.md step 5. Do **not** fire a mid-flow `AskUserQuestion`.
+Signals split adjacent tiers, or overlay mix unusual?
+Mark **low-confidence** — forces meta-plan gate in SKILL.md step 5.
+Do **not** fire mid-flow `AskUserQuestion`.
 
 ## Primary: diff metrics
 
-Compute once at the start of classification:
+Compute once at classification start:
 
 ```
 git diff <base>...HEAD --name-only    # → changed-file list
 git diff <base>...HEAD --shortstat    # → lines added/removed
 ```
 
-Then derive:
+Derive:
 
-- **file_count** — `wc -l` of the name-only output
+- **file_count** — `wc -l` of name-only output
 - **lines_changed** — `added + removed` from `--shortstat`
-- **subsystems_touched** — match each path against the subsystem path
+- **subsystems_touched** — match each path vs subsystem path
   scopes in `.claude/rules.md` "By subsystem" table
 - **structural_markers** — see table below
-- **pr_labels** — present only when the target resolves to a PR
+- **pr_labels** — only when target resolves to PR
 
 ## Tier metric table
 
 | Tier | file_count | lines_changed | subsystems | structural markers |
 |------|-----------|---------------|------------|-------------------|
-| **low** | ≤3 | ≤100 | 1 | None from the adversarial list |
+| **low** | ≤3 | ≤100 | 1 | None from adversarial list |
 | **high** | ≤15 | ≤500 | 1–2 | No One-Way Door High signals |
 | **max** | >15 or any One-Way Door High signal | any | ≥2 or cross-subsystem | Any One-Way Door High signal |
 
-A diff may match multiple rows — pick the **highest** tier for which at
-least one clear signal fires. A small file count does not demote a diff
-that introduces a new crate.
+Diff may match multiple rows — pick **highest** tier with ≥1
+clear signal firing. Small file count no demote diff
+introducing new crate.
 
 ## Structural marker signals
 
@@ -58,47 +58,47 @@ that introduces a new crate.
 | `Cargo.toml` dependency changes | Adds `--breadth=full` (supply-chain scrutiny) |
 | `deny.toml`, `.licenserc.toml` | Adds `--breadth=full` |
 | Public API breakage (removed `pub` items) | → **max**, adds `--codex` |
-| `crates/ocx_schema/**` | → **max** if changed (metadata schema is load-bearing) |
+| `crates/ocx_schema/**` | → **max** if changed (metadata schema load-bearing) |
 
 ## PR label signals
 
-When the target resolves to a PR, read labels and apply:
+Target resolves to PR? Read labels, apply:
 
 | Label | Effect |
 |---|---|
 | `breaking-change` | → **max**; `--codex` on |
 | `security` | Adds `--breadth=adversarial`; `--codex` on |
 | `epic` | → **max** |
-| `small` | Hint toward **low** (but metrics can still escalate) |
+| `small` | Hint toward **low** (metrics can still escalate) |
 | `docs` | Hint toward **low** if no code paths touched |
 | `chore` | Hint toward **low** |
 
-Labels never *demote* below what the metrics dictate — a `small` label
-on a 30-file diff still classifies as high (size wins over label).
+Labels never *demote* below metrics dictate — `small` label
+on 30-file diff still high (size beat label).
 
 ## Confidence rules
 
-- **Confident**: one tier has ≥2 matching signals (from metrics OR
-  markers OR labels) and no competing signals from an adjacent tier.
-  Proceed without the meta-plan gate.
-- **Low-confidence**: signals split across adjacent tiers (e.g.,
-  metrics say `low`, one structural marker says `high`), or the diff is
-  empty-but-metadata-only (e.g., rename-only), or the target is
-  ambiguous. Flag; SKILL.md routes into the meta-plan gate.
+- **Confident**: one tier has ≥2 matching signals (metrics OR
+  markers OR labels), no competing signals from adjacent tier.
+  Proceed without meta-plan gate.
+- **Low-confidence**: signals split adjacent tiers (e.g.,
+  metrics say `low`, one structural marker say `high`), or diff
+  empty-but-metadata-only (e.g., rename-only), or target
+  ambiguous. Flag; SKILL.md routes into meta-plan gate.
 
-Never manufacture a question when confident. *Announce and proceed*, or
-*let the meta-plan gate handle it*.
+Never manufacture question when confident. *Announce and proceed*, or
+*let meta-plan gate handle*.
 
 ## Overlay triggers
 
-Overlays adjust a single axis on top of the chosen tier. They stack —
-multiple triggers may fire. Axis definitions live in `overlays.md`.
+Overlays adjust single axis on top of chosen tier. Stack —
+multiple triggers may fire. Axis defs live in `overlays.md`.
 
 | Overlay | Triggered by |
 |---|---|
 | `--breadth=full` | tier=high (default); `.github/workflows/**`, `Cargo.toml`, or dependency paths touched at tier=low (escalation) |
 | `--breadth=adversarial` | tier=max (default); `package_manager/` touched at tier=high; `security` label; `--rca=on` together with ≥2 subsystems |
-| `--reviewer=haiku` | tier=low AND NO structural markers from `classify.md:48-61` present in the diff |
+| `--reviewer=haiku` | tier=low AND NO structural markers from `classify.md:48-61` present in diff |
 | `--reviewer=opus` | tier=max AND `--breadth=adversarial` |
 | `--doc-reviewer=haiku` | Diff touches ≤2 doc files (`website/**/*.md` or `CHANGELOG.md`) AND does not touch `website/src/docs/user-guide.md` |
 | `--rca=on` | tier=high+ (default) — scope differs per tier (see overlays.md) |
@@ -116,7 +116,7 @@ Defaults per tier (before overlays apply):
 
 ## Baseline interaction with auto-tier
 
-`--base` changes what the classifier sees:
+`--base` change what classifier see:
 
 | Invocation | Typical diff size | Typical auto tier |
 |---|---|---|
@@ -126,23 +126,22 @@ Defaults per tier (before overlays apply):
 | `/swarm-review --base=<older-tag>` | entire release delta | **max** |
 | `/swarm-review <PR>` (base auto-resolved to PR base) | PR-sized diff | tier matches PR scope |
 
-This is the intended design: **baseline controls effort**. A user who
-wants a quick re-check of their last commit should pass
-`--base=HEAD~1`; a user reviewing a release-cut should let the default
-baseline expand the scope.
+Intended design: **baseline controls effort**. User want
+quick re-check of last commit → pass `--base=HEAD~1`; user
+reviewing release-cut → let default baseline expand scope.
 
 ## Examples
 
-1. `/swarm-review` on a 2-commit branch with 5 files in
+1. `/swarm-review` on 2-commit branch, 5 files in
    `crates/ocx_cli/src/command/` → tier=**high**, default overlays,
    confident. (Single subsystem, medium size.)
-2. `/swarm-review --base=HEAD~1` on a one-line flag change →
+2. `/swarm-review --base=HEAD~1` on one-line flag change →
    tier=**low**, `--breadth=minimal`, `--rca=off`, `--codex=off`,
    confident.
 3. `/swarm-review 143` where PR #143 has labels
-   `breaking-change` + `enhancement` and touches `crates/ocx_schema/`
+   `breaking-change` + `enhancement`, touches `crates/ocx_schema/`
    → tier=**max**, `--breadth=adversarial`, `--codex=on`, confident.
-4. `/swarm-review --base=v0.5.0` on a branch that's 30 commits ahead
+4. `/swarm-review --base=v0.5.0` on branch 30 commits ahead
    → tier=**max** by metrics, meta-plan gate fires (max auto-fires
    gate).
 5. `/swarm-review` with 4 files changed across `crates/ocx_lib/` and

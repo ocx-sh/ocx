@@ -9,9 +9,9 @@ Related Skills: architect
 
 Format: Based on MADR (Markdown Any Decision Records) - https://adr.github.io/madr/
 Best Practices:
-- Write ADRs BEFORE committing to implementation
-- Keep them short, specific, and comparable across the codebase
-- One decision per ADR (not groups of decisions)
+- Write ADRs BEFORE implementation commit
+- Keep short, specific, comparable across codebase
+- One decision per ADR (not groups)
 - Quantify when possible (SLOs, latency budgets, cost envelopes)
 -->
 
@@ -19,19 +19,19 @@ Best Practices:
 
 **Status:** Proposed | Accepted | Deprecated | Superseded
 **Date:** [YYYY-MM-DD]
-**Deciders:** [List of people involved]
+**Deciders:** [People involved]
 **Beads Issue:** [bd://issue-id or N/A]
 **Related PRD:** [Link to PRD]
 **Tech Strategy Alignment:**
 - [ ] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md`
-- [ ] OR deviation is explicitly justified in Rationale section
+- [ ] OR deviation justified in Rationale section
 **Domain Tags:** [security | data | integration | infrastructure | api | frontend | devops]
 **Supersedes:** [adr_NNNN if applicable]
 **Superseded By:** [adr_NNNN if applicable]
 
 ## Context
 
-[What is the issue that we're seeing that motivates this decision or change?]
+[Issue motivating this decision or change?]
 
 ## Decision Drivers
 
@@ -42,11 +42,11 @@ Best Practices:
 
 ## Industry Context & Research
 
-[Summary of technology landscape research conducted before this decision. Include trending alternatives, adoption signals, and design patterns considered. Reference research artifacts if available.]
+[Tech landscape research before decision. Include trending alternatives, adoption signals, design patterns. Reference research artifacts if available.]
 
 **Research artifact:** [`.claude/artifacts/research_[topic].md`](./research_[topic].md) or N/A
-**Trending approaches:** [What the industry is moving toward]
-**Key insight:** [Most important finding that influenced this decision]
+**Trending approaches:** [Where industry moving]
+**Key insight:** [Top finding driving decision]
 
 ## Considered Options
 
@@ -81,7 +81,7 @@ Best Practices:
 
 **Chosen Option:** [Option N]
 
-**Rationale:** [Why this option was selected over others]
+**Rationale:** [Why picked over others]
 
 ### Quantified Impact (where applicable)
 
@@ -133,8 +133,8 @@ Best Practices:
 
 ## Validation
 
-- [ ] Performance benchmarks meet requirements
-- [ ] Security review completed
+- [ ] Perf benchmarks meet requirements
+- [ ] Security review done
 - [ ] Cost analysis approved
 
 ## Links

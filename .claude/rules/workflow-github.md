@@ -5,11 +5,11 @@ paths:
 
 # GitHub Workflow — Issues & Pull Requests
 
-**Never create issues or PRs without user approval.** Pushing triggers CI, which has real cost.
+**Never create issues or PRs without user approval.** Push trigger CI, real cost.
 
 ## Tooling: MCP first
 
-Prefer `mcp__github__*` MCP tools for structured, typed access. `gh` CLI is a fallback when MCP lacks parity (label admin, org issue-type admin, ad-hoc JSON projections) or when a parallel session already uses `gh`. When `GITHUB_TOKEN` is set in the environment, `gh` uses it and ignores stored credentials — prefix with `env -u GITHUB_TOKEN gh ...` if you need the stored credential's scopes (e.g., `admin:org`).
+Prefer `mcp__github__*` MCP tools for typed access. `gh` CLI = fallback when MCP lack parity (label admin, org issue-type admin, ad-hoc JSON projections) or parallel session use `gh`. When `GITHUB_TOKEN` set in env, `gh` use it and ignore stored creds — prefix `env -u GITHUB_TOKEN gh ...` if need stored cred scopes (e.g., `admin:org`).
 
 | Action | MCP tool | `gh` fallback |
 |--------|----------|---------------|
@@ -28,22 +28,22 @@ Prefer `mcp__github__*` MCP tools for structured, typed access. `gh` CLI is a fa
 
 ## Issue Types (org-level, `ocx-sh`)
 
-Every issue MUST have a type. Types replace the old `bug` / `enhancement` / `chore` labels entirely. Types do NOT apply to PRs — use labels on PRs for cross-cutting concerns.
+Every issue MUST have type. Types replace old `bug` / `enhancement` / `chore` labels entirely. Types do NOT apply to PRs — use labels on PRs for cross-cutting concerns.
 
 | Type | When to use |
 |------|-------------|
 | **Bug** | Broken behavior, unexpected output, crash, spec deviation |
 | **Feature** | New user-facing capability, command, or behavior |
-| **Task** | Internal work with no user-visible capability — refactor, CI, tooling, chore, AI-config maintenance |
+| **Task** | Internal work, no user-visible capability — refactor, CI, tooling, chore, AI-config maintenance |
 | **Documentation** | Docs-only: website, user guide, `--help`, ADRs, man pages |
 | **Performance** | Measurable throughput / latency / memory / RSS change |
 | **Security** | Vulnerability, hardening, auth, credentials, secret handling |
 
-**When ambiguous**: a perf-motivated refactor is **Performance**, not Task. A bug fix that adds a new flag is still **Bug**. A new doc site feature (beyond docs content) is **Feature**.
+**When ambiguous**: perf-motivated refactor = **Performance**, not Task. Bug fix that add new flag still **Bug**. New doc site feature (beyond docs content) = **Feature**.
 
-Discover types programmatically via `mcp__github__list_issue_types` (or `env -u GITHUB_TOKEN gh api /orgs/ocx-sh/issue-types`).
+Discover types via `mcp__github__list_issue_types` (or `env -u GITHUB_TOKEN gh api /orgs/ocx-sh/issue-types`).
 
-**Setting the type on an issue.** Prefer `mcp__github__issue_write` (supports `type:` natively). If you must fall back to `gh`, note that `gh issue create/edit` has no `--type` flag — use the GraphQL `updateIssue` mutation with the type's node id. Fetch ids once, then update:
+**Setting type on issue.** Prefer `mcp__github__issue_write` (supports `type:` natively). If fall back to `gh`, note `gh issue create/edit` no `--type` flag — use GraphQL `updateIssue` mutation with type's node id. Fetch ids once, then update:
 
 ```sh
 # 1. fetch org type ids (one-shot)
@@ -57,13 +57,13 @@ gh api graphql -f query='mutation($i:ID!,$t:ID!){ updateIssue(input:{id:$i,issue
   -f i=<issue-node-id> -f t=<type-node-id>
 ```
 
-To clear a type, pass `issueTypeId: null` via `-F i=<id> -F t=`.
+Clear type: pass `issueTypeId: null` via `-F i=<id> -F t=`.
 
 ---
 
 ## Labels — Curated Taxonomy
 
-**Do not invent labels.** If a concept isn't covered below, propose an addition to this file first, get approval, then create it. The taxonomy has three axes: subsystem routing (`area/*`), priority (`priority/*`), and cross-cutting concerns.
+**Do not invent labels.** If concept not covered below, propose addition to this file first, get approval, then create. Taxonomy has three axes: subsystem routing (`area/*`), priority (`priority/*`), cross-cutting concerns.
 
 ### Area labels — subsystem routing (mirrors `CLAUDE.md` subsystem table)
 
@@ -79,15 +79,15 @@ To clear a type, pass `issueTypeId: null` via `-F i=<id> -F t=`.
 | `area/website` | VitePress docs site |
 | `area/ci` | GitHub Actions, release pipeline |
 
-### Priority labels — only the ends of the spectrum
+### Priority labels — only ends of spectrum
 
 | Label | Meaning |
 |-------|---------|
-| `priority/critical` | Blocks a release or causes data loss |
-| `priority/high` | Should land in the next release |
+| `priority/critical` | Blocks release or cause data loss |
+| `priority/high` | Should land in next release |
 | `priority/low` | Backlog, nice-to-have |
 
-Default (untagged) = normal priority. No `priority/medium` — it becomes a dumping ground.
+Default (untagged) = normal priority. No `priority/medium` — become dumping ground.
 
 ### Cross-cutting labels — apply on both issues AND PRs
 
@@ -95,8 +95,8 @@ Default (untagged) = normal priority. No `priority/medium` — it becomes a dump
 |-------|-----|
 | `performance` | PR tag for perf-impacting changes (types don't apply to PRs) |
 | `security` | PR tag for security-sensitive changes |
-| `breaking-change` | API or behavior change requiring a version bump; surfaces in changelog |
-| `regression` | Worked before, broken by a recent change; elevates triage |
+| `breaking-change` | API or behavior change requiring version bump; surfaces in changelog |
+| `regression` | Worked before, broken by recent change; elevates triage |
 | `flaky-test` | CI reliability, distinct from product bugs |
 | `dependencies` | Dependabot and manual dep bumps (auto-applied) |
 
@@ -109,15 +109,15 @@ Default (untagged) = normal priority. No `priority/medium` — it becomes a dump
 
 ## Issues — Proposal-First Protocol
 
-When the user describes future work, a feature idea, or technical debt to track:
+When user describe future work, feature idea, or tech debt to track:
 
-1. **Draft** — Prepare issue(s) as a proposal table, then ask for approval
-2. **Refine** — Incorporate feedback, re-present if changes are significant
+1. **Draft** — Prepare issue(s) as proposal table, then ask for approval
+2. **Refine** — Incorporate feedback, re-present if changes significant
 3. **Create** — Only after explicit approval
 
 ### Proposal Format
 
-Present all proposed issues in a single overview table, then one body section per issue using the template below, then ask "Shall I create these? Any changes?":
+Present all proposed issues in single overview table, then one body section per issue using template below, then ask "Shall I create these? Any changes?":
 
 ```
 | # | Title | Type | Labels | Depends On |
@@ -149,7 +149,7 @@ Mermaid diagrams where they clarify relationships or flows. Skip for simple issu
 - #issue — one-line description of why this blocks
 ```
 
-**Titles**: do not prefix with `feat:` / `fix:` / `chore:` — the issue type already classifies the work. Titles describe the outcome in plain imperative form.
+**Titles**: don't prefix with `feat:` / `fix:` / `chore:` — issue type already classify work. Titles describe outcome in plain imperative form.
 
 ---
 
@@ -157,7 +157,7 @@ Mermaid diagrams where they clarify relationships or flows. Skip for simple issu
 
 ### PR Creation Protocol
 
-1. **Branch ready** — all commits are Conventional Commits, `task verify` passes (see `workflow-git.md`)
+1. **Branch ready** — all commits Conventional Commits, `task verify` pass (see `workflow-git.md`)
 2. **Draft PR body** — present title + summary to user for approval
 3. **Create** — only after explicit approval; push + create in one step
 
@@ -176,19 +176,19 @@ Closes #<issue>
 
 ### PR Conventions
 
-- **Title**: Conventional Commit format matching the primary commit (e.g., `feat: three-tier CAS`). PR titles keep the `type:` prefix; issue titles do not.
-- **Labels**: apply `area/*` for routing; add `performance`, `security`, `breaking-change`, or `regression` when relevant. (Issue types do not apply to PRs — labels are the only signal.)
-- **One concern per PR**: matches the one-concern-per-issue rule
-- **Link issues**: use `Closes #N` in the body to auto-close on merge
-- **Draft PRs**: use `--draft` for work-in-progress that needs early CI feedback
+- **Title**: Conventional Commit format matching primary commit (e.g., `feat: three-tier CAS`). PR titles keep `type:` prefix; issue titles don't.
+- **Labels**: apply `area/*` for routing; add `performance`, `security`, `breaking-change`, or `regression` when relevant. (Issue types don't apply to PRs — labels = only signal.)
+- **One concern per PR**: match one-concern-per-issue rule
+- **Link issues**: use `Closes #N` in body to auto-close on merge
+- **Draft PRs**: use `--draft` for WIP needing early CI feedback
 - **Review comments**: use `mcp__github__add_reply_to_pull_request_comment` for threaded replies
 
 ---
 
 ## Shared Conventions
 
-- **User-first framing**: Value section answers "why should anyone care?" before "how does it work?"
-- **Cross-reference**: Use `#N` to link related issues/PRs. Add a "Depends on" section when order matters.
+- **User-first framing**: Value section answer "why should anyone care?" before "how does it work?"
+- **Cross-reference**: Use `#N` to link related issues/PRs. Add "Depends on" section when order matters.
 - **One concern per item**: Don't combine unrelated work
 - **Mermaid where applicable**: Architecture, data flow, state machines. Not for simple lists.
 - **No implementation details in titles**

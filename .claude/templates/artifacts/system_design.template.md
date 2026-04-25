@@ -7,8 +7,8 @@ Owner: Architect (/architect)
 Handoff to: Builder (/builder), Security Auditor (/security-auditor)
 Related Skills: architect
 
-This document covers TECHNICAL architecture. For UI/visual design, use design_spec.template.md
-Uses C4 model for architecture visualization (Context → Container → Component → Code)
+Covers TECHNICAL architecture. UI/visual design → design_spec.template.md
+Uses C4 model (Context → Container → Component → Code)
 -->
 
 ## Metadata
@@ -22,14 +22,14 @@ Uses C4 model for architecture visualization (Context → Container → Componen
 
 **Tech Strategy Alignment:**
 - [ ] Language/Framework follows Golden Path (`.claude/rules/product-tech-strategy.md`)
-- [ ] Database choice aligns with Data section (PostgreSQL for OLTP)
-- [ ] Infrastructure tier appropriate (Static/Agile/Production)
-- [ ] Observability uses OpenTelemetry (OTel) with OTLP protocol
-- [ ] Deviations documented in ADR with justification
+- [ ] DB choice match Data section (PostgreSQL for OLTP)
+- [ ] Infra tier fit (Static/Agile/Production)
+- [ ] Observability use OpenTelemetry (OTel) + OTLP
+- [ ] Deviations doc'd in ADR with reason
 
 ## Executive Summary
 
-[2-3 sentences describing the system, its purpose, and the problem it solves. What does this system do and why does it exist?]
+[2-3 sentences: what system do, why exist, what problem solve.]
 
 ---
 
@@ -56,7 +56,7 @@ graph TB
 
 | Actor/System | Type | Description | Interaction |
 |--------------|------|-------------|-------------|
-| [User Persona] | Person | [Description] | [How they interact] |
+| [User Persona] | Person | [Description] | [How interact] |
 | [External System] | System | [Description] | [Integration type] |
 
 ---
@@ -89,10 +89,10 @@ graph TB
 
 | Container | Technology | Purpose | Scaling Strategy |
 |-----------|------------|---------|------------------|
-| Web Application | [Tech stack] | [Purpose] | [How it scales] |
-| API Server | [Tech stack] | [Purpose] | [How it scales] |
-| Database | [Tech stack] | [Purpose] | [How it scales] |
-| Cache | [Tech stack] | [Purpose] | [How it scales] |
+| Web Application | [Tech stack] | [Purpose] | [How scales] |
+| API Server | [Tech stack] | [Purpose] | [How scales] |
+| Database | [Tech stack] | [Purpose] | [How scales] |
+| Cache | [Tech stack] | [Purpose] | [How scales] |
 
 ---
 
@@ -120,8 +120,8 @@ graph TB
 
 | Component | Responsibility | Dependencies |
 |-----------|---------------|--------------|
-| [Component 1] | [Single responsibility] | [What it depends on] |
-| [Component 2] | [Single responsibility] | [What it depends on] |
+| [Component 1] | [Single responsibility] | [Depends on] |
+| [Component 2] | [Single responsibility] | [Depends on] |
 
 ---
 
@@ -129,11 +129,11 @@ graph TB
 
 | Decision | Options Considered | Chosen | Rationale |
 |----------|-------------------|--------|-----------|
-| Database | PostgreSQL, MongoDB, DynamoDB | PostgreSQL | ACID compliance, relational data |
-| Caching | Redis, Memcached | Redis | Data structures, pub/sub support |
-| Queue | SQS, RabbitMQ, Kafka | SQS | Managed service, AWS integration |
+| Database | PostgreSQL, MongoDB, DynamoDB | PostgreSQL | ACID, relational |
+| Caching | Redis, Memcached | Redis | Data structures, pub/sub |
+| Queue | SQS, RabbitMQ, Kafka | SQS | Managed, AWS native |
 
-**For detailed decision rationale, see related ADRs.**
+**Detail rationale → see ADRs.**
 
 ---
 
@@ -181,7 +181,7 @@ interface ErrorResponse {
 
 ### API Versioning Strategy
 
-[Describe versioning approach: URL path, header, query param]
+[Versioning approach: URL path, header, query param]
 
 ---
 
@@ -230,7 +230,7 @@ erDiagram
 
 ### Data Migration Strategy
 
-[How will data be migrated? What's the rollback plan?]
+[How migrate data? Rollback plan?]
 
 ---
 
@@ -255,12 +255,12 @@ erDiagram
 
 | STRIDE Threat | Mitigation |
 |---------------|------------|
-| Spoofing | [Mitigation strategy] |
-| Tampering | [Mitigation strategy] |
-| Repudiation | [Mitigation strategy] |
-| Information Disclosure | [Mitigation strategy] |
-| Denial of Service | [Mitigation strategy] |
-| Elevation of Privilege | [Mitigation strategy] |
+| Spoofing | [Mitigation] |
+| Tampering | [Mitigation] |
+| Repudiation | [Mitigation] |
+| Information Disclosure | [Mitigation] |
+| Denial of Service | [Mitigation] |
+| Elevation of Privilege | [Mitigation] |
 
 ---
 
@@ -279,9 +279,9 @@ erDiagram
 
 | Dimension | Current Capacity | Target Capacity | Strategy |
 |-----------|------------------|-----------------|----------|
-| Users | [X] | [Y] | [How to scale] |
-| Requests/sec | [X] | [Y] | [How to scale] |
-| Data Volume | [X] GB | [Y] TB | [How to scale] |
+| Users | [X] | [Y] | [How scale] |
+| Requests/sec | [X] | [Y] | [How scale] |
+| Data Volume | [X] GB | [Y] TB | [How scale] |
 
 ### Availability & Reliability
 
@@ -336,8 +336,8 @@ erDiagram
 
 | Environment | Purpose | Infrastructure |
 |-------------|---------|----------------|
-| Development | Local development | Docker Compose |
-| Staging | Pre-production testing | [Reduced AWS setup] |
+| Development | Local dev | Docker Compose |
+| Staging | Pre-prod testing | [Reduced AWS setup] |
 | Production | Live system | [Full AWS setup] |
 
 ### CI/CD Pipeline
@@ -354,13 +354,13 @@ Code Push → Lint/Test → Build → Security Scan → Deploy Staging → Integ
 
 | Service | Purpose | Criticality | Fallback |
 |---------|---------|-------------|----------|
-| [Service 1] | [Purpose] | High/Medium/Low | [Fallback strategy] |
+| [Service 1] | [Purpose] | High/Medium/Low | [Fallback] |
 
 ### External Dependencies
 
 | Service | Purpose | SLA | Fallback |
 |---------|---------|-----|----------|
-| [External API] | [Purpose] | [SLA] | [Fallback strategy] |
+| [External API] | [Purpose] | [SLA] | [Fallback] |
 
 ### Dependency Diagram
 
@@ -388,8 +388,8 @@ graph LR
 ## 12. Implementation Phases
 
 ### Phase 1: Foundation
-- [ ] Infrastructure setup (IaC)
-- [ ] Database schema
+- [ ] Infra setup (IaC)
+- [ ] DB schema
 - [ ] Basic API scaffolding
 - [ ] CI/CD pipeline
 
@@ -399,10 +399,10 @@ graph LR
 - [ ] Authentication/Authorization
 
 ### Phase 3: Polish & Launch
-- [ ] Performance optimization
+- [ ] Perf optimization
 - [ ] Security hardening
-- [ ] Documentation
-- [ ] Monitoring & alerting
+- [ ] Docs
+- [ ] Monitoring + alerting
 
 ---
 

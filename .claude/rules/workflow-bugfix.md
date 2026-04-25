@@ -11,7 +11,7 @@ paths:
 
 # Bug Fix Workflow
 
-Path-scoped rule (auto-loads on source-work surfaces: `crates/**`, `test/**`, `website/**`, `mirrors/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock`). Referenced from [workflow-intent.md](./workflow-intent.md) when work is classified as a bug fix. Enforces root-cause discipline: understand the bug before fixing it.
+Path-scoped rule (auto-loads on source-work surfaces: `crates/**`, `test/**`, `website/**`, `mirrors/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock`). Referenced from [workflow-intent.md](./workflow-intent.md) when work classified as bug fix. Enforce root-cause discipline: understand bug before fix.
 
 ## Non-Negotiable Sequence
 
@@ -19,124 +19,124 @@ Path-scoped rule (auto-loads on source-work surfaces: `crates/**`, `test/**`, `w
 Reproduce → Root Cause Analysis → Regression Test → Fix → Verify → Document
 ```
 
-Every step must complete before the next begins. Skipping steps (especially RCA and regression test) is the #1 cause of incomplete fixes and regressions.
+Every step complete before next begin. Skip steps (especially RCA + regression test) = #1 cause of incomplete fixes + regressions.
 
 ## Phase 1: Reproduce
 
-Confirm the bug exists and capture the exact conditions.
+Confirm bug exist + capture exact conditions.
 
-- [ ] Identify the failing behavior (error message, incorrect output, crash)
-- [ ] Write down exact reproduction steps (commands, inputs, environment)
-- [ ] Confirm the bug is reproducible — if intermittent, note frequency and conditions
-- [ ] Identify the scope: which versions, platforms, configurations are affected?
+- [ ] Identify failing behavior (error message, wrong output, crash)
+- [ ] Write exact reproduction steps (commands, inputs, environment)
+- [ ] Confirm bug reproducible — if intermittent, note frequency + conditions
+- [ ] Identify scope: which versions, platforms, configurations affected?
 
-**Gate**: Bug is reproducible with documented steps. If it cannot be reproduced, investigate further before proceeding — do not guess at fixes.
+**Gate**: Bug reproducible with documented steps. If cannot reproduce, investigate more before proceed — no guess fixes.
 
 ## Phase 2: Root Cause Analysis
 
-Trace the symptom to its actual cause. Do not stop at the first suspicious code.
+Trace symptom to actual cause. No stop at first suspicious code.
 
-- [ ] Read the code path that produces the error — trace from symptom to source
-- [ ] Identify the root cause vs. the proximate cause (the line that throws vs. the condition that made it throw)
-- [ ] Check: is this a single bug or a pattern? Search for similar code that might have the same defect
-- [ ] Check git blame / history: was this a regression from a recent change?
+- [ ] Read code path that produce error — trace symptom to source
+- [ ] Identify root cause vs proximate cause (line that throw vs condition that made it throw)
+- [ ] Check: single bug or pattern? Search similar code with same defect
+- [ ] Check git blame / history: regression from recent change?
 
-**Output**: A clear statement of the root cause: "X happens because Y, introduced by Z" — not "the error is on line N."
+**Output**: Clear root cause statement: "X happens because Y, introduced by Z" — not "error on line N."
 
-**Gate**: Root cause identified and explained. If the cause is unclear, deepen investigation — do not proceed with a speculative fix.
+**Gate**: Root cause identified + explained. If unclear, dig deeper — no speculative fix.
 
 ## Phase 3: Regression Test
 
-Write a failing test that proves the bug exists *before* writing the fix.
+Write failing test that prove bug exist *before* writing fix.
 
-- [ ] Write a test that exercises the exact reproduction steps from Phase 1
-- [ ] The test MUST fail on the current code (proving the bug exists)
-- [ ] The test should target the root cause, not just the symptom
-- [ ] For acceptance-level bugs: write a pytest test in `test/tests/`
-- [ ] For unit-level bugs: write an inline `#[cfg(test)]` test in the affected module
+- [ ] Write test exercising exact reproduction steps from Phase 1
+- [ ] Test MUST fail on current code (prove bug exist)
+- [ ] Test target root cause, not just symptom
+- [ ] Acceptance-level bugs: pytest test in `test/tests/`
+- [ ] Unit-level bugs: inline `#[cfg(test)]` test in affected module
 
-**Gate**: Test exists, compiles, and fails with the expected error. This test becomes the proof that the fix works.
+**Gate**: Test exists, compiles, fails with expected error. Test = proof fix works.
 
 ## Phase 4: Fix
 
-Apply the minimal change that addresses the root cause.
+Apply minimal change that address root cause.
 
-- [ ] Fix targets the root cause identified in Phase 2, not just the symptom
-- [ ] Change is minimal — no drive-by refactoring, no "while I'm here" improvements
-- [ ] If the root cause analysis revealed a pattern of similar bugs (Phase 2), fix all instances
-- [ ] If the fix requires architectural changes, escalate to a feature workflow with a plan artifact
+- [ ] Fix target root cause from Phase 2, not symptom
+- [ ] Change minimal — no drive-by refactor, no "while I'm here" extras
+- [ ] If RCA revealed pattern of similar bugs (Phase 2), fix all instances
+- [ ] If fix needs architectural change, escalate to feature workflow with plan artifact
 
 ## Phase 5: Verify
 
-Confirm the fix works and hasn't introduced regressions.
+Confirm fix work + no new regressions.
 
 - [ ] Regression test from Phase 3 now passes
-- [ ] All existing tests still pass (subsystem verify for the changed area)
-- [ ] Manually verify the reproduction steps from Phase 1 no longer reproduce the bug
-- [ ] If the bug was in a hot path or had security implications, check for edge cases
+- [ ] All existing tests still pass (subsystem verify for changed area)
+- [ ] Manually verify reproduction steps from Phase 1 no longer reproduce bug
+- [ ] If bug in hot path or had security impact, check edge cases
 
-**Gate**: Subsystem verify passes. Regression test passes. Manual verification confirms the fix.
+**Gate**: Subsystem verify passes. Regression test passes. Manual verify confirms fix.
 
 ## Phase 6: Review-Fix Loop
 
-Apply the canonical Review-Fix Loop to the bug-fix diff. Bug-fix-specific perspectives run first in Round 1:
-- **Correctness**: Does the fix address the root cause (Phase 2), not just the symptom?
-- **Regression risk**: Could this change break other callers or edge cases?
-- **Minimality**: Is every line in the diff necessary for the fix? No drive-by changes?
-- **Test coverage**: Does the regression test (Phase 3) adequately prove the fix?
+Apply canonical Review-Fix Loop to bug-fix diff. Bug-fix perspectives run first in Round 1:
+- **Correctness**: Fix address root cause (Phase 2), not symptom?
+- **Regression risk**: Could change break other callers or edge cases?
+- **Minimality**: Every line in diff necessary? No drive-by changes?
+- **Test coverage**: Regression test (Phase 3) prove fix adequately?
 
 <!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->
 Diff-scoped, bounded iterative review. Tier-scaled: 1 round at `low`, up to 3 rounds at `high`/`max`.
 
-**Round 1** — run every perspective on the diff. Perspectives most likely to find blockers run first (e.g. spec-compliance, correctness, behavior-preservation); if they surface actionable findings, fix before running the remaining perspectives in the same round.
+**Round 1** — run every perspective on diff. Perspectives most likely find blockers run first (e.g. spec-compliance, correctness, behavior-preservation); if surface actionable findings, fix before remaining perspectives in same round.
 
 Classify each finding:
 
 - **Actionable** — fix automatically, re-run affected perspectives next round.
-- **Deferred** — needs human judgment; surface in the commit summary with context.
+- **Deferred** — needs human judgment; surface in commit summary with context.
 
-**Subsequent rounds** — re-run only perspectives that had actionable findings in the previous round. Loop exits when no actionable findings remain or the tier's round cap is reached. Oscillating findings (same issue surfaced in two rounds) auto-defer.
+**Subsequent rounds** — re-run only perspectives with actionable findings prior round. Loop exits when no actionable findings remain or tier's round cap hit. Oscillating findings (same issue surfaced two rounds) auto-defer.
 
-**Cross-model adversarial pass** (optional, tier-scaled): after the Claude loop converges, run a single Codex adversarial review against the diff as a final gate. One-shot, no looping — two-family stylistic thrash is the failure mode. Skipped gracefully if Codex is unavailable.
+**Cross-model adversarial pass** (optional, tier-scaled): after Claude loop converges, run single Codex adversarial review against diff as final gate. One-shot, no looping — two-family stylistic thrash = failure mode. Skipped gracefully if Codex unavailable.
 
-**Gate to exit**: no actionable findings remain, verification passes on the final state, and deferred findings are documented for handoff.
+**Gate to exit**: no actionable findings remain, verification passes on final state, deferred findings documented for handoff.
 <!-- REVIEW_FIX_LOOP_CANONICAL_END -->
 
 ## Phase 7: Commit & Document
 
-Close the loop so the fix is traceable.
+Close loop so fix traceable.
 
-- [ ] Commit with `fix:` conventional commit type, referencing the root cause in the body
-- [ ] If there's an open GitHub issue for this bug, reference it in the commit (`fixes #N`)
-- [ ] If the bug was non-trivial and has no GitHub issue, consider creating one for the record
-- [ ] If the bug revealed a gap in test coverage, note it for future work
+- [ ] Commit with `fix:` conventional commit type, reference root cause in body
+- [ ] If open GitHub issue for bug, reference in commit (`fixes #N`)
+- [ ] If bug non-trivial + no GitHub issue, consider creating one for record
+- [ ] If bug revealed test coverage gap, note for future work
 
 ## Plan Artifacts
 
 | Scope | Artifact |
 |-------|----------|
-| Trivial (obvious cause, < 30 min) | No artifact — follow the phases inline |
+| Trivial (obvious cause, < 30 min) | No artifact — follow phases inline |
 | Non-trivial (unclear cause, multi-file, or high risk) | Create `.claude/artifacts/bugfix_plan_[topic].md` from `bugfix_plan.template.md` |
 | Post-incident (production impact, security) | Create `.claude/artifacts/postmortem_[topic].md` from `postmortem.template.md` |
 
 ## Red Flags — Recognize Rationalizations Before Acting on Them
 
-If you find yourself thinking any of the left column, stop and apply the right column. These are the most common ways a bug-fix session goes wrong.
+If you think anything in left column, stop + apply right column. Most common ways bug-fix session goes wrong.
 
 | Rationalization | Red flag | Correct action |
 |---|---|---|
-| "I know what's wrong, I'll just fix it" | No Phase 2 RCA written | Write the root-cause statement first. If you can't, you don't know the cause yet. |
-| "The test will be trivial, I'll add it after the fix" | Planning to write test after fix | Write the failing test first. A test added after the fix doesn't prove the fix works. |
-| "Clippy warns about something nearby — I'll fix it while I'm here" | Diff contains unrelated changes | Commit the fix alone. Open a separate commit for the cleanup. |
-| "Catching the exception is simpler than preventing the state" | Fix is in a `try/except` | That's a symptom fix. Find the condition that produced the bad state. |
+| "I know what's wrong, I'll just fix it" | No Phase 2 RCA written | Write root-cause statement first. If can't, you don't know cause yet. |
+| "Test trivial, I'll add after fix" | Planning test after fix | Write failing test first. Test added after fix don't prove fix works. |
+| "Clippy warns nearby — I'll fix while I'm here" | Diff contains unrelated changes | Commit fix alone. Separate commit for cleanup. |
+| "Catching exception simpler than preventing state" | Fix in `try/except` | Symptom fix. Find condition that produced bad state. |
 
 ## Anti-Patterns
 
-- **Fix without RCA**: "It works now" is not a fix — you need to explain *why* it works
-- **Test after fix**: Writing the test after the fix doesn't prove the test catches the bug
-- **Symptom fix**: Catching an exception instead of preventing the condition that caused it
-- **Scope creep**: Refactoring nearby code during a bug fix — split into separate commits
-- **Speculative fix**: "This might be the cause" → investigate until you're certain
+- **Fix without RCA**: "It works now" not a fix — must explain *why* works
+- **Test after fix**: Test after fix don't prove test catches bug
+- **Symptom fix**: Catch exception instead of prevent condition that caused it
+- **Scope creep**: Refactor nearby code during bug fix — split into separate commits
+- **Speculative fix**: "Might be cause" → investigate until certain
 
 ## References
 

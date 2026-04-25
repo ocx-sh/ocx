@@ -25,7 +25,7 @@ Blameless culture: Focus on systems and processes, not individuals.
 
 ### One-Line Summary
 
-[Brief description of what happened and impact]
+[What happened + impact]
 
 ---
 
@@ -57,7 +57,7 @@ Blameless culture: Focus on systems and processes, not individuals.
 
 ## Timeline
 
-All times in UTC.
+Times UTC.
 
 | Time | Event |
 |------|-------|
@@ -75,11 +75,11 @@ All times in UTC.
 
 ### What Happened
 
-[Detailed technical explanation of the failure chain]
+[Tech explanation of failure chain]
 
 ### Why It Happened
 
-[Analysis of underlying causes - use 5 Whys if helpful]
+[Underlying causes — 5 Whys if helpful]
 
 1. **Why?** [First level cause]
 2. **Why?** [Second level cause]
@@ -89,15 +89,15 @@ All times in UTC.
 
 ### Trigger
 
-[What specific event or change triggered the incident?]
+[Event/change that triggered incident]
 
 ---
 
 ## Contributing Factors
 
-Factors that made the incident possible or worse:
+Factors made incident possible/worse:
 
-- [ ] **Detection Gap**: [Monitoring didn't catch it]
+- [ ] **Detection Gap**: [Monitoring missed it]
 - [ ] **Process Gap**: [Missing runbook/procedure]
 - [ ] **Testing Gap**: [Untested scenario]
 - [ ] **Documentation Gap**: [Missing/outdated docs]
@@ -143,7 +143,7 @@ Key Incident Metrics:
 
 ### Detection Gaps
 
-[What should have alerted us but didn't?]
+[What should have alerted but didn't?]
 
 ---
 
@@ -152,19 +152,19 @@ Key Incident Metrics:
 ### What Went Well
 
 - [Positive 1: e.g., "Quick escalation to on-call"]
-- [Positive 2: e.g., "Clear communication in incident channel"]
-- [Positive 3: e.g., "Runbook was helpful"]
+- [Positive 2: e.g., "Clear comms in incident channel"]
+- [Positive 3: e.g., "Runbook helpful"]
 
 ### What Didn't Go Well
 
-- [Issue 1: e.g., "Took too long to identify root cause"]
-- [Issue 2: e.g., "Missing access to logs"]
+- [Issue 1: e.g., "Slow to find root cause"]
+- [Issue 2: e.g., "Missing log access"]
 - [Issue 3: e.g., "Unclear ownership"]
 
 ### Where We Got Lucky
 
-- [Lucky break 1: e.g., "Engineer happened to be online"]
-- [Lucky break 2: e.g., "Impact was during low-traffic period"]
+- [Lucky 1: e.g., "Engineer online"]
+- [Lucky 2: e.g., "Hit during low-traffic"]
 
 ---
 
@@ -172,7 +172,7 @@ Key Incident Metrics:
 
 ### Immediate Fix
 
-[What was done to stop the bleeding?]
+[Steps to stop bleeding]
 
 ```
 [Commands/steps taken]
@@ -180,7 +180,7 @@ Key Incident Metrics:
 
 ### Verification
 
-[How did we confirm the fix worked?]
+[How fix confirmed]
 
 ---
 
@@ -211,15 +211,15 @@ Key Incident Metrics:
 
 ### How Do We Prevent Recurrence?
 
-[Specific technical and process changes]
+[Tech + process changes]
 
 ### How Do We Detect Faster?
 
-[New alerts, dashboards, or checks to add]
+[New alerts, dashboards, checks]
 
 ### How Do We Recover Faster?
 
-[Runbook updates, automation, or process improvements]
+[Runbook updates, automation, process improvements]
 
 ---
 

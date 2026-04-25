@@ -1,71 +1,45 @@
 # Tier: low — /swarm-review
 
-Minimal-effort review for small diffs: flag/option changes, doc edits,
-test fixtures, single-subsystem tweaks ≤3 files. The adversarial anchors
-still fire (the protocol itself is part of the skill identity) but the
-parallel perspective panel shrinks to a single reviewer — no RCA, no
-Codex. Matches what a fast branch check against `--base=HEAD~1` or a
-close sibling branch should feel like.
+Min-effort review for small diffs: flag/option changes, doc edits, test fixtures, single-subsystem tweaks ≤3 files. Adversarial anchors still fire (protocol part of skill identity) but parallel perspective panel shrink to one reviewer — no RCA, no Codex. Match what fast branch check against `--base=HEAD~1` or close sibling branch feel like.
 
-Load this file via `Read` from `SKILL.md` after the config is announced.
+Load this file via `Read` from `SKILL.md` after config announced.
 
 ## Phase 1: Discover
 
-Read the diff against the resolved baseline (already computed by
-SKILL.md step 2). Identify the single subsystem touched by matching
-changed paths against `.claude/rules.md` "By subsystem". Read that
-subsystem's `subsystem-*.md` rule inline. For pure Python tests, read
-`subsystem-tests.md`.
+Read diff against resolved baseline (already computed by SKILL.md step 2). Identify single subsystem touched by matching changed paths against `.claude/rules.md` "By subsystem". Read that subsystem's `subsystem-*.md` rule inline. For pure Python tests, read `subsystem-tests.md`.
 
 **Gate**: Diff fetched, single subsystem identified, context rule read.
 
 ## Phase 2: Stage 1 — Correctness (single reviewer)
 
-> **Reviewer model**: the `worker-reviewer` launch in this tier uses the resolved `--reviewer` overlay value (tier=low default `haiku`; escalated to `sonnet` when structural markers from `classify.md:48-61` are present). See `overlays.md` reviewer axis.
+> **Reviewer model**: `worker-reviewer` launch this tier use resolved `--reviewer` overlay value (tier=low default `haiku`; escalate to `sonnet` when structural markers from `classify.md:48-61` present). See `overlays.md` reviewer axis.
 
-Launch **1** `worker-reviewer` (focus: `spec-compliance`, phase:
-`post-implementation`) to review the diff. Phase `post-implementation`
-because review runs against **Implement-phase output** — there's already
-code (not Stub-phase scaffolding, not Specify-phase tests). The
-reviewer applies:
+Launch **1** `worker-reviewer` (focus: `spec-compliance`, phase: `post-implementation`) to review diff. Phase `post-implementation` because review run against **Implement-phase output** — code already exist (not Stub-phase scaffolding, not Specify-phase tests). Reviewer apply:
 
 - OCX pattern compliance (error model, symlink safety, CLI/API contract)
 - Quality (naming, style, tests present, duplication)
 
-The spec-compliance phase anchors cover the Stub / Specify / Implement
-lifecycle positions without requiring the reviewer to look at stubs or
-specification tests separately — at this tier the entire review
-collapses into one pass.
+Spec-compliance phase anchors cover Stub / Specify / Implement lifecycle positions without reviewer needing look at stubs or specification tests separately — this tier whole review collapse to one pass.
 
-**Gate**: Reviewer completes; findings classified as actionable or
-deferred.
+**Gate**: Reviewer complete; findings classified as actionable or deferred.
 
 ## Phase 3: Stage 2 — skipped
 
-Two-Way Door scope. No security, performance, documentation, or
-architect perspectives. If the discover phase surprised with signals
-the classifier should have caught (e.g., a dependency change slipped
-into a "doc" diff), stop and re-run `/swarm-review high <target>` —
-don't silently upgrade mid-pipeline.
+Two-Way Door scope. No security, performance, documentation, or architect perspectives. If discover phase surprise with signals classifier should have caught (e.g., dependency change slip into "doc" diff), stop and re-run `/swarm-review high <target>` — no silent upgrade mid-pipeline.
 
-**Gate**: Skip logged in the output; proceed to verdict.
+**Gate**: Skip logged in output; proceed to verdict.
 
 ## Phase 4: Root-cause analysis — skipped
 
-`rca: off`. Reviewer reports findings with proximate cause and
-remediation only. If a finding smells systemic the reviewer still flags
-it as deferred with a reason — the human can escalate to
-`/swarm-review high` or `/architect` for Five Whys.
+`rca: off`. Reviewer report findings with proximate cause and remediation only. If finding smell systemic, reviewer still flag as deferred with reason — human can escalate to `/swarm-review high` or `/architect` for Five Whys.
 
 ## Phase 5: Cross-model — skipped
 
-`codex: off`. If the user explicitly passed `--codex`, run the pass
-anyway (user override). Otherwise log `Cross-model gate skipped:
-tier=low default` and continue.
+`codex: off`. If user explicit pass `--codex`, run pass anyway (user override). Else log `Cross-model gate skipped: tier=low default` and continue.
 
 ## Phase 6: Verdict & Output
 
-Produce the review report using the shared skeleton from `SKILL.md`:
+Produce review report using shared skeleton from `SKILL.md`:
 
 ```markdown
 ## Code Review: [target]
@@ -80,10 +54,9 @@ Produce the review report using the shared skeleton from `SKILL.md`:
 [Each with: what it is, why human judgment is needed]
 ```
 
-Omit Stage 2, Cross-Model, and Root-Cause sections — their absence is
-the tier contract, not a bug.
+Omit Stage 2, Cross-Model, and Root-Cause sections — absence = tier contract, not bug.
 
-**Gate**: Report printed. No commits (review is read-only).
+**Gate**: Report printed. No commits (review read-only).
 
 ## Handoff
 
@@ -96,6 +69,6 @@ Standard handoff from `SKILL.md`. Classification line:
 - Overlays: breadth=minimal, rca=off, codex=off
 ```
 
-If actionable findings exist and the caller wants fixes:
+If actionable findings exist and caller want fixes:
 
     /swarm-execute --target=diff "apply low-tier review findings"

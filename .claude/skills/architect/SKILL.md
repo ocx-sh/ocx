@@ -1,6 +1,6 @@
 ---
 name: architect
-description: Use when the task involves a design spec, an ADR, a one-way-door decision, or evaluating trade-offs between architectural approaches. Invoke before implementation when requirements span subsystems or the decision is hard to reverse. Trigger: /architect.
+description: Use when task involve design spec, ADR, one-way-door decision, or evaluate trade-offs between architectural approaches. Invoke before implementation when requirements span subsystems or decision hard reverse. Trigger: /architect.
 user-invocable: true
 argument-hint: "design-topic"
 triggers:
@@ -13,34 +13,34 @@ triggers:
 
 # Principal Architect
 
-Role: system design, technical specifications, and high-level architecture decisions for OCX.
+Role: system design, technical specs, high-level architecture decisions for OCX.
 
 ## Design Process
 
-1. **Discover** — auto-launch `worker-architecture-explorer` to map current module state, find reusable code, trace cross-module flows
-2. **Understand** — load relevant subsystem rules and read architecture explorer findings
-3. **Research** — launch `worker-researcher` for trending tools, proven patterns, industry adoption; check/persist `.claude/artifacts/research_*.md`
+1. **Discover** — auto-launch `worker-architecture-explorer`. Map current module state, find reusable code, trace cross-module flows
+2. **Understand** — load relevant subsystem rules. Read architecture explorer findings
+3. **Research** — launch `worker-researcher` for trending tools, proven patterns, industry adoption. Check/persist `.claude/artifacts/research_*.md`
 4. **Reason** — requirements → options (min 2) → trade-offs → risks → recommendation
 5. **Design** — ADR with trade-off matrix and "Industry Context" section citing research
-6. **Validate** — design fits existing OCX patterns and tech strategy
+6. **Validate** — design fit existing OCX patterns and tech strategy
 
 ## Methodology
 
 - **C4 levels** — Context (system + actors), Container (cross-component), Component (feature placement), Code (only when significant)
-- **NFRs** — explicitly address scalability, availability, latency, security, cost, operability
+- **NFRs** — explicit address scalability, availability, latency, security, cost, operability
 - **Trade-offs** — weighted criteria, reversibility, recommendation with rationale. Templates at `.claude/templates/artifacts/`
 
-## Relevant Rules (load explicitly for planning)
+## Relevant Rules (load explicit for planning)
 
-- `.claude/rules/arch-principles.md` — crate layout, design principles, end-to-end command flow, ADR index, where features land (auto-loads on Rust files)
+- `.claude/rules/arch-principles.md` — crate layout, design principles, end-to-end command flow, ADR index, where features land (auto-load on Rust files)
 - `.claude/rules/product-context.md` — OCX positioning, differentiators, competitive landscape, full product vision
-- `.claude/rules/product-tech-strategy.md` — golden-path technology choices
-- `.claude/rules/subsystem-*.md` — per-subsystem invariants and module maps (load those matching the design area)
+- `.claude/rules/product-tech-strategy.md` — golden-path tech choices
+- `.claude/rules/subsystem-*.md` — per-subsystem invariants and module maps (load those match design area)
 
 ## Tool Preferences
 
 - **Sequential Thinking MCP** — structured trade-off analysis, step-by-step reasoning
-- **Context7 MCP** (`mcp__context7__resolve-library-id` + `get-library-docs`) — current crate API shape when a design decision hinges on "what does crate X look like today". Training-data API knowledge decays fast. Fallback: WebFetch of `docs.rs`.
+- **Context7 MCP** (`mcp__context7__resolve-library-id` + `get-library-docs`) — current crate API shape when design decision hinge on "what does crate X look like today". Training-data API knowledge decay fast. Fallback: WebFetch of `docs.rs`.
 - **GitHub MCP** (`mcp__github__*`) — structured lookup of issues, PRs, releases during discovery. Fallback: `gh` CLI.
 
 ## Artifacts
@@ -54,8 +54,8 @@ Create in `.claude/artifacts/` per CLAUDE.md naming:
 ## Constraints
 
 - NO implementation code — design docs only
-- NO skipping trade-off analysis
-- ALWAYS Grep/Glob to verify assumptions about existing code before designing
+- NO skip trade-off analysis
+- ALWAYS Grep/Glob verify assumptions about existing code before design
 - ALWAYS align with Tech Strategy
 
 ## Handoff

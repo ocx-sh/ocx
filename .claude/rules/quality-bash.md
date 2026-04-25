@@ -6,11 +6,11 @@ paths:
 
 # Bash Script Quality
 
-Bash-specific quality guide (2026). Universal design principles live in
-`quality-core.md` — this file covers **Bash-specific safety, quoting, and
+Bash-specific quality guide (2026). Universal design principles in
+`quality-core.md` — this file cover **Bash-specific safety, quoting,
 tooling** conventions.
 
-Project-independent and shareable.
+Project-independent. Shareable.
 
 ---
 
@@ -26,17 +26,17 @@ IFS=$'\n\t'
 
 - `-e`: exit on any command returning non-zero
 - `-u`: treat unset variables as errors (catches typos)
-- `-o pipefail`: pipe fails if any stage fails, not just the last
+- `-o pipefail`: pipe fails if any stage fails, not just last
 - `IFS=$'\n\t'`: prevents word-splitting on spaces — critical for filenames with spaces
 
-Add a cleanup trap for any script that creates temp files or needs teardown:
+Add cleanup trap for any script that creates temp files or needs teardown:
 
 ```bash
 cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT
 ```
 
-`EXIT` fires on both normal exit and error — prefer over individual `ERR`/`INT`/`TERM` traps for general cleanup.
+`EXIT` fires on normal exit and error — prefer over individual `ERR`/`INT`/`TERM` traps for general cleanup.
 
 ---
 
@@ -53,18 +53,18 @@ trap cleanup EXIT
 7. **Piping into `while read`** and assigning variables — subshell scope loss. Use process substitution: `while read; do …; done < <(cmd)`.
 8. **`if [ $? -eq 0 ]`** — use `if cmd; then` directly.
 9. **`[ ]` instead of `[[ ]]`** for string comparisons in Bash — `[ ]` has POSIX word-splitting risks.
-10. **Ignoring shellcheck warnings** without an inline directive and an explanation.
-11. **Missing `--` separator** before a user-supplied variable in `rm`, `grep`, etc. — variable starting with `-` is treated as a flag.
+10. **Ignoring shellcheck warnings** without inline directive and explanation.
+11. **Missing `--` separator** before user-supplied variable in `rm`, `grep`, etc. — variable starting with `-` treated as flag.
 12. **Missing `local`** in function-scoped variables — globally mutable by default.
-13. **`set -e` with `|| true` sprinkled everywhere** — defeats the purpose. If you're absorbing a specific failure, comment why.
+13. **`set -e` with `|| true` sprinkled everywhere** — defeats purpose. If absorbing specific failure, comment why.
 
 ### Warn (should fix)
 
-- **Heredocs without `<<'EOF'`** when interpolation is unintended
-- **Temporary files without `mktemp`** — collisions and symlink attacks
+- **Heredocs without `<<'EOF'`** when interpolation unintended
+- **Temp files without `mktemp`** — collisions and symlink attacks
 - **Scripts over 200 lines** without function decomposition
 - **No `main` function** — all code at top level, no clear entry point
-- **`pipefail` + `grep` gotcha** — `grep` exits 1 on no match, which `pipefail` propagates. Use `|| true` when that's intentional, and comment it
+- **`pipefail` + `grep` gotcha** — `grep` exits 1 on no match, `pipefail` propagates. Use `|| true` when intentional, comment it
 - **Associative arrays without Bash version check** (`bash >=4`)
 - **Subshell variable scoping surprises** — variables set inside `(...)` don't persist outside
 
@@ -74,9 +74,9 @@ trap cleanup EXIT
 
 - **ALWAYS double-quote variable expansions**: `"$var"`, `"${var}"`, `"${arr[@]}"`
 - `"$var"` for brevity; `"${var}"` when needed to disambiguate: `"${var}_suffix"`
-- `"$(cmd)"` over backticks — nestable and readable
-- Glob patterns in conditions are NOT quoted: `[[ $file == *.txt ]]`
-- **Arrays**: `"${arr[@]}"` preserves each element as a separate argument; `"${arr[*]}"` collapses to one string
+- `"$(cmd)"` over backticks — nestable, readable
+- Glob patterns in conditions NOT quoted: `[[ $file == *.txt ]]`
+- **Arrays**: `"${arr[@]}"` preserves each element as separate argument; `"${arr[*]}"` collapses to one string
 
 Build command arguments as arrays, not concatenated strings:
 
@@ -91,7 +91,7 @@ cmd "${args[@]}"
 
 ## Shellcheck Discipline
 
-- Run at `shellcheck -S warning` — treats `warning` and `error` as blocking; `info`/`style` are advisory
+- Run at `shellcheck -S warning` — treats `warning` and `error` as blocking; `info`/`style` advisory
 - **Never blanket-suppress.** Use inline directives with comments:
   ```bash
   # shellcheck disable=SC2034  # intentionally unused, sourced externally
@@ -106,26 +106,26 @@ cmd "${args[@]}"
 
 | Use POSIX sh (`#!/bin/sh`) when... | Use Bash when... |
 |------------------------------------|------------------|
-| Minimal containers (Alpine, distroless) | You need arrays, associative arrays, `[[ ]]`, `(( ))` |
-| Cross-platform portability (BSD, macOS `/bin/sh` is dash) | You need process substitution, `mapfile`, `nameref` |
-| Short glue scripts with no complex logic | Long-lived scripts benefiting from Bash-specific safety features |
+| Minimal containers (Alpine, distroless) | Need arrays, associative arrays, `[[ ]]`, `(( ))` |
+| Cross-platform portability (BSD, macOS `/bin/sh` is dash) | Need process substitution, `mapfile`, `nameref` |
+| Short glue scripts, no complex logic | Long-lived scripts benefit from Bash-specific safety features |
 
-For CI/CD (GitHub Actions), Bash is always available — use it. For Docker `ENTRYPOINT` in minimal images, use POSIX sh or install Bash explicitly.
+CI/CD (GitHub Actions): Bash always available — use it. Docker `ENTRYPOINT` in minimal images: use POSIX sh or install Bash explicitly.
 
 ---
 
 ## Testing
 
-- **bats-core**: TAP-compliant, simple, widely used in CI. Good for integration tests ("run the script, check output").
+- **bats-core**: TAP-compliant, simple, widely used in CI. Good for integration tests ("run script, check output").
 - **ShellSpec**: BDD-style, pure POSIX, supports mocking/stubbing and parameterized tests. Better for unit-level isolation.
 
-Recommendation: bats-core for smoke tests, ShellSpec when you need mocking.
+Recommendation: bats-core for smoke tests, ShellSpec when need mocking.
 
 ---
 
 ## Code Review Checklist (Bash-Specific)
 
-See `quality-core.md` for the universal review checklist. Bash-specific additions:
+See `quality-core.md` for universal review checklist. Bash-specific additions:
 
 - [ ] Script starts with `#!/usr/bin/env bash`, `set -euo pipefail`, `IFS=$'\n\t'`
 - [ ] All variable expansions quoted
@@ -136,7 +136,7 @@ See `quality-core.md` for the universal review checklist. Bash-specific addition
 - [ ] Arrays used for command-arg construction, not string concatenation
 - [ ] `--` separator used before user-supplied variables in destructive commands
 - [ ] `[[ ]]` for string comparisons (not `[ ]`)
-- [ ] Scripts > 50 lines have a `main` function
+- [ ] Scripts > 50 lines have `main` function
 
 ---
 

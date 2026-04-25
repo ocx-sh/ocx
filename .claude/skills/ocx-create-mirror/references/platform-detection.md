@@ -1,6 +1,6 @@
 # Platform Detection Heuristics
 
-Asset filenames encode platform info in various ways. Common patterns ranked by reliability:
+Asset filenames encode platform info various ways. Common patterns ranked by reliability:
 
 1. **Explicit os-arch**: `tool-linux-amd64.tar.gz` — highest confidence
 2. **Explicit os_arch**: `tool-linux_amd64.tar.gz` — high confidence
@@ -10,7 +10,7 @@ Asset filenames encode platform info in various ways. Common patterns ranked by 
 
 ## Platform mapping table
 
-Match asset filenames to platforms using common naming conventions:
+Match asset filenames to platforms via common naming conventions:
 
 | Platform | Common substrings |
 |----------|-------------------|
@@ -21,14 +21,14 @@ Match asset filenames to platforms using common naming conventions:
 | `windows/amd64` | `windows-x86_64`, `win64`, `windows-amd64`, `win-x64`, `pc-windows` |
 | `windows/arm64` | `windows-arm64`, `win-arm64` |
 
-- If a `universal` or `any` asset exists for macOS, map it to both `darwin/amd64` and `darwin/arm64`.
-- Build regex patterns per platform. Use `.*` for version segments, escape dots and special chars.
-- If asset names changed between versions, add multiple patterns per platform (ordered newest first).
+- `universal`/`any` macOS asset exists → map both `darwin/amd64` and `darwin/arm64`.
+- Build regex per platform. Use `.*` for version segments, escape dots and special chars.
+- Asset names changed between versions → add multiple patterns per platform (newest first).
 
 ## musl vs glibc decision process
 
-When multiple assets could match the same platform (e.g. both `-gnu` and `-musl` variants for Linux), prefer **statically linked musl** variants — they work on both glibc-based distros (Ubuntu, Fedora) and musl-based distros (Alpine). However, **not all musl binaries are statically linked**. Some tools (e.g. Bun) produce dynamically linked musl binaries that require `/lib/ld-musl-*.so.1` at runtime and fail on glibc systems with a misleading "No such file or directory" error.
+Multiple assets match same platform (e.g. both `-gnu` and `-musl` Linux variants) → prefer **statically linked musl** — works on glibc distros (Ubuntu, Fedora) and musl distros (Alpine). But **not all musl binaries statically linked**. Some tools (e.g. Bun) produce dynamically linked musl binaries needing `/lib/ld-musl-*.so.1` at runtime, fail on glibc with misleading "No such file or directory" error.
 
-1. **Rust triple** (`*-unknown-linux-musl`): safe to prefer musl — Rust's musl target produces statically linked binaries by convention.
-2. **Non-Rust musl variants**: download the musl asset during inspection and verify with `file <binary>`. If it says `statically linked`, use musl. If it says `dynamically linked, interpreter /lib/ld-musl-*`, use the **gnu/glibc variant** instead.
-3. **When in doubt**, prefer gnu/glibc — it works on the vast majority of Linux systems (all major distros, CI runners, WSL, containers except Alpine).
+1. **Rust triple** (`*-unknown-linux-musl`): safe prefer musl — Rust musl target produces statically linked binaries by convention.
+2. **Non-Rust musl variants**: download musl asset during inspection, verify with `file <binary>`. Says `statically linked` → use musl. Says `dynamically linked, interpreter /lib/ld-musl-*` → use **gnu/glibc variant**.
+3. **When in doubt**, prefer gnu/glibc — works on vast majority Linux systems (all major distros, CI runners, WSL, containers except Alpine).

@@ -1,20 +1,20 @@
 ---
 name: ocx-sync-roadmap
-description: Use when syncing the website roadmap page against current GitHub issues and PRs. Matches open/closed issues + open/merged PRs to roadmap features, updates statuses, adds links, and flags unlinked issues as candidates. Triggers: "sync roadmap", "/ocx-sync-roadmap".
+description: Use when syncing website roadmap page against current GitHub issues and PRs. Matches open/closed issues + open/merged PRs to roadmap features, updates statuses, adds links, flags unlinked issues as candidates. Triggers: "sync roadmap", "/ocx-sync-roadmap".
 disable-model-invocation: true
 ---
 
 # Sync Roadmap
 
-Synchronize `website/src/docs/roadmap.md` with the current state of GitHub issues and pull requests.
+Sync `website/src/docs/roadmap.md` with current GitHub issues + PRs.
 
 ## Workflow
 
 ### Step 1: Gather GitHub State
 
-**Prefer MCP tools** `mcp__github__list_issues` and `mcp__github__list_pull_requests` for structured access — they return typed objects without shell parsing and avoid subprocess startup cost. Request `state: "all"` and paginate as needed.
+**Prefer MCP tools** `mcp__github__list_issues` and `mcp__github__list_pull_requests` — return typed objects, no shell parsing, no subprocess cost. Request `state: "all"`, paginate as needed.
 
-Fallback (when MCP is unavailable or lacks a specific field projection), run these in parallel:
+Fallback (MCP unavailable or missing field projection), run parallel:
 
 ```sh
 gh issue list --state all --limit 200 --json number,title,state,labels
@@ -23,13 +23,13 @@ gh pr list --state all --limit 200 --json number,title,state,labels
 
 ### Step 2: Read Current Roadmap
 
-Read `website/src/docs/roadmap.md` and parse:
+Read `website/src/docs/roadmap.md`, parse:
 - Each `<RoadmapItem>` (title, accent, icon)
-- Each `<RoadmapFeature>` within it (text, status, issue number, PR number)
+- Each `<RoadmapFeature>` within (text, status, issue number, PR number)
 
 ### Step 3: Match and Update
 
-For each roadmap feature that has an `issue` or `pr` prop:
+Each roadmap feature with `issue` or `pr` prop:
 
 | GitHub State | → Roadmap Status |
 |-------------|-----------------|
@@ -38,11 +38,11 @@ For each roadmap feature that has an `issue` or `pr` prop:
 | PR merged | `shipped` |
 | Issue closed (no PR) | `shipped` |
 
-Update the `status` prop on each `<RoadmapFeature>` accordingly.
+Update `status` prop on each `<RoadmapFeature>`.
 
 ### Step 4: Find Unlinked Issues
 
-Scan issues and PRs with titles matching roadmap themes:
+Scan issues + PRs with titles matching roadmap themes:
 
 | Issue/PR title contains | Likely roadmap item |
 |------------------------|-------------------|
@@ -55,7 +55,7 @@ Scan issues and PRs with titles matching roadmap themes:
 
 ### Step 5: Propose Changes
 
-Present a summary table of all changes before applying:
+Show summary table of all changes before apply:
 
 ```
 ## Roadmap Sync Proposal
@@ -80,14 +80,14 @@ Apply these changes? [y/n]
 
 ### Step 6: Apply
 
-Edit `website/src/docs/roadmap.md` with the approved changes.
+Edit `website/src/docs/roadmap.md` with approved changes.
 
 ## Feature Conventions
 
-- Feature text: 1-3 words, nominative style, consistent capitalization
-- Shipped features listed first within their `<RoadmapFeatures>` block
-- Active features next, planned last
-- Both `issue` and `pr` can be set on the same feature
+- Feature text: 1-3 words, nominative, consistent capitalization
+- Shipped first within `<RoadmapFeatures>` block
+- Active next, planned last
+- Both `issue` and `pr` can set on same feature
 
 ## Component Reference
 

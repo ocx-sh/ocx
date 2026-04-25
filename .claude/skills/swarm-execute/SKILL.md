@@ -14,13 +14,13 @@ triggers:
 
 # Execution Orchestrator — Tiered
 
-Thin dispatch layer. Phase plans live in sibling tier files
-(`tier-low.md`, `tier-high.md`, `tier-max.md`); this file parses
-arguments, classifies the target (`classify.md`), resolves overlays
-(`overlays.md`), optionally gates on a meta-plan approval, then hands
-off to the matching tier file. Shared content (worker table, loop
-design principles, constraints, handoff) stays here — phase-by-phase
-execution lives in the tier files.
+Thin dispatch layer. Phase plans in sibling tier files
+(`tier-low.md`, `tier-high.md`, `tier-max.md`); this file parse
+args, classify target (`classify.md`), resolve overlays
+(`overlays.md`), optional gate on meta-plan approval, hand
+off to matching tier file. Shared content (worker table, loop
+design principles, constraints, handoff) stay here — phase-by-phase
+execution in tier files.
 
 ## Argument syntax
 
@@ -39,7 +39,7 @@ execution lives in the tier files.
   - `--loop-rounds=1|2|3`
   - `--review=minimal|full|adversarial`
   - `--codex` / `--no-codex`
-  - `--dry-run` / `--form` — meta-plan preview (`--form` uses `AskUserQuestion`; implies `--dry-run`)
+  - `--dry-run` / `--form` — meta-plan preview (`--form` use `AskUserQuestion`; imply `--dry-run`)
 
 ## Workflow
 
@@ -47,17 +47,17 @@ execution lives in the tier files.
 
 Detect target type:
 1. Path ending `.md` (typically under `.claude/state/plans/`) → plan-artifact mode
-2. Anything else → free-text mode
+2. Else → free-text mode
 
-When a plan is present, read it and parse the handoff block for Tier,
+When plan present, read and parse handoff block for Tier,
 Scope, Reversibility, Overlays; parse phase definitions; extract
-"Subsystems Touched" from the plan body.
+"Subsystems Touched" from plan body.
 
 ### 2. Classify (only when tier=`auto`)
 
 Read `classify.md`. Apply plan-header signals first (primary); fall
 back to free-text signals (pointer to `/swarm-plan`'s classify.md when
-no plan artifact) only for axes the plan header doesn't cover. Produce
+no plan artifact) only for axes plan header miss. Produce
 candidate tier + confidence flag + overlay set.
 
 ### 3. Resolve overlays
@@ -69,7 +69,7 @@ classifier overlays + user flag overrides. User flags always win
 ### 4. Meta-plan gate (single consolidated approval point)
 
 Fire when ANY of: `--dry-run`, `--form`, tier resolved to `max`, or
-classification marked low-confidence. This is the **only** user-prompt
+classification marked low-confidence. **Only** user-prompt
 point — no mid-flow `AskUserQuestion` during classification.
 
 Write `.claude/state/plans/meta-plan_execute_[feature].md` with:
@@ -77,19 +77,19 @@ Classification (tier + rationale + plan-header source), Overlays
 (+ rationale), Workers per phase, `loop-rounds` budget, Estimated cost,
 Whether Codex fires, Not Doing (push, PR creation).
 
-**Approval UI** (always a single interaction):
-- Default: `EnterPlanMode` with the meta-plan path; resume on approve.
-  *If skill resume after `ExitPlanMode` is unreliable in practice,
+**Approval UI** (always single interaction):
+- Default: `EnterPlanMode` with meta-plan path; resume on approve.
+  *If skill resume after `ExitPlanMode` unreliable in practice,
   fall back to `AskUserQuestion` with Approve / Edit / Cancel options.*
 - `--form`: ONE `AskUserQuestion` call with ≤4 batched axis questions
   (Tier / Builder / Loop-rounds / Codex), first option "Recommended".
 
-On reject: re-draft meta-plan with the rejection rationale and
+On reject: re-draft meta-plan with rejection rationale and
 re-present once.
 
 ### 5. Announce final config (always)
 
-Print before loading the tier file:
+Print before loading tier file:
 
 ```
 Swarm execute
@@ -105,33 +105,33 @@ Swarm execute
 
 ### 6. Dispatch to tier file
 
-`Read` the matching `tier-{low,high,max}.md` and execute its phase
+`Read` matching `tier-{low,high,max}.md` and execute its phase
 plan. No phase content duplicated here.
 
 ## Review-Fix Loop
 
-Protocol: see the canonical Review-Fix Loop in [`workflow-swarm.md`](../../rules/workflow-swarm.md#review-fix-loop). The protocol auto-loads for swarm-skill contexts via `workflow-swarm.md` path-scoping. Per-tier loop configuration (rounds, perspectives) is set in each tier file.
+Protocol: see canonical Review-Fix Loop in [`workflow-swarm.md`](../../rules/workflow-swarm.md#review-fix-loop). Protocol auto-load for swarm-skill contexts via `workflow-swarm.md` path-scoping. Per-tier loop config (rounds, perspectives) set in each tier file.
 
 ## Cross-Model Adversarial Pass — shared protocol
 
-See `overlays.md` "codex axis" for when this fires per tier. Use the
-`codex-adversary` skill with scope `code-diff` against the branch diff
-after the Claude loop converges.
+See `overlays.md` "codex axis" for when fires per tier. Use
+`codex-adversary` skill with scope `code-diff` against branch diff
+after Claude loop converges.
 
 - **Preconditions**: loop exited, `task verify` green, working tree
   clean except intended diff.
 - **Invocation**: delegate to `codex-adversary` with `--scope code-diff
-  --base main`. Codex loads `AGENTS.md` automatically — do not inject
+  --base main`. Codex load `AGENTS.md` automatically — do not inject
   project context.
 - **Triage**: Actionable → one-shot `worker-builder` fix pass, gate
   `task verify`. Deferred → summary. Stated-convention / trivia →
   dropped with count.
-- **One-shot only**: never re-enter the Review-Fix Loop — prevents
-  two-family thrash. If the one-shot fix fails `task verify`, revert
+- **One-shot only**: never re-enter Review-Fix Loop — prevent
+  two-family thrash. If one-shot fix fails `task verify`, revert
   and promote findings to deferred.
 - **Unavailable path**: `CLAUDE_PLUGIN_ROOT` unset / companion
   non-zero / empty output → log `Cross-model gate skipped: <reason>`
-  and continue. Gate, not blocker (at tier=max, surface the skip
+  and continue. Gate, not blocker (at tier=max, surface skip
   prominently).
 
 ## Worker assignment (shared across tiers)
@@ -154,15 +154,15 @@ Max concurrent workers: 8 (per `workflow-swarm.md`).
 
 ## Quality Gates & Git Protocol
 
-- `task --list` to discover workflows; `task verify` is the final gate (subsystem verify runs during the review loop)
+- `task --list` to discover workflows; `task verify` is final gate (subsystem verify runs during review loop)
 - Stage and commit with conventional commit message; never push
 - Use `task checkpoint` for work-in-progress saves
 
 ## Living Design Records
 
-Plan artifacts are living documents. When implementation reveals a
-behavior or edge case not captured in the design record: update the
-plan artifact first, write the corresponding test, then implement.
+Plan artifacts = living documents. When implementation reveal
+behavior or edge case not in design record: update
+plan artifact first, write corresponding test, then implement.
 
 ## Constraints
 
@@ -172,7 +172,7 @@ plan artifact first, write the corresponding test, then implement.
 - NO pushing to remote
 - NO running stub and test phases concurrently (sequential only)
 - NO mid-flow `AskUserQuestion` during classification — ambiguity
-  resolves at the meta-plan gate
+  resolve at meta-plan gate
 - ALWAYS report blockers immediately
 - ALWAYS validate `git status` shows clean before commit
 - ALWAYS update design record before adding tests for unspecified behaviors

@@ -13,27 +13,27 @@ triggers:
 
 # Codebase Health Auditor
 
-Role: audit OCX code for Clean Code, SOLID, DRY, and pattern consistency.
+Role: audit OCX code for Clean Code, SOLID, DRY, pattern consistency.
 
 ## Workflow
 
 1. **Swarm** — launch parallel `worker-reviewer` agents per audit dimension
 2. **Audit** — SOLID, DRY, smells, consistency, context-rule freshness
-3. **Report** — prioritized findings with file:line references and remediation
+3. **Report** — prioritized findings with file:line refs + remediation
 
 ## Audit Dimensions
 
 - **SOLID** — one responsibility per module, interface narrowness, dependency inversion
 - **DRY** — knowledge duplication (MUST fix) vs incidental similarity (evaluate)
 - **Smells** — long methods, god objects, primitive obsession, feature envy, message chains
-- **Consistency** — error handling, async/await, naming, import strategy follow existing patterns
+- **Consistency** — error handling, async/await, naming, import strategy match existing patterns
 - **Context freshness** — verify `subsystem-*.md` rules still match current code
 
-## Relevant Rules (load for the scope under audit)
+## Relevant Rules (load for scope under audit)
 
 - `.claude/rules/quality-core.md` — universal SOLID/DRY/YAGNI, severity tiers, review checklist
 - `.claude/rules/quality-rust.md` — Rust block/warn-tier anti-patterns (`.unwrap()`, `MutexGuard`, blocking I/O, `.clone()` discipline, JoinSet, bounded channels)
-- `.claude/rules/arch-principles.md` — crate layout, pattern catalog, code style conventions (descriptive type names, no `mod.rs`)
+- `.claude/rules/arch-principles.md` — crate layout, pattern catalog, code style (descriptive type names, no `mod.rs`)
 - `.claude/rules/subsystem-cli.md` — Printable single-table rule, Api flow
 - `.claude/rules/subsystem-package-manager.md` — three-layer error model, `_all` order preservation, task module discipline
 - `.claude/rules/subsystem-file-structure.md` — ReferenceManager usage, `link()` arg order
@@ -69,11 +69,11 @@ Role: audit OCX code for Clean Code, SOLID, DRY, and pattern consistency.
 
 - NO flagging incidental duplication as critical
 - NO recommending public API breakage without migration
-- ALWAYS provide specific file:line references and concrete remediation
+- ALWAYS provide specific file:line refs + concrete remediation
 
 ## Handoff
 
-- To Builder — with specific fixes and refactoring items
+- To Builder — with specific fixes + refactoring items
 - To Architect — for systemic architectural issues
 
 $ARGUMENTS
