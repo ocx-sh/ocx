@@ -139,9 +139,20 @@ Otherwise, `AskUserQuestion`:
 - **Never** `--no-verify`, `--no-gpg-sign`, or any hook-skipping flags. If hook fails, fix root cause and create **new** commit (not `--amend` — previous commit stands).
 - **Never push.** Human decides when to push.
 
-### 7. Report
+### 7. Bump plan Status `Last update`
 
-One or two sentences: commit hash, subject, whether stranded-Checkpoint case handled, whether PR opened. Nothing else.
+After successful commit, if `.claude/state/current_plan.md` exists and references a plan with a `## Status` block:
+
+- Bump `Last update:` line in the Status block to today's date with the new HEAD sha:
+  `- **Last update:** YYYY-MM-DD (after <sha-short>: <subject>)`
+- Do NOT advance `Active phase:` — phase advancement is the plan author's decision (next phase entry in `/swarm-execute`), not an automatic side-effect of commits.
+- Skip silently when no `current_plan.md`, no plan match, no Status block.
+
+This keeps `/next`'s staleness check (plan-mtime-vs-`Last update`) accurate without surprising the user.
+
+### 8. Report
+
+One or two sentences: commit hash, subject, whether stranded-Checkpoint case handled, whether PR opened, whether Status `Last update` was bumped. Nothing else.
 
 ## References
 

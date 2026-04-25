@@ -1712,3 +1712,129 @@ class TestUserPromptRouter:
             f"line with no newlines — zero context bloat is a load-bearing "
             f"invariant. Violations: {bad}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Plan Status block — top-of-plan progress signal for /next
+# ---------------------------------------------------------------------------
+
+
+class TestPlanStatusBlock:
+    """Every plan file in `.claude/state/plans/plan_*.md` must carry a `## Status`
+    block at the top with the four mandatory fields. Schema and protocol live in
+    `.claude/rules/meta-ai-config.md` "Plan Status Protocol".
+
+    The `.claude/state/` directory is gitignored — plans are local per-worktree.
+    Tests skip silently when no plan files exist (fresh checkout).
+    Excludes `meta-plan_*.md` files (skill-internal scratch artifacts).
+    """
+
+    _MANDATORY_FIELDS = (
+        "**Plan:**",
+        "**Active phase:**",
+        "**Step:**",
+        "**Last update:**",
+    )
+
+    def _plan_files(self) -> list[Path]:
+        plans_dir = CLAUDE_DIR / "state" / "plans"
+        if not plans_dir.exists():
+            return []
+        return [
+            p
+            for p in sorted(plans_dir.glob("plan_*.md"))
+            if not p.name.startswith("meta-plan_")
+        ]
+
+    def _extract_status_block(self, text: str) -> str | None:
+        """Return content between `## Status` and the next `## ` heading, or None."""
+        lines = text.splitlines()
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip() == "## Status":
+                start = i + 1
+                break
+        if start is None:
+            return None
+        end = len(lines)
+        for j in range(start, len(lines)):
+            if lines[j].startswith("## ") and lines[j].strip() != "## Status":
+                end = j
+                break
+        return "\n".join(lines[start:end])
+
+    def test_every_plan_has_status_block(self) -> None:
+        """Each plan_*.md must contain a `## Status` heading."""
+        plans = self._plan_files()
+        if not plans:
+            pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
+        missing = [
+            p.relative_to(ROOT) for p in plans if "## Status" not in p.read_text()
+        ]
+        assert not missing, (
+            f"Plans missing `## Status` block: {missing}. "
+            f"Add one per `.claude/templates/artifacts/plan.template.md` schema. "
+            f"Protocol: `.claude/rules/meta-ai-config.md` `Plan Status Protocol`."
+        )
+
+    def test_status_block_has_all_mandatory_fields(self) -> None:
+        """Status block must contain Plan / Active phase / Step / Last update."""
+        plans = self._plan_files()
+        if not plans:
+            pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
+        violations: list[tuple[Path, list[str]]] = []
+        for plan in plans:
+            block = self._extract_status_block(plan.read_text())
+            if block is None:
+                # covered by previous test
+                continue
+            missing_fields = [f for f in self._MANDATORY_FIELDS if f not in block]
+            if missing_fields:
+                violations.append((plan.relative_to(ROOT), missing_fields))
+        assert not violations, (
+            f"Plans with incomplete Status block: {violations}. "
+            f"Required fields: {list(self._MANDATORY_FIELDS)}."
+        )
+
+    def test_status_block_in_first_30_lines(self) -> None:
+        """Status block must be near the top — /next reads first 30 lines only."""
+        plans = self._plan_files()
+        if not plans:
+            pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
+        too_late: list[tuple[Path, int]] = []
+        for plan in plans:
+            lines = plan.read_text().splitlines()
+            for i, line in enumerate(lines[:30], start=1):
+                if line.strip() == "## Status":
+                    break
+            else:
+                # not found in first 30 lines
+                for j, line in enumerate(lines, start=1):
+                    if line.strip() == "## Status":
+                        too_late.append((plan.relative_to(ROOT), j))
+                        break
+        assert not too_late, (
+            f"`## Status` block must appear within first 30 lines for /next "
+            f"to read it cheaply. Late blocks: {too_late}."
+        )
+
+    def test_template_has_status_block(self) -> None:
+        """Plan templates must seed the Status block so new plans get one for free."""
+        templates = [
+            CLAUDE_DIR / "templates" / "artifacts" / "plan.template.md",
+            CLAUDE_DIR / "templates" / "artifacts" / "bugfix_plan.template.md",
+        ]
+        for tmpl in templates:
+            assert tmpl.exists(), f"Template missing: {tmpl}"
+            text = tmpl.read_text()
+            assert "## Status" in text, (
+                f"{tmpl.relative_to(ROOT)} missing `## Status` block — "
+                f"new plans created from this template would fail "
+                f"TestPlanStatusBlock invariants."
+            )
+            block = self._extract_status_block(text)
+            assert block is not None, f"Status heading present but block parse failed: {tmpl}"
+            for field in self._MANDATORY_FIELDS:
+                assert field in block, (
+                    f"{tmpl.relative_to(ROOT)} Status block missing field {field}"
+                )

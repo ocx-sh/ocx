@@ -160,6 +160,7 @@ ground external findings in local code. `meta-ai-config.md`
   cases) and user experience scenarios (with error cases)
 - ALWAYS announce final config, even post-approval, hand off to
   `/swarm-execute` with explicit next-step
+- ALWAYS init plan with `## Status` block (template seeds it; Step `/swarm-plan → plan-approved`) and write `.claude/state/current_plan.md` pointer — schema + mutation table → [`meta-ai-config.md`](../../rules/meta-ai-config.md) "Plan Status Protocol"
 
 ## Handoff format
 
@@ -173,7 +174,8 @@ ground external findings in local code. `meta-ai-config.md`
 - **Overlays**: architect=X, research=Y, codex=Z
 
 ### Artifacts
-- `.claude/state/plans/plan_[feature].md`
+- `.claude/state/plans/plan_[feature].md` (with `## Status` block initialized)
+- `.claude/state/current_plan.md` (pointer)
 - `.claude/artifacts/research_[topic].md`
 - `.claude/artifacts/adr_[decision].md` (One-Way Door High)
 

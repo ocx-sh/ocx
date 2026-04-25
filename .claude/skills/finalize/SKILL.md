@@ -32,6 +32,7 @@ Sibling `/commit` skill handles **working phase** (save progress during dev). `/
 
 - `--squash-all` — skip per-commit analysis, collapse `main..HEAD` into single commit. Skill drafts one message for whole diff, asks approval.
 - `--dry-run` — produce classification + rebase plan, show, no execute. Useful for review.
+- `--force` — skip the active-phase check (still honors other refuse conditions). Use when no plan tracks the branch or Status block is intentionally stale.
 
 ## Workflow
 
@@ -51,6 +52,7 @@ Sibling `/commit` skill handles **working phase** (save progress during dev). `/
 - Current branch is `main` — tell user switch to feature/worktree branch first.
 - `main..HEAD` empty — nothing to finalize.
 - Working tree dirty — tell user commit or stash with `/commit` first. No auto-stash; user must consciously save state.
+- **Plan still in flight** — read `.claude/state/current_plan.md`; if pointer present, parse the referenced plan's `## Status` block. **Refuse** if `Step` is not `finalized`/`awaiting /finalize` or `Active phase` is not the last plan phase. `--force` overrides. Schema → [`meta-ai-config.md`](../../rules/meta-ai-config.md) "Plan Status Protocol".
 
 **Rebase target — always current local `main`.** `/finalize` produces branch fast-forwarding onto local `main` HEAD. Two cases:
 
@@ -169,13 +171,13 @@ After rebase, `task verify` must still pass on new HEAD. Run it. On fail:
 
 No push. Never push.
 
-### 7. Report
+### 7. Mark plan finalized + clear `current_plan.md`
 
-One to three sentences:
+After successful rebase, if a Status block exists in the plan referenced by `.claude/state/current_plan.md`: set `Step:` to `finalized`, bump `Last update:` (with new HEAD sha), delete `.claude/state/current_plan.md`. Skip silently when no plan / no Status block / `--force` was used.
 
-- Starting commit count → final commit count
-- Whether `task verify` passed
-- Next step for user (`git checkout main && git merge --ff-only <branch>` — only if asked; else stop)
+### 8. Report
+
+Starting → final commit count, whether `task verify` passed, whether Status was marked `finalized` and `current_plan.md` cleared, next step for user (`git checkout main && git merge --ff-only <branch>` if asked; else stop).
 
 ## Safety Rules
 

@@ -56,6 +56,10 @@ Enable `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Multiple Claude sessions coordi
 
 See `.claude/rules/workflow-swarm.md` for worker types, models, tools, focus modes.
 
+## Plan Status Tracking
+
+Every plan in `.claude/state/plans/plan_*.md` carries a `## Status` block at the top (after H1, before first content section). Block fields: `Plan`, `Active phase`, `Step`, `Last update`. Read+mutated by `/swarm-plan` (init), `/swarm-execute` (phase entry/advance), `/swarm-review` (round/verdict), `/commit` (Last update), `/finalize` (refuse if active, mark `finalized` on done), `/next` (read primary signal, state-fix fallback). Global pointer `.claude/state/current_plan.md` (gitignored) names the active plan. Schema + mutation table → [`meta-ai-config.md`](./meta-ai-config.md) "Plan Status Protocol".
+
 ## Quality Gates
 
 Run `task verify` (fmt check + clippy + build + unit tests + acceptance tests). See `.claude/rules/quality-core.md` for canonical gate list.

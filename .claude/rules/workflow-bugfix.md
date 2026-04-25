@@ -119,6 +119,8 @@ Close loop so fix traceable.
 | Non-trivial (unclear cause, multi-file, or high risk) | Create `.claude/artifacts/bugfix_plan_[topic].md` from `bugfix_plan.template.md` |
 | Post-incident (production impact, security) | Create `.claude/artifacts/postmortem_[topic].md` from `postmortem.template.md` |
 
+Bug-fix plans created from the template carry a `## Status` block at the top — same schema and mutation protocol as feature plans. See [`meta-ai-config.md`](./meta-ai-config.md) "Plan Status Protocol".
+
 ## Red Flags — Recognize Rationalizations Before Acting on Them
 
 If you think anything in left column, stop + apply right column. Most common ways bug-fix session goes wrong.

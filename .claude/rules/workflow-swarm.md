@@ -177,6 +177,10 @@ Both one-shot (no looping — prevents two-family stylistic thrash). Gating by t
 
 Triage for plan-artifact scope mirrors code-diff pass: Actionable → orchestrator edits plan, re-runs one `worker-reviewer` (spec-compliance) pass; Deferred → handoff; Stated-convention / Trivia → dropped with count. Unavailable path (CLAUDE_PLUGIN_ROOT unset or companion non-zero): log `Cross-model plan review skipped: <reason>` and continue.
 
+## Plan Status Tracking
+
+Every `.claude/state/plans/plan_*.md` carries a `## Status` block at top: `Plan` / `Active phase` / `Step` / `Last update`. Swarm skills mutate it on phase entry, round entry, verdict, commit. Global pointer `.claude/state/current_plan.md` (gitignored) names the active plan. `/next` reads block as primary signal; `/finalize` refuses if any phase still active. Schema + per-skill mutation table → [`meta-ai-config.md`](./meta-ai-config.md) "Plan Status Protocol".
+
 ## Coordination Protocol
 
 1. **Orchestrator** decomposes task into clear assignments

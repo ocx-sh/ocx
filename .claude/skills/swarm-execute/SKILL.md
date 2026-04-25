@@ -164,6 +164,10 @@ Plan artifacts = living documents. When implementation reveal
 behavior or edge case not in design record: update
 plan artifact first, write corresponding test, then implement.
 
+## Plan Status block (mutate on phase entry + advance)
+
+Mutate the `## Status` block in the plan referenced by `.claude/state/current_plan.md`: flip `Step` on phase entry / Stub→Specify→Implement→Review-Fix transitions; increment `Active phase` on plan-phase advance; set `Step: awaiting /swarm-review` when the final phase completes (don't clear `current_plan.md` — `/finalize` does that). Skip silently when no `current_plan.md` / no Status block. Full mutation table → [`meta-ai-config.md`](../../rules/meta-ai-config.md) "Plan Status Protocol".
+
 ## Constraints
 
 - NO completing tasks without passing quality gates

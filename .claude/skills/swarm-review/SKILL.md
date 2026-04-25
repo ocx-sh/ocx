@@ -180,6 +180,10 @@ security / breaking changes / missing tests / arch violations).
 - ALWAYS classify every finding as actionable or deferred
 - ALWAYS stay within diff scope (`<base>...HEAD`)
 
+## Plan Status block (mutate on round entry + verdict)
+
+Mutate the plan's `## Status` block: flip `Step` to `/swarm-review → round N` on each round entry; on verdict, set `awaiting /finalize` (Approve) or `awaiting /swarm-execute (review-fix loop)` (Needs Work / Request Changes); bump `Last update`. Skip silently when no `current_plan.md` / no Status block. Full mutation table → [`meta-ai-config.md`](../../rules/meta-ai-config.md) "Plan Status Protocol".
+
 ## Handoff
 
 - **To `/swarm-execute`**: when actionable findings exist and user

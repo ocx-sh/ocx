@@ -8,6 +8,23 @@ Handoff to: Builder (/builder), QA Engineer (/qa-engineer)
 Related Skills: builder, qa-engineer
 -->
 
+## Status
+
+<!--
+Status block — mandatory for every plan.
+Read+mutated by /swarm-plan, /swarm-execute, /swarm-review, /commit, /finalize, /next.
+First 20 lines of plan must contain this block — /next reads it via grep.
+Schema enforced by .claude/tests/test_ai_config.py::TestPlanStatusBlock.
+See .claude/rules/meta-ai-config.md "Plan Status Protocol" for protocol details.
+-->
+
+- **Plan:** plan_[task]
+- **Active phase:** 1 — [first phase title]
+- **Step:** /swarm-plan → plan-approved
+- **Last update:** [YYYY-MM-DD] (initialized)
+
+---
+
 ## Overview
 
 **Status:** Draft | Approved | In Progress | Complete

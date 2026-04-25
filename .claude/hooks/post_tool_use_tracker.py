@@ -135,6 +135,15 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         ),
         "an AI config rule — update the catalog and meta-ai-config if scoping or globals changed",
     ),
+    (
+        ".claude/state/plans/plan_*.md",
+        (
+            "- Plan `## Status` block — bump `Last update:` line if implementation advanced\n"
+            "- `.claude/state/current_plan.md` — refresh pointer if active plan or branch changed\n"
+            "- See .claude/rules/meta-ai-config.md `Plan Status Protocol` for the schema"
+        ),
+        "a plan file — keep the Status block fresh so /next stays accurate",
+    ),
 ]
 
 
