@@ -51,7 +51,11 @@ impl ShellProfileLoad {
         }
 
         // Convert resolved profile entries to InstallInfo for dependency expansion.
-        let install_infos: Vec<_> = resolved.iter().map(InstallInfo::from).collect();
+        let install_infos: Vec<std::sync::Arc<InstallInfo>> = resolved
+            .iter()
+            .map(InstallInfo::from)
+            .map(std::sync::Arc::new)
+            .collect();
 
         println!("{}", detected_shell.comment("ocx profile"));
         let entries = manager.resolve_env(&install_infos).await?;

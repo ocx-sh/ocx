@@ -245,7 +245,7 @@ fn build_sentinel_contexts(name_map: &HashMap<String, &Dependency>) -> HashMap<D
             // a valid DependencyName (either an explicit validated name or a repository basename
             // guaranteed to satisfy the slug pattern by the OCI identifier parser).
             let dep_name = DependencyName::try_from(name.as_str()).expect("dep name from name_map is a valid slug");
-            (dep_name, DependencyContext::sentinel(dep.identifier.clone(), sentinel))
+            (dep_name, DependencyContext::path_only(dep.identifier.clone(), sentinel))
         })
         .collect()
 }

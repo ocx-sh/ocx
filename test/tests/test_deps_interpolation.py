@@ -216,6 +216,47 @@ def test_file_uri_mode_validates_metadata_via_validmetadata(
     )
 
 
+def test_package_push_rejects_transitive_dep_ref(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """`${deps.NAME.installPath}` must reference a *direct* dep, not a transitive one.
+
+    Topology: R → D → T. T is a published package in the registry and a dep of D,
+    but R declares only D as a dependency. R's env references `${deps.<T>.installPath}`,
+    which is allowed only for D's interpolation namespace — not R's. Publish-time
+    validation in `validate_env_tokens` walks R's declared deps only and must reject
+    the unknown name.
+    """
+    t_repo = f"{unique_repo}_transitive"
+    d_repo = f"{unique_repo}_direct"
+    r_repo = f"{unique_repo}_root"
+
+    t_pkg = make_package(ocx, t_repo, "1.0.0", tmp_path, new=True)
+    t_dep_entry = _dep_entry(ocx, t_pkg)
+
+    d_pkg = make_package(
+        ocx, d_repo, "1.0.0", tmp_path,
+        new=True,
+        dependencies=[t_dep_entry],
+    )
+    d_dep_entry = _dep_entry(ocx, d_pkg)
+
+    # R declares only D as a dependency; the env value references T's name,
+    # which exists transitively but is not in R's direct dependency map.
+    with pytest.raises(AssertionError) as exc_info:
+        make_package(
+            ocx, r_repo, "1.0.0", tmp_path,
+            new=True,
+            env=[{"key": "T_PATH", "type": "constant", "value": f"${{deps.{t_repo}.installPath}}"}],
+            dependencies=[d_dep_entry],
+        )
+
+    error_text = str(exc_info.value)
+    assert t_repo in error_text, (
+        f"error must name the transitive dep '{t_repo}': {error_text}"
+    )
+
+
 def test_package_push_rejects_unsupported_field(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):

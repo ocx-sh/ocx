@@ -159,10 +159,11 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::package_manager::error::PackageErrorKind::EntrypointNameCollision`]
-    /// when `package`'s entrypoint names overlap with launcher names already
-    /// owned by a different `(registry, repository)` in the per-registry
-    /// `entrypoints-index.json`.
+    /// Returns I/O errors from the symlink wire-up. Closure-scoped entrypoint
+    /// name collisions are detected at consumption time
+    /// ([`apply_visible_packages`](crate::package_manager::visible::apply_visible_packages))
+    /// or at install Stage 1 ([`pull::setup_owned`](crate::package_manager::tasks::pull)),
+    /// not here.
     #[allow(clippy::result_large_err)]
     pub async fn wire_selection(
         &self,
@@ -244,6 +245,6 @@ impl PackageManager {
         pkg_root: &std::path::Path,
     ) -> crate::Result<Vec<crate::package::metadata::env::exporter::Entry>> {
         let info = self.install_info_from_package_root(pkg_root).await?;
-        self.resolve_env(&[info]).await
+        self.resolve_env(&[std::sync::Arc::new(info)]).await
     }
 }

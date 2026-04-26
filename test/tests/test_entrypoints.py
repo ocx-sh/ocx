@@ -428,3 +428,108 @@ def test_install_warns_when_pathext_missing_cmd_on_windows(
     assert "PATHEXT" in result.stderr, (
         f"install must warn about missing .CMD in PATHEXT; stderr={result.stderr.strip()!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Closure-scoped collision detection
+# ---------------------------------------------------------------------------
+
+
+def test_env_two_roots_with_same_entrypoint_name_errors(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`ocx env A B` must surface EntrypointNameCollision with exit code 65 when
+    two independent roots declare the same entrypoint name.
+
+    Both packages install without `--select`, so Stage 1 (install-time) does not
+    fire — the collision is only visible at consumption time when the caller
+    asks for the merged env of both roots. This is the Stage 2 path of the
+    closure-scoped collision check (`apply_visible_packages`).
+    """
+    repo_a = f"{unique_repo}-ea"
+    repo_b = f"{unique_repo}-eb"
+
+    pkg_a = make_package_with_entrypoints(
+        ocx, repo_a, tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+    )
+    pkg_b = make_package_with_entrypoints(
+        ocx, repo_b, tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+    )
+
+    ocx.plain("install", pkg_a.short)
+    ocx.plain("install", pkg_b.short)
+
+    result = ocx.run("env", pkg_a.short, pkg_b.short, check=False)
+    assert result.returncode == 65, (
+        f"ocx env across colliding roots must exit 65 (DataError); "
+        f"got rc={result.returncode}, stderr={result.stderr.strip()!r}"
+    )
+    assert "cmake" in result.stderr, (
+        f"error must cite the colliding entrypoint name 'cmake'; "
+        f"stderr={result.stderr.strip()!r}"
+    )
+
+
+def test_install_intra_closure_collision_aborts_before_candidate_symlink(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Stage 1 intra-closure collision must abort before any disk state is created.
+
+    Setup: pkg_a declares `cmake` entrypoint, pkg_b imports pkg_a as a public dep
+    AND declares its own `cmake` entrypoint. Pulling pkg_b drags pkg_a into pkg_b's
+    visible closure, so the Stage 1 check (`pull.rs::setup_owned`) sees both
+    declarations and aborts. The aborted install must leave no candidate symlink
+    behind for pkg_b — the collision is detected before the temp→final atomic move.
+    """
+    from src.registry import fetch_manifest_digest  # noqa: PLC0415
+    from src.runner import registry_dir  # noqa: PLC0415
+
+    repo_a = f"{unique_repo}-sa"
+    repo_b = f"{unique_repo}-sb"
+
+    pkg_a = make_package_with_entrypoints(
+        ocx, repo_a, tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="a",
+    )
+    dep_digest = fetch_manifest_digest(ocx.registry, repo_a, "1.0.0")
+    dep_entry = {
+        "identifier": f"{pkg_a.fq}@{dep_digest}",
+        "visibility": "public",
+    }
+
+    pkg_b = make_package_with_entrypoints(
+        ocx, repo_b, tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="b",
+        dependencies=[dep_entry],
+    )
+
+    result = ocx.run("install", "--select", pkg_b.short, check=False)
+    assert result.returncode == 65, (
+        f"install --select with intra-closure collision must exit 65 (DataError); "
+        f"got rc={result.returncode}, stderr={result.stderr.strip()!r}"
+    )
+    assert "cmake" in result.stderr, (
+        f"error must cite the colliding entrypoint name 'cmake'; "
+        f"stderr={result.stderr.strip()!r}"
+    )
+
+    reg = registry_dir(ocx.registry)
+    candidate_b = (
+        Path(str(ocx.ocx_home)) / "symlinks" / reg / pkg_b.repo / "candidates" / "1.0.0"
+    )
+    assert not candidate_b.exists() and not candidate_b.is_symlink(), (
+        f"pkg_b candidate symlink must not be created after Stage 1 collision; "
+        f"found at {candidate_b}"
+    )

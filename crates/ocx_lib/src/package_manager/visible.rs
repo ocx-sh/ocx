@@ -159,9 +159,15 @@ pub async fn import_visible_packages(
                         d.identifier.registry().to_string(),
                         d.identifier.repository().to_string(),
                     );
+                    // Falls back to the metadata identifier when the dep is
+                    // not present in the resolved closure — e.g. when the dep
+                    // was added to metadata after this dep's last pull. The
+                    // env-time consumer only needs a stable install path, and
+                    // `objects.content(metadata_id)` resolves the same content
+                    // tree the resolver would have written.
                     let install_id = dep_resolved_id_map.get(&key).copied().unwrap_or(&d.identifier);
                     let install_path = objects.content(install_id);
-                    (name, DependencyContext::sentinel(install_id.clone(), install_path))
+                    (name, DependencyContext::path_only(install_id.clone(), install_path))
                 })
                 .collect();
 
@@ -200,9 +206,14 @@ pub async fn import_visible_packages(
                     dep.identifier.registry().to_string(),
                     dep.identifier.repository().to_string(),
                 );
+                // Falls back to the metadata identifier when the dep is not
+                // in this root's resolved closure (same rationale as in the
+                // dep-of-dep loop above): metadata may name a dep that the
+                // last pull did not record, but `objects.content(metadata_id)`
+                // still resolves to the correct content tree.
                 let install_id = resolved_id_map.get(&key).copied().unwrap_or(&dep.identifier);
                 let install_path = objects.content(install_id);
-                (name, DependencyContext::sentinel(install_id.clone(), install_path))
+                (name, DependencyContext::path_only(install_id.clone(), install_path))
             })
             .collect();
 
@@ -222,8 +233,8 @@ pub async fn import_visible_packages(
 }
 
 /// Iterates the visible packages in input order and emits resolved environment
-/// variable entries for each one, then runs a closure-scoped entrypoint
-/// collision check.
+/// variable entries for each one. Pure env emission — does **not** run the
+/// closure-scoped entrypoint collision check.
 ///
 /// For each [`VisiblePackage`] in `visible`:
 /// 1. When `metadata.bundle_entrypoints()` is non-empty, emits a synthetic
@@ -238,10 +249,11 @@ pub async fn import_visible_packages(
 /// 2. Calls `tasks::common::export_env` with the package's metadata, content
 ///    path, and pre-built dep_contexts and appends the resulting entries.
 ///
-/// After iterating, calls [`collect_entrypoints`] over the same slice and
-/// returns the resulting name→identifier map alongside the env entries. A
-/// collision detected here (Stage 2 — consumption time) surfaces as
-/// [`PackageErrorKind::EntrypointNameCollision`] from the calling command.
+/// Pair with [`collect_entrypoints`] when the caller wants fail-fast on
+/// closure-scoped name collisions (the current consumption-time policy via
+/// [`apply_visible_packages`]). Callers that want warn-not-fail behaviour
+/// (e.g. `ocx env --json`, `ocx ci export`) can run the two passes
+/// independently and surface the map without erroring.
 ///
 /// The apply phase performs **no I/O**. All metadata and content paths are
 /// already present on `install_info`. Emission order equals input order so
@@ -250,13 +262,9 @@ pub async fn import_visible_packages(
 ///
 /// # Errors
 ///
-/// - Template-resolution failures from `export_env` (see [`crate::package::metadata::env`]).
-/// - [`PackageErrorKind::EntrypointNameCollision`] when two packages in
-///   `visible` declare the same entrypoint name.
+/// Template-resolution failures from `export_env` (see [`crate::package::metadata::env`]).
 #[allow(clippy::result_large_err)]
-pub fn apply_visible_packages(
-    visible: &[VisiblePackage],
-) -> Result<(Vec<Entry>, BTreeMap<EntrypointName, oci::PinnedIdentifier>), PackageErrorKind> {
+pub fn emit_env(visible: &[VisiblePackage]) -> Result<Vec<Entry>, PackageErrorKind> {
     let mut entries = Vec::new();
     for pkg in visible {
         // Emit synthetic PATH entry for the entrypoints/ directory BEFORE
@@ -272,6 +280,11 @@ pub fn apply_visible_packages(
             .is_some_and(|eps| !eps.is_empty())
         {
             let entrypoints_dir = pkg.install_info.package_root().join("entrypoints");
+            // Invariant: callers ensure the package root is UTF-8. `LauncherSafeString`
+            // (entrypoints.rs) only screens forbidden characters, not UTF-8 validity, so
+            // a non-UTF-8 `OCX_HOME` byte sequence on Unix would survive install but get
+            // U+FFFD-replaced here and the resulting PATH entry would not resolve to the
+            // launcher. Treated as out-of-scope until a real-world report surfaces.
             entries.push(Entry {
                 key: "PATH".to_string(),
                 value: entrypoints_dir.to_string_lossy().into_owned(),
@@ -279,15 +292,34 @@ pub fn apply_visible_packages(
             });
         }
 
-        let dep_contexts = pkg.scope.dep_contexts.clone();
         common::export_env(
             &pkg.install_info.content,
             &pkg.install_info.metadata,
-            dep_contexts,
+            &pkg.scope.dep_contexts,
             &mut entries,
         )
         .map_err(PackageErrorKind::Internal)?;
     }
+    Ok(entries)
+}
+
+/// Phase B convenience: runs [`emit_env`] then [`collect_entrypoints`] and
+/// returns both results together. Fails fast on closure-scoped name collisions.
+///
+/// Use [`emit_env`] / [`collect_entrypoints`] directly when you want
+/// warn-not-fail behaviour (env-only consumers that only need the entrypoints
+/// map for diagnostics).
+///
+/// # Errors
+///
+/// - Template-resolution failures from [`emit_env`].
+/// - [`PackageErrorKind::EntrypointNameCollision`] when two packages in
+///   `visible` declare the same entrypoint name.
+#[allow(clippy::result_large_err)]
+pub fn apply_visible_packages(
+    visible: &[VisiblePackage],
+) -> Result<(Vec<Entry>, BTreeMap<EntrypointName, oci::PinnedIdentifier>), PackageErrorKind> {
+    let entries = emit_env(visible)?;
     let entrypoints_map = collect_entrypoints(visible)?;
     Ok((entries, entrypoints_map))
 }

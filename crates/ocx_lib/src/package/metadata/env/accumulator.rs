@@ -14,64 +14,76 @@ use super::var;
 
 /// Resolved context for a single direct dependency, available during env interpolation.
 ///
-/// Keyed in `Accumulator::dep_contexts` by `dep.name()` (the explicit name or repository basename).
-/// Backed by `Arc<InstallInfo>` so that future fields like `${deps.NAME.version}` and
-/// `${deps.NAME.digest}` become additive match arms in `resolve_field` without changing
-/// any upstream signatures.
+/// Keyed in `Accumulator::dep_contexts` by `dep.name()` (the explicit name or repository
+/// basename). Two variants encode the available data so consumers can never silently
+/// fan out from a fake install record:
 ///
-/// # Reserved
-///
-/// A `resolved_env` field for per-dep resolved environment data is reserved for a future
-/// extension and is not present yet.
+/// - [`DependencyContext::Full`] — backs the runtime path. Carries the real `Arc<InstallInfo>`,
+///   so future template fields (`${deps.NAME.version}`, `${deps.NAME.digest}`) can read
+///   metadata without an extra lookup.
+/// - [`DependencyContext::PathOnly`] — backs the publish-time validator and the env-only
+///   runtime callers (`apply_visible_packages`) where no full `InstallInfo` is loaded.
+///   Only `installPath` is resolvable; metadata-dependent fields return `None`.
 #[derive(Debug, Clone)]
-pub struct DependencyContext {
-    install_info: Arc<InstallInfo>,
+pub enum DependencyContext {
+    /// Full install record — every field on [`InstallInfo`] is available.
+    Full(Arc<InstallInfo>),
+    /// Identifier and resolved content path only — no metadata, no resolved deps.
+    PathOnly { id: oci::PinnedIdentifier, path: PathBuf },
 }
 
 impl DependencyContext {
     /// Constructs a `DependencyContext` wrapping real install info.
-    pub fn new(install_info: Arc<InstallInfo>) -> Self {
-        Self { install_info }
-    }
-
-    /// Returns the underlying `Arc<InstallInfo>`.
-    pub fn install_info(&self) -> &Arc<InstallInfo> {
-        &self.install_info
-    }
-
-    /// Returns the absolute content path for this dependency (`packages/.../content/`).
-    pub fn install_path(&self) -> &Path {
-        &self.install_info.content
-    }
-
-    /// Returns the full pinned OCI identifier for this dependency.
-    pub fn identifier(&self) -> &oci::PinnedIdentifier {
-        &self.install_info.identifier
-    }
-
-    /// Resolves a named field to a string value.
-    ///
-    /// Currently supports `"installPath"` only. Future fields (`"version"`, `"digest"`)
-    /// will become additional match arms here without signature churn in callers.
-    pub fn resolve_field(&self, field: &str) -> Option<String> {
-        match field {
-            "installPath" => Some(self.install_path().to_string_lossy().into_owned()),
-            _ => None,
-        }
+    pub fn full(install_info: Arc<InstallInfo>) -> Self {
+        Self::Full(install_info)
     }
 
     /// Constructs a context from an identifier and a content path only.
     ///
-    /// Wraps a synthetic `InstallInfo` whose `content` is the supplied path and
-    /// whose other fields use minimal placeholders. Used by call sites that have
-    /// no full `InstallInfo` available — `validate_entrypoints` (publish-time
-    /// sentinels) and `resolve.rs` (runtime, where only `${...installPath}`
-    /// resolution is required). Future fields beyond `installPath` will require
-    /// callers to supply a real `InstallInfo` via [`DependencyContext::new`].
-    pub fn sentinel(identifier: oci::PinnedIdentifier, sentinel_path: PathBuf) -> Self {
-        let info = InstallInfo::new_for_sentinel(identifier, sentinel_path);
-        Self {
-            install_info: Arc::new(info),
+    /// Used by call sites that have no full `InstallInfo` available —
+    /// `validate_entrypoints` (publish-time sentinels) and `apply_visible_packages`
+    /// (runtime, where only `${...installPath}` resolution is required). Metadata-dependent
+    /// template fields are unresolvable on this variant and return `None`.
+    pub fn path_only(id: oci::PinnedIdentifier, path: PathBuf) -> Self {
+        Self::PathOnly { id, path }
+    }
+
+    /// Returns the underlying `Arc<InstallInfo>` when the variant carries one.
+    ///
+    /// Returns `None` for [`DependencyContext::PathOnly`] — there is no install record.
+    pub fn install_info(&self) -> Option<&Arc<InstallInfo>> {
+        match self {
+            Self::Full(info) => Some(info),
+            Self::PathOnly { .. } => None,
+        }
+    }
+
+    /// Returns the absolute content path for this dependency (`packages/.../content/`).
+    pub fn install_path(&self) -> &Path {
+        match self {
+            Self::Full(info) => &info.content,
+            Self::PathOnly { path, .. } => path,
+        }
+    }
+
+    /// Returns the full pinned OCI identifier for this dependency.
+    pub fn identifier(&self) -> &oci::PinnedIdentifier {
+        match self {
+            Self::Full(info) => &info.identifier,
+            Self::PathOnly { id, .. } => id,
+        }
+    }
+
+    /// Resolves a named field to a string value.
+    ///
+    /// `"installPath"` is supported on every variant. Future metadata-dependent fields
+    /// (`"version"`, `"digest"`) will resolve only on [`DependencyContext::Full`] and
+    /// return `None` on [`DependencyContext::PathOnly`] — the type discriminates at
+    /// compile time, no synthetic-empty fallbacks.
+    pub fn resolve_field(&self, field: &str) -> Option<String> {
+        match field {
+            "installPath" => Some(self.install_path().to_string_lossy().into_owned()),
+            _ => None,
         }
     }
 }
@@ -158,7 +170,7 @@ mod tests {
     }
 
     fn ctx(dir: &TempDir, repo: &str) -> DependencyContext {
-        DependencyContext::sentinel(pinned(repo), dir.path().to_path_buf())
+        DependencyContext::path_only(pinned(repo), dir.path().to_path_buf())
     }
 
     fn dep_name(s: &str) -> DependencyName {
@@ -199,7 +211,7 @@ mod tests {
         let mut ctxs = HashMap::new();
         ctxs.insert(
             dep_name("cmake"),
-            DependencyContext::sentinel(pinned("cmake"), cmake_dir.path().to_path_buf()),
+            DependencyContext::path_only(pinned("cmake"), cmake_dir.path().to_path_buf()),
         );
 
         let template = "${installPath}:${deps.cmake.installPath}/bin".to_string();
@@ -220,11 +232,11 @@ mod tests {
         let mut ctxs = HashMap::new();
         ctxs.insert(
             dep_name("cmake"),
-            DependencyContext::sentinel(pinned("cmake"), cmake_dir.path().to_path_buf()),
+            DependencyContext::path_only(pinned("cmake"), cmake_dir.path().to_path_buf()),
         );
         ctxs.insert(
             dep_name("python"),
-            DependencyContext::sentinel(pinned("python"), python_dir.path().to_path_buf()),
+            DependencyContext::path_only(pinned("python"), python_dir.path().to_path_buf()),
         );
 
         let template = "${deps.cmake.installPath}/bin:${deps.python.installPath}/bin";
@@ -281,7 +293,7 @@ mod tests {
         let mut ctxs = HashMap::new();
         ctxs.insert(
             dep_name("cmake"),
-            DependencyContext::sentinel(pinned("cmake"), missing_path),
+            DependencyContext::path_only(pinned("cmake"), missing_path),
         );
 
         let var = constant_var("X", "${deps.cmake.installPath}");
@@ -331,22 +343,55 @@ mod tests {
         );
     }
 
-    // DependencyContext::sentinel — install_path() returns the supplied sentinel path.
+    // DependencyContext::path_only — install_path() returns the supplied path.
     #[test]
-    fn dependency_context_sentinel_resolves_install_path() {
-        let sentinel_path = PathBuf::from("/__OCX_SENTINEL__");
-        let ctx = DependencyContext::sentinel(pinned("cmake"), sentinel_path.clone());
-        assert_eq!(ctx.install_path(), sentinel_path.as_path());
+    fn dependency_context_path_only_resolves_install_path() {
+        let path = PathBuf::from("/__OCX_SENTINEL__");
+        let ctx = DependencyContext::path_only(pinned("cmake"), path.clone());
+        assert_eq!(ctx.install_path(), path.as_path());
         assert_eq!(ctx.resolve_field("installPath").as_deref(), Some("/__OCX_SENTINEL__"),);
+        assert!(ctx.install_info().is_none(), "PathOnly carries no InstallInfo");
     }
 
     // DependencyContext::resolve_field — unknown fields return None.
     #[test]
     fn dependency_context_resolve_field_unknown_returns_none() {
         let dir = TempDir::new().unwrap();
-        let ctx = DependencyContext::sentinel(pinned("cmake"), dir.path().to_path_buf());
+        let ctx = DependencyContext::path_only(pinned("cmake"), dir.path().to_path_buf());
         assert!(ctx.resolve_field("version").is_none());
         assert!(ctx.resolve_field("digest").is_none());
         assert!(ctx.resolve_field("").is_none());
+    }
+
+    // DependencyContext::Full — accessors read through to the wrapped InstallInfo.
+    #[test]
+    fn dependency_context_full_reads_through_install_info() {
+        use crate::package::metadata::Metadata;
+        use crate::package::metadata::bundle::{Bundle, Version};
+        use crate::package::metadata::dependency::Dependencies;
+        use crate::package::metadata::entrypoint::Entrypoints;
+        use crate::package::metadata::env::Env;
+        use crate::package::resolved_package::ResolvedPackage;
+
+        let dir = TempDir::new().unwrap();
+        let id = pinned("cmake");
+        let info = Arc::new(InstallInfo {
+            identifier: id.clone(),
+            metadata: Metadata::Bundle(Bundle {
+                version: Version::V1,
+                strip_components: None,
+                env: Env::default(),
+                dependencies: Dependencies::default(),
+                entrypoints: Entrypoints::default(),
+            }),
+            resolved: ResolvedPackage::new(),
+            content: dir.path().to_path_buf(),
+        });
+        let ctx = DependencyContext::full(Arc::clone(&info));
+
+        assert_eq!(ctx.install_path(), dir.path());
+        assert_eq!(ctx.identifier(), &id);
+        assert!(ctx.install_info().is_some(), "Full carries the InstallInfo");
+        assert!(Arc::ptr_eq(ctx.install_info().unwrap(), &info));
     }
 }

@@ -342,7 +342,7 @@ pub(super) fn rollback_symlink(rm: &ReferenceManager, forward_path: &Path, prior
 pub fn export_env(
     content: &Path,
     metadata: &metadata::Metadata,
-    dep_contexts: std::collections::HashMap<
+    dep_contexts: &std::collections::HashMap<
         crate::package::metadata::dependency::DependencyName,
         metadata::env::accumulator::DependencyContext,
     >,

@@ -243,7 +243,7 @@ mod tests {
     }
 
     fn ctx(path: &Path, repo: &str) -> DependencyContext {
-        DependencyContext::sentinel(pinned(repo), path.to_path_buf())
+        DependencyContext::path_only(pinned(repo), path.to_path_buf())
     }
 
     fn dep_name(s: &str) -> DependencyName {
@@ -351,7 +351,7 @@ mod tests {
         let mut contexts = HashMap::new();
         contexts.insert(
             dep_name("dep1"),
-            DependencyContext::sentinel(pinned("dep1"), missing_path),
+            DependencyContext::path_only(pinned("dep1"), missing_path),
         );
         let resolver = TemplateResolver::new(dir.path(), &contexts);
 
@@ -374,7 +374,7 @@ mod tests {
         let mut contexts = HashMap::new();
         contexts.insert(
             dep_name("dep1"),
-            DependencyContext::sentinel(pinned("dep1"), nonexistent),
+            DependencyContext::path_only(pinned("dep1"), nonexistent),
         );
         let resolver = TemplateResolver::new(dir.path(), &contexts);
 

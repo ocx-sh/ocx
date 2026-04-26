@@ -17,11 +17,10 @@ use crate::{
 /// Resolves each package via the index and verifies that its content is present
 /// in the local object store, then updates the per-repo `current` symlink to
 /// point at the package root (consumers traverse `<current>/content/`,
-/// `<current>/entrypoints/`, or `<current>/metadata.json`). The same
-/// per-registry collision check, per-repo `.select.lock`, and
-/// `entrypoints-index.json` ownership write that `install --select` runs are
-/// applied here — `install --select` and `select` share a single code path.
-/// No downloading is performed.
+/// `<current>/entrypoints/`, or `<current>/metadata.json`). The same per-repo
+/// `.select.lock` that `install --select` acquires is held here as well, and
+/// closure-scoped entrypoint name collisions surface at consumption time
+/// (`ocx env`, `ocx exec`) rather than at select. No downloading is performed.
 #[derive(Parser)]
 pub struct Select {
     /// Platforms to consider when resolving the package. Defaults to the current platform.

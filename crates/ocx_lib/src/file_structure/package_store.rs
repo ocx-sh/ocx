@@ -608,4 +608,32 @@ mod tests {
         let packages = store.list_all().await.unwrap();
         assert_eq!(packages.len(), 1);
     }
+
+    /// Renaming the entrypoints directory invalidates every installed launcher
+    /// — the synthetic `PATH ⊳ <pkg_root>/entrypoints` entry baked at install
+    /// time hard-codes this name. Both `PackageDir::entrypoints()` and
+    /// `PackageStore::entrypoints(identifier)` must keep it stable.
+    #[test]
+    fn entrypoints_dir_name_is_stable_invariant() {
+        // PackageDir
+        let pkg_dir = PackageDir {
+            dir: PathBuf::from("/packages/foo"),
+        };
+        let from_dir = pkg_dir.entrypoints();
+        assert_eq!(
+            from_dir.file_name().and_then(|n| n.to_str()),
+            Some("entrypoints"),
+            "PackageDir::entrypoints() must terminate in `entrypoints` (baked into installed launchers)"
+        );
+
+        // PackageStore
+        let store = PackageStore::new("/packages");
+        let id = pinned("example.com", "cmake");
+        let from_store = store.entrypoints(&id);
+        assert_eq!(
+            from_store.file_name().and_then(|n| n.to_str()),
+            Some("entrypoints"),
+            "PackageStore::entrypoints(id) must terminate in `entrypoints` (baked into installed launchers)"
+        );
+    }
 }

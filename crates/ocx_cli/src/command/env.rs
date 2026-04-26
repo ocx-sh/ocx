@@ -48,6 +48,8 @@ impl Env {
             manager.find_or_install_all(identifiers, platforms).await?
         };
 
+        let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
+            info.into_iter().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&info).await?;
         #[allow(unused_mut)]
         let mut all_entries: Vec<api::data::env::EnvEntry> = entries
@@ -59,13 +61,15 @@ impl Env {
             })
             .collect();
 
-        // On Windows, if the resolved env output includes a PATH entry (meaning
-        // the packages declare an entrypoint bin directory), also emit a
-        // synthetic PATHEXT prepend so consumers of this output get `.CMD`
-        // entries discoverable without manual PATHEXT configuration.
-        // We emit this whenever the current host PATHEXT lacks `.cmd` — `ocx
-        // env` produces output for shell-eval downstream, so we own what is
-        // emitted and should make it complete.
+        // On Windows, prepend a synthetic `PATHEXT ⊳ .CMD` entry to the env
+        // output when the host shell's PATHEXT lacks `.cmd`. `ocx env` is the
+        // shell-eval boundary — what we emit becomes the consumer's effective
+        // env after `eval`. The host PATHEXT we read here drives the gate, not
+        // whether the resolved env actually contains a launcher PATH entry:
+        // false-positive cost (one extra exported segment) is lower than the
+        // metadata-inspection cost we would pay to gate on launcher presence,
+        // and a benign duplicate is collapsed by `pathext_includes_launcher`
+        // on the consumer side.
         #[cfg(target_os = "windows")]
         {
             let current_pathext = std::env::var("PATHEXT").unwrap_or_default();

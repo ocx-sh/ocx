@@ -372,7 +372,7 @@ async fn setup_owned(
             .zip(dependencies.iter())
             .map(|(decl, info)| {
                 let name = decl.name();
-                let ctx = DependencyContext::new(Arc::new(info.clone()));
+                let ctx = DependencyContext::full(Arc::new(info.clone()));
                 (name, ctx)
             })
             .collect();

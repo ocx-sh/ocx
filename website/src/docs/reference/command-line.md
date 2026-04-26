@@ -254,7 +254,7 @@ Removes the current-version symlink for one or more packages.
 
 The package is deselected but not uninstalled: its [candidate symlink](../user-guide.md#path-resolution) and object-store content remain intact. To also remove the installed files, use [`uninstall`](#uninstall).
 
-When the deselected package declares [entry points](../guide/entry-points.md), the per-registry `.entrypoints-index.json` ownership row is dropped at the same time. The symlink removal is idempotent — an already-absent link is not an error.
+When the deselected package declares [entry points](../guide/entry-points.md), the launchers stop being reachable through `current/entrypoints/` as soon as the `current` symlink is removed. The symlink removal is idempotent — an already-absent link is not an error.
 
 **Usage**
 
@@ -297,6 +297,10 @@ ocx env [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `-h`, `--help`: Print help information.
+
+::: info Windows: synthetic `PATHEXT ⊳ .CMD`
+On Windows, `env` prepends `.CMD` to `PATHEXT` in its output when the host shell's `PATHEXT` does not already include it. Generated entrypoint launchers are `.cmd` files; this prepend lets callers that adopt the printed env (e.g. by piping it into a child process) find launchers by bare name without further configuration. The host `PATHEXT` is left untouched if it already includes `.CMD`. `ocx exec` auto-injects the same prepend silently into the child environment.
+:::
 
 ### `exec` {#exec}
 
@@ -454,6 +458,10 @@ ocx install [OPTIONS] <PACKAGE>...
 - `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
 - `-h`, `--help`: Print help information.
 
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows, `install` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. Generated entrypoint launchers are `.cmd` files and require `PATHEXT` to advertise that extension before bare-name lookup (e.g. `cmake`) can find them. Add `.CMD` to `PATHEXT` (typically via your shell profile) or invoke launchers with their full filename.
+:::
+
 ### `select` {#select}
 
 Selects one or more packages as the current version by updating the [current symlink](../user-guide.md#path-resolution).
@@ -476,6 +484,10 @@ ocx select [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
 - `-h`, `--help`: Print help information.
 
+::: warning Windows: `PATHEXT` must include `.CMD`
+Same `PATHEXT` warning as `install` — see [`install`](#install). `select` flips `current` so generated launchers become reachable through `current/entrypoints/`; bare-name resolution requires `.CMD` in `PATHEXT`.
+:::
+
 ::: tip
 `ocx install --select` installs and selects in one step.
 :::
@@ -484,7 +496,7 @@ See [path resolution modes](../user-guide.md#path-resolution) for how the `curre
 
 #### Entry-point name collisions {#select-entry-point-collision}
 
-If the package being selected declares [entry points](../guide/entry-points.md) and one of the declared names is already contributed to `$PATH` by another currently-selected package, `select` (and `install --select`) refuses to flip `entrypoints-current` and exits with a structured `EntrypointNameCollision` error reporting the conflicting name and the package that already owns it. The exit code is `65` (`DataError`); see [Exit codes](#exit-codes) for the full taxonomy. Resolve the conflict by deselecting the other package — the collision is detected before any state changes, so a failed select leaves the existing `current` and `entrypoints-current` symlinks intact.
+If the package being selected declares [entry points](../guide/entry-points.md) and one of the declared names is already contributed to `$PATH` by another currently-selected package, `select` (and `install --select`) refuses to flip `current` and exits with a structured `EntrypointNameCollision` error reporting the conflicting name and the package that already owns it. The exit code is `65` (`DataError`); see [Exit codes](#exit-codes) for the full taxonomy. Resolve the conflict by deselecting the other package — the collision is detected before any state changes, so a failed select leaves the existing `current` symlink intact.
 
 ### `shell` {#shell}
 
@@ -515,6 +527,10 @@ ocx shell env [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider. Auto-detected by default.
 - `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
+
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows, `shell env` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. The exported lines do not modify `PATHEXT`; the consuming shell must already advertise `.CMD` for bare-name resolution of generated launchers to work.
+:::
 
 #### `completion` {#shell-completion}
 
@@ -607,7 +623,11 @@ Reads `$OCX_HOME/profile.json` and emits shell-specific export lines for each pa
 eval "$(ocx --offline shell profile load)"
 ```
 
-For each profile entry whose package declares a non-empty `entrypoints` array and whose `entrypoints-current` symlink exists under `$OCX_HOME/symlinks/{registry}/{repo}/`, an additional `PATH` export line is emitted that prepends the symlinked entry-point directory. Entries without `entrypoints` produce only their declared environment variables; entries that have not yet been selected (no `entrypoints-current` symlink) are silently skipped, so profile load never points `$PATH` at a missing directory. See the [entry points guide](../guide/entry-points.md#path) for the full PATH-integration model.
+For each profile entry whose package declares a non-empty `entrypoints` array and whose `current` symlink exists under `$OCX_HOME/symlinks/{registry}/{repo}/`, an additional `PATH` export line is emitted that prepends `current/entrypoints/`. Entries without `entrypoints` produce only their declared environment variables; entries that have not yet been selected (no `current` symlink) are silently skipped, so profile load never points `$PATH` at a missing directory.
+
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows, `shell profile load` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. The emitted exports do not modify `PATHEXT`; add `.CMD` to your shell profile alongside the env-file `eval` so generated launchers resolve by bare name.
+:::
 
 ### `uninstall` {#uninstall}
 
@@ -627,7 +647,7 @@ ocx uninstall [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution) and the `entrypoints-current` symlink (when present). Equivalent to running `ocx deselect` after uninstall — see [`deselect`](#deselect) for the full cleanup behavior.
+- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution). Equivalent to running `ocx deselect` after uninstall — see [`deselect`](#deselect) for the full cleanup behavior.
 - `--purge`: Delete the object from the store when no other references remain after uninstall.
 - `-h`, `--help`: Print help information.
 
@@ -671,6 +691,10 @@ ocx ci export [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `-h`, `--help`: Print help information.
+
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows runners, `ci export` prints a stderr warning when `PATHEXT` is missing `.CMD`. Generated `.cmd` launchers exported via `$GITHUB_PATH` only resolve by bare name when `PATHEXT` advertises `.CMD`; configure the runner shell or invoke launchers with their full filename.
+:::
 
 ::: tip
 Pair with [`package pull`](#package-pull) for a minimal CI setup:

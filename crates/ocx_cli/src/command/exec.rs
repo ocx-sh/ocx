@@ -9,7 +9,7 @@ use clap::Parser;
 use ocx_lib::cli::UsageError;
 use ocx_lib::package::install_info::InstallInfo;
 use ocx_lib::package::metadata::env::exporter::Entry as EnvEntry;
-use ocx_lib::package_manager::{PackageRef, PackageRefParseError};
+use ocx_lib::package_manager::PackageRef;
 use ocx_lib::{env, oci};
 use tokio::process::Command;
 
@@ -77,7 +77,7 @@ impl Exec {
         let mut oci_identifiers: Vec<oci::Identifier> = Vec::new();
         let mut oci_indexes: Vec<usize> = Vec::new();
         for (idx, raw) in self.refs.iter().enumerate() {
-            let ref_ = PackageRef::from_str(raw).map_err(|e| UsageError::new(format_package_ref_parse_error(&e)))?;
+            let ref_ = PackageRef::from_str(raw).map_err(|e| UsageError::new(e.to_string()))?;
             match ref_ {
                 PackageRef::Oci(_) => {
                     let id = ref_
@@ -101,7 +101,8 @@ impl Exec {
             }
         }
 
-        let install_infos: Vec<InstallInfo> = ordered.into_iter().flatten().collect();
+        let install_infos: Vec<std::sync::Arc<InstallInfo>> =
+            ordered.into_iter().flatten().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&install_infos).await?;
         self.run_with_env(entries).await
     }
@@ -156,14 +157,6 @@ impl Exec {
         let status = child_process.wait().await?;
         Ok(child_exit_to_exit_code(status))
     }
-}
-
-/// Renders a [`PackageRefParseError`] as the sentence-cased usage message
-/// the CLI surfaces on parse failure. Keeps the typed error in the library
-/// (machine-checkable) while giving the CLI a single place to control
-/// presentation.
-fn format_package_ref_parse_error(err: &PackageRefParseError) -> String {
-    err.to_string()
 }
 
 /// Validate a `file://` package root: must be an absolute path that
@@ -274,24 +267,6 @@ mod tests {
     #[test]
     fn child_exit_no_code_is_failure() {
         assert_exit_code_eq(exit_code_from_raw(None), ExitCode::FAILURE);
-    }
-
-    // ── format_package_ref_parse_error — wrapper surface ──────────────────
-    //
-    // PackageRef parse-time tests live in `ocx_lib::package_manager::package_ref`.
-    // Here we only check the CLI rendering wrapper preserves the error text
-    // verbatim so the surrounding `UsageError` remains greppable.
-
-    #[test]
-    fn format_parse_error_preserves_relative_message() {
-        let err = PackageRef::from_str("file://relative/path").unwrap_err();
-        assert!(format_package_ref_parse_error(&err).contains("absolute"));
-    }
-
-    #[test]
-    fn format_parse_error_preserves_empty_message() {
-        let err = PackageRef::from_str("file://").unwrap_err();
-        assert!(format_package_ref_parse_error(&err).contains("absolute"));
     }
 
     // ── validate_package_root ─────────────────────────────────────────────

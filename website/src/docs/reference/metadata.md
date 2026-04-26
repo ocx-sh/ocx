@@ -107,7 +107,7 @@ Each entry is an object with a `key`, a `type` (`path` or `constant`), and a `va
 template. Two placeholders are available in `value`:
 
 - **`${installPath}`** — replaced with the absolute path to this package's content directory.
-- **`${deps.NAME.installPath}`** — replaced with the absolute path to a declared dependency's content directory, where `NAME` is the dependency's repository basename (or its `alias` if one is declared). Useful for pointing consumers at a dependency's installation directory.
+- **`${deps.NAME.installPath}`** — replaced with the absolute path to a declared dependency's content directory, where `NAME` is the dependency's repository basename (or its explicit `name` field if one is declared). Useful for pointing consumers at a dependency's installation directory.
 
 `${installPath}` and `${deps.NAME.installPath}` may appear multiple times and can be combined in the same value (e.g. `${installPath}/bin:${deps.cmake.installPath}/bin`). OCX validates at publish time that every `${deps.*}` reference names a declared dependency.
 
@@ -170,7 +170,7 @@ on every machine regardless of the current registry state.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `identifier` | string | Yes | Fully qualified pinned OCX identifier including the registry and an inline OCI digest (`@sha256:…`). The tag is advisory; only the digest is authoritative. The digest may reference an Image Index (platform resolution at install time) or a single manifest. e.g. `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`, `ghcr.io/myorg/tool@sha256:...`. |
-| `alias` | string | No | Short name used to reference this dependency in `${deps.ALIAS.installPath}` templates. When set, the alias is used instead of the repository basename. Useful when two dependencies share the same basename (e.g. `myorg/cmake` and `upstream/cmake`) or when the basename is long. |
+| `name` | string | No | Short name used to reference this dependency in `${deps.NAME.installPath}` templates. When set, this name is used instead of the repository basename. Useful when two dependencies share the same basename (e.g. `myorg/cmake` and `upstream/cmake`) or when the basename is long. |
 | `visibility` | string | No | Controls how the dependency's environment variables propagate. Default: `sealed`. See [Visibility](#dependencies-visibility). |
 
 ```json
@@ -189,7 +189,7 @@ on every machine regardless of the current registry state.
     },
     {
       "identifier": "ocx.sh/cmake:3.28@sha256:f6e5d4c3b2a1...",
-      "alias": "cmake"
+      "name": "cmake"
     }
   ]
 }
@@ -274,7 +274,7 @@ preserving clean-environment execution semantics on every invocation.
 The `target` field supports the same placeholders as [environment variable values](#env):
 
 - **`${installPath}`** — replaced with the absolute path to this package's content directory.
-- **`${deps.NAME.installPath}`** — replaced with a declared dependency's content directory, where `NAME` is the repository basename or `alias`.
+- **`${deps.NAME.installPath}`** — replaced with a declared dependency's content directory, where `NAME` is the repository basename or explicit `name` field.
 
 ### Disk Layout {#entry-points-disk-layout}
 

@@ -56,6 +56,8 @@ impl CiExport {
         )
         .await?;
 
+        let package_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
+            package_infos.into_iter().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&package_infos).await?;
 
         flavor.export(&entries)?;

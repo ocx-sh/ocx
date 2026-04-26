@@ -12,13 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-layer package push and pull. `ocx package push` now accepts multiple layer arguments, each either a file path or a `sha256:<hex>.tar.gz` digest reference. *(package)*
 - Layered configuration from `/etc/ocx/config.toml`, `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml` with `--config` / `OCX_CONFIG_FILE` overrides and `OCX_NO_CONFIG` kill-switch. *(config)*
 - Typed `ExitCode` taxonomy aligned with BSD sysexits (64/65/69/74/75/77/78/79/80/81). Scripts can now `case $?` reliably. *(cli)*
-- `entry_points` field in package metadata. Publishers declare named launchers (e.g. `cmake`, `ctest`); `ocx install` generates per-platform launchers under `<package>/entrypoints/<name>` (POSIX) and `<package>/entrypoints/<name>.cmd` (Windows) that delegate to `ocx exec --install-dir=<path>`. *(package)*
-- `${deps.NAME.installPath}` template interpolation in env-var values. Entry-point `target` strings and env modifier values can now reference dependency install paths. Unrecognized `${...}` tokens are rejected at publish time. *(package)*
-- `alias` field on `Dependency`. Lets a package import a dependency under a different name, disambiguating basename collisions when two deps would otherwise resolve to the same launcher slot. *(package)*
-- `ocx exec --install-dir=<absolute-path>` flag. Generated entry-point launchers invoke `ocx exec` with the package's content path, preserving clean-env execution semantics. *(cli)*
-- `entrypoints-current` symlink alongside `current` in the symlink store. Tracks the active entry-point set for the selected version; cleaned up on `deselect` and `uninstall --deselect`. *(file-structure)*
+- `entrypoints` field in package metadata. Publishers declare named launchers (e.g. `cmake`, `ctest`); `ocx install` generates per-platform launchers under `<package>/entrypoints/<name>` (POSIX) and `<package>/entrypoints/<name>.cmd` (Windows) that delegate to `ocx exec` against a baked `file://<package-root>` URI. *(package)*
+- `${deps.NAME.installPath}` template interpolation in env-var values. Entrypoint `target` strings and env modifier values can now reference dependency install paths. Unrecognized `${...}` tokens are rejected at publish time. *(package)*
+- `name` field on `Dependency`. Lets a package import a dependency under a different name, disambiguating basename collisions when two deps would otherwise resolve to the same launcher slot. *(package)*
+- `ocx exec` accepts a `file://<absolute-package-root>` URI. Generated entrypoint launchers bake this URI into a single `ocx exec 'file://<root>' -- "$(basename $0)"` form so they survive a re-`select` to a different version (the symlink target moves; the URI does not). *(cli)*
+- Flat install layout: `current` and `candidates/{tag}` target the package root, so generated launchers are reachable through `current/entrypoints/`. The previous `entrypoints-current` symlink is gone; selection state lives on a single per-repo `current` anchor. *(file-structure)*
 - `ValidMetadata` typestate on package metadata. Publish-time validation rejects bundles with malformed entry points, undeclared dep references, or duplicate launcher names; downstream code consumes only validated metadata. *(package)*
-- `EntryPointNameCollision` structured error at `install --select` / `select` when two installed packages would write the same launcher into the active entry-point set. Surfaces with exit code 65 (`DataError`). *(package-manager)*
+- `EntrypointNameCollision` structured error at `install --select` / `select` and at consumption time (`ocx env`, `ocx exec`) when two packages in the same visible closure declare the same entrypoint `name`. Surfaces with exit code 65 (`DataError`); recovery: deselect one package before selecting the other. *(package-manager)*
+- Synthetic `PATH ⊳ <pkg-root>/entrypoints` entry emitted per visible package with a non-empty `entrypoints` array, so generated launchers are reachable through `ocx env` / `ocx exec` / `ocx shell env` without manual PATH wiring. *(env)*
+- Windows-only synthetic `PATHEXT ⊳ .CMD` prepend on `ocx env` and auto-injected by `ocx exec` so generated `.cmd` launchers are discoverable when the host shell's `PATHEXT` does not already include `.CMD`. Consumer-boundary commands (`install`, `select`, `shell env`, `ci export`, `shell profile load`) emit a stderr warning when `PATHEXT` is missing `.CMD`. *(cli)*
 
 ### Changed
 
@@ -28,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Breaking:** Package metadata field renamed from `entry_points` to `entrypoints`. Publishers must update `metadata.json` files; bundles using the old field name fail validation at `package create`. *(package)*
+- **Breaking:** `Dependency.alias` renamed to `Dependency.name`. The `${deps.ALIAS.installPath}` template form continues to spell as `${deps.NAME.installPath}` — only the JSON field key changes. Existing bundles must be re-published with the new field. *(package)*
 - **Breaking:** `ocx-mirror` exit codes changed from `0/2/3/4` to `0/65/79/1/69` to align with the sysexits-based taxonomy. Wrapper scripts matching historic codes must be updated. *(mirror)*
 
 ### Fixed

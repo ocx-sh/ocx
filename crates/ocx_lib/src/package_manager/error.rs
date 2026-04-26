@@ -124,7 +124,9 @@ pub enum PackageErrorKind {
     /// Raised when two packages in the same visible closure (at install time or
     /// at consumption time) declare the same entrypoint `name`. The `first`
     /// identifier is the prior owner; `second` is the conflicting package.
-    #[error("entrypoint name collision: '{name}' provided by both '{first}' and '{second}'")]
+    #[error(
+        "entrypoint name collision: '{name}' declared by both '{first}' and '{second}'; deselect one package before selecting the other"
+    )]
     EntrypointNameCollision {
         name: EntrypointName,
         first: oci::PinnedIdentifier,
@@ -213,10 +215,14 @@ impl ClassifyExitCode for PackageErrorKind {
 
 impl ClassifyExitCode for DependencyError {
     fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Conflict { .. } => ExitCode::DataError,
-            Self::SetupFailed(_) => ExitCode::Failure,
-        })
+        match self {
+            Self::Conflict { .. } => Some(ExitCode::DataError),
+            // Defer to the wrapped singleflight error's source chain so the
+            // underlying classifiable variant (e.g. `EntrypointNameCollision`)
+            // wins over the generic "setup failed" wrapper. The chain walker
+            // re-enters `try_classify` on the next cause.
+            Self::SetupFailed(_) => None,
+        }
     }
 }
 

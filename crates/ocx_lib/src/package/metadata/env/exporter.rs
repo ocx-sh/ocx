@@ -26,14 +26,17 @@ pub struct Entry {
 ///
 /// Unlike [`Accumulator`], which writes resolved values into a runtime [`crate::env::Env`],
 /// `Exporter` returns the entries as structured data so callers can decide how to apply them.
-pub struct Exporter {
+pub struct Exporter<'a> {
     content: std::path::PathBuf,
-    dep_contexts: HashMap<DependencyName, DependencyContext>,
+    dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
     entries: Vec<Entry>,
 }
 
-impl Exporter {
-    pub fn new(content: impl AsRef<std::path::Path>, dep_contexts: HashMap<DependencyName, DependencyContext>) -> Self {
+impl<'a> Exporter<'a> {
+    pub fn new(
+        content: impl AsRef<std::path::Path>,
+        dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
+    ) -> Self {
         Self {
             content: content.as_ref().to_path_buf(),
             dep_contexts,
@@ -43,7 +46,7 @@ impl Exporter {
 
     pub fn add(&mut self, var: &Var) -> crate::Result<()> {
         let mut dummy = crate::env::Env::clean();
-        let acc = Accumulator::new(&self.content, &self.dep_contexts, &mut dummy);
+        let acc = Accumulator::new(&self.content, self.dep_contexts, &mut dummy);
         if let Some(value) = acc.resolve_var(var)? {
             self.entries.push(Entry {
                 key: var.key.clone(),

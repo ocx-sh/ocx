@@ -90,8 +90,20 @@ pub enum Error {
     /// A string baked into an install-time launcher contains a character that
     /// cannot be safely embedded in either the Unix `.sh` or Windows `.cmd`
     /// template (single-quote, percent, double-quote, NUL, CR, LF).
-    #[error("launcher-unsafe character {character:?} in {value:?}")]
+    #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
     LauncherUnsafeCharacter { value: String, character: char },
+}
+
+fn launcher_unsafe_hint(c: char) -> &'static str {
+    match c {
+        '\'' => {
+            "single quotes cannot appear in installation paths — relocate $OCX_HOME to a directory whose absolute path has no apostrophe"
+        }
+        '"' => "double quotes break Windows launcher quoting — relocate the path to a directory without `\"`",
+        '%' => "percent triggers cmd.exe variable expansion — relocate the path to a directory without `%`",
+        '\n' | '\r' | '\0' => "control characters cannot be embedded in launcher scripts",
+        _ => "remove the offending character from the path",
+    }
 }
 
 impl From<crate::package::error::Error> for Error {

@@ -213,11 +213,10 @@ impl PackageManager {
     /// Phase B — `apply_visible_packages` — emits env entries in order.
     pub async fn resolve_env(
         &self,
-        packages: &[InstallInfo],
+        packages: &[Arc<InstallInfo>],
     ) -> crate::Result<Vec<crate::package::metadata::env::exporter::Entry>> {
         let objects = &self.file_structure().packages;
-        let roots: Vec<Arc<InstallInfo>> = packages.iter().map(|p| Arc::new(p.clone())).collect();
-        let visible = visible::import_visible_packages(objects, &roots).await?;
+        let visible = visible::import_visible_packages(objects, packages).await?;
         // Discard the entrypoints map — `resolve_env` is an env-only consumer.
         // Future consumers (`ocx exec`, `ocx env`) will surface the map or
         // fail-fast on collisions.
