@@ -147,7 +147,7 @@ impl Dependencies {
             );
             if !seen_ids.insert(key) {
                 return Err(DependencyError::DuplicateIdentifier {
-                    identifier: dep.identifier.to_string(),
+                    identifier: dep.identifier.clone(),
                 });
             }
         }
@@ -201,7 +201,7 @@ impl<'de> Deserialize<'de> for Dependencies {
 pub enum DependencyError {
     /// A dependency identifier appears more than once.
     #[error("duplicate dependency identifier: '{identifier}'")]
-    DuplicateIdentifier { identifier: String },
+    DuplicateIdentifier { identifier: oci::PinnedIdentifier },
     /// An alias is not a valid identifier (`^[a-z0-9][a-z0-9_-]*$`).
     #[error("invalid dependency alias '{alias}': must match ^[a-z0-9][a-z0-9_-]*$")]
     InvalidAlias { alias: String },
