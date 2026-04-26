@@ -17,12 +17,12 @@ from src.runner import OcxRunner, PackageInfo
 # ---------------------------------------------------------------------------
 
 
-def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, alias: str | None = None) -> dict:
+def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, name: str | None = None) -> dict:
     """Build a dependency descriptor from a published PackageInfo."""
     digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     entry: dict = {"identifier": f"{pkg.fq}@{digest}"}
-    if alias is not None:
-        entry["alias"] = alias
+    if name is not None:
+        entry["name"] = name
     return entry
 
 
@@ -31,7 +31,7 @@ def _push_dep_and_app(
     unique_repo: str,
     tmp_path: Path,
     *,
-    dep_alias: str | None = None,
+    dep_name: str | None = None,
     env_token: str,
 ) -> tuple[PackageInfo, PackageInfo]:
     """Push a leaf dep and an app package whose env var uses an interpolation token."""
@@ -39,7 +39,7 @@ def _push_dep_and_app(
     app_repo = f"{unique_repo}_app"
 
     leaf = make_package(ocx, leaf_repo, "1.0.0", tmp_path, new=True)
-    dep = _dep_entry(ocx, leaf, alias=dep_alias)
+    dep = _dep_entry(ocx, leaf, name=dep_name)
 
     app = make_package(
         ocx,
@@ -85,15 +85,15 @@ def test_dep_install_path_resolves_to_content_dir(
     assert "packages" in resolved, f"expected CAS packages path, got: {resolved!r}"
 
 
-def test_dep_install_path_with_alias(
+def test_dep_install_path_with_explicit_name(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """${deps.ALIAS.installPath} resolves when the dep declares an alias."""
+    """${deps.NAME.installPath} resolves when the dep declares an explicit name."""
     leaf, app = _push_dep_and_app(
         ocx,
         unique_repo,
         tmp_path,
-        dep_alias="my-dep",
+        dep_name="my-dep",
         env_token="${deps.my-dep.installPath}",
     )
 
@@ -104,8 +104,8 @@ def test_dep_install_path_with_alias(
     assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result]}"
 
     resolved = dep_path_entry["value"]
-    assert "${deps." not in resolved, f"alias token not expanded: {resolved!r}"
-    assert Path(resolved).exists(), f"resolved alias path does not exist: {resolved!r}"
+    assert "${deps." not in resolved, f"explicit-name token not expanded: {resolved!r}"
+    assert Path(resolved).exists(), f"resolved explicit-name path does not exist: {resolved!r}"
 
 
 def test_dep_install_path_mixed_with_install_path(

@@ -233,7 +233,6 @@ mod tests {
         assert_eq!(store.root(), Path::new("/symlinks"));
     }
 
-    // ── collision check — drives check_entry_point_collisions stub ────────
+    // ── collision check — drives entrypoint collision check ───────────────
     // Tests for select-time collision check live in tasks/install.rs tests.
-    // The collision-check function is in tasks/install.rs (check_entry_point_collisions).
 }

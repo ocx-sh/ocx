@@ -13,7 +13,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::package::metadata::entry_point::EntryPoints;
+use crate::package::metadata::dependency::DependencyName;
+use crate::package::metadata::entrypoint::Entrypoints;
 use crate::package::metadata::env::accumulator::DependencyContext;
 use crate::package::metadata::template::TemplateResolver;
 
@@ -58,7 +59,7 @@ impl LauncherSafeString {
     }
 }
 
-/// Generates Unix and Windows launchers for all declared entry points.
+/// Generates Unix and Windows launchers for all declared entrypoints.
 ///
 /// Writes `<dest>/<name>` (Unix, chmod 0755) and `<dest>/<name>.cmd` (Windows)
 /// for each entry in `entries`. If `entries` is empty, no files are written
@@ -84,8 +85,8 @@ impl LauncherSafeString {
 /// - An entry's `target` references an unknown dependency or field.
 pub async fn generate(
     pkg_root: &Path,
-    entries: &EntryPoints,
-    dep_contexts: &HashMap<String, DependencyContext>,
+    entries: &Entrypoints,
+    dep_contexts: &HashMap<DependencyName, DependencyContext>,
     dest: &Path,
 ) -> Result<(), crate::Error> {
     if entries.is_empty() {
@@ -109,7 +110,7 @@ pub async fn generate(
         // `metadata.json` at invocation time — so the result is discarded.
         resolver
             .resolve(&entry.target)
-            .map_err(|e| crate::Error::EntryPointTargetInvalid {
+            .map_err(|e| crate::Error::EntrypointTargetInvalid {
                 name: name.to_string(),
                 source: Box::new(e),
             })?;
@@ -192,19 +193,19 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::tempdir;
 
-    use crate::package::metadata::entry_point::{EntryPoint, EntryPointName, EntryPoints};
+    use crate::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
 
     // ── helpers ────────────────────────────────────────────────────────────
 
-    fn make_entry_point(name: &str, target: &str) -> EntryPoint {
-        EntryPoint {
-            name: EntryPointName::try_from(name).unwrap(),
+    fn make_entrypoint(name: &str, target: &str) -> Entrypoint {
+        Entrypoint {
+            name: EntrypointName::try_from(name).unwrap(),
             target: target.to_string(),
         }
     }
 
-    fn make_entry_points(entries: Vec<EntryPoint>) -> EntryPoints {
-        EntryPoints::new(entries).unwrap()
+    fn make_entrypoints(entries: Vec<Entrypoint>) -> Entrypoints {
+        Entrypoints::new(entries).unwrap()
     }
 
     fn safe(s: &str) -> super::LauncherSafeString {
@@ -308,26 +309,26 @@ mod tests {
         assert!(body.contains("spaces"), "space must appear in body: {body}");
     }
 
-    // ── Empty EntryPoints — no files generated ────────────────────────────
+    // ── Empty Entrypoints — no files generated ────────────────────────────
 
     #[tokio::test]
-    async fn generate_empty_entry_points_creates_nothing() {
+    async fn generate_empty_entrypoints_creates_nothing() {
         let tmp = tempdir().unwrap();
         let pkg_root = tmp.path().join("pkg");
         let dest = pkg_root.join("entrypoints");
-        let entry_points = make_entry_points(vec![]);
+        let entrypoints = make_entrypoints(vec![]);
         let dep_contexts = HashMap::new();
 
-        super::generate(&pkg_root, &entry_points, &dep_contexts, &dest)
+        super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest)
             .await
             .unwrap();
         assert!(
             !dest.exists(),
-            "entrypoints/ dir must not be created for empty entry_points"
+            "entrypoints/ dir must not be created for empty entrypoints"
         );
     }
 
-    // ── Generator writes files for non-empty entry_points ─────────────────
+    // ── Generator writes files for non-empty entrypoints ──────────────────
 
     #[tokio::test]
     async fn generate_writes_unix_and_windows_launchers() {
@@ -335,10 +336,10 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entry_points = make_entry_points(vec![make_entry_point("cmake", "${installPath}/bin/cmake")]);
+        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake", "${installPath}/bin/cmake")]);
         let dep_contexts = HashMap::new();
 
-        super::generate(&pkg_root, &entry_points, &dep_contexts, &dest)
+        super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest)
             .await
             .unwrap();
         assert!(dest.join("cmake").exists(), "unix launcher must be created");
@@ -355,10 +356,10 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entry_points = make_entry_points(vec![make_entry_point("cmake", "${installPath}/bin/cmake")]);
+        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake", "${installPath}/bin/cmake")]);
         let dep_contexts = HashMap::new();
 
-        super::generate(&pkg_root, &entry_points, &dep_contexts, &dest)
+        super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest)
             .await
             .unwrap();
         let mode = std::fs::metadata(dest.join("cmake")).unwrap().permissions().mode();
@@ -433,18 +434,18 @@ mod tests {
         }
     }
 
-    // ── Path traversal defense-in-depth (EntryPointName) ─────────────────
+    // ── Path traversal defense-in-depth (EntrypointName) ─────────────────
 
     #[test]
-    fn entry_point_name_rejects_path_traversal_bytes() {
-        // EntryPointName construction must reject names with / or \ or ..
+    fn entrypoint_name_rejects_path_traversal_bytes() {
+        // EntrypointName construction must reject names with / or \ or ..
         // (slug regex already excludes / and \; .. is caught by the regex too)
-        assert!(EntryPointName::try_from("../evil").is_err());
-        assert!(EntryPointName::try_from("sub/path").is_err());
-        assert!(EntryPointName::try_from("back\\slash").is_err());
+        assert!(EntrypointName::try_from("../evil").is_err());
+        assert!(EntrypointName::try_from("sub/path").is_err());
+        assert!(EntrypointName::try_from("back\\slash").is_err());
     }
 
-    // ── Idempotent re-run (generating same entry_points twice) ────────────
+    // ── Idempotent re-run (generating same entrypoints twice) ─────────────
 
     #[tokio::test]
     async fn generate_is_idempotent() {
@@ -452,13 +453,13 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entry_points = make_entry_points(vec![make_entry_point("cmake", "${installPath}/bin/cmake")]);
+        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake", "${installPath}/bin/cmake")]);
         let dep_contexts = HashMap::new();
 
         // First call
-        let _ = super::generate(&pkg_root, &entry_points, &dep_contexts, &dest).await;
+        let _ = super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest).await;
         // Second call — must not error due to already-existing files
-        let _ = super::generate(&pkg_root, &entry_points, &dep_contexts, &dest).await;
+        let _ = super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest).await;
         // Both calls should return Ok(()).
     }
 }

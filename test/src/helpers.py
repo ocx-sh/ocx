@@ -214,19 +214,19 @@ def make_package(
     )
 
 
-def make_package_with_entry_points(
+def make_package_with_entrypoints(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
-    entry_points: list[dict],
+    entrypoints: list[dict],
     bins: list[str] | None = None,
     tag: str = "1.0.0",
     *,
     file_prefix: str = "ep",
 ) -> PackageInfo:
-    """Publish a test package whose metadata declares ``entry_points``.
+    """Publish a test package whose metadata declares ``entrypoints``.
 
-    Shared by ``test_entry_points*`` modules so the suite has one construction
+    Shared by ``test_entrypoints*`` modules so the suite has one construction
     path. ``file_prefix`` keeps temp filenames distinct when a single
     ``tmp_path`` hosts multiple packages.
     """
@@ -259,7 +259,7 @@ def make_package_with_entry_points(
         "type": "bundle",
         "version": 1,
         "env": env,
-        "entry_points": entry_points,
+        "entrypoints": entrypoints,
     }
     metadata_path.write_text(json.dumps(metadata_obj))
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-pub mod entry_points;
+pub mod entrypoints;
 pub mod error;
 pub mod package_ref;
 
@@ -158,8 +158,8 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::package_manager::error::PackageErrorKind::EntryPointNameCollision`]
-    /// when `package`'s entry-point names overlap with launcher names already
+    /// Returns [`crate::package_manager::error::PackageErrorKind::EntrypointNameCollision`]
+    /// when `package`'s entrypoint names overlap with launcher names already
     /// owned by a different `(registry, repository)` in the per-registry
     /// `entrypoints-index.json`.
     #[allow(clippy::result_large_err)]

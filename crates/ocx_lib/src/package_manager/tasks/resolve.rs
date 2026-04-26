@@ -241,12 +241,15 @@ impl PackageManager {
             // validate_env_dep_refs and prevents publishing. At runtime, packages with colliding
             // basenames and ${deps.*} tokens cannot exist; packages without such tokens never
             // trigger the interpolation path. So last-writer-wins from .collect() is safe.
-            let dep_contexts: std::collections::HashMap<String, DependencyContext> = pkg
+            let dep_contexts: std::collections::HashMap<
+                crate::package::metadata::dependency::DependencyName,
+                DependencyContext,
+            > = pkg
                 .metadata
                 .dependencies()
                 .iter()
                 .map(|dep| {
-                    let name = dep.name().to_string();
+                    let name = dep.name();
                     // Use the resolved identifier (platform-manifest digest) when available so
                     // objects.content() points to the actual on-disk location.
                     let key = (
@@ -255,7 +258,7 @@ impl PackageManager {
                     );
                     let install_id = resolved_id_map.get(&key).copied().unwrap_or(&dep.identifier);
                     let install_path = objects.content(install_id);
-                    (name, DependencyContext::new(install_id.clone(), install_path))
+                    (name, DependencyContext::sentinel(install_id.clone(), install_path))
                 })
                 .collect();
 
@@ -287,18 +290,21 @@ impl PackageManager {
                             (key, &d.identifier)
                         })
                         .collect();
-                let dep_dep_contexts: std::collections::HashMap<String, DependencyContext> = dep_metadata
+                let dep_dep_contexts: std::collections::HashMap<
+                    crate::package::metadata::dependency::DependencyName,
+                    DependencyContext,
+                > = dep_metadata
                     .dependencies()
                     .iter()
                     .map(|d| {
-                        let n = d.name().to_string();
+                        let n = d.name();
                         let key = (
                             d.identifier.registry().to_string(),
                             d.identifier.repository().to_string(),
                         );
                         let install_id = dep_resolved_id_map.get(&key).copied().unwrap_or(&d.identifier);
                         let p = objects.content(install_id);
-                        (n, DependencyContext::new(install_id.clone(), p))
+                        (n, DependencyContext::sentinel(install_id.clone(), p))
                     })
                     .collect();
                 super::common::export_env(&content, &dep_metadata, dep_dep_contexts, &mut entries)?;

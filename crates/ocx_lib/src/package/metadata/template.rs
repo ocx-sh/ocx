@@ -14,6 +14,8 @@ use crate::oci;
 use regex::Regex;
 
 use super::env::accumulator::DependencyContext;
+use super::slug;
+use crate::package::metadata::dependency::DependencyName;
 
 /// Resolves `${installPath}` and `${deps.NAME.FIELD}` tokens in template strings.
 ///
@@ -26,15 +28,15 @@ use super::env::accumulator::DependencyContext;
 ///   verifies each dep's `install_path.exists()` on disk. Used by `env::Accumulator`
 ///   at install/exec time.
 /// - [`TemplateResolver::resolve_for_validate`] — publish-time mode. Pure syntax +
-///   reference-existence check, no filesystem access. Used by `validate_entry_points`
+///   reference-existence check, no filesystem access. Used by `validate_entrypoints`
 ///   so publish-time validation is platform-portable (no `Path::new("/")` sentinel).
 pub struct TemplateResolver<'a> {
     install_path: &'a Path,
-    dep_contexts: &'a HashMap<String, DependencyContext>,
+    dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
 }
 
 impl<'a> TemplateResolver<'a> {
-    pub fn new(install_path: &'a Path, dep_contexts: &'a HashMap<String, DependencyContext>) -> Self {
+    pub fn new(install_path: &'a Path, dep_contexts: &'a HashMap<DependencyName, DependencyContext>) -> Self {
         Self {
             install_path,
             dep_contexts,
@@ -54,7 +56,7 @@ impl<'a> TemplateResolver<'a> {
     }
 
     /// Publish-time validation mode: substitutes tokens and checks references but does
-    /// **not** consult the filesystem. Used by `validate_entry_points` so validation
+    /// **not** consult the filesystem. Used by `validate_entrypoints` so validation
     /// is platform-portable — Windows publishers no longer rely on a `Path::new("/")`
     /// sentinel that may not exist on their host.
     ///
@@ -77,9 +79,13 @@ impl<'a> TemplateResolver<'a> {
         // Step 1: substitute ${installPath}
         let value = template.replace("${installPath}", &self.install_path.to_string_lossy());
 
-        // Step 2: substitute ${deps.NAME.FIELD} tokens
+        // Step 2: substitute ${deps.NAME.FIELD} tokens.
+        // The NAME segment uses the shared slug body (anchors stripped from SLUG_PATTERN_STR)
+        // so the accepted character class stays in sync with DependencyName validation.
         static DEP_TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-            Regex::new(r"\$\{deps\.([a-z0-9][a-z0-9_-]*)\.([a-zA-Z]+)\}").expect("valid regex")
+            let slug_body = slug::SLUG_PATTERN_STR.trim_start_matches('^').trim_end_matches('$');
+            let pattern = format!(r"\$\{{deps\.({slug_body})\.([a-zA-Z]+)\}}");
+            Regex::new(&pattern).expect("valid dep-token regex")
         });
 
         if !value.contains("${deps.") {
@@ -105,11 +111,16 @@ impl<'a> TemplateResolver<'a> {
                 .expect("regex group 2 guaranteed by DEP_TOKEN pattern")
                 .as_str();
 
+            // The regex only matches the slug pattern [a-z0-9][a-z0-9_-]* so every
+            // captured dep_name is a structurally valid DependencyName by construction.
+            let dep_name_typed =
+                DependencyName::try_from(dep_name).expect("regex guarantees dep_name matches slug pattern");
+
             let ctx = self
                 .dep_contexts
                 .get(dep_name)
                 .ok_or_else(|| TemplateError::UnknownDependencyRef {
-                    ref_name: dep_name.to_string(),
+                    ref_name: dep_name_typed.clone(),
                     declared: self.dep_contexts.keys().cloned().collect(),
                 })?;
 
@@ -121,10 +132,10 @@ impl<'a> TemplateResolver<'a> {
                     supported_fields: vec!["installPath".to_string()],
                 })?;
 
-            if check_exists && !ctx.install_path.exists() {
+            if check_exists && !ctx.install_path().exists() {
                 return Err(TemplateError::DependencyNotInstalled {
-                    ref_name: dep_name.to_string(),
-                    dep_identifier: ctx.identifier.clone(),
+                    ref_name: dep_name_typed,
+                    dep_identifier: ctx.identifier().clone(),
                 });
             }
 
@@ -147,9 +158,12 @@ pub enum TemplateError {
     /// A `${deps.NAME.*}` token names a dependency that is not declared.
     #[error(
         "references unknown dependency '{ref_name}'; declared: [{declared}]",
-        declared = declared.join(", ")
+        declared = declared.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
     )]
-    UnknownDependencyRef { ref_name: String, declared: Vec<String> },
+    UnknownDependencyRef {
+        ref_name: DependencyName,
+        declared: Vec<DependencyName>,
+    },
 
     /// A `${deps.NAME.FIELD}` token names a field that is not supported.
     #[error(
@@ -162,8 +176,8 @@ pub enum TemplateError {
         supported_fields: Vec<String>,
     },
 
-    /// Two direct dependencies share the same interpolation name (alias or basename) and the
-    /// template references that name — the publisher must set `alias` to disambiguate.
+    /// Two direct dependencies share the same interpolation name (name field or basename) and
+    /// the template references that name — the publisher must set `name` to disambiguate.
     ///
     /// Constructed only by `ValidMetadata::try_from` in `metadata.rs` (publish-time).
     /// `TemplateResolver::resolve` never constructs this variant — it receives a
@@ -173,7 +187,7 @@ pub enum TemplateError {
          matches both {first} and {second}"
     )]
     AmbiguousDependencyRef {
-        ref_name: String,
+        ref_name: DependencyName,
         first: oci::PinnedIdentifier,
         second: oci::PinnedIdentifier,
     },
@@ -181,7 +195,7 @@ pub enum TemplateError {
     /// A `${deps.NAME.*}` token names a known dependency that is not installed on disk.
     #[error("references dependency '{ref_name}' ({dep_identifier}) which is not installed")]
     DependencyNotInstalled {
-        ref_name: String,
+        ref_name: DependencyName,
         dep_identifier: oci::PinnedIdentifier,
     },
 
@@ -217,6 +231,7 @@ impl ClassifyExitCode for TemplateError {
 mod tests {
     use super::*;
     use crate::oci;
+    use crate::package::metadata::dependency::DependencyName;
     use std::collections::HashMap;
     use std::path::Path;
     use tempfile::TempDir;
@@ -228,14 +243,18 @@ mod tests {
     }
 
     fn ctx(path: &Path, repo: &str) -> DependencyContext {
-        DependencyContext::new(pinned(repo), path.to_path_buf())
+        DependencyContext::sentinel(pinned(repo), path.to_path_buf())
+    }
+
+    fn dep_name(s: &str) -> DependencyName {
+        DependencyName::try_from(s).unwrap()
     }
 
     // 1. Literal strings (including empty) pass through unchanged.
     #[test]
     fn literal_passes_through() {
         let dir = TempDir::new().unwrap();
-        let contexts: HashMap<String, DependencyContext> = HashMap::new();
+        let contexts: HashMap<DependencyName, DependencyContext> = HashMap::new();
         let resolver = TemplateResolver::new(dir.path(), &contexts);
 
         assert_eq!(resolver.resolve("plain text").unwrap(), "plain text");
@@ -247,7 +266,7 @@ mod tests {
     #[test]
     fn install_path_substitution() {
         let dir = TempDir::new().unwrap();
-        let contexts: HashMap<String, DependencyContext> = HashMap::new();
+        let contexts: HashMap<DependencyName, DependencyContext> = HashMap::new();
         let resolver = TemplateResolver::new(dir.path(), &contexts);
 
         let install = dir.path().to_string_lossy();
@@ -267,7 +286,7 @@ mod tests {
         let dep_dir = TempDir::new().unwrap();
         let self_dir = TempDir::new().unwrap();
         let mut contexts = HashMap::new();
-        contexts.insert("dep1".to_string(), ctx(dep_dir.path(), "dep1"));
+        contexts.insert(dep_name("dep1"), ctx(dep_dir.path(), "dep1"));
         let resolver = TemplateResolver::new(self_dir.path(), &contexts);
 
         let dep_path = dep_dir.path().to_string_lossy();
@@ -280,7 +299,7 @@ mod tests {
         let self_dir = TempDir::new().unwrap();
         let dep_dir = TempDir::new().unwrap();
         let mut contexts = HashMap::new();
-        contexts.insert("dep1".to_string(), ctx(dep_dir.path(), "dep1"));
+        contexts.insert(dep_name("dep1"), ctx(dep_dir.path(), "dep1"));
         let resolver = TemplateResolver::new(self_dir.path(), &contexts);
 
         let self_path = self_dir.path().to_string_lossy();
@@ -295,13 +314,13 @@ mod tests {
     #[test]
     fn unknown_dep_returns_error() {
         let dir = TempDir::new().unwrap();
-        let contexts: HashMap<String, DependencyContext> = HashMap::new();
+        let contexts: HashMap<DependencyName, DependencyContext> = HashMap::new();
         let resolver = TemplateResolver::new(dir.path(), &contexts);
 
         let err = resolver.resolve("${deps.missing.installPath}").unwrap_err();
         assert!(
             matches!(&err, TemplateError::UnknownDependencyRef { ref_name, declared }
-                if ref_name == "missing" && declared.is_empty()),
+                if ref_name.as_str() == "missing" && declared.is_empty()),
             "unexpected error: {err}"
         );
     }
@@ -312,7 +331,7 @@ mod tests {
         let dep_dir = TempDir::new().unwrap();
         let self_dir = TempDir::new().unwrap();
         let mut contexts = HashMap::new();
-        contexts.insert("dep1".to_string(), ctx(dep_dir.path(), "dep1"));
+        contexts.insert(dep_name("dep1"), ctx(dep_dir.path(), "dep1"));
         let resolver = TemplateResolver::new(self_dir.path(), &contexts);
 
         let err = resolver.resolve("${deps.dep1.version}").unwrap_err();
@@ -330,27 +349,33 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing_path = dir.path().join("not-there");
         let mut contexts = HashMap::new();
-        contexts.insert("dep1".to_string(), DependencyContext::new(pinned("dep1"), missing_path));
+        contexts.insert(
+            dep_name("dep1"),
+            DependencyContext::sentinel(pinned("dep1"), missing_path),
+        );
         let resolver = TemplateResolver::new(dir.path(), &contexts);
 
         let err = resolver.resolve("${deps.dep1.installPath}").unwrap_err();
         assert!(
             matches!(&err, TemplateError::DependencyNotInstalled { ref_name, .. }
-                if ref_name == "dep1"),
+                if ref_name.as_str() == "dep1"),
             "unexpected error: {err}"
         );
     }
 
     // 8a. resolve_for_validate substitutes tokens but does NOT consult the filesystem,
     //     so a dep whose install_path doesn't exist still resolves cleanly. This is
-    //     the publish-time mode used by `validate_entry_points` — Windows publishers
+    //     the publish-time mode used by `validate_entrypoints` — Windows publishers
     //     can't rely on a `Path::new("/")` sentinel existing on their host.
     #[test]
     fn resolve_for_validate_does_not_check_exists() {
         let dir = TempDir::new().unwrap();
         let nonexistent = dir.path().join("definitely-not-there");
         let mut contexts = HashMap::new();
-        contexts.insert("dep1".to_string(), DependencyContext::new(pinned("dep1"), nonexistent));
+        contexts.insert(
+            dep_name("dep1"),
+            DependencyContext::sentinel(pinned("dep1"), nonexistent),
+        );
         let resolver = TemplateResolver::new(dir.path(), &contexts);
 
         // Runtime mode: errors because install_path doesn't exist.
@@ -367,7 +392,7 @@ mod tests {
     #[test]
     fn resolve_for_validate_rejects_unknown_dep() {
         let dir = TempDir::new().unwrap();
-        let contexts: HashMap<String, DependencyContext> = HashMap::new();
+        let contexts: HashMap<DependencyName, DependencyContext> = HashMap::new();
         let resolver = TemplateResolver::new(dir.path(), &contexts);
         let err = resolver
             .resolve_for_validate("${deps.missing.installPath}")
@@ -382,7 +407,7 @@ mod tests {
     fn uppercase_dep_name_not_matched() {
         let dir = TempDir::new().unwrap();
         let mut contexts = HashMap::new();
-        contexts.insert("python".to_string(), ctx(dir.path(), "python"));
+        contexts.insert(dep_name("python"), ctx(dir.path(), "python"));
         let resolver = TemplateResolver::new(dir.path(), &contexts);
 
         let result = resolver.resolve("${deps.Python.installPath}").unwrap();

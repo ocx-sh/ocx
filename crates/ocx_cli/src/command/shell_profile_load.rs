@@ -59,8 +59,8 @@ impl ShellProfileLoad {
             }
         }
 
-        // Emit `<current>/entrypoints` PATH entries for packages that declare entry_points.
-        // For each resolved profile entry whose metadata has non-empty bundle_entry_points,
+        // Emit `<current>/entrypoints` PATH entries for packages that declare entrypoints.
+        // For each resolved profile entry whose metadata has non-empty bundle_entrypoints,
         // prepend `$OCX_HOME/symlinks/{registry}/{repo}/current/entrypoints` to PATH so
         // launchers are findable without an explicit `ocx exec` wrapper.
         // Only emit when the `current` symlink actually exists on disk: the
@@ -71,7 +71,7 @@ impl ShellProfileLoad {
         for resolved_entry in &resolved {
             if resolved_entry
                 .metadata
-                .bundle_entry_points()
+                .bundle_entrypoints()
                 .is_none_or(|e| e.is_empty())
             {
                 continue;

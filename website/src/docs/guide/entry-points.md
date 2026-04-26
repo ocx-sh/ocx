@@ -19,7 +19,7 @@ Entry points live as a sibling array on the bundle metadata:
   "env": [
     { "key": "CMAKE_ROOT", "constant": { "value": "${installPath}/share/cmake" } }
   ],
-  "entry_points": [
+  "entrypoints": [
     { "name": "cmake", "target": "${installPath}/bin/cmake" },
     { "name": "ctest", "target": "${installPath}/bin/ctest" }
   ]
@@ -40,7 +40,7 @@ Names are validated at metadata deserialization time. The regex is `^[a-z0-9][a-
 
 Uniqueness is enforced at two layers:
 
-- **Within a package** — duplicate `name` values in the same `entry_points` array are rejected at deserialization (so the bundle never publishes in a broken state). A package shipping both a `cmake` and a second `cmake` entry will fail to parse.
+- **Within a package** — duplicate `name` values in the same `entrypoints` array are rejected at deserialization (so the bundle never publishes in a broken state). A package shipping both a `cmake` and a second `cmake` entry will fail to parse.
 - **Across selected packages** — two different packages that both declare `cmake` coexist on disk, but only one can contribute `cmake` to `$PATH` at a time. Collisions are detected when the user runs [`ocx select`][cmd-select] (or `ocx install --select`) — the command reports the conflict and refuses to flip `current` until the user deselects the competing package.
 
 ::: warning Choose names carefully for binaries that other tools also ship
@@ -96,7 +96,7 @@ Launchers are harmless files until something puts them on `$PATH`. OCX does that
 
 - [`ocx select <package>`][cmd-select] flips `current` to the selected package root. Tools that need launchers reach them via `{registry}/{repo}/current/entrypoints` — there is no separate symlink for entry points; the same anchor exposes content (`current/content`), launchers (`current/entrypoints`), and metadata (`current/metadata.json`).
 - [`ocx deselect <package>`][cmd-deselect] and [`ocx uninstall <package>`][cmd-uninstall] remove `current` as part of their cleanup. Both operations are idempotent — an already-absent symlink is not an error.
-- [`ocx shell profile load`][cmd-shell-profile] emits a shell-specific `PATH` export for every profile entry whose `current` symlink exists *and* whose metadata has a non-empty `entry_points` array; the exported path is `{registry}/{repo}/current/entrypoints`. Packages that haven't been `ocx select`ed yet (candidate-mode profile entries) are silently skipped, so profile loading never points `$PATH` at a missing directory.
+- [`ocx shell profile load`][cmd-shell-profile] emits a shell-specific `PATH` export for every profile entry whose `current` symlink exists *and* whose metadata has a non-empty `entrypoints` array; the exported path is `{registry}/{repo}/current/entrypoints`. Packages that haven't been `ocx select`ed yet (candidate-mode profile entries) are silently skipped, so profile loading never points `$PATH` at a missing directory.
 
 The typical shell wire-up is a single line in a dotfile:
 
@@ -150,7 +150,7 @@ Publishing a CMake package with two launchers looks like this on the publisher s
   "env": [
     { "key": "PATH", "path": { "value": "${installPath}/bin" } }
   ],
-  "entry_points": [
+  "entrypoints": [
     { "name": "cmake", "target": "${installPath}/bin/cmake" },
     { "name": "ctest", "target": "${installPath}/bin/ctest" }
   ]

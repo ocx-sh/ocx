@@ -79,9 +79,9 @@ pub enum Error {
     #[error(transparent)]
     PinnedIdentifier(#[from] crate::oci::pinned_identifier::PinnedIdentifierError),
 
-    /// An entry point's `target` template could not be resolved at install time.
-    #[error("entry point '{name}' has invalid target: {source}")]
-    EntryPointTargetInvalid {
+    /// An entrypoint's `target` template could not be resolved at install time.
+    #[error("entrypoint '{name}' has invalid target: {source}")]
+    EntrypointTargetInvalid {
         name: String,
         #[source]
         source: Box<crate::package::metadata::template::TemplateError>,
@@ -174,7 +174,7 @@ impl ClassifyExitCode for Error {
             Self::Digest(e) => e.classify(),
             Self::Dependency(e) => e.classify(),
             Self::PinnedIdentifier(e) => e.classify(),
-            Self::EntryPointTargetInvalid { source, .. } => source.classify(),
+            Self::EntrypointTargetInvalid { source, .. } => source.classify(),
             Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
         }
     }

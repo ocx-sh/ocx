@@ -118,17 +118,17 @@ pub enum PackageErrorKind {
     /// The identifier has no digest after resolution.
     #[error("identifier has no digest after resolution")]
     DigestMissing,
-    /// An entry point name collision was detected at select time.
+    /// An entrypoint name collision was detected at select time.
     ///
-    /// Raised when the package being selected declares an entry point `name` that
+    /// Raised when the package being selected declares an entrypoint `name` that
     /// is already owned by `existing_package` (another currently-selected package
     /// in a different repository). The user must deselect the other package first,
-    /// or ask the publisher to rename the conflicting entry point.
+    /// or ask the publisher to rename the conflicting entrypoint.
     #[error(
-        "entry point '{name}' conflicts with installed package {existing_package}; \
-         deselect {existing_package} first or ask the publisher to rename the entry point"
+        "entrypoint '{name}' conflicts with installed package {existing_package}; \
+         deselect {existing_package} first or ask the publisher to rename the entrypoint"
     )]
-    EntryPointNameCollision {
+    EntrypointNameCollision {
         name: String,
         existing_package: oci::Identifier,
     },
@@ -204,7 +204,7 @@ impl ClassifyExitCode for PackageErrorKind {
             Self::SelectionAmbiguous(_)
             | Self::SymlinkRequiresTag
             | Self::DigestMissing
-            | Self::EntryPointNameCollision { .. } => ExitCode::DataError,
+            | Self::EntrypointNameCollision { .. } => ExitCode::DataError,
             Self::TaskPanicked => ExitCode::Failure,
             // Internal wraps a full `crate::Error` — walk through classify_error
             // so the inner chain is inspected via the generic entry point.

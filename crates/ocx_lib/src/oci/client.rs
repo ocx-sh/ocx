@@ -1656,7 +1656,7 @@ mod tests {
                     strip_components: None,
                     env: Default::default(),
                     dependencies: Default::default(),
-                    entry_points: Default::default(),
+                    entrypoints: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             };
@@ -1732,7 +1732,7 @@ mod tests {
                     strip_components: None,
                     env: Default::default(),
                     dependencies: Default::default(),
-                    entry_points: Default::default(),
+                    entrypoints: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             };
@@ -1787,7 +1787,7 @@ mod tests {
                 strip_components: None,
                 env: Default::default(),
                 dependencies: Default::default(),
-                entry_points: Default::default(),
+                entrypoints: Default::default(),
             })
         }
 
@@ -1929,7 +1929,7 @@ mod tests {
                     strip_components: None,
                     env: Default::default(),
                     dependencies: Default::default(),
-                    entry_points: Default::default(),
+                    entrypoints: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             }

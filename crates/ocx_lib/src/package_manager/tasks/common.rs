@@ -360,7 +360,7 @@ pub struct WireSelectionOutcome {
 ///
 /// # Errors
 ///
-/// - [`PackageErrorKind::EntryPointNameCollision`] when any new launcher name
+/// - [`PackageErrorKind::EntrypointNameCollision`] when any new launcher name
 ///   is already owned by a different `(registry, repository)` in the index.
 /// - [`PackageErrorKind::Internal`] for I/O, JSON, or symlink failures.
 #[allow(clippy::result_large_err)]
@@ -392,11 +392,11 @@ pub async fn wire_selection(
         return Ok(WireSelectionOutcome { current: current_path });
     }
 
-    // Entry-point names this package wants to publish (empty when the package
-    // declares no entry_points or selects a version without them).
+    // Entrypoint names this package wants to publish (empty when the package
+    // declares no entrypoints or selects a version without them).
     let new_names: Vec<String> = info
         .metadata
-        .bundle_entry_points()
+        .bundle_entrypoints()
         .map(|eps| eps.iter().map(|e| e.name.as_str().to_string()).collect())
         .unwrap_or_default();
     let needs_entrypoints = !new_names.is_empty();
@@ -417,7 +417,7 @@ pub async fn wire_selection(
                 && !(owner.registry == package.registry() && owner.repository == package.repository())
             {
                 let other_id = oci::Identifier::new_registry(owner.repository.clone(), owner.registry.clone());
-                return Err(PackageErrorKind::EntryPointNameCollision {
+                return Err(PackageErrorKind::EntrypointNameCollision {
                     name: name.clone(),
                     existing_package: other_id,
                 });
@@ -604,7 +604,10 @@ pub(super) fn rollback_symlink(rm: &ReferenceManager, forward_path: &Path, prior
 pub fn export_env(
     content: &Path,
     metadata: &metadata::Metadata,
-    dep_contexts: std::collections::HashMap<String, metadata::env::accumulator::DependencyContext>,
+    dep_contexts: std::collections::HashMap<
+        crate::package::metadata::dependency::DependencyName,
+        metadata::env::accumulator::DependencyContext,
+    >,
     entries: &mut Vec<metadata::env::exporter::Entry>,
 ) -> crate::Result<()> {
     let mut exp = metadata::env::exporter::Exporter::new(content, dep_contexts);
@@ -828,7 +831,7 @@ mod tests {
         let json = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entry_points": [{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+            "entrypoints": [{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         })
         .to_string();
         let metadata: Metadata = serde_json::from_str(&json).unwrap();

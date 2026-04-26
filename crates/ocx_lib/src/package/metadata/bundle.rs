@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
-use super::{dependency::Dependencies, entry_point::EntryPoints, env};
+use super::{dependency::Dependencies, entrypoint::Entrypoints, env};
 
 /// Constants of known versions of the bundle metadata format.
 #[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq)]
@@ -52,11 +52,11 @@ pub struct Bundle {
     #[serde(skip_serializing_if = "Dependencies::is_empty", default)]
     pub dependencies: Dependencies,
 
-    /// Named entry points that `ocx install` generates launchers for.
+    /// Named entrypoints that `ocx install` generates launchers for.
     ///
     /// Each entry produces a Unix `.sh` script and a Windows `.cmd` batch file
     /// under the package's `entrypoints/` sibling directory at install time.
     /// Absent or empty means no launchers are generated (backward-compat default).
-    #[serde(skip_serializing_if = "EntryPoints::is_empty", default)]
-    pub entry_points: EntryPoints,
+    #[serde(skip_serializing_if = "Entrypoints::is_empty", default)]
+    pub entrypoints: Entrypoints,
 }

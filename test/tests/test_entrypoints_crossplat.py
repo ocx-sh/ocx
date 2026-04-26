@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import make_package_with_entry_points
+from src.helpers import make_package_with_entrypoints
 from src.runner import OcxRunner, PackageInfo
 
 
@@ -26,13 +26,13 @@ def _make_pkg(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
-    entry_points: list[dict],
+    entrypoints: list[dict],
     bins: list[str] | None = None,
     tag: str = "1.0.0",
 ) -> PackageInfo:
     """Cross-platform-flavored wrapper that uses a distinct file prefix."""
-    return make_package_with_entry_points(
-        ocx, unique_repo, tmp_path, entry_points,
+    return make_package_with_entrypoints(
+        ocx, unique_repo, tmp_path, entrypoints,
         bins=bins, tag=tag, file_prefix="cp",
     )
 
@@ -66,7 +66,7 @@ def test_linux_unix_launcher_exists_and_is_executable(
     """Linux: Unix launcher file exists and has mode 0755 after install --select."""
     pkg = _make_pkg(
         ocx, unique_repo, tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -102,7 +102,7 @@ def test_linux_windows_cmd_launcher_also_exists(
     """
     pkg = _make_pkg(
         ocx, unique_repo, tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -132,7 +132,7 @@ def test_macos_unix_launcher_exists(
     """macOS: Unix launcher exists after install --select."""
     pkg = _make_pkg(
         ocx, unique_repo, tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -162,7 +162,7 @@ def test_macos_path_with_spaces_in_ocx_home(
 
     pkg = _make_pkg(
         spaced_ocx, unique_repo, tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     # ADR §5: baked absolute paths must handle spaces safely (single-quote on Unix).
@@ -190,7 +190,7 @@ def test_windows_cmd_launcher_exists(
     """
     pkg = _make_pkg(
         ocx, unique_repo, tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -231,7 +231,7 @@ def test_msys2_git_bash_invokes_cmd_launcher(
     import subprocess  # noqa: PLC0415
     pkg = _make_pkg(
         ocx, unique_repo, tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)

@@ -8,6 +8,7 @@ use super::{
     modifier::ModifierKind,
     var::Var,
 };
+use crate::package::metadata::dependency::DependencyName;
 
 /// A resolved environment variable entry produced by [`Exporter`].
 pub struct Entry {
@@ -27,12 +28,12 @@ pub struct Entry {
 /// `Exporter` returns the entries as structured data so callers can decide how to apply them.
 pub struct Exporter {
     content: std::path::PathBuf,
-    dep_contexts: HashMap<String, DependencyContext>,
+    dep_contexts: HashMap<DependencyName, DependencyContext>,
     entries: Vec<Entry>,
 }
 
 impl Exporter {
-    pub fn new(content: impl AsRef<std::path::Path>, dep_contexts: HashMap<String, DependencyContext>) -> Self {
+    pub fn new(content: impl AsRef<std::path::Path>, dep_contexts: HashMap<DependencyName, DependencyContext>) -> Self {
         Self {
             content: content.as_ref().to_path_buf(),
             dep_contexts,

@@ -484,7 +484,7 @@ See [path resolution modes](../user-guide.md#path-resolution) for how the `curre
 
 #### Entry-point name collisions {#select-entry-point-collision}
 
-If the package being selected declares [entry points](../guide/entry-points.md) and one of the declared names is already contributed to `$PATH` by another currently-selected package, `select` (and `install --select`) refuses to flip `entrypoints-current` and exits with a structured `EntryPointNameCollision` error reporting the conflicting name and the package that already owns it. The exit code is `65` (`DataError`); see [Exit codes](#exit-codes) for the full taxonomy. Resolve the conflict by deselecting the other package — the collision is detected before any state changes, so a failed select leaves the existing `current` and `entrypoints-current` symlinks intact.
+If the package being selected declares [entry points](../guide/entry-points.md) and one of the declared names is already contributed to `$PATH` by another currently-selected package, `select` (and `install --select`) refuses to flip `entrypoints-current` and exits with a structured `EntrypointNameCollision` error reporting the conflicting name and the package that already owns it. The exit code is `65` (`DataError`); see [Exit codes](#exit-codes) for the full taxonomy. Resolve the conflict by deselecting the other package — the collision is detected before any state changes, so a failed select leaves the existing `current` and `entrypoints-current` symlinks intact.
 
 ### `shell` {#shell}
 
@@ -607,7 +607,7 @@ Reads `$OCX_HOME/profile.json` and emits shell-specific export lines for each pa
 eval "$(ocx --offline shell profile load)"
 ```
 
-For each profile entry whose package declares a non-empty `entry_points` array and whose `entrypoints-current` symlink exists under `$OCX_HOME/symlinks/{registry}/{repo}/`, an additional `PATH` export line is emitted that prepends the symlinked entry-point directory. Entries without `entry_points` produce only their declared environment variables; entries that have not yet been selected (no `entrypoints-current` symlink) are silently skipped, so profile load never points `$PATH` at a missing directory. See the [entry points guide](../guide/entry-points.md#path) for the full PATH-integration model.
+For each profile entry whose package declares a non-empty `entrypoints` array and whose `entrypoints-current` symlink exists under `$OCX_HOME/symlinks/{registry}/{repo}/`, an additional `PATH` export line is emitted that prepends the symlinked entry-point directory. Entries without `entrypoints` produce only their declared environment variables; entries that have not yet been selected (no `entrypoints-current` symlink) are silently skipped, so profile load never points `$PATH` at a missing directory. See the [entry points guide](../guide/entry-points.md#path) for the full PATH-integration model.
 
 ### `uninstall` {#uninstall}
 

@@ -7,69 +7,75 @@ use serde::{Deserialize, Serialize};
 
 use crate::oci;
 
+use super::slug::{SLUG_MAX_LEN, SLUG_PATTERN, SLUG_PATTERN_STR};
 use super::visibility::Visibility;
 
-static ALIAS_PATTERN: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9][a-z0-9_-]*$").expect("valid regex"));
-
-/// A validated dependency alias.
+/// A validated dependency name used for `${deps.NAME.field}` interpolation.
 ///
-/// Must match `^[a-z0-9][a-z0-9_-]*$`. Enforced at construction and deserialization.
+/// Must match `^[a-z0-9][a-z0-9_-]*$` and be at most [`SLUG_MAX_LEN`] bytes.
+/// Enforced at construction and deserialization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
-pub struct Alias(String);
+pub struct DependencyName(String);
 
-impl Alias {
+impl DependencyName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl TryFrom<String> for Alias {
+impl TryFrom<String> for DependencyName {
     type Error = DependencyError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if !ALIAS_PATTERN.is_match(&value) {
-            return Err(DependencyError::InvalidAlias { alias: value });
+        if value.len() > SLUG_MAX_LEN || !SLUG_PATTERN.is_match(&value) {
+            return Err(DependencyError::InvalidName { name: value });
         }
-        Ok(Alias(value))
+        Ok(DependencyName(value))
     }
 }
 
-impl TryFrom<&str> for Alias {
+impl TryFrom<&str> for DependencyName {
     type Error = DependencyError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Alias::try_from(value.to_string())
+        DependencyName::try_from(value.to_string())
     }
 }
 
-impl std::fmt::Display for Alias {
+impl std::fmt::Display for DependencyName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
 }
 
-impl<'de> Deserialize<'de> for Alias {
+impl std::borrow::Borrow<str> for DependencyName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for DependencyName {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Alias::try_from(s).map_err(serde::de::Error::custom)
+        DependencyName::try_from(s).map_err(serde::de::Error::custom)
     }
 }
 
-impl schemars::JsonSchema for Alias {
+impl schemars::JsonSchema for DependencyName {
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("Alias")
+        std::borrow::Cow::Borrowed("DependencyName")
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Interpolation name for this dependency. Must match ^[a-z0-9][a-z0-9_-]*$.",
-            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+            "description": "Interpolation name for this dependency. Must match ^[a-z0-9][a-z0-9_-]*$ (max 64 chars).",
+            "pattern": SLUG_PATTERN_STR,
+            "maxLength": SLUG_MAX_LEN
         })
     }
 }
@@ -92,24 +98,28 @@ pub struct Dependency {
     #[serde(default)]
     pub visibility: Visibility,
 
-    /// Optional alias for this dependency used in `${deps.ALIAS.installPath}` interpolation.
+    /// Optional name for this dependency used in `${deps.NAME.installPath}` interpolation.
     ///
     /// When set, overrides the default name (last path segment of the OCI repository).
     /// Use to resolve collisions when two dependencies share the same repository basename.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alias: Option<Alias>,
+    pub name: Option<DependencyName>,
 }
 
 impl Dependency {
     /// Returns the interpolation name for this dependency.
     ///
-    /// Returns `alias` when set; otherwise the last path segment of the OCI repository
-    /// (e.g. `"cmake"` for `"myorg/cmake"`).
-    pub fn name(&self) -> &str {
-        self.alias
-            .as_ref()
-            .map(Alias::as_str)
-            .unwrap_or_else(|| self.identifier.name())
+    /// Returns the explicit `name` when set; otherwise the last path segment of the OCI
+    /// repository (e.g. `"cmake"` for `"myorg/cmake"`).
+    pub fn name(&self) -> DependencyName {
+        if let Some(n) = &self.name {
+            return n.clone();
+        }
+        let basename = self.identifier.name();
+        // SAFETY-invariant: OCI repository basenames are already guaranteed by the OCI
+        // identifier parser to be lowercase alphanumeric with dashes/underscores — they
+        // satisfy the slug pattern by construction.
+        DependencyName::try_from(basename).expect("repository basename is a valid slug")
     }
 }
 
@@ -131,14 +141,12 @@ pub struct Dependencies {
 impl Dependencies {
     pub fn new(entries: Vec<Dependency>) -> Result<Self, DependencyError> {
         let mut seen_ids = HashSet::new();
-        let mut seen_aliases: HashSet<String> = HashSet::new();
+        let mut seen_names: HashSet<DependencyName> = HashSet::new();
         for dep in &entries {
-            if let Some(alias) = &dep.alias
-                && !seen_aliases.insert(alias.to_string())
+            if let Some(name) = &dep.name
+                && !seen_names.insert(name.clone())
             {
-                return Err(DependencyError::DuplicateAlias {
-                    alias: alias.to_string(),
-                });
+                return Err(DependencyError::DuplicateName { name: name.to_string() });
             }
             // Validate unique (registry, repository).
             let key = (
@@ -202,12 +210,12 @@ pub enum DependencyError {
     /// A dependency identifier appears more than once.
     #[error("duplicate dependency identifier: '{identifier}'")]
     DuplicateIdentifier { identifier: oci::PinnedIdentifier },
-    /// An alias is not a valid identifier (`^[a-z0-9][a-z0-9_-]*$`).
-    #[error("invalid dependency alias '{alias}': must match ^[a-z0-9][a-z0-9_-]*$")]
-    InvalidAlias { alias: String },
-    /// Two dependencies share the same explicit alias.
-    #[error("duplicate dependency alias '{alias}'")]
-    DuplicateAlias { alias: String },
+    /// A name is not a valid slug (`^[a-z0-9][a-z0-9_-]*$`, max 64 chars).
+    #[error("invalid dependency name '{name}': must match ^[a-z0-9][a-z0-9_-]*$ (max 64 chars)")]
+    InvalidName { name: String },
+    /// Two dependencies share the same explicit name.
+    #[error("duplicate dependency name '{name}'")]
+    DuplicateName { name: String },
 }
 
 impl schemars::JsonSchema for Dependencies {
@@ -492,109 +500,125 @@ mod tests {
         );
     }
 
-    // ── Alias + name() — Phase 3.2 spec tests ────────────────────────
+    // ── DependencyName + name() — Phase 3.2 spec tests ────────────────────────
 
-    fn make_dep(repo: &str, alias: Option<&str>) -> Dependency {
+    fn make_dep(repo: &str, name: Option<&str>) -> Dependency {
         let hex = sha256_hex();
-        let json = match alias {
-            Some(a) => format!(r#"{{"identifier":"ocx.sh/{repo}:1@sha256:{hex}","alias":"{a}"}}"#),
+        let json = match name {
+            Some(n) => format!(r#"{{"identifier":"ocx.sh/{repo}:1@sha256:{hex}","name":"{n}"}}"#),
             None => format!(r#"{{"identifier":"ocx.sh/{repo}:1@sha256:{hex}"}}"#),
         };
         serde_json::from_str(&json).unwrap()
     }
 
     #[test]
-    fn name_returns_alias_when_set() {
+    fn name_returns_explicit_name_when_set() {
         let dep = make_dep("myorg/cmake", Some("my-cmake"));
-        assert_eq!(dep.name(), "my-cmake");
+        assert_eq!(dep.name().as_str(), "my-cmake");
     }
 
     #[test]
-    fn name_returns_repository_basename_when_no_alias() {
+    fn name_returns_repository_basename_when_no_name() {
         let dep = make_dep("myorg/cmake", None);
-        assert_eq!(dep.name(), "cmake");
+        assert_eq!(dep.name().as_str(), "cmake");
     }
 
     #[test]
     fn name_returns_single_segment_repo_basename() {
         let dep = make_dep("python", None);
-        assert_eq!(dep.name(), "python");
+        assert_eq!(dep.name().as_str(), "python");
     }
 
     #[test]
-    fn alias_valid_forms() {
-        for alias in &["foo", "my-dep", "dep-1", "dep_1", "a0"] {
-            let dep = make_dep("cmake", Some(alias));
-            assert_eq!(dep.name(), *alias);
+    fn name_valid_forms() {
+        for n in &["foo", "my-dep", "dep-1", "dep_1", "a0"] {
+            let dep = make_dep("cmake", Some(n));
+            assert_eq!(dep.name().as_str(), *n);
         }
     }
 
-    fn dep_with_alias(repo: &str, alias: &str) -> Result<Dependency, serde_json::Error> {
+    fn dep_with_name(repo: &str, name: &str) -> Result<Dependency, serde_json::Error> {
         let hex = sha256_hex();
-        let json = format!(r#"{{"identifier":"ocx.sh/{repo}:1@sha256:{hex}","alias":"{alias}"}}"#);
+        let json = format!(r#"{{"identifier":"ocx.sh/{repo}:1@sha256:{hex}","name":"{name}"}}"#);
         serde_json::from_str::<Dependency>(&json)
     }
 
-    fn deps_with_alias(repo: &str, alias: &str) -> Result<Dependencies, serde_json::Error> {
+    fn deps_with_name(repo: &str, name: &str) -> Result<Dependencies, serde_json::Error> {
         let hex = sha256_hex();
-        let json = format!(r#"[{{"identifier":"ocx.sh/{repo}:1@sha256:{hex}","alias":"{alias}"}}]"#);
+        let json = format!(r#"[{{"identifier":"ocx.sh/{repo}:1@sha256:{hex}","name":"{name}"}}]"#);
         serde_json::from_str::<Dependencies>(&json)
     }
 
     #[test]
-    fn alias_invalid_empty_rejected() {
-        // Validation fires at Dependency deserialization (Alias newtype), not only at Dependencies::new().
-        let err = dep_with_alias("cmake", "").unwrap_err();
-        assert!(err.to_string().contains("alias"), "expected alias error, got: {err}");
-        let err = deps_with_alias("cmake", "").unwrap_err();
-        assert!(err.to_string().contains("alias"), "expected alias error, got: {err}");
+    fn name_invalid_empty_rejected() {
+        // Validation fires at Dependency deserialization (DependencyName newtype), not only at Dependencies::new().
+        let err = dep_with_name("cmake", "").unwrap_err();
+        assert!(err.to_string().contains("name"), "expected name error, got: {err}");
+        let err = deps_with_name("cmake", "").unwrap_err();
+        assert!(err.to_string().contains("name"), "expected name error, got: {err}");
     }
 
     #[test]
-    fn alias_invalid_uppercase_rejected() {
-        let err = dep_with_alias("cmake", "Cmake").unwrap_err();
-        assert!(err.to_string().contains("alias"), "expected alias error, got: {err}");
-        let err = deps_with_alias("cmake", "Cmake").unwrap_err();
-        assert!(err.to_string().contains("alias"), "expected alias error, got: {err}");
+    fn name_invalid_uppercase_rejected() {
+        let err = dep_with_name("cmake", "Cmake").unwrap_err();
+        assert!(err.to_string().contains("name"), "expected name error, got: {err}");
+        let err = deps_with_name("cmake", "Cmake").unwrap_err();
+        assert!(err.to_string().contains("name"), "expected name error, got: {err}");
     }
 
     #[test]
-    fn alias_invalid_slash_rejected() {
-        let err = deps_with_alias("cmake", "my/alias").unwrap_err();
-        assert!(err.to_string().contains("alias"), "expected alias error, got: {err}");
+    fn name_invalid_slash_rejected() {
+        let err = deps_with_name("cmake", "my/name").unwrap_err();
+        assert!(err.to_string().contains("name"), "expected name error, got: {err}");
     }
 
     #[test]
-    fn duplicate_alias_rejected() {
+    fn name_invalid_too_long_rejected() {
+        let long_name = "a".repeat(65);
+        let err = dep_with_name("cmake", &long_name).unwrap_err();
+        assert!(
+            err.to_string().contains("name"),
+            "expected name error for 65-char name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn name_valid_max_length_accepted() {
+        let at_cap = "a".repeat(64);
+        assert!(dep_with_name("cmake", &at_cap).is_ok(), "64-char name must be accepted");
+    }
+
+    #[test]
+    fn duplicate_name_rejected() {
         let hex = sha256_hex();
         let hex2 = "b".repeat(64);
         let json = format!(
             r#"[
-                {{"identifier":"ocx.sh/cmake:1@sha256:{hex}","alias":"tool"}},
-                {{"identifier":"ocx.sh/ninja:1@sha256:{hex2}","alias":"tool"}}
+                {{"identifier":"ocx.sh/cmake:1@sha256:{hex}","name":"tool"}},
+                {{"identifier":"ocx.sh/ninja:1@sha256:{hex2}","name":"tool"}}
             ]"#
         );
         let err = serde_json::from_str::<Dependencies>(&json).unwrap_err();
         assert!(
-            err.to_string().contains("alias") || err.to_string().contains("duplicate"),
-            "expected duplicate alias error, got: {err}"
+            err.to_string().contains("name") || err.to_string().contains("duplicate"),
+            "expected duplicate name error, got: {err}"
         );
     }
 
     #[test]
-    fn alias_roundtrips_through_serde() {
+    fn name_roundtrips_through_serde() {
         let hex = sha256_hex();
-        let json = format!(r#"{{"identifier":"ocx.sh/cmake:1@sha256:{hex}","alias":"my-cmake"}}"#);
+        let json = format!(r#"{{"identifier":"ocx.sh/cmake:1@sha256:{hex}","name":"my-cmake"}}"#);
         let dep: Dependency = serde_json::from_str(&json).unwrap();
         let reserialized = serde_json::to_string(&dep).unwrap();
         let dep2: Dependency = serde_json::from_str(&reserialized).unwrap();
-        assert_eq!(dep2.alias.as_ref().map(Alias::as_str), Some("my-cmake"));
+        assert_eq!(dep2.name.as_ref().map(DependencyName::as_str), Some("my-cmake"));
     }
 
     #[test]
-    fn no_alias_not_serialized() {
+    fn no_name_not_serialized() {
         let dep = make_dep("cmake", None);
         let json = serde_json::to_string(&dep).unwrap();
-        assert!(!json.contains("alias"), "alias should not appear when None");
+        assert!(!json.contains("\"name\""), "name should not appear when None: {json}");
     }
 }

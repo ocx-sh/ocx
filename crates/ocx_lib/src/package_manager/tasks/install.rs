@@ -92,16 +92,16 @@ async fn create_install_symlinks(
 #[cfg(test)]
 mod tests {
     use crate::oci;
-    use crate::package::metadata::entry_point::{EntryPoint, EntryPointName, EntryPoints};
+    use crate::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
 
     // ── helpers ─────────────────────────────────────────────────────────────
 
-    fn make_ep(name: &str) -> EntryPoints {
-        let entries = vec![EntryPoint {
-            name: EntryPointName::try_from(name).unwrap(),
+    fn make_ep(name: &str) -> Entrypoints {
+        let entries = vec![Entrypoint {
+            name: EntrypointName::try_from(name).unwrap(),
             target: format!("${{installPath}}/bin/{name}"),
         }];
-        EntryPoints::new(entries).unwrap()
+        Entrypoints::new(entries).unwrap()
     }
 
     /// PackageDir::entrypoints() returns sibling of content/ — verify path shape.
@@ -129,7 +129,7 @@ mod tests {
         repository: &str,
         digest_hex: &str,
         content_path: std::path::PathBuf,
-        entry_points: EntryPoints,
+        entrypoints: Entrypoints,
     ) -> crate::package::install_info::InstallInfo {
         use crate::package::install_info::InstallInfo;
         use crate::package::metadata::Metadata;
@@ -141,7 +141,7 @@ mod tests {
         let json = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entry_points": entry_points,
+            "entrypoints": entrypoints,
         })
         .to_string();
         let metadata: Metadata = serde_json::from_str(&json).unwrap();
@@ -173,7 +173,7 @@ mod tests {
     // ── plan_review_findings_pr64 §3.7–3.8: collision identifier + scan depth ──
 
     /// Plan §3.7 (R2.2): when a select-time collision is detected, the
-    /// `EntryPointNameCollision::existing_package` field must carry a valid OCI
+    /// `EntrypointNameCollision::existing_package` field must carry a valid OCI
     /// identifier formed from `<registry>/<repository>` — not a filesystem path
     /// (the prior implementation stuffed `repo_dir.to_string_lossy()` into
     /// `repository`). The new index-mediated path stores `(registry, repository)`
@@ -216,7 +216,7 @@ mod tests {
 
         let err = result.expect_err("collision must be detected");
         match err {
-            PackageErrorKind::EntryPointNameCollision { name, existing_package } => {
+            PackageErrorKind::EntrypointNameCollision { name, existing_package } => {
                 assert_eq!(name, "cmake");
                 // Repo name must NOT be a filesystem path: no leading `/`,
                 // no backslash separators, no embedded registry slug.
@@ -246,7 +246,7 @@ mod tests {
                     "registry must be carried verbatim",
                 );
             }
-            other => panic!("expected EntryPointNameCollision, got {other:?}"),
+            other => panic!("expected EntrypointNameCollision, got {other:?}"),
         }
     }
 
@@ -292,11 +292,11 @@ mod tests {
         let result = super::super::common::wire_selection(&fs, &new_id, &new_info, false, true).await;
 
         match result {
-            Err(PackageErrorKind::EntryPointNameCollision { name, .. }) => {
+            Err(PackageErrorKind::EntrypointNameCollision { name, .. }) => {
                 assert_eq!(name, "cmake");
             }
             other => panic!(
-                "expected EntryPointNameCollision at depth 3, got {other:?} \
+                "expected EntrypointNameCollision at depth 3, got {other:?} \
                  — index-mediated check must be depth-agnostic",
             ),
         }

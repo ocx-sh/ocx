@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import make_package, make_package_with_entry_points
+from src.helpers import make_package, make_package_with_entrypoints
 from src.runner import OcxRunner, PackageInfo
 
 
@@ -43,15 +43,15 @@ def current_entrypoints(ocx: OcxRunner, pkg: PackageInfo) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_entry_point_launcher_files_created_after_select(
+def test_entrypoint_launcher_files_created_after_select(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """install --select wires `current` so launchers are reachable at `current/entrypoints/`."""
-    pkg = make_package_with_entry_points(
+    pkg = make_package_with_entrypoints(
         ocx,
         unique_repo,
         tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -66,15 +66,15 @@ def test_entry_point_launcher_files_created_after_select(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix launcher test")
-def test_entry_point_unix_launcher_is_executable(
+def test_entrypoint_unix_launcher_is_executable(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """Unix launcher file must exist (via current/entrypoints) and be executable (+x)."""
-    pkg = make_package_with_entry_points(
+    pkg = make_package_with_entrypoints(
         ocx,
         unique_repo,
         tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -89,11 +89,11 @@ def test_deselect_removes_current_symlink(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """`ocx deselect` removes the `current` symlink, severing PATH access to launchers."""
-    pkg = make_package_with_entry_points(
+    pkg = make_package_with_entrypoints(
         ocx,
         unique_repo,
         tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -105,15 +105,15 @@ def test_deselect_removes_current_symlink(
     )
 
 
-def test_install_without_entry_points_leaves_current_entrypoints_absent(
+def test_install_without_entrypoints_leaves_current_entrypoints_absent(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
-    """A package without entry_points must not produce a current/entrypoints dir."""
+    """A package without entrypoints must not produce a current/entrypoints dir."""
     pkg = published_package
     ocx.plain("install", "--select", pkg.short)
     entrypoints_dir = current_entrypoints(ocx, pkg)
     assert not entrypoints_dir.exists(), (
-        f"current/entrypoints/ must not exist for pkg without entry_points: {entrypoints_dir}"
+        f"current/entrypoints/ must not exist for pkg without entrypoints: {entrypoints_dir}"
     )
 
 
@@ -122,12 +122,12 @@ def test_install_without_entry_points_leaves_current_entrypoints_absent(
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_entry_point_name_rejected_at_validation(
+def test_invalid_entrypoint_name_rejected_at_validation(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Metadata with invalid entry_point name (uppercase) is rejected at validation time.
+    """Metadata with invalid entrypoint name (uppercase) is rejected at validation time.
 
-    The custom `EntryPoints` deserializer enforces the name regex at deserialize time,
+    The custom `Entrypoints` deserializer enforces the name regex at deserialize time,
     so `package create` fails as soon as it parses the metadata file — no push needed.
     """
     del unique_repo  # rejection is local; no registry interaction
@@ -144,7 +144,7 @@ def test_invalid_entry_point_name_rejected_at_validation(
     metadata_obj = {
         "type": "bundle",
         "version": 1,
-        "entry_points": [{"name": "INVALID_UPPER", "target": "${installPath}/bin/hello"}],
+        "entrypoints": [{"name": "INVALID_UPPER", "target": "${installPath}/bin/hello"}],
     }
     metadata_path.write_text(json.dumps(metadata_obj))
 
@@ -154,7 +154,7 @@ def test_invalid_entry_point_name_rejected_at_validation(
         check=False,
     )
     assert result.returncode != 0, (
-        "package create with invalid entry_point name must fail at metadata parse\n"
+        "package create with invalid entrypoint name must fail at metadata parse\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "INVALID_UPPER" in result.stderr, (
@@ -165,19 +165,19 @@ def test_invalid_entry_point_name_rejected_at_validation(
 def test_collision_at_select_time_fails_with_structured_error(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """select on a package whose entry-point name collides → EntryPointNameCollision, exit 65."""
+    """select on a package whose entrypoint name collides → EntrypointNameCollision, exit 65."""
     repo_a = f"{unique_repo}-a"
     repo_b = f"{unique_repo}-b"
 
-    pkg_a = make_package_with_entry_points(
+    pkg_a = make_package_with_entrypoints(
         ocx, repo_a, tmp_path,
-        entry_points=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
-    pkg_b = make_package_with_entry_points(
+    pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entry_points=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
@@ -190,7 +190,7 @@ def test_collision_at_select_time_fails_with_structured_error(
         f"stderr={result.stderr.strip()}"
     )
     assert "cmake" in result.stderr, (
-        f"collision error must cite the colliding entry-point name; stderr={result.stderr.strip()}"
+        f"collision error must cite the colliding entrypoint name; stderr={result.stderr.strip()}"
     )
 
 
@@ -201,15 +201,15 @@ def test_install_without_select_does_not_trigger_collision_check(
     repo_a = f"{unique_repo}-ca"
     repo_b = f"{unique_repo}-cb"
 
-    pkg_a = make_package_with_entry_points(
+    pkg_a = make_package_with_entrypoints(
         ocx, repo_a, tmp_path,
-        entry_points=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
-    pkg_b = make_package_with_entry_points(
+    pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entry_points=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
@@ -217,7 +217,7 @@ def test_install_without_select_does_not_trigger_collision_check(
     ocx.plain("install", "--select", pkg_a.short)
     result = ocx.run("install", pkg_b.short, check=False)
     assert result.returncode == 0, (
-        f"install without --select must succeed even when entry-point names collide; "
+        f"install without --select must succeed even when entrypoint names collide; "
         f"got rc={result.returncode}, stderr={result.stderr.strip()}"
     )
 
@@ -230,19 +230,19 @@ def test_install_without_select_does_not_trigger_collision_check(
 def test_select_command_collision_rejects_with_structured_error(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`ocx select pkg2` after a colliding `--select` install must fail with DataError (65)."""
+    """`ocx select pkg2` with a colliding entrypoint name must fail with DataError (65)."""
     repo_a = f"{unique_repo}-sa"
     repo_b = f"{unique_repo}-sb"
 
-    pkg_a = make_package_with_entry_points(
+    pkg_a = make_package_with_entrypoints(
         ocx, repo_a, tmp_path,
-        entry_points=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
-    pkg_b = make_package_with_entry_points(
+    pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entry_points=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
@@ -252,7 +252,7 @@ def test_select_command_collision_rejects_with_structured_error(
 
     result = ocx.run("select", pkg_b.short, check=False)
     assert result.returncode == 65, (
-        f"`ocx select` with colliding entry-point name must exit 65 (DataError); "
+        f"`ocx select` with colliding entrypoint name must exit 65 (DataError); "
         f"got rc={result.returncode}, stderr={result.stderr.strip()}"
     )
     assert "cmake" in result.stderr, (
@@ -269,15 +269,15 @@ def test_concurrent_install_select_one_loses(
     repo_a = f"{unique_repo}-pa"
     repo_b = f"{unique_repo}-pb"
 
-    pkg_a = make_package_with_entry_points(
+    pkg_a = make_package_with_entrypoints(
         ocx, repo_a, tmp_path,
-        entry_points=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
-    pkg_b = make_package_with_entry_points(
+    pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entry_points=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
@@ -311,18 +311,18 @@ def test_concurrent_install_select_one_loses(
     )
 
 
-def test_reselect_to_package_without_entry_points_drops_entrypoints_dir(
+def test_reselect_to_package_without_entrypoints_drops_entrypoints_dir(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Re-selecting to a package without entry_points must leave `current/entrypoints` absent.
+    """Re-selecting to a package without entrypoints must leave `current/entrypoints` absent.
 
     The flat layout achieves this via a single `current` flip: pointing it at a
     package root that has no `entrypoints/` child is enough — the launchers
     from the previous package are no longer reachable through `current`.
     """
-    pkg_with = make_package_with_entry_points(
+    pkg_with = make_package_with_entrypoints(
         ocx, unique_repo, tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
         tag="1.0.0",
     )
@@ -336,7 +336,7 @@ def test_reselect_to_package_without_entry_points_drops_entrypoints_dir(
 
     ocx.plain("install", "--select", pkg_without.short)
     assert not entrypoints_dir.exists(), (
-        f"re-selecting to a package without entry_points must leave current/entrypoints/ unreachable; "
+        f"re-selecting to a package without entrypoints must leave current/entrypoints/ unreachable; "
         f"still present at {entrypoints_dir}"
     )
 
@@ -346,9 +346,9 @@ def test_launcher_invocation_runs_target_and_forwards_args(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """Invoking the generated launcher with extra args runs the resolved target and forwards args."""
-    pkg = make_package_with_entry_points(
+    pkg = make_package_with_entrypoints(
         ocx, unique_repo, tmp_path,
-        entry_points=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
         bins=["hello"],
         tag="1.0.0",
     )

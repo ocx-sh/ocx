@@ -356,17 +356,19 @@ async fn setup_owned(
     // `fs.packages.path(pinned)`), NOT the temp staging path: the launcher file
     // moves atomically with the package, but the path it bakes must reference the
     // post-move location to remain valid after the move.
-    if let Some(entry_points) = metadata.bundle_entry_points()
-        && !entry_points.is_empty()
+    if let Some(entrypoints) = metadata.bundle_entrypoints()
+        && !entrypoints.is_empty()
     {
+        use crate::package::metadata::dependency::DependencyName;
         use crate::package::metadata::env::accumulator::DependencyContext;
-        let dep_contexts: std::collections::HashMap<String, DependencyContext> = metadata
+        use std::sync::Arc;
+        let dep_contexts: std::collections::HashMap<DependencyName, DependencyContext> = metadata
             .dependencies()
             .iter()
             .zip(dependencies.iter())
             .map(|(decl, info)| {
-                let name = decl.name().to_string();
-                let ctx = DependencyContext::new(info.identifier.clone(), info.content.clone());
+                let name = decl.name();
+                let ctx = DependencyContext::new(Arc::new(info.clone()));
                 (name, ctx)
             })
             .collect();
@@ -374,7 +376,7 @@ async fn setup_owned(
         // Bake the post-move package-root path into the launcher so it remains
         // valid after the temp→final atomic rename.
         let final_pkg_root = fs.packages.path(pinned);
-        crate::package_manager::entry_points::generate(&final_pkg_root, entry_points, &dep_contexts, &dest)
+        crate::package_manager::entrypoints::generate(&final_pkg_root, entrypoints, &dep_contexts, &dest)
             .await
             .map_err(PackageErrorKind::Internal)?;
     }

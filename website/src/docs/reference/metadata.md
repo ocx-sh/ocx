@@ -35,7 +35,7 @@ The metadata file is a JSON object with a `type` discriminator. Currently only t
 | `strip_components` | integer | No | Leading path components to strip during extraction. |
 | `env` | array | No | [Environment variable declarations](#env). |
 | `dependencies` | array | No | [Package dependencies](#dependencies) pinned by digest. |
-| `entry_points` | array | No | Named entry points for generating launcher scripts. |
+| `entrypoints` | array | No | Named entry points for generating launcher scripts. |
 
 ::: details Why a type discriminator?
 The `type` field allows future metadata formats (e.g. `"manifest"`, `"virtual"`) without
@@ -89,7 +89,7 @@ A language runtime with multiple environment variables, archive stripping, a dep
       "identifier": "ocx.sh/gcc:13@sha256:a1b2c3d4e5f6..."
     }
   ],
-  "entry_points": [
+  "entrypoints": [
     {
       "name": "cmake",
       "target": "${installPath}/bin/cmake"
@@ -253,7 +253,7 @@ installation, environment composition, and garbage collection from a user's pers
 
 ## Entry Points {#entry-points}
 
-The `entry_points` array declares named launchers that `ocx install` generates at install time. Each
+The `entrypoints` array declares named launchers that `ocx install` generates at install time. Each
 launcher is a small shell script (or `.cmd` on Windows) placed in an `entrypoints/` directory inside
 the package directory. When the package is selected with `--select`, the per-repo `current` symlink
 is flipped to the package root and consumers traverse `current/entrypoints` from the same anchor to
@@ -281,12 +281,12 @@ The `target` field supports the same placeholders as [environment variable value
 Generated launchers land in `entrypoints/` inside the package directory (a sibling of `content/`).
 When the package is selected with `ocx install --select` or `ocx select`, the per-repo `current`
 symlink is flipped to that package root, and consumers reach the launchers via
-`{registry}/{repo}/current/entrypoints`. Packages with no entry points produce no `entrypoints/`
+`{registry}/{repo}/current/entrypoints`. Packages with no entrypoints produce no `entrypoints/`
 directory, so the same `current/entrypoints` path simply does not exist for them.
 
 ### Uniqueness {#entry-points-uniqueness}
 
-Duplicate `name` values within the same `entry_points` array are rejected at deserialization with
+Duplicate `name` values within the same `entrypoints` array are rejected at deserialization with
 a descriptive error. Name collisions across different currently-selected packages are detected at
 select time.
 
@@ -294,7 +294,7 @@ select time.
 
 ```json
 {
-  "entry_points": [
+  "entrypoints": [
     { "name": "cmake", "target": "${installPath}/bin/cmake" },
     { "name": "ctest", "target": "${installPath}/bin/ctest" }
   ]

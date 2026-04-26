@@ -2,8 +2,11 @@
 // Copyright 2026 The OCX Authors
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::package::install_info::InstallInfo;
+use crate::package::metadata::dependency::DependencyName;
 use crate::package::metadata::template::TemplateResolver;
 use crate::{Result, env, oci};
 
@@ -11,47 +14,78 @@ use super::var;
 
 /// Resolved context for a single direct dependency, available during env interpolation.
 ///
-/// Keyed in `Accumulator::dep_contexts` by `dep.name()` (the alias or repository basename).
-/// Carries `PinnedIdentifier` rather than just `PathBuf` so that future fields like
-/// `${deps.NAME.version}` and `${deps.NAME.digest}` become additive match arms in
-/// `resolve_field` without changing any upstream signatures.
+/// Keyed in `Accumulator::dep_contexts` by `dep.name()` (the explicit name or repository basename).
+/// Backed by `Arc<InstallInfo>` so that future fields like `${deps.NAME.version}` and
+/// `${deps.NAME.digest}` become additive match arms in `resolve_field` without changing
+/// any upstream signatures.
+///
+/// # Reserved
+///
+/// A `resolved_env` field for per-dep resolved environment data is reserved for a future
+/// extension and is not present yet.
+#[derive(Debug, Clone)]
 pub struct DependencyContext {
-    /// Full pinned OCI identifier — future-proofs `version`/`digest` interpolation.
-    pub identifier: oci::PinnedIdentifier,
-    /// Absolute content path for this dependency (`packages/.../content/`).
-    pub install_path: PathBuf,
+    install_info: Arc<InstallInfo>,
 }
 
 impl DependencyContext {
-    pub fn new(identifier: oci::PinnedIdentifier, install_path: PathBuf) -> Self {
-        Self {
-            identifier,
-            install_path,
-        }
+    /// Constructs a `DependencyContext` wrapping real install info.
+    pub fn new(install_info: Arc<InstallInfo>) -> Self {
+        Self { install_info }
+    }
+
+    /// Returns the underlying `Arc<InstallInfo>`.
+    pub fn install_info(&self) -> &Arc<InstallInfo> {
+        &self.install_info
+    }
+
+    /// Returns the absolute content path for this dependency (`packages/.../content/`).
+    pub fn install_path(&self) -> &Path {
+        &self.install_info.content
+    }
+
+    /// Returns the full pinned OCI identifier for this dependency.
+    pub fn identifier(&self) -> &oci::PinnedIdentifier {
+        &self.install_info.identifier
     }
 
     /// Resolves a named field to a string value.
     ///
-    /// Currently supports `"installPath"` only.  Future fields (`"version"`, `"digest"`)
+    /// Currently supports `"installPath"` only. Future fields (`"version"`, `"digest"`)
     /// will become additional match arms here without signature churn in callers.
     pub fn resolve_field(&self, field: &str) -> Option<String> {
         match field {
-            "installPath" => Some(self.install_path.to_string_lossy().into_owned()),
+            "installPath" => Some(self.install_path().to_string_lossy().into_owned()),
             _ => None,
+        }
+    }
+
+    /// Constructs a context from an identifier and a content path only.
+    ///
+    /// Wraps a synthetic `InstallInfo` whose `content` is the supplied path and
+    /// whose other fields use minimal placeholders. Used by call sites that have
+    /// no full `InstallInfo` available — `validate_entrypoints` (publish-time
+    /// sentinels) and `resolve.rs` (runtime, where only `${...installPath}`
+    /// resolution is required). Future fields beyond `installPath` will require
+    /// callers to supply a real `InstallInfo` via [`DependencyContext::new`].
+    pub fn sentinel(identifier: oci::PinnedIdentifier, sentinel_path: PathBuf) -> Self {
+        let info = InstallInfo::new_for_sentinel(identifier, sentinel_path);
+        Self {
+            install_info: Arc::new(info),
         }
     }
 }
 
 pub struct Accumulator<'a> {
     install_path: std::path::PathBuf,
-    dep_contexts: &'a HashMap<String, DependencyContext>,
+    dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
     env: &'a mut env::Env,
 }
 
 impl<'a> Accumulator<'a> {
     pub fn new(
         install_path: impl AsRef<std::path::Path>,
-        dep_contexts: &'a HashMap<String, DependencyContext>,
+        dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
         env: &'a mut crate::env::Env,
     ) -> Self {
         Accumulator {
@@ -124,7 +158,11 @@ mod tests {
     }
 
     fn ctx(dir: &TempDir, repo: &str) -> DependencyContext {
-        DependencyContext::new(pinned(repo), dir.path().to_path_buf())
+        DependencyContext::sentinel(pinned(repo), dir.path().to_path_buf())
+    }
+
+    fn dep_name(s: &str) -> DependencyName {
+        DependencyName::try_from(s).unwrap()
     }
 
     fn constant_var(key: &str, value: &str) -> crate::package::metadata::env::var::Var {
@@ -132,7 +170,7 @@ mod tests {
     }
 
     fn resolve(
-        dep_contexts: &HashMap<String, DependencyContext>,
+        dep_contexts: &HashMap<DependencyName, DependencyContext>,
         install_path: &std::path::Path,
         var: &crate::package::metadata::env::var::Var,
     ) -> crate::Result<Option<String>> {
@@ -146,7 +184,7 @@ mod tests {
     fn dep_install_path_expands() {
         let dir = TempDir::new().unwrap();
         let mut ctxs = HashMap::new();
-        ctxs.insert("python".to_string(), ctx(&dir, "python"));
+        ctxs.insert(dep_name("python"), ctx(&dir, "python"));
 
         let var = constant_var("MY_PYTHON", "${deps.python.installPath}/bin/python");
         let result = resolve(&ctxs, dir.path(), &var).unwrap().unwrap();
@@ -160,8 +198,8 @@ mod tests {
         let cmake_dir = TempDir::new().unwrap();
         let mut ctxs = HashMap::new();
         ctxs.insert(
-            "cmake".to_string(),
-            DependencyContext::new(pinned("cmake"), cmake_dir.path().to_path_buf()),
+            dep_name("cmake"),
+            DependencyContext::sentinel(pinned("cmake"), cmake_dir.path().to_path_buf()),
         );
 
         let template = "${installPath}:${deps.cmake.installPath}/bin".to_string();
@@ -181,12 +219,12 @@ mod tests {
         let python_dir = TempDir::new().unwrap();
         let mut ctxs = HashMap::new();
         ctxs.insert(
-            "cmake".to_string(),
-            DependencyContext::new(pinned("cmake"), cmake_dir.path().to_path_buf()),
+            dep_name("cmake"),
+            DependencyContext::sentinel(pinned("cmake"), cmake_dir.path().to_path_buf()),
         );
         ctxs.insert(
-            "python".to_string(),
-            DependencyContext::new(pinned("python"), python_dir.path().to_path_buf()),
+            dep_name("python"),
+            DependencyContext::sentinel(pinned("python"), python_dir.path().to_path_buf()),
         );
 
         let template = "${deps.cmake.installPath}/bin:${deps.python.installPath}/bin";
@@ -202,7 +240,7 @@ mod tests {
     #[test]
     fn unknown_dep_name_returns_error() {
         let dir = TempDir::new().unwrap();
-        let ctxs: HashMap<String, DependencyContext> = HashMap::new();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
 
         let var = constant_var("X", "${deps.nonexistent.installPath}");
         let err = resolve(&ctxs, dir.path(), &var).unwrap_err();
@@ -210,7 +248,7 @@ mod tests {
             matches!(&err, crate::Error::Package(e) if matches!(e.as_ref(),
                 PackageError::EnvVarInterpolation {
                     source: TemplateError::UnknownDependencyRef { ref_name, .. }, ..
-                } if ref_name == "nonexistent"
+                } if ref_name.as_str() == "nonexistent"
             )),
             "unexpected error: {err}"
         );
@@ -221,7 +259,7 @@ mod tests {
     fn unsupported_field_returns_error() {
         let dir = TempDir::new().unwrap();
         let mut ctxs = HashMap::new();
-        ctxs.insert("cmake".to_string(), ctx(&dir, "cmake"));
+        ctxs.insert(dep_name("cmake"), ctx(&dir, "cmake"));
 
         let var = constant_var("X", "${deps.cmake.version}");
         let err = resolve(&ctxs, dir.path(), &var).unwrap_err();
@@ -242,8 +280,8 @@ mod tests {
         let missing_path = dir.path().join("not-there");
         let mut ctxs = HashMap::new();
         ctxs.insert(
-            "cmake".to_string(),
-            DependencyContext::new(pinned("cmake"), missing_path),
+            dep_name("cmake"),
+            DependencyContext::sentinel(pinned("cmake"), missing_path),
         );
 
         let var = constant_var("X", "${deps.cmake.installPath}");
@@ -252,7 +290,7 @@ mod tests {
             matches!(&err, crate::Error::Package(e) if matches!(e.as_ref(),
                 PackageError::EnvVarInterpolation {
                     source: TemplateError::DependencyNotInstalled { ref_name, .. }, ..
-                } if ref_name == "cmake"
+                } if ref_name.as_str() == "cmake"
             )),
             "unexpected error: {err}"
         );
@@ -263,7 +301,7 @@ mod tests {
     fn uppercase_dep_name_not_matched() {
         let dir = TempDir::new().unwrap();
         let mut ctxs = HashMap::new();
-        ctxs.insert("python".to_string(), ctx(&dir, "python"));
+        ctxs.insert(dep_name("python"), ctx(&dir, "python"));
 
         // ${deps.Python.installPath} — uppercase P doesn't match the pattern [a-z0-9...]
         let var = constant_var("X", "${deps.Python.installPath}");
@@ -278,7 +316,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // dep_contexts contains only direct dep D; transitive dep T is not included
         let mut ctxs = HashMap::new();
-        ctxs.insert("cmake".to_string(), ctx(&dir, "cmake"));
+        ctxs.insert(dep_name("cmake"), ctx(&dir, "cmake"));
 
         let var = constant_var("X", "${deps.transitive-tool.installPath}");
         let err = resolve(&ctxs, dir.path(), &var).unwrap_err();
@@ -286,9 +324,29 @@ mod tests {
             matches!(&err, crate::Error::Package(e) if matches!(e.as_ref(),
                 PackageError::EnvVarInterpolation {
                     source: TemplateError::UnknownDependencyRef { ref_name, declared, .. }, ..
-                } if ref_name == "transitive-tool" && declared.contains(&"cmake".to_string())
+                } if ref_name.as_str() == "transitive-tool"
+                    && declared.iter().any(|n| n.as_str() == "cmake")
             )),
             "unexpected error: {err}"
         );
+    }
+
+    // DependencyContext::sentinel — install_path() returns the supplied sentinel path.
+    #[test]
+    fn dependency_context_sentinel_resolves_install_path() {
+        let sentinel_path = PathBuf::from("/__OCX_SENTINEL__");
+        let ctx = DependencyContext::sentinel(pinned("cmake"), sentinel_path.clone());
+        assert_eq!(ctx.install_path(), sentinel_path.as_path());
+        assert_eq!(ctx.resolve_field("installPath").as_deref(), Some("/__OCX_SENTINEL__"),);
+    }
+
+    // DependencyContext::resolve_field — unknown fields return None.
+    #[test]
+    fn dependency_context_resolve_field_unknown_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let ctx = DependencyContext::sentinel(pinned("cmake"), dir.path().to_path_buf());
+        assert!(ctx.resolve_field("version").is_none());
+        assert!(ctx.resolve_field("digest").is_none());
+        assert!(ctx.resolve_field("").is_none());
     }
 }
