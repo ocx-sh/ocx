@@ -42,7 +42,7 @@ Concise index of all `ocx` CLI commands. User-facing per-command docs live in [`
 | `shell profile list` | List profiled packages *(deprecated — see `shell profile generate` / `shell init`)* | No | — |
 | `shell profile load` | Output profile export lines *(deprecated — see `shell profile generate` / `shell init`)* | No | `-s/--shell` |
 | `shell profile generate` | Generate shell init file from profile | No | `-s/--shell`, `-o/--output` |
-| `index catalog` | List known repositories | No | `--with-tags` |
+| `index catalog` | List known repositories | No | `--tags` |
 | `index list PKGS...` | List tags for packages | No | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote | No | — |
 | `lock` | Resolve project tool tags to digests and write `ocx.lock` | No | `-g/--group` |
