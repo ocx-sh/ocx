@@ -40,6 +40,7 @@ pub struct ShellEnv {
 
 impl ShellEnv {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        warn_if_pathext_missing_launcher();
         let shell = match self.shell {
             Some(shell) => shell,
             None => {

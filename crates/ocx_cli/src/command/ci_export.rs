@@ -38,6 +38,7 @@ pub struct CiExport {
 
 impl CiExport {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        warn_if_pathext_missing_launcher();
         let flavor = match self.flavor {
             Some(f) => f,
             None => CiFlavor::detect()

@@ -49,7 +49,8 @@ impl Env {
         };
 
         let entries = manager.resolve_env(&info).await?;
-        let all_entries = entries
+        #[allow(unused_mut)]
+        let mut all_entries: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
             .map(|e| api::data::env::EnvEntry {
                 key: e.key,
@@ -57,6 +58,25 @@ impl Env {
                 kind: e.kind,
             })
             .collect();
+
+        // On Windows, if the resolved env output includes a PATH entry (meaning
+        // the packages declare an entrypoint bin directory), also emit a
+        // synthetic PATHEXT prepend so consumers of this output get `.CMD`
+        // entries discoverable without manual PATHEXT configuration.
+        // We emit this whenever the current host PATHEXT lacks `.cmd` — `ocx
+        // env` produces output for shell-eval downstream, so we own what is
+        // emitted and should make it complete.
+        #[cfg(target_os = "windows")]
+        {
+            let current_pathext = std::env::var("PATHEXT").unwrap_or_default();
+            if !ocx_lib::env::pathext_includes_launcher(&current_pathext) {
+                all_entries.push(api::data::env::EnvEntry {
+                    key: "PATHEXT".to_string(),
+                    value: ".CMD".to_string(),
+                    kind: ocx_lib::package::metadata::env::modifier::ModifierKind::Path,
+                });
+            }
+        }
 
         context.api().report(&api::data::env::EnvVars::new(all_entries))?;
 

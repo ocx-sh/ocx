@@ -188,54 +188,20 @@ async fn uninstall_symlinks(
     };
 
     if deselect {
-        // Hold both selection locks (index → select, in that order) for the
-        // entire teardown so it serializes with concurrent install --select
-        // and the index update + `current` unlink form a single critical
-        // section. Symmetric with tasks/deselect.rs.
+        // Hold the per-repo .select.lock for the entire teardown.
+        // Symmetric with tasks/deselect.rs.
         let _locks = super::common::acquire_selection_locks(fs, package).await?;
 
         let current_path = fs.symlinks.current(package);
 
-        // Snapshot the pre-mutation index file so a unlink failure can roll
-        // the registry-scoped ownership map back to its prior state. Without
-        // the snapshot, a clear-then-fail-to-unlink ordering would free a
-        // launcher name in the index while the old `current` symlink still
-        // resolved on disk — a missed-collision shape future selects could
-        // walk into.
-        let index_path = fs.symlinks.entrypoints_index(package.registry());
-        let prior_index_bytes: Option<Vec<u8>> = match tokio::fs::read(&index_path).await {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                return Err(PackageErrorKind::Internal(crate::error::file_error(&index_path, e)));
-            }
-        };
-
-        // Unlink `current` FIRST — same rationale as `deselect`. The unlink
-        // is idempotent when the symlink is already absent.
-        let teardown_result: Result<(), crate::Error> = (|| {
-            if crate::symlink::is_link(&current_path) {
-                rm.unlink(&current_path)?;
-            } else {
-                log::debug!(
-                    "Package '{}' has no current symlink at '{}' — skipping deselect.",
-                    package,
-                    current_path.display(),
-                );
-            }
-            Ok(())
-        })();
-
-        if let Err(e) = teardown_result {
-            super::common::restore_index_snapshot(&index_path, prior_index_bytes.as_deref()).await;
-            return Err(PackageErrorKind::Internal(e));
-        }
-
-        // Symlinks gone — now drop launcher ownership in the index. If the
-        // index write fails, restore the snapshot before surfacing the error.
-        if let Err(e) = super::common::clear_index_owner(fs, package).await {
-            super::common::restore_index_snapshot(&index_path, prior_index_bytes.as_deref()).await;
-            return Err(e);
+        if crate::symlink::is_link(&current_path) {
+            rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
+        } else {
+            log::debug!(
+                "Package '{}' has no current symlink at '{}' — skipping deselect.",
+                package,
+                current_path.display(),
+            );
         }
     }
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.assertions import assert_not_exists, assert_symlink_exists
-from src.helpers import make_package
+from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
@@ -1332,3 +1332,88 @@ def _list_dep_targets(obj_dir: Path) -> list[Path]:
     if not deps_dir.exists():
         return []
     return sorted(entry.resolve() for entry in deps_dir.iterdir() if entry.is_symlink())
+
+
+# ---------------------------------------------------------------------------
+# Tests: Entrypoint visibility in dependency env
+# ---------------------------------------------------------------------------
+
+
+def test_public_dep_entrypoints_appear_in_consumer_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A's env must include B's entrypoints/ in PATH when B is a public dependency.
+
+    The visible-package pipeline emits a synthetic `PATH ⊳ <B_pkg_root>/entrypoints`
+    for every visible package that has non-empty entrypoints.  When A depends on B
+    publicly, B is visible to A — so B's entrypoints/ must appear in `ocx env A`.
+    """
+    b_repo = f"{unique_repo}_b"
+    a_repo = f"{unique_repo}_a"
+
+    pkg_b = make_package_with_entrypoints(
+        ocx,
+        b_repo,
+        tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="b",
+    )
+
+    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_entry = {
+        "identifier": f"{pkg_b.fq}@{dep_digest}",
+        "visibility": "public",
+    }
+    pkg_a = make_package(ocx, a_repo, "1.0.0", tmp_path, dependencies=[dep_entry])
+    ocx.plain("install", "--select", pkg_a.short)
+
+    env_result = ocx.json("env", pkg_a.short)
+    path_values = [e["value"] for e in env_result if e["key"] == "PATH"]
+
+    assert any("entrypoints" in v for v in path_values), (
+        f"expected B's entrypoints/ in PATH for public dep; PATH values: {path_values}"
+    )
+
+
+def test_sealed_dep_entrypoints_excluded_from_consumer_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A's env must NOT include B's entrypoints/ in PATH when B is a sealed dependency.
+
+    Sealed (non-exported) dependencies are not visible to A's consumers — the
+    synthetic entrypoints/ PATH entry for B must not appear in `ocx env A`.
+    """
+    b_repo = f"{unique_repo}_b"
+    a_repo = f"{unique_repo}_a"
+
+    pkg_b = make_package_with_entrypoints(
+        ocx,
+        b_repo,
+        tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="b",
+    )
+
+    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_entry = {
+        "identifier": f"{pkg_b.fq}@{dep_digest}",
+        "visibility": "sealed",
+    }
+    pkg_a = make_package(ocx, a_repo, "1.0.0", tmp_path, dependencies=[dep_entry])
+    ocx.plain("install", "--select", pkg_a.short)
+
+    env_result = ocx.json("env", pkg_a.short)
+    path_values = [e["value"] for e in env_result if e["key"] == "PATH"]
+
+    # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
+    b_find = ocx.json("find", pkg_b.short)
+    b_content_path = next(iter(b_find.values()))
+    b_pkg_root = str(Path(b_content_path).parent)
+
+    assert not any(v.startswith(b_pkg_root) and "entrypoints" in v for v in path_values), (
+        f"sealed dep B's entrypoints/ must NOT appear in consumer PATH; PATH values: {path_values}"
+    )

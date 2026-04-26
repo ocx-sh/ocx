@@ -16,6 +16,16 @@ pub struct InstallInfo {
 }
 
 impl InstallInfo {
+    /// Returns the package root directory (the directory containing `content/`,
+    /// `metadata.json`, `entrypoints/`, `refs/`, etc.).
+    ///
+    /// The `content` field always points at `<pkg_root>/content` by
+    /// construction (see `tasks::common::find_in_store` and the pull
+    /// pipeline). `parent()` navigates to the package root.
+    pub fn package_root(&self) -> &std::path::Path {
+        self.content.parent().unwrap_or(&self.content)
+    }
+
     /// Constructs a minimal `InstallInfo` for use as a publish-time sentinel.
     ///
     /// The `content` path is the sentinel path passed by the caller; all other

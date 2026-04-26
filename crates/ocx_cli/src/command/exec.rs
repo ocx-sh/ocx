@@ -52,6 +52,9 @@ pub struct Exec {
     ///   package root (e.g. `file:///home/u/.ocx/packages/...`). Skips
     ///   identifier resolution and the index entirely; used by generated
     ///   entry-point launchers.
+    // Parsed inside `execute()` rather than via clap's `value_parser` so that
+    // a malformed ref surfaces as `ExitCode::UsageError` (64) through our own
+    // [`UsageError`] classification, not clap's universal exit-code 2.
     #[clap(required = true, num_args = 1.., value_terminator = "--", value_name = "REF")]
     refs: Vec<String>,
 
@@ -62,25 +65,19 @@ pub struct Exec {
 
 impl Exec {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let parsed: Vec<PackageRef> = self
-            .refs
-            .iter()
-            .map(|raw| PackageRef::from_str(raw).map_err(|e| UsageError::new(format_package_ref_parse_error(&e))))
-            .collect::<Result<_, _>>()?;
-
         let manager = context.manager();
         let packages_root = context.file_structure().packages.root();
         let default_registry = context.default_registry();
 
-        // Build install infos in input order. `oci://` and bare refs go
-        // through the identifier resolution + auto-install path; `file://`
-        // refs short-circuit straight to the on-disk package root. Mixing
-        // schemes in one invocation works — env entries layer in the order
-        // refs appear on the command line.
+        // Resolve refs to install infos in input order. `file://` refs short-circuit
+        // to the on-disk package root; `oci://` and bare refs collect for a single
+        // batched `find_or_install_all` call so OCI parallelism is preserved. Env
+        // entries layer in the order refs appear on the command line.
+        let mut ordered: Vec<Option<InstallInfo>> = (0..self.refs.len()).map(|_| None).collect();
         let mut oci_identifiers: Vec<oci::Identifier> = Vec::new();
         let mut oci_indexes: Vec<usize> = Vec::new();
-        let mut file_pkg_roots: Vec<(usize, PathBuf)> = Vec::new();
-        for (idx, ref_) in parsed.into_iter().enumerate() {
+        for (idx, raw) in self.refs.iter().enumerate() {
+            let ref_ = PackageRef::from_str(raw).map_err(|e| UsageError::new(format_package_ref_parse_error(&e)))?;
             match ref_ {
                 PackageRef::Oci(_) => {
                     let id = ref_
@@ -91,13 +88,10 @@ impl Exec {
                 }
                 PackageRef::PackageRoot(path) => {
                     let validated = validate_package_root(&path, packages_root).await?;
-                    file_pkg_roots.push((idx, validated));
+                    ordered[idx] = Some(manager.install_info_from_package_root(&validated).await?);
                 }
             }
         }
-
-        let total = oci_indexes.len() + file_pkg_roots.len();
-        let mut ordered: Vec<Option<InstallInfo>> = (0..total).map(|_| None).collect();
 
         if !oci_identifiers.is_empty() {
             let platforms = platforms_or_default(&self.platforms);
@@ -105,10 +99,6 @@ impl Exec {
             for (idx, info) in oci_indexes.into_iter().zip(infos) {
                 ordered[idx] = Some(info);
             }
-        }
-        for (idx, pkg_root) in file_pkg_roots {
-            let info = manager.install_info_from_package_root(&pkg_root).await?;
-            ordered[idx] = Some(info);
         }
 
         let install_infos: Vec<InstallInfo> = ordered.into_iter().flatten().collect();
@@ -121,6 +111,29 @@ impl Exec {
     async fn run_with_env(&self, entries: Vec<EnvEntry>) -> anyhow::Result<ExitCode> {
         let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
         process_env.apply_entries(&entries);
+
+        // On Windows, ensure `.CMD` is listed in PATHEXT so that the generated
+        // `.cmd` entry-point launchers are found by the shell resolver. We
+        // control the child environment here, so we inject silently — no
+        // warning is appropriate for `exec`.
+        #[cfg(target_os = "windows")]
+        {
+            let current_pathext = process_env
+                .get("PATHEXT")
+                .and_then(|v| v.to_str())
+                .unwrap_or("")
+                .to_string();
+            if !env::pathext_includes_launcher(&current_pathext) {
+                // Prepend .CMD to the existing PATHEXT (or use a safe default
+                // that covers the most common Windows executable extensions).
+                let new_pathext = if current_pathext.is_empty() {
+                    ".CMD;.EXE;.BAT;.COM".to_string()
+                } else {
+                    format!(".CMD;{current_pathext}")
+                };
+                process_env.set("PATHEXT", new_pathext);
+            }
+        }
 
         let Some((command, args)) = self.command.split_first() else {
             return Err(anyhow::anyhow!("No command provided to execute."));

@@ -223,12 +223,20 @@ def make_package_with_entrypoints(
     tag: str = "1.0.0",
     *,
     file_prefix: str = "ep",
+    dependencies: list[dict] | None = None,
 ) -> PackageInfo:
     """Publish a test package whose metadata declares ``entrypoints``.
 
     Shared by ``test_entrypoints*`` modules so the suite has one construction
     path. ``file_prefix`` keeps temp filenames distinct when a single
     ``tmp_path`` hosts multiple packages.
+
+    Parameters
+    ----------
+    dependencies:
+        Optional list of dependency descriptors to embed in metadata.  Each
+        entry must be a dict with at least an ``identifier`` key (same shape
+        as ``make_package``'s ``dependencies`` parameter).
     """
     bin_names = bins or ["hello"]
     env = [
@@ -255,12 +263,14 @@ def make_package_with_entrypoints(
             script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
     metadata_path = tmp_path / f"metadata-{file_prefix}-{unique_repo}-{tag}.json"
-    metadata_obj = {
+    metadata_obj: dict = {
         "type": "bundle",
         "version": 1,
         "env": env,
         "entrypoints": entrypoints,
     }
+    if dependencies:
+        metadata_obj["dependencies"] = dependencies
     metadata_path.write_text(json.dumps(metadata_obj))
 
     bundle = tmp_path / f"bundle-{file_prefix}-{unique_repo}-{tag}.tar.xz"

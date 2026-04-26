@@ -8,25 +8,18 @@
 //!
 //! ## Selection-state lock order
 //!
-//! Selection-state mutations (the per-repo `current` symlink plus the
-//! per-registry `.entrypoints-index.json`) are guarded by two layered locks.
-//! **Lock order MUST be `index_lock` → `select_lock`** — the reverse risks
-//! deadlock under concurrent installs that target distinct repos in the same
-//! registry.
+//! Selection-state mutations (the per-repo `current` symlink) are guarded by
+//! the per-repo `.select.lock`.
 //!
-//! - **`{symlinks/{registry}/.entrypoints-index.lock}`** (per registry) — held
-//!   for the full read → collision check → symlink update → index write
-//!   sequence inside [`wire_selection`].
 //! - **`{symlinks/{registry}/{repo}}/.select.lock`** (per repo) — held for the
-//!   actual symlink writes/rollback. Acquired *after* the index lock.
+//!   actual symlink writes/rollback inside [`wire_selection`].
 //!
-//! `deselect` and `uninstall --deselect` follow the same order: index lock
-//! first, repo `.select.lock` second.
+//! `deselect` and `uninstall --deselect` acquire the same per-repo
+//! `.select.lock` before clearing symlinks.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use crate::{
@@ -222,119 +215,6 @@ pub async fn acquire_select_lock(
         .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&lock_path, e)))
 }
 
-/// Acquires the per-registry entry-points index lock.
-///
-/// Lock order: this lock MUST be acquired *before* [`acquire_select_lock`]
-/// when both are needed. See module docs.
-async fn acquire_index_lock(fs: &file_structure::FileStructure, registry: &str) -> Result<FileLock, PackageErrorKind> {
-    let lock_path = fs.symlinks.entrypoints_index_lock(registry);
-    if let Some(parent) = lock_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(parent, e)))?;
-    }
-    let file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .await
-        .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&lock_path, e)))?
-        .into_std()
-        .await;
-    FileLock::lock_exclusive(file)
-        .await
-        .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&lock_path, e)))
-}
-
-/// On-disk shape of the per-registry entry-points ownership index.
-///
-/// File: `{symlinks/{registry_slug}}/.entrypoints-index.json`. Maps every
-/// currently-selected launcher name (under this registry) to the package that
-/// owns it. Replaces the prior O(N·M) directory walk with a single O(1) map
-/// lookup and lets cross-repo collision detection run atomically under a
-/// single registry-scoped lock.
-///
-/// Lifecycle: written under [`acquire_index_lock`] in [`wire_selection`],
-/// updated by [`update_index_for_package`] on deselect/uninstall, removed
-/// implicitly when the parent registry directory is cleaned up.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct EntrypointsIndex {
-    /// Schema version — set to `1` on write. Reserved for future migrations.
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u8,
-    /// Launcher name → owning package. Sorted by name for deterministic on-disk
-    /// output (uses `BTreeMap`, which serializes keys in sort order).
-    #[serde(default)]
-    pub entries: BTreeMap<String, IndexOwner>,
-}
-
-/// Manual `Default` so a freshly-created index pinned at the documented
-/// `schema_version = 1` contract — `#[derive(Default)]` would emit `0`,
-/// which the missing-file path used to persist on first write.
-impl Default for EntrypointsIndex {
-    fn default() -> Self {
-        Self {
-            schema_version: default_schema_version(),
-            entries: BTreeMap::new(),
-        }
-    }
-}
-
-fn default_schema_version() -> u8 {
-    1
-}
-
-/// One row in [`EntrypointsIndex::entries`]. Identifies the owning package by
-/// its OCI registry + repository + (current) digest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct IndexOwner {
-    pub registry: String,
-    pub repository: String,
-    pub digest: String,
-}
-
-impl EntrypointsIndex {
-    /// Reads the index from disk, returning a fresh empty instance when the
-    /// file is absent. Any other I/O or parse failure surfaces as a hard error.
-    async fn read(path: &Path) -> Result<Self, PackageErrorKind> {
-        match tokio::fs::try_exists(path).await {
-            Ok(true) => Self::read_json(path).await.map_err(PackageErrorKind::Internal),
-            Ok(false) => Ok(Self::default()),
-            Err(e) => Err(PackageErrorKind::Internal(crate::error::file_error(path, e))),
-        }
-    }
-
-    /// Writes the index atomically (temp file in the same directory, then
-    /// rename). Same-directory rename keeps the swap on a single filesystem.
-    async fn write_atomic(&self, path: &Path) -> Result<(), PackageErrorKind> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(parent, e)))?;
-        }
-        let tmp_path = path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(self).map_err(|e| PackageErrorKind::Internal(e.into()))?;
-        tokio::fs::write(&tmp_path, bytes)
-            .await
-            .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&tmp_path, e)))?;
-        tokio::fs::rename(&tmp_path, path)
-            .await
-            .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(path, e)))?;
-        Ok(())
-    }
-
-    /// Removes every entry whose owner matches `registry` + `repository`.
-    ///
-    /// Used on deselect/uninstall and as the first step of re-select to clear
-    /// stale launcher names before publishing the new package's entries.
-    fn remove_owner(&mut self, registry: &str, repository: &str) {
-        self.entries
-            .retain(|_, owner| !(owner.registry == registry && owner.repository == repository));
-    }
-}
-
 /// Outcome of [`wire_selection`] for the caller's reporting.
 #[derive(Debug, Clone)]
 pub struct WireSelectionOutcome {
@@ -342,27 +222,25 @@ pub struct WireSelectionOutcome {
     pub current: std::path::PathBuf,
 }
 
-/// Wires the per-repo `current` selection symlink for `package`, updates the
-/// per-registry entry-points ownership index atomically, and optionally writes
-/// the candidate symlink first. Both symlinks target the package root, so
-/// consumers traverse `<symlink>/content/`, `<symlink>/entrypoints/`, or
+/// Wires the per-repo `current` selection symlink for `package` and optionally
+/// writes the candidate symlink first. Both symlinks target the package root,
+/// so consumers traverse `<symlink>/content/`, `<symlink>/entrypoints/`, or
 /// `<symlink>/metadata.json` from a single anchor.
 ///
 /// Shared by [`super::install::create_install_symlinks`] and the CLI `select`
-/// command so both paths run identical lock acquisition, collision detection,
-/// and update logic.
+/// command so both paths run identical lock acquisition and symlink logic.
+/// Entrypoint name collision detection has moved to `collect_entrypoints` in
+/// `visible.rs`, called from `pull.rs` (Stage 1) and `apply_visible_packages`
+/// (Stage 2).
 ///
 /// # Lock order
 ///
-/// 1. `entrypoints_index_lock` — registry-scoped — held for the full sequence.
-/// 2. `select_lock` — repo-scoped — held only across the symlink write and
-///    rollback window. Acquired *after* (1). See module docs.
+/// Acquires the per-repo `.select.lock` before the symlink write. See module
+/// docs for the updated lock hierarchy.
 ///
 /// # Errors
 ///
-/// - [`PackageErrorKind::EntrypointNameCollision`] when any new launcher name
-///   is already owned by a different `(registry, repository)` in the index.
-/// - [`PackageErrorKind::Internal`] for I/O, JSON, or symlink failures.
+/// - [`PackageErrorKind::Internal`] for I/O or symlink failures.
 #[allow(clippy::result_large_err)]
 pub async fn wire_selection(
     fs: &file_structure::FileStructure,
@@ -392,183 +270,43 @@ pub async fn wire_selection(
         return Ok(WireSelectionOutcome { current: current_path });
     }
 
-    // Entrypoint names this package wants to publish (empty when the package
-    // declares no entrypoints or selects a version without them).
-    let new_names: Vec<String> = info
-        .metadata
-        .bundle_entrypoints()
-        .map(|eps| eps.iter().map(|e| e.name.as_str().to_string()).collect())
-        .unwrap_or_default();
-    let needs_entrypoints = !new_names.is_empty();
-
-    // Phase 1: acquire registry-index-lock. Serializes ALL select/deselect
-    // operations across every repo under the registry so collision detection
-    // and the symlink update form a single critical section.
-    let _index_guard = acquire_index_lock(fs, package.registry()).await?;
-    let index_path = fs.symlinks.entrypoints_index(package.registry());
-    let mut index = EntrypointsIndex::read(&index_path).await?;
-
-    // Phase 2: collision check against the index. Skip names this package
-    // already owns from a prior --select (idempotent re-select must not
-    // collide with itself).
-    if needs_entrypoints {
-        for name in &new_names {
-            if let Some(owner) = index.entries.get(name)
-                && !(owner.registry == package.registry() && owner.repository == package.repository())
-            {
-                let other_id = oci::Identifier::new_registry(owner.repository.clone(), owner.registry.clone());
-                return Err(PackageErrorKind::EntrypointNameCollision {
-                    name: name.clone(),
-                    existing_package: other_id,
-                });
-            }
-        }
-    }
-
-    // Phase 3: acquire the per-repo .select.lock for the symlink write.
+    // Acquire the per-repo .select.lock for the symlink write.
     let _select_guard = acquire_select_lock(fs, package).await?;
 
-    // Snapshot the pre-mutation state of every byte we are about to change so
-    // rollback can restore the registry to exactly what was on disk before the
-    // call:
-    //
-    // - the prior `current` symlink target (or absence), so it can be rewound,
-    // - the entry-points index file contents (or absence), so an index swap
-    //   that succeeds before the symlink write fails can be undone.
-    //
-    // Without the index snapshot, the previous order — symlink first, index
-    // last — would either publish stale ownership (if the index write failed
-    // after the symlink succeeded) or strand the symlink while the index
-    // claimed cross-repo ownership of the launcher set.
+    // Snapshot the prior `current` symlink target so rollback can restore it
+    // on symlink write failure.
     let prior_current_target = tokio::fs::read_link(&current_path).await.ok();
-    let prior_index_bytes: Option<Vec<u8>> = match tokio::fs::read(&index_path).await {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            return Err(PackageErrorKind::Internal(crate::error::file_error(&index_path, e)));
-        }
-    };
 
-    // Phase 4a: update + persist the index FIRST — under both locks. Writing
-    // the ownership record before the symlink ensures the only way an
-    // observer can see the new launcher set is alongside the corresponding
-    // index entry. If the symlink write fails, the index snapshot taken
-    // above is replayed so the on-disk state collapses back to pre-call.
-    index.remove_owner(package.registry(), package.repository());
-    if needs_entrypoints {
-        let owner = IndexOwner {
-            registry: package.registry().to_string(),
-            repository: package.repository().to_string(),
-            digest: info.identifier.digest().to_string(),
-        };
-        for name in new_names {
-            index.entries.insert(name, owner.clone());
-        }
-    }
-    index.write_atomic(&index_path).await?;
-
-    // Phase 4b: commit the `current` symlink. Failure here triggers a full
-    // rollback: prior symlink target (or removal) AND prior index contents
-    // are restored before the error is surfaced.
+    // Commit the `current` symlink. Failure here triggers rollback of the
+    // prior symlink target before the error is surfaced.
     log::debug!("Creating current symlink at '{}'.", current_path.display());
     if let Err(e) = rm.link(&current_path, pkg_root) {
         rollback_symlink(&rm, &current_path, prior_current_target.as_deref());
-        restore_index_snapshot(&index_path, prior_index_bytes.as_deref()).await;
         return Err(PackageErrorKind::Internal(e));
     }
 
     Ok(WireSelectionOutcome { current: current_path })
 }
 
-/// RAII guard combining the registry-scoped entry-points index lock and the
-/// per-repo `.select.lock`, in the documented acquisition order
-/// (index → select). Releases both on drop.
+/// RAII guard for the per-repo `.select.lock`. Releases on drop.
 ///
 /// Used by `deselect` / `uninstall --deselect` to hold the same critical
-/// section as [`wire_selection`] while clearing index entries and unlinking
-/// the symlink pair.
+/// section as [`wire_selection`] while unlinking the symlink pair.
 pub struct SelectionLocks {
-    /// Held first; outlives `_select` because Rust drops fields in
-    /// declaration order, ensuring release order = select → index (reverse of
-    /// acquisition) per the lock hierarchy.
-    _index: FileLock,
     _select: FileLock,
 }
 
-/// Acquires both selection locks in the documented order.
+/// Acquires the per-repo `.select.lock`.
 ///
-/// Lock order: `index_lock` → `select_lock`. The reverse risks deadlock under
-/// concurrent installs targeting different repos in the same registry.
+/// Serializes mutations of the per-repo `current` symlink across
+/// `install --select`, `deselect`, and `uninstall --deselect`.
 #[allow(clippy::result_large_err)]
 pub async fn acquire_selection_locks(
     fs: &file_structure::FileStructure,
     package: &oci::Identifier,
 ) -> Result<SelectionLocks, PackageErrorKind> {
-    let index = acquire_index_lock(fs, package.registry()).await?;
     let select = acquire_select_lock(fs, package).await?;
-    Ok(SelectionLocks {
-        _index: index,
-        _select: select,
-    })
-}
-
-/// Removes every index entry owned by `package` and writes the index back
-/// atomically when changes occur. Caller MUST hold the registry index lock.
-///
-/// No-op when the index file does not exist or no entries match.
-#[allow(clippy::result_large_err)]
-pub async fn clear_index_owner(
-    fs: &file_structure::FileStructure,
-    package: &oci::Identifier,
-) -> Result<(), PackageErrorKind> {
-    let index_path = fs.symlinks.entrypoints_index(package.registry());
-    if !tokio::fs::try_exists(&index_path).await.unwrap_or(false) {
-        return Ok(());
-    }
-    let mut index = EntrypointsIndex::read(&index_path).await?;
-    let before = index.entries.len();
-    index.remove_owner(package.registry(), package.repository());
-    if index.entries.len() != before {
-        index.write_atomic(&index_path).await?;
-    }
-    Ok(())
-}
-
-/// Restores the entry-points index file to its pre-mutation state.
-///
-/// `prior_bytes = None` indicates the index did not exist before the critical
-/// section opened — restore by removing the file. `Some(bytes)` indicates a
-/// pre-existing index whose contents must be re-materialised verbatim. Either
-/// way, the on-disk index is collapsed back to what was observed under the
-/// registry-index lock at the start of the operation, regardless of whatever
-/// in-memory swap the caller had already attempted.
-///
-/// Rollback failures are logged but never propagated: the caller already has
-/// a real error to surface, and a secondary failure in cleanup would only
-/// obscure the root cause.
-pub(super) async fn restore_index_snapshot(index_path: &Path, prior_bytes: Option<&[u8]>) {
-    match prior_bytes {
-        Some(bytes) => {
-            if let Err(rollback_err) = tokio::fs::write(index_path, bytes).await {
-                log::warn!(
-                    "Failed to roll back entry-points index at '{}': {}",
-                    index_path.display(),
-                    rollback_err,
-                );
-            }
-        }
-        None => match tokio::fs::remove_file(index_path).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(rollback_err) => {
-                log::warn!(
-                    "Failed to roll back (remove) entry-points index at '{}': {}",
-                    index_path.display(),
-                    rollback_err,
-                );
-            }
-        },
-    }
+    Ok(SelectionLocks { _select: select })
 }
 
 /// Restores a symlink to its prior state after a partial-select failure.
@@ -625,7 +363,7 @@ mod tests {
     use crate::file_structure::{FileStructure, PackageStore};
     use crate::oci;
     use crate::package::resolved_package::ResolvedPackage;
-    use crate::prelude::SerdeExt;
+    use crate::prelude::SerdeExt as _;
 
     /// Writes valid + resolve.json under a fake content path, then writes a
     /// metadata.json that references an undeclared dep — `load_object_data`
@@ -737,136 +475,5 @@ mod tests {
         .await
         .expect("distinct-repo acquire timed out — locks are not per-repo")
         .expect("distinct-repo acquire failed");
-    }
-
-    /// `EntrypointsIndex::default()` must yield `schema_version = 1` so the
-    /// missing-file path in [`super::wire_selection`] persists the documented
-    /// schema on first write — the prior `#[derive(Default)]` emitted `0`,
-    /// silently shipping pre-spec metadata to disk.
-    #[test]
-    fn entrypoints_index_default_pins_schema_version_to_one() {
-        let idx = super::EntrypointsIndex::default();
-        assert_eq!(
-            idx.schema_version, 1,
-            "Default must seed schema_version with the documented contract value"
-        );
-        assert!(idx.entries.is_empty(), "Default must start with no ownership entries");
-    }
-
-    /// Round-trips a freshly-created index file through the same I/O path
-    /// `wire_selection` uses: `read` (returns `Default` when absent) →
-    /// `write_atomic` → re-parse from disk. The persisted JSON must declare
-    /// `schema_version: 1`. Locks down the contract Codex Warn 1 flagged.
-    #[tokio::test]
-    async fn freshly_created_index_file_persists_schema_version_one() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
-        let registry = "example.com";
-        let index_path = fs.symlinks.entrypoints_index(registry);
-        // Sanity: registry has no index yet — exercises the missing-file branch.
-        assert!(
-            !tokio::fs::try_exists(&index_path).await.unwrap(),
-            "test precondition: no pre-existing index"
-        );
-
-        let idx = super::EntrypointsIndex::read(&index_path)
-            .await
-            .expect("read missing index");
-        idx.write_atomic(&index_path).await.expect("write fresh index");
-
-        let bytes = tokio::fs::read(&index_path).await.expect("read written index");
-        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse index json");
-        assert_eq!(
-            json.get("schema_version").and_then(|v| v.as_u64()),
-            Some(1),
-            "freshly-written index file must declare schema_version=1, got {bytes:?}",
-            bytes = String::from_utf8_lossy(&bytes),
-        );
-    }
-
-    /// `wire_selection` must roll the entry-points index back to its
-    /// pre-call contents when symlink commit fails. We force a symlink write
-    /// failure by handing `wire_selection` a content path whose
-    /// `<parent>/refs/symlinks/` directory does not exist and cannot be
-    /// created (parent points at a *file* instead of a directory) —
-    /// `ReferenceManager::link` then fails when it tries to create the
-    /// back-reference, after the index swap has already landed on disk.
-    /// Post-error, the index file must byte-match the snapshot taken before
-    /// the call, including the absence of the new launcher entry.
-    #[tokio::test]
-    async fn wire_selection_rolls_back_index_on_symlink_failure() {
-        use crate::package::install_info::InstallInfo;
-        use crate::package::metadata::Metadata;
-        use crate::package::resolved_package::ResolvedPackage;
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dunce::canonicalize(dir.path()).unwrap();
-        let fs = FileStructure::with_root(root.clone());
-
-        // Seed the index with an unrelated entry so we can later prove the
-        // file was not just deleted but truly restored to its prior bytes.
-        let registry = "example.com";
-        let index_path = fs.symlinks.entrypoints_index(registry);
-        let seeded = r#"{"schema_version":1,"entries":{"unrelated":{"registry":"example.com","repository":"other/pkg","digest":"sha256:00"}}}"#;
-        if let Some(parent) = index_path.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
-        tokio::fs::write(&index_path, seeded).await.unwrap();
-        let snapshot_before = tokio::fs::read(&index_path).await.unwrap();
-
-        // Build a content path whose parent (the would-be package dir) is a
-        // FILE, not a directory. `ReferenceManager::link` calls
-        // `create_dir_all` on `<parent>/refs/symlinks/` and that fails with
-        // `NotADirectory`, surfacing as the wire_selection symlink commit
-        // error after the index write has already happened.
-        let pkg_parent = root.join("packages").join("reg").join("sha256");
-        std::fs::create_dir_all(&pkg_parent).unwrap();
-        let pkg_dir_as_file = pkg_parent.join("ab1234567890abcdef1234567890abcd");
-        std::fs::write(&pkg_dir_as_file, b"poison").unwrap();
-        let content_path = pkg_dir_as_file.join("content");
-
-        let id = oci::Identifier::new_registry("myorg/cmake", registry)
-            .clone_with_digest(oci::Digest::Sha256("a".repeat(64)));
-        let pinned = oci::PinnedIdentifier::try_from(id.clone()).unwrap();
-        let json = serde_json::json!({
-            "type": "bundle",
-            "version": 1,
-            "entrypoints": [{"name": "cmake", "target": "${installPath}/bin/cmake"}],
-        })
-        .to_string();
-        let metadata: Metadata = serde_json::from_str(&json).unwrap();
-        let info = InstallInfo {
-            identifier: pinned.clone(),
-            metadata,
-            resolved: ResolvedPackage::new(),
-            content: content_path,
-        };
-        let pkg_id: oci::Identifier = pinned.into();
-
-        let result = super::wire_selection(&fs, &pkg_id, &info, false, true).await;
-        assert!(
-            result.is_err(),
-            "test precondition: poisoned content path must produce a symlink commit failure"
-        );
-
-        // Index file must be byte-identical to the pre-call snapshot.
-        let snapshot_after = tokio::fs::read(&index_path).await.expect("index restored on rollback");
-        assert_eq!(
-            snapshot_after, snapshot_before,
-            "wire_selection must restore the entry-points index byte-for-byte after a symlink commit failure"
-        );
-
-        // And the new entry must NOT be visible — proves the rollback covers
-        // the in-flight ownership change, not just the file's existence.
-        let parsed: super::EntrypointsIndex = serde_json::from_slice(&snapshot_after).unwrap();
-        assert!(
-            !parsed.entries.contains_key("cmake"),
-            "rolled-back index must not contain the launcher name from the failed call"
-        );
-        assert!(
-            parsed.entries.contains_key("unrelated"),
-            "rolled-back index must preserve unrelated entries: {entries:?}",
-            entries = parsed.entries.keys().collect::<Vec<_>>(),
-        );
     }
 }

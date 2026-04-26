@@ -100,6 +100,26 @@ impl From<crate::package::error::Error> for Error {
     }
 }
 
+impl From<crate::package_manager::error::PackageErrorKind> for Error {
+    fn from(kind: crate::package_manager::error::PackageErrorKind) -> Self {
+        use crate::package_manager::error::PackageErrorKind;
+        match kind {
+            PackageErrorKind::Internal(e) => e,
+            other => {
+                // Wrap non-internal kinds in a single-entry ResolveFailed batch.
+                // The error message is preserved via `PackageError::Display`.
+                let batch_err = crate::package_manager::error::Error::ResolveFailed(vec![
+                    crate::package_manager::error::PackageError::new(
+                        crate::oci::Identifier::new_registry("", ""),
+                        other,
+                    ),
+                ]);
+                Error::PackageManager(batch_err)
+            }
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn file_error(path: impl AsRef<std::path::Path>, error: std::io::Error) -> Error {

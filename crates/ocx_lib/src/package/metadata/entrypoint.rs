@@ -12,7 +12,7 @@ use super::slug::{SLUG_MAX_LEN, SLUG_PATTERN, SLUG_PATTERN_STR};
 /// Must match `^[a-z0-9][a-z0-9_-]*$` and be at most
 /// [`EntrypointName::MAX_LEN`] bytes. Enforced at construction and
 /// deserialization.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct EntrypointName(String);
 

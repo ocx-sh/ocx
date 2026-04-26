@@ -94,32 +94,8 @@ impl SymlinkStore {
     }
 
     /// Returns the per-registry directory: `{root}/{registry_slug}/`.
-    ///
-    /// Used by the entry-points index file and lock, which live one level
-    /// above the per-repo `current` symlinks.
     pub fn registry_dir(&self, registry: &str) -> PathBuf {
         self.root.join(super::slugify(registry))
-    }
-
-    /// Returns the per-registry entry-points index file path:
-    /// `{root}/{registry_slug}/.entrypoints-index.json`.
-    ///
-    /// The index is the canonical source of truth for "which currently-selected
-    /// package owns launcher name X across all repos under this registry."
-    /// Mediates collision detection across repos under a single registry.
-    pub fn entrypoints_index(&self, registry: &str) -> PathBuf {
-        self.registry_dir(registry).join(".entrypoints-index.json")
-    }
-
-    /// Returns the per-registry entry-points index lock path:
-    /// `{root}/{registry_slug}/.entrypoints-index.lock`.
-    ///
-    /// The index lock is a coarser lock than `.select.lock`: it serializes the
-    /// full read → collision-check → atomic-pair-update → index-write sequence
-    /// across all repos in a registry. Lock order MUST be `index_lock` →
-    /// `select_lock`; the reverse risks deadlock under concurrent installs.
-    pub fn entrypoints_index_lock(&self, registry: &str) -> PathBuf {
-        self.registry_dir(registry).join(".entrypoints-index.lock")
     }
 }
 

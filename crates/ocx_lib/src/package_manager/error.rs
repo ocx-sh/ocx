@@ -3,6 +3,7 @@
 
 use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
+use crate::package::metadata::entrypoint::EntrypointName;
 use crate::{file_structure, oci};
 
 /// Task-level error for package manager operations.
@@ -118,19 +119,16 @@ pub enum PackageErrorKind {
     /// The identifier has no digest after resolution.
     #[error("identifier has no digest after resolution")]
     DigestMissing,
-    /// An entrypoint name collision was detected at select time.
+    /// An entrypoint name collision was detected in the visible closure.
     ///
-    /// Raised when the package being selected declares an entrypoint `name` that
-    /// is already owned by `existing_package` (another currently-selected package
-    /// in a different repository). The user must deselect the other package first,
-    /// or ask the publisher to rename the conflicting entrypoint.
-    #[error(
-        "entrypoint '{name}' conflicts with installed package {existing_package}; \
-         deselect {existing_package} first or ask the publisher to rename the entrypoint"
-    )]
+    /// Raised when two packages in the same visible closure (at install time or
+    /// at consumption time) declare the same entrypoint `name`. The `first`
+    /// identifier is the prior owner; `second` is the conflicting package.
+    #[error("entrypoint name collision: '{name}' provided by both '{first}' and '{second}'")]
     EntrypointNameCollision {
-        name: String,
-        existing_package: oci::Identifier,
+        name: EntrypointName,
+        first: oci::PinnedIdentifier,
+        second: oci::PinnedIdentifier,
     },
 
     /// An underlying internal error (I/O, OCI, network, etc.).

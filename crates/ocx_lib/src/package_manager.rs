@@ -4,6 +4,7 @@
 pub mod entrypoints;
 pub mod error;
 pub mod package_ref;
+pub mod visible;
 
 mod tasks;
 

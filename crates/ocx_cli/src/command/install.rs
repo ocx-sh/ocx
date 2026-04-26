@@ -7,7 +7,11 @@ use clap::Parser;
 
 use ocx_lib::{log, oci};
 
-use crate::{api, conventions::platforms_or_default, options};
+use crate::{
+    api,
+    conventions::{platforms_or_default, warn_if_pathext_missing_launcher},
+    options,
+};
 
 #[derive(Parser, Clone)]
 pub struct Install {
@@ -25,6 +29,7 @@ pub struct Install {
 
 impl Install {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        warn_if_pathext_missing_launcher();
         let oci_packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         log::info!(
             "Installing packages: {}",

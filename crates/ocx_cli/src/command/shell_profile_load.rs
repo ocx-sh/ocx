@@ -8,6 +8,8 @@ use ocx_lib::{
     log::*, package::install_info::InstallInfo, package::metadata::env::modifier::ModifierKind, shell, symlink,
 };
 
+use crate::conventions::warn_if_pathext_missing_launcher;
+
 /// Output shell export statements for all profiled packages.
 ///
 /// Reads `$OCX_HOME/profile.json` and emits shell-specific export lines for
@@ -25,6 +27,7 @@ pub struct ShellProfileLoad {
 
 impl ShellProfileLoad {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        warn_if_pathext_missing_launcher();
         let detected_shell = match self.shell {
             Some(s) => s,
             None => {

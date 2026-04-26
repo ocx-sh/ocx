@@ -45,6 +45,33 @@ pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
     }
 }
 
+/// Emits a `tracing::warn!` on Windows when the current process `PATHEXT`
+/// does not include the OCX launcher extension (`.cmd`).
+///
+/// Called at the start of commands whose env output is **consumed outside
+/// `ocx exec`**: `install`, `select`, `shell env`, `ci export`,
+/// `shell profile load`. Those commands emit paths that include `.cmd`
+/// launchers in `entrypoints/`; if `PATHEXT` lacks `.cmd` the launchers will
+/// not be found by the parent shell.
+///
+/// The warning fires per command invocation regardless of whether the packages
+/// involved actually declare entrypoints — inspecting metadata at this point
+/// would require an extra async round-trip and is intentionally avoided.
+///
+/// On non-Windows platforms this function is a no-op.
+pub fn warn_if_pathext_missing_launcher() {
+    #[cfg(target_os = "windows")]
+    {
+        let current_pathext = std::env::var("PATHEXT").unwrap_or_default();
+        if !ocx_lib::env::pathext_includes_launcher(&current_pathext) {
+            tracing::warn!(
+                "entrypoint launchers require .cmd in PATHEXT; current PATHEXT lacks it. \
+                 add \".CMD\" to PATHEXT for entrypoints to launch correctly outside ocx exec."
+            );
+        }
+    }
+}
+
 /// Resolves packages using either symlink-based or platform-based lookup.
 ///
 /// When `content_path` specifies a symlink kind (candidate/current), packages

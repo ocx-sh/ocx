@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tokio::task::JoinSet;
 use tracing::{Instrument, info_span};
@@ -10,7 +11,7 @@ use crate::{
     oci,
     oci::index::SelectResult,
     package::install_info::InstallInfo,
-    package_manager::{self, error::PackageError, error::PackageErrorKind},
+    package_manager::{self, error::PackageError, error::PackageErrorKind, visible},
 };
 
 use super::super::PackageManager;
@@ -206,114 +207,21 @@ impl PackageManager {
     ///
     /// Detects conflicts: if the same `registry/repo` appears with different
     /// digests across the requested packages, an error is returned.
+    ///
+    /// Delegates to the two-phase pipeline in `visible.rs`:
+    /// Phase A — `import_visible_packages` — builds the ordered visible set.
+    /// Phase B — `apply_visible_packages` — emits env entries in order.
     pub async fn resolve_env(
         &self,
         packages: &[InstallInfo],
     ) -> crate::Result<Vec<crate::package::metadata::env::exporter::Entry>> {
-        use crate::package::metadata::env::accumulator::DependencyContext;
         let objects = &self.file_structure().packages;
-        let mut seen_digests = HashSet::new();
-        let mut seen_repos: HashMap<oci::Repository, oci::Digest> = HashMap::new();
-        let mut entries = Vec::new();
-
-        for pkg in packages {
-            // Build a (registry, repository) → resolved identifier map for content path lookups.
-            // Metadata dep identifiers may carry image-index digests; resolved identifiers carry
-            // the platform-manifest digest at which the package is actually installed on disk.
-            let resolved_id_map: std::collections::HashMap<(String, String), &oci::PinnedIdentifier> = pkg
-                .resolved
-                .dependencies
-                .iter()
-                .map(|dep| {
-                    let key = (
-                        dep.identifier.registry().to_string(),
-                        dep.identifier.repository().to_string(),
-                    );
-                    (key, &dep.identifier)
-                })
-                .collect();
-
-            // Build dep_contexts for this root package: all direct deps (no visibility filter).
-            // Visibility controls env propagation (is_visible() below); interpolation scope
-            // includes all declared deps — these two filters are independent.
-            //
-            // Collision (two deps sharing the same .name()) is detected at publish time by
-            // validate_env_dep_refs and prevents publishing. At runtime, packages with colliding
-            // basenames and ${deps.*} tokens cannot exist; packages without such tokens never
-            // trigger the interpolation path. So last-writer-wins from .collect() is safe.
-            let dep_contexts: std::collections::HashMap<
-                crate::package::metadata::dependency::DependencyName,
-                DependencyContext,
-            > = pkg
-                .metadata
-                .dependencies()
-                .iter()
-                .map(|dep| {
-                    let name = dep.name();
-                    // Use the resolved identifier (platform-manifest digest) when available so
-                    // objects.content() points to the actual on-disk location.
-                    let key = (
-                        dep.identifier.registry().to_string(),
-                        dep.identifier.repository().to_string(),
-                    );
-                    let install_id = resolved_id_map.get(&key).copied().unwrap_or(&dep.identifier);
-                    let install_path = objects.content(install_id);
-                    (name, DependencyContext::sentinel(install_id.clone(), install_path))
-                })
-                .collect();
-
-            // Visible transitive deps first (topological order preserved).
-            // Root packages are direct exec targets — include self-visible
-            // (Private, Public) and consumer-visible (Public, Interface) deps.
-            for dep in &pkg.resolved.dependencies {
-                if !dep.visibility.is_visible() {
-                    continue;
-                }
-                if !check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)? {
-                    continue;
-                }
-                let content = objects.content(&dep.identifier);
-                let (dep_metadata, dep_resolved) = super::common::load_object_data(objects, &content).await?;
-                // Build dep's own direct-dep context map (scoped to dep's declared deps, not root's).
-                // Each package's interpolation surface is only its own direct deps.
-                // Use dep's OWN resolved closure for digest translation (metadata deps carry
-                // image-index digests; dep's resolve.json carries platform-manifest digests).
-                let dep_resolved_id_map: std::collections::HashMap<(String, String), &oci::PinnedIdentifier> =
-                    dep_resolved
-                        .dependencies
-                        .iter()
-                        .map(|d| {
-                            let key = (
-                                d.identifier.registry().to_string(),
-                                d.identifier.repository().to_string(),
-                            );
-                            (key, &d.identifier)
-                        })
-                        .collect();
-                let dep_dep_contexts: std::collections::HashMap<
-                    crate::package::metadata::dependency::DependencyName,
-                    DependencyContext,
-                > = dep_metadata
-                    .dependencies()
-                    .iter()
-                    .map(|d| {
-                        let n = d.name();
-                        let key = (
-                            d.identifier.registry().to_string(),
-                            d.identifier.repository().to_string(),
-                        );
-                        let install_id = dep_resolved_id_map.get(&key).copied().unwrap_or(&d.identifier);
-                        let p = objects.content(install_id);
-                        (n, DependencyContext::sentinel(install_id.clone(), p))
-                    })
-                    .collect();
-                super::common::export_env(&content, &dep_metadata, dep_dep_contexts, &mut entries)?;
-            }
-            // Then the root package itself, using root's direct dep contexts.
-            if check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)? {
-                super::common::export_env(&pkg.content, &pkg.metadata, dep_contexts, &mut entries)?;
-            }
-        }
+        let roots: Vec<Arc<InstallInfo>> = packages.iter().map(|p| Arc::new(p.clone())).collect();
+        let visible = visible::import_visible_packages(objects, &roots).await?;
+        // Discard the entrypoints map — `resolve_env` is an env-only consumer.
+        // Future consumers (`ocx exec`, `ocx env`) will surface the map or
+        // fail-fast on collisions.
+        let (entries, _entrypoints) = visible::apply_visible_packages(&visible).map_err(crate::Error::from)?;
         Ok(entries)
     }
 
