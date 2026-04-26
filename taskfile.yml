@@ -110,6 +110,14 @@ tasks:
     cmds:
       - task: .verify:lint
       - task: .verify:build-test
+      - task: .verify:mark
+
+  .verify:mark:
+    internal: true
+    desc: Mark commit-verified state for the pre-commit hook.
+    cmds:
+      - mkdir -p {{.ROOT_DIR}}/.claude/hooks/.state
+      - date +%s > {{.ROOT_DIR}}/.claude/hooks/.state/commit-verified
 
   .verify:lint:
     internal: true
