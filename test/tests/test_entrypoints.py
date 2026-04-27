@@ -581,3 +581,103 @@ def test_install_intra_closure_collision_aborts_before_candidate_symlink(
         f"pkg_b candidate symlink must not be created after Stage 1 collision; "
         f"found at {candidate_b}"
     )
+
+
+def test_install_transitive_closure_collision_aborts_before_disk(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Stage 1 transitive-closure collision must abort install and leave no candidate symlink.
+
+    Setup: root depends on A and B (both public). A depends on C (public) which
+    declares entrypoint `cmake`. B depends on D (public) which also declares
+    entrypoint `cmake`. Neither A nor B declares the entrypoint — the collision
+    is only visible when the full transitive closure of root is checked.
+
+    The Stage 1 check in pull.rs uses `import_visible_packages` which walks the
+    complete reachable set from root. It must detect the duplicate `cmake` name
+    across C and D and abort before the temp→final atomic move — i.e. before the
+    root candidate symlink is written to disk.
+    """
+    from src.registry import fetch_manifest_digest  # noqa: PLC0415
+    from src.runner import registry_dir  # noqa: PLC0415
+
+    repo_c = f"{unique_repo}-tc"
+    repo_d = f"{unique_repo}-td"
+    repo_a = f"{unique_repo}-ta"
+    repo_b = f"{unique_repo}-tb"
+    repo_root = f"{unique_repo}-tr"
+
+    # C — leaf with `cmake` entrypoint.
+    pkg_c = make_package_with_entrypoints(
+        ocx, repo_c, tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="c",
+    )
+    c_digest = fetch_manifest_digest(ocx.registry, repo_c, "1.0.0")
+
+    # D — leaf with conflicting `cmake` entrypoint.
+    pkg_d = make_package_with_entrypoints(
+        ocx, repo_d, tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="d",
+    )
+    d_digest = fetch_manifest_digest(ocx.registry, repo_d, "1.0.0")
+
+    # A — intermediate, no entrypoint, depends publicly on C.
+    c_dep_entry = {
+        "identifier": f"{pkg_c.fq}@{c_digest}",
+        "visibility": "public",
+    }
+    pkg_a = make_package(
+        ocx, repo_a, "1.0.0", tmp_path,
+        dependencies=[c_dep_entry],
+    )
+    a_digest = fetch_manifest_digest(ocx.registry, repo_a, "1.0.0")
+
+    # B — intermediate, no entrypoint, depends publicly on D.
+    d_dep_entry = {
+        "identifier": f"{pkg_d.fq}@{d_digest}",
+        "visibility": "public",
+    }
+    pkg_b = make_package(
+        ocx, repo_b, "1.0.0", tmp_path,
+        dependencies=[d_dep_entry],
+    )
+    b_digest = fetch_manifest_digest(ocx.registry, repo_b, "1.0.0")
+
+    # root — depends publicly on A and B; no entrypoint of its own.
+    a_dep_entry = {
+        "identifier": f"{pkg_a.fq}@{a_digest}",
+        "visibility": "public",
+    }
+    b_dep_entry = {
+        "identifier": f"{pkg_b.fq}@{b_digest}",
+        "visibility": "public",
+    }
+    pkg_root = make_package(
+        ocx, repo_root, "1.0.0", tmp_path,
+        dependencies=[a_dep_entry, b_dep_entry],
+    )
+
+    result = ocx.run("install", "--select", pkg_root.short, check=False)
+    assert result.returncode == 65, (
+        f"install --select with transitive collision must exit 65 (DataError); "
+        f"got rc={result.returncode}, stderr={result.stderr.strip()!r}"
+    )
+    assert "cmake" in result.stderr, (
+        f"error must cite the colliding entrypoint name 'cmake'; "
+        f"stderr={result.stderr.strip()!r}"
+    )
+
+    reg = registry_dir(ocx.registry)
+    candidate_root = (
+        Path(str(ocx.ocx_home)) / "symlinks" / reg / pkg_root.repo / "candidates" / "1.0.0"
+    )
+    assert not candidate_root.exists() and not candidate_root.is_symlink(), (
+        f"root candidate symlink must not be created after transitive Stage 1 collision; "
+        f"found at {candidate_root}"
+    )

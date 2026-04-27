@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
+from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 
 
@@ -159,4 +161,66 @@ def test_exec_file_uri_produces_same_env_as_identifier_mode(
         f"file:// mode must produce same PATH as identifier mode;\n"
         f"identifier: {id_result.stdout.strip()!r}\n"
         f"file://:   {file_result.stdout.strip()!r}"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="printenv is POSIX-only")
+def test_exec_two_file_uri_packages_both_env_vars_visible(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """`ocx exec file://A file://B -- printenv` exposes env from both packages.
+
+    Each package declares a unique constant env var.  Using two `file://` URIs
+    in the same invocation must expose both vars, proving that the two roots
+    receive distinct synthetic OCI identifiers and do not collapse in the
+    dedup map.
+    """
+    uid = uuid4().hex[:8]
+    repo_a = f"t_{uid}_file_exec_a"
+    repo_b = f"t_{uid}_file_exec_b"
+    env_key_a = "OCX_TEST_FILE_EXEC_A"
+    env_key_b = "OCX_TEST_FILE_EXEC_B"
+
+    pkg_a = make_package(
+        ocx,
+        repo_a,
+        "1.0.0",
+        tmp_path,
+        env=[{"key": env_key_a, "type": "constant", "value": "value_a"}],
+    )
+    pkg_b = make_package(
+        ocx,
+        repo_b,
+        "1.0.0",
+        tmp_path,
+        env=[{"key": env_key_b, "type": "constant", "value": "value_b"}],
+    )
+
+    ocx.plain("install", pkg_a.short)
+    ocx.plain("install", pkg_b.short)
+
+    result_a = ocx.json("find", pkg_a.short)
+    result_b = ocx.json("find", pkg_b.short)
+    path_a = result_a.get(pkg_a.short) if isinstance(result_a, dict) else None
+    path_b = result_b.get(pkg_b.short) if isinstance(result_b, dict) else None
+    assert path_a and path_b, "both packages must be findable after install"
+
+    root_a = Path(path_a).parent
+    root_b = Path(path_b).parent
+
+    result = ocx.run(
+        "exec", f"file://{root_a}", f"file://{root_b}", "--", "printenv",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"exec with two file:// URIs must succeed; "
+        f"rc={result.returncode}, stderr={result.stderr.strip()}"
+    )
+    assert env_key_a in result.stdout, (
+        f"env var from package A ({env_key_a}) must appear in printenv output;\n"
+        f"stdout={result.stdout!r}"
+    )
+    assert env_key_b in result.stdout, (
+        f"env var from package B ({env_key_b}) must appear in printenv output;\n"
+        f"stdout={result.stdout!r}"
     )

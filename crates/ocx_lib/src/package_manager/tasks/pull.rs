@@ -14,7 +14,7 @@ use crate::{
     package_manager::{
         self,
         error::{PackageError, PackageErrorKind},
-        visible::{ImportScope, VisiblePackage, collect_entrypoints},
+        visible::{collect_entrypoints, import_visible_packages},
     },
     prelude::SerdeExt,
     utility::{self, singleflight},
@@ -395,48 +395,25 @@ async fn setup_owned(
             .map(|(decl, info)| (info.identifier.clone(), info.resolved.clone(), decl.visibility)),
     );
 
-    // Stage 1 entrypoint collision check — runs against the just-resolved
+    // Stage 1 entrypoint collision check — runs against the full transitive
     // closure, before `resolve.json` is persisted. Catches intra-closure
     // duplicate launcher names at install time so the bad state never reaches
-    // disk. We build a thin visible slice (visible deps + root) using the
-    // already-fetched in-memory data — no extra disk I/O.
+    // disk. `import_visible_packages` loads each transitive dep's on-disk
+    // metadata (already installed by `setup_dependencies`) and applies the
+    // same visibility filter as Phase A of the env pipeline, so the collision
+    // check covers the complete reachable set — not just direct deps.
     {
-        use crate::package::metadata::visibility::Visibility;
         use std::sync::Arc;
 
-        let mut visible_for_check: Vec<VisiblePackage> = Vec::with_capacity(dependencies.len() + 1);
-
-        // Visible transitive deps (same visibility filter as Phase A).
-        for (decl, dep_info) in metadata.dependencies().iter().zip(dependencies.iter()) {
-            if !decl.visibility.is_visible() {
-                continue;
-            }
-            visible_for_check.push(VisiblePackage {
-                install_info: Arc::new(dep_info.clone()),
-                scope: ImportScope {
-                    visibility: decl.visibility,
-                    is_root: false,
-                    dep_contexts: std::collections::HashMap::new(),
-                },
-            });
-        }
-
-        // The root package being installed.
         let root_info = InstallInfo {
             identifier: pinned.clone(),
             metadata: metadata.clone(),
             resolved: resolved_package.clone(),
             content: pkg.content(),
         };
-        visible_for_check.push(VisiblePackage {
-            install_info: Arc::new(root_info),
-            scope: ImportScope {
-                visibility: Visibility::Public,
-                is_root: true,
-                dep_contexts: std::collections::HashMap::new(),
-            },
-        });
-
+        let visible_for_check = import_visible_packages(&fs.packages, &[Arc::new(root_info)])
+            .await
+            .map_err(PackageErrorKind::Internal)?;
         collect_entrypoints(&visible_for_check)?;
     }
 

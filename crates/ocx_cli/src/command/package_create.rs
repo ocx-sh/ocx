@@ -39,7 +39,9 @@ impl PackageCreate {
         let identifier = options::Identifier::transform_optional(self.identifier.clone(), context.default_registry())?;
         let output = match &self.output {
             Some(output) => {
-                if output.is_dir() || output.ends_with("/") {
+                let is_dir =
+                    output.ends_with("/") || tokio::fs::metadata(output).await.map(|m| m.is_dir()).unwrap_or(false);
+                if is_dir {
                     output.join(self.infer_filename(&identifier))
                 } else {
                     output.clone()
@@ -48,14 +50,14 @@ impl PackageCreate {
             None => self.infer_filename(&identifier).into(),
         };
 
-        if output.exists() && !self.force {
+        if tokio::fs::try_exists(&output).await? && !self.force {
             anyhow::bail!(
                 "Output file {} already exists. Use --force to overwrite.",
                 output.display()
             );
         }
         if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
         let compression_options =
             compression::CompressionOptions::from_level(self.compression_level.into()).with_threads(self.threads);
@@ -78,7 +80,7 @@ impl PackageCreate {
             let metadata = package::metadata::Metadata::read_json(metadata_source.as_path()).await?;
             package::metadata::ValidMetadata::try_from(metadata)?;
             let metadata_target = crate::conventions::infer_metadata_file(&output)?;
-            std::fs::copy(metadata_source, &metadata_target)?;
+            tokio::fs::copy(metadata_source, &metadata_target).await?;
         }
 
         Ok(ExitCode::SUCCESS)

@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Pulled layer blobs are verified against the claimed digest before extraction; mismatched blobs are deleted and fail the pull with a clear error. *(oci)*
+- Hardened the Windows `.cmd` launcher template by adding `DisableDelayedExpansion` to the `SETLOCAL` directive to mitigate registry-level `!`-expansion vectors when forwarding untrusted argv (`BatBadBut` interim mitigation). The `%*` parameter remains unescaped at the `.cmd` level — see `.claude/artifacts/adr_windows_cmd_argv_injection.md` for the threat model and tracked compiled-shim follow-up. *(package)*
 
 ## [0.2.1] - 2026-03-24
 

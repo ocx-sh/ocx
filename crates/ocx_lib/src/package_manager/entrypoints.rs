@@ -135,15 +135,25 @@ fn unix_launcher_body(pkg_root: &LauncherSafeString) -> String {
 /// `metadata.json` from that root and resolves the target via env
 /// interpolation at invocation time.
 ///
+/// `SETLOCAL DisableDelayedExpansion` closes the registry-level `!VAR!`
+/// expansion vector (BatBadBut interim mitigation, ADR
+/// `adr_windows_cmd_argv_injection.md`). Residual risk: caller-supplied
+/// arguments forwarded via `%*` are still re-parsed by `cmd.exe`; callers
+/// passing user-controlled argument strings must shell-quote them.
+///
 /// Inputs are pre-validated [`LauncherSafeString`]s — see [`unix_launcher_body`].
 fn windows_launcher_body(pkg_root: &LauncherSafeString) -> String {
     let pkg_root = pkg_root.as_str();
     // `%~n0` expands to the script's filename without path or extension —
     // identical role to Unix `$(basename "$0")`. ADR §6 invariant preserved:
     // nothing from `target` is baked.
+    // `DisableDelayedExpansion`: closes the `!VAR!` expansion vector that is
+    // active when the Windows registry key
+    // `HKCU\Software\Microsoft\Command Processor\DelayedExpansion` is set to
+    // `1`. See ADR `adr_windows_cmd_argv_injection.md` for threat model.
     format!(
         "@ECHO off\n\
-         SETLOCAL\n\
+         SETLOCAL DisableDelayedExpansion\n\
          ocx exec \"file://{pkg_root}\" -- \"%~n0\" %*\n"
     )
 }
@@ -208,7 +218,10 @@ mod tests {
             body.contains("@ECHO off") || body.contains("@echo off"),
             "must have ECHO off: {body}"
         );
-        assert!(body.contains("SETLOCAL"), "must have SETLOCAL: {body}");
+        assert!(
+            body.contains("SETLOCAL DisableDelayedExpansion"),
+            "must have SETLOCAL DisableDelayedExpansion (BatBadBut interim mitigation): {body}"
+        );
         assert!(
             body.contains("ocx exec \"file://C:\\pkg\\root\""),
             "must inline file:// URI for the package root: {body}"
@@ -315,16 +328,25 @@ mod tests {
 
     /// Windows launcher mirrors ADR §6 — no `_target` SET. `%~n0` injects
     /// the script's name without extension as first positional, then `%*`
-    /// forwards user args.
+    /// forwards user args. `DisableDelayedExpansion` closes the `!VAR!`
+    /// vector (BatBadBut interim mitigation — ADR `adr_windows_cmd_argv_injection.md`).
     #[test]
     fn windows_launcher_body_byte_exact_match_adr_form() {
         let body = super::windows_launcher_body(&safe("C:\\pkg\\root"));
         let expected = "@ECHO off\n\
-                        SETLOCAL\n\
+                        SETLOCAL DisableDelayedExpansion\n\
                         ocx exec \"file://C:\\pkg\\root\" -- \"%~n0\" %*\n";
         assert_eq!(
             body, expected,
             "Windows launcher must match the ADR §6 byte-exact form (file:// URI; no `_target` SET; uses %~n0)",
+        );
+        assert!(
+            body.contains("SETLOCAL DisableDelayedExpansion"),
+            "launcher must use SETLOCAL DisableDelayedExpansion (BatBadBut interim mitigation): {body}"
+        );
+        assert!(
+            !body.contains("EnableDelayedExpansion"),
+            "template must not enable delayed expansion: {body}"
         );
     }
 

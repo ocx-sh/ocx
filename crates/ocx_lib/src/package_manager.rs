@@ -78,6 +78,114 @@ mod resolve_env_package_root_tests {
     }
 }
 
+#[cfg(test)]
+mod install_info_identifier_tests {
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    use crate::{
+        file_structure::{BlobStore, FileStructure, TagStore},
+        oci::index::{ChainMode, Index, LocalConfig, LocalIndex},
+    };
+
+    fn make_test_manager(ocx_home: &Path) -> super::PackageManager {
+        let fs = FileStructure::with_root(ocx_home.to_path_buf());
+        let local_index = LocalIndex::new(LocalConfig {
+            tag_store: TagStore::new(ocx_home.join("tags")),
+            blob_store: BlobStore::new(ocx_home.join("blobs")),
+        });
+        let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
+        super::PackageManager::new(fs, index, None, "localhost:5000")
+    }
+
+    /// Write the minimal set of files that make `install_info_from_package_root`
+    /// succeed for a package rooted at `pkg_root` with the given SHA-256 hex.
+    async fn write_minimal_package_root(pkg_root: &std::path::Path, hex: &str) {
+        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
+        // metadata.json — bare Bundle with no env vars (passes ValidMetadata).
+        let meta = serde_json::json!({"type": "bundle", "version": 1, "env": []});
+        tokio::fs::write(pkg_root.join("metadata.json"), meta.to_string().as_bytes())
+            .await
+            .unwrap();
+        // resolve.json — leaf package with no dependencies.
+        let resolve = serde_json::json!({"dependencies": []});
+        tokio::fs::write(pkg_root.join("resolve.json"), resolve.to_string().as_bytes())
+            .await
+            .unwrap();
+        // digest file written in the same format as `write_digest_file`.
+        tokio::fs::write(pkg_root.join("digest"), format!("sha256:{hex}").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    /// Two distinct `file://` package roots must produce distinct repository
+    /// components so they do not collapse onto the same key in the `seen_repos`
+    /// dedup map inside `resolve_env`.
+    #[tokio::test]
+    async fn distinct_package_roots_yield_distinct_identifiers() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+
+        let root_a = tmp.path().join("pkg_a");
+        let root_b = tmp.path().join("pkg_b");
+        // Two distinct 64-char SHA-256 hex digests.
+        let hex_a = "a".repeat(64);
+        let hex_b = "b".repeat(64);
+
+        write_minimal_package_root(&root_a, &hex_a).await;
+        write_minimal_package_root(&root_b, &hex_b).await;
+
+        let info_a = manager
+            .install_info_from_package_root(&root_a)
+            .await
+            .expect("package root A must succeed");
+        let info_b = manager
+            .install_info_from_package_root(&root_b)
+            .await
+            .expect("package root B must succeed");
+
+        assert_ne!(
+            info_a.identifier.repository(),
+            info_b.identifier.repository(),
+            "distinct package roots must have distinct synthetic repository components"
+        );
+        assert!(
+            info_a.identifier.repository().starts_with("file-url-mode/"),
+            "synthetic repository must start with 'file-url-mode/'"
+        );
+        assert!(
+            info_b.identifier.repository().starts_with("file-url-mode/"),
+            "synthetic repository must start with 'file-url-mode/'"
+        );
+    }
+
+    /// Calling `install_info_from_package_root` twice on the same root must
+    /// yield the same repository component (idempotency).
+    #[tokio::test]
+    async fn same_package_root_yields_stable_identifier() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+
+        let root = tmp.path().join("pkg");
+        write_minimal_package_root(&root, &"c".repeat(64)).await;
+
+        let info_first = manager
+            .install_info_from_package_root(&root)
+            .await
+            .expect("first call must succeed");
+        let info_second = manager
+            .install_info_from_package_root(&root)
+            .await
+            .expect("second call must succeed");
+
+        assert_eq!(
+            info_first.identifier.repository(),
+            info_second.identifier.repository(),
+            "repeated calls on the same root must produce a stable identifier"
+        );
+    }
+}
+
 // Re-export types needed by other modules and CLI commands.
 pub use error::DependencyError;
 pub use package_ref::{PackageRef, PackageRefParseError};
@@ -219,10 +327,13 @@ impl PackageManager {
 
         // Reconstruct a PinnedIdentifier from the sibling `digest` file.
         // The identifier is used only for dedup tracking in resolve_env.
+        // Each package root gets a distinct synthetic repository component derived
+        // from the first 16 hex characters of its content digest, ensuring that
+        // two distinct `file://` roots never collide in the seen_repos dedup map.
         let digest_path = objects.digest_file_for_content(pkg_root)?;
         let digest = read_digest_file(&digest_path).await?;
-        let base_id =
-            crate::oci::Identifier::new_registry("file-url-mode", &self.default_registry).clone_with_digest(digest);
+        let repo_name = format!("file-url-mode/{}", &digest.hex()[..16]);
+        let base_id = crate::oci::Identifier::new_registry(repo_name, &self.default_registry).clone_with_digest(digest);
         let pinned = crate::oci::PinnedIdentifier::try_from(base_id)?;
 
         Ok(InstallInfo {

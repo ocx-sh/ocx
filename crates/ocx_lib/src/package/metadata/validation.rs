@@ -76,10 +76,9 @@ impl TryFrom<Metadata> for ValidMetadata {
         validate_env_tokens(&metadata)?;
 
         if let Some(entrypoints) = metadata.bundle_entrypoints() {
-            // Build name_map here for entrypoint validation; validate_env_tokens builds its
-            // own copy internally since it needs the collision_map too.
-            let name_map = build_name_map(metadata.dependencies());
-            validate_entrypoints(entrypoints, &name_map)?;
+            // Build both maps so validate_entrypoints can reject collision names used in targets.
+            let (name_map, collision_map) = build_name_and_collision_maps(metadata.dependencies());
+            validate_entrypoints(entrypoints, &name_map, &collision_map)?;
         }
 
         Ok(Self(metadata))
@@ -101,21 +100,6 @@ impl std::ops::Deref for ValidMetadata {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Builds a name → `&Dependency` map from the given `Dependencies`.
-///
-/// Keys are the interpolation names returned by `dep.name()`. When two deps
-/// resolve to the same name, the second write wins in the `name_map` and the
-/// colliding entry is recorded in `collision_map`. This function returns only
-/// the primary map; callers that need collision detection use
-/// [`build_name_and_collision_maps`].
-fn build_name_map<'a>(deps: &'a Dependencies) -> HashMap<String, &'a Dependency> {
-    let mut name_map: HashMap<String, &'a Dependency> = HashMap::new();
-    for dep in deps {
-        name_map.insert(dep.name().to_string(), dep);
-    }
-    name_map
-}
-
 /// Builds both the primary name map and the collision map from `Dependencies`.
 ///
 /// The primary map maps dep names to the last dep with that name; the collision
@@ -129,8 +113,10 @@ fn build_name_and_collision_maps<'a>(
 
     for dep in deps {
         let name = dep.name().to_string();
-        if name_map.insert(name.clone(), dep).is_some() {
-            collision_map.insert(name, dep);
+        if let Some(prev) = name_map.insert(name.clone(), dep) {
+            // `prev` is the first dep with this name; store it so callers can
+            // include both identifiers in the ambiguity error message.
+            collision_map.insert(name, prev);
         }
     }
 
@@ -225,6 +211,23 @@ pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), crate::Erro
                     }
                     .into());
                 }
+            }
+
+            // W1: reject any leftover `${...}` that is not `${installPath}` and was not
+            // consumed by the DEP_TOKEN loop above (e.g. `${unknown}`, `${installpath}`,
+            // `${deps.foo.install_path}`, `${deps.Python.installPath}`). Strip the two
+            // recognized token forms before checking so UNKNOWN_TOKEN_RE only fires on
+            // truly unrecognized placeholders.
+            let stripped = DEP_TOKEN.replace_all(value, "");
+            let stripped = stripped.replace("${installPath}", "");
+            if let Some(m) = UNKNOWN_TOKEN_RE.find(&stripped) {
+                return Err(Error::EnvVarInterpolation {
+                    var_key: var.key.clone(),
+                    source: TemplateError::UnknownPlaceholder {
+                        placeholder: m.as_str().to_string(),
+                    },
+                }
+                .into());
             }
         }
     }
@@ -348,10 +351,27 @@ fn check_launcher_safe(resolved: &str, _ep_name: &EntrypointName) -> Result<(), 
 /// Uses sentinel strings for `${installPath}` and each declared dep's
 /// `${...installPath}` so resolution happens without filesystem access — Windows
 /// publishers no longer rely on the host's `/` directory existing.
+///
+/// `collision_map` carries deps whose interpolation name is shared by two or more
+/// declared deps. A target referencing any such name is rejected immediately because
+/// the name is ambiguous and cannot be resolved deterministically.
 pub(super) fn validate_entrypoints(
     entrypoints: &Entrypoints,
     name_map: &HashMap<String, &Dependency>,
+    collision_map: &HashMap<String, &Dependency>,
 ) -> Result<(), crate::Error> {
+    use super::super::error::Error;
+
+    // Dep-token scanner — same slug body as validate_env_tokens so the accepted
+    // character class stays in sync with DependencyName validation.
+    static DEP_TOKEN_EP: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        let slug_body = super::slug::SLUG_PATTERN_STR
+            .trim_start_matches('^')
+            .trim_end_matches('$');
+        let pattern = format!(r"\$\{{deps\.({slug_body})\.([a-zA-Z]+)\}}");
+        regex::Regex::new(&pattern).expect("valid dep-token regex")
+    });
+
     if entrypoints.is_empty() {
         return Ok(());
     }
@@ -374,6 +394,30 @@ pub(super) fn validate_entrypoints(
     }
 
     for entry in entrypoints.iter() {
+        // Collision check: scan the raw target string for ${deps.NAME.*} tokens and
+        // reject immediately if NAME appears in the collision map. The resolver would
+        // silently pick one dep arbitrarily; rejecting early surfaces the ambiguity.
+        for cap in DEP_TOKEN_EP.captures_iter(&entry.target) {
+            let dep_name = cap
+                .get(1)
+                .expect("regex group 1 guaranteed by DEP_TOKEN_EP pattern")
+                .as_str();
+            if collision_map.contains_key(dep_name) {
+                let dep_name_typed =
+                    DependencyName::try_from(dep_name).expect("regex guarantees dep_name matches slug pattern");
+                let first = name_map[dep_name].identifier.clone();
+                let second = collision_map[dep_name].identifier.clone();
+                return Err(crate::Error::Package(Box::new(Error::EntrypointTargetInvalid {
+                    name: entry.name.to_string(),
+                    source: TemplateError::AmbiguousDependencyRef {
+                        ref_name: dep_name_typed,
+                        first,
+                        second,
+                    },
+                })));
+            }
+        }
+
         // R1.1 / reference check: resolve tokens, reject unknown/unsupported refs.
         let resolved = check_target_resolves(&resolver, &entry.target, &entry.name)?;
 
@@ -535,6 +579,64 @@ mod tests {
         );
     }
 
+    // W1 — leftover ${...} rejection in env values
+
+    // W1.1 — completely unknown placeholder is rejected
+    #[test]
+    fn unknown_placeholder_in_env_value_rejected() {
+        let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${unknown}"));
+        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown") || msg.contains("${unknown}"),
+            "expected unknown placeholder in error: {msg}"
+        );
+    }
+
+    // W1.2 — wrong case: ${installpath} (lowercase) is rejected
+    #[test]
+    fn lowercase_install_path_placeholder_rejected() {
+        let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${installpath}/bin"));
+        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("installpath") || msg.contains("${installpath}"),
+            "expected installpath placeholder in error: {msg}"
+        );
+    }
+
+    // W1.3 — snake_case field: ${deps.foo.install_path} is rejected
+    // The DEP_TOKEN regex only accepts [a-zA-Z]+ for the field segment, so
+    // install_path (contains underscore) does not match and the whole token
+    // is treated as an unknown placeholder by UNKNOWN_TOKEN_RE.
+    #[test]
+    fn snake_case_field_placeholder_rejected() {
+        let meta = make_metadata(&dep_json("foo", None), &constant_env("X", "${deps.foo.install_path}"));
+        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("install_path") || msg.contains("${deps.foo.install_path}"),
+            "expected install_path placeholder in error: {msg}"
+        );
+    }
+
+    // W1.4 — uppercase dep NAME: ${deps.Python.installPath} is rejected
+    // The slug pattern [a-z0-9][a-z0-9_-]* forbids uppercase, so DEP_TOKEN does
+    // not match and the token falls through to the UNKNOWN_TOKEN_RE check.
+    #[test]
+    fn uppercase_dep_name_placeholder_rejected() {
+        let meta = make_metadata(
+            &dep_json("python", None),
+            &constant_env("X", "${deps.Python.installPath}"),
+        );
+        let err = ValidMetadata::try_from(meta).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Python") || msg.contains("${deps.Python.installPath}"),
+            "expected Python placeholder in error: {msg}"
+        );
+    }
+
     // ── validate_entrypoints ──────────────────────────────────────────────────
 
     /// Valid target resolving under ${installPath} — should pass.
@@ -640,6 +742,36 @@ mod tests {
                 || msg.to_lowercase().contains("unknown")
                 || msg.to_lowercase().contains("placeholder"),
             "error must name the unknown token or describe it: {msg}"
+        );
+    }
+
+    // H3 — collision-aware deps in entrypoint targets
+
+    /// Two deps with the same basename used in an entrypoint target must be rejected
+    /// with an ambiguity error that names both repositories.
+    #[test]
+    fn entrypoint_collision_dep_in_target_rejected() {
+        let h1 = hex(1);
+        let h2 = hex(2);
+        let deps =
+            format!(r#"{{"identifier":"ocx.sh/cmake:1@sha256:{h1}"}},{{"identifier":"ghcr.io/cmake:1@sha256:{h2}"}}"#);
+        let ep = r#"{"name":"cmake","target":"${deps.cmake.installPath}/bin/cmake"}"#;
+        let json = format!(r#"{{"type":"bundle","version":1,"dependencies":[{deps}],"entrypoints":[{ep}]}}"#);
+        let meta: Metadata = serde_json::from_str(&json).unwrap_or_else(|e| panic!("bad test JSON: {e}"));
+        let result = ValidMetadata::try_from(meta);
+        assert!(result.is_err(), "collision dep in entrypoint target must be rejected");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("cmake"),
+            "error must mention the ambiguous dep name 'cmake': {msg}"
+        );
+        assert!(
+            msg.contains("ocx.sh/cmake") || msg.contains("ocx.sh"),
+            "error must name the first colliding repository: {msg}"
+        );
+        assert!(
+            msg.contains("ghcr.io/cmake") || msg.contains("ghcr.io"),
+            "error must name the second colliding repository: {msg}"
         );
     }
 

@@ -25,10 +25,29 @@ use crate::cli::{ClassifyExitCode, ExitCode};
 /// its `Display` shows up at the terminal boundary alongside any inner
 /// cause.
 ///
+/// Use [`UsageError::with_source`] when the rejection originates from a
+/// structured library error (e.g. a `PackageRefParseError`) — this preserves
+/// the full `source()` chain so diagnostics tools and the exit-code classifier
+/// can walk the inner cause.
+///
 /// Always classifies to [`ExitCode::UsageError`] (`64`, mirrors `EX_USAGE`).
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct UsageError(String);
+#[derive(Debug)]
+pub struct UsageError {
+    message: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UsageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref().map(|e| e as _)
+    }
+}
 
 impl UsageError {
     /// Construct a usage error with the given message.
@@ -37,7 +56,23 @@ impl UsageError {
     /// `"--platform"`) inside the message so users can `grep` stderr for the
     /// failing option.
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Construct a usage error that wraps an inner cause.
+    ///
+    /// The wrapped error is surfaced via [`std::error::Error::source`] so that
+    /// chain-walking diagnostics and the exit-code classifier can inspect the
+    /// underlying error. Use this form whenever the rejection originates from a
+    /// structured library error rather than a pure formatting problem.
+    pub fn with_source(message: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
     }
 }
 
@@ -49,6 +84,8 @@ impl ClassifyExitCode for UsageError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
 
     #[test]
@@ -70,5 +107,39 @@ mod tests {
     fn display_returns_message_verbatim() {
         let err = UsageError::new("file:// URI must be absolute, got 'rel'");
         assert_eq!(format!("{err}"), "file:// URI must be absolute, got 'rel'");
+    }
+
+    #[test]
+    fn with_source_surfaces_inner_error_via_source_chain() {
+        // Lock in: UsageError::with_source wraps an inner cause that is
+        // reachable via std::error::Error::source() — chain walkers and
+        // diagnostics see both the outer message and the inner error.
+        #[derive(Debug)]
+        struct Inner;
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "inner error detail")
+            }
+        }
+        impl std::error::Error for Inner {}
+
+        let err = UsageError::with_source("invalid package ref", Inner);
+        // Display shows outer message only.
+        assert_eq!(format!("{err}"), "invalid package ref");
+        // source() returns Some and points to the inner error.
+        let src = err.source().expect("source must be Some for with_source");
+        assert_eq!(format!("{src}"), "inner error detail");
+        // Chain walks: the classify_error walker sees UsageError first.
+        assert_eq!(
+            crate::cli::classify_error(&err as &(dyn std::error::Error + 'static)),
+            ExitCode::UsageError,
+        );
+    }
+
+    #[test]
+    fn new_has_no_source() {
+        // UsageError::new must have source() == None (message-only variant).
+        let err = UsageError::new("plain usage error");
+        assert!(err.source().is_none());
     }
 }

@@ -58,7 +58,7 @@ pub struct Exec {
     refs: Vec<String>,
 
     /// Command to execute, with arguments. The command will be executed with the environment with the packages.
-    #[clap(allow_hyphen_values = true, num_args = 1..)]
+    #[clap(allow_hyphen_values = true, required = true, num_args = 1..)]
     command: Vec<String>,
 }
 
@@ -76,7 +76,7 @@ impl Exec {
         let mut oci_identifiers: Vec<oci::Identifier> = Vec::new();
         let mut oci_indexes: Vec<usize> = Vec::new();
         for (idx, raw) in self.refs.iter().enumerate() {
-            let ref_ = PackageRef::from_str(raw).map_err(|e| UsageError::new(e.to_string()))?;
+            let ref_ = PackageRef::from_str(raw).map_err(|e| UsageError::with_source("invalid package ref", e))?;
             match ref_ {
                 PackageRef::Oci(_) => {
                     let id = ref_
@@ -128,9 +128,12 @@ impl Exec {
             }
         }
 
-        let Some((command, args)) = self.command.split_first() else {
-            return Err(anyhow::anyhow!("No command provided to execute."));
-        };
+        // clap enforces `required = true, num_args = 1..` on the `command`
+        // field — `self.command` is always non-empty at this point.
+        let (command, args) = self
+            .command
+            .split_first()
+            .expect("clap required=true guarantees at least one command element");
 
         let resolved = process_env.resolve_command(command);
 
@@ -179,7 +182,7 @@ async fn validate_package_root(dir: &Path, packages_root: &Path) -> Result<PathB
     // the async runtime instead of blocking via `std::fs`.
     let canonical_dir = tokio::fs::canonicalize(dir)
         .await
-        .map_err(|e| UsageError::new(format!("file:// path cannot be resolved ({}): {}", e, dir.display())))?;
+        .map_err(|e| UsageError::new(format!("file:// path '{}' cannot be resolved: {e}", dir.display())))?;
     let canonical_root = tokio::fs::canonicalize(packages_root).await.map_err(|e| {
         UsageError::new(format!(
             "file:// validation failed: cannot resolve packages root ({}): {}",

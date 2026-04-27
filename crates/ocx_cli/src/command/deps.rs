@@ -12,7 +12,7 @@ use ocx_lib::{
     oci,
     package::{
         install_info::InstallInfo,
-        metadata::{Metadata, visibility::Visibility},
+        metadata::{Metadata, ValidMetadata, visibility::Visibility},
         resolved_package::ResolvedPackage,
     },
     prelude::SerdeExt,
@@ -237,7 +237,9 @@ async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),
     );
-    let metadata = metadata.ok()?;
+    // Enforce the ValidMetadata typestate: tampered or invalid metadata is silently
+    // skipped (returns None) rather than fed to downstream graph traversal.
+    let metadata = ValidMetadata::try_from(metadata.ok()?).ok()?.into();
     let resolved = resolved.ok()?;
     Some(InstallInfo {
         identifier,
@@ -245,4 +247,48 @@ async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path
         resolved,
         content,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(n: u8) -> String {
+        format!("{:x}", n).repeat(64).chars().take(64).collect()
+    }
+
+    /// `load_install_info` must return `None` when `metadata.json` contains metadata
+    /// that fails `ValidMetadata` validation (e.g. an env token referencing a dep name
+    /// absent from the dependency list).
+    #[tokio::test]
+    async fn load_install_info_returns_none_for_invalid_metadata() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let content = dir.path().join("content");
+        tokio::fs::create_dir_all(&content).await.expect("create content dir");
+
+        // Build metadata that references "ninja" in an env token but declares no such dep.
+        // ValidMetadata::try_from rejects this with an UnknownDependencyRef error.
+        let h = hex(1);
+        let metadata_json = format!(
+            r#"{{"type":"bundle","version":1,"dependencies":[{{"identifier":"ocx.sh/cmake:1@sha256:{h}"}}],"env":[{{"key":"PATH","type":"constant","value":"${{deps.ninja.installPath}}/bin"}}]}}"#
+        );
+        tokio::fs::write(content.with_file_name("metadata.json"), &metadata_json)
+            .await
+            .expect("write metadata.json");
+
+        // Write a valid resolve.json so the only failure comes from metadata validation.
+        let resolve_json = r#"{"version":1,"dependencies":[]}"#;
+        tokio::fs::write(content.with_file_name("resolve.json"), resolve_json)
+            .await
+            .expect("write resolve.json");
+
+        let identifier: oci::Identifier = format!("ocx.sh/cmake:1@sha256:{h}").parse().expect("valid identifier");
+        let pinned = oci::PinnedIdentifier::try_from(identifier).expect("identifier has digest");
+
+        let result = load_install_info(pinned, content).await;
+        assert!(
+            result.is_none(),
+            "load_install_info must return None for invalid metadata"
+        );
+    }
 }

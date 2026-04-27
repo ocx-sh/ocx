@@ -72,7 +72,7 @@ On Windows the equivalent `.cmd` file is:
 
 ```bat
 @ECHO off
-SETLOCAL
+SETLOCAL DisableDelayedExpansion
 ocx exec "file://C:\Users\alice\.ocx\packages\ocx.sh\sha256\ab\c123…" -- "%~n0" %*
 ```
 
@@ -125,6 +125,10 @@ The Windows launcher is a `cmd.exe` batch file. The `file://` URI is double-quot
 
 `cmd.exe`'s `%*` argument expansion silently drops empty arguments. A caller who invokes `cmake "" --version` will see the launcher forward `cmake --version` to `ocx exec`. This is a native `cmd.exe` limitation rather than an OCX design choice; tools that genuinely need empty positional arguments on Windows should call [`ocx exec`][cmd-exec] directly instead of going through a launcher.
 
+::: warning Residual argument-injection risk on Windows
+OCX launchers use `SETLOCAL DisableDelayedExpansion`, which closes the registry-level `!VAR!` expansion vector (the narrower `BatBadBut`-class path that requires a prior registry write). However, the `%*` parameter that forwards caller arguments is still re-parsed by `cmd.exe`. Arguments containing metacharacters (`&`, `|`, `^`, `<`, `>`, `(`, `)`) outside double-quoted regions can be interpreted as shell commands. If your automation passes user-controlled strings — for example a CI pipeline interpolating a branch name or a build label — as arguments to an OCX launcher without quoting, those strings are exploitable. Shell-quote all arguments before passing them to OCX launchers. See [`.claude/artifacts/adr_windows_cmd_argv_injection.md`][adr-argv] for the full threat model; a compiled `.exe` shim that bypasses `cmd.exe` entirely is tracked as the definitive follow-up.
+:::
+
 ### PowerShell {#powershell}
 
 PowerShell invokes `.cmd` files natively — `cmake --version` in a PowerShell prompt resolves to `cmake.cmd` on `$PATH`, runs it under `cmd.exe`, and returns the combined exit code. OCX does **not** generate a `.ps1` variant: a native PowerShell script ran into argument-forwarding quirks around `--` and quoted empty strings during prototyping, and the `.cmd` path avoids every known issue while covering the entire PowerShell user base.
@@ -176,6 +180,9 @@ ocx select cmake:3.30     # current flips; next shell command uses 3.30
 ```
 
 No shell profile rewrite, no re-sourcing dotfiles. The stable `current/entrypoints` path was already on `$PATH`; the select just re-points the `current` symlink at the new package root.
+
+<!-- security -->
+[adr-argv]: ../../../../.claude/artifacts/adr_windows_cmd_argv_injection.md
 
 <!-- external -->
 [sdkman]: https://sdkman.io/
