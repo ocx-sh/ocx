@@ -20,7 +20,7 @@ use tokio::task::JoinSet;
 use super::error::{ProjectError, ProjectErrorKind};
 use super::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock, declaration_hash};
 use crate::oci::client::error::ClientError;
-use crate::oci::index::Index;
+use crate::oci::index::{Index, IndexOperation};
 use crate::oci::{Identifier, PinnedIdentifier};
 use crate::project::hash::DECLARATION_HASH_VERSION;
 
@@ -344,7 +344,7 @@ async fn retry_fetch(
     let mut backoff = options.initial_backoff;
 
     loop {
-        match index.fetch_manifest_digest(&identifier).await {
+        match index.fetch_manifest_digest(&identifier, IndexOperation::Resolve).await {
             Ok(Some(digest)) => return Ok(digest),
             Ok(None) => {
                 return Err(ProjectError::new(
@@ -787,11 +787,15 @@ mod tests {
             Ok(None)
         }
 
-        async fn fetch_manifest(&self, _: &Identifier) -> crate::Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(
+            &self,
+            _: &Identifier,
+            _op: IndexOperation,
+        ) -> crate::Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
 
-        async fn fetch_manifest_digest(&self, _: &Identifier) -> crate::Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> crate::Result<Option<Digest>> {
             if let Some(delay) = self.per_call_delay {
                 tokio::time::sleep(delay).await;
             }
@@ -820,10 +824,14 @@ mod tests {
         async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier) -> crate::Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(
+            &self,
+            _: &Identifier,
+            _op: IndexOperation,
+        ) -> crate::Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier) -> crate::Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> crate::Result<Option<Digest>> {
             if let Some(delay) = self.per_call_delay {
                 tokio::time::sleep(delay).await;
             }

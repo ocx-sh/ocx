@@ -224,8 +224,9 @@ variable.
 
 ### `OCX_OFFLINE` {#ocx-offline}
 
-When set to a [truthy value](#truthy-values), OCX will run in offline mode, which will not attempt to fetch any remote information.
-The command line option [`--offline`][arg-offline] takes precedence over this variable.
+When set to a [truthy value](#truthy-values), OCX disables all network access. Tag→digest resolution must be satisfied by the local index or by a digest-pinned identifier; unpinned tags missing from the local index error immediately. Useful for hermetic CI runs and air-gapped environments. The command line option [`--offline`][arg-offline] takes precedence over this variable.
+
+Combined with [`OCX_REMOTE`](#ocx-remote), enables [pinned-only mode][cmd-pinned-only-mode]: no source contact, no local writes, and any tag-addressed resolution that cannot be satisfied locally errors instead of falling back.
 
 ### `OCX_PROJECT_FILE` {#ocx-project-file}
 
@@ -245,11 +246,9 @@ Precedence: `--project` > `OCX_PROJECT_FILE` > CWD walk. [`OCX_NO_PROJECT=1`](#o
 
 ### `OCX_REMOTE` {#ocx-remote}
 
-When set to a [truthy value](#truthy-values), tag and catalog lookups query the registry directly,
-bypassing the local tag store. Digest-addressed blob reads still use the local cache with
-write-through to `$OCX_HOME/blobs/`. Only `$OCX_HOME/tags/` is not updated.
+When set to a [truthy value](#truthy-values), routes mutable lookups (tag list, catalog, tag→manifest resolution) to the remote registry instead of the local index. Pure-query commands (`ocx index list`, `ocx index catalog`, `ocx package info`) do **not** persist results to the local index — to refresh the snapshot, run [`ocx index update`][cmd-index-update] explicitly. Digest-addressed reads still consult the local index first (immutable content is safe to cache).
 
-Equivalent to passing the [`--remote`][arg-remote] flag on every invocation.
+Equivalent to passing the [`--remote`][arg-remote] flag on every invocation. See the user guide for the [routing model][indices-routing] and the [pinned-only mode][cmd-pinned-only-mode] (combined with `OCX_OFFLINE`).
 
 ## External {#external}
 
@@ -335,6 +334,9 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-project]: command-line.md#arg-project
 [arg-quiet]: command-line.md#arg-quiet
 [arg-remote]: command-line.md#arg-remote
+[cmd-index-update]: command-line.md#index-update
+[cmd-pinned-only-mode]: command-line.md#pinned-only-mode
+[indices-routing]: ../user-guide.md#indices-routing
 
 <!-- reference -->
 [config-ref]: ./configuration.md

@@ -480,13 +480,47 @@ Every command that resolves a package identifier — [`ocx install`][cmd-install
 | Remote | [`--remote`][arg-remote] | OCI registry | Yes |
 | Offline | [`--offline`][arg-offline] | Local snapshot | Never |
 
-**`--remote`** forces tag and catalog lookups to query the registry directly for a single command. The persistent local tag store (`$OCX_HOME/tags/`) is not updated. Blob data fetched under `--remote` still writes through to `$OCX_HOME/blobs/`, so the command populates the blob cache while bypassing the tag snapshot. Use it for a one-off check — seeing current available tags, or resolving the latest digest — without committing the tag resolution result to the local snapshot.
+**`--remote`** routes tag and catalog lookups to the registry directly for a single command. Pure-query commands ([`ocx index list`][cmd-index-list], [`ocx index catalog`][cmd-index-catalog], [`ocx package info`][cmd-package-info]) do **not** persist the result to the local index — to refresh the snapshot, run [`ocx index update`][cmd-index-update] explicitly. Use `--remote` for a one-off check (current available tags, latest digest) without committing the resolution to the local snapshot.
 
 **`--offline`** prevents all network access for that command. If the local index does not have a requested package, the command fails immediately rather than attempting a registry query. Useful to verify that your current index and object store are self-sufficient before a build in a restricted or air-gapped environment.
 
 [`--index`][arg-index] / [`OCX_INDEX`][env-ocx-index] do not change the active index mode — the local snapshot remains active. They only change *where* that snapshot is read from. See [Local Index](#indices-local).
 
 The active index controls tag and manifest resolution only. The [package store][fs-packages] is independent — installed binaries are accessible in all three modes regardless of which index is active.
+
+### Routing {#indices-routing}
+
+Behind the user-facing flags, ocx encodes two orthogonal axes at every index call site:
+
+- **Routing axis** — *where* a lookup reads from, controlled by the active mode plus the immutability of the identifier (digest-addressed reads always trust the local index first; tag-addressed reads route per mode).
+- **Intent axis** — *whether* a lookup may mutate the local index. Pure-query commands (`index list`, `index catalog`, `package info`) declare `Query` intent and never trigger a write; install/pull commands declare `Resolve` intent and may persist.
+
+The routing matrix below summarises the combinations:
+
+| Operation | `--remote` | `--offline` | `--offline --remote` | Default |
+|-----------|-----------|-------------|----------------------|---------|
+| Tag list / catalog (pure query) | source only, no write | local only | local only (info log) | local only |
+| Tag → manifest, install/pull | source only, write blobs+tag | local only (errors if missing) | local only (errors) | local first, miss → fetch+write |
+| Digest → manifest, any path | local first | local only | local only | local first |
+| Digest → manifest, pinned-id pull | source on miss, write blobs only, **no tag** | local only | local only | local first, miss → fetch blobs only |
+
+The "no tag" cell on the last row is the post-pin contract: when `ocx.lock` already pins a tool to a digest, `ocx pull` persists the manifest blobs but does not commit a tag pointer. The lock is the canonical record of the tag→digest mapping; writing through would silently shadow it.
+
+::: info Why this matters
+Pre-Phase-11, a pure `ocx --remote index list cmake` would silently write through to `$OCX_HOME/tags/` on cache miss — the trait conflated "look this up" with "look this up and persist". Build-pipeline workarounds existed only to mask this leak. With intent declared at every call site, queries are guaranteed read-only.
+:::
+
+### Pinned-only mode {#indices-pinned-only}
+
+Combining [`--offline`][arg-offline] with [`--remote`][arg-remote] is accepted as **pinned-only mode**: no source contact, no local writes, and any tag-addressed resolution that cannot be satisfied locally errors instead of silently falling back. The CLI emits an `info` log to confirm the mode is active.
+
+Use it to assert in CI that every project dependency is digest-pinned:
+
+```sh
+ocx --offline --remote exec -- my-build-script
+```
+
+If any tool resolution falls back to a floating tag, the command fails — a hermetic-build sanity check without round-tripping to the registry.
 
 ## Authentication {#authentication}
 
@@ -932,6 +966,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [cmd-index-catalog]: ./reference/command-line.md#index-catalog
 [cmd-index-list]: ./reference/command-line.md#index-list
 [cmd-index-update]: ./reference/command-line.md#index-update
+[cmd-package-info]: ./reference/command-line.md#package-info
 [cmd-package-pull]: ./reference/command-line.md#package-pull
 [cmd-package-push]: ./reference/command-line.md#package-push
 [cmd-ci-export]: ./reference/command-line.md#ci-export

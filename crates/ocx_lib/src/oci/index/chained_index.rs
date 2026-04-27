@@ -5,26 +5,25 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use super::{ChainMode, Index, LocalIndex, index_impl};
+use super::{ChainMode, Index, IndexOperation, LocalIndex, index_impl};
 use crate::utility::singleflight;
 use crate::{Result, log, oci};
 
-/// Two-role index: a persistent `cache` plus an ordered list of read-only
-/// `sources` queried in order on cache miss.
+/// A curated local index plus an ordered list of upstream sources
+/// queried on miss for `Resolve` callers.
 ///
-/// On a cache miss the chain is walked until a source successfully populates
-/// the cache with both the tag pointer and the full manifest chain, after
-/// which the cache is re-queried. Concurrent identical cache misses are
-/// deduplicated via [`singleflight`](crate::utility::singleflight) — only the
-/// leader task performs the fetch; waiters reuse its result.
+/// The local index is **not** a transparent cache: it is populated only
+/// by explicit paths (`ocx index update`) or `Resolve` callers
+/// (install / pull). Concurrent identical cache misses are deduplicated
+/// via [`singleflight`](crate::utility::singleflight) — only the leader
+/// task performs the fetch; waiters reuse its result.
 ///
 /// `ChainMode` controls how mutable lookups (tag listings, catalog) are
 /// routed:
 ///
-/// - `Default` reads the persisted local index. A miss returns `None`
-///   (or empty) — pure queries never auto-fetch from sources. The local
-///   index is populated only by explicit paths (`ocx index update`) or
-///   data-required paths (install / pull).
+/// - `Default` reads the persisted local index. `Resolve` callers walk
+///   the chain and persist on miss; `Query` callers return `None` and
+///   never contact a source.
 /// - `Remote` queries sources directly for mutable lookups and never
 ///   consults the local index. A pure query in Remote mode never mutates
 ///   local state — `--remote` is a read-through-to-source flag, not a
@@ -32,14 +31,16 @@ use crate::{Result, log, oci};
 ///   propagated rather than silently falling back to the local index.
 /// - `Offline` reads the local index only; sources are never consulted.
 ///
-/// Digest-addressed reads (`fetch_manifest` with a digest in the
-/// identifier) still use the local index in any mode because immutable
-/// content cannot be wrong. Tag-addressed `fetch_manifest` currently
-/// auto-fetches and persists the manifest chain on miss — see
-/// `feedback_index_routing_semantics.md` (recommendation M3) for the
-/// in-flight refactor that splits the read path from the write path.
+/// Digest-addressed reads still consult the local index first in any
+/// mode because immutable content cannot be wrong. The query/resolve
+/// split is encoded by the [`super::IndexOperation`] argument:
+/// `Query` callers never trigger a chain walk, `Resolve` callers do.
 pub struct ChainedIndex {
-    cache: LocalIndex,
+    /// The curated, persisted local index. Not a transparent cache — see
+    /// the struct doc for the lifecycle. Renamed from `cache` to make
+    /// "this is data we deliberately wrote, not opportunistic cache fill"
+    /// the obvious mental model at every access site.
+    local_index: LocalIndex,
     sources: Vec<Index>,
     mode: ChainMode,
     /// Singleflight group for de-duplicating concurrent cache-miss fetches
@@ -57,9 +58,9 @@ const SINGLEFLIGHT_MAX_KEYS: usize = 1024;
 const SINGLEFLIGHT_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl ChainedIndex {
-    pub fn new(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
+    pub fn new(local_index: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
-            cache,
+            local_index,
             sources,
             mode,
             singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
@@ -80,11 +81,13 @@ impl ChainedIndex {
             return Ok(());
         }
 
-        // Digest-only inputs are fetched directly via `GET /v2/<repo>/manifests/<digest>`
-        // and persisted without a tag commit — there is no tag to pin. Tagged
-        // inputs (or bare repos) normalise to `tag_or_latest()` so the
+        // Digest-bearing inputs (digest-only OR tag+digest pinned-id pulls)
+        // are fetched directly via `GET /v2/<repo>/manifests/<digest>`. The
+        // tag-pointer commit decision lives in `fetch_and_persist_chain`:
+        // tag+digest skips the commit because `ocx.lock` is canonical.
+        // Bare or tag-only inputs normalise to `tag_or_latest()` so the
         // singleflight key collapses concurrent waiters.
-        let walked = if identifier.tag().is_none() && identifier.digest().is_some() {
+        let walked = if identifier.digest().is_some() {
             identifier.clone()
         } else {
             identifier.clone_with_tag(identifier.tag_or_latest())
@@ -149,12 +152,26 @@ impl ChainedIndex {
     async fn fetch_and_persist_chain(&self, identifier: &oci::Identifier) -> Result<()> {
         let mut last_error: Option<crate::Error> = None;
         for source in &self.sources {
-            match self.cache.write_chain_and_commit_tag(source, identifier).await {
-                Ok(true) => {
+            match self.local_index.persist_manifest_chain(source, identifier).await {
+                Ok(Some(digest)) => {
+                    // Tag-pointer commit gated on identifier shape:
+                    //   - tag-only (`cmake:1.0`)            → commit
+                    //   - digest-only (`cmake@sha256:...`)  → skip (no tag to pin)
+                    //   - tag+digest (`cmake:1.0@sha256:`)  → skip (pinned-id pull;
+                    //                                        `ocx.lock` is canonical)
+                    //   - bare repo (`cmake`)               → normalised to `latest`
+                    //                                        in walk_chain → commits
+                    // The `tag+digest` skip is the post-pin contract change: the
+                    // caller already has the digest pinned in `ocx.lock`, so a
+                    // tag-pointer write here is redundant and silently shadows
+                    // the lock. See `adr_index_routing_semantics.md`.
+                    if identifier.tag().is_some() && identifier.digest().is_none() {
+                        self.local_index.commit_tag(identifier, &digest).await?;
+                    }
                     log::debug!("Fetched '{}' from chained source, persisted to cache.", identifier);
                     return Ok(());
                 }
-                Ok(false) => {
+                Ok(None) => {
                     log::debug!("Source has no '{}' — trying next source.", identifier);
                 }
                 Err(e) => {
@@ -200,7 +217,7 @@ impl index_impl::IndexImpl for ChainedIndex {
             }
             return last_error.map_or_else(|| Ok(Vec::new()), Err);
         }
-        self.cache.list_repositories(registry).await
+        self.local_index.list_repositories(registry).await
     }
 
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
@@ -208,8 +225,9 @@ impl index_impl::IndexImpl for ChainedIndex {
         // index only; Remote queries sources directly without write-through.
         // A pure query must never mutate local state — write paths live on
         // `LocalIndex::refresh_tags` (called from `ocx index update`) and
-        // `LocalIndex::write_chain_and_commit_tag` (called from install /
-        // pull). First Ok wins; if every source errors we propagate.
+        // the `persist_manifest_chain` + `commit_tag` pair driven by
+        // `fetch_and_persist_chain` (called from install / pull). First Ok
+        // wins; if every source errors we propagate.
         //
         // Trust-boundary: in Remote mode, if every configured source fails
         // we propagate the last error rather than silently falling back to
@@ -230,51 +248,72 @@ impl index_impl::IndexImpl for ChainedIndex {
             }
             return last_error.map_or(Ok(None), Err);
         }
-        self.cache.list_tags(identifier).await
+        self.local_index.list_tags(identifier).await
     }
 
-    async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {
-        // Digest-addressed reads are cache-first in every mode — immutable
+    async fn fetch_manifest(
+        &self,
+        identifier: &oci::Identifier,
+        op: IndexOperation,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+        // Digest-addressed reads are local-first in every mode — immutable
         // content cannot be wrong. Mutable (tag-based) reads in `Remote`
-        // mode go straight to the chain walk, skipping the cache read.
+        // mode go straight to the chain walk, skipping the local read.
         let is_digest_addressed = identifier.digest().is_some();
         if is_digest_addressed || self.mode != ChainMode::Remote {
-            match self.cache.fetch_manifest(identifier).await {
+            match self.local_index.fetch_manifest(identifier, op).await {
                 Ok(Some(result)) => return Ok(Some(result)),
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!(
-                        "Local tag cache read failed for '{}', falling back to chained source: {e}",
+                        "Local index read failed for '{}', falling back to chained source: {e}",
                         identifier
                     );
                 }
             }
         }
-        self.walk_chain(identifier).await?;
-        self.cache.fetch_manifest(identifier).await
+        // Pure queries never walk the chain. The local index's role is to
+        // cache resolved data; populating it on a query call would silently
+        // mutate state from a read-only command.
+        match op {
+            IndexOperation::Query => Ok(None),
+            IndexOperation::Resolve => {
+                self.walk_chain(identifier).await?;
+                self.local_index.fetch_manifest(identifier, op).await
+            }
+        }
     }
 
-    async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
+    async fn fetch_manifest_digest(
+        &self,
+        identifier: &oci::Identifier,
+        op: IndexOperation,
+    ) -> Result<Option<oci::Digest>> {
         let is_digest_addressed = identifier.digest().is_some();
         if is_digest_addressed || self.mode != ChainMode::Remote {
-            match self.cache.fetch_manifest_digest(identifier).await {
+            match self.local_index.fetch_manifest_digest(identifier, op).await {
                 Ok(Some(digest)) => return Ok(Some(digest)),
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!(
-                        "Local tag cache read failed for '{}', falling back to chained source: {e}",
+                        "Local index read failed for '{}', falling back to chained source: {e}",
                         identifier
                     );
                 }
             }
         }
-        self.walk_chain(identifier).await?;
-        self.cache.fetch_manifest_digest(identifier).await
+        match op {
+            IndexOperation::Query => Ok(None),
+            IndexOperation::Resolve => {
+                self.walk_chain(identifier).await?;
+                self.local_index.fetch_manifest_digest(identifier, op).await
+            }
+        }
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(Self {
-            cache: self.cache.clone(),
+            local_index: self.local_index.clone(),
             sources: self.sources.clone(),
             mode: self.mode,
             // Singleflight group is shared across clones so waiters coalesce.
@@ -371,12 +410,20 @@ mod chain_refs_tests {
             *self.call_count.lock().unwrap() += 1;
             Ok(Some(self.known_tags.keys().cloned().collect()))
         }
-        async fn fetch_manifest(&self, identifier: &Identifier) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _op: super::super::IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
             let tag = identifier.tag_or_latest();
             *self.call_count.lock().unwrap() += 1;
             Ok(self.known_tags.get(tag).map(|d| (d.clone(), make_image_manifest())))
         }
-        async fn fetch_manifest_digest(&self, identifier: &Identifier) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &Identifier,
+            _op: super::super::IndexOperation,
+        ) -> Result<Option<Digest>> {
             let tag = identifier.tag_or_latest();
             *self.call_count.lock().unwrap() += 1;
             Ok(self.known_tags.get(tag).cloned())
@@ -402,8 +449,14 @@ mod chain_refs_tests {
     /// subsequent cache-only reads succeed. Equivalent to what a successful
     /// `ChainedIndex` walk would leave behind.
     async fn seed_full(cache: &LocalIndex, identifier: &Identifier, _d: Digest, source: &Index) {
-        let persisted = cache.write_chain_and_commit_tag(source, identifier).await.unwrap();
-        assert!(persisted, "source must know the seeded tag");
+        let digest = cache
+            .persist_manifest_chain(source, identifier)
+            .await
+            .unwrap()
+            .expect("source must know the seeded tag");
+        if identifier.tag().is_some() {
+            cache.commit_tag(identifier, &digest).await.unwrap();
+        }
     }
 
     // ── test 22 ───────────────────────────────────────────────────────────
@@ -421,7 +474,10 @@ mod chain_refs_tests {
         // Now create a spy source and verify it is never called on cache hit.
         let (spy, spy_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![spy_idx], ChainMode::Default);
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(result.is_some(), "cache hit must return Some");
         assert_eq!(spy.calls(), 0, "source must not be queried on cache hit (Default mode)");
     }
@@ -438,7 +494,10 @@ mod chain_refs_tests {
 
         let (_, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(result.is_some(), "cache-miss source fetch must return Some");
 
         // Property: the blob data file must exist after a successful fetch.
@@ -467,7 +526,10 @@ mod chain_refs_tests {
         // Source has digest_a — in Remote mode the source is consulted.
         let (spy, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Remote);
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         // Remote mode must have gone to the source (digest_a != digest_b).
         assert!(result.is_some());
         assert!(spy.calls() > 0, "Remote mode must consult source for tag lookup");
@@ -501,7 +563,10 @@ mod chain_refs_tests {
         let (spy, src_idx) = make_source(TAG, digest_a());
         let id_with_digest = digest_only_id(); // digest-addressed, no tag
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Remote);
-        let result = chained.fetch_manifest(&id_with_digest).await.unwrap();
+        let result = chained
+            .fetch_manifest(&id_with_digest, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(
             result.is_some(),
             "digest-addressed lookup must hit cache in Remote mode"
@@ -524,7 +589,10 @@ mod chain_refs_tests {
 
         let (spy, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Offline);
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(result.is_none(), "Offline mode: cache miss must return None");
         assert_eq!(spy.calls(), 0, "Offline mode must never consult sources");
     }
@@ -544,7 +612,10 @@ mod chain_refs_tests {
         // Now query Offline mode — must hit from disk, no source calls.
         let (spy, src_idx) = make_source(TAG, digest_b()); // different digest
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Offline);
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(result.is_some(), "Offline mode: cache hit must return Some");
         assert_eq!(spy.calls(), 0, "Offline mode must never consult sources on hit");
     }
@@ -569,7 +640,7 @@ mod chain_refs_tests {
         for _ in 0..4 {
             let ch = chained.clone();
             let id = tagged_id();
-            tasks.spawn(async move { ch.fetch_manifest(&id).await });
+            tasks.spawn(async move { ch.fetch_manifest(&id, super::IndexOperation::Resolve).await });
         }
         while let Some(joined) = tasks.join_next().await {
             joined.expect("task panicked").expect("fetch_manifest failed");
@@ -598,10 +669,18 @@ mod chain_refs_tests {
             async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
                 Ok(None)
             }
-            async fn fetch_manifest(&self, _: &Identifier) -> Result<Option<(Digest, Manifest)>> {
+            async fn fetch_manifest(
+                &self,
+                _: &Identifier,
+                _op: super::super::IndexOperation,
+            ) -> Result<Option<(Digest, Manifest)>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("test error".to_string()).into())
             }
-            async fn fetch_manifest_digest(&self, _: &Identifier) -> Result<Option<Digest>> {
+            async fn fetch_manifest_digest(
+                &self,
+                _: &Identifier,
+                _op: super::super::IndexOperation,
+            ) -> Result<Option<Digest>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("test error".to_string()).into())
             }
             fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -618,7 +697,7 @@ mod chain_refs_tests {
         for _ in 0..3 {
             let ch = chained.clone();
             let id = tagged_id();
-            tasks.spawn(async move { ch.fetch_manifest(&id).await });
+            tasks.spawn(async move { ch.fetch_manifest(&id, super::IndexOperation::Resolve).await });
         }
 
         let mut error_count = 0;
@@ -675,6 +754,89 @@ mod chain_refs_tests {
             tags3,
             vec![TAG.to_string()],
             "Remote mode must return the source's tag list"
+        );
+    }
+
+    // ── routing invariant: Op::Query never walks the source chain ────────
+
+    /// `IndexOperation::Query` is the contract for pure-read callers
+    /// (`index list`, `index catalog`, `package info`). The contract holds
+    /// only if `ChainedIndex::fetch_manifest` never invokes `walk_chain`
+    /// on cache miss for a `Query` call. This test asserts that contract
+    /// across every `ChainMode` using a spy source that records every
+    /// invocation: zero calls means no chain walk happened, which means
+    /// no write-through could have happened either.
+    #[tokio::test]
+    async fn op_query_never_walks_source_in_any_mode() {
+        for mode in [ChainMode::Default, ChainMode::Remote, ChainMode::Offline] {
+            let cache_dir = TempDir::new().unwrap();
+            let cache = make_local_index(&cache_dir);
+            let (spy, src_idx) = make_source(TAG, digest_a());
+            let chained = Index::from_chained(cache, vec![src_idx], mode);
+
+            // Tag-addressed lookup with cache miss — the path that *would*
+            // walk the chain under `Resolve`. Under `Query` it must short-
+            // circuit to `None` without touching the source.
+            let result = chained
+                .fetch_manifest(&tagged_id(), super::IndexOperation::Query)
+                .await
+                .unwrap();
+            assert!(
+                result.is_none(),
+                "Op::Query cache miss must return None in mode {mode:?}, got Some"
+            );
+            assert_eq!(
+                spy.calls(),
+                0,
+                "Op::Query must not call source in mode {mode:?}; got {} call(s)",
+                spy.calls()
+            );
+
+            // Tag store must be untouched.
+            let tags_root = cache_dir.path().join("tags");
+            assert!(
+                !tags_root.join(REGISTRY).exists(),
+                "Op::Query in mode {mode:?} must not create the tag store"
+            );
+        }
+    }
+
+    // ── pinned-id pull: tag+digest identifier must skip tag-pointer commit ──
+
+    /// A pinned-id pull (`cmake:1.0@sha256:...`) carries both tag and
+    /// digest. Persisting the manifest chain is fine — content-addressed
+    /// blobs are immutable — but committing the tag pointer would
+    /// silently shadow `ocx.lock` (which is the canonical record). The
+    /// post-pin contract is to skip the tag commit and let the lock own
+    /// the tag→digest mapping. Asserted by checking that the tag store
+    /// directory is never created.
+    #[tokio::test]
+    async fn pinned_id_pull_skips_tag_pointer_commit() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let (_, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+
+        // tag+digest identifier — what `command/pull.rs` produces from a
+        // `PinnedIdentifier` via `clone_with_digest` after `lock` resolved
+        // the tag.
+        let pinned_id = tagged_id().clone_with_digest(digest_a());
+        assert!(pinned_id.tag().is_some() && pinned_id.digest().is_some());
+
+        let result = chained
+            .fetch_manifest(&pinned_id, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
+        assert!(result.is_some(), "pinned-id resolve must succeed and return manifest");
+
+        // Manifest blobs are persisted (content-addressed), but the tag
+        // store must not be written.
+        let tags_root = cache_dir.path().join("tags");
+        let registry_dir = tags_root.join(REGISTRY);
+        assert!(
+            !registry_dir.exists(),
+            "tag+digest pull must not create the tag store registry dir at {}",
+            registry_dir.display()
         );
     }
 
@@ -769,10 +931,18 @@ mod chain_refs_tests {
             async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
                 Ok(None)
             }
-            async fn fetch_manifest(&self, _: &Identifier) -> Result<Option<(Digest, Manifest)>> {
+            async fn fetch_manifest(
+                &self,
+                _: &Identifier,
+                _op: super::super::IndexOperation,
+            ) -> Result<Option<(Digest, Manifest)>> {
                 Ok(None)
             }
-            async fn fetch_manifest_digest(&self, _: &Identifier) -> Result<Option<Digest>> {
+            async fn fetch_manifest_digest(
+                &self,
+                _: &Identifier,
+                _op: super::super::IndexOperation,
+            ) -> Result<Option<Digest>> {
                 Ok(None)
             }
             fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -808,10 +978,18 @@ mod chain_refs_tests {
             async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()).into())
             }
-            async fn fetch_manifest(&self, _: &Identifier) -> Result<Option<(Digest, Manifest)>> {
+            async fn fetch_manifest(
+                &self,
+                _: &Identifier,
+                _op: super::super::IndexOperation,
+            ) -> Result<Option<(Digest, Manifest)>> {
                 Ok(None)
             }
-            async fn fetch_manifest_digest(&self, _: &Identifier) -> Result<Option<Digest>> {
+            async fn fetch_manifest_digest(
+                &self,
+                _: &Identifier,
+                _op: super::super::IndexOperation,
+            ) -> Result<Option<Digest>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()).into())
             }
             fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -845,7 +1023,11 @@ mod chain_refs_tests {
         let (_, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
 
-        if let Some((digest, _)) = chained.fetch_manifest(&tagged_id()).await.unwrap() {
+        if let Some((digest, _)) = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap()
+        {
             let blob_path = blob_store.data(REGISTRY, &digest);
             assert!(
                 blob_path.exists(),
@@ -879,7 +1061,7 @@ mod chain_refs_tests {
         for _ in 0..N {
             let ch = chained.clone();
             let id = tagged_id();
-            tasks.spawn(async move { ch.fetch_manifest(&id).await });
+            tasks.spawn(async move { ch.fetch_manifest(&id, super::IndexOperation::Resolve).await });
         }
         while let Some(joined) = tasks.join_next().await {
             joined.expect("task panicked").expect("fetch_manifest failed");
@@ -1020,7 +1202,11 @@ mod tests {
             Ok(Some(self.known_tags.keys().cloned().collect()))
         }
 
-        async fn fetch_manifest(&self, identifier: &Identifier) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _op: super::super::IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
             if let Some(msg) = &self.force_error {
                 // Use a RemoteManifestNotFound error to simulate registry errors.
                 // The exact variant is unimportant for these tests — only that an
@@ -1036,7 +1222,11 @@ mod tests {
             }
         }
 
-        async fn fetch_manifest_digest(&self, identifier: &Identifier) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &Identifier,
+            _op: super::super::IndexOperation,
+        ) -> Result<Option<Digest>> {
             if let Some(msg) = &self.force_error {
                 return Err(super::super::error::Error::RemoteManifestNotFound(msg.clone()).into());
             }
@@ -1091,8 +1281,14 @@ mod tests {
     /// Seed the cache with the full chain (tag pointer + manifest blob) so
     /// subsequent cache-only reads succeed.
     async fn seed_full(cache: &LocalIndex, identifier: &Identifier, _d: Digest, source: &Index) {
-        let persisted = cache.write_chain_and_commit_tag(source, identifier).await.unwrap();
-        assert!(persisted, "source must know the seeded tag");
+        let digest = cache
+            .persist_manifest_chain(source, identifier)
+            .await
+            .unwrap()
+            .expect("source must know the seeded tag");
+        if identifier.tag().is_some() {
+            cache.commit_tag(identifier, &digest).await.unwrap();
+        }
     }
 
     // ── Single-source chain tests ─────────────────────────────────────────
@@ -1123,7 +1319,10 @@ mod tests {
         let source = make_source(spy);
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         assert!(result.is_some(), "cache hit should return Some");
         assert!(
@@ -1141,7 +1340,10 @@ mod tests {
         let source = make_source(TestIndex::with_tag(TAG, digest_a()));
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         assert!(result.is_some(), "should return the manifest fetched from source");
         let (digest, _) = result.unwrap();
@@ -1157,7 +1359,10 @@ mod tests {
         let source = make_source(TestIndex::with_tag(TAG, digest_a()));
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
-        let result = chained.fetch_manifest_digest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest_digest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         assert_eq!(result, Some(digest_a()));
     }
@@ -1171,7 +1376,10 @@ mod tests {
         let source = make_source(TestIndex::empty());
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(result.is_none(), "unknown tag should degrade to None");
     }
 
@@ -1189,7 +1397,9 @@ mod tests {
         let source = make_source(TestIndex::failing("connection timed out"));
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
-        let result = chained.fetch_manifest(&tagged_id()).await;
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await;
         assert!(
             result.is_err(),
             "sole-source error must propagate, not collapse to Ok(None)"
@@ -1210,7 +1420,9 @@ mod tests {
         let source = make_source(TestIndex::failing("401 unauthorized"));
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
-        let result = chained.fetch_manifest_digest(&tagged_id()).await;
+        let result = chained
+            .fetch_manifest_digest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await;
         assert!(
             result.is_err(),
             "sole-source error must propagate for digest queries too"
@@ -1236,7 +1448,10 @@ mod tests {
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
         let id = digest_only_id(); // no tag
-        let _ = chained.fetch_manifest(&id).await.unwrap();
+        let _ = chained
+            .fetch_manifest(&id, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         assert!(
             !spy_calls.lock().unwrap().is_empty(),
@@ -1257,7 +1472,10 @@ mod tests {
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
         let id = digest_only_id();
-        let _ = chained.fetch_manifest_digest(&id).await.unwrap();
+        let _ = chained
+            .fetch_manifest_digest(&id, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         assert!(
             !spy_calls.lock().unwrap().is_empty(),
@@ -1278,7 +1496,10 @@ mod tests {
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
         let bare = Identifier::new_registry(REPO, REGISTRY);
-        let result = chained.fetch_manifest(&bare).await.unwrap();
+        let result = chained
+            .fetch_manifest(&bare, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         assert!(result.is_some(), "bare identifier must resolve via implicit :latest");
         let (digest, _) = result.unwrap();
@@ -1296,7 +1517,10 @@ mod tests {
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
         let bare = Identifier::new_registry(REPO, REGISTRY);
-        let result = chained.fetch_manifest(&bare).await.unwrap();
+        let result = chained
+            .fetch_manifest(&bare, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(
             result.is_none(),
             "bare identifier with no remote :latest should degrade to None"
@@ -1321,7 +1545,10 @@ mod tests {
         seed_full(&cache, &tagged_id(), digest_a(), &seed_source).await;
 
         // The cloned index should see the tag because caches are shared via Arc.
-        let result_via_clone = cloned.fetch_manifest(&tagged_id()).await.unwrap();
+        let result_via_clone = cloned
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(
             result_via_clone.is_some(),
             "cloned ChainedIndex must share cache with original — mutation must be visible"
@@ -1390,7 +1617,10 @@ mod tests {
             super::super::ChainMode::Default,
         );
 
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(result.is_some(), "first source hit should succeed");
 
         // Second source must not have been queried.
@@ -1415,7 +1645,10 @@ mod tests {
             super::super::ChainMode::Default,
         );
 
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(result.is_some(), "second source should succeed when first errors");
         let (digest, _) = result.unwrap();
         assert_eq!(digest, digest_b(), "digest should come from the second source");
@@ -1436,7 +1669,10 @@ mod tests {
             super::super::ChainMode::Default,
         );
 
-        let result = chained.fetch_manifest_digest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest_digest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert_eq!(result, Some(digest_b()));
     }
 
@@ -1459,7 +1695,9 @@ mod tests {
             super::super::ChainMode::Default,
         );
 
-        let result = chained.fetch_manifest(&tagged_id()).await;
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await;
         assert!(result.is_err(), "all-source-error must propagate as Err");
         let err_message = result.unwrap_err().to_string();
         assert!(
@@ -1486,7 +1724,9 @@ mod tests {
             super::super::ChainMode::Default,
         );
 
-        let result = chained.fetch_manifest(&tagged_id()).await;
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await;
         assert!(
             result.is_err(),
             "error on primary followed by clean miss on mirror must propagate as Err, \
@@ -1514,7 +1754,9 @@ mod tests {
             super::super::ChainMode::Default,
         );
 
-        let result = chained.fetch_manifest_digest(&tagged_id()).await;
+        let result = chained
+            .fetch_manifest_digest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await;
         assert!(result.is_err(), "digest query: error-then-miss must propagate as Err");
         let err_message = result.unwrap_err().to_string();
         assert!(
@@ -1532,7 +1774,10 @@ mod tests {
         // No sources — empty chain.
         let chained = super::super::Index::from_chained(cache, vec![], super::super::ChainMode::Default);
 
-        let result = chained.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(result.is_none(), "empty sources and empty cache → None");
     }
 
@@ -1548,13 +1793,19 @@ mod tests {
         {
             let chained =
                 super::super::Index::from_chained(cache.clone(), vec![source], super::super::ChainMode::Default);
-            let _ = chained.fetch_manifest(&tagged_id()).await.unwrap();
+            let _ = chained
+                .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+                .await
+                .unwrap();
         }
 
         // Second call: same cache, but NO sources.  Must still return the tag
         // from cache because the first call persisted it.
         let chained_no_source = super::super::Index::from_chained(cache, vec![], super::super::ChainMode::Default);
-        let result = chained_no_source.fetch_manifest(&tagged_id()).await.unwrap();
+        let result = chained_no_source
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(
             result.is_some(),
             "tag fetched in first call must be persisted so a cache-only second call succeeds"
@@ -1585,7 +1836,7 @@ mod tests {
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
         let result = chained
-            .fetch_manifest(&tagged_id())
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
             .await
             .expect("corrupt cache must degrade to chain walk, not propagate");
         let (digest, _) = result.expect("chain walk must recover the manifest from the source");
@@ -1614,7 +1865,7 @@ mod tests {
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
         let result = chained
-            .fetch_manifest_digest(&tagged_id())
+            .fetch_manifest_digest(&tagged_id(), super::super::IndexOperation::Resolve)
             .await
             .expect("corrupt cache must degrade for digest queries too");
         assert_eq!(result, Some(digest_a()));

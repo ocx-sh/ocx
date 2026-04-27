@@ -32,8 +32,10 @@ The available data depends on the command being executed.
 
 ### `--offline` {#arg-offline}
 
-When set, ocx will run in offline mode and will not attempt to fetch any remote information.
-If any command requires information that is not already available locally, it will fail with an error.
+Disables all network access for this invocation. Tag→digest resolution must
+be satisfied by the local index or by a digest-pinned identifier; unpinned
+tags missing from the local index error immediately rather than triggering
+a registry query. Useful for hermetic CI runs and air-gapped environments.
 
 ::: warning
 Running `ocx --offline install <pkg>` after a bare `ocx index update <pkg>` (without a prior
@@ -44,12 +46,37 @@ Run `ocx install <pkg>` online first to populate the blob cache, then offline in
 
 ### `--remote` {#arg-remote}
 
-When set, tag and catalog lookups query the registry directly, bypassing the local tag store.
-Digest-addressed blob reads (manifests and layers already identified by a content digest) still
-use the local cache and write newly fetched blobs through to `$OCX_HOME/blobs/`.
-Only `$OCX_HOME/tags/` is not updated — the persistent local tag snapshot is left unchanged.
+Routes mutable lookups (tag list, catalog, tag→manifest resolution) to the
+remote registry instead of the local index. Pure-query commands
+([`ocx index list`](#index-list), [`ocx index catalog`](#index-catalog),
+[`ocx package info`](#package-info)) do **not** persist the result to the
+local index — to refresh the persistent snapshot, run
+[`ocx index update`](#index-update) explicitly. Implies network access.
 
-Combining this flag with [`--offline`](#arg-offline) will result in an error.
+Digest-addressed reads (manifests and layers already identified by a content
+digest) still consult the local index first and write newly fetched blobs
+through to `$OCX_HOME/blobs/` — content-addressed data is immutable, so
+caching is safe regardless of mode.
+
+Combining this flag with [`--offline`](#arg-offline) is **accepted** as
+"pinned-only mode" — see [Pinned-only mode](#pinned-only-mode) below.
+
+### Pinned-only mode {#pinned-only-mode}
+
+Setting both [`--offline`](#arg-offline) and [`--remote`](#arg-remote)
+together produces a deliberately strict mode: no source contact, no local
+writes, and any tag-addressed resolution that cannot be satisfied locally
+errors instead of silently falling back. The CLI emits an `info` log to
+confirm the mode is active.
+
+Use it in CI to assert every project dependency is digest-pinned:
+
+```sh
+ocx --offline --remote exec -- my-build-script
+```
+
+If any tool resolution falls back to a floating tag, the command fails — a
+hermetic-build sanity check without round-tripping to the registry.
 
 ### `--index` {#arg-index}
 
@@ -500,7 +527,7 @@ ocx hook-env [OPTIONS]
 ocx index catalog [OPTIONS] [REGISTRY...]
 ```
 
-Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/cmake`).
+Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly without writing through to the local snapshot. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/cmake`).
 
 **Arguments**
 
@@ -518,9 +545,15 @@ ocx index list [OPTIONS] <PACKAGE>...
 
 Lists available tags for one or more packages.
 
+Identifiers carrying a digest (`@sha256:...`) are rejected with a usage
+error — `index list` enumerates tags, and a digest narrows nothing. Use
+[`ocx package info <pkg>@<digest>`](#package-info) for a single artifact, or
+drop the `@digest` suffix. Tag-only identifiers (`<pkg>:<tag>`) still work
+as a tag filter on the returned list.
+
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to list tags for.
+- `<PACKAGE>`: Package identifiers to list tags for. Must not include a digest suffix.
 
 **Options**
 
@@ -528,14 +561,23 @@ Lists available tags for one or more packages.
 - `--variants`: Lists unique variant names found in the tags.
 - `-h`, `--help`: Print help information.
 
+::: tip
+`index list` is a pure-query command — under [`--remote`](#arg-remote) it
+contacts the registry without writing the local tag store. To refresh the
+persistent snapshot, run [`ocx index update`](#index-update) explicitly.
+:::
+
 #### `update` {#index-update}
 
 ```bash
 ocx index update <PACKAGE>...
 ```
 
-Writes tag→digest pointers to `$OCX_HOME/tags/` for the specified packages by querying the
-registry directly. No manifest or layer blobs are written to `$OCX_HOME/blobs/`.
+Explicitly refresh the local index from the remote registry. **The only
+command that writes tag pointers to `$OCX_HOME/tags/` outside of
+`ocx install` / `ocx package pull`** (the install/pull path commits via
+`LocalIndex::commit_tag`, gated to skip pinned-id pulls). No manifest or
+layer blobs are written to `$OCX_HOME/blobs/` by `index update`.
 
 When a tagged identifier is used (e.g., `cmake:3.28`), only that single tag's digest pointer is
 recorded — the remote tag listing is skipped entirely. This is ideal for lockfile workflows where

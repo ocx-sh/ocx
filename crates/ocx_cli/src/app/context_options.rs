@@ -30,13 +30,25 @@ pub struct ContextOptions {
     #[arg(long, value_name = "FILE")]
     pub project: Option<std::path::PathBuf>,
 
-    /// Use the remote index by default instead of the local index.
+    /// Route mutable lookups (tag list, catalog, tag→manifest) to the
+    /// remote registry instead of the local index.
+    ///
+    /// Pure queries (`index list`, `index catalog`, `package info`) do
+    /// **not** persist the result to the local index — use
+    /// `ocx index update` to refresh the local index explicitly. Implies
+    /// network access. Combined with `--offline` the result is
+    /// "pinned-only mode": no source contact, and any tag-addressed
+    /// resolution that cannot be satisfied locally errors instead of
+    /// silently falling back. Equivalent env var: `OCX_REMOTE`.
     #[arg(long, default_value_t = env::flag("OCX_REMOTE", false))]
     pub remote: bool,
 
-    /// Run in offline mode, which will not attempt to fetch any remote information.
+    /// Disable all network access.
     ///
-    /// If a required package is not already installed, the command will fail.
+    /// Tag→digest resolution must be satisfied by the local index or a
+    /// digest-pinned identifier; unpinned tags missing from the local
+    /// index will error. Useful for hermetic CI runs and air-gapped
+    /// environments. Equivalent env var: `OCX_OFFLINE`.
     #[arg(long, default_value_t = env::flag("OCX_OFFLINE", false))]
     pub offline: bool,
 

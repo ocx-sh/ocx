@@ -46,6 +46,18 @@ impl Context {
 
         log::debug!("Creating context with options: {:?}", options);
 
+        if options.offline && options.remote {
+            // `--offline --remote` = pinned-only mode. Both flags accepted
+            // together because the routing matrix collapses cleanly:
+            // `--offline` overrides `--remote` to no-source-contact, and
+            // any tag-addressed resolution must succeed locally or error.
+            // Documented in user-guide §Routing and command-line.md.
+            log::info!(
+                "--offline --remote: pinned-only mode — tag and catalog lookups will not contact a source. \
+                 Tag-addressed resolution attempts must be satisfied locally or by digest-pinned identifiers."
+            );
+        }
+
         // Capture the explicit project path before consuming `options` into other
         // init calls. `lock` and similar commands need it for the precedence
         // chain: explicit flag > env > CWD walk > home fallback.
