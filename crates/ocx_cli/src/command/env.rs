@@ -73,17 +73,64 @@ impl Env {
         #[cfg(target_os = "windows")]
         {
             let current_pathext = std::env::var("PATHEXT").unwrap_or_default();
-            if !ocx_lib::env::pathext_includes_launcher(&current_pathext) {
-                all_entries.push(api::data::env::EnvEntry {
-                    key: "PATHEXT".to_string(),
-                    value: ".CMD".to_string(),
-                    kind: ocx_lib::package::metadata::env::modifier::ModifierKind::Path,
-                });
+            if let Some(entry) = synthetic_pathext_entry(&current_pathext) {
+                all_entries.push(entry);
             }
         }
 
         context.api().report(&api::data::env::EnvVars::new(all_entries))?;
 
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Returns a synthetic `PATHEXT ⊳ .CMD` env entry when the host PATHEXT does
+/// not already list the launcher extension. Returns `None` otherwise so
+/// `ocx env` does not emit a redundant entry for shells that already include
+/// `.CMD`.
+#[cfg(target_os = "windows")]
+fn synthetic_pathext_entry(host_pathext: &str) -> Option<api::data::env::EnvEntry> {
+    if ocx_lib::env::pathext_includes_launcher(host_pathext) {
+        return None;
+    }
+    Some(api::data::env::EnvEntry {
+        key: "PATHEXT".to_string(),
+        value: ".CMD".to_string(),
+        kind: ocx_lib::package::metadata::env::modifier::ModifierKind::Path,
+    })
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod synthetic_pathext_tests {
+    use super::synthetic_pathext_entry;
+
+    #[test]
+    fn returns_none_when_host_pathext_includes_cmd() {
+        assert!(synthetic_pathext_entry(".EXE;.CMD;.BAT").is_none());
+    }
+
+    #[test]
+    fn returns_none_for_lowercase_cmd() {
+        assert!(synthetic_pathext_entry(".exe;.cmd").is_none());
+    }
+
+    #[test]
+    fn returns_synthetic_entry_when_cmd_absent() {
+        let entry = synthetic_pathext_entry(".EXE;.BAT").expect("synthetic entry expected");
+        assert_eq!(entry.key, "PATHEXT");
+        assert_eq!(entry.value, ".CMD");
+    }
+
+    #[test]
+    fn returns_synthetic_entry_when_pathext_empty() {
+        let entry = synthetic_pathext_entry("").expect("synthetic entry expected");
+        assert_eq!(entry.key, "PATHEXT");
+        assert_eq!(entry.value, ".CMD");
+    }
+
+    #[test]
+    fn partial_match_still_emits_synthetic() {
+        // ".cmdextra" must not silence the gate.
+        assert!(synthetic_pathext_entry(".cmdextra;.EXE").is_some());
     }
 }

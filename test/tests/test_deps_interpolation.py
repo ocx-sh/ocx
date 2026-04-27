@@ -85,6 +85,65 @@ def test_dep_install_path_resolves_to_content_dir(
     assert "packages" in resolved, f"expected CAS packages path, got: {resolved!r}"
 
 
+def test_transitive_dep_install_path_propagates_via_public_chain(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """``${deps.<NAME>.installPath}`` declared on a transitively-public dep resolves at the consumer.
+
+    Topology: A → B → C. C is a leaf. B declares ``C_PATH = ${deps.<C>.installPath}``
+    in its env and a Public dep on C. A has a Public dep on B and no env of its own.
+    Running ``ocx env A`` must expose ``C_PATH`` with the token expanded to C's
+    on-disk content path — i.e. B's env propagates through the Public chain and
+    its template references the (also Public) transitive dep at resolve time.
+    """
+    c_repo = f"{unique_repo}_c"
+    b_repo = f"{unique_repo}_b"
+    a_repo = f"{unique_repo}_a"
+
+    # C: leaf, no deps.
+    c = make_package(ocx, c_repo, "1.0.0", tmp_path, new=True)
+
+    # B: Public dep on C, env references C's installPath.
+    c_dep = _dep_entry(ocx, c)
+    c_dep["visibility"] = "public"
+    b = make_package(
+        ocx, b_repo, "1.0.0", tmp_path,
+        new=True,
+        env=[{"key": "C_PATH", "type": "constant", "value": f"${{deps.{c_repo}.installPath}}"}],
+        dependencies=[c_dep],
+    )
+
+    # A: Public dep on B, no env of its own.
+    b_dep = _dep_entry(ocx, b)
+    b_dep["visibility"] = "public"
+    a = make_package(
+        ocx, a_repo, "1.0.0", tmp_path,
+        new=True,
+        dependencies=[b_dep],
+    )
+
+    ocx.plain("install", "--select", a.short)
+
+    env_result = ocx.json("env", a.short)
+    c_path_entry = next((e for e in env_result if e["key"] == "C_PATH"), None)
+    keys = [e["key"] for e in env_result]
+    assert c_path_entry is not None, (
+        f"C_PATH (declared on B) must propagate to A through Public chain; got keys={keys}"
+    )
+
+    resolved = c_path_entry["value"]
+    assert "${deps." not in resolved, f"transitive token not expanded: {resolved!r}"
+    assert Path(resolved).exists(), f"resolved transitive path missing: {resolved!r}"
+    # The resolved path must equal C's content path (not B's), proving the
+    # template was expanded against C and not silently against the consumer.
+    c_paths = ocx.json("find", c.short)
+    expected_c_content = c_paths.get(c.short) if isinstance(c_paths, dict) else c_paths
+    assert expected_c_content, f"`ocx find {c.short}` returned no content path: {c_paths!r}"
+    assert resolved == expected_c_content, (
+        f"C_PATH must equal C's content path; got {resolved!r}, expected {expected_c_content!r}"
+    )
+
+
 def test_dep_install_path_with_explicit_name(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):

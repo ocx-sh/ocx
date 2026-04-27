@@ -291,6 +291,54 @@ def test_root_package_entrypoints_appear_in_self_env(
     )
 
 
+def test_synthetic_entrypoints_path_emitted_before_declared_bin(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """The synthetic `entrypoints/` PATH entry must be emitted BEFORE the
+    declared `${installPath}/bin` PATH entry in `ocx env` output.
+
+    `ocx env` lists PATH-typed entries in apply order. Consumers process them
+    by prepending, so the LAST entry in the list ends up FIRST in the resolved
+    PATH. Putting the synthetic `entrypoints/` entry before the declared `bin/`
+    entry in the output therefore makes `bin/` win lookup priority — which is
+    the invariant that prevents `ocx exec file://<pkg>` from re-resolving its
+    own launcher and recursing.
+
+    Acceptance-level mirror of the unit test in
+    `crates/ocx_lib/src/package_manager/visible.rs::apply_visible_packages_synthetic_path_before_declared_env`.
+    """
+    pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        bins=["hello"],
+    )
+    ocx.plain("install", "--select", pkg.short)
+
+    env_result = ocx.json("env", pkg.short)
+    path_entries = [(i, e["value"]) for i, e in enumerate(env_result) if e["key"] == "PATH"]
+    assert path_entries, f"expected PATH entries in env output: {env_result}"
+
+    # On Windows the bin segment uses backslashes; match either separator.
+    syn_idx = next((i for i, v in path_entries if "entrypoints" in v), None)
+    bin_idx = next(
+        (i for i, v in path_entries if v.endswith("/bin") or v.endswith("\\bin")),
+        None,
+    )
+
+    assert syn_idx is not None, (
+        f"synthetic entrypoints PATH entry missing; PATH values: {[v for _, v in path_entries]}"
+    )
+    assert bin_idx is not None, (
+        f"declared bin/ PATH entry missing; PATH values: {[v for _, v in path_entries]}"
+    )
+    assert syn_idx < bin_idx, (
+        f"synthetic entrypoints entry (index {syn_idx}) must precede declared bin/ entry "
+        f"(index {bin_idx}) in env output; values: {[v for _, v in path_entries]}"
+    )
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix exec integration test")
 def test_exec_dep_launcher_via_path(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path

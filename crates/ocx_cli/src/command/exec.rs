@@ -124,14 +124,7 @@ impl Exec {
                 .and_then(|v| v.to_str())
                 .unwrap_or("")
                 .to_string();
-            if !env::pathext_includes_launcher(&current_pathext) {
-                // Prepend .CMD to the existing PATHEXT (or use a safe default
-                // that covers the most common Windows executable extensions).
-                let new_pathext = if current_pathext.is_empty() {
-                    ".CMD;.EXE;.BAT;.COM".to_string()
-                } else {
-                    format!(".CMD;{current_pathext}")
-                };
+            if let Some(new_pathext) = pathext_for_child(&current_pathext) {
                 process_env.set("PATHEXT", new_pathext);
             }
         }
@@ -157,6 +150,21 @@ impl Exec {
         let status = child_process.wait().await?;
         Ok(child_exit_to_exit_code(status))
     }
+}
+
+/// Returns the `PATHEXT` value that should be set on the child env when
+/// launching a binary, or `None` if the inherited value already lists the
+/// `.cmd` launcher extension (case-insensitive). On Windows-only.
+#[cfg(target_os = "windows")]
+fn pathext_for_child(current: &str) -> Option<String> {
+    if env::pathext_includes_launcher(current) {
+        return None;
+    }
+    Some(if current.is_empty() {
+        ".CMD;.EXE;.BAT;.COM".to_string()
+    } else {
+        format!(".CMD;{current}")
+    })
 }
 
 /// Validate a `file://` package root: must be an absolute path that
@@ -316,5 +324,41 @@ mod tests {
             .await
             .expect_err("missing dir must be rejected");
         assert!(err.to_string().contains("file://"));
+    }
+
+    // ── pathext_for_child (Windows only) ─────────────────────────────────
+
+    #[cfg(target_os = "windows")]
+    mod pathext_for_child_tests {
+        use super::super::pathext_for_child;
+
+        #[test]
+        fn returns_none_when_already_includes_cmd() {
+            assert_eq!(pathext_for_child(".EXE;.CMD;.BAT"), None);
+        }
+
+        #[test]
+        fn returns_none_for_lowercase_cmd() {
+            assert_eq!(pathext_for_child(".exe;.cmd;.bat"), None);
+        }
+
+        #[test]
+        fn prepends_cmd_to_existing_pathext() {
+            assert_eq!(pathext_for_child(".EXE;.BAT").as_deref(), Some(".CMD;.EXE;.BAT"));
+        }
+
+        #[test]
+        fn supplies_default_when_pathext_empty() {
+            assert_eq!(pathext_for_child("").as_deref(), Some(".CMD;.EXE;.BAT;.COM"));
+        }
+
+        #[test]
+        fn does_not_double_prepend_when_partial_match_present() {
+            // ".cmdextra" is not ".cmd"; injection should still happen.
+            assert_eq!(
+                pathext_for_child(".cmdextra;.EXE").as_deref(),
+                Some(".CMD;.cmdextra;.EXE")
+            );
+        }
     }
 }
