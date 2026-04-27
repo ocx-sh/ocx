@@ -149,7 +149,7 @@ The `--candidate` and `--current` flags are available on commands that resolve a
 path, for example [`env`](#env), [`find`](#find), or [`shell env`](#shell-env).
 
 By default these commands use the content-addressed path in the
-[object store](../user-guide.md#file-structure-objects) — a hash-derived directory that changes
+[object store](../user-guide.md#file-structure-packages) — a hash-derived directory that changes
 whenever the package is reinstalled at a different version. Use `--candidate` or `--current` to
 resolve via a [stable install symlink](../user-guide.md#path-resolution) instead, whose path never changes regardless of the underlying
 object. This is useful for paths embedded in editor configs, Makefiles, or shell profiles that
@@ -440,7 +440,7 @@ ocx info
 
 Downloads and installs one or more packages into the local object store.
 
-Installs packages into the [object store](../user-guide.md#file-structure-objects) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
+Installs packages into the [object store](../user-guide.md#file-structure-packages) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
 
 **Usage**
 
@@ -696,6 +696,12 @@ ocx ci export [OPTIONS] <PACKAGE>...
 On Windows runners, `ci export` prints a stderr warning when `PATHEXT` is missing `.CMD`. Generated `.cmd` launchers exported via `$GITHUB_PATH` only resolve by bare name when `PATHEXT` advertises `.CMD`; configure the runner shell or invoke launchers with their full filename.
 :::
 
+For packages that declare [entry points][guide-entry-points], `ci export` includes a synthetic PATH
+entry pointing at the package's `entrypoints/` directory. This entry is placed before any
+`bin/`-style paths declared by the package's `env` metadata, so installed launchers take
+precedence over raw binaries when both are on the exported PATH. See the
+[entry-points guide][guide-entry-points] for the rationale behind this ordering.
+
 ::: tip
 Pair with [`package pull`](#package-pull) for a minimal CI setup:
 
@@ -873,9 +879,10 @@ ocx package info [OPTIONS] <IDENTIFIER>
 
 <!-- internal -->
 [entry-points]: ./metadata.md#entry-points
+[guide-entry-points]: ../guide/entry-points.md
 [exit-codes]: #exit-codes
-[fs-objects]: ../user-guide.md#file-structure-objects
+[fs-objects]: ../user-guide.md#file-structure-packages
 [fs-symlinks]: ../user-guide.md#file-structure-symlinks
-[fs-index]: ../user-guide.md#file-structure-index
+[fs-index]: ../user-guide.md#indices-local
 [ug-dependencies]: ../user-guide.md#dependencies
 [ug-deps-env]: ../user-guide.md#dependencies-environment

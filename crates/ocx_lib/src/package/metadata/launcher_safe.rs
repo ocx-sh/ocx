@@ -18,6 +18,16 @@
 ///
 /// Both launchers are generated on every platform (cross-platform packages),
 /// so the character set is unified rather than per-platform.
+///
+/// **Why backslash (`\`) is intentionally NOT in the set.** Windows package
+/// roots normally contain `\` (e.g. `C:\Users\…\.ocx\packages\…`), and the
+/// `.cmd` template embeds the package root inside a double-quoted `file://`
+/// URI on the `ocx exec` line. Inside `cmd.exe` double quotes, `\` is a
+/// literal byte — not an escape character — so a `\`-bearing path cannot
+/// terminate the string or change the parse. Forbidding `\` would block
+/// every realistic Windows install path; allowing it does not introduce a
+/// new injection surface beyond the residual `%*` argv risk documented in
+/// `.claude/artifacts/adr_windows_cmd_argv_injection.md`.
 const LAUNCHER_UNSAFE_CHARS: &[char] = &['\'', '%', '"', '\n', '\r', '\0'];
 
 /// A `String` proven free of characters that would corrupt a generated launcher.

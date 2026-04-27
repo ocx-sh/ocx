@@ -382,3 +382,14 @@ Contracts 16 and 17 together prove the direct-deps-only scoping invariant: creat
 |------|--------|--------|
 | 2026-04-19 | Michael Herwig | Initial draft (swarm-plan output) |
 | 2026-04-19 | Merge | Cross-worktree merge: `DependencyContext` now carries `PinnedIdentifier` (enables future `version`/`digest` properties + structured error chain); added explicit direct-deps-only scoping invariant; added `AmbiguousDependencyRef` error variant with `PinnedIdentifier` pair; added 17-contract list including transitive-scoping double gate and extensibility-seam guard; added older-client silent-mis-substitution risk |
+
+## Post-implementation update
+
+The original ADR chose Option A (basename derivation with optional `alias` override) and named
+the override field `alias`. During implementation on `feat/package-entry-points`, the field was
+renamed from `alias` to `name` — the `Dependency` struct now carries `pub name: Option<String>`
+instead of `pub alias: Option<String>`, and `Dependency::name()` returns it directly. The
+template token form `${deps.NAME.installPath}` is unchanged. See the [`Dependency.name` field
+in `metadata.md`][metadata-dep-name] for the current field reference.
+
+[metadata-dep-name]: ../../website/src/docs/reference/metadata.md#dependencies

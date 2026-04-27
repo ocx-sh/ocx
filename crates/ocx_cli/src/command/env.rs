@@ -59,7 +59,7 @@ impl Env {
             })
             .collect();
 
-        // On Windows, prepend a synthetic `PATHEXT ⊳ .CMD` entry to the env
+        // On Windows, append a synthetic `PATHEXT ⊳ .CMD` entry to the env
         // output when the host shell's PATHEXT lacks `.cmd`. `ocx env` is the
         // shell-eval boundary — what we emit becomes the consumer's effective
         // env after `eval`. The host PATHEXT we read here drives the gate, not

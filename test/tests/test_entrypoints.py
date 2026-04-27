@@ -672,6 +672,11 @@ def test_install_transitive_closure_collision_aborts_before_disk(
         f"error must cite the colliding entrypoint name 'cmake'; "
         f"stderr={result.stderr.strip()!r}"
     )
+    assert repo_c in result.stderr and repo_d in result.stderr, (
+        f"error must cite both colliding repositories ({repo_c!r}, {repo_d!r}) "
+        f"so the user can identify which transitively-reached packages own the "
+        f"duplicate entrypoint; stderr={result.stderr.strip()!r}"
+    )
 
     reg = registry_dir(ocx.registry)
     candidate_root = (

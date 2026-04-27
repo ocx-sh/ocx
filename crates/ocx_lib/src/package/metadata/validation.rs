@@ -494,7 +494,7 @@ mod tests {
         assert!(ValidMetadata::try_from(meta).is_ok());
     }
 
-    // 3.3 — valid: env ref matches declared dep alias
+    // 3.3 — valid: env ref matches declared dep name
     #[test]
     fn valid_dep_ref_via_alias() {
         let meta = make_metadata(
@@ -533,7 +533,7 @@ mod tests {
         );
     }
 
-    // 3.3 — error: collision — two same-basename deps (no alias) + token → AmbiguousDependencyRef
+    // 3.3 — error: collision — two same-basename deps (no name override) + token → AmbiguousDependencyRef
     #[test]
     fn same_basename_collision_with_token_errors() {
         let h1 = hex(1);

@@ -277,7 +277,9 @@ mod tests {
             .expect("write metadata.json");
 
         // Write a valid resolve.json so the only failure comes from metadata validation.
-        let resolve_json = r#"{"version":1,"dependencies":[]}"#;
+        // ResolvedPackage uses #[serde(deny_unknown_fields)] — passing a `version` field
+        // would short-circuit the test before it reaches the ValidMetadata gate.
+        let resolve_json = r#"{"dependencies":[]}"#;
         tokio::fs::write(content.with_file_name("resolve.json"), resolve_json)
             .await
             .expect("write resolve.json");

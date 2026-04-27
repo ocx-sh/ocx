@@ -23,7 +23,7 @@ OCX installs binaries into a content-addressed store but does not expose them to
 
 Issue #61 specifies:
 
-- Additive `entry_points` field on bundle metadata
+- Additive `entrypoints` field on bundle metadata
 - Launchers generated at install time, invoking `ocx exec` with the package path
 - Host-OCX coupling (launcher calls whatever `ocx` is on PATH; no OCX version baked)
 - Cross-platform: Unix `.sh` + Windows `.cmd` targets
@@ -326,7 +326,7 @@ The issue body decided: use host OCX. Launchers contain no embedded `ocx` versio
 **Testing strategy:**
 
 - Round-trip tests mirroring `dependency.rs::alias_invalid_empty_rejected` and `alias_invalid_uppercase_rejected`
-- Schema test: regenerate JSON Schema; assert `entry_points` is an additive-optional property on Bundle
+- Schema test: regenerate JSON Schema; assert `entrypoints` is an additive-optional property on Bundle
 
 ### 2. `EntryPoints` wrapper
 
@@ -350,7 +350,7 @@ The issue body decided: use host OCX. Launchers contain no embedded `ocx` versio
 - Serde round-trip + preserve-order test (array position is stable — not used for resolution but documented)
 - `duplicate_name_rejected` test mirroring `duplicate_alias_rejected`
 
-### 3. `Metadata::Bundle.entry_points`
+### 3. `Metadata::Bundle.entrypoints`
 
 **Location:** `crates/ocx_lib/src/package/metadata/bundle.rs:36`.
 
@@ -367,11 +367,11 @@ pub struct Bundle {
     pub dependencies: Dependencies,
     // NEW:
     #[serde(skip_serializing_if = "EntryPoints::is_empty", default)]
-    pub entry_points: EntryPoints,
+    pub entrypoints: EntryPoints,
 }
 ```
 
-**Forward-compat stance:** Additive-optional. Older `ocx` encountering a newer package with `entry_points` set **parses successfully, ignores the field**, and produces a package install without launchers. This matches existing precedent (`dependencies` was added the same way). Documented in ADR consequences.
+**Forward-compat stance:** Additive-optional. Older `ocx` encountering a newer package with `entrypoints` set **parses successfully, ignores the field**, and produces a package install without launchers. This matches existing precedent (`dependencies` was added the same way). Documented in ADR consequences.
 
 ### 4. Publish-time template validation
 
@@ -421,12 +421,12 @@ impl PackageStore {
 
 ### 6. Launcher template generator
 
-**Location:** `crates/ocx_lib/src/package_manager/entry_points.rs` (new file, module-private helpers; no `impl PackageManager` additions).
+**Location:** `crates/ocx_lib/src/package_manager/entrypoints.rs` (new file, module-private helpers; no `impl PackageManager` additions).
 
 **Inputs:**
 
 - `content_path: &Path` — absolute path to package `content/` (baked into launcher)
-- `entry_points: &EntryPoints` — validated list
+- `entrypoints: &EntryPoints` — validated list
 - `dep_contexts: HashMap<String, DependencyContext>` — for `${deps.NAME.installPath}` resolution in `target`
 - `dest: &Path` — the package's `entrypoints/` temp dir
 
@@ -478,11 +478,11 @@ No `find_dp0` subroutine needed because the path is baked, not self-located.
 
 ```rust
 // After assemble_from_layers completes successfully:
-if let Some(entry_points) = metadata.bundle_entry_points() {
+if let Some(entrypoints) = metadata.bundle_entrypoints() {
     let dest = pkg.entrypoints();
     // Build dep_contexts same way resolve_env does (resolve.rs:220-260)
     let dep_contexts = build_dep_contexts(&metadata, &dependencies, fs);
-    entry_points::generate(&pkg.content(), entry_points, &dep_contexts, &dest)
+    entrypoints::generate(&pkg.content(), entrypoints, &dep_contexts, &dest)
         .await
         .map_err(PackageErrorKind::Internal)?;
 }
@@ -574,7 +574,7 @@ if let Some(content) = &self.install_dir {
 
 - `crates/ocx_lib/src/file_structure/symlink_store.rs` — new `entrypoints_current(&self, id) → PathBuf` accessor returning `{root}/symlinks/{registry}/{repo}/entrypoints-current`.
 - `crates/ocx_lib/src/package_manager/tasks/install.rs` — on `select: true`, after `rm.link(&current_path, &info.content)`, also `rm.link(&entrypoints_current_path, &info.entrypoints())`.
-- Shell-profile machinery (`crates/ocx_lib/src/profile/manager.rs`) — when a profiled package has `entry_points.is_empty() == false`, emit a PATH entry pointing at `entrypoints-current` in addition to (or instead of — to be decided by the builder phase) the existing `${installPath}/bin` PATH entry driven by metadata `env`.
+- Shell-profile machinery (`crates/ocx_lib/src/profile/manager.rs`) — when a profiled package has `entrypoints.is_empty() == false`, emit a PATH entry pointing at `entrypoints-current` in addition to (or instead of — to be decided by the builder phase) the existing `${installPath}/bin` PATH entry driven by metadata `env`.
 
 **Invariants:**
 
@@ -609,7 +609,7 @@ Baked absolute paths work on network-mounted `$OCX_HOME` locations (SMB shares, 
 
 ## Launcher Name Collision Policy
 
-**Decision:** **Reject at select time.** Generation of launcher *files* under each package's `entrypoints/` is unconditional (every install with `entry_points` declared produces launcher files in the package dir). Collision is checked when `entrypoints-current` is about to be wired — i.e., at `ocx install --select` (the combined install+select path) or at `ocx select` on an already-installed package. Install without `--select` never fires the check. When a selected package's entry-point `name` collides with another *currently-selected* package's entry-point in a different repo, the select step fails with `PackageErrorKind::EntryPointNameCollision { name, existing_package: oci::Identifier }`. See Additional Considerations §3 for the precise trigger.
+**Decision:** **Reject at select time.** Generation of launcher *files* under each package's `entrypoints/` is unconditional (every install with `entrypoints` declared produces launcher files in the package dir). Collision is checked when `entrypoints-current` is about to be wired — i.e., at `ocx install --select` (the combined install+select path) or at `ocx select` on an already-installed package. Install without `--select` never fires the check. When a selected package's entry-point `name` collides with another *currently-selected* package's entry-point in a different repo, the select step fails with `PackageErrorKind::EntryPointNameCollision { name, existing_package: oci::Identifier }`. See Additional Considerations §3 for the precise trigger.
 
 **Alternatives considered:**
 
@@ -632,8 +632,8 @@ Baked absolute paths work on network-mounted `$OCX_HOME` locations (SMB shares, 
 
 | Scenario | Behavior |
 |----------|----------|
-| Old `ocx` reads new metadata with `entry_points` | `#[serde(default)]` + `skip_serializing_if`: field parses to empty, package installs without launchers |
-| New `ocx` reads old metadata without `entry_points` | Same path — field defaults to empty; install proceeds without launchers |
+| Old `ocx` reads new metadata with `entrypoints` | `#[serde(default)]` + `skip_serializing_if`: field parses to empty, package installs without launchers |
+| New `ocx` reads old metadata without `entrypoints` | Same path — field defaults to empty; install proceeds without launchers |
 | Publisher renames an entry point | Breaking change for callers. Not detected by OCX; publisher discipline. Documented in user-guide |
 | Publisher deletes an entry point | Same — breaking for callers; not enforced |
 
@@ -705,11 +705,11 @@ Documented limitation; matches Windows cmd.exe behavior everywhere.
 
 ## Migration Plan
 
-**For existing publishers:** No action. `entry_points` defaults to empty; existing packages continue to install without launchers. Publishers opt in by adding the field in the next release.
+**For existing publishers:** No action. `entrypoints` defaults to empty; existing packages continue to install without launchers. Publishers opt in by adding the field in the next release.
 
 **For existing consumers:** No action. `ocx exec <identifier> -- <cmd>` continues to work unchanged. Users who want launchers run the same `ocx install --select` they run today and get launchers as a side effect.
 
-**For existing installs when upgrading `ocx`:** Installed packages do not retroactively gain launchers. The next `ocx install` generates launchers for newly-installed packages that declare `entry_points`. For users who want launchers for already-installed packages: `ocx install <pkg> --select` reinstalls and generates launchers.
+**For existing installs when upgrading `ocx`:** Installed packages do not retroactively gain launchers. The next `ocx install` generates launchers for newly-installed packages that declare `entrypoints`. For users who want launchers for already-installed packages: `ocx install <pkg> --select` reinstalls and generates launchers.
 
 No `ocx migrate` or `ocx repair` command v1. If post-launch feedback shows demand, add `ocx install --repair` that regenerates launchers for an already-installed package without re-downloading.
 
@@ -719,7 +719,7 @@ No `ocx migrate` or `ocx repair` command v1. If post-launch feedback shows deman
 2. [ ] Extend `Bundle` struct + `Metadata` accessor + JSON Schema
 3. [ ] Extend `ValidMetadata::try_from` with target-template validation
 4. [ ] Add `PackageDir::entrypoints()` + `PackageStore::entrypoints()` + `PackageStore::entrypoints_for_content()`
-5. [ ] Add launcher generator in `package_manager/entry_points.rs`
+5. [ ] Add launcher generator in `package_manager/entrypoints.rs`
 6. [ ] Wire install-pipeline hook in `tasks/pull.rs` (between line 344 and 355)
 7. [ ] Add `PackageManager::resolve_env_from_content_path` and add `--install-dir` flag + path-mode branch in `command/exec.rs`
 8. [ ] Add `SymlinkStore::entrypoints_current` + wire `ocx select` / `ocx deselect`
@@ -733,8 +733,8 @@ No `ocx migrate` or `ocx repair` command v1. If post-launch feedback shows deman
 
 - [ ] Performance: `time <launcher> --version` on Linux <5 ms (launcher script) + `ocx exec` startup
 - [ ] Security review: launchers contain no secret interpolation; baked paths are content-addressed + publish-time-validated; no shell injection via unquoted vars (acceptance test with path containing spaces and `"`)
-- [ ] Schema check: `task schema:generate` produces valid JSON Schema with `entry_points` as additive-optional property
-- [ ] Backward compat: acceptance test installing an existing package without `entry_points` succeeds and produces no launchers
+- [ ] Schema check: `task schema:generate` produces valid JSON Schema with `entrypoints` as additive-optional property
+- [ ] Backward compat: acceptance test installing an existing package without `entrypoints` succeeds and produces no launchers
 - [ ] Cross-platform parity: acceptance tests run on Linux + macOS + Windows runners (existing matrix) and on MSYS2 Git Bash
 
 ## Consequences
@@ -766,13 +766,13 @@ No `ocx migrate` or `ocx repair` command v1. If post-launch feedback shows deman
 
 ```
 metadata.json (publisher-authored)
-  └─ entry_points: [ { name, target } ]           ← new field
+  └─ entrypoints: [ { name, target } ]             ← new field
        └─ ValidMetadata::try_from validates       ← extend existing validator
 
 ↓ publish via ocx package push
 
 package in OCI registry
-  └─ metadata.json contains entry_points
+  └─ metadata.json contains entrypoints
 
 ↓ ocx install
 
@@ -849,7 +849,7 @@ Bundle {
     strip_components: Option<u8>,
     env: Env,
     dependencies: Dependencies,
-    entry_points: EntryPoints,   // NEW, #[serde(default, skip_serializing_if = "is_empty")]
+    entrypoints: EntryPoints,   // NEW, #[serde(default, skip_serializing_if = "is_empty")]
 }
 
 EntryPointError {

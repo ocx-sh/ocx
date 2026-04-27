@@ -51,7 +51,7 @@ Competitors fill this gap with launcher scripts: Homebrew emits symlinks into `/
 ### Package Publisher
 
 - As a package publisher, I want to declare which binaries in my package are user-facing entry points so that consumers can invoke them by name.
-  - **Acceptance:** Publisher adds `entry_points: [{name: "cmake", target: "${installPath}/bin/cmake"}]` to `metadata.json`. `ocx package create` / `ocx package push` validates the list (name slug regex, unique names, target paths that resolve under `${installPath}` or a declared dep's `installPath`). Invalid lists reject at publish time with a structured error.
+  - **Acceptance:** Publisher adds `entrypoints: [{name: "cmake", target: "${installPath}/bin/cmake"}]` to `metadata.json`. `ocx package create` / `ocx package push` validates the list (name slug regex, unique names, target paths that resolve under `${installPath}` or a declared dep's `installPath`). Invalid lists reject at publish time with a structured error.
 - As a package publisher, I want entry-point names to follow the same naming conventions as dependency aliases so that I only have to learn one rule.
   - **Acceptance:** Names must match `^[a-z0-9][a-z0-9_-]*$`. Uniqueness enforced at deserialization like `Dependencies::new()`. Error message cites both the offending name and the existing rule.
 
@@ -80,7 +80,7 @@ Competitors fill this gap with launcher scripts: Homebrew emits symlinks into `/
 
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
-| FR-1 | `Metadata::Bundle` gains a new optional field `entry_points: Option<Vec<EntryPoint>>` | Must Have | Additive-optional, does not break existing packages |
+| FR-1 | `Metadata::Bundle` gains a new optional field `entrypoints: Option<Vec<EntryPoint>>` | Must Have | Additive-optional, does not break existing packages |
 | FR-2 | `EntryPoint` has two validated fields: `name` (slug regex `^[a-z0-9][a-z0-9_-]*$`) and `target` (template string resolved against `${installPath}` + `${deps.NAME.installPath}`) | Must Have | Same validation rules as the existing deps-interpolation surface (#32) |
 | FR-3 | Entry-point `name` uniqueness is enforced at deserialization time, matching `Dependencies::new()` | Must Have | Error type `EntryPointError::DuplicateName { name }` |
 | FR-4 | Publish-time validation of `target` templates in `ValidMetadata::try_from` | Must Have | Must reference `${installPath}` or declared dep names; unknown fields rejected |
@@ -106,7 +106,7 @@ Competitors fill this gap with launcher scripts: Homebrew emits symlinks into `/
 
 ### In Scope (v1)
 
-- `Metadata::Bundle.entry_points: Option<Vec<EntryPoint>>` schema field
+- `Metadata::Bundle.entrypoints: Option<Vec<EntryPoint>>` schema field
 - `EntryPoint { name, target }` type with slug + template validation
 - Unix POSIX sh launcher template
 - Windows `.cmd` launcher template
@@ -176,7 +176,7 @@ Competitors fill this gap with launcher scripts: Homebrew emits symlinks into `/
   "dependencies": [
     { "identifier": "ocx.sh/openssl:3@sha256:..." }
   ],
-  "entry_points": [
+  "entrypoints": [
     { "name": "cmake", "target": "${installPath}/bin/cmake" },
     { "name": "ctest", "target": "${installPath}/bin/ctest" }
   ]

@@ -16,8 +16,9 @@ Entry points live as a sibling array on the bundle metadata:
 ```json
 {
   "type": "bundle",
+  "version": 1,
   "env": [
-    { "key": "CMAKE_ROOT", "constant": { "value": "${installPath}/share/cmake" } }
+    { "key": "CMAKE_ROOT", "type": "constant", "value": "${installPath}/share/cmake" }
   ],
   "entrypoints": [
     { "name": "cmake", "target": "${installPath}/bin/cmake" },
@@ -52,7 +53,7 @@ Short, common names (`ls`, `gcc`, `tar`) create more cross-package collisions th
 The `target` field understands the same placeholders as [environment variable values][metadata-env]:
 
 - `${installPath}` — the absolute path to *this* package's content directory at install time. Baked once into the generated launcher; future selects do not rewrite it.
-- `${deps.NAME.installPath}` — the content directory of a declared dependency, where `NAME` is the repository basename (or the dependency's `alias` when one is declared). Expands against the exact digest resolved at install time, so launchers keep pointing at the build the package was originally installed against even after the dependency's tag advances.
+- `${deps.NAME.installPath}` — the content directory of a declared dependency, where `NAME` is the repository basename (or the dependency's `name` field when one is declared). Expands against the exact digest resolved at install time, so launchers keep pointing at the build the package was originally installed against even after the dependency's tag advances.
 
 Tokens that don't match the `${installPath}` or `${deps.NAME.FIELD}` shapes — anything missing the leading `$`, missing braces, or that is plainly not a placeholder (`{whatever}`, `$installPath`, `${{nested}}`) — pass through as literals on disk. Anything that *does* parse as `${...}` but isn't recognized is rejected at publish time: a `${deps.NAME.FIELD}` token referencing a dependency the package does not declare is rejected, an unsupported field on a declared dependency is rejected, and any other well-formed `${...}` token in an entry-point `target` is rejected as unrecognized. Validation runs at publish, again at install, and a final time when launcher scripts are generated, so invalid metadata never reaches the launcher.
 
@@ -150,9 +151,10 @@ Publishing a CMake package with two launchers looks like this on the publisher s
 ```json
 {
   "type": "bundle",
+  "version": 1,
   "strip_components": 1,
   "env": [
-    { "key": "PATH", "path": { "value": "${installPath}/bin" } }
+    { "key": "PATH", "type": "path", "required": true, "value": "${installPath}/bin" }
   ],
   "entrypoints": [
     { "name": "cmake", "target": "${installPath}/bin/cmake" },
@@ -182,7 +184,7 @@ ocx select cmake:3.30     # current flips; next shell command uses 3.30
 No shell profile rewrite, no re-sourcing dotfiles. The stable `current/entrypoints` path was already on `$PATH`; the select just re-points the `current` symlink at the new package root.
 
 <!-- security -->
-[adr-argv]: ../../../../.claude/artifacts/adr_windows_cmd_argv_injection.md
+[adr-argv]: https://github.com/ocx-sh/ocx/blob/main/.claude/artifacts/adr_windows_cmd_argv_injection.md
 
 <!-- external -->
 [sdkman]: https://sdkman.io/

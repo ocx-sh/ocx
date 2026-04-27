@@ -159,6 +159,16 @@ mod tests {
     }
 
     #[test]
+    fn lexical_normalize_backslash_parent_no_trailing_segment() {
+        // `foo\..` — parent-dir segment with no trailing component must
+        // collapse to an empty path, not a literal single component named
+        // `foo\..`. Without the collapse, `escapes_root` could miss it as a
+        // current-directory equivalent.
+        assert_eq!(lexical_normalize(Path::new("foo\\..")), PathBuf::new());
+        assert!(!escapes_root(Path::new("foo\\..")));
+    }
+
+    #[test]
     fn lexical_normalize_backslash_two_components() {
         // `foo\bar` must be two components yielding `foo/bar`, not a single
         // component named `foo\bar`.

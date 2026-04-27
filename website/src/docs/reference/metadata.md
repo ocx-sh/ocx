@@ -373,6 +373,13 @@ Initial release. Supports `path` and `constant` variable types, `strip_component
 for archive extraction, `${installPath}` template substitution, and optional
 `dependencies` for declaring digest-pinned package dependencies.
 
+Fields added during the entry-points feature (current branch):
+
+- `Bundle.entrypoints` — optional array of named launcher declarations; absent field is equivalent to an empty array (backward-compatible with old packages).
+- `Dependency.name` — optional explicit name override for a dependency; when absent, the name defaults to the repository basename of the `identifier`. Used as `NAME` in `${deps.NAME.installPath}` template tokens.
+- `${deps.NAME.installPath}` — template form available in `env` value strings and `entrypoints` target strings; expands to the resolved content path of the named direct dependency.
+- `visibility` — four levels controlling env propagation from dependencies (serialized lowercase): `sealed` (default; no env propagation, path still accessible via `${deps.NAME.installPath}`), `private` (env available for the package's own execution but not propagated to consumers), `public` (env available for the package's own execution AND propagated to consumers), `interface` (env propagated to consumers but not used by the package itself; typical for meta-packages that compose environments).
+
 <!-- external -->
 [json-schema]: https://json-schema.org/
 [check-jsonschema]: https://github.com/python-jsonschema/check-jsonschema
@@ -390,5 +397,5 @@ for archive extraction, `${installPath}` template substitution, and optional
 [cmd-env]: ./command-line.md#env
 
 <!-- internal -->
-[fs-objects]: ../user-guide.md#file-structure-objects
+[fs-objects]: ../user-guide.md#file-structure-packages
 [ug-dependencies]: ../user-guide.md#dependencies

@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - **Breaking:** Package metadata field renamed from `entry_points` to `entrypoints`. Publishers must update `metadata.json` files; bundles using the old field name fail validation at `package create`. *(package)*
-- **Breaking:** `Dependency.alias` renamed to `Dependency.name`. The `${deps.ALIAS.installPath}` template form continues to spell as `${deps.NAME.installPath}` — only the JSON field key changes. Existing bundles must be re-published with the new field. *(package)*
+- **Breaking:** Dependency JSON field key renamed from `alias` to `name`. Existing bundles must be re-published with `"name"` in place of `"alias"`. The `${deps.NAME.installPath}` template token is unchanged — `NAME` was always the placeholder keyword, never the literal field name. *(package)*
 - **Breaking:** `ocx-mirror` exit codes changed from `0/2/3/4` to `0/65/79/1/69` to align with the sysexits-based taxonomy. Wrapper scripts matching historic codes must be updated. *(mirror)*
 
 ### Fixed
