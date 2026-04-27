@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use ocx_lib::{log, oci};
+use ocx_lib::log;
 
 use crate::{
     api,
@@ -19,8 +19,8 @@ pub struct Install {
     #[clap(short = 's', long = "select")]
     select: bool,
 
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     /// Package identifiers to install.
     #[arg(required = true, num_args = 1..)]
@@ -43,7 +43,7 @@ impl Install {
             .manager()
             .install_all(
                 oci_packages.clone(),
-                platforms_or_default(&self.platforms),
+                platforms_or_default(self.platforms.as_slice()),
                 true,
                 self.select,
             )

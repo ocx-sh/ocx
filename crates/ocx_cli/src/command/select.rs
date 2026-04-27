@@ -4,7 +4,6 @@
 use std::{collections::HashMap, process::ExitCode};
 
 use clap::Parser;
-use ocx_lib::oci;
 
 use crate::{
     api,
@@ -23,9 +22,8 @@ use crate::{
 /// (`ocx env`, `ocx exec`) rather than at select. No downloading is performed.
 #[derive(Parser)]
 pub struct Select {
-    /// Platforms to consider when resolving the package. Defaults to the current platform.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     /// Package identifiers to select.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -37,7 +35,7 @@ impl Select {
         warn_if_pathext_missing_launcher();
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
-        let platforms = platforms_or_default(&self.platforms);
+        let platforms = platforms_or_default(self.platforms.as_slice());
 
         let package_infos = context.manager().find_all(identifiers.clone(), platforms).await?;
 

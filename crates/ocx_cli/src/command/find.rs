@@ -4,7 +4,6 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::oci;
 
 use crate::{api, conventions::platforms_or_default, options};
 
@@ -22,10 +21,8 @@ use crate::{api, conventions::platforms_or_default, options};
 ///   cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 #[derive(Parser)]
 pub struct Find {
-    /// Platforms to consider when resolving the package. Defaults to the current platform.
-    /// Ignored when `--candidate` or `--current` is used.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     #[clap(flatten)]
     content_path: options::ContentPath,
@@ -57,7 +54,7 @@ impl Find {
                 })
                 .collect()
         } else {
-            let platforms = platforms_or_default(&self.platforms);
+            let platforms = platforms_or_default(self.platforms.as_slice());
             let infos = manager.find_all(identifiers, platforms).await?;
             self.packages
                 .iter()

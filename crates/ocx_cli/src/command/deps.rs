@@ -42,9 +42,8 @@ pub struct Deps {
     #[clap(long, value_name = "N", conflicts_with_all = ["flat", "why"])]
     depth: Option<usize>,
 
-    /// Target platforms to consider when resolving packages.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     /// Package identifiers to inspect.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -53,7 +52,7 @@ pub struct Deps {
 
 impl Deps {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let platforms = platforms_or_default(&self.platforms);
+        let platforms = platforms_or_default(self.platforms.as_slice());
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();

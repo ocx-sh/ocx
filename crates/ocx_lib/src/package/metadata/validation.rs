@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::package_manager::entrypoints::LauncherSafeString;
+use super::LauncherSafeString;
 use crate::utility::fs::path::lexical_normalize;
 
 use super::Metadata;

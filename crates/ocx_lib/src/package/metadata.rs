@@ -7,6 +7,7 @@ pub mod bundle;
 pub mod dependency;
 pub mod entrypoint;
 pub mod env;
+pub(crate) mod launcher_safe;
 pub mod slug;
 pub mod template;
 pub mod validation;
@@ -14,6 +15,8 @@ pub mod visibility;
 
 // Re-export entrypoint public API so callers can use `metadata::Entrypoint` etc.
 pub use entrypoint::{Entrypoint, EntrypointError, EntrypointName, Entrypoints};
+// Re-export LauncherSafeString so callers can use `metadata::LauncherSafeString`.
+pub(crate) use launcher_safe::LauncherSafeString;
 // Re-export ValidMetadata so callers continue to use `metadata::ValidMetadata`.
 pub use validation::ValidMetadata;
 

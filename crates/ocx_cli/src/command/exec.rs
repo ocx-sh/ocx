@@ -13,7 +13,7 @@ use ocx_lib::package_manager::PackageRef;
 use ocx_lib::{env, oci};
 use tokio::process::Command;
 
-use crate::conventions::*;
+use crate::{conventions::*, options};
 
 /// Runs installed packages.
 ///
@@ -37,9 +37,8 @@ pub struct Exec {
     #[clap(long = "clean", default_value_t = false)]
     clean: bool,
 
-    /// Target platforms to consider when resolving packages. If not specified, only supported platforms will be considered.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM", num_args = 0..)]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     /// Package references to layer environment from.
     ///
@@ -94,7 +93,7 @@ impl Exec {
         }
 
         if !oci_identifiers.is_empty() {
-            let platforms = platforms_or_default(&self.platforms);
+            let platforms = platforms_or_default(self.platforms.as_slice());
             let infos = manager.find_or_install_all(oci_identifiers, platforms).await?;
             for (idx, info) in oci_indexes.into_iter().zip(infos) {
                 ordered[idx] = Some(info);

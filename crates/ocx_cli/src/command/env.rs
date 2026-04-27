@@ -4,7 +4,6 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::oci;
 
 use crate::{api, conventions::*, options};
 
@@ -23,9 +22,8 @@ use crate::{api, conventions::*, options};
 /// See the path resolution modes documentation for details.
 #[derive(Parser)]
 pub struct Env {
-    /// Target platforms to consider when resolving packages.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM", num_args = 0..)]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     #[clap(flatten)]
     content_path: options::ContentPath,
@@ -37,7 +35,7 @@ pub struct Env {
 
 impl Env {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let platforms = platforms_or_default(&self.platforms);
+        let platforms = platforms_or_default(self.platforms.as_slice());
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();

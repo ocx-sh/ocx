@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    file_structure::PackageStore,
+    file_structure::{PackageDir, PackageStore},
     oci,
     package::{
         install_info::InstallInfo,
@@ -279,7 +279,10 @@ pub fn emit_env(visible: &[VisiblePackage]) -> Result<Vec<Entry>, PackageErrorKi
             .bundle_entrypoints()
             .is_some_and(|eps| !eps.is_empty())
         {
-            let entrypoints_dir = pkg.install_info.package_root().join("entrypoints");
+            let entrypoints_dir = PackageDir {
+                dir: pkg.install_info.package_root().to_path_buf(),
+            }
+            .entrypoints();
             // Invariant: callers ensure the package root is UTF-8. `LauncherSafeString`
             // (entrypoints.rs) only screens forbidden characters, not UTF-8 validity, so
             // a non-UTF-8 `OCX_HOME` byte sequence on Unix would survive install but get
@@ -639,7 +642,7 @@ mod tests {
 
     /// Builds a `VisiblePackage` with a real on-disk content directory and a
     /// single entrypoint. Needed for `apply_visible_packages` tests that assert
-    /// on `package_root().join("entrypoints")`.
+    /// on `PackageDir::entrypoints()` for the same root.
     fn make_visible_with_ep_and_content(
         dir: &std::path::Path,
         repo: &str,
@@ -695,7 +698,7 @@ mod tests {
             !path_entries.is_empty(),
             "at least one PATH entry must be emitted for package with entrypoints"
         );
-        let expected_dir = pkg_root.join("entrypoints");
+        let expected_dir = crate::file_structure::PackageDir { dir: pkg_root }.entrypoints();
         assert!(
             path_entries
                 .iter()
@@ -877,5 +880,40 @@ mod tests {
         assert_eq!(map.len(), 2, "both entrypoints must be in the map");
         assert!(map.keys().any(|k| k.as_str() == "cmake"), "cmake must be in map");
         assert!(map.keys().any(|k| k.as_str() == "ninja"), "ninja must be in map");
+    }
+
+    // ── emit_env — entrypoints PATH round-trip ────────────────────────────────
+
+    /// The synthetic PATH value emitted by `emit_env` for a package with
+    /// entrypoints must equal `PackageDir::entrypoints()` for the same root.
+    ///
+    /// This test is the source-of-truth round-trip: `emit_env` constructs the
+    /// path via `PackageDir`, and the assertion independently derives the
+    /// expected value via the same accessor, so any future rename of the
+    /// `entrypoints` directory name will be caught by a single compile-time
+    /// failure here (the accessor is the only authorised site for the name).
+    #[test]
+    fn emit_env_synthetic_path_equals_package_dir_entrypoints() {
+        use super::emit_env;
+        use crate::file_structure::PackageDir;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = make_visible_with_ep_and_content(dir.path(), "roundtrip", 'r', "roundtrip");
+        let pkg_root = pkg.install_info.package_root().to_path_buf();
+
+        // Derive expected value through the canonical accessor — same as emit_env uses.
+        let expected = PackageDir { dir: pkg_root }.entrypoints();
+        let expected_str = expected.to_string_lossy().into_owned();
+
+        let visible = vec![pkg];
+        let entries = emit_env(&visible).expect("emit_env must succeed");
+
+        let path_entries: Vec<_> = entries.iter().filter(|e| e.key == "PATH").collect();
+        assert!(
+            path_entries.iter().any(|e| e.value == expected_str),
+            "emit_env PATH value must equal PackageDir::entrypoints() = {expected_str:?}; \
+             got: {:?}",
+            path_entries.iter().map(|e| &e.value).collect::<Vec<_>>()
+        );
     }
 }

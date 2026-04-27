@@ -13,51 +13,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::package::metadata::LauncherSafeString;
 use crate::package::metadata::dependency::DependencyName;
 use crate::package::metadata::entrypoint::Entrypoints;
 use crate::package::metadata::env::accumulator::DependencyContext;
 use crate::package::metadata::template::TemplateResolver;
-
-/// Characters that cannot appear in any string baked into a generated launcher.
-///
-/// The set is the union of constraints from both supported platforms:
-/// - `'` breaks Unix single-quoted shell literals (cannot be escaped inside one).
-/// - `%` triggers `cmd.exe` variable expansion (`%X%`) inside the `.cmd` body.
-/// - `"` would close the `SET "var=value"` statement on Windows.
-/// - `\n`, `\r`, `\0` would inject newlines/control bytes into either script
-///   body — a code-injection vector.
-///
-/// Both launchers are generated on every platform (cross-platform packages),
-/// so the character set is unified rather than per-platform.
-const LAUNCHER_UNSAFE_CHARS: &[char] = &['\'', '%', '"', '\n', '\r', '\0'];
-
-/// A `String` proven free of characters that would corrupt a generated launcher.
-///
-/// Construction via [`LauncherSafeString::new`] is the only way to obtain one;
-/// the launcher body functions accept `&LauncherSafeString` so the unsafe-char
-/// check happens once, at the entry boundary, not per platform.
-#[derive(Debug, Clone)]
-pub(crate) struct LauncherSafeString(String);
-
-impl LauncherSafeString {
-    /// Validates `value` against [`LAUNCHER_UNSAFE_CHARS`] and wraps it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::Error::LauncherUnsafeCharacter`] if the input contains
-    /// any of the unsafe characters listed above.
-    pub(crate) fn new(value: impl Into<String>) -> Result<Self, crate::Error> {
-        let value = value.into();
-        if let Some(c) = value.chars().find(|c| LAUNCHER_UNSAFE_CHARS.contains(c)) {
-            return Err(crate::Error::LauncherUnsafeCharacter { value, character: c });
-        }
-        Ok(Self(value))
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 /// Generates Unix and Windows launchers for all declared entrypoints.
 ///
@@ -266,38 +226,6 @@ mod tests {
             !body.contains("--install-dir"),
             "post-flatten launcher must use file:// URI, not --install-dir: {body}"
         );
-    }
-
-    // ── LauncherSafeString — unified character rejection ──────────────────
-
-    #[test]
-    fn launcher_safe_string_rejects_all_unsafe_characters() {
-        for unsafe_char in ['\'', '%', '"', '\n', '\r', '\0'] {
-            let input = format!("prefix{unsafe_char}suffix");
-            let err = super::LauncherSafeString::new(input.clone())
-                .expect_err(&format!("must reject {unsafe_char:?} (input {input:?})"));
-            match err {
-                crate::Error::LauncherUnsafeCharacter { character, value } => {
-                    assert_eq!(character, unsafe_char, "must report the offending char");
-                    assert_eq!(value, input, "must echo the rejected value");
-                }
-                other => panic!("expected LauncherUnsafeCharacter, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn launcher_safe_string_rejects_double_quote_even_though_unix_tolerates_it() {
-        // Both launchers are generated on every platform, so the constraint is
-        // unified: `"` would break the Windows `SET "var=value"` form even on
-        // a Linux install where only the `.sh` launcher is used.
-        assert!(super::LauncherSafeString::new("/path/with\"dq").is_err());
-    }
-
-    #[test]
-    fn launcher_safe_string_accepts_path_with_spaces() {
-        let s = super::LauncherSafeString::new("/path with spaces/bin/tool").unwrap();
-        assert_eq!(s.as_str(), "/path with spaces/bin/tool");
     }
 
     // ── Path with spaces is handled correctly ─────────────────────────────
