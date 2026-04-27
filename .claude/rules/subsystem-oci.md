@@ -44,17 +44,19 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 ```rust
 #[non_exhaustive]
 pub enum ChainMode {
-    Default,  // Cache-first; write-through on source fetch. Normal online operation.
-    Remote,   // Tag/catalog bypass cache, go straight to source. Immutable (digest) lookups still cache. Used for `--remote`.
-    Offline,  // Cache only; source never consulted; cache miss returns None. Used for `--offline`.
+    Default,  // Local index only for queries. Tag-addressed fetch_manifest still walks chain on miss (write-through). Normal online operation.
+    Remote,   // Mutable lookups (tag list, catalog) hit source directly with NO write-through. Immutable (digest) lookups still cache. Used for `--remote`.
+    Offline,  // Local index only; source never consulted; miss returns None. Used for `--offline`.
 }
 ```
 
-| Mode | Tag/catalog lookup | Blob/manifest (digest-addressed) | `$OCX_HOME/tags/` updated? |
-|------|-------------------|----------------------------------|---------------------------|
-| `Default` | Local cache first, then source | Cache + write-through | Yes |
-| `Remote` | Source always (bypass cache) | Cache + write-through | No |
-| `Offline` | Cache only | Cache only | No |
+| Mode | Tag list / catalog (pure query) | Tag-addressed `fetch_manifest` | Digest-addressed `fetch_manifest` | Local index mutated by query? |
+|------|----------------------------------|----------------------------------|------------------------------------|-------------------------------|
+| `Default` | Local only | Local first, miss → walk chain (write-through) | Local first, miss → fetch (write-through) | No (queries); install/pull do |
+| `Remote` | **Source only, no write-through** | Source only (write-through still happens — split planned, see `feedback_index_routing_semantics.md` M3) | Local first (immutable, safe to cache) | No for tag list/catalog; tag-addressed `fetch_manifest` still writes (pre-M3) |
+| `Offline` | Local only | Local only | Local only | No |
+
+**Design note — write paths.** Local index mutation is owned by two explicit entry points: `LocalIndex::refresh_tags` (called from `ocx index update`) and `LocalIndex::write_chain_and_commit_tag` (called from install/pull during chain walk). Pure query paths (`list_repositories`, `list_tags`) must never trigger either. Tag-addressed `fetch_manifest` currently piggybacks on the write path because the trait conflates query and update intent — this is the M3 follow-up tracked in `feedback_index_routing_semantics.md`.
 
 ### Identifier
 

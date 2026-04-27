@@ -804,7 +804,7 @@ def test_different_package_versions_produce_disjoint_refs(
             )
 
 
-# ── Test 63 — AC9 (cache-bypass): --remote bypasses the local tag cache ───
+# ── Test 63 — query operations must not mutate the local index ──────────
 
 
 def test_remote_mode_tag_resolution_bypasses_local_cache(
@@ -812,27 +812,33 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
     unique_repo: str,
     tmp_path: Path,
 ) -> None:
-    """AC9 (cache-bypass): Under --remote, tag→digest resolution must go to
-    the registry and bypass the local tag cache.  Without --remote, the local
-    tag cache is used and the cached (stale) digest is returned.
+    """Pure query operations must never mutate the local tag store.
 
-    Design record AC9 / plan review T6: "Under --remote, tag→digest resolution
-    must always go to the registry (not cache). Manifest caching for
-    digest-addressed content is allowed."
+    Design record (revised 2026-04-27, see
+    `.claude/artifacts/feedback_index_routing_semantics.md`):
+      - `--remote` is a *read-through-to-source* flag, not a write-through
+        cache fill. A pure `--remote index list` query must consult the
+        source for the response but must NOT update the local tag file.
+      - Default mode reads the local tag store only; pure queries never
+        auto-fetch from sources.
+      - The only paths that mutate the local tag store are explicit
+        (`ocx index update`) or data-required (install / pull).
 
-    Strategy (mirrors test_ac4_stale_cached_tag_uses_cached_digest in
-    test_tag_fallback.py):
-      1. Push v1 to unique_repo:1.0.0 and install it → populates local tag
-         cache with digest_A.
-      2. Snapshot the tag file (digest_A).
+    Strategy:
+      1. Push v1 to unique_repo:1.0.0 and install it → local tag store
+         records digest_A.
+      2. Snapshot the tag file.
       3. Push v2 to unique_repo:1.0.0 → registry now resolves 1.0.0 to
-         digest_B.  make_package also refreshes the cache to digest_B.
-      4. Restore the tag file to the v1 snapshot (digest_A) — simulates a
-         stale cache while the registry has moved to digest_B.
-      5. ocx --remote index list unique_repo:1.0.0 → must show digest_B
-         (bypassed the cache, fetched from registry).
-      6. ocx index list unique_repo:1.0.0 (no --remote) → must show the
-         cached digest_A (cache wins in Default mode).
+         digest_B.
+      4. Restore the tag file to the v1 snapshot — simulates a stale
+         local index while the registry has moved to digest_B.
+      5. `ocx --remote index list unique_repo:1.0.0` must succeed and the
+         tag file must remain byte-identical to the v1 snapshot
+         (i.e. still digest_A, not refreshed to digest_B).
+      6. `ocx index list unique_repo:1.0.0` (no --remote) must also
+         succeed and leave the tag file byte-identical (still digest_A).
+      7. `ocx index update unique_repo:1.0.0` (the explicit refresh path)
+         must update the tag file to digest_B.
     """
     v1_dir = tmp_path / "v1"
     v1_dir.mkdir()
@@ -845,11 +851,11 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
         / registry_dir(ocx.registry)
         / f"{unique_repo}.json"
     )
-    assert tag_file.exists(), "AC9 prerequisite: tag file must exist after install"
+    assert tag_file.exists(), "prerequisite: tag file must exist after install"
     v1_snapshot = tag_file.read_text()
     cached_data = json.loads(v1_snapshot)
     digest_a = cached_data["tags"].get(pkg_v1.tag)
-    assert digest_a is not None, "AC9 prerequisite: digest_A must be cached"
+    assert digest_a is not None, "prerequisite: digest_A must be cached"
 
     # Push v2 to the same repo:tag → registry now resolves 1.0.0 to digest_B.
     v2_dir = tmp_path / "v2"
@@ -857,41 +863,50 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
     _ = make_package(ocx, unique_repo, "1.0.0", v2_dir, new=False, cascade=False)
     digest_b = fetch_manifest_digest(ocx.registry, unique_repo, "1.0.0")
     assert digest_b != digest_a, (
-        "AC9 prerequisite: registry digest must differ from cached digest after pushing v2"
+        "prerequisite: registry digest must differ from cached digest after pushing v2"
     )
 
-    # Restore the stale cache (digest_A) — make_package refreshed it to digest_B.
+    # Restore the stale local index (digest_A) — make_package refreshed it to digest_B.
     tag_file.write_text(v1_snapshot)
 
-    # Step 5: --remote index list must bypass cache and refresh the local tag
-    # file to digest_B. We prove this by running --remote index list and then
-    # reading the tag file — it must now contain digest_B.
+    # Step 5: --remote index list must NOT mutate the local tag file.
     remote_result = ocx.plain("--remote", "index", "list", pkg_v1.short)
     assert remote_result.returncode == 0, (
-        f"AC9: --remote index list must succeed; rc={remote_result.returncode}\n"
+        f"--remote index list must succeed; rc={remote_result.returncode}\n"
         f"stderr: {remote_result.stderr}"
     )
-    # After --remote index list the tag file must have been refreshed to digest_B.
-    refreshed_data = json.loads(tag_file.read_text())
-    stored_after_remote = refreshed_data["tags"].get(pkg_v1.tag)
-    assert stored_after_remote == digest_b, (
-        f"AC9: --remote index list must bypass cache and update tag to registry digest.\n"
-        f"Expected (registry) digest_B: {digest_b}\n"
-        f"Found in tag file after --remote: {stored_after_remote}"
+    after_remote = tag_file.read_text()
+    assert after_remote == v1_snapshot, (
+        "Pure --remote query must not mutate the local tag file.\n"
+        f"Tag file changed after --remote index list. Snapshot diff:\n"
+        f"  before: {v1_snapshot!r}\n"
+        f"  after:  {after_remote!r}"
     )
 
-    # Restore the stale cache again so we can verify default mode still uses it.
-    tag_file.write_text(v1_snapshot)
-
-    # Step 6: default (no --remote) index list must NOT refresh → cache stays digest_A.
+    # Step 6: default-mode index list also must not mutate.
     default_result = ocx.plain("index", "list", pkg_v1.short)
     assert default_result.returncode == 0, (
-        f"AC9: index list (default mode) must succeed; rc={default_result.returncode}"
+        f"index list (default mode) must succeed; rc={default_result.returncode}"
     )
-    default_data = json.loads(tag_file.read_text())
-    stored_after_default = default_data["tags"].get(pkg_v1.tag)
-    assert stored_after_default == digest_a, (
-        f"AC9: default-mode index list must not refresh the tag cache.\n"
-        f"Expected (cached) digest_A: {digest_a}\n"
-        f"Found in tag file after default list: {stored_after_default}"
+    after_default = tag_file.read_text()
+    assert after_default == v1_snapshot, (
+        "Default-mode query must not mutate the local tag file.\n"
+        f"Tag file changed after default index list. Snapshot diff:\n"
+        f"  before: {v1_snapshot!r}\n"
+        f"  after:  {after_default!r}"
+    )
+
+    # Step 7: explicit `ocx index update` is the only path that should refresh
+    # the tag file. Confirms the contract that mutation is opt-in, not implicit.
+    update_result = ocx.plain("index", "update", pkg_v1.short)
+    assert update_result.returncode == 0, (
+        f"index update must succeed; rc={update_result.returncode}\n"
+        f"stderr: {update_result.stderr}"
+    )
+    after_update = json.loads(tag_file.read_text())
+    stored_after_update = after_update["tags"].get(pkg_v1.tag)
+    assert stored_after_update == digest_b, (
+        "index update must refresh the tag file to the registry digest.\n"
+        f"Expected (registry) digest_B: {digest_b}\n"
+        f"Found in tag file after index update: {stored_after_update}"
     )

@@ -19,10 +19,25 @@ use crate::{Result, log, oci};
 /// leader task performs the fetch; waiters reuse its result.
 ///
 /// `ChainMode` controls how mutable lookups (tag listings, catalog) are
-/// routed: `Default` is cache-first, `Remote` goes straight to the source
-/// for tag lookups (but digest-addressed reads still use the cache because
-/// immutable content can never be wrong), and `Offline` never consults any
-/// source — a cache miss returns `None`.
+/// routed:
+///
+/// - `Default` reads the persisted local index. A miss returns `None`
+///   (or empty) — pure queries never auto-fetch from sources. The local
+///   index is populated only by explicit paths (`ocx index update`) or
+///   data-required paths (install / pull).
+/// - `Remote` queries sources directly for mutable lookups and never
+///   consults the local index. A pure query in Remote mode never mutates
+///   local state — `--remote` is a read-through-to-source flag, not a
+///   write-through cache fill. If every source errors the failure is
+///   propagated rather than silently falling back to the local index.
+/// - `Offline` reads the local index only; sources are never consulted.
+///
+/// Digest-addressed reads (`fetch_manifest` with a digest in the
+/// identifier) still use the local index in any mode because immutable
+/// content cannot be wrong. Tag-addressed `fetch_manifest` currently
+/// auto-fetches and persists the manifest chain on miss — see
+/// `feedback_index_routing_semantics.md` (recommendation M3) for the
+/// in-flight refactor that splits the read path from the write path.
 pub struct ChainedIndex {
     cache: LocalIndex,
     sources: Vec<Index>,
@@ -163,36 +178,57 @@ impl ChainedIndex {
 #[async_trait]
 impl index_impl::IndexImpl for ChainedIndex {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
-        // Repositories always come from the persisted local index; no source
-        // consultation in any mode.
-        self.cache.list_repositories(registry).await
-    }
-
-    async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
-        // Tag listings route by mode. Default and Offline delegate to cache
-        // only; Remote refreshes tags from the source first (but still
-        // persists the write-through) and then reads from cache.
-        //
-        // Trust-boundary: in Remote mode, if every configured source refresh
-        // fails we propagate the last error rather than silently falling
-        // back to cached tags. `--remote` forces live lookups — collapsing a
-        // registry outage into "cached tags" would hide the real problem
-        // from the caller and break retry policy.
-        if self.mode == ChainMode::Remote && !self.sources.is_empty() {
-            let mut any_ok = false;
+        // Catalog routes by mode. Default and Offline read the persisted
+        // cache; Remote queries sources only and never falls back to the
+        // cache — the whole point of `--remote` is to bypass cached state,
+        // and silently serving stale repos on a registry outage would hide
+        // the failure from --remote callers. First Ok wins; if every source
+        // errors we propagate the last error. Empty `sources` in Remote
+        // mode (only possible via misconfiguration: `Context::try_init`
+        // pairs Remote with a remote source) returns an empty catalog
+        // rather than reading cache.
+        if self.mode == ChainMode::Remote {
             let mut last_error: Option<crate::Error> = None;
             for source in &self.sources {
-                match self.cache.refresh_tags(identifier, source).await {
-                    Ok(()) => any_ok = true,
+                match source.list_repositories(registry).await {
+                    Ok(repos) => return Ok(repos),
                     Err(e) => {
-                        log::warn!("Remote-mode list_tags refresh failed for '{}': {e}", identifier);
+                        log::warn!("Remote-mode list_repositories failed for '{registry}': {e}");
                         last_error = Some(e);
                     }
                 }
             }
-            if !any_ok && let Some(e) = last_error {
-                return Err(e);
+            return last_error.map_or_else(|| Ok(Vec::new()), Err);
+        }
+        self.cache.list_repositories(registry).await
+    }
+
+    async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
+        // Tag listings route by mode. Default and Offline read the local
+        // index only; Remote queries sources directly without write-through.
+        // A pure query must never mutate local state — write paths live on
+        // `LocalIndex::refresh_tags` (called from `ocx index update`) and
+        // `LocalIndex::write_chain_and_commit_tag` (called from install /
+        // pull). First Ok wins; if every source errors we propagate.
+        //
+        // Trust-boundary: in Remote mode, if every configured source fails
+        // we propagate the last error rather than silently falling back to
+        // the local index. `--remote` forces live lookups — collapsing a
+        // registry outage into stale local data would hide the real problem
+        // from callers and break retry policy.
+        if self.mode == ChainMode::Remote {
+            let mut last_error: Option<crate::Error> = None;
+            for source in &self.sources {
+                match source.list_tags(identifier).await {
+                    Ok(Some(tags)) => return Ok(Some(tags)),
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::warn!("Remote-mode list_tags failed for '{}': {e}", identifier);
+                        last_error = Some(e);
+                    }
+                }
             }
+            return last_error.map_or(Ok(None), Err);
         }
         self.cache.list_tags(identifier).await
     }
@@ -299,6 +335,7 @@ mod chain_refs_tests {
     #[derive(Clone)]
     struct CountingSource {
         known_tags: HashMap<String, Digest>,
+        repos: Vec<String>,
         call_count: Arc<Mutex<usize>>,
     }
 
@@ -308,6 +345,14 @@ mod chain_refs_tests {
             known_tags.insert(tag.to_string(), d);
             Self {
                 known_tags,
+                repos: Vec::new(),
+                call_count: Arc::new(Mutex::new(0)),
+            }
+        }
+        fn with_repos(repos: Vec<String>) -> Self {
+            Self {
+                known_tags: HashMap::new(),
+                repos,
                 call_count: Arc::new(Mutex::new(0)),
             }
         }
@@ -319,9 +364,11 @@ mod chain_refs_tests {
     #[async_trait]
     impl index_impl::IndexImpl for CountingSource {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
-            Ok(Vec::new())
+            *self.call_count.lock().unwrap() += 1;
+            Ok(self.repos.clone())
         }
         async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            *self.call_count.lock().unwrap() += 1;
             Ok(Some(self.known_tags.keys().cloned().collect()))
         }
         async fn fetch_manifest(&self, identifier: &Identifier) -> Result<Option<(Digest, Manifest)>> {
@@ -341,6 +388,12 @@ mod chain_refs_tests {
 
     fn make_source(tag: &str, d: Digest) -> (CountingSource, Index) {
         let src = CountingSource::with_tag(tag, d);
+        let idx = super::super::Index::from_impl(src.clone());
+        (src, idx)
+    }
+
+    fn make_source_with_repos(repos: Vec<String>) -> (CountingSource, Index) {
+        let src = CountingSource::with_repos(repos);
         let idx = super::super::Index::from_impl(src.clone());
         (src, idx)
     }
@@ -584,20 +637,20 @@ mod chain_refs_tests {
     // ── test 30 ───────────────────────────────────────────────────────────
 
     /// Design record §30: list_tags respects ChainMode.
-    /// Default: uses cache only.
-    /// Remote: hits source and persists.
-    /// Offline: cache only, never consults source.
+    /// Default: local index only, no source contact.
+    /// Remote: hits source, returns source tags, no write-through.
+    /// Offline: local index only, never consults source.
     #[tokio::test]
     async fn list_tags_respects_chain_mode() {
-        // --- Default: cache only ---
+        // --- Default: local only ---
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
         let (spy, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache.clone(), vec![src_idx], ChainMode::Default);
-        // Cache is empty — list_tags must return None or empty (no source call).
+        // Local index is empty — list_tags must return None or empty (no source call).
         let result = chained.list_tags(&tagged_id()).await.unwrap();
         let is_empty_or_none = result.is_none() || result.unwrap().is_empty();
-        assert!(is_empty_or_none, "Default mode list_tags must delegate to cache only");
+        assert!(is_empty_or_none, "Default mode list_tags must read local index only");
         assert_eq!(spy.calls(), 0, "Default mode list_tags must not consult source");
 
         // --- Offline: same contract ---
@@ -607,29 +660,135 @@ mod chain_refs_tests {
         let chained2 = Index::from_chained(cache2, vec![src_idx2], ChainMode::Offline);
         let result2 = chained2.list_tags(&tagged_id()).await.unwrap();
         let empty2 = result2.is_none() || result2.unwrap().is_empty();
-        assert!(empty2, "Offline mode list_tags must delegate to cache only");
+        assert!(empty2, "Offline mode list_tags must read local index only");
         assert_eq!(spy2.calls(), 0, "Offline mode list_tags must not consult source");
+
+        // --- Remote: source returns tags, local index untouched ---
+        let cache_dir3 = TempDir::new().unwrap();
+        let cache3 = make_local_index(&cache_dir3);
+        let (spy3, src_idx3) = make_source(TAG, digest_a());
+        let chained3 = Index::from_chained(cache3, vec![src_idx3], ChainMode::Remote);
+        let result3 = chained3.list_tags(&tagged_id()).await.unwrap();
+        assert!(spy3.calls() > 0, "Remote mode list_tags must consult source");
+        let tags3 = result3.expect("Remote mode list_tags must return source tags");
+        assert_eq!(
+            tags3,
+            vec![TAG.to_string()],
+            "Remote mode must return the source's tag list"
+        );
+    }
+
+    // ── regression: Remote-mode list_tags must not mutate the local index ──
+
+    /// A pure `--remote` query must never write to the local index. The tag
+    /// store layout is `{root}/{registry_slug}/{repository}.json`, so a
+    /// Remote-mode `list_tags` call must not create the registry directory
+    /// nor any per-repository tag file.
+    #[tokio::test]
+    async fn remote_mode_list_tags_does_not_mutate_local_index() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let (_, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Remote);
+
+        let tags_root = cache_dir.path().join("tags");
+        let registry_dir = tags_root.join(REGISTRY);
+        let repo_file = registry_dir.join(format!("{REPO}.json"));
+        assert!(!repo_file.exists(), "preconditions: tag file must not exist");
+
+        let result = chained.list_tags(&tagged_id()).await.unwrap();
+        assert!(result.is_some(), "Remote-mode list_tags must return source tags");
+
+        assert!(
+            !repo_file.exists(),
+            "Remote-mode list_tags must not create the local tag file at {}",
+            repo_file.display()
+        );
+        // Registry-dir creation is also a write; reject it explicitly so a
+        // future regression that creates the dir but no file still fails.
+        assert!(
+            !registry_dir.exists(),
+            "Remote-mode list_tags must not create the registry directory at {}",
+            registry_dir.display()
+        );
     }
 
     // ── test 31 ───────────────────────────────────────────────────────────
 
-    /// Design record §31: list_repositories respects ChainMode — in all modes,
-    /// list_repositories delegates to the cache (repos come from the persisted
-    /// local tag index, not from the source).
+    /// Design record §31: list_repositories routes by ChainMode. Default and
+    /// Offline read the persisted cache without consulting sources; Remote
+    /// bypasses the cache and returns the source's repo list.
     #[tokio::test]
     async fn list_repositories_respects_chain_mode() {
-        for mode in [ChainMode::Default, ChainMode::Remote, ChainMode::Offline] {
-            let cache_dir = TempDir::new().unwrap();
-            let cache = make_local_index(&cache_dir);
-            let (spy, src_idx) = make_source(TAG, digest_a());
-            let chained = Index::from_chained(cache, vec![src_idx], mode);
-            let repos = chained.list_repositories(REGISTRY).await.unwrap();
-            assert!(
-                repos.is_empty(),
-                "{mode:?}: list_repositories must read from cache (empty on fresh index)"
-            );
-            assert_eq!(spy.calls(), 0, "{mode:?}: list_repositories must not consult source");
+        // --- Default: cache only, source untouched ---
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let (spy, src_idx) = make_source_with_repos(vec!["a".to_string(), "b".to_string()]);
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+        let repos = chained.list_repositories(REGISTRY).await.unwrap();
+        assert!(repos.is_empty(), "Default mode list_repositories must read from cache");
+        assert_eq!(spy.calls(), 0, "Default mode list_repositories must not consult source");
+
+        // --- Offline: same contract ---
+        let cache_dir2 = TempDir::new().unwrap();
+        let cache2 = make_local_index(&cache_dir2);
+        let (spy2, src_idx2) = make_source_with_repos(vec!["a".to_string(), "b".to_string()]);
+        let chained2 = Index::from_chained(cache2, vec![src_idx2], ChainMode::Offline);
+        let repos2 = chained2.list_repositories(REGISTRY).await.unwrap();
+        assert!(repos2.is_empty(), "Offline mode list_repositories must read from cache");
+        assert_eq!(
+            spy2.calls(),
+            0,
+            "Offline mode list_repositories must not consult source"
+        );
+
+        // --- Remote: source consulted, returns source's repo list ---
+        let cache_dir3 = TempDir::new().unwrap();
+        let cache3 = make_local_index(&cache_dir3);
+        let expected_repos = vec!["cmake".to_string(), "ninja".to_string()];
+        let (spy3, src_idx3) = make_source_with_repos(expected_repos.clone());
+        let chained3 = Index::from_chained(cache3, vec![src_idx3], ChainMode::Remote);
+        let repos3 = chained3.list_repositories(REGISTRY).await.unwrap();
+        assert!(spy3.calls() > 0, "Remote mode list_repositories must consult source");
+        assert_eq!(repos3, expected_repos, "Remote mode must return source's repo list");
+    }
+
+    // ── regression: Remote-mode list_repositories must propagate source errors ─
+
+    /// Remote mode must NOT silently fall back to cached repos when every
+    /// configured source errors — same trust boundary as list_tags.
+    #[tokio::test]
+    async fn remote_mode_list_repositories_propagates_source_errors() {
+        #[derive(Clone)]
+        struct AlwaysErrorSource;
+        #[async_trait]
+        impl index_impl::IndexImpl for AlwaysErrorSource {
+            async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+                Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()).into())
+            }
+            async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+                Ok(None)
+            }
+            async fn fetch_manifest(&self, _: &Identifier) -> Result<Option<(Digest, Manifest)>> {
+                Ok(None)
+            }
+            async fn fetch_manifest_digest(&self, _: &Identifier) -> Result<Option<Digest>> {
+                Ok(None)
+            }
+            fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+                Box::new(self.clone())
+            }
         }
+
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let src_idx = super::super::Index::from_impl(AlwaysErrorSource);
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Remote);
+        let result = chained.list_repositories(REGISTRY).await;
+        assert!(
+            result.is_err(),
+            "Remote mode must propagate source errors, not fall back to cache"
+        );
     }
 
     // ── regression: Remote-mode list_tags must propagate source errors ───
