@@ -228,6 +228,21 @@ When two paths reach the same dependency (diamond), the most open visibility win
 (self-visible, consumer-visible) is OR-merged independently.
 :::
 
+::: info Compare with Nix and Guix
+
+Functional package managers describe the same idea as **propagated dependencies**. In [Nix][nix],
+[`propagatedBuildInputs`][nix-propagated] is the propagated counterpart to `buildInputs` —
+dependencies of a package whose own dependencies cascade to indirect dependents without each
+consumer having to relist them. In [Guix][guix], [`propagated-inputs`][guix-propagated] are
+"similar to `inputs`, but the specified packages will be automatically installed to profiles
+alongside the package they belong to."
+
+OCX's `public` and `interface` visibilities are the same shape: they mark a dependency as
+contributing its environment to consumers transitively. `private` is the OCX equivalent of plain
+`buildInputs` / `inputs` — the package itself sees the env, consumers do not. `sealed` deliberately
+contributes nothing to either side.
+:::
+
 ### Ordering {#dependencies-ordering}
 
 Array position defines the canonical order for environment composition. Dependencies are processed
@@ -362,6 +377,10 @@ for archive extraction, `${installPath}` template substitution, and optional
 [json-schema]: https://json-schema.org/
 [check-jsonschema]: https://github.com/python-jsonschema/check-jsonschema
 [cmake-tll]: https://cmake.org/cmake/help/latest/command/target_link_libraries.html
+[nix]: https://nixos.org/
+[nix-propagated]: https://ryantm.github.io/nixpkgs/stdenv/stdenv/
+[guix]: https://guix.gnu.org/
+[guix-propagated]: https://guix.gnu.org/manual/en/html_node/package-Reference.html
 
 <!-- schema -->
 [schema-url]: /schemas/metadata/v1.json

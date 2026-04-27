@@ -237,41 +237,13 @@ impl PackageManager {
         for pkg in packages {
             for dep in &pkg.resolved.dependencies {
                 if dep.visibility.is_visible() {
-                    check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)?;
+                    visible::check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)?;
                 }
             }
-            check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)?;
+            visible::check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)?;
         }
         Ok(seen_digests)
     }
-}
-
-/// Deduplicates a visible dependency by digest, warning on conflicts.
-///
-/// Returns `true` if newly inserted, `false` if already seen (or conflict
-/// where first-seen wins). When the same `registry/repo` appears with
-/// different digests, a warning is emitted and the first-seen digest is
-/// kept — matching the last-writer-wins semantics of scalar env vars.
-fn check_exported(
-    id: &oci::PinnedIdentifier,
-    seen_digests: &mut HashSet<oci::Digest>,
-    seen_repos: &mut HashMap<oci::Repository, oci::Digest>,
-) -> crate::Result<bool> {
-    let digest = id.digest();
-    let repo_key = oci::Repository::from(&**id);
-    if let Some(existing) = seen_repos.get(&repo_key)
-        && *existing != digest
-    {
-        tracing::warn!(
-            "Conflicting digests for {}: keeping {}, ignoring {}.",
-            repo_key,
-            existing,
-            digest,
-        );
-        return Ok(false);
-    }
-    seen_repos.insert(repo_key, digest.clone());
-    Ok(seen_digests.insert(digest))
 }
 
 // ── Specification tests — plan_resolution_chain_refs.md (revised) ────────

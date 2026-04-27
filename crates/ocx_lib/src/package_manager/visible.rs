@@ -376,9 +376,10 @@ pub fn collect_entrypoints(
 /// emitted and the first-seen digest is kept — matching the semantics of
 /// scalar env vars (last-writer-wins would require a different ordering).
 ///
-/// Moved here from `tasks/resolve.rs` as a private helper for Phase A. The
-/// semantics are identical; the location is the only change.
-fn check_exported(
+/// Phase A's dedup helper. Shared with `tasks::resolve::resolve_visible_set`
+/// so the digest-only consumer and the metadata-loading consumer use one
+/// dedup taxonomy (same conflict-warning, same first-seen-wins rule).
+pub(super) fn check_exported(
     id: &oci::PinnedIdentifier,
     seen_digests: &mut HashSet<oci::Digest>,
     seen_repos: &mut HashMap<oci::Repository, oci::Digest>,
