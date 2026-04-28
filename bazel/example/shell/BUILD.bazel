@@ -1,0 +1,24 @@
+load("@rules_ocx//ocx:defs.bzl", "ocx_launcher")
+
+ocx_launcher(
+    name = "shfmt",
+    bin = "shfmt",
+    package = "@shfmt",
+)
+
+ocx_launcher(
+    name = "shellcheck",
+    bin = "shellcheck",
+    package = "@shellcheck",
+)
+
+genrule(
+    name = "shell_script_report",
+    srcs = ["smelly.sh"],
+    outs = ["shell_script_report.txt"],
+    cmd = "echo shfmt: > $@ && ((./$(location :shfmt) $< 2>> $@) || true) && echo shellcheck: >> $@ && ((./$(location :shellcheck) $< >> $@) || true)",
+    tools = [
+        ":shellcheck",
+        ":shfmt",
+    ],
+)

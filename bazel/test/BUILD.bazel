@@ -1,0 +1,148 @@
+load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@rules_ocx//ocx:defs.bzl", "ocx_launcher")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+ocx_launcher(
+    name = "cmake",
+    bin = "bin/cmake",
+    package = "@cmake",
+)
+
+ocx_launcher(
+    name = "cmake_3",
+    bin = "bin/cmake",
+    package = "@cmake_3",
+)
+
+sh_test(
+    name = "test_run_cmake",
+    size = "small",
+    srcs = [":test_run_cmake.sh"],
+    data = [
+        ":cmake",
+        ":cmake_3",
+    ],
+    env = {
+        "CMAKE3_BIN": "$(location :cmake_3)",
+        "CMAKE4_BIN": "$(location :cmake)",
+    },
+    tags = ["linux_only_test"],
+)
+
+[
+    ocx_launcher(
+        name = uv_version,
+        bin = "uv",
+        package = "@" + uv_version,
+    )
+    for uv_version in [
+        "uv",  # latest
+        "uv_0_10",
+        "uv_0_10_10",
+    ]
+]
+
+sh_test(
+    name = "test_run_uv",
+    size = "small",
+    srcs = [":test_run_uv.sh"],
+    data = [
+        ":uv",
+        ":uv_0_10",
+        ":uv_0_10_10",
+    ],
+    env = {
+        "UV_LATEST_BIN": "$(location :uv)",
+        "UV_0_10_BIN": "$(location :uv_0_10)",
+        "UV_0_10_10_BIN": "$(location :uv_0_10_10)",
+    },
+    tags = ["linux_only_test"],
+)
+
+platform(
+    name = "windows_x86_64",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+platform(
+    name = "linux_aarch64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+platform_transition_filegroup(
+    name = "task_windows_x86_64",
+    srcs = ["@task"],
+    target_platform = ":windows_x86_64",
+)
+
+platform_transition_filegroup(
+    name = "task_linux_aarch64",
+    srcs = ["@task"],
+    target_platform = ":linux_aarch64",
+)
+
+sh_test(
+    name = "test_task_platform_handling",
+    size = "small",
+    srcs = [":test_task_platform_handling.sh"],
+    data = [
+        ":task_linux_aarch64",
+        ":task_windows_x86_64",
+    ],
+    env = {
+        "TASK_WINDOWS_X86_64": "$(locations :task_windows_x86_64)",
+        "TASK_LINUX_AARCH64": "$(locations :task_linux_aarch64)",
+    },
+    tags = ["common_test"],
+)
+
+ocx_launcher(
+    name = "task",
+    bin = "task",
+    package = "@task",
+)
+
+sh_test(
+    name = "test_run_task",
+    size = "small",
+    srcs = [":test_run_task.sh"],
+    data = [
+        ":task",
+    ],
+    env = {
+        "TASK_BIN": "$(location :task)",
+    },
+    tags = ["common_test"],
+)
+
+test_suite(
+    name = "common_tests",
+    tags = [
+        "common_test",
+    ],
+)
+
+test_suite(
+    name = "linux_only_tests",
+    tags = [
+        "linux_only_test",
+    ],
+)
+
+ocx_launcher(
+    name = "ocx",
+    bin = "bin/ocx",
+    package = "@ocx",
+)
+
+ocx_launcher(
+    name = "shellcheck",
+    bin = "shellcheck",
+    package = "@shellcheck",
+)
