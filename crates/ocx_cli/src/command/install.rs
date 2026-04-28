@@ -41,6 +41,7 @@ impl Install {
                 platforms_or_default(&self.platforms),
                 true,
                 self.select,
+                context.concurrency(),
             )
             .await?;
 

@@ -20,16 +20,30 @@ impl ProfileBuilder {
     }
 
     pub fn add(&mut self, var: Var) {
+        // `export_path` / `export_constant` reject keys that fail POSIX
+        // env-var-name validation by returning `None`. Skip the line
+        // silently with a stderr note: the only path that produces a bad
+        // key is malformed package metadata, which `ocx pull` should have
+        // rejected — falling through preserves the rest of the profile
+        // rather than aborting the whole build.
         match var.modifier {
             Modifier::Path(path_var) => {
                 let value = self.expand_variables(&path_var.value);
-                self.script.push_str(&self.shell.export_path(&var.key, &value));
-                self.script.push('\n');
+                if let Some(line) = self.shell.export_path(&var.key, &value) {
+                    self.script.push_str(&line);
+                    self.script.push('\n');
+                } else {
+                    eprintln!("# ocx: skipping invalid env-var key {:?}", var.key);
+                }
             }
             Modifier::Constant(constant_var) => {
                 let value = self.expand_variables(&constant_var.value);
-                self.script.push_str(&self.shell.export_constant(&var.key, &value));
-                self.script.push('\n');
+                if let Some(line) = self.shell.export_constant(&var.key, &value) {
+                    self.script.push_str(&line);
+                    self.script.push('\n');
+                } else {
+                    eprintln!("# ocx: skipping invalid env-var key {:?}", var.key);
+                }
             }
         }
     }

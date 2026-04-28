@@ -163,6 +163,16 @@ impl IntoIterator for Env {
     }
 }
 
+/// Process working directory.
+///
+/// Thin wrapper around [`std::env::current_dir`] so call sites route through
+/// the OCX env layer instead of the std library directly. Keeps the
+/// abstraction boundary consistent (and gives us a single seam for future
+/// test injection without touching every consumer).
+pub fn current_dir() -> std::io::Result<PathBuf> {
+    std::env::current_dir()
+}
+
 pub fn var(key: impl AsRef<str>) -> Option<String> {
     #[cfg(test)]
     match crate::test::env::get_override(key.as_ref()) {

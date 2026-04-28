@@ -82,6 +82,7 @@ CLI command (clap parse)
 | `adr_sbom_strategy.md` | SBOM gen approach |
 | `adr_version_build_separator.md` | Underscore as build separator in version tags |
 | `adr_three_tier_cas_storage.md` | Three-tier content-addressed storage (blobs + layers + packages) |
+| `adr_index_routing_semantics.md` | `IndexOperation::{Query, Resolve}` enum; pinned-id pulls skip tag commit |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 

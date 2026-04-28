@@ -45,7 +45,9 @@ impl Env {
         let info = if let Some(kind) = self.content_path.symlink_kind() {
             manager.find_symlink_all(identifiers, kind).await?
         } else {
-            manager.find_or_install_all(identifiers, platforms).await?
+            manager
+                .find_or_install_all(identifiers, platforms, context.concurrency())
+                .await?
         };
 
         let entries = manager.resolve_env(&info).await?;

@@ -46,6 +46,7 @@ pub struct ShellProfileAdd {
 
 impl ShellProfileAdd {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        super::shell_profile::emit_deprecation_note();
         let mode = if self.current {
             profile::ProfileMode::Current
         } else if self.content {
@@ -62,7 +63,7 @@ impl ShellProfileAdd {
         let platforms = platforms_or_default(&self.platforms);
         let infos = context
             .manager()
-            .find_or_install_all(identifiers.clone(), platforms)
+            .find_or_install_all(identifiers.clone(), platforms, context.concurrency())
             .await?;
 
         let inputs: Vec<profile::ProfileAddInput> = identifiers

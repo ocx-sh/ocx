@@ -6,6 +6,34 @@ use std::path::PathBuf;
 use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
 
+/// Which config tier produced an error — decides the remediation hint shown
+/// in [`Error::FileNotFound`] / [`Error::Io`] messages. Without this, a
+/// missing `--project` file would misdirect the user to `--config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Config-tier source: `--config`, `OCX_CONFIG_FILE`, or a discovered
+    /// tier-config path (system / user / `$OCX_HOME`).
+    Config,
+    /// Project-tier source: `--project` or `OCX_PROJECT_FILE`.
+    Project,
+}
+
+impl ConfigSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Project => "project",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Config => "check --config or OCX_CONFIG_FILE",
+            Self::Project => "check --project or OCX_PROJECT_FILE",
+        }
+    }
+}
+
 /// Errors that can occur during configuration parsing and validation.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -22,16 +50,19 @@ pub enum Error {
         source: toml::de::Error,
     },
 
-    /// An explicit config file (`--config` or `OCX_CONFIG_FILE`) was
-    /// specified but does not exist.
-    #[error("config file not found: {} (check --config or OCX_CONFIG_FILE)", path.display())]
-    FileNotFound { path: PathBuf },
+    /// An explicit config file (`--config` / `OCX_CONFIG_FILE` for the
+    /// config tier, `--project` / `OCX_PROJECT_FILE` for the project tier)
+    /// was specified but does not exist. The `tier` field steers the
+    /// remediation hint so users see the flag they actually typed.
+    #[error("{} file not found: {} ({})", tier.label(), path.display(), tier.hint())]
+    FileNotFound { path: PathBuf, tier: ConfigSource },
 
     /// I/O failure while reading a config file (permission denied,
     /// unreadable file, config path is a directory, etc.).
-    #[error("failed to read config file {}", path.display())]
+    #[error("failed to read {} file {} ({})", tier.label(), path.display(), tier.hint())]
     Io {
         path: PathBuf,
+        tier: ConfigSource,
         #[source]
         source: std::io::Error,
     },

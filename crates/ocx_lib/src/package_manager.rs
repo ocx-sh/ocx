@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod concurrency;
 pub mod error;
 
 mod tasks;
 
 // Re-export types needed by other modules and CLI commands.
+pub use concurrency::Concurrency;
 pub use error::DependencyError;
 pub use tasks::profile_resolve::{ProfileEntryResolution, ResolvedProfileEntry};
 
@@ -71,5 +73,35 @@ impl PackageManager {
 
     pub fn is_offline(&self) -> bool {
         self.client.is_none()
+    }
+
+    /// Boundary primitive for hook-style commands (`shell-hook`, `hook-env`,
+    /// future `generate direnv`) that must NOT contact any registry,
+    /// regardless of the global `--remote` / `--offline` flags.
+    ///
+    /// Builds a fresh [`PackageManager`] using the supplied local cache
+    /// `local_index` as the *only* index source: chain mode is forced to
+    /// [`oci::index::ChainMode::Offline`], and the OCI client is dropped to
+    /// `None`. Any incidental tag/manifest lookup short-circuits to the
+    /// local cache; an attempt to use the (now-absent) client surfaces as
+    /// `Error::OfflineMode`. This is the layer the security boundary docs
+    /// in ADR §5B (decision 5B) reference — see
+    /// `.claude/artifacts/adr_project_toolchain_config.md`.
+    ///
+    /// Caller passes the local-index handle separately because the manager
+    /// holds a type-erased `Index` (which may be `Default`, `Remote`, or
+    /// already `Offline`); reaching back through the type-erased boundary
+    /// would couple this primitive to `ChainedIndex` internals. The CLI
+    /// `Context` already exposes `local_index().clone()`, so the call site
+    /// is `context.manager().offline_view(context.local_index().clone())`.
+    pub fn offline_view(&self, local_index: oci::index::LocalIndex) -> Self {
+        let offline_index = oci::index::Index::from_chained(local_index, Vec::new(), oci::index::ChainMode::Offline);
+        Self {
+            file_structure: self.file_structure.clone(),
+            index: offline_index,
+            client: None,
+            default_registry: self.default_registry.clone(),
+            profile: self.profile.clone(),
+        }
     }
 }

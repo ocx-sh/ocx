@@ -251,7 +251,7 @@ Retention policy configuration will live under `[clean]`. Deferred to the retent
 
 ### Project-level `ocx.toml` {#future-project}
 
-A CWD-walk for a project-level `ocx.toml` is planned. The file name is deliberately different from `config.toml` so the data-directory tier and project tier are never confused. When it lands, it will sit between `$OCX_HOME/config.toml` and `OCX_CONFIG_FILE` in the precedence order.
+A project-level `ocx.toml` is now shipped — see the [Project Toolchain section in the user guide](../user-guide.md#project-toolchain) for the schema, locking model, and activation hooks. The file name is deliberately different from `config.toml` so the data-directory tier and project tier are never confused: `ocx.toml` is loaded by a distinct API and never participates in the ambient config chain described above.
 :::
 
 <!-- external -->

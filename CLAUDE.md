@@ -88,8 +88,8 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 | `OCX_HOME` | Root data directory | `~/.ocx` |
 | `OCX_DEFAULT_REGISTRY` | Default registry for short identifiers | `ocx.sh` |
 | `OCX_INSECURE_REGISTRIES` | Comma-separated HTTP-only registries | (empty) |
-| `OCX_OFFLINE` | Offline mode flag | false |
-| `OCX_REMOTE` | Use remote index directly | false |
+| `OCX_OFFLINE` | Disable all network access; tag→digest must resolve locally or be pinned | false |
+| `OCX_REMOTE` | Route mutable lookups to remote registry; pure queries never write local index | false |
 | `OCX_NO_UPDATE_CHECK` | Disable update check notification | false |
 | `OCX_NO_MODIFY_PATH` | Disable shell profile modification during install | false |
 

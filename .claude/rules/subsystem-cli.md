@@ -55,6 +55,10 @@ Every command same flow:
 3. **Build report data** — from task return values (never from CLI args alone)
 4. **Report** — `context.api().report(&data_type)?`
 
+## Routing intent
+
+Commands that hit `Index::fetch_manifest{,_digest}` / `Index::select` / `Index::fetch_candidates` must declare caller intent via `IndexOperation::{Query, Resolve}`. Pure-read commands (`index list`, `index catalog`, `package info`) pass `Op::Query` so a cache miss returns `None` instead of triggering a chain walk + write-through. Install/pull paths in `package_manager::tasks::resolve` pass `Op::Resolve`. Misuse silently leaks writes through query paths — the structural test `chain_refs_tests::op_query_never_walks_source_in_any_mode` catches the most common regression mode. Full contract → [`subsystem-oci.md`](./subsystem-oci.md) and [`adr_index_routing_semantics.md`](../artifacts/adr_index_routing_semantics.md).
+
 ## API Reporting Layer
 
 ### Printable Trait

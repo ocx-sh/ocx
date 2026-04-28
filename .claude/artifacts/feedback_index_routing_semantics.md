@@ -1,6 +1,8 @@
 # Index Routing Semantics — Feedback Capture
 
-**Status:** Working note. Captures user feedback on `ChainedIndex`/`LocalIndex` routing for re-review before `sion` merges to `main`.
+**Status:** Superseded by [`adr_index_routing_semantics.md`](./adr_index_routing_semantics.md) (decisions accepted 2026-04-27).
+This file is retained as the exploratory working note that informed the ADR. Future readers should reach for the ADR for the canonical decision; this note documents the reasoning trail.
+
 **Branch context:** Authored on `main` while investigating the `--remote` catalog bug. Sion changes (pinned identifiers) compound the existing design issues.
 **Author:** Claude session, 2026-04-27.
 

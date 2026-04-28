@@ -4,7 +4,7 @@
 use crate::{
     log, oci,
     package::install_info::InstallInfo,
-    package_manager::{self, error::PackageError, error::PackageErrorKind},
+    package_manager::{self, concurrency::Concurrency, error::PackageError, error::PackageErrorKind},
 };
 
 use super::super::PackageManager;
@@ -50,9 +50,10 @@ impl PackageManager {
         platforms: Vec<oci::Platform>,
         candidate: bool,
         select: bool,
+        concurrency: Concurrency,
     ) -> Result<Vec<InstallInfo>, package_manager::error::Error> {
         // Phase 1: Pull all packages with shared singleflight group.
-        let infos = self.pull_all(&packages, platforms).await?;
+        let infos = self.pull_all(&packages, platforms, concurrency).await?;
 
         // Phase 2: Create symlinks sequentially.
         if candidate || select {

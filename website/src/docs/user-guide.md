@@ -480,13 +480,47 @@ Every command that resolves a package identifier — [`ocx install`][cmd-install
 | Remote | [`--remote`][arg-remote] | OCI registry | Yes |
 | Offline | [`--offline`][arg-offline] | Local snapshot | Never |
 
-**`--remote`** forces tag and catalog lookups to query the registry directly for a single command. The persistent local tag store (`$OCX_HOME/tags/`) is not updated. Blob data fetched under `--remote` still writes through to `$OCX_HOME/blobs/`, so the command populates the blob cache while bypassing the tag snapshot. Use it for a one-off check — seeing current available tags, or resolving the latest digest — without committing the tag resolution result to the local snapshot.
+**`--remote`** routes tag and catalog lookups to the registry directly for a single command. Pure-query commands ([`ocx index list`][cmd-index-list], [`ocx index catalog`][cmd-index-catalog], [`ocx package info`][cmd-package-info]) do **not** persist the result to the local index — to refresh the snapshot, run [`ocx index update`][cmd-index-update] explicitly. Use `--remote` for a one-off check (current available tags, latest digest) without committing the resolution to the local snapshot.
 
 **`--offline`** prevents all network access for that command. If the local index does not have a requested package, the command fails immediately rather than attempting a registry query. Useful to verify that your current index and object store are self-sufficient before a build in a restricted or air-gapped environment.
 
 [`--index`][arg-index] / [`OCX_INDEX`][env-ocx-index] do not change the active index mode — the local snapshot remains active. They only change *where* that snapshot is read from. See [Local Index](#indices-local).
 
 The active index controls tag and manifest resolution only. The [package store][fs-packages] is independent — installed binaries are accessible in all three modes regardless of which index is active.
+
+### Routing {#indices-routing}
+
+Behind the user-facing flags, ocx encodes two orthogonal axes at every index call site:
+
+- **Routing axis** — *where* a lookup reads from, controlled by the active mode plus the immutability of the identifier (digest-addressed reads always trust the local index first; tag-addressed reads route per mode).
+- **Intent axis** — *whether* a lookup may mutate the local index. Pure-query commands (`index list`, `index catalog`, `package info`) declare `Query` intent and never trigger a write; install/pull commands declare `Resolve` intent and may persist.
+
+The routing matrix below summarises the combinations:
+
+| Operation | `--remote` | `--offline` | `--offline --remote` | Default |
+|-----------|-----------|-------------|----------------------|---------|
+| Tag list / catalog (pure query) | source only, no write | local only | local only (info log) | local only |
+| Tag → manifest, install/pull | source only, write blobs+tag | local only (errors if missing) | local only (errors) | local first, miss → fetch+write |
+| Digest → manifest, any path | local first | local only | local only | local first |
+| Digest → manifest, pinned-id pull | source on miss, write blobs only, **no tag** | local only | local only | local first, miss → fetch blobs only |
+
+The "no tag" cell on the last row is the post-pin contract: when `ocx.lock` already pins a tool to a digest, `ocx pull` persists the manifest blobs but does not commit a tag pointer. The lock is the canonical record of the tag→digest mapping; writing through would silently shadow it.
+
+::: info Why this matters
+Pre-Phase-11, a pure `ocx --remote index list cmake` would silently write through to `$OCX_HOME/tags/` on cache miss — the trait conflated "look this up" with "look this up and persist". Build-pipeline workarounds existed only to mask this leak. With intent declared at every call site, queries are guaranteed read-only.
+:::
+
+### Pinned-only mode {#indices-pinned-only}
+
+Combining [`--offline`][arg-offline] with [`--remote`][arg-remote] is accepted as **pinned-only mode**: no source contact, no local writes, and any tag-addressed resolution that cannot be satisfied locally errors instead of silently falling back. The CLI emits an `info` log to confirm the mode is active.
+
+Use it to assert in CI that every project dependency is digest-pinned:
+
+```sh
+ocx --offline --remote exec -- my-build-script
+```
+
+If any tool resolution falls back to a floating tag, the command fails — a hermetic-build sanity check without round-tripping to the registry.
 
 ## Authentication {#authentication}
 
@@ -739,6 +773,147 @@ content-addressed package-store path that `package pull` reports is fully reprod
 digest-derived.
 :::
 
+## Project Toolchain {#project-toolchain}
+
+A project-tier `ocx.toml` declares the tools a repository depends on — every contributor and CI runner resolves to identical, digest-pinned binaries without arguing about versions over chat. The shell profile mechanism that ships in earlier OCX releases ([`shell profile add`][cmd-shell-profile]) is interactive and per-user; it cannot describe what a repository expects, only what an individual machine has installed.
+
+The project toolchain closes that gap. A committed `ocx.toml` plus its sibling `ocx.lock` makes "the tools this project needs" a piece of source code: reviewable, mergeable, reproducible across machines, and resolvable offline once the lock is fetched.
+
+### Declaring tools — `ocx.toml` {#project-toolchain-toml}
+
+`ocx.toml` lives at the root of a repository (or anywhere up the directory tree from `cwd`). It is a [TOML][toml] file with a single `[tools]` table mapping local binding names to fully-qualified [OCI identifiers][oci-identifier]:
+
+```toml
+[tools]
+cmake    = "ocx.sh/cmake:3.28"
+ripgrep  = "ocx.sh/ripgrep:14"
+mytool   = "ghcr.io/acme/mytool:1.0"
+```
+
+:::info
+If you use [mise][mise] or [asdf][asdf], `ocx.toml` fills a different role: mise/asdf manage what is installed on a developer's workstation; `ocx.toml` + `ocx.lock` pin cryptographically what a repository requires — including private OCI registry tools that mise/asdf have no plugin for.
+:::
+
+Each value is `registry/repo:tag` (optionally `@digest`); bare-tag forms like `cmake = "3.28"` are rejected at parse time so an `ocx.toml` is unambiguous regardless of which registry the user has configured as their default. The binding name on the left is independent of the repository path — `mytool = "ghcr.io/acme/mytool:1.0"` is fine and lets internal projects rename tools without touching the registry.
+
+The schema is published at [`https://ocx.sh/schemas/project/v1.json`][schema-project] and wired through [taplo][taplo] for editor auto-completion. With `taplo` installed and an `ocx.toml` open in [Helix][helix], [VSCode][vscode-taplo], or [Neovim][neovim-taplo-lsp], unknown fields surface as red squiggles and tool names are completed as you type.
+
+:::warning Avoid global state in `ocx.toml`
+The project file describes tools the project needs, not how a contributor's shell prompt should behave. Shell-profile state (`PATH` munging, sentinel env vars, "load on every prompt") stays in the user-tier mechanisms — see [interactive activation][project-toolchain-activation] for how the project tier hooks into a developer's shell without spilling into `ocx.toml`.
+:::
+
+### Locking — `ocx.lock` {#project-toolchain-lock}
+
+`ocx.toml` declares advisory tags (`cmake:3.28`); the registry resolves those tags to immutable digests. To make the project reproducible, [`ocx lock`][cmd-lock] resolves every tag once and writes the result to `ocx.lock` next to `ocx.toml`. Subsequent commands read the lock, never the registry, so two machines running `ocx pull` from the same commit get the same bytes.
+
+The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 8785 JCS][rfc-8785]). When you change `ocx.toml`, the hash changes; commands that depend on the lock ([`ocx pull`][cmd-pull], [`ocx exec`][cmd-exec]) detect the mismatch and refuse to run with stale digests. Re-run `ocx lock` to regenerate the file.
+
+:::warning Commit your `ocx.lock`
+`ocx.lock` is what makes the project reproducible — without it, every contributor and CI runner re-resolves advisory tags against whatever the registry surfaces today. Commit it alongside `ocx.toml`.
+
+To keep merge conflicts manageable on busy projects, add a [`.gitattributes`][gitattributes] entry that lets `git` union sibling lock entries instead of choking on overlapping diff hunks:
+
+```text
+ocx.lock merge=union
+```
+
+The `merge=union` driver concatenates both sides of a conflict; each `[[tool]]` entry is independent, so the result is a syntactically valid lock file in most cases — duplicate `[[tool]]` entries are concatenated; running `ocx lock` after the merge normalizes the result and resolves any sort-order or deduplication concerns.
+:::
+
+:::warning `ocx.lock` is machine-generated
+Do not hand-edit `ocx.lock`. The format is canonicalized — sort order, whitespace, and the per-entry `declaration_hash` are computed by `ocx lock` and may evolve across OCX versions. Manual edits will be overwritten on the next `ocx lock` run and may be rejected by future schema versions. The schema's top-level `$comment` reinforces this for tooling consumers; treat it as read-only source code.
+
+Tooling that reads `ocx.lock` should validate against the published schema at [`https://ocx.sh/schemas/project-lock/v1.json`][schema-lock]; the schema's `$comment` field carries a machine-readable do-not-edit marker recognizable to JSON Schema processors.
+:::
+
+### Pulling and executing {#project-toolchain-pull-exec}
+
+Once `ocx.lock` exists, two commands cover the bulk of day-to-day use. [`ocx pull`][cmd-pull] pre-warms the [package store][fs-packages] from the lock without creating install symlinks — ideal for CI matrix builds and developer machines that already have a [direnv][direnv] hook in place. [`ocx exec`][cmd-exec] runs a command with the project's resolved environment, treating the lock as the source of truth:
+
+```shell
+ocx pull
+ocx exec cmake -- cmake --version    # uses cmake from ocx.lock, not the system
+```
+
+`ocx exec` gates on the same `declaration_hash` check as `ocx pull`: if the lock is stale, the command exits with a structured error pointing at `ocx lock`. There is no implicit re-resolution — the project file is the input, the lock file is the contract, and registry round-trips happen only when you ask for them.
+
+### Groups {#project-toolchain-groups}
+
+Not every contributor needs every tool. CI needs `shellcheck` and `shfmt`; the release pipeline needs `goreleaser`; daily development needs neither. Named groups let `ocx.toml` describe these subsets without forcing every workstation to download release tooling on first checkout:
+
+```toml
+[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci]
+shellcheck = "ocx.sh/shellcheck:0.10"
+shfmt      = "ocx.sh/shfmt:3.7"
+
+[group.release]
+goreleaser = "ocx.sh/goreleaser:2.0"
+```
+
+The top-level `[tools]` table is the implicit `default` group; named `[group.<name>]` tables add to it. `[group.default]` is reserved and produces a parse error — there is no ambiguity between "implicit default" and "named default."
+
+Pass `--group` (repeatable, comma-separated) to scope a command:
+
+```shell
+ocx pull -g ci,lint               # CI runner — only what's needed for lint jobs
+ocx pull -g release               # release runner — only release tools
+ocx lock                          # workstation — every group resolved
+```
+
+When a tool name appears in both `[tools]` and a `[group.*]` table, the parser rejects the file with a structured error naming the duplicate. The same name in two different groups is allowed — it's the resolver's job to surface conflicts at exec time, not the schema's.
+
+### Interactive shell activation {#project-toolchain-activation}
+
+A project's tools should be on `PATH` whenever you `cd` into the project — without `eval`-ing anything on every shell startup. OCX ships three ways to wire that, each suited to a different workflow.
+
+The hooks only export variables — they never install missing tools, never contact the registry, and never mutate the [package store][fs-packages]. Use [`ocx pull`][cmd-pull] to materialize anything `ocx.lock` requires before activation.
+
+[`ocx hook-env`][cmd-hook-env] is the prompt-hook entry point. It reads the nearest `ocx.toml` plus its lock, computes a fingerprint over the actually-installed tools, and emits export lines only when something changed. The fingerprint lives in the `_OCX_APPLIED` environment variable; if `ocx hook-env` is invoked twice with the same lock and the same on-disk tool set, the second invocation prints nothing and exits zero. This is how the prompt stays cheap.
+
+[`ocx shell-hook`][cmd-shell-hook] is the [direnv][direnv] entry point. It is stateless — no `_OCX_APPLIED`, no diffing — and emits a fresh export block on every invocation. `direnv` supplies the cache layer (one re-evaluation per `cd`, watched files re-trigger), so the hook stays simple. Run [`ocx generate direnv`][cmd-generate-direnv] in a project directory to drop a ready-made `.envrc`, then `direnv allow`.
+
+[`ocx shell init <shell>`][cmd-shell-init] prints a one-time snippet you append to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. The snippet wires `ocx hook-env` into the shell's prompt-hook mechanism (`PROMPT_COMMAND` for Bash, `precmd` for Zsh, `fish_prompt` for Fish, `pre_prompt` for Nushell) so every prompt re-evaluates the project toolchain. All three commands work with both the project-tier `ocx.toml` and the [home-tier `ocx.toml`][project-toolchain-home-tier] — the resolver decides which file is in scope, the hooks emit exports for whichever wins.
+
+:::tip Choose one entry point per workflow
+The three hooks are not meant to coexist in the same shell. `direnv` users want `ocx shell-hook`; pure shell-builtin users want `ocx shell init`; tooling that needs to skip the prompt-hook ceremony (CI, scripted environments) calls `ocx exec` directly with no hook at all.
+:::
+
+### Home-tier `ocx.toml` {#project-toolchain-home-tier}
+
+A user-wide `ocx.toml` lives at `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) and serves as a fallback when a developer's CWD has no project file in sight. Tools declared here become the implicit project — handy for scratch directories, system shells, and one-off invocations where you still want `ripgrep` or `cmake` available.
+
+The home-tier file uses the same [schema][schema-project] and the same lock semantics; the lock lives at `$OCX_HOME/ocx.lock`. Commands that consult the project tier walk the directory tree first; only when the walk finds nothing does the home file activate.
+
+:::warning Project replaces home — never merges
+Per [ADR Amendment C][adr-project-toolchain-amendment-c], a project-tier `ocx.toml` and a home-tier `ocx.toml` never compose. Whichever the resolver finds first is the only one that contributes. This avoids the `cargo`-style "config-merging" cascade where it's hard to predict which file declared which tool.
+:::
+
+To opt out entirely (one-off CI invocation, hermetic test), set `OCX_NO_PROJECT=1`. The home-tier fallback is suppressed even when `$OCX_HOME/ocx.toml` exists.
+
+### Migration from `shell profile` {#project-toolchain-migration}
+
+The earlier shell-profile mechanism — [`ocx shell profile add`][cmd-shell-profile-add], `remove`, `list`, `load` — is deprecated in v1 and will be removed in v2. The project toolchain replaces it with a file-based, per-repo declaration that survives across machines and review cycles.
+
+In v1 (this release), the `shell profile add`, `remove`, `list`, and `load` subcommands continue to work but emit a one-line deprecation note on stderr pointing at this guide. Existing users have a release cycle to migrate; nothing breaks today.
+
+In v2 (next breaking release), `shell profile add`, `shell profile remove`, `shell profile list`, and `shell profile load` are removed. The recommended migration path is:
+
+- For project-scoped tools, declare them in `ocx.toml` and pick an [activation hook][project-toolchain-activation] — `ocx shell init <shell>` is the closest one-line replacement for `shell profile load`.
+- For user-scoped tools that should be on every shell regardless of `cwd`, declare them in `$OCX_HOME/ocx.toml` (the [home-tier file][project-toolchain-home-tier]) and let the same hook trio surface them.
+
+[`ocx shell profile generate`][cmd-shell-profile-generate] survives v2 as a convenience for users who want a one-shot exported init file (sourced once from `~/.bashrc`) without a prompt hook. It is the only `shell profile` subcommand that remains.
+
+### Reproducibility and SLSA {#project-toolchain-reproducibility}
+
+OCX v1 ships digest-pinning reproducibility: every tool a project resolves is identified by its OCI manifest digest, and the lock file commits that digest under a hash of the source `ocx.toml`. Any consumer with the lock can verify they are pulling exactly the bytes the project committed to — no tag races, no silent registry rewrites.
+
+What is not yet shipped is a signed build attestation describing how each tool was produced. That capability — the kind of [SLSA build provenance][slsa-l1] producers can generate via [Sigstore][sigstore] or similar — is deferred to v2. Treat OCX v1 as solid input integrity, not as compliance with any [SLSA level][slsa-attestation].
+
+In practice, the v1 contract is sufficient for the most common reproducibility needs: locking a CI matrix to known-good binaries, surviving registry mutability incidents, and ensuring contributors review tool upgrades the same way they review code changes. v2 will add the cryptographic chain that links published digests to verifiable build pipelines.
+
 <!-- external -->
 [toml]: https://toml.io/
 [concourse-registry]: https://github.com/concourse/registry-image-resource
@@ -749,6 +924,7 @@ digest-derived.
 [docker-images]: https://hub.docker.com/search?image_filter=official
 [semver]: https://semver.org/
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+[oci-identifier]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
@@ -761,6 +937,21 @@ digest-derived.
 [helm-oci]: https://helm.sh/docs/topics/registries/
 [docker-layers]: https://docs.docker.com/get-started/docker-concepts/building-images/understanding-image-layers/
 [pnpm]: https://pnpm.io/motivation#saving-disk-space
+[taplo]: https://taplo.tamasfe.dev/
+[helix]: https://helix-editor.com/
+[vscode-taplo]: https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml
+[neovim-taplo-lsp]: https://github.com/neovim/nvim-lspconfig/blob/master/lua/lspconfig/configs/taplo.lua
+[direnv]: https://direnv.net/
+[gitattributes]: https://git-scm.com/docs/gitattributes
+[rfc-8785]: https://www.rfc-editor.org/rfc/rfc8785
+[slsa-l1]: https://slsa.dev/spec/v1.0/levels#build-l1
+[slsa-attestation]: https://slsa.dev/spec/v1.0/attestation-model
+[sigstore]: https://www.sigstore.dev/
+[schema-project]: https://ocx.sh/schemas/project/v1.json
+[adr-project-toolchain-amendment-c]: https://github.com/ocxbase/ocx/blob/main/.claude/artifacts/adr_project_level_toolchain_config.md
+[mise]: https://mise.jdx.dev/
+[asdf]: https://asdf-vm.com/
+[schema-lock]: https://ocx.sh/schemas/project-lock/v1.json
 
 <!-- commands -->
 [arg-config]: ./reference/command-line.md#arg-config
@@ -775,6 +966,7 @@ digest-derived.
 [cmd-index-catalog]: ./reference/command-line.md#index-catalog
 [cmd-index-list]: ./reference/command-line.md#index-list
 [cmd-index-update]: ./reference/command-line.md#index-update
+[cmd-package-info]: ./reference/command-line.md#package-info
 [cmd-package-pull]: ./reference/command-line.md#package-pull
 [cmd-package-push]: ./reference/command-line.md#package-push
 [cmd-ci-export]: ./reference/command-line.md#ci-export
@@ -782,6 +974,14 @@ digest-derived.
 [cmd-env]: ./reference/command-line.md#env
 [cmd-shell-env]: ./reference/command-line.md#shell-env
 [cmd-shell-profile]: ./reference/command-line.md#shell-profile
+[cmd-shell-profile-add]: ./reference/command-line.md#shell-profile-add
+[cmd-shell-profile-generate]: ./reference/command-line.md#shell-profile-generate
+[cmd-lock]: ./reference/command-line.md#lock
+[cmd-pull]: ./reference/command-line.md#pull
+[cmd-hook-env]: ./reference/command-line.md#hook-env
+[cmd-shell-hook]: ./reference/command-line.md#shell-hook
+[cmd-shell-init]: ./reference/command-line.md#shell-init
+[cmd-generate-direnv]: ./reference/command-line.md#generate-direnv
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-offline]: ./reference/command-line.md#arg-offline
 [arg-index]: ./reference/command-line.md#arg-index
@@ -809,4 +1009,6 @@ digest-derived.
 [versioning-tags]: #versioning-tags
 [auth-env-vars]: #authentication-environment-variables
 [auth-docker-creds]: #authentication-docker-credentials
+[project-toolchain-activation]: #project-toolchain-activation
+[project-toolchain-home-tier]: #project-toolchain-home-tier
 [faq-build-separator]: ./faq.md#versioning-build-separator

@@ -7,10 +7,15 @@ use std::{
 };
 
 use clap::Parser;
-use ocx_lib::{log, oci, package::version::Version};
+use ocx_lib::{log, oci, oci::index::IndexOperation, package::version::Version};
 
 use crate::{api, options};
 
+/// List tags available for a package.
+///
+/// Identifiers carrying a digest (`@sha256:...`) are rejected — `index list`
+/// enumerates tags, and a digest narrows nothing. Use
+/// `ocx package info <pkg>@<digest>` for a single artifact.
 #[derive(Parser)]
 pub struct IndexList {
     /// Shows which platforms are available for each package.
@@ -31,6 +36,20 @@ type ResolvedTags = Vec<(String, oci::Identifier, Vec<String>)>;
 
 impl IndexList {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // `index list` enumerates tags. A digest-bearing identifier
+        // narrows nothing — reject early with a usage error so the user
+        // gets a clear pointer to `package info`.
+        let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
+        for (raw, identifier) in self.packages.iter().zip(&identifiers) {
+            if identifier.digest().is_some() {
+                anyhow::bail!(
+                    "`ocx index list` lists tags and does not accept digest-pinned identifiers. \
+                     Use `ocx package info {raw}` for a single artifact, or drop the @digest suffix.",
+                    raw = raw.raw(),
+                );
+            }
+        }
+
         let resolved = self.resolve_tags(&context).await?;
 
         if self.variants {
@@ -118,7 +137,11 @@ impl IndexList {
             }
 
             let tag_identifier = identifier.clone_with_tag(&tag);
-            let platforms = match context.default_index().fetch_manifest(&tag_identifier).await? {
+            let platforms = match context
+                .default_index()
+                .fetch_manifest(&tag_identifier, IndexOperation::Query)
+                .await?
+            {
                 Some((_, manifest)) => oci::Platform::from_manifest(&manifest)?
                     .into_iter()
                     .map(|p| p.to_string())

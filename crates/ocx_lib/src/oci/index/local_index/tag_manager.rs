@@ -55,7 +55,10 @@ impl TagManager {
         for tag in tags {
             let tagged = identifier.clone_with_tag(&tag);
             log::info!("Refreshing tag '{}' for identifier '{}'.", tag, identifier);
-            let Some(digest) = source.fetch_manifest_digest(&tagged).await? else {
+            let Some(digest) = source
+                .fetch_manifest_digest(&tagged, super::super::IndexOperation::Resolve)
+                .await?
+            else {
                 log::debug!("Source has no digest for tag '{}' — skipping.", tag);
                 continue;
             };

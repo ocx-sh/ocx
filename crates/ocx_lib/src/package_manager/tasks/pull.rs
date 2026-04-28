@@ -11,7 +11,7 @@ use tracing::{Instrument, info_span};
 use crate::{
     MEDIA_TYPE_PACKAGE_V1, file_structure, log, media_type_select_some, oci,
     package::{install_info::InstallInfo, install_status::InstallStatus, metadata, resolved_package::ResolvedPackage},
-    package_manager::{self, error::PackageError, error::PackageErrorKind},
+    package_manager::{self, concurrency::Concurrency, error::PackageError, error::PackageErrorKind},
     prelude::SerdeExt,
     utility::{self, singleflight},
 };
@@ -108,10 +108,16 @@ impl PackageManager {
 
     /// Pulls multiple packages in parallel with a shared singleflight group
     /// for cross-package diamond dependency dedup.
+    ///
+    /// `concurrency` caps the **outer** dispatch only — at most N root-package
+    /// pulls run in parallel. Inner `setup_dependencies` and `extract_layers`
+    /// stay unbounded so a transitive dependency never blocks waiting for a
+    /// permit held by its own ancestor (deadlock).
     pub async fn pull_all(
         &self,
         packages: &[oci::Identifier],
         platforms: Vec<oci::Platform>,
+        concurrency: Concurrency,
     ) -> Result<Vec<InstallInfo>, package_manager::error::Error> {
         if packages.is_empty() {
             return Ok(Vec::new());
@@ -131,15 +137,21 @@ impl PackageManager {
         }
 
         let shared_groups = SetupGroups::new();
+        let semaphore = concurrency.semaphore();
         let mut tasks = JoinSet::new();
         for package in packages {
             let mgr = self.clone();
             let package = package.clone();
             let platforms = platforms.clone();
             let groups = shared_groups.clone();
+            let sem = semaphore.clone();
             let span = crate::cli::progress::spinner_span(info_span!("Pulling", package = %package), &package);
             tasks.spawn(
                 async move {
+                    // Permit lives for the full setup_with_tracker call; drop
+                    // happens after the await returns, releasing the slot for
+                    // the next queued root pull.
+                    let _permit = super::super::concurrency::acquire_permit(&sem).await;
                     let result = setup_with_tracker(&mgr, &package, platforms, groups).await;
                     (package, result)
                 }
@@ -460,6 +472,13 @@ async fn post_download_actions(
     pinned: &oci::PinnedIdentifier,
     resolved: &ResolvedPackage,
 ) -> Result<(), PackageErrorKind> {
+    // Tag-preservation policy: `resolve.json` deliberately keeps each
+    // dependency's advisory tag (the form that won the install-time race).
+    // `ocx.lock` strips it via `PinnedIdentifier::strip_advisory()` because
+    // a project lock is the canonical pinned record and a tag-only churn
+    // would bust `generated_at` preservation. The two files have different
+    // jobs: install-time audit trail vs. canonical project pin. Do not
+    // harmonise without revisiting plan_project_toolchain.md §7.4.
     resolved
         .write_json(pkg.resolve())
         .await
