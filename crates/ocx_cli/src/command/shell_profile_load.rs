@@ -4,7 +4,11 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log::*, package::install_info::InstallInfo, package::metadata::env::modifier::ModifierKind, shell};
+use ocx_lib::{
+    log::*, package::install_info::InstallInfo, package::metadata::env::modifier::ModifierKind, shell, symlink,
+};
+
+use crate::conventions::warn_if_pathext_missing_launcher;
 
 /// Output shell export statements for all profiled packages.
 ///
@@ -23,6 +27,7 @@ pub struct ShellProfileLoad {
 
 impl ShellProfileLoad {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        warn_if_pathext_missing_launcher();
         let detected_shell = match self.shell {
             Some(s) => s,
             None => {
@@ -46,7 +51,11 @@ impl ShellProfileLoad {
         }
 
         // Convert resolved profile entries to InstallInfo for dependency expansion.
-        let install_infos: Vec<_> = resolved.iter().map(InstallInfo::from).collect();
+        let install_infos: Vec<std::sync::Arc<InstallInfo>> = resolved
+            .iter()
+            .map(InstallInfo::from)
+            .map(std::sync::Arc::new)
+            .collect();
 
         println!("{}", detected_shell.comment("ocx profile"));
         let entries = manager.resolve_env(&install_infos).await?;
@@ -55,6 +64,34 @@ impl ShellProfileLoad {
                 ModifierKind::Path => println!("{}", detected_shell.export_path(&entry.key, &entry.value)),
                 ModifierKind::Constant => println!("{}", detected_shell.export_constant(&entry.key, &entry.value)),
             }
+        }
+
+        // Emit `<current>/entrypoints` PATH entries for packages that declare entrypoints.
+        // For each resolved profile entry whose metadata has non-empty bundle_entrypoints,
+        // prepend `$OCX_HOME/symlinks/{registry}/{repo}/current/entrypoints` to PATH so
+        // launchers are findable without an explicit `ocx exec` wrapper.
+        // Only emit when the `current` symlink actually exists on disk: the
+        // default profile mode is `candidate` (no `current` symlink created),
+        // so unconditional emission would add non-existent directories to PATH
+        // on every shell startup.
+        let symlinks = &manager.file_structure().symlinks;
+        for resolved_entry in &resolved {
+            if resolved_entry
+                .metadata
+                .bundle_entrypoints()
+                .is_none_or(|e| e.is_empty())
+            {
+                continue;
+            }
+            let current = symlinks.current(&resolved_entry.identifier);
+            if !symlink::is_link(&current) {
+                continue;
+            }
+            let entrypoints_path = current.join("entrypoints");
+            println!(
+                "{}",
+                detected_shell.export_path("PATH", entrypoints_path.to_string_lossy().as_ref())
+            );
         }
 
         Ok(ExitCode::SUCCESS)

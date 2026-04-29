@@ -10,10 +10,10 @@ use crate::options;
 pub fn infer_metadata_file(content: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let content_parent = content
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid content path."))?;
+        .ok_or_else(|| anyhow::anyhow!("content path has no parent directory: {}", content.display()))?;
     let mut content_name = content
         .file_stem()
-        .ok_or_else(|| anyhow::anyhow!("Invalid content path."))?
+        .ok_or_else(|| anyhow::anyhow!("content path has no file stem: {}", content.display()))?
         .to_string_lossy()
         .to_string();
     let known_archive_extensions = [".tar", ".tar.gz", ".tgz", ".zip"];
@@ -42,6 +42,35 @@ pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
         supported_platforms()
     } else {
         platforms.to_vec()
+    }
+}
+
+/// Emits a `tracing::warn!` on Windows when the current process `PATHEXT`
+/// does not include the OCX launcher extension (`.cmd`).
+///
+/// Called at the start of commands whose env output is **consumed outside
+/// `ocx exec`**: `install`, `select`, `shell env`, `ci export`,
+/// `shell profile load`. Those commands emit paths that include `.cmd`
+/// launchers in `entrypoints/`; if `PATHEXT` lacks `.cmd` the launchers will
+/// not be found by the parent shell.
+///
+/// The warning fires per command invocation regardless of whether the packages
+/// involved actually declare entrypoints — inspecting metadata at this point
+/// would require an extra async round-trip and is intentionally avoided.
+///
+/// On non-Windows platforms this function is a no-op.
+pub fn warn_if_pathext_missing_launcher() {
+    #[cfg(target_os = "windows")]
+    {
+        let current_pathext = std::env::var("PATHEXT").unwrap_or_default();
+        if !ocx_lib::env::pathext_includes_launcher(&current_pathext) {
+            tracing::warn!(
+                "entrypoint launchers require {ext} in PATHEXT (case-insensitive); \
+                 current PATHEXT lacks it. add \"{ext}\" to PATHEXT for entrypoints \
+                 to launch correctly outside ocx exec.",
+                ext = ocx_lib::env::LAUNCHER_EXT,
+            );
+        }
     }
 }
 

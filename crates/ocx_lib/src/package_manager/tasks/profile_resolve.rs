@@ -11,6 +11,7 @@ use crate::{
         resolved_package::ResolvedPackage,
     },
     profile::{ProfileEntry, ProfileMode},
+    utility,
 };
 
 use super::super::PackageManager;
@@ -160,7 +161,7 @@ async fn resolve_symlink_entry(
     symlink_path: &std::path::Path,
     kind: crate::file_structure::SymlinkKind,
 ) -> ProfileEntryResolution {
-    if !symlink_path.exists() {
+    if !utility::fs::path_exists_lossy(symlink_path).await {
         return ProfileEntryResolution::broken(
             entry,
             Some(symlink_path.to_path_buf()),
@@ -178,10 +179,14 @@ async fn resolve_symlink_entry(
                         return ProfileEntryResolution::broken(entry, Some(symlink_path.to_path_buf()), e.to_string());
                     }
                 };
+            // Install symlinks target the package root (post-flatten layout);
+            // env resolution expects `content_path` to point at the content
+            // tree. Append `/content` so traversal stays stable through the
+            // symlink while landing in the right subdir.
             ProfileEntryResolution::Resolved(ResolvedProfileEntry {
                 identifier,
                 mode: entry.mode,
-                content_path: symlink_path.to_path_buf(),
+                content_path: symlink_path.join("content"),
                 metadata,
                 resolved,
             })
@@ -197,7 +202,7 @@ async fn resolve_content_entry(mgr: &PackageManager, entry: &ProfileEntry) -> Pr
     // Digest is on the identifier — resolve directly from the object store.
     if let Ok(pinned) = oci::PinnedIdentifier::try_from(entry.identifier.clone()) {
         let content_path = mgr.file_structure().packages.content(&pinned);
-        if content_path.exists() {
+        if utility::fs::path_exists_lossy(&content_path).await {
             return match super::common::load_object_data(&mgr.file_structure().packages, &content_path).await {
                 Ok((metadata, resolved)) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
                     identifier: pinned,

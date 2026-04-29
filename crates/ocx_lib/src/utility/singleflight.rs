@@ -25,6 +25,15 @@ use tokio::sync::{Mutex, watch};
 #[derive(Clone)]
 pub struct SharedError(Arc<dyn std::error::Error + Send + Sync>);
 
+impl SharedError {
+    /// Test-only constructor used by classification and chain-walk tests
+    /// that need to fabricate a `SharedError` without going through `Group`.
+    #[cfg(test)]
+    pub fn for_test<E: std::error::Error + Send + Sync + 'static>(error: E) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
 impl fmt::Debug for SharedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
@@ -39,7 +48,10 @@ impl fmt::Display for SharedError {
 
 impl std::error::Error for SharedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.0.source()
+        // Expose the wrapped error itself as the chain successor so callers
+        // walking via `Error::source` (e.g. `cli::classify_error`) can
+        // downcast to the leader's typed error and recover its discriminant.
+        Some(&*self.0)
     }
 }
 
@@ -49,7 +61,7 @@ impl std::error::Error for SharedError {
 pub enum Error {
     /// The leader task failed and broadcast its error.
     #[error("singleflight leader failed: {0}")]
-    Failed(SharedError),
+    Failed(#[source] SharedError),
     /// The task responsible for producing the value was dropped without
     /// calling [`Handle::complete`] or [`Handle::fail`].
     #[error("singleflight leader abandoned")]

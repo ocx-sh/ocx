@@ -9,7 +9,7 @@ def test_env_path_contains_bin(
     ocx.plain("install", pkg.short)
 
     env_result = ocx.json("env", pkg.short)
-    path_entry = next(e for e in env_result if e["key"] == "PATH")
+    path_entry = next(e for e in env_result["entries"] if e["key"] == "PATH")
     assert "/bin" in path_entry["value"] or "\\bin" in path_entry["value"]
 
 
@@ -22,7 +22,7 @@ def test_env_constant_contains_content_path(
 
     home_key = pkg.repo.upper().replace("-", "_") + "_HOME"
     env_result = ocx.json("env", pkg.short)
-    home_entry = next(e for e in env_result if e["key"] == home_key)
+    home_entry = next(e for e in env_result["entries"] if e["key"] == home_key)
     assert registry_dir(ocx.registry) in home_entry["value"]
     # CAS layout: packages/{registry}/sha256/{prefix}/{suffix}/content
     assert "packages" in home_entry["value"]
@@ -37,7 +37,7 @@ def test_env_candidate_uses_symlink_path(
 
     home_key = pkg.repo.upper().replace("-", "_") + "_HOME"
     env_result = ocx.json("env", "--candidate", pkg.short)
-    home_entry = next(e for e in env_result if e["key"] == home_key)
+    home_entry = next(e for e in env_result["entries"] if e["key"] == home_key)
     assert f"candidates/{pkg.tag}" in home_entry["value"] or f"candidates\\{pkg.tag}" in home_entry["value"]
 
 

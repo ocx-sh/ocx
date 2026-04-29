@@ -658,6 +658,8 @@ class TestRuleCatalog:
             "CHANGELOG.md",
             # Generated at build time, not in repo
             "dependencies.md",
+            # Runtime state file written by /swarm-plan, deleted by /finalize
+            "current_plan.md",
         }
 
         # Prefixes for artifact/plan/memory example patterns — these show

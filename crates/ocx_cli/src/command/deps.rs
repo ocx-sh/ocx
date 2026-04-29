@@ -12,7 +12,7 @@ use ocx_lib::{
     oci,
     package::{
         install_info::InstallInfo,
-        metadata::{Metadata, visibility::Visibility},
+        metadata::{Metadata, ValidMetadata, visibility::Visibility},
         resolved_package::ResolvedPackage,
     },
     prelude::SerdeExt,
@@ -42,9 +42,8 @@ pub struct Deps {
     #[clap(long, value_name = "N", conflicts_with_all = ["flat", "why"])]
     depth: Option<usize>,
 
-    /// Target platforms to consider when resolving packages.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     /// Package identifiers to inspect.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -53,7 +52,7 @@ pub struct Deps {
 
 impl Deps {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let platforms = platforms_or_default(&self.platforms);
+        let platforms = platforms_or_default(self.platforms.as_slice());
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();
@@ -182,7 +181,7 @@ fn find_paths_to<'a>(
             let dep_id = &dep.identifier;
             current_path.push(dep_id.clone().into());
 
-            if oci::Repository::from(&**dep_id) == oci::Repository::from(target) {
+            if oci::Repository::from(dep_id.as_identifier()) == oci::Repository::from(target) {
                 all_paths.push(current_path.clone());
             }
 
@@ -238,7 +237,9 @@ async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),
     );
-    let metadata = metadata.ok()?;
+    // Enforce the ValidMetadata typestate: tampered or invalid metadata is silently
+    // skipped (returns None) rather than fed to downstream graph traversal.
+    let metadata = ValidMetadata::try_from(metadata.ok()?).ok()?.into();
     let resolved = resolved.ok()?;
     Some(InstallInfo {
         identifier,
@@ -246,4 +247,50 @@ async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path
         resolved,
         content,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(n: u8) -> String {
+        format!("{:x}", n).repeat(64).chars().take(64).collect()
+    }
+
+    /// `load_install_info` must return `None` when `metadata.json` contains metadata
+    /// that fails `ValidMetadata` validation (e.g. an env token referencing a dep name
+    /// absent from the dependency list).
+    #[tokio::test]
+    async fn load_install_info_returns_none_for_invalid_metadata() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let content = dir.path().join("content");
+        tokio::fs::create_dir_all(&content).await.expect("create content dir");
+
+        // Build metadata that references "ninja" in an env token but declares no such dep.
+        // ValidMetadata::try_from rejects this with an UnknownDependencyRef error.
+        let h = hex(1);
+        let metadata_json = format!(
+            r#"{{"type":"bundle","version":1,"dependencies":[{{"identifier":"ocx.sh/cmake:1@sha256:{h}"}}],"env":[{{"key":"PATH","type":"constant","value":"${{deps.ninja.installPath}}/bin"}}]}}"#
+        );
+        tokio::fs::write(content.with_file_name("metadata.json"), &metadata_json)
+            .await
+            .expect("write metadata.json");
+
+        // Write a valid resolve.json so the only failure comes from metadata validation.
+        // ResolvedPackage uses #[serde(deny_unknown_fields)] — passing a `version` field
+        // would short-circuit the test before it reaches the ValidMetadata gate.
+        let resolve_json = r#"{"dependencies":[]}"#;
+        tokio::fs::write(content.with_file_name("resolve.json"), resolve_json)
+            .await
+            .expect("write resolve.json");
+
+        let identifier: oci::Identifier = format!("ocx.sh/cmake:1@sha256:{h}").parse().expect("valid identifier");
+        let pinned = oci::PinnedIdentifier::try_from(identifier).expect("identifier has digest");
+
+        let result = load_install_info(pinned, content).await;
+        assert!(
+            result.is_none(),
+            "load_install_info must return None for invalid metadata"
+        );
+    }
 }

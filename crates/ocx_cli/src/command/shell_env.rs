@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log, oci, package::metadata::env::modifier::ModifierKind, shell};
+use ocx_lib::{log, package::metadata::env::modifier::ModifierKind, shell};
 
 use crate::{conventions::*, options};
 
@@ -22,9 +22,8 @@ use crate::{conventions::*, options};
 /// See the path resolution modes documentation for details.
 #[derive(Parser)]
 pub struct ShellEnv {
-    /// Platforms to consider when looking for the package. If not specified, it will use the current supported platform.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     /// The shell to generate the environment configuration for. If not specified, it will be auto-detected.
     #[clap(short = 's', long = "shell")]
@@ -40,6 +39,7 @@ pub struct ShellEnv {
 
 impl ShellEnv {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        warn_if_pathext_missing_launcher();
         let shell = match self.shell {
             Some(shell) => shell,
             None => {
@@ -54,7 +54,7 @@ impl ShellEnv {
         let manager = context.manager();
         let package_infos = resolve_packages(
             self.packages.clone(),
-            &self.platforms,
+            self.platforms.as_slice(),
             &self.content_path,
             manager,
             context.default_registry(),
@@ -62,6 +62,8 @@ impl ShellEnv {
         .await?;
 
         println!("{}", shell.comment("ocx env"));
+        let package_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
+            package_infos.into_iter().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&package_infos).await?;
         for entry in &entries {
             match entry.kind {

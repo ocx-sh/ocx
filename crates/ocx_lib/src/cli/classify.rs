@@ -77,6 +77,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::archive::Error as ArchiveError;
     use crate::auth::error::AuthError;
     use crate::ci::error::Error as CiError;
+    use crate::cli::error::UsageError;
     use crate::compression::error::Error as CompressionError;
     use crate::config::error::Error as ConfigError;
     use crate::file_structure::error::Error as FileStructureError;
@@ -100,6 +101,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
         };
     }
 
+    try_downcast!(UsageError);
     try_downcast!(crate::Error);
     try_downcast!(ConfigError);
     try_downcast!(ClientError);
@@ -319,7 +321,31 @@ mod tests {
         assert_eq!(classify(err), ExitCode::DataError);
     }
 
-    // SetupFailed omitted: singleflight::Error has no public test constructor.
+    /// `DependencyError::SetupFailed` itself returns `None` from `classify()` so the
+    /// chain walker continues via `source()`. With `singleflight::Error::Failed` carrying
+    /// `#[source]` and `SharedError::source()` exposing the wrapped error directly, the
+    /// walker reaches the inner `PackageErrorKind::EntrypointNameCollision` and recovers
+    /// `ExitCode::DataError`. Before the chain fix, the walker stopped at the wrapper
+    /// and fell through to `ExitCode::Failure` — masking the typed discriminant.
+    #[test]
+    fn dependency_setup_failed_singleflight_collision_classifies_to_data_error() {
+        use crate::oci;
+        use crate::package::metadata::entrypoint::EntrypointName;
+        use crate::utility::singleflight;
+
+        let name = EntrypointName::try_from("cmake").unwrap();
+        let hex = "a".repeat(64);
+        let id_a: oci::Identifier = format!("ocx.sh/foo:1.0@sha256:{hex}").parse().unwrap();
+        let id_b: oci::Identifier = format!("ocx.sh/bar:1.0@sha256:{hex}").parse().unwrap();
+        let inner = PackageErrorKind::EntrypointNameCollision {
+            name,
+            first: oci::PinnedIdentifier::try_from(id_a).unwrap(),
+            second: oci::PinnedIdentifier::try_from(id_b).unwrap(),
+        };
+        let shared = singleflight::SharedError::for_test(inner);
+        let err = DependencyError::SetupFailed(singleflight::Error::Failed(shared));
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
 
     // ── OciIndex chain-walk delegation ───────────────────────────────────────
 

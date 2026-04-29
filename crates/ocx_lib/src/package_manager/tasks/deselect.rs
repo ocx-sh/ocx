@@ -29,17 +29,26 @@ impl PackageManager {
         let rm = super::common::reference_manager(self.file_structure());
         let current_path = self.file_structure().symlinks.current(package);
 
-        if crate::symlink::is_link(&current_path) {
+        // Hold the per-repo .select.lock for the entire teardown.
+        // See tasks/common.rs module docs.
+        let _locks = super::common::acquire_selection_locks(self.file_structure(), package).await?;
+
+        let removed_current = if crate::symlink::is_link(&current_path) {
             rm.unlink(&current_path).map_err(PackageErrorKind::Internal)?;
-            Ok(Some(current_path))
+            Some(current_path.clone())
         } else {
+            None
+        };
+
+        if removed_current.is_none() {
             log::warn!(
                 "Package '{}' has no current symlink at '{}' — nothing to deselect.",
                 package,
                 current_path.display(),
             );
-            Ok(None)
         }
+
+        Ok(removed_current)
     }
 
     pub async fn deselect_all(

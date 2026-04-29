@@ -73,6 +73,14 @@ impl PackageDir {
     pub fn refs_blobs_dir(&self) -> PathBuf {
         self.dir.join("refs").join("blobs")
     }
+
+    /// Path to the generated launchers directory.
+    ///
+    /// `entrypoints/` is a sibling of `content/` and `refs/` under the package root.
+    /// Launcher files are regular files generated at install time, not content-addressed.
+    pub fn entrypoints(&self) -> PathBuf {
+        self.dir.join("entrypoints")
+    }
 }
 
 /// Manages the content-addressed package store on the local filesystem.
@@ -206,6 +214,13 @@ impl PackageStore {
         Ok(package_dir_for_content(content_path)?.join("resolve.json"))
     }
 
+    /// Returns the `entrypoints/` path for the given identifier.
+    ///
+    /// `entrypoints/` is a sibling of `content/` and `refs/` inside the package root.
+    pub fn entrypoints(&self, identifier: &oci::PinnedIdentifier) -> PathBuf {
+        self.path(identifier).join("entrypoints")
+    }
+
     /// Returns the `digest` file path for the package that owns `content_path`.
     ///
     /// `content_path` may be a real path or a symlink; symlinks are resolved
@@ -232,22 +247,28 @@ impl PackageStore {
     }
 }
 
-/// Resolves `content_path` (following any install symlinks) and returns the
-/// package root directory that contains it. Used internally to derive sibling
-/// paths such as `metadata.json` and `refs/`.
+/// Resolves `path` (following any install symlinks) to the package root
+/// directory. Accepts either a `content/` child directory or the package root
+/// itself, so callers don't need to know which they hold.
 ///
-/// `packages/{P}/content/` is a real directory, so `dunce::canonicalize` stops
-/// there and `.parent()` reaches the package dir. Install symlinks
-/// (`symlinks/.../candidates/tag` → `packages/.../content`) canonicalize
-/// through to the real content path, so the same `canonicalize().parent()`
-/// chain handles both cases uniformly — no filename-based dispatch needed.
-fn package_dir_for_content(content_path: &Path) -> Result<PathBuf> {
-    let canonical =
-        dunce::canonicalize(content_path).map_err(|e| Error::InternalFile(content_path.to_path_buf(), e))?;
-    canonical
-        .parent()
-        .map(|p| p.to_path_buf())
-        .ok_or(Error::InternalPathInvalid(canonical))
+/// - When `path` resolves to `packages/.../<digest>/content`, returns
+///   `packages/.../<digest>` (the parent — the package root).
+/// - When `path` resolves to `packages/.../<digest>` (the package root), returns
+///   it unchanged. This is the shape produced by the flattened install layout
+///   where `symlinks/{registry}/{repo}/current` and
+///   `symlinks/{registry}/{repo}/candidates/{tag}` target the package root
+///   directly and consumers traverse into `content/` or `entrypoints/` as
+///   needed.
+fn package_dir_for_content(path: &Path) -> Result<PathBuf> {
+    let canonical = dunce::canonicalize(path).map_err(|e| Error::InternalFile(path.to_path_buf(), e))?;
+    if canonical.file_name() == Some(std::ffi::OsStr::new("content")) {
+        canonical
+            .parent()
+            .map(|p| p.to_path_buf())
+            .ok_or(Error::InternalPathInvalid(canonical))
+    } else {
+        Ok(canonical)
+    }
 }
 
 /// Registry directory + CAS shard depth (algorithm/prefix/suffix).
@@ -487,6 +508,22 @@ mod tests {
     }
 
     #[test]
+    fn metadata_for_content_accepts_package_root() {
+        // After the layout flatten, install symlinks (`current`,
+        // `candidates/{tag}`) target the package root rather than the
+        // `content/` child. `*_for_content` must therefore accept the package
+        // root and return the root's sibling files directly, without
+        // climbing one level higher.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let store = PackageStore::new(&root);
+        let pkg_root = root.join("obj");
+        std::fs::create_dir_all(pkg_root.join("content")).unwrap();
+        let result = store.metadata_for_content(&pkg_root).unwrap();
+        assert_eq!(result, pkg_root.join("metadata.json"));
+    }
+
+    #[test]
     fn metadata_for_content_follows_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(dir.path()).unwrap();
@@ -570,5 +607,33 @@ mod tests {
         let store = PackageStore::new(dir.path());
         let packages = store.list_all().await.unwrap();
         assert_eq!(packages.len(), 1);
+    }
+
+    /// Renaming the entrypoints directory invalidates every installed launcher
+    /// — the synthetic `PATH ⊳ <pkg_root>/entrypoints` entry baked at install
+    /// time hard-codes this name. Both `PackageDir::entrypoints()` and
+    /// `PackageStore::entrypoints(identifier)` must keep it stable.
+    #[test]
+    fn entrypoints_dir_name_is_stable_invariant() {
+        // PackageDir
+        let pkg_dir = PackageDir {
+            dir: PathBuf::from("/packages/foo"),
+        };
+        let from_dir = pkg_dir.entrypoints();
+        assert_eq!(
+            from_dir.file_name().and_then(|n| n.to_str()),
+            Some("entrypoints"),
+            "PackageDir::entrypoints() must terminate in `entrypoints` (baked into installed launchers)"
+        );
+
+        // PackageStore
+        let store = PackageStore::new("/packages");
+        let id = pinned("example.com", "cmake");
+        let from_store = store.entrypoints(&id);
+        assert_eq!(
+            from_store.file_name().and_then(|n| n.to_str()),
+            Some("entrypoints"),
+            "PackageStore::entrypoints(id) must terminate in `entrypoints` (baked into installed launchers)"
+        );
     }
 }

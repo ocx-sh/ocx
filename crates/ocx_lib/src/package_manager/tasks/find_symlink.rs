@@ -8,6 +8,7 @@ use crate::{
     log, oci,
     package::install_info::InstallInfo,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
+    utility,
 };
 
 use super::super::PackageManager;
@@ -45,7 +46,7 @@ impl PackageManager {
 
         let symlink_path = self.file_structure().symlinks.symlink(package, kind);
 
-        if !symlink_path.exists() {
+        if !utility::fs::path_exists_lossy(&symlink_path).await {
             return Err(PackageErrorKind::SymlinkNotFound(kind));
         }
 
@@ -64,11 +65,18 @@ impl PackageManager {
             symlink_path.display()
         );
 
+        // Install symlinks target the package root (post-flatten layout); the
+        // env-resolution layer expects `info.content` to point at the content
+        // tree where `${installPath}` should resolve. Append `/content` to keep
+        // the path traversal stable through the symlink while landing in the
+        // right subdir.
+        let content = symlink_path.join("content");
+
         Ok(InstallInfo {
             identifier,
             metadata,
             resolved,
-            content: symlink_path,
+            content,
         })
     }
 

@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tokio::task::JoinSet;
 use tracing::{Instrument, info_span};
@@ -10,7 +11,7 @@ use crate::{
     oci,
     oci::index::SelectResult,
     package::install_info::InstallInfo,
-    package_manager::{self, error::PackageError, error::PackageErrorKind},
+    package_manager::{self, error::PackageError, error::PackageErrorKind, visible},
 };
 
 use super::super::PackageManager;
@@ -206,35 +207,20 @@ impl PackageManager {
     ///
     /// Detects conflicts: if the same `registry/repo` appears with different
     /// digests across the requested packages, an error is returned.
+    ///
+    /// Delegates to the two-phase pipeline in `visible.rs`:
+    /// Phase A — `import_visible_packages` — builds the ordered visible set.
+    /// Phase B — `apply_visible_packages` — emits env entries in order.
     pub async fn resolve_env(
         &self,
-        packages: &[InstallInfo],
+        packages: &[Arc<InstallInfo>],
     ) -> crate::Result<Vec<crate::package::metadata::env::exporter::Entry>> {
         let objects = &self.file_structure().packages;
-        let mut seen_digests = HashSet::new();
-        let mut seen_repos: HashMap<oci::Repository, oci::Digest> = HashMap::new();
-        let mut entries = Vec::new();
-
-        for pkg in packages {
-            // Visible transitive deps first (topological order preserved).
-            // Root packages are direct exec targets — include self-visible
-            // (Private, Public) and consumer-visible (Public, Interface) deps.
-            for dep in &pkg.resolved.dependencies {
-                if !dep.visibility.is_visible() {
-                    continue;
-                }
-                if !check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)? {
-                    continue;
-                }
-                let content = objects.content(&dep.identifier);
-                let (dep_metadata, _) = super::common::load_object_data(objects, &content).await?;
-                super::common::export_env(&content, &dep_metadata, &mut entries)?;
-            }
-            // Then the root package itself.
-            if check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)? {
-                super::common::export_env(&pkg.content, &pkg.metadata, &mut entries)?;
-            }
-        }
+        let visible = visible::import_visible_packages(objects, packages).await?;
+        // Discard the entrypoints map — `resolve_env` is an env-only consumer.
+        // Future consumers (`ocx exec`, `ocx env`) will surface the map or
+        // fail-fast on collisions.
+        let (entries, _entrypoints) = visible::apply_visible_packages(&visible).map_err(crate::Error::from)?;
         Ok(entries)
     }
 
@@ -251,41 +237,13 @@ impl PackageManager {
         for pkg in packages {
             for dep in &pkg.resolved.dependencies {
                 if dep.visibility.is_visible() {
-                    check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)?;
+                    visible::check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)?;
                 }
             }
-            check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)?;
+            visible::check_exported(&pkg.identifier, &mut seen_digests, &mut seen_repos)?;
         }
         Ok(seen_digests)
     }
-}
-
-/// Deduplicates a visible dependency by digest, warning on conflicts.
-///
-/// Returns `true` if newly inserted, `false` if already seen (or conflict
-/// where first-seen wins). When the same `registry/repo` appears with
-/// different digests, a warning is emitted and the first-seen digest is
-/// kept — matching the last-writer-wins semantics of scalar env vars.
-fn check_exported(
-    id: &oci::PinnedIdentifier,
-    seen_digests: &mut HashSet<oci::Digest>,
-    seen_repos: &mut HashMap<oci::Repository, oci::Digest>,
-) -> crate::Result<bool> {
-    let digest = id.digest();
-    let repo_key = oci::Repository::from(&**id);
-    if let Some(existing) = seen_repos.get(&repo_key)
-        && *existing != digest
-    {
-        tracing::warn!(
-            "Conflicting digests for {}: keeping {}, ignoring {}.",
-            repo_key,
-            existing,
-            digest,
-        );
-        return Ok(false);
-    }
-    seen_repos.insert(repo_key, digest.clone());
-    Ok(seen_digests.insert(digest))
 }
 
 // ── Specification tests — plan_resolution_chain_refs.md (revised) ────────

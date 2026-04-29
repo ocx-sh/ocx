@@ -3,12 +3,22 @@
 
 use ocx_lib::{Result, oci};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Identifier {
     raw: String,
 }
 
 impl Identifier {
+    /// Constructs from a body whose OCI shape has already been validated.
+    ///
+    /// Used by sibling option parsers (e.g. `PackageRef`) that have already
+    /// run [`oci::Identifier::from_str`] and want to store the validated raw
+    /// string for later `with_domain` resolution without paying the cost of
+    /// a second parse.
+    pub(super) fn from_validated_raw(raw: impl Into<String>) -> Self {
+        Self { raw: raw.into() }
+    }
+
     pub fn with_domain(&self, domain: impl AsRef<str>) -> Result<oci::Identifier> {
         Ok(oci::Identifier::parse_with_default_registry(
             &self.raw,

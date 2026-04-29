@@ -4,7 +4,6 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::oci;
 
 use crate::{api, conventions::platforms_or_default, options};
 
@@ -22,10 +21,8 @@ use crate::{api, conventions::platforms_or_default, options};
 ///   cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 #[derive(Parser)]
 pub struct Find {
-    /// Platforms to consider when resolving the package. Defaults to the current platform.
-    /// Ignored when `--candidate` or `--current` is used.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     #[clap(flatten)]
     content_path: options::ContentPath,
@@ -40,23 +37,34 @@ impl Find {
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();
+        let fs = context.file_structure();
 
-        let infos = if let Some(kind) = self.content_path.symlink_kind() {
-            manager.find_symlink_all(identifiers, kind).await?
+        let entries: Vec<api::data::paths::PathEntry> = if let Some(kind) = self.content_path.symlink_kind() {
+            // Validate the symlink resolves and the package is installed,
+            // then report the symlink anchor itself (the stable per-repo
+            // path that targets the package root). Consumers traverse into
+            // `<anchor>/content` or `<anchor>/entrypoints` as needed.
+            let _ = manager.find_symlink_all(identifiers.clone(), kind).await?;
+            self.packages
+                .iter()
+                .zip(identifiers.iter())
+                .map(|(raw, id)| api::data::paths::PathEntry {
+                    package: raw.raw().to_string(),
+                    path: fs.symlinks.symlink(id, kind),
+                })
+                .collect()
         } else {
-            let platforms = platforms_or_default(&self.platforms);
-            manager.find_all(identifiers, platforms).await?
+            let platforms = platforms_or_default(self.platforms.as_slice());
+            let infos = manager.find_all(identifiers, platforms).await?;
+            self.packages
+                .iter()
+                .zip(infos)
+                .map(|(raw, info)| api::data::paths::PathEntry {
+                    package: raw.raw().to_string(),
+                    path: info.content,
+                })
+                .collect()
         };
-
-        let entries = self
-            .packages
-            .iter()
-            .zip(infos)
-            .map(|(raw, info)| api::data::paths::PathEntry {
-                package: raw.raw().to_string(),
-                path: info.content,
-            })
-            .collect();
 
         context.api().report(&api::data::paths::Paths::new(entries))?;
 

@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{ci::CiFlavor, log, oci};
+use ocx_lib::{ci::CiFlavor, log};
 
 use crate::{api, conventions::*, options};
 
@@ -20,9 +20,8 @@ use crate::{api, conventions::*, options};
 /// available locally it will fail with an error.
 #[derive(Parser)]
 pub struct CiExport {
-    /// Target platforms to consider when resolving packages.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     /// CI system to generate export commands for. Auto-detected if omitted.
     #[clap(long = "flavor")]
@@ -38,6 +37,7 @@ pub struct CiExport {
 
 impl CiExport {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        warn_if_pathext_missing_launcher();
         let flavor = match self.flavor {
             Some(f) => f,
             None => CiFlavor::detect()
@@ -48,13 +48,15 @@ impl CiExport {
         let manager = context.manager();
         let package_infos = resolve_packages(
             self.packages.clone(),
-            &self.platforms,
+            self.platforms.as_slice(),
             &self.content_path,
             manager,
             context.default_registry(),
         )
         .await?;
 
+        let package_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
+            package_infos.into_iter().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&package_infos).await?;
 
         flavor.export(&entries)?;

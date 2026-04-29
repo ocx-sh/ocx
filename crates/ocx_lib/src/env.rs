@@ -13,6 +13,84 @@ pub const PATH_SEPARATOR: &str = ";";
 #[cfg(not(target_os = "windows"))]
 pub const PATH_SEPARATOR: &str = ":";
 
+/// Canonical uppercase form of the OCX launcher extension as it appears in
+/// `PATHEXT`-style export contexts (`PATHEXT=.CMD;.EXE;...`).
+///
+/// PATHEXT matching itself is case-insensitive (see [`pathext_includes_launcher`]),
+/// so this constant is purely a stylistic source of truth for the form OCX
+/// emits when constructing PATHEXT exports, user-facing warnings, or synthetic
+/// env entries. The lowercase form used internally for case-insensitive
+/// matching is exposed via [`launcher_extension`].
+///
+/// Single source of truth: `ocx exec`, `ocx env`, and the
+/// `warn_if_pathext_missing_launcher` user message all reference this constant
+/// instead of inlining the literal `".CMD"`. Renaming the launcher extension
+/// is then a one-site edit.
+pub const LAUNCHER_EXT: &str = ".CMD";
+
+/// Returns the file extension that OCX-generated entry-point launchers carry on
+/// the current platform.
+///
+/// - On Windows the generator writes `<name>.cmd` scripts, so the launcher
+///   extension is `.cmd`.
+/// - On all other platforms launchers are plain executables with no extension;
+///   the function returns `""`.
+///
+/// Returns the **lowercase** form for case-insensitive PATHEXT matching;
+/// see [`LAUNCHER_EXT`] for the uppercase form OCX exports back into
+/// PATHEXT-style strings.
+///
+/// Callers that only care about Windows behaviour can short-circuit when the
+/// return value is empty:
+///
+/// ```rust
+/// # use ocx_lib::env::launcher_extension;
+/// if launcher_extension().is_empty() {
+///     // non-Windows: nothing to do
+/// }
+/// ```
+pub fn launcher_extension() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        ".cmd"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ""
+    }
+}
+
+/// Returns `true` when `path_ext` lists the launcher extension returned by
+/// [`launcher_extension`].
+///
+/// The comparison is **case-insensitive** because Windows treats `PATHEXT` as
+/// case-insensitive by convention (`.cmd`, `.CMD`, `.Cmd` are all equivalent).
+///
+/// On non-Windows platforms this function **always returns `true`** — the
+/// `PATHEXT` concept does not exist and there is nothing to check.
+///
+/// # Note on simplification
+///
+/// This function does not inspect whether the packages involved actually declare
+/// any entrypoints. The caller is responsible for invoking this only at
+/// appropriate boundaries. See `ocx install`, `ocx select`, `ocx shell env`,
+/// `ocx ci export`, and `ocx shell profile load` for the consumer-boundary
+/// warning pattern; `ocx exec` and `ocx env` for the auto-inject pattern.
+pub fn pathext_includes_launcher(path_ext: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let ext = launcher_extension();
+        path_ext
+            .split(';')
+            .any(|segment| segment.trim().eq_ignore_ascii_case(ext))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path_ext;
+        true
+    }
+}
+
 /// Case-normalizing wrapper for environment variable keys.
 ///
 /// On Windows, environment variable names are case-insensitive, so we
@@ -389,5 +467,79 @@ mod tests {
         env.apply_entries(&entries);
         assert_eq!(env.get("HOME").unwrap(), "/home/user");
         assert_eq!(env.get("PATH").unwrap(), "/opt/bin");
+    }
+
+    // ── launcher_extension ────────────────────────────────────────────────
+
+    #[test]
+    fn launcher_extension_is_static_str() {
+        // The return type is &'static str — just confirm it compiles and
+        // returns a non-panic value.
+        let ext = super::launcher_extension();
+        #[cfg(windows)]
+        assert_eq!(ext, ".cmd", "Windows launcher extension must be .cmd");
+        #[cfg(not(windows))]
+        assert_eq!(ext, "", "non-Windows launcher extension must be empty string");
+    }
+
+    // ── pathext_includes_launcher ─────────────────────────────────────────
+
+    #[test]
+    fn pathext_includes_launcher_on_non_windows_always_true() {
+        // Regardless of what string we pass, non-Windows returns true.
+        #[cfg(not(windows))]
+        {
+            assert!(super::pathext_includes_launcher(""));
+            assert!(super::pathext_includes_launcher(".EXE;.BAT"));
+            assert!(super::pathext_includes_launcher("anything"));
+        }
+    }
+
+    #[cfg(windows)]
+    mod pathext_windows {
+        use super::super::pathext_includes_launcher;
+
+        #[test]
+        fn detects_cmd_lowercase() {
+            assert!(pathext_includes_launcher(".cmd"));
+        }
+
+        #[test]
+        fn detects_cmd_uppercase() {
+            assert!(pathext_includes_launcher(".CMD"));
+        }
+
+        #[test]
+        fn detects_cmd_mixed_case() {
+            assert!(pathext_includes_launcher(".Cmd"));
+            assert!(pathext_includes_launcher(".cMd"));
+        }
+
+        #[test]
+        fn detects_cmd_among_multiple_extensions() {
+            assert!(pathext_includes_launcher(".EXE;.BAT;.CMD;.COM"));
+        }
+
+        #[test]
+        fn detects_cmd_with_surrounding_whitespace() {
+            // Some environments include spaces around the semicolons.
+            assert!(pathext_includes_launcher(".EXE; .CMD ;.BAT"));
+        }
+
+        #[test]
+        fn returns_false_when_cmd_absent() {
+            assert!(!pathext_includes_launcher(".EXE;.BAT;.COM"));
+        }
+
+        #[test]
+        fn returns_false_for_empty_string() {
+            assert!(!pathext_includes_launcher(""));
+        }
+
+        #[test]
+        fn returns_false_for_partial_match() {
+            // ".cmdextra" must not match ".cmd"
+            assert!(!pathext_includes_launcher(".cmdextra;.EXE"));
+        }
     }
 }

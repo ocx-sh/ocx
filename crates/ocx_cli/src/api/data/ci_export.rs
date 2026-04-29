@@ -10,7 +10,10 @@ use crate::api::Printable;
 ///
 /// Plain format: three-column table (Key | Value | Type).
 ///
-/// JSON format: array of `{ key, value, type }` objects.
+/// JSON format: `{"entries": [{"key": "...", "value": "...", "type": "constant"|"path"}, ...]}`.
+/// Shares the canonical `entries` envelope with `env` so consumers can branch on a single
+/// shape and so future top-level fields can be added without breaking the wire format.
+#[derive(Serialize)]
 pub struct CiExported {
     entries: Vec<EnvEntry>,
 }
@@ -18,12 +21,6 @@ pub struct CiExported {
 impl CiExported {
     pub fn new(entries: Vec<EnvEntry>) -> Self {
         Self { entries }
-    }
-}
-
-impl Serialize for CiExported {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
     }
 }
 

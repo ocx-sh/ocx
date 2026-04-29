@@ -5,9 +5,13 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use ocx_lib::{log, oci};
+use ocx_lib::log;
 
-use crate::{api, conventions::platforms_or_default, options};
+use crate::{
+    api,
+    conventions::{platforms_or_default, warn_if_pathext_missing_launcher},
+    options,
+};
 
 #[derive(Parser, Clone)]
 pub struct Install {
@@ -15,8 +19,8 @@ pub struct Install {
     #[clap(short = 's', long = "select")]
     select: bool,
 
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::PlatformsFlag,
 
     /// Package identifiers to install.
     #[arg(required = true, num_args = 1..)]
@@ -25,6 +29,7 @@ pub struct Install {
 
 impl Install {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        warn_if_pathext_missing_launcher();
         let oci_packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         log::info!(
             "Installing packages: {}",
@@ -38,7 +43,7 @@ impl Install {
             .manager()
             .install_all(
                 oci_packages.clone(),
-                platforms_or_default(&self.platforms),
+                platforms_or_default(self.platforms.as_slice()),
                 true,
                 self.select,
             )

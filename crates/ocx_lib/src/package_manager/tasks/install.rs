@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use crate::{
-    log, oci,
+    oci,
     package::install_info::InstallInfo,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
 };
@@ -21,6 +21,8 @@ impl PackageManager {
     /// - A **current** symlink at `symlinks/{repo}/current` when `select` is
     ///   `true` — makes this version the active selection.
     ///
+    /// Both symlinks target the package root; consumers traverse into
+    /// `<symlink>/content/`, `<symlink>/entrypoints/`, or `<symlink>/metadata.json`.
     /// Symlinks are managed via [`ReferenceManager::link`] which also creates
     /// back-references in the object store for GC tracking.
     pub async fn install(
@@ -32,7 +34,7 @@ impl PackageManager {
     ) -> Result<InstallInfo, PackageErrorKind> {
         let install_info = self.pull(package, platforms).await?;
 
-        create_install_symlinks(self, package, &install_info, candidate, select)?;
+        create_install_symlinks(self, package, &install_info, candidate, select).await?;
 
         Ok(install_info)
     }
@@ -57,9 +59,11 @@ impl PackageManager {
         // Phase 2: Create symlinks sequentially.
         if candidate || select {
             for (pkg, info) in packages.iter().zip(infos.iter()) {
-                create_install_symlinks(self, pkg, info, candidate, select).map_err(|kind| {
-                    package_manager::error::Error::InstallFailed(vec![PackageError::new(pkg.clone(), kind)])
-                })?;
+                create_install_symlinks(self, pkg, info, candidate, select)
+                    .await
+                    .map_err(|kind| {
+                        package_manager::error::Error::InstallFailed(vec![PackageError::new(pkg.clone(), kind)])
+                    })?;
             }
         }
 
@@ -68,23 +72,39 @@ impl PackageManager {
 }
 
 /// Creates candidate and/or current symlinks for a single package.
-fn create_install_symlinks(
+///
+/// Delegates to [`super::common::wire_selection`] for the `current` symlink
+/// update plus the per-registry entry-points index update. Collision
+/// detection, lock acquisition, and rollback all live in the shared helper so
+/// this path and the `command/select.rs` path stay byte-equivalent.
+#[allow(clippy::result_large_err)]
+async fn create_install_symlinks(
     mgr: &PackageManager,
     package: &oci::Identifier,
     info: &InstallInfo,
     candidate: bool,
     select: bool,
 ) -> Result<(), PackageErrorKind> {
-    let rm = super::common::reference_manager(mgr.file_structure());
-    if candidate {
-        let link_path = mgr.file_structure().symlinks.candidate(package);
-        log::debug!("Creating candidate symlink at '{}'.", link_path.display());
-        rm.link(&link_path, &info.content).map_err(PackageErrorKind::Internal)?;
-    }
-    if select {
-        let link_path = mgr.file_structure().symlinks.current(package);
-        log::debug!("Creating current symlink at '{}'.", link_path.display());
-        rm.link(&link_path, &info.content).map_err(PackageErrorKind::Internal)?;
-    }
+    super::common::wire_selection(mgr.file_structure(), package, info, candidate, select).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// PackageDir::entrypoints() returns sibling of content/ — verify path shape.
+    #[test]
+    fn package_dir_entrypoints_path_is_sibling_of_content() {
+        use crate::file_structure::PackageDir;
+        let dir = std::path::PathBuf::from("/packages/sha256/ab/cdef");
+        let pkg_dir = PackageDir { dir };
+        assert_eq!(
+            pkg_dir.entrypoints(),
+            std::path::PathBuf::from("/packages/sha256/ab/cdef/entrypoints")
+        );
+        assert_eq!(
+            pkg_dir.content().parent(),
+            pkg_dir.entrypoints().parent(),
+            "entrypoints must be sibling of content"
+        );
+    }
 }

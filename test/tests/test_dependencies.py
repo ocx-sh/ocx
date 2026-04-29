@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.assertions import assert_not_exists, assert_symlink_exists
-from src.helpers import make_package
+from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
@@ -193,9 +193,9 @@ def test_env_includes_dependency_vars(ocx: OcxRunner, unique_repo: str, tmp_path
     assert env_result is not None
 
     # The leaf sets a {REPO_UPPER}_HOME constant. Check that key is present.
-    # env_result is a list of {"key": "...", "value": "...", "type": "..."}
+    # env_result["entries"] is a list of {"key": "...", "value": "...", "type": "..."}
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert leaf_home_key in env_keys, (
         f"expected {leaf_home_key!r} from leaf dep in env output; got keys: {env_keys}"
     )
@@ -596,7 +596,7 @@ def test_env_dependency_order_deps_first(ocx: OcxRunner, unique_repo: str, tmp_p
     ocx.json("install", "--select", app.short)
 
     env_result = ocx.json("env", app.short)
-    keys = [e["key"] for e in env_result]
+    keys = [e["key"] for e in env_result["entries"]]
 
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
     app_home_key = app_repo.upper().replace("-", "_") + "_HOME"
@@ -1005,7 +1005,7 @@ def test_env_candidate_deduplicates_root_that_is_also_dependency(
     env_result = ocx.json("env", "--candidate", app.short, lib.short)
 
     lib_home_key = lib_repo.upper().replace("-", "_") + "_HOME"
-    occurrences = [e for e in env_result if e["key"] == lib_home_key]
+    occurrences = [e for e in env_result["entries"] if e["key"] == lib_home_key]
     assert len(occurrences) == 1, (
         f"expected {lib_home_key!r} exactly once, got {len(occurrences)} times"
     )
@@ -1029,7 +1029,7 @@ def test_sealed_suppresses_dep_env(
 
     env_result = ocx.json("env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key not in env_keys, (
         f"non-exported dep key {b_home_key!r} should NOT appear in env; got keys: {env_keys}"
     )
@@ -1048,7 +1048,7 @@ def test_public_includes_dep_env(
 
     env_result = ocx.json("env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"exported dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1127,7 +1127,7 @@ def test_transitive_public_propagates(
 
     env_result = ocx.json("env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert c_home_key in env_keys, (
         f"transitively exported dep key {c_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1150,7 +1150,7 @@ def test_sealed_blocks_transitive_chain(
 
     env_result = ocx.json("env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert c_home_key not in env_keys, (
         f"blocked transitive dep key {c_home_key!r} should NOT appear in env; got keys: {env_keys}"
     )
@@ -1199,7 +1199,7 @@ def test_private_includes_dep_env_for_direct_target(
     ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
 
     env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"private dep key {b_home_key!r} MUST appear in env for direct target; got keys: {env_keys}"
     )
@@ -1228,7 +1228,7 @@ def test_private_suppresses_dep_env_for_consumer(
     ocx.json("install", "--select", f"{unique_repo}_root:1.0.0")
 
     env_result = ocx.json("env", f"{unique_repo}_root:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key not in env_keys, (
         f"private transitive dep key {b_home_key!r} should NOT appear for consumer; got keys: {env_keys}"
     )
@@ -1253,7 +1253,7 @@ def test_interface_includes_dep_env(
     ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
 
     env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"interface dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1332,3 +1332,88 @@ def _list_dep_targets(obj_dir: Path) -> list[Path]:
     if not deps_dir.exists():
         return []
     return sorted(entry.resolve() for entry in deps_dir.iterdir() if entry.is_symlink())
+
+
+# ---------------------------------------------------------------------------
+# Tests: Entrypoint visibility in dependency env
+# ---------------------------------------------------------------------------
+
+
+def test_public_dep_entrypoints_appear_in_consumer_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A's env must include B's entrypoints/ in PATH when B is a public dependency.
+
+    The visible-package pipeline emits a synthetic `PATH ⊳ <B_pkg_root>/entrypoints`
+    for every visible package that has non-empty entrypoints.  When A depends on B
+    publicly, B is visible to A — so B's entrypoints/ must appear in `ocx env A`.
+    """
+    b_repo = f"{unique_repo}_b"
+    a_repo = f"{unique_repo}_a"
+
+    pkg_b = make_package_with_entrypoints(
+        ocx,
+        b_repo,
+        tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="b",
+    )
+
+    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_entry = {
+        "identifier": f"{pkg_b.fq}@{dep_digest}",
+        "visibility": "public",
+    }
+    pkg_a = make_package(ocx, a_repo, "1.0.0", tmp_path, dependencies=[dep_entry])
+    ocx.plain("install", "--select", pkg_a.short)
+
+    env_result = ocx.json("env", pkg_a.short)
+    path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
+
+    assert any("entrypoints" in v for v in path_values), (
+        f"expected B's entrypoints/ in PATH for public dep; PATH values: {path_values}"
+    )
+
+
+def test_sealed_dep_entrypoints_excluded_from_consumer_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A's env must NOT include B's entrypoints/ in PATH when B is a sealed dependency.
+
+    Sealed (non-exported) dependencies are not visible to A's consumers — the
+    synthetic entrypoints/ PATH entry for B must not appear in `ocx env A`.
+    """
+    b_repo = f"{unique_repo}_b"
+    a_repo = f"{unique_repo}_a"
+
+    pkg_b = make_package_with_entrypoints(
+        ocx,
+        b_repo,
+        tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="b",
+    )
+
+    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_entry = {
+        "identifier": f"{pkg_b.fq}@{dep_digest}",
+        "visibility": "sealed",
+    }
+    pkg_a = make_package(ocx, a_repo, "1.0.0", tmp_path, dependencies=[dep_entry])
+    ocx.plain("install", "--select", pkg_a.short)
+
+    env_result = ocx.json("env", pkg_a.short)
+    path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
+
+    # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
+    b_find = ocx.json("find", pkg_b.short)
+    b_content_path = next(iter(b_find.values()))
+    b_pkg_root = str(Path(b_content_path).parent)
+
+    assert not any(v.startswith(b_pkg_root) and "entrypoints" in v for v in path_values), (
+        f"sealed dep B's entrypoints/ must NOT appear in consumer PATH; PATH values: {path_values}"
+    )

@@ -54,6 +54,9 @@ When ocx installs a package, the actual files land in `packages/`. The critical 
         <Node name="content/" icon="📂">
           <Description>package files — binaries, libraries, headers</Description>
         </Node>
+        <Node name="entrypoints/" icon="🚀">
+          <Description>generated launchers for declared entry points — one script per name</Description>
+        </Node>
         <Node name="metadata.json" icon="📋">
           <Description>declared env vars and extraction options</Description>
         </Node>
@@ -73,6 +76,8 @@ This <Tooltip term="content-addressed layout">A storage scheme where every item'
 ::: info Similar to the Nix store and Git objects
 The [Nix package manager][nix] stores every package at `/nix/store/{hash}-name/` using the same principle: the path is a function of the content. This is what makes Nix derivations reproducible across machines — the same hash always means the same files. Git's internal object store (`.git/objects/`) works identically. ocx applies this model to OCI-distributed binaries.
 :::
+
+**Generated launchers in `entrypoints/`.** When a package's [`metadata.json`][metadata-ref] declares an [`entrypoints`][metadata-entry-points] array, ocx materializes a sibling `entrypoints/` directory at install time with one script per entry — a POSIX `.sh` launcher for Unix shells and a `.cmd` launcher for Windows. Each launcher bakes the digest-addressed `content/` path and delegates to [`ocx exec 'file://<package-root>'`][cmd-exec], so every invocation runs under the same clean-environment guarantee as [`ocx exec <package>`][cmd-exec]. Packages that declare no entrypoints never get an `entrypoints/` directory. See the [entry points guide][guide-entry-points] for the publisher workflow.
 
 **Garbage collection via `refs/`.** The `refs/symlinks/` subdirectory inside each package tracks every install symlink that currently points to it. That directory is the GC root signal — [`ocx clean`][cmd-clean] starts a reachability walk from every package with a live `refs/symlinks/` entry and follows forward-refs through all three tiers.
 
@@ -175,15 +180,24 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/conten
   <Node name="~/.ocx/symlinks/" icon="🔀" open>
     <Node name="{registry}/" icon="📁" open-icon="📂" open>
       <Node name="{repo}/" icon="📁" open-icon="📂" open>
-        <Node name="current" icon="➡️">
-          <Description>active version — set by ocx select</Description>
+        <Node name="current" icon="➡️" open>
+          <Description>active package root — set by ocx select</Description>
+          <Node name="content/" icon="📂">
+            <Description>package files — binaries, libraries, headers</Description>
+          </Node>
+          <Node name="entrypoints/" icon="🚀">
+            <Description>generated launchers — added to $PATH by ocx shell profile load</Description>
+          </Node>
+          <Node name="metadata.json" icon="📋">
+            <Description>declared env vars and extraction options</Description>
+          </Node>
         </Node>
         <Node name="candidates/" icon="📁" open-icon="📂" open>
           <Node name="3.28" icon="➡️">
-            <Description>pinned install — created by ocx install cmake:3.28</Description>
+            <Description>pinned package root — created by ocx install cmake:3.28</Description>
           </Node>
           <Node name="3.30" icon="➡️">
-            <Description>pinned install — created by ocx install cmake:3.30</Description>
+            <Description>pinned package root — created by ocx install cmake:3.30</Description>
           </Node>
         </Node>
       </Node>
@@ -191,11 +205,11 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/conten
   </Node>
 </Tree>
 
-There are two symlink levels, for two different use cases:
+Two symlink entries cover every use case. Both target the **package root** (`packages/{registry}/{algorithm}/{2hex}/{30hex}/`) rather than the `content/` subdirectory; consumers traverse into `…/content/` for files, `…/entrypoints/` for launcher scripts, or read `…/metadata.json` directly:
 
 **`candidates/{tag}`** — pinned to a specific version. Created by `ocx install` and pointed at the exact digest that tag resolved to at install time. You can have cmake 3.28 and 3.30 installed side by side; both candidates coexist until you explicitly uninstall one. Even if the registry later re-pushes the `3.28` tag with a different binary, your candidate still points to the build you originally installed.
 
-**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you update the tag store. This is intentional: tools referencing `current` should only change behavior when *you* decide they should.
+**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you update the tag store. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], [`ocx shell profile load`][cmd-shell-profile] adds `{repo}/current/entrypoints` to `$PATH` so every declared launcher becomes a top-level command. See the [entry points guide][guide-entry-points] for how launchers, PATH, and clean-env execution compose.
 
 ::: info Inspired by SDKMAN and Homebrew
 [SDKMAN][sdkman] (the Java SDK manager) uses the same two-level pattern: `~/.sdkman/candidates/{tool}/{version}/` for pinned installs and a `current` symlink updated by `sdk default {version}`. [Homebrew][homebrew] does the same with its `Cellar/{formula}/{version}/` store and a stable `opt/{formula}` symlink pointing at the active version. Linux's `update-alternatives` is the system-level equivalent, managing tools like `java` and `python3` via a layer of stable symlinks in `/etc/alternatives/`.
@@ -640,10 +654,10 @@ debugging which dependencies actually contribute to the environment:
 ::: details Self-execution path
 All four visibility levels are fully implemented in the propagation algebra and stored in
 `resolve.json`. The consumer-visible axis (`public`, `interface`) controls which deps contribute
-to [`ocx exec`][cmd-exec] and [`ocx env`][cmd-env] today. The self-visible axis (`public`,
-`private`) will activate when self-execution environments (shims, entry points) are added in
-a future release — at that point, `private` deps will contribute to a package's own shim
-execution but remain invisible to consumers.
+to [`ocx exec`][cmd-exec] and [`ocx env`][cmd-env]. The self-visible axis (`public`, `private`)
+controls which deps contribute to a package's own execution environment when a launcher generated
+from its [`entrypoints`][metadata-entry-points] array is invoked — `private` deps are included in
+that self-execution context but remain invisible to consumers.
 :::
 
 ### Inspection {#dependencies-inspection}
@@ -799,6 +813,11 @@ digest-derived.
 
 <!-- reference pages -->
 [config-ref]: ./reference/configuration.md
+[metadata-ref]: ./reference/metadata.md
+[metadata-entry-points]: ./reference/metadata.md#entry-points
+
+<!-- guides -->
+[guide-entry-points]: ./guide/entry-points.md
 
 <!-- internal -->
 [versioning-variants]: #versioning-variants

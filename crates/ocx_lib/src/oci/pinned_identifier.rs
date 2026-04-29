@@ -41,6 +41,15 @@ impl PinnedIdentifier {
     pub fn strip_advisory(&self) -> Self {
         Self(self.0.without_tag())
     }
+
+    /// Returns a borrow of the inner [`Identifier`].
+    ///
+    /// Prefer this over the `Deref` impl plus reference gymnastics
+    /// (e.g. `&**pinned`) when callers need an explicit `&Identifier` —
+    /// for example, when constructing `oci::Repository::from(&Identifier)`.
+    pub fn as_identifier(&self) -> &Identifier {
+        &self.0
+    }
 }
 
 impl std::ops::Deref for PinnedIdentifier {

@@ -697,6 +697,32 @@ mod tests {
     }
 
     #[test]
+    fn sealed_inside_public_inside_interface_chain() {
+        // Root→(Interface)→A→(Public)→B→(Sealed)→C
+        //
+        // Walk from leaf upward:
+        //   C@B          = Sealed (edge)
+        //   C@A          = Public.propagate(Sealed)     = Sealed (Sealed never exports)
+        //   C@Root       = Interface.propagate(Sealed)  = Sealed
+        //   B@A          = Public (edge)
+        //   B@Root       = Interface.propagate(Public)  = Interface
+        //   A@Root       = Interface (edge)
+        //
+        // C must stay Sealed under Root regardless of the outer Interface
+        // wrapper, and the intermediate Public hop is what enforces it: a
+        // Sealed grandchild cannot leak through Public→Interface chaining.
+        let c = leaf("c", 'c');
+        let b = leaf("b", 'b').with_dependencies([(c, Visibility::Sealed)]);
+        let a = leaf("a", 'a').with_dependencies([(b, Visibility::Public)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Interface)]);
+
+        assert_eq!(root.dependencies.len(), 3);
+        assert_dep(&root.dependencies, 0, "c", Visibility::Sealed);
+        assert_dep(&root.dependencies, 1, "b", Visibility::Interface);
+        assert_dep(&root.dependencies, 2, "a", Visibility::Interface);
+    }
+
+    #[test]
     fn four_level_chain_mixed_visibility() {
         // Root→(Private)→A→(Public)→B→(Interface)→C→(Public)→D
         // D's visibility from C: Interface.propagate(Public) = Interface (Public exports, result=edge)

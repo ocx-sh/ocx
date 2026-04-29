@@ -212,3 +212,84 @@ def make_package(
         marker=marker,
         platform=plat,
     )
+
+
+def make_package_with_entrypoints(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    entrypoints: list[dict],
+    bins: list[str] | None = None,
+    tag: str = "1.0.0",
+    *,
+    file_prefix: str = "ep",
+    dependencies: list[dict] | None = None,
+) -> PackageInfo:
+    """Publish a test package whose metadata declares ``entrypoints``.
+
+    Shared by ``test_entrypoints*`` modules so the suite has one construction
+    path. ``file_prefix`` keeps temp filenames distinct when a single
+    ``tmp_path`` hosts multiple packages.
+
+    Parameters
+    ----------
+    dependencies:
+        Optional list of dependency descriptors to embed in metadata.  Each
+        entry must be a dict with at least an ``identifier`` key (same shape
+        as ``make_package``'s ``dependencies`` parameter).
+    """
+    bin_names = bins or ["hello"]
+    env = [
+        {
+            "key": "PATH",
+            "type": "path",
+            "required": True,
+            "value": "${installPath}/bin",
+        },
+    ]
+    pkg_dir = tmp_path / f"pkg-{file_prefix}-{unique_repo}-{tag}"
+    bin_dir = pkg_dir / "bin"
+    bin_dir.mkdir(parents=True)
+    marker = f"marker-{uuid4().hex[:12]}"
+    for name in bin_names:
+        script = bin_dir / name
+        if sys.platform == "win32":
+            script = script.with_suffix(".bat")
+            script.write_text(f"@echo entry-point-{name} {marker} %*\n")
+        else:
+            script.write_text(
+                f'#!/bin/sh\necho "entry-point-{name} {marker} $@"\n'
+            )
+            script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    metadata_path = tmp_path / f"metadata-{file_prefix}-{unique_repo}-{tag}.json"
+    metadata_obj: dict = {
+        "type": "bundle",
+        "version": 1,
+        "env": env,
+        "entrypoints": entrypoints,
+    }
+    if dependencies:
+        metadata_obj["dependencies"] = dependencies
+    metadata_path.write_text(json.dumps(metadata_obj))
+
+    bundle = tmp_path / f"bundle-{file_prefix}-{unique_repo}-{tag}.tar.xz"
+    ocx.plain("package", "create", "-m", str(metadata_path), "-o", str(bundle), str(pkg_dir))
+
+    plat = current_platform()
+    fq = f"{ocx.registry}/{unique_repo}:{tag}"
+    ocx.plain(
+        "package", "push", "-p", plat, "-m", str(metadata_path), "-n", "--cascade", fq, str(bundle),
+    )
+    short = f"{unique_repo}:{tag}"
+    ocx.plain("index", "update", unique_repo)
+
+    return PackageInfo(
+        repo=unique_repo,
+        tag=tag,
+        short=short,
+        fq=fq,
+        content_dir=pkg_dir,
+        marker=marker,
+        platform=plat,
+    )

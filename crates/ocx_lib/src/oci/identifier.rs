@@ -139,11 +139,12 @@ impl Identifier {
         &self.repository
     }
 
-    /// Returns the last segment of the repository as the package name.
+    /// Returns the last segment of the repository path as the package name.
     ///
-    /// For `"myorg/cmake"` this returns `Some("cmake")`.
-    pub fn name(&self) -> Option<String> {
-        self.repository.split('/').next_back().map(|s| s.to_string())
+    /// For `"myorg/cmake"` this returns `"cmake"`.
+    /// For a single-segment repository like `"python"` this returns `"python"`.
+    pub fn name(&self) -> &str {
+        self.repository.rsplit('/').next().unwrap_or(&self.repository)
     }
 
     /// Returns the tag if one was explicitly provided, or `None` otherwise.
