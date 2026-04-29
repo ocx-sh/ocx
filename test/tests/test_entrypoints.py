@@ -283,7 +283,7 @@ def test_root_package_entrypoints_appear_in_self_env(
     ocx.plain("install", "--select", pkg.short)
 
     env_result = ocx.json("env", pkg.short)
-    path_entries = [e["value"] for e in env_result if e["key"] == "PATH"]
+    path_entries = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
 
     # At least one PATH entry must contain the entrypoints/ subdirectory.
     assert any("entrypoints" in v for v in path_entries), (
@@ -317,7 +317,7 @@ def test_synthetic_entrypoints_path_emitted_before_declared_bin(
     ocx.plain("install", "--select", pkg.short)
 
     env_result = ocx.json("env", pkg.short)
-    path_entries = [(i, e["value"]) for i, e in enumerate(env_result) if e["key"] == "PATH"]
+    path_entries = [(i, e["value"]) for i, e in enumerate(env_result["entries"]) if e["key"] == "PATH"]
     assert path_entries, f"expected PATH entries in env output: {env_result}"
 
     # On Windows the bin segment uses backslashes; match either separator.

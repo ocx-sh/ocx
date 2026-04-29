@@ -24,6 +24,7 @@ pub struct PackageCreate {
     /// Force overwrite of output file if it already exists
     #[clap(short, long)]
     force: bool,
+    /// Path to a `metadata.json` file to validate and copy alongside the output bundle
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
     /// Compression level to use for the package bundle
@@ -39,20 +40,19 @@ impl PackageCreate {
         let identifier = options::Identifier::transform_optional(self.identifier.clone(), context.default_registry())?;
         let output = match &self.output {
             Some(output) => {
-                let is_dir =
-                    output.ends_with("/") || tokio::fs::metadata(output).await.map(|m| m.is_dir()).unwrap_or(false);
+                let is_dir = tokio::fs::metadata(output).await.map(|m| m.is_dir()).unwrap_or(false);
                 if is_dir {
-                    output.join(self.infer_filename(&identifier))
+                    output.join(self.infer_filename(identifier.as_ref()))
                 } else {
                     output.clone()
                 }
             }
-            None => self.infer_filename(&identifier).into(),
+            None => self.infer_filename(identifier.as_ref()).into(),
         };
 
         if tokio::fs::try_exists(&output).await? && !self.force {
             anyhow::bail!(
-                "Output file {} already exists. Use --force to overwrite.",
+                "output file {} already exists; use --force to overwrite",
                 output.display()
             );
         }
@@ -87,7 +87,7 @@ impl PackageCreate {
     }
 
     /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
-    fn infer_filename(&self, identifier: &Option<oci::Identifier>) -> String {
+    fn infer_filename(&self, identifier: Option<&oci::Identifier>) -> String {
         let mut name = match identifier {
             Some(identifier) => format!("{}-{}", identifier.name(), identifier.tag_or_latest()),
             None => self

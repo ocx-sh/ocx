@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus, Stdio};
 use std::str::FromStr;
 
@@ -9,10 +8,10 @@ use clap::Parser;
 use ocx_lib::cli::UsageError;
 use ocx_lib::package::install_info::InstallInfo;
 use ocx_lib::package::metadata::env::exporter::Entry as EnvEntry;
-use ocx_lib::package_manager::PackageRef;
 use ocx_lib::{env, oci};
 use tokio::process::Command;
 
+use crate::options::{PackageRef, validate_package_root};
 use crate::{conventions::*, options};
 
 /// Runs installed packages.
@@ -58,6 +57,12 @@ pub struct Exec {
     refs: Vec<String>,
 
     /// Command to execute, with arguments. The command will be executed with the environment with the packages.
+    ///
+    /// `required = true` + `num_args = 1..` means clap rejects the invocation
+    /// before [`Self::execute`] runs when the slice would be empty, so the
+    /// `.split_first().expect(...)` below is sound: clap is the single source
+    /// of truth for non-emptiness, and we depend on its guarantee rather than
+    /// duplicating the check.
     #[clap(allow_hyphen_values = true, required = true, num_args = 1..)]
     command: Vec<String>,
 }
@@ -72,17 +77,17 @@ impl Exec {
         // to the on-disk package root; `oci://` and bare refs collect for a single
         // batched `find_or_install_all` call so OCI parallelism is preserved. Env
         // entries layer in the order refs appear on the command line.
-        let mut ordered: Vec<Option<InstallInfo>> = (0..self.refs.len()).map(|_| None).collect();
+        let mut ordered: Vec<Option<InstallInfo>> = vec![None; self.refs.len()];
         let mut oci_identifiers: Vec<oci::Identifier> = Vec::new();
         let mut oci_indexes: Vec<usize> = Vec::new();
         for (idx, raw) in self.refs.iter().enumerate() {
             let ref_ = PackageRef::from_str(raw).map_err(|e| UsageError::with_source("invalid package ref", e))?;
             match ref_ {
-                PackageRef::Oci(_) => {
-                    let id = ref_
-                        .into_identifier(default_registry)?
-                        .expect("Oci variant must produce Some identifier");
-                    oci_identifiers.push(id);
+                // `Identifier::with_domain` re-applies the CLI default registry
+                // at resolution time — keeping `OCX_DEFAULT_REGISTRY` in charge
+                // rather than `oci::Identifier::from_str`'s built-in default.
+                PackageRef::Oci(id) => {
+                    oci_identifiers.push(id.with_domain(default_registry)?);
                     oci_indexes.push(idx);
                 }
                 PackageRef::PackageRoot(path) => {
@@ -163,53 +168,10 @@ fn pathext_for_child(current: &str) -> Option<String> {
         return None;
     }
     Some(if current.is_empty() {
-        ".CMD;.EXE;.BAT;.COM".to_string()
+        format!("{ext};.EXE;.BAT;.COM", ext = env::LAUNCHER_EXT)
     } else {
-        format!(".CMD;{current}")
+        format!("{ext};{current}", ext = env::LAUNCHER_EXT)
     })
-}
-
-/// Validate a `file://` package root: must be an absolute path that
-/// canonicalizes to a location *inside* the OCX packages CAS root and contains
-/// a `metadata.json` file. Returns the canonical path on success.
-///
-/// Both checks surface as [`UsageError`] so [`ocx_lib::cli::classify_error`]
-/// maps the failure to [`ExitCode::UsageError`] (`64`) rather than the
-/// default [`ExitCode::Failure`] (`1`).
-async fn validate_package_root(dir: &Path, packages_root: &Path) -> Result<PathBuf, UsageError> {
-    // Canonicalize both sides so symlinks and `..` components cannot smuggle
-    // a path outside the packages root. `tokio::fs::canonicalize` keeps us in
-    // the async runtime instead of blocking via `std::fs`.
-    let canonical_dir = tokio::fs::canonicalize(dir)
-        .await
-        .map_err(|e| UsageError::new(format!("file:// path '{}' cannot be resolved: {e}", dir.display())))?;
-    let canonical_root = tokio::fs::canonicalize(packages_root).await.map_err(|e| {
-        UsageError::new(format!(
-            "file:// validation failed: cannot resolve packages root ({}): {}",
-            e,
-            packages_root.display()
-        ))
-    })?;
-
-    if !canonical_dir.starts_with(&canonical_root) {
-        return Err(UsageError::new(format!(
-            "file:// path must point inside {} (got {})",
-            canonical_root.display(),
-            canonical_dir.display()
-        )));
-    }
-
-    // Quick existence check on metadata.json — the canonical signal that
-    // `dir` is actually a package root and not, say, a registry slug dir.
-    let metadata = canonical_dir.join("metadata.json");
-    if !tokio::fs::try_exists(&metadata).await.unwrap_or(false) {
-        return Err(UsageError::new(format!(
-            "file:// path is not a package root (missing metadata.json): {}",
-            canonical_dir.display()
-        )));
-    }
-
-    Ok(canonical_dir)
 }
 
 /// Translate a child process [`ExitStatus`] into a typed [`ExitCode`].
@@ -277,55 +239,6 @@ mod tests {
     #[test]
     fn child_exit_no_code_is_failure() {
         assert_exit_code_eq(exit_code_from_raw(None), ExitCode::FAILURE);
-    }
-
-    // ── validate_package_root ─────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn validate_rejects_outside_packages_root() {
-        let packages_root = tempfile::tempdir().expect("packages root");
-        let outside = tempfile::tempdir().expect("outside");
-        let err = validate_package_root(outside.path(), packages_root.path())
-            .await
-            .expect_err("outside packages root must be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("file://"), "msg should name scheme: {msg}");
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_inside_root_without_metadata_json() {
-        let packages_root = tempfile::tempdir().expect("packages root");
-        let inside = packages_root.path().join("registry/algo/aa/rest");
-        tokio::fs::create_dir_all(&inside).await.expect("mkdir");
-        let err = validate_package_root(&inside, packages_root.path())
-            .await
-            .expect_err("missing metadata.json must be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("metadata.json"), "msg should name metadata.json: {msg}");
-    }
-
-    #[tokio::test]
-    async fn validate_accepts_path_under_packages_root_with_metadata() {
-        let packages_root = tempfile::tempdir().expect("packages root");
-        let pkg_root = packages_root.path().join("registry/algo/aa/rest");
-        tokio::fs::create_dir_all(&pkg_root).await.expect("mkdir");
-        tokio::fs::write(pkg_root.join("metadata.json"), b"{}")
-            .await
-            .expect("write metadata");
-        let canonical = validate_package_root(&pkg_root, packages_root.path())
-            .await
-            .expect("inside path with metadata.json should be accepted");
-        assert!(canonical.starts_with(packages_root.path().canonicalize().expect("canon root")));
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_nonexistent_path_with_usage_error() {
-        let packages_root = tempfile::tempdir().expect("packages root");
-        let missing = packages_root.path().join("does-not-exist");
-        let err = validate_package_root(&missing, packages_root.path())
-            .await
-            .expect_err("missing dir must be rejected");
-        assert!(err.to_string().contains("file://"));
     }
 
     // ── pathext_for_child (Windows only) ─────────────────────────────────

@@ -11,13 +11,15 @@
 //! time.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::package::metadata::LauncherSafeString;
+use tokio::task::JoinSet;
+
 use crate::package::metadata::dependency::DependencyName;
 use crate::package::metadata::entrypoint::Entrypoints;
 use crate::package::metadata::env::accumulator::DependencyContext;
 use crate::package::metadata::template::TemplateResolver;
+use crate::package_manager::launcher_safe::LauncherSafeString;
 
 /// Generates Unix and Windows launchers for all declared entrypoints.
 ///
@@ -62,6 +64,12 @@ pub async fn generate(
         .await
         .map_err(|e| crate::error::file_error(dest, e))?;
 
+    // Spawn one task per launcher file (Unix + Windows for every entry).
+    // Each task is independent — there is no ordering constraint between
+    // entries or between platforms — so concurrent writes amortise per-file
+    // syscall latency over a large `entrypoints/` directory.
+    let mut tasks: JoinSet<Result<(), crate::Error>> = JoinSet::new();
+
     for entry in entries.iter() {
         let name = entry.name.as_str();
         // Resolve the target template eagerly to fail fast on malformed
@@ -70,34 +78,56 @@ pub async fn generate(
         // `metadata.json` at invocation time — so the result is discarded.
         resolver
             .resolve(&entry.target)
-            .map_err(|e| crate::Error::EntrypointTargetInvalid {
+            .map_err(|e| crate::Error::EntrypointInstallFailed {
                 name: name.to_string(),
                 source: Box::new(e),
             })?;
 
-        // Write Unix launcher.
+        // Unix launcher: write body, then set the executable bit.
         let unix_body = unix_launcher_body(&pkg_root_str);
         let unix_path = dest.join(name);
-        tokio::fs::write(&unix_path, unix_body.as_bytes())
-            .await
-            .map_err(|e| crate::error::file_error(&unix_path, e))?;
-        // Set the executable bit (no-op on non-Unix platforms).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&unix_path, std::fs::Permissions::from_mode(0o755))
-                .await
-                .map_err(|e| crate::error::file_error(&unix_path, e))?;
-        }
+        tasks.spawn(write_unix_launcher(unix_path, unix_body));
 
-        // Write Windows launcher.
+        // Windows launcher.
         let windows_body = windows_launcher_body(&pkg_root_str);
         let windows_path = dest.join(format!("{name}.cmd"));
-        tokio::fs::write(&windows_path, windows_body.as_bytes())
-            .await
-            .map_err(|e| crate::error::file_error(&windows_path, e))?;
+        tasks.spawn(write_launcher_file(windows_path, windows_body));
     }
 
+    // Drain results, surfacing the first error. Aborting the rest on failure
+    // matches the previous serial behaviour: a single failed write halts the
+    // generator and the partial `entrypoints/` directory is left for the
+    // caller's atomic-move / cleanup contract.
+    while let Some(join_result) = tasks.join_next().await {
+        match join_result.expect("entrypoint launcher task panicked") {
+            Ok(()) => {}
+            Err(err) => {
+                tasks.abort_all();
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Writes a launcher file at `path` with the supplied body.
+async fn write_launcher_file(path: PathBuf, body: String) -> Result<(), crate::Error> {
+    tokio::fs::write(&path, body.as_bytes())
+        .await
+        .map_err(|e| crate::error::file_error(&path, e))
+}
+
+/// Writes the Unix launcher and sets its executable bit (no-op off Unix).
+async fn write_unix_launcher(path: PathBuf, body: String) -> Result<(), crate::Error> {
+    write_launcher_file(path.clone(), body).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .await
+            .map_err(|e| crate::error::file_error(&path, e))?;
+    }
     Ok(())
 }
 
@@ -411,5 +441,46 @@ mod tests {
         // Second call — must not error due to already-existing files
         let _ = super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest).await;
         // Both calls should return Ok(()).
+    }
+
+    // ── W1: pkg_root rejection on launcher-unsafe characters ──────────────
+    //
+    // `generate()` validates `pkg_root.to_string_lossy()` against
+    // `LauncherSafeString::new` before any file is written. A path containing
+    // any character in `LAUNCHER_UNSAFE_CHARS` (e.g. `'`, `%`, `"`, `\n`,
+    // `\r`, `\0`) must surface the rejection and never produce a launcher with
+    // an unsafe pkg_root baked in. This pins the contract that the unsafe-char
+    // check fires once at the entry boundary in `generate()` rather than per
+    // platform body.
+    #[tokio::test]
+    async fn generate_rejects_pkg_root_with_unsafe_character() {
+        let tmp = tempdir().unwrap();
+        // Single-quote `'` is in LAUNCHER_UNSAFE_CHARS — would break Unix
+        // single-quoted shell literals if it slipped through.
+        let pkg_root = tmp.path().join("pkg'with'quote");
+        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
+        let dest = pkg_root.join("entrypoints");
+        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake", "${installPath}/bin/cmake")]);
+        let dep_contexts = HashMap::new();
+
+        let err = super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest)
+            .await
+            .expect_err("pkg_root with unsafe character must be rejected");
+        match err {
+            crate::Error::LauncherUnsafeCharacter { character, .. } => {
+                assert_eq!(character, '\'', "must report the offending single quote");
+            }
+            other => panic!("expected LauncherUnsafeCharacter, got {other:?}"),
+        }
+        // No launcher files must have been written when validation fails at
+        // the entry boundary.
+        assert!(
+            !dest.join("cmake").exists(),
+            "no unix launcher must be written when pkg_root rejected"
+        );
+        assert!(
+            !dest.join("cmake.cmd").exists(),
+            "no windows launcher must be written when pkg_root rejected"
+        );
     }
 }

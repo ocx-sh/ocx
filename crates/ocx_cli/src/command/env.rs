@@ -49,7 +49,7 @@ impl Env {
         let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             info.into_iter().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&info).await?;
-        #[allow(unused_mut)]
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut all_entries: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
             .map(|e| api::data::env::EnvEntry {
@@ -93,7 +93,7 @@ fn synthetic_pathext_entry(host_pathext: &str) -> Option<api::data::env::EnvEntr
     }
     Some(api::data::env::EnvEntry {
         key: "PATHEXT".to_string(),
-        value: ".CMD".to_string(),
+        value: ocx_lib::env::LAUNCHER_EXT.to_string(),
         kind: ocx_lib::package::metadata::env::modifier::ModifierKind::Path,
     })
 }

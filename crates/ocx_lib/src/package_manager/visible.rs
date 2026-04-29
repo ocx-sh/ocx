@@ -83,10 +83,26 @@ pub struct ImportScope {
 ///   when two paths reach the same repo with different digests.
 /// - Roots last: root packages come after all their transitive visible deps.
 ///
-/// Does **not** load extra metadata from disk — all needed data is already on
-/// the `InstallInfo` fields (`metadata`, `resolved`, `content`). Transitive dep
-/// metadata is loaded via `common::load_object_data` for deps not already in
-/// the root's closure.
+/// # Implementation: serial dedup + parallel I/O
+///
+/// Earlier shape of this function read each transitive dep's `metadata.json`
+/// and `resolve.json` serially while iterating the closure. For an `ocx exec`
+/// over an N-dep root, that was N×serial `await load_object_data`. The current
+/// shape splits the work in three:
+///
+/// 1. Sweep the closures sequentially to apply dedup (`check_exported`),
+///    collecting an indexed list of content paths for deps that need on-disk
+///    data, plus a per-root decision record (which surviving deps in which
+///    slot, and whether the root itself emits). No I/O.
+/// 2. Run `load_object_data` for every collected path in parallel via
+///    [`JoinSet`]. Each task carries its global list index so results can be
+///    reassembled regardless of completion order.
+/// 3. Sweep the closures a second time, weaving the loaded `(metadata,
+///    resolved)` pairs back into the topological-order output vector.
+///
+/// Net effect: I/O parallelism scales with the number of unique transitive
+/// deps in one call (Tokio runtime spawn limit caps this; the realistic peak
+/// of a few dozen per `ocx exec` stays well below).
 ///
 /// # Errors
 ///
@@ -98,31 +114,28 @@ pub async fn import_visible_packages(
 ) -> crate::Result<Vec<VisiblePackage>> {
     let mut seen_digests: HashSet<oci::Digest> = HashSet::new();
     let mut seen_repos: HashMap<oci::Repository, oci::Digest> = HashMap::new();
-    let mut result: Vec<VisiblePackage> = Vec::new();
+
+    // ── Phase 1: serial dedup sweep — collect deps that need disk reads ──
+    //
+    // Tracks per-root which deps survived the visibility + dedup filter and
+    // whether the root itself made the cut. Same iteration order as the
+    // original loop, so topological order is preserved when we re-walk in
+    // Phase 3.
+    struct RootDecision {
+        // (dep_idx_in_root, dep_task_global_idx) for visible deps that survived dedup.
+        emit_deps: Vec<(usize, usize)>,
+        emit_root: bool,
+    }
+    // Each entry is the resolved content path for one surviving dep. Index
+    // into this vector ("global_idx") is what the parallel JoinSet keys on,
+    // so the resolved `(metadata, resolved)` pairs can be reassembled in
+    // topological order in Phase 3.
+    let mut content_paths_to_load: Vec<std::path::PathBuf> = Vec::new();
+    let mut root_decisions: Vec<RootDecision> = Vec::with_capacity(roots.len());
 
     for root in roots {
-        // Build a (registry, repository) → resolved identifier map for content
-        // path lookups. Metadata dep identifiers may carry image-index digests;
-        // resolved identifiers carry the platform-manifest digest at which the
-        // package is actually installed on disk.
-        let resolved_id_map: HashMap<(String, String), &oci::PinnedIdentifier> = root
-            .resolved
-            .dependencies
-            .iter()
-            .map(|dep| {
-                let key = (
-                    dep.identifier.registry().to_string(),
-                    dep.identifier.repository().to_string(),
-                );
-                (key, &dep.identifier)
-            })
-            .collect();
-
-        // Visible transitive deps first (topological order preserved from
-        // `ResolvedPackage::with_dependencies`). Root packages are direct exec
-        // targets so both self-visible (Private, Public) and consumer-visible
-        // (Public, Interface) deps contribute — i.e. everything except Sealed.
-        for dep in &root.resolved.dependencies {
+        let mut emit_deps = Vec::new();
+        for (dep_idx, dep) in root.resolved.dependencies.iter().enumerate() {
             if !dep.visibility.is_visible() {
                 continue;
             }
@@ -132,33 +145,100 @@ pub async fn import_visible_packages(
             if !check_exported(&dep.identifier, &mut seen_digests, &mut seen_repos)? {
                 continue;
             }
-
             let content = objects.content(&dep.identifier);
-            let (dep_metadata, dep_resolved) = common::load_object_data(objects, &content).await?;
+            let global_idx = content_paths_to_load.len();
+            content_paths_to_load.push(content);
+            emit_deps.push((dep_idx, global_idx));
+        }
+        // Root dedup decision — does NOT need any I/O. The root carries its
+        // own metadata and resolved closure already.
+        let emit_root = check_exported(&root.identifier, &mut seen_digests, &mut seen_repos)?;
+        root_decisions.push(RootDecision { emit_deps, emit_root });
+    }
+
+    // ── Phase 2: parallel load_object_data for all surviving deps ────────
+    //
+    // Each task carries its global index so results can be reassembled in
+    // topological order during Phase 3, regardless of completion order.
+    let loaded: Vec<(
+        crate::package::metadata::Metadata,
+        crate::package::resolved_package::ResolvedPackage,
+    )> = if content_paths_to_load.is_empty() {
+        Vec::new()
+    } else {
+        let mut joinset: tokio::task::JoinSet<(
+            usize,
+            crate::Result<(
+                crate::package::metadata::Metadata,
+                crate::package::resolved_package::ResolvedPackage,
+            )>,
+        )> = tokio::task::JoinSet::new();
+        for (global_idx, content) in content_paths_to_load.iter().enumerate() {
+            let objects = objects.clone();
+            let content = content.clone();
+            joinset.spawn(async move {
+                let res = common::load_object_data(&objects, &content).await;
+                (global_idx, res)
+            });
+        }
+        let mut results: Vec<Option<(_, _)>> = vec![None; content_paths_to_load.len()];
+        while let Some(join_result) = joinset.join_next().await {
+            // Per `quality-rust.md` Async Patterns: preserve the original
+            // panic at the JoinSet boundary instead of swallowing into a
+            // generic "task panicked" message.
+            let (global_idx, res) = match join_result {
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => panic!("import_visible_packages dep load aborted: {e}"),
+                Ok(v) => v,
+            };
+            results[global_idx] = Some(res?);
+        }
+        results.into_iter().flatten().collect()
+    };
+
+    // ── Phase 3: weave deps + roots into topological-order output ────────
+    let mut result: Vec<VisiblePackage> = Vec::new();
+    for (root_idx, root) in roots.iter().enumerate() {
+        let decision = &root_decisions[root_idx];
+
+        // Build an `oci::Repository` → resolved identifier map for content
+        // path lookups. Metadata dep identifiers may carry image-index digests;
+        // resolved identifiers carry the platform-manifest digest at which the
+        // package is actually installed on disk.
+        //
+        // Using `oci::Repository` (the same key shape used by `seen_repos`
+        // for digest-conflict dedup) eliminates the per-dep `String` cloning
+        // and unifies the dedup taxonomy with `check_exported`.
+        let resolved_id_map: HashMap<oci::Repository, &oci::PinnedIdentifier> = root
+            .resolved
+            .dependencies
+            .iter()
+            .map(|dep| (oci::Repository::from(dep.identifier.as_identifier()), &dep.identifier))
+            .collect();
+
+        // Visible transitive deps first (topological order preserved from
+        // `ResolvedPackage::with_dependencies`). Root packages are direct exec
+        // targets so both self-visible (Private, Public) and consumer-visible
+        // (Public, Interface) deps contribute — i.e. everything except Sealed.
+        for &(dep_idx, global_idx) in &decision.emit_deps {
+            let dep = &root.resolved.dependencies[dep_idx];
+            let (dep_metadata, dep_resolved) = &loaded[global_idx];
+            let content = content_paths_to_load[global_idx].clone();
 
             // Build dep's own direct-dep context map (scoped to the dep's
             // declared deps, not the root's). Each package's interpolation
             // surface is only its own direct deps.
-            let dep_resolved_id_map: HashMap<(String, String), &oci::PinnedIdentifier> = dep_resolved
+            let dep_resolved_id_map: HashMap<oci::Repository, &oci::PinnedIdentifier> = dep_resolved
                 .dependencies
                 .iter()
-                .map(|d| {
-                    let key = (
-                        d.identifier.registry().to_string(),
-                        d.identifier.repository().to_string(),
-                    );
-                    (key, &d.identifier)
-                })
+                .map(|d| (oci::Repository::from(d.identifier.as_identifier()), &d.identifier))
                 .collect();
             let dep_dep_contexts: HashMap<DependencyName, DependencyContext> = dep_metadata
                 .dependencies()
                 .iter()
                 .map(|d| {
                     let name = d.name();
-                    let key = (
-                        d.identifier.registry().to_string(),
-                        d.identifier.repository().to_string(),
-                    );
+                    let key = oci::Repository::from(d.identifier.as_identifier());
                     // Falls back to the metadata identifier when the dep is
                     // not present in the resolved closure — e.g. when the dep
                     // was added to metadata after this dep's last pull. The
@@ -176,8 +256,8 @@ pub async fn import_visible_packages(
             // the resolved identifier which has the platform-manifest digest.
             let dep_info = InstallInfo {
                 identifier: dep.identifier.clone(),
-                metadata: dep_metadata,
-                resolved: dep_resolved,
+                metadata: dep_metadata.clone(),
+                resolved: dep_resolved.clone(),
                 content,
             };
 
@@ -202,10 +282,7 @@ pub async fn import_visible_packages(
             .iter()
             .map(|dep| {
                 let name = dep.name();
-                let key = (
-                    dep.identifier.registry().to_string(),
-                    dep.identifier.repository().to_string(),
-                );
+                let key = oci::Repository::from(dep.identifier.as_identifier());
                 // Falls back to the metadata identifier when the dep is not
                 // in this root's resolved closure (same rationale as in the
                 // dep-of-dep loop above): metadata may name a dep that the
@@ -217,7 +294,7 @@ pub async fn import_visible_packages(
             })
             .collect();
 
-        if check_exported(&root.identifier, &mut seen_digests, &mut seen_repos)? {
+        if decision.emit_root {
             result.push(VisiblePackage {
                 install_info: Arc::clone(root),
                 scope: ImportScope {
@@ -883,6 +960,130 @@ mod tests {
     }
 
     // ── emit_env — entrypoints PATH round-trip ────────────────────────────────
+
+    // ── W3: diamond-dep dedup ────────────────────────────────────────────────
+    //
+    // When the same dep `C` appears in the closure of two roots (or via two
+    // intermediate deps inside one closure), it must be emitted at most once
+    // — the first-seen-wins rule encoded by `check_exported`. This test
+    // constructs a diamond fan-in: roots `A` and `B` both list `C` as a
+    // visible dep. After `import_visible_packages`, the `C` entry must appear
+    // exactly once in the visible set (per its content-addressed digest),
+    // even though both root closures reference it.
+    #[tokio::test]
+    async fn import_visible_packages_dedups_diamond_dep() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let c_id = pinned("c", 'c');
+        seed_package_in_store(&store, &c_id, ResolvedPackage::new());
+
+        // Both A and B list C as their only visible dep.
+        let a_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: c_id.clone(),
+                visibility: Visibility::Public,
+            }],
+        };
+        let b_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: c_id.clone(),
+                visibility: Visibility::Public,
+            }],
+        };
+
+        let a = Arc::new(make_install_info("a", 'a', a_resolved));
+        let b = Arc::new(make_install_info("b", 'b', b_resolved));
+
+        let visible = import_visible_packages(&store, &[a, b]).await.unwrap();
+
+        // Count how many times the `c` repository appears. Diamond dedup
+        // demands exactly one occurrence even though both closures reference it.
+        let c_count = visible
+            .iter()
+            .filter(|v| v.install_info.identifier.repository() == "c")
+            .count();
+        assert_eq!(
+            c_count,
+            1,
+            "diamond dep `c` must appear exactly once across both root closures, \
+             got {c_count}; full visible repos: {:?}",
+            visible
+                .iter()
+                .map(|v| v.install_info.identifier.repository())
+                .collect::<Vec<_>>()
+        );
+
+        // Both roots themselves must still appear.
+        let root_repos: Vec<&str> = visible
+            .iter()
+            .filter(|v| v.scope.is_root)
+            .map(|v| v.install_info.identifier.repository())
+            .collect();
+        assert!(
+            root_repos.contains(&"a"),
+            "root a must be in visible set: {root_repos:?}"
+        );
+        assert!(
+            root_repos.contains(&"b"),
+            "root b must be in visible set: {root_repos:?}"
+        );
+    }
+
+    // ── W3: same-repo conflicting-digest dedup ───────────────────────────────
+    //
+    // When two roots pin the SAME repository (`oci::Repository`) but DIFFERENT
+    // digests, `check_exported` warns and keeps the first-seen digest — both
+    // roots can still be in the visible set, but only one entry for the
+    // shared repo survives. This test pins that semantics: the second
+    // conflicting digest is dropped (logged as a conflict) rather than
+    // silently emitted alongside the first.
+    #[tokio::test]
+    async fn import_visible_packages_skips_same_repo_conflicting_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        // Two distinct digests but the same repository name.
+        let dep_v1 = pinned("shared", '1');
+        let dep_v2 = pinned("shared", '2');
+        seed_package_in_store(&store, &dep_v1, ResolvedPackage::new());
+        seed_package_in_store(&store, &dep_v2, ResolvedPackage::new());
+
+        let a_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: dep_v1.clone(),
+                visibility: Visibility::Public,
+            }],
+        };
+        let b_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: dep_v2.clone(),
+                visibility: Visibility::Public,
+            }],
+        };
+        let a = Arc::new(make_install_info("a", 'a', a_resolved));
+        let b = Arc::new(make_install_info("b", 'b', b_resolved));
+
+        let visible = import_visible_packages(&store, &[a, b]).await.unwrap();
+
+        // The same repository name `shared` must appear at most once — the
+        // first digest seen wins; the second is logged as a conflict and
+        // dropped (per `check_exported` semantics).
+        let shared_count = visible
+            .iter()
+            .filter(|v| v.install_info.identifier.repository() == "shared")
+            .count();
+        assert_eq!(
+            shared_count,
+            1,
+            "conflicting digests for the same repo must collapse to one entry (first-seen wins), \
+             got {shared_count}; visible: {:?}",
+            visible
+                .iter()
+                .map(|v| v.install_info.identifier.repository())
+                .collect::<Vec<_>>()
+        );
+    }
 
     /// The synthetic PATH value emitted by `emit_env` for a package with
     /// entrypoints must equal `PackageDir::entrypoints()` for the same root.

@@ -8,6 +8,7 @@ use crate::{
     log, oci,
     package::install_info::InstallInfo,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
+    utility,
 };
 
 use super::super::PackageManager;
@@ -45,7 +46,7 @@ impl PackageManager {
 
         let symlink_path = self.file_structure().symlinks.symlink(package, kind);
 
-        if !symlink_path.exists() {
+        if !utility::fs::path_exists_lossy(&symlink_path).await {
             return Err(PackageErrorKind::SymlinkNotFound(kind));
         }
 

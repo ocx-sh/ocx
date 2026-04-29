@@ -44,7 +44,7 @@ impl Find {
             // then report the symlink anchor itself (the stable per-repo
             // path that targets the package root). Consumers traverse into
             // `<anchor>/content` or `<anchor>/entrypoints` as needed.
-            let _infos = manager.find_symlink_all(identifiers.clone(), kind).await?;
+            let _ = manager.find_symlink_all(identifiers.clone(), kind).await?;
             self.packages
                 .iter()
                 .zip(identifiers.iter())

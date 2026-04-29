@@ -193,9 +193,9 @@ def test_env_includes_dependency_vars(ocx: OcxRunner, unique_repo: str, tmp_path
     assert env_result is not None
 
     # The leaf sets a {REPO_UPPER}_HOME constant. Check that key is present.
-    # env_result is a list of {"key": "...", "value": "...", "type": "..."}
+    # env_result["entries"] is a list of {"key": "...", "value": "...", "type": "..."}
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert leaf_home_key in env_keys, (
         f"expected {leaf_home_key!r} from leaf dep in env output; got keys: {env_keys}"
     )
@@ -596,7 +596,7 @@ def test_env_dependency_order_deps_first(ocx: OcxRunner, unique_repo: str, tmp_p
     ocx.json("install", "--select", app.short)
 
     env_result = ocx.json("env", app.short)
-    keys = [e["key"] for e in env_result]
+    keys = [e["key"] for e in env_result["entries"]]
 
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
     app_home_key = app_repo.upper().replace("-", "_") + "_HOME"
@@ -1005,7 +1005,7 @@ def test_env_candidate_deduplicates_root_that_is_also_dependency(
     env_result = ocx.json("env", "--candidate", app.short, lib.short)
 
     lib_home_key = lib_repo.upper().replace("-", "_") + "_HOME"
-    occurrences = [e for e in env_result if e["key"] == lib_home_key]
+    occurrences = [e for e in env_result["entries"] if e["key"] == lib_home_key]
     assert len(occurrences) == 1, (
         f"expected {lib_home_key!r} exactly once, got {len(occurrences)} times"
     )
@@ -1029,7 +1029,7 @@ def test_sealed_suppresses_dep_env(
 
     env_result = ocx.json("env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key not in env_keys, (
         f"non-exported dep key {b_home_key!r} should NOT appear in env; got keys: {env_keys}"
     )
@@ -1048,7 +1048,7 @@ def test_public_includes_dep_env(
 
     env_result = ocx.json("env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"exported dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1127,7 +1127,7 @@ def test_transitive_public_propagates(
 
     env_result = ocx.json("env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert c_home_key in env_keys, (
         f"transitively exported dep key {c_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1150,7 +1150,7 @@ def test_sealed_blocks_transitive_chain(
 
     env_result = ocx.json("env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert c_home_key not in env_keys, (
         f"blocked transitive dep key {c_home_key!r} should NOT appear in env; got keys: {env_keys}"
     )
@@ -1199,7 +1199,7 @@ def test_private_includes_dep_env_for_direct_target(
     ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
 
     env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"private dep key {b_home_key!r} MUST appear in env for direct target; got keys: {env_keys}"
     )
@@ -1228,7 +1228,7 @@ def test_private_suppresses_dep_env_for_consumer(
     ocx.json("install", "--select", f"{unique_repo}_root:1.0.0")
 
     env_result = ocx.json("env", f"{unique_repo}_root:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key not in env_keys, (
         f"private transitive dep key {b_home_key!r} should NOT appear for consumer; got keys: {env_keys}"
     )
@@ -1253,7 +1253,7 @@ def test_interface_includes_dep_env(
     ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
 
     env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"interface dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1370,7 +1370,7 @@ def test_public_dep_entrypoints_appear_in_consumer_path(
     ocx.plain("install", "--select", pkg_a.short)
 
     env_result = ocx.json("env", pkg_a.short)
-    path_values = [e["value"] for e in env_result if e["key"] == "PATH"]
+    path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
 
     assert any("entrypoints" in v for v in path_values), (
         f"expected B's entrypoints/ in PATH for public dep; PATH values: {path_values}"
@@ -1407,7 +1407,7 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
     ocx.plain("install", "--select", pkg_a.short)
 
     env_result = ocx.json("env", pkg_a.short)
-    path_values = [e["value"] for e in env_result if e["key"] == "PATH"]
+    path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
 
     # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
     b_find = ocx.json("find", pkg_b.short)

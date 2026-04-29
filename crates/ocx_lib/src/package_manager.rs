@@ -3,7 +3,7 @@
 
 pub mod entrypoints;
 pub mod error;
-pub mod package_ref;
+pub(crate) mod launcher_safe;
 pub mod visible;
 
 mod tasks;
@@ -159,6 +159,59 @@ mod install_info_identifier_tests {
         );
     }
 
+    /// Two distinct content digests that share the first 16 hex characters
+    /// must still yield DISTINCT synthetic repository components.
+    ///
+    /// Regression guard: an earlier shape truncated to `digest.hex()[..16]`,
+    /// which collapsed any pair of `file://` roots whose digests collided in
+    /// their first 64 bits onto the same `(registry, repository)` dedup key
+    /// inside `resolve_env`. One side then surfaced as a "conflicting digest"
+    /// warning and was silently dropped. Using the full digest hex makes such
+    /// a collision probabilistically impossible (full SHA-256 keyspace).
+    #[tokio::test]
+    async fn file_url_mode_repos_with_same_16char_prefix_do_not_collapse() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+
+        let root_a = tmp.path().join("pkg_a");
+        let root_b = tmp.path().join("pkg_b");
+        // Two 64-char SHA-256 hex digests sharing the first 16 hex chars
+        // ("aaaaaaaaaaaaaaaa") but diverging from char 17 onwards.
+        let prefix = "a".repeat(16);
+        let hex_a = format!("{prefix}{}", "0".repeat(48));
+        let hex_b = format!("{prefix}{}", "f".repeat(48));
+        assert_eq!(&hex_a[..16], &hex_b[..16], "test fixture must share 16-char prefix");
+        assert_ne!(hex_a, hex_b, "test fixture must diverge after the prefix");
+
+        write_minimal_package_root(&root_a, &hex_a).await;
+        write_minimal_package_root(&root_b, &hex_b).await;
+
+        let info_a = manager
+            .install_info_from_package_root(&root_a)
+            .await
+            .expect("package root A must succeed");
+        let info_b = manager
+            .install_info_from_package_root(&root_b)
+            .await
+            .expect("package root B must succeed");
+
+        assert_ne!(
+            info_a.identifier.repository(),
+            info_b.identifier.repository(),
+            "digests sharing the first 16 hex chars must still yield distinct synthetic repositories"
+        );
+        // Sanity: synthetic repo string must include the full 64-char digest hex,
+        // not the truncated 16-char prefix that caused the original collision.
+        assert!(
+            info_a.identifier.repository().ends_with(&hex_a),
+            "synthetic repo for A must embed the full 64-char digest hex"
+        );
+        assert!(
+            info_b.identifier.repository().ends_with(&hex_b),
+            "synthetic repo for B must embed the full 64-char digest hex"
+        );
+    }
+
     /// Calling `install_info_from_package_root` twice on the same root must
     /// yield the same repository component (idempotency).
     #[tokio::test]
@@ -188,7 +241,6 @@ mod install_info_identifier_tests {
 
 // Re-export types needed by other modules and CLI commands.
 pub use error::DependencyError;
-pub use package_ref::{PackageRef, PackageRefParseError};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::profile_resolve::{ProfileEntryResolution, ResolvedProfileEntry};
 
@@ -327,12 +379,15 @@ impl PackageManager {
 
         // Reconstruct a PinnedIdentifier from the sibling `digest` file.
         // The identifier is used only for dedup tracking in resolve_env.
-        // Each package root gets a distinct synthetic repository component derived
-        // from the first 16 hex characters of its content digest, ensuring that
-        // two distinct `file://` roots never collide in the seen_repos dedup map.
+        // Uses the full content digest hex; collision-resistant. The synthetic
+        // repository path is internal-only — never persisted in OCI manifests
+        // and never compared with real registry repositories — so the longer
+        // string is acceptable in exchange for full SHA-256 (~2^256) keyspace,
+        // which makes a `(registry, repository)` collision between two distinct
+        // `file://` roots probabilistically impossible.
         let digest_path = objects.digest_file_for_content(pkg_root)?;
         let digest = read_digest_file(&digest_path).await?;
-        let repo_name = format!("file-url-mode/{}", &digest.hex()[..16]);
+        let repo_name = format!("file-url-mode/{}", digest.hex());
         let base_id = crate::oci::Identifier::new_registry(repo_name, &self.default_registry).clone_with_digest(digest);
         let pinned = crate::oci::PinnedIdentifier::try_from(base_id)?;
 

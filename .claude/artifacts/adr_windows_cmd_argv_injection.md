@@ -366,7 +366,7 @@ than a hard cutover.
 - **Research artifact**: [`research_batbatbut_mitigations.md`](./research_batbatbut_mitigations.md) — CVE timeline, cmd.exe parsing layers, escape-loop intractability analysis, shim comparison table, npm cmd-shim behavior post-CVE.
 - **Code**: `/home/mherwig/dev/ocx/crates/ocx_lib/src/package_manager/entrypoints.rs` — `windows_launcher_body` (line 179), `LauncherSafeString` (line 40), golden test (line 392).
 - **CVE-2024-24576** — [Rust advisory GHSA-q455-m56c-85mh](https://github.com/rust-lang/rust/security/advisories/GHSA-q455-m56c-85mh); fixed in Rust 1.77.2.
-- **CVE-2024-43402** — [GHSA-2xg3-7mm6-98jj](https://github.com/rust-lang/rust/security/advisories/GHSA-2xg3-7mm6-98jj) — 1.77.2 bypass via trailing whitespace/period; fixed in Rust 1.81.0.
+- **CVE-2024-43402** — [GHSA-2xg3-7mm6-98jj](https://github.com/rust-lang/rust/security/advisories/GHSA-2xg3-7mm6-98jj) — Rust 1.81.0 bypass of the CVE-2024-24576 fix via trailing whitespace or period in the executable path, causing `cmd.exe` to re-parse the argument as a batch invocation. The stdlib fix in Rust 1.81.0 patches `std::process::Command` when spawning `.bat`/`.cmd` targets. **OCX relevance:** OCX launchers are statically generated text files; they do not invoke `std::process::Command` on `.bat` or `.cmd` targets at launcher-generation time. The stdlib fix is therefore irrelevant to OCX's attack surface. Cross-ref recorded here for security reviewers auditing the BatBadBut class. Per max-tier review finding SOTA-1.
 - **CVE-2024-27980** — Node.js response: disallow `.bat`/`.cmd` direct spawn without `shell: true`.
 - **hermetic-launcher**: [hermeticbuild/hermetic-launcher](https://github.com/hermeticbuild/hermetic-launcher) — Rust shim prior art.
 - **BatBadBut disclosure**: [Flatt Security, RyotaK, 2024-04-09](https://flatt.tech/research/posts/batbadbut-you-cant-securely-execute-commands-on-windows/).
@@ -378,3 +378,4 @@ than a hard cutover.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-04-27 | Architect worker (Sonnet 4.6, PR #64 round-2) | Initial draft — interim hardening + threat model + deferred shim |
+| 2026-04-29 | worker-doc-writer (Sonnet 4.6) | Expanded CVE-2024-43402 cross-reference to clarify OCX-specific irrelevance: OCX generates static text files, not `Command` invocations on `.bat`, so Rust 1.81.0 stdlib fix does not apply to OCX's attack surface. Recorded for security reviewer context (SOTA-1). |

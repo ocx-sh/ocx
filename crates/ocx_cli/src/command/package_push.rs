@@ -76,7 +76,7 @@ impl PackagePush {
         };
 
         log::info!(
-            "Deploying package with {} layer(s) and metadata {}",
+            "deploying package with {} layer(s) and metadata {}",
             self.layers.len(),
             metadata_path.display()
         );
@@ -96,11 +96,11 @@ impl PackagePush {
                 Ok(tags) => tags,
                 Err(err) => {
                     if self.new {
-                        log::info!("Failed to list tags, assuming new package: {err}");
+                        log::info!("failed to list tags, assuming new package: {err}");
                         Vec::new()
                     } else {
                         return Err(anyhow::anyhow!(
-                            "Failed to list existing tags for {}: {err}",
+                            "failed to list existing tags for {}: {err}",
                             identifier
                         ));
                     }

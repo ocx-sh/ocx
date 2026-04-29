@@ -181,7 +181,7 @@ fn find_paths_to<'a>(
             let dep_id = &dep.identifier;
             current_path.push(dep_id.clone().into());
 
-            if oci::Repository::from(&**dep_id) == oci::Repository::from(target) {
+            if oci::Repository::from(dep_id.as_identifier()) == oci::Repository::from(target) {
                 all_paths.push(current_path.clone());
             }
 

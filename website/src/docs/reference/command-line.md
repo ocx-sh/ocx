@@ -155,13 +155,13 @@ resolve via a [stable install symlink](../user-guide.md#path-resolution) instead
 object. This is useful for paths embedded in editor configs, Makefiles, or shell profiles that
 should survive package updates.
 
-| Mode | Flag | Path |
+| Mode | Flag | Path returned |
 |------|------|------|
 | Object store (default) | _(none)_ | `~/.ocx/packages/…/{digest}/content` |
-| Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/{tag}/content` |
-| Current symlink | `--current` | `~/.ocx/symlinks/…/current/content` |
+| Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/{tag}` |
+| Current symlink | `--current` | `~/.ocx/symlinks/…/current` |
 
-`candidates/{tag}` and `current` target the **package root** (the parent of `content/`); the resolved path you see above is the same anchor with `/content` appended. Consumers that need launcher scripts traverse `…/current/entrypoints` from the same anchor, and metadata readers traverse `…/current/metadata.json`.
+In the default (no flag) mode, the returned path is the `content/` subdirectory — suitable for most `$PATH` and file lookup uses. With `--candidate` or `--current`, the returned path is the **package root anchor** (the symlink itself, which targets the parent of `content/`). Consumers that need launcher scripts traverse `<anchor>/entrypoints` from there; metadata readers traverse `<anchor>/metadata.json`.
 
 **Constraints**
 
@@ -252,9 +252,9 @@ myapp:1.0 → ocx.sh/cmake:3.28 → ocx.sh/gcc:13
 
 Removes the current-version symlink for one or more packages.
 
-The package is deselected but not uninstalled: its [candidate symlink](../user-guide.md#path-resolution) and object-store content remain intact. To also remove the installed files, use [`uninstall`](#uninstall).
+The package is deselected but not uninstalled: its [candidate symlink][fs-symlinks] and object-store content remain intact. To also remove the installed files, use [`uninstall`](#uninstall).
 
-When the deselected package declares [entry points](../guide/entry-points.md), the launchers stop being reachable through `current/entrypoints/` as soon as the `current` symlink is removed. The symlink removal is idempotent — an already-absent link is not an error.
+When the deselected package declares [entry points][guide-entry-points], the launchers stop being reachable through `current/entrypoints/` as soon as the `current` symlink is removed. The symlink removal is idempotent — an already-absent link is not an error.
 
 **Usage**
 
@@ -310,7 +310,7 @@ Each positional accepts a package reference in one of three forms:
 
 - A bare OCI identifier (`node:20`) — equivalent to the explicit `oci://node:20`.
 - An explicit `oci://<identifier>` URI — resolved through the index and auto-installed when missing (unless [`--offline`](#arg-offline) is set).
-- A `file://<absolute-package-root>` URI — points at an already-installed package directory under `$OCX_HOME/packages/...`, skipping identifier resolution and the index. This is the form generated [entry point][entry-points] launchers bake; it is also the contract that lets the launcher survive an `ocx select` to a different version (the symlink target moves, the URI does not).
+- A `file://<absolute-package-root>` URI — points at an already-installed package directory under `$OCX_HOME/packages/...`, skipping identifier resolution and the index. This is the form generated [entry point][entry-points] launchers bake; it is also the contract that lets the launcher survive an `ocx select` to a different version (the symlink target moves, the URI does not). The path is canonicalized and validated to fall inside `$OCX_HOME/packages/`; a path outside that directory or one without a `metadata.json` at its root is rejected with exit code 64 (`UsageError`).
 
 If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables. Refs of either scheme can be mixed in one invocation; env entries layer in the order refs appear on the command line.
 
@@ -671,6 +671,10 @@ runtime files. For [GitHub Actions][github-actions-docs], this appends path entr
 
 The CI flavor is auto-detected from the environment (e.g. `GITHUB_ACTIONS=true`) but can be
 overridden with `--flavor`.
+
+Plain format writes directly to the CI runtime files and prints nothing to stdout.
+JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}` —
+the same canonical envelope as [`env`](#env).
 
 This command does not auto-install packages — if a package is not already available locally it
 will fail with an error. In CI workflows, use [`package pull`](#package-pull) before `ci export`.

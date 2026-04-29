@@ -11,10 +11,9 @@ use std::path::Path;
 
 use crate::cli::{ClassifyExitCode, ExitCode};
 use crate::oci;
-use regex::Regex;
 
 use super::env::accumulator::DependencyContext;
-use super::slug;
+use super::slug::DEP_TOKEN_PATTERN;
 use crate::package::metadata::dependency::DependencyName;
 
 /// Resolves `${installPath}` and `${deps.NAME.FIELD}` tokens in template strings.
@@ -35,6 +34,12 @@ pub struct TemplateResolver<'a> {
     dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
 }
 
+// Every method on `TemplateResolver` returns `Result<_, TemplateError>`.
+// `TemplateError` has large variants (Vec<DependencyName>, PinnedIdentifier);
+// error paths are cold, so boxing the error to silence `result_large_err` would
+// only add an allocation on the hot Ok-return path. Hoisted from per-fn allows
+// to keep the rationale in one place — see Q15 in the entry-points review plan.
+#[allow(clippy::result_large_err)]
 impl<'a> TemplateResolver<'a> {
     pub fn new(install_path: &'a Path, dep_contexts: &'a HashMap<DependencyName, DependencyContext>) -> Self {
         Self {
@@ -49,8 +54,6 @@ impl<'a> TemplateResolver<'a> {
     ///
     /// Returns [`TemplateError`] if a `${deps.*}` token references an unknown dependency name,
     /// an unsupported field, or a dependency that is not installed on disk.
-    // `TemplateError` has large variants (Vec<String>, PinnedIdentifier); error paths are cold.
-    #[allow(clippy::result_large_err)]
     pub fn resolve(&self, template: &str) -> Result<String, TemplateError> {
         self.resolve_inner(template, /* check_exists = */ true)
     }
@@ -69,25 +72,25 @@ impl<'a> TemplateResolver<'a> {
     /// Returns [`TemplateError::UnknownDependencyRef`] / `UnknownDependencyField` when
     /// a `${deps.*}` token references something not declared. Never returns
     /// [`TemplateError::DependencyNotInstalled`].
-    #[allow(clippy::result_large_err)]
     pub fn resolve_for_validate(&self, template: &str) -> Result<String, TemplateError> {
         self.resolve_inner(template, /* check_exists = */ false)
     }
 
-    #[allow(clippy::result_large_err)]
     fn resolve_inner(&self, template: &str, check_exists: bool) -> Result<String, TemplateError> {
-        // Step 1: substitute ${installPath}
-        let value = template.replace("${installPath}", &self.install_path.to_string_lossy());
+        // Step 1: substitute ${installPath}. Avoid the `String::replace` allocation
+        // when the token isn't present — most templates contain only one of the two
+        // forms (`${installPath}` xor `${deps.*}`) so the fast-path covers many calls.
+        let value = if template.contains("${installPath}") {
+            template.replace("${installPath}", &self.install_path.to_string_lossy())
+        } else {
+            // No substitution needed; defer the borrow→owned promotion until we know
+            // step 2 won't short-circuit either.
+            template.to_string()
+        };
 
-        // Step 2: substitute ${deps.NAME.FIELD} tokens.
-        // The NAME segment uses the shared slug body (anchors stripped from SLUG_PATTERN_STR)
-        // so the accepted character class stays in sync with DependencyName validation.
-        static DEP_TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-            let slug_body = slug::SLUG_PATTERN_STR.trim_start_matches('^').trim_end_matches('$');
-            let pattern = format!(r"\$\{{deps\.({slug_body})\.([a-zA-Z]+)\}}");
-            Regex::new(&pattern).expect("valid dep-token regex")
-        });
-
+        // Step 2: substitute ${deps.NAME.FIELD} tokens. Regex shared with the
+        // validator sites in `validation.rs` via `slug::DEP_TOKEN_PATTERN` so the
+        // accepted character class stays in sync with DependencyName validation.
         if !value.contains("${deps.") {
             return Ok(value);
         }
@@ -95,8 +98,8 @@ impl<'a> TemplateResolver<'a> {
         let mut result = String::with_capacity(value.len());
         let mut last = 0usize;
 
-        for cap in DEP_TOKEN.captures_iter(&value) {
-            // Invariant: DEP_TOKEN defines exactly 2 capture groups; a successful
+        for cap in DEP_TOKEN_PATTERN.captures_iter(&value) {
+            // Invariant: DEP_TOKEN_PATTERN defines exactly 2 capture groups; a successful
             // captures_iter match guarantees groups 0–2 are Some.
             let m = cap.get(0).expect("regex group 0 is the full match, always present");
             result.push_str(&value[last..m.start()]);
@@ -104,11 +107,11 @@ impl<'a> TemplateResolver<'a> {
 
             let dep_name = cap
                 .get(1)
-                .expect("regex group 1 guaranteed by DEP_TOKEN pattern")
+                .expect("regex group 1 guaranteed by DEP_TOKEN_PATTERN")
                 .as_str();
             let field = cap
                 .get(2)
-                .expect("regex group 2 guaranteed by DEP_TOKEN pattern")
+                .expect("regex group 2 guaranteed by DEP_TOKEN_PATTERN")
                 .as_str();
 
             // The regex only matches the slug pattern [a-z0-9][a-z0-9_-]* so every
@@ -132,6 +135,12 @@ impl<'a> TemplateResolver<'a> {
                     supported_fields: vec!["installPath".to_string()],
                 })?;
 
+            // Sync `.exists()` is intentional: this method is the synchronous
+            // template-resolution API consumed by `env::Accumulator` and the
+            // entrypoint resolver (both call sites are themselves sync). The
+            // probe is a single `stat(2)` against a path the caller has just
+            // opened or is about to open, so its latency is bounded by the
+            // local filesystem cache — not a candidate for `block_in_place`.
             if check_exists && !ctx.install_path().exists() {
                 return Err(TemplateError::DependencyNotInstalled {
                     ref_name: dep_name_typed,
@@ -307,6 +316,52 @@ mod tests {
         assert_eq!(
             resolver.resolve("${installPath}:${deps.dep1.installPath}/bin").unwrap(),
             format!("{self_path}:{dep_path}/bin"),
+        );
+    }
+
+    /// S2-prime: positional fidelity for mixed `${installPath}` and
+    /// `${deps.NAME.installPath}` resolution. Pins that each substitution
+    /// lands at the exact position where the corresponding token appeared
+    /// in the template — not anywhere else, no token swap, no duplicated
+    /// substitution. The template uses a `:` separator (PATH-style) and a
+    /// `/share` suffix on the dep arm so a transposition would be visible
+    /// in the assertion.
+    #[test]
+    fn mixed_install_path_and_deps_install_path_resolve_correctly() {
+        let self_dir = TempDir::new().unwrap();
+        let dep_dir = TempDir::new().unwrap();
+        let mut contexts = HashMap::new();
+        contexts.insert(dep_name("a"), ctx(dep_dir.path(), "a"));
+        let resolver = TemplateResolver::new(self_dir.path(), &contexts);
+
+        let self_path = self_dir.path().to_string_lossy();
+        let dep_path = dep_dir.path().to_string_lossy();
+
+        // PATH-shaped: <install>/bin:<dep_a>/share
+        let template = "${installPath}/bin:${deps.a.installPath}/share";
+        let resolved = resolver.resolve(template).unwrap();
+        let expected = format!("{self_path}/bin:{dep_path}/share");
+        assert_eq!(
+            resolved, expected,
+            "mixed ${{installPath}} + ${{deps.a.installPath}} must land at correct positions; \
+             template={template:?} resolved={resolved:?} expected={expected:?}"
+        );
+
+        // Sanity: each substituted prefix appears exactly once in the output.
+        assert_eq!(
+            resolved.matches(self_path.as_ref()).count(),
+            1,
+            "${{installPath}} must be substituted exactly once: {resolved:?}"
+        );
+        assert_eq!(
+            resolved.matches(dep_path.as_ref()).count(),
+            1,
+            "${{deps.a.installPath}} must be substituted exactly once: {resolved:?}"
+        );
+        // No leftover token markers.
+        assert!(
+            !resolved.contains("${"),
+            "no template token markers may remain in resolved output: {resolved:?}"
         );
     }
 

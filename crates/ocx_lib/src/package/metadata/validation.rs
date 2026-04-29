@@ -19,14 +19,18 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::LauncherSafeString;
+// Defense-in-depth: surface launcher-unsafe characters at publish time. The
+// type lives in `package_manager::launcher_safe` (consumer layer) but the
+// publish-time validator calls in via the crate-visible re-export so a single
+// definition guards both writes.
+use crate::package_manager::launcher_safe::LauncherSafeString;
 use crate::utility::fs::path::lexical_normalize;
 
 use super::Metadata;
 use super::dependency::{Dependencies, Dependency, DependencyName};
 use super::entrypoint::{EntrypointName, Entrypoints};
 use super::env::accumulator::DependencyContext;
-use super::slug;
+use super::slug::DEP_TOKEN_PATTERN;
 use super::template::{TemplateError, TemplateResolver};
 
 // ── Sentinel constants ────────────────────────────────────────────────────────
@@ -130,15 +134,6 @@ fn build_name_and_collision_maps<'a>(
 pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), crate::Error> {
     use super::super::error::Error;
 
-    // Build the dep-token regex by embedding the slug body (without ^..$ anchors)
-    // from the shared SLUG_PATTERN_STR constant so the pattern stays in sync.
-    static DEP_TOKEN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        // SLUG_PATTERN_STR is "^[a-z0-9][a-z0-9_-]*$"; strip anchors for embedding.
-        let slug_body = slug::SLUG_PATTERN_STR.trim_start_matches('^').trim_end_matches('$');
-        let pattern = format!(r"\$\{{deps\.({slug_body})\.([a-zA-Z]+)\}}");
-        regex::Regex::new(&pattern).expect("valid dep-token regex")
-    });
-
     let deps = metadata.dependencies();
     let (name_map, collision_map) = build_name_and_collision_maps(deps);
 
@@ -149,19 +144,22 @@ pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), crate::Erro
                 None => continue,
             };
 
-            for cap in DEP_TOKEN.captures_iter(value) {
-                // Invariant: DEP_TOKEN defines exactly 2 capture groups; a successful
+            // Dep-token regex shared with `template::resolve_inner` and
+            // `validate_entrypoints` via `slug::DEP_TOKEN_PATTERN` so the three
+            // sites cannot drift out of sync.
+            for cap in DEP_TOKEN_PATTERN.captures_iter(value) {
+                // Invariant: DEP_TOKEN_PATTERN defines exactly 2 capture groups; a successful
                 // captures_iter match guarantees groups 1 and 2 are Some.
                 let dep_name = cap
                     .get(1)
-                    .expect("regex group 1 guaranteed by DEP_TOKEN pattern")
+                    .expect("regex group 1 guaranteed by DEP_TOKEN_PATTERN")
                     .as_str();
                 let field = cap
                     .get(2)
-                    .expect("regex group 2 guaranteed by DEP_TOKEN pattern")
+                    .expect("regex group 2 guaranteed by DEP_TOKEN_PATTERN")
                     .as_str();
 
-                // The DEP_TOKEN regex only matches the slug pattern so dep_name is always
+                // The DEP_TOKEN_PATTERN regex only matches the slug pattern so dep_name is always
                 // a structurally valid DependencyName by construction.
                 let dep_name_typed =
                     DependencyName::try_from(dep_name).expect("regex guarantees dep_name matches slug pattern");
@@ -214,11 +212,11 @@ pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), crate::Erro
             }
 
             // W1: reject any leftover `${...}` that is not `${installPath}` and was not
-            // consumed by the DEP_TOKEN loop above (e.g. `${unknown}`, `${installpath}`,
-            // `${deps.foo.install_path}`, `${deps.Python.installPath}`). Strip the two
-            // recognized token forms before checking so UNKNOWN_TOKEN_RE only fires on
-            // truly unrecognized placeholders.
-            let stripped = DEP_TOKEN.replace_all(value, "");
+            // consumed by the DEP_TOKEN_PATTERN loop above (e.g. `${unknown}`,
+            // `${installpath}`, `${deps.foo.install_path}`, `${deps.Python.installPath}`).
+            // Strip the two recognized token forms before checking so UNKNOWN_TOKEN_RE
+            // only fires on truly unrecognized placeholders.
+            let stripped = DEP_TOKEN_PATTERN.replace_all(value, "");
             let stripped = stripped.replace("${installPath}", "");
             if let Some(m) = UNKNOWN_TOKEN_RE.find(&stripped) {
                 return Err(Error::EnvVarInterpolation {
@@ -362,16 +360,6 @@ pub(super) fn validate_entrypoints(
 ) -> Result<(), crate::Error> {
     use super::super::error::Error;
 
-    // Dep-token scanner — same slug body as validate_env_tokens so the accepted
-    // character class stays in sync with DependencyName validation.
-    static DEP_TOKEN_EP: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        let slug_body = super::slug::SLUG_PATTERN_STR
-            .trim_start_matches('^')
-            .trim_end_matches('$');
-        let pattern = format!(r"\$\{{deps\.({slug_body})\.([a-zA-Z]+)\}}");
-        regex::Regex::new(&pattern).expect("valid dep-token regex")
-    });
-
     if entrypoints.is_empty() {
         return Ok(());
     }
@@ -397,10 +385,12 @@ pub(super) fn validate_entrypoints(
         // Collision check: scan the raw target string for ${deps.NAME.*} tokens and
         // reject immediately if NAME appears in the collision map. The resolver would
         // silently pick one dep arbitrarily; rejecting early surfaces the ambiguity.
-        for cap in DEP_TOKEN_EP.captures_iter(&entry.target) {
+        // Regex shared with `template::resolve_inner` and `validate_env_tokens`
+        // via `slug::DEP_TOKEN_PATTERN`.
+        for cap in DEP_TOKEN_PATTERN.captures_iter(&entry.target) {
             let dep_name = cap
                 .get(1)
-                .expect("regex group 1 guaranteed by DEP_TOKEN_EP pattern")
+                .expect("regex group 1 guaranteed by DEP_TOKEN_PATTERN")
                 .as_str();
             if collision_map.contains_key(dep_name) {
                 let dep_name_typed =
@@ -450,7 +440,11 @@ mod tests {
     use crate::package::metadata::Metadata;
 
     fn hex(n: u8) -> String {
-        format!("{:x}", n).repeat(64).chars().take(64).collect()
+        // Build a 64-char fixture digest by repeating the single hex digit of `n`
+        // (e.g. n=1 → "111…1", 64 chars). Callers pass small distinct n values
+        // (1, 2, …) so each test gets a distinct, recognizable digest fixture.
+        let digit = format!("{n:x}");
+        digit.chars().cycle().take(64).collect()
     }
 
     fn dep_json(repo: &str, name: Option<&str>) -> String {
@@ -816,6 +810,49 @@ mod tests {
             result.is_err(),
             "prefix substring without path separator must fail: {result:?}"
         );
+    }
+
+    /// S2 + SOTA-7: Windows-shaped traversal must NOT escape the install
+    /// root. The `target` template language is forward-slash-canonical by
+    /// design (see ADR §"`target` template path-separator assumption"), and
+    /// `lexical_normalize` defends against Windows-style backslashes by
+    /// converting them to forward slashes BEFORE component-walking. This
+    /// means `${installPath}\..\..\evil` collapses to `/evil` and fails the
+    /// prefix-containment check, while `${installPath}\evil` collapses to
+    /// `<sentinel>/evil` (a valid subpath).
+    ///
+    /// This test pins the property: every Windows-shaped traversal that
+    /// would cross the install-root boundary on a real Windows host MUST be
+    /// rejected here, even when the publish host is Linux. The legitimate
+    /// `${installPath}\evil` form is documented as accepted because lexical
+    /// normalization treats it as `<sentinel>/evil` — equivalent to a
+    /// forward-slash subpath.
+    #[test]
+    fn check_target_contained_rejects_windows_shaped_traversal() {
+        let ep_name = EntrypointName::try_from("cmd").unwrap();
+        let prefixes = vec![VALIDATE_INSTALL_PATH_SENTINEL.to_string()];
+        // Each of these escapes the install-root after normalization and
+        // MUST be rejected.
+        let escaping_cases = [
+            // `${installPath}\..\..\evil` — sentinel + Windows-style traversal.
+            format!("{VALIDATE_INSTALL_PATH_SENTINEL}\\..\\..\\evil"),
+            // Pure `..\evil` — outside the prefix entirely.
+            "..\\evil".to_string(),
+            // Backslash-prefixed `\..\evil` — also outside the sentinel set.
+            "\\..\\evil".to_string(),
+            // Mixed separators: `${installPath}\../evil` collapses to /evil.
+            format!("{VALIDATE_INSTALL_PATH_SENTINEL}\\../evil"),
+            // Mixed: `${installPath}/..\evil` collapses to /evil.
+            format!("{VALIDATE_INSTALL_PATH_SENTINEL}/..\\evil"),
+        ];
+        for evil in &escaping_cases {
+            let result = check_target_contained(evil, &prefixes, &ep_name, evil);
+            assert!(
+                result.is_err(),
+                "Windows-shaped traversal target must be rejected (escapes after normalize): \
+                 {evil:?} got {result:?}",
+            );
+        }
     }
 
     // ── check_no_unknown_tokens — per-concern unit tests ──────────────────────

@@ -619,6 +619,10 @@ Baked absolute paths work on network-mounted `$OCX_HOME` locations (SMB shares, 
 
 **Rejection is loud, unambiguous, and actionable:** error message names both packages and suggests `ocx deselect <other-package>` or asking the publisher to rename. The publisher-side discipline question (how do two publishers coordinate?) is a product question, not a technical one.
 
+**Transitive dep isolation (SOTA-6):** Transitive dep entrypoints are NOT exposed via the parent package's PATH. Only direct dependencies reachable from the consumer's explicit root are visible. This matches the dep-name interpolation scoping in `adr_deps_name_interpolation.md` — `${deps.NAME.installPath}` is only reachable for direct deps declared in the consumer's `metadata.json`; sealed/private transitive deps do not propagate their launchers to grandparent consumers.
+
+**`target` template path-separator assumption (SOTA-7):** The `target` field in `metadata.json` uses forward-slash-only for path components relative to `${installPath}`. Backslash characters in the template string are treated as literals, not path separators. This assumption holds because packages are published from Linux/macOS hosts (where forward slash is the path separator); the template string travels through the OCI registry unchanged and is interpreted at install time on the consuming host (where OCX translates `${installPath}` to the platform-appropriate absolute path). A publisher who hand-authors `target` with backslash separators on a Windows host would produce a template that does not validate correctly under `check_target_contained` on a Linux publish host.
+
 ## GC Impact
 
 **Non-Issue.** Reconfirmed from Discover §6:
@@ -943,6 +947,34 @@ sense that any subsequent change must again be propagated to every installed
 launcher. The original ADR's "load-bearing across releases" caveat applies
 to the new shape.
 
+### Negative consequences — Update 2026-04-26 (Arch-A2) {#update-2026-04-26-negative}
+
+**Synthetic `file-url-mode/<digest>` OCI repository for `file://` exec paths.**
+
+When `ocx exec 'file://<pkg-root>'` is invoked, the package is not identified by a real OCI `PinnedIdentifier` (no registry, no tag). To flow `file://` exec paths through the existing dedup map and `EntrypointNameCollision` error variants — both of which are keyed on `PinnedIdentifier` — the implementation at `crates/ocx_lib/src/package_manager.rs:300-345` synthesises a fake OCI repository component of the form `format!("file-url-mode/{}", &digest.hex()[..16])`. The first 16 hex digits of the content digest make each package root unique. This identifier is used only for dedup tracking inside `resolve_env`; it is never written to disk, never sent to a registry, and is not visible in any user-facing output.
+
+The consequence is that `file://` packages are treated as a special case within the `PinnedIdentifier` type, creating a latent semantic mismatch: `PinnedIdentifier` values with `file-url-mode/…` repositories are not real OCI identifiers. Any future code that inspects the repository component must account for this synthetic prefix or filter `file://` paths upstream.
+
+Flagged refactor target: introduce `enum PackageIdentity { Oci(PinnedIdentifier), PackageRoot(PathBuf) }` to make the distinction type-safe and eliminate the synthetic string. Per max-tier review finding Arch-A2.
+
+## Stable Surfaces {#stable-surfaces}
+
+Three orthogonal contracts are baked into every generated launcher. Changes to any of these break launcher-format compatibility with launchers already installed on user machines.
+
+### (a) `file://` URI scheme passed to `ocx exec` {#stable-file-uri}
+
+Launchers invoke `ocx exec 'file://<absolute-package-root>' -- ...`. The `file://` URI scheme is the scheme-dispatch mechanism that routes `ocx exec` into path-mode (no index lookup, reads `metadata.json` + `resolve.json` from disk). Removing or renaming this scheme requires regenerating every installed launcher.
+
+### (b) `-- "$0" "$@"` / `-- "%~n0" %*` argv shape {#stable-argv-shape}
+
+Both the POSIX `.sh` launcher and the Windows `.cmd` launcher pass `"$0"` / `"%~n0"` (the script's own name, which resolves to the entry-point name) as the first argument after `--`. `ocx exec` uses this to determine which binary to invoke inside the package's content tree. The `-- <name> <user-args>` separator + argv shape is preserved by both launcher formats. Changing the separator or the position of `<name>` requires regenerating every installed launcher.
+
+### (c) `ocx exec` accepting `file://<pkg-root>` as a positional argument {#stable-exec-positional}
+
+The positional `<packages...>` argument of `ocx exec` must continue to accept `file://`-prefixed values as a stable contract. If `ocx exec` ever stops parsing `file://` as a valid positional form — or if the argument is refactored into a flag — every installed launcher breaks without a migration. This constraint flows from the OCX version coupling reconfirmed in Tension 4: launchers call the host `ocx` binary; there is no version lock.
+
+Per max-tier review finding Arch-A6.
+
 ## Changelog
 
 | Date | Author | Change |
@@ -950,3 +982,4 @@ to the new shape.
 | 2026-04-21 | worker-architect (opus, Phase 4 of /swarm-plan high #61) | Initial draft |
 | 2026-04-21 | worker-architect (opus, Phase 6 Round 2 of /swarm-plan high #61) | Round 2 corrections: (1) Tension 1 premise corrected (no identifier path-mode fallback exists) and re-weighed, flipping from Option A (positional) to **Option B (`--install-dir=<path>` flag)**; §8, launcher templates, UX scenarios, and data-flow diagram updated. (2) Reversibility upgraded from Medium to **One-Way Door High** with honest rationale; Codex cross-model review recommendation flagged for user decision. (3) Added Additional Considerations section covering #23 relative-symlinks interaction, bare-`ocx` PATH lookup trade-off, select-time (not install-time) collision policy, and SMB/UNC path limitation. (4) `.ps1` framing corrected — deferral is architectural (PowerShell `--` / `--%` semantics by design), not conditional on a fixable upstream bug. |
 | 2026-04-26 | Reviewer (pre-release reshape on `feat/package-entry-points`) | Tension 1 + Tension 4: replaced `--install-dir` flag with `file://` URI scheme; `ocx exec` accepts bare/`oci://`/`file://` refs, launchers bake `file://<package-root>`. Tension 2: removed `entrypoints-current` sibling symlink; `current` and `candidates/{tag}` now target the package root, consumers traverse `<current>/content`, `<current>/entrypoints`, `<current>/metadata.json`. Both supersedes documented inline at the affected sections; new "Update 2026-04-26" decision block at the bottom summarizes the new shape. |
+| 2026-04-29 | worker-doc-writer (Sonnet 4.6) | Added §Negative consequences — Update 2026-04-26 documenting synthetic `file-url-mode/<digest>` fake OCI repo for `file://` exec paths + flagged `PackageIdentity` refactor (Arch-A2). Added §Stable Surfaces enumerating three load-bearing launcher contracts: `file://` URI scheme, `-- "$0"/"$@"` argv shape, `ocx exec` positional `file://` acceptance (Arch-A6). Added transitive dep isolation clarification + `target` forward-slash-only note in §Collision Policy (SOTA-6, SOTA-7). |

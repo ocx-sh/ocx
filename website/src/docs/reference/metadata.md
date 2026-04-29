@@ -170,7 +170,7 @@ on every machine regardless of the current registry state.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `identifier` | string | Yes | Fully qualified pinned OCX identifier including the registry and an inline OCI digest (`@sha256:…`). The tag is advisory; only the digest is authoritative. The digest may reference an Image Index (platform resolution at install time) or a single manifest. e.g. `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`, `ghcr.io/myorg/tool@sha256:...`. |
-| `name` | string | No | Short name used to reference this dependency in `${deps.NAME.installPath}` templates. When set, this name is used instead of the repository basename. Useful when two dependencies share the same basename (e.g. `myorg/cmake` and `upstream/cmake`) or when the basename is long. |
+| `name` | string | No | Short name used to reference this dependency in `${deps.NAME.installPath}` templates. When set, this name is used instead of the repository basename. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Useful when two dependencies share the same basename (e.g. `myorg/cmake` and `upstream/cmake`) or when the basename is long. |
 | `visibility` | string | No | Controls how the dependency's environment variables propagate. Default: `sealed`. See [Visibility](#dependencies-visibility). |
 
 ```json
@@ -281,8 +281,12 @@ preserving clean-environment execution semantics on every invocation.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | Yes | The launcher name. Must match `^[a-z0-9][a-z0-9_-]*$`. Used as the script filename and the command users invoke. |
+| `name` | string | Yes | The launcher name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Used as the script filename and the command users invoke. |
 | `target` | string | Yes | Template string for the binary to execute. Supports the same placeholders as [`env`](#env) values. |
+
+::: tip `target` must point to an executable file
+OCX resolves `target` to a filesystem path. The Python [entry-points][python-entry-points] convention of `module:callable` strings is incompatible — `target` must be a path to an executable binary or script, not a Python import expression.
+:::
 
 ### Template Substitution {#entry-points-template}
 
@@ -373,7 +377,7 @@ Initial release. Supports `path` and `constant` variable types, `strip_component
 for archive extraction, `${installPath}` template substitution, and optional
 `dependencies` for declaring digest-pinned package dependencies.
 
-Fields added during the entry-points feature (current branch):
+Fields added in the unreleased version (pending next release):
 
 - `Bundle.entrypoints` — optional array of named launcher declarations; absent field is equivalent to an empty array (backward-compatible with old packages).
 - `Dependency.name` — optional explicit name override for a dependency; when absent, the name defaults to the repository basename of the `identifier`. Used as `NAME` in `${deps.NAME.installPath}` template tokens.
@@ -388,6 +392,7 @@ Fields added during the entry-points feature (current branch):
 [nix-propagated]: https://ryantm.github.io/nixpkgs/stdenv/stdenv/
 [guix]: https://guix.gnu.org/
 [guix-propagated]: https://guix.gnu.org/manual/en/html_node/package-Reference.html
+[python-entry-points]: https://packaging.python.org/en/latest/specifications/entry-points/
 
 <!-- schema -->
 [schema-url]: /schemas/metadata/v1.json

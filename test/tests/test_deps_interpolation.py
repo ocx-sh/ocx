@@ -61,7 +61,14 @@ def _push_dep_and_app(
 def test_dep_install_path_resolves_to_content_dir(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """${deps.NAME.installPath} resolves to the dep's content directory after install."""
+    """${deps.NAME.installPath} resolves to the dep's content directory after install.
+
+    S4: pins the EXACT resolved path against the canonical content directory
+    surfaced by `ocx find <leaf>`. The two paths must agree byte-for-byte —
+    a regression that resolved the dep token to anything other than the
+    leaf's installed content path (e.g. the consumer's content path, a
+    layer dir, or a stale snapshot) is caught here.
+    """
     leaf_repo = f"{unique_repo}_leaf"
     leaf, app = _push_dep_and_app(
         ocx,
@@ -73,8 +80,8 @@ def test_dep_install_path_resolves_to_content_dir(
     ocx.plain("install", "--select", app.short)
 
     env_result = ocx.json("env", app.short)
-    dep_path_entry = next((e for e in env_result if e["key"] == "DEP_PATH"), None)
-    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result]}"
+    dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
+    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
 
     resolved = dep_path_entry["value"]
     # Token must be expanded — no literal ${deps. remaining
@@ -83,6 +90,24 @@ def test_dep_install_path_resolves_to_content_dir(
     assert Path(resolved).exists(), f"resolved path does not exist: {resolved!r}"
     # Must point into the packages/ CAS tree
     assert "packages" in resolved, f"expected CAS packages path, got: {resolved!r}"
+
+    # S4: pin EXACT path equality against `ocx find <leaf>` — the canonical
+    # content-path accessor. Resolving via ${deps.NAME.installPath} must
+    # produce the same string as the dep's own `find` output, otherwise the
+    # template resolver is consulting the wrong content tree.
+    leaf_paths = ocx.json("find", leaf.short)
+    expected_leaf_content = leaf_paths.get(leaf.short) if isinstance(leaf_paths, dict) else leaf_paths
+    assert expected_leaf_content, (
+        f"`ocx find {leaf.short}` must return the leaf's content path; got: {leaf_paths!r}"
+    )
+    assert resolved == expected_leaf_content, (
+        f"${{deps.{leaf_repo}.installPath}} must resolve to leaf's `ocx find` content path; "
+        f"got {resolved!r}, expected {expected_leaf_content!r}"
+    )
+    # Canonical CAS shape: <packages_root>/<registry>/<algo>/<2hex>/<30hex>/content
+    assert resolved.endswith("/content"), (
+        f"resolved path must end with `/content` (CAS package content directory): {resolved!r}"
+    )
 
 
 def test_transitive_dep_install_path_propagates_via_public_chain(
@@ -125,8 +150,8 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
     ocx.plain("install", "--select", a.short)
 
     env_result = ocx.json("env", a.short)
-    c_path_entry = next((e for e in env_result if e["key"] == "C_PATH"), None)
-    keys = [e["key"] for e in env_result]
+    c_path_entry = next((e for e in env_result["entries"] if e["key"] == "C_PATH"), None)
+    keys = [e["key"] for e in env_result["entries"]]
     assert c_path_entry is not None, (
         f"C_PATH (declared on B) must propagate to A through Public chain; got keys={keys}"
     )
@@ -159,8 +184,8 @@ def test_dep_install_path_with_explicit_name(
     ocx.plain("install", "--select", app.short)
 
     env_result = ocx.json("env", app.short)
-    dep_path_entry = next((e for e in env_result if e["key"] == "DEP_PATH"), None)
-    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result]}"
+    dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
+    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
 
     resolved = dep_path_entry["value"]
     assert "${deps." not in resolved, f"explicit-name token not expanded: {resolved!r}"
@@ -182,8 +207,8 @@ def test_dep_install_path_mixed_with_install_path(
     ocx.plain("install", "--select", app.short)
 
     env_result = ocx.json("env", app.short)
-    dep_path_entry = next((e for e in env_result if e["key"] == "DEP_PATH"), None)
-    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result]}"
+    dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
+    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
 
     resolved = dep_path_entry["value"]
     assert "${deps." not in resolved, f"dep token not expanded: {resolved!r}"

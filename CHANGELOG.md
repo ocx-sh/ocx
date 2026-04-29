@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** `--remote` / `OCX_REMOTE` semantics narrowed — tag and catalog lookups now bypass the local tag store and query the registry directly, but digest-addressed blob reads still use the local cache with write-through to `$OCX_HOME/blobs/`. Previously, `--remote` routed all operations to the registry. Only `$OCX_HOME/tags/` is no longer updated under `--remote`. *(oci)*
 - **Breaking:** `ocx index update` no longer pre-fetches manifest or layer blobs. It writes only tag→digest pointers to `$OCX_HOME/tags/`. Run `ocx install <pkg>` online first to populate the blob cache before using `--offline`. *(index)*
+- **Breaking:** `ocx env --format json` and `ocx ci export --format json` now emit `{"entries": [{"key": ..., "value": ..., "type": ...}, ...]}` (canonical envelope) instead of a bare top-level array. Update consumers that deserialize JSON output to read the `entries` field. The shape is shared across env-related JSON outputs for forward compatibility. *(cli)*
 - Error messages normalized across 11 modules per Rust API Guidelines `C-GOOD-ERR` (lowercase, no trailing punctuation). *(error)*
 
 ### Breaking

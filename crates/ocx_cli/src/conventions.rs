@@ -10,10 +10,10 @@ use crate::options;
 pub fn infer_metadata_file(content: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let content_parent = content
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid content path."))?;
+        .ok_or_else(|| anyhow::anyhow!("content path has no parent directory: {}", content.display()))?;
     let mut content_name = content
         .file_stem()
-        .ok_or_else(|| anyhow::anyhow!("Invalid content path."))?
+        .ok_or_else(|| anyhow::anyhow!("content path has no file stem: {}", content.display()))?
         .to_string_lossy()
         .to_string();
     let known_archive_extensions = [".tar", ".tar.gz", ".tgz", ".zip"];
@@ -65,8 +65,10 @@ pub fn warn_if_pathext_missing_launcher() {
         let current_pathext = std::env::var("PATHEXT").unwrap_or_default();
         if !ocx_lib::env::pathext_includes_launcher(&current_pathext) {
             tracing::warn!(
-                "entrypoint launchers require .cmd in PATHEXT; current PATHEXT lacks it. \
-                 add \".CMD\" to PATHEXT for entrypoints to launch correctly outside ocx exec."
+                "entrypoint launchers require {ext} in PATHEXT (case-insensitive); \
+                 current PATHEXT lacks it. add \"{ext}\" to PATHEXT for entrypoints \
+                 to launch correctly outside ocx exec.",
+                ext = ocx_lib::env::LAUNCHER_EXT,
             );
         }
     }

@@ -200,7 +200,7 @@ Both Stage 1 (install — invoked from `pull.rs` while building `ResolvedPackage
 /// entrypoints in topological order. The first owner wins; subsequent
 /// owners surface as `EntrypointNameCollision`.
 ///
-/// Stage 1 caller (pull.rs::pull_one): runs against the just-resolved
+/// Stage 1 caller (pull.rs::setup_owned): runs against the just-resolved
 /// closure to catch intra-closure dupes at install time, before
 /// `resolve.json` is persisted. A failure here aborts the install with
 /// `PackageErrorKind::EntrypointNameCollision`.
@@ -232,7 +232,7 @@ The following code is removed in the F9 commit:
 `wire_selection` collapses to: acquire `.select.lock`, optionally write candidate symlink, write `current` symlink, return outcome. Same atomicity guarantees, smaller surface.
 
 The `PackageErrorKind::EntrypointNameCollision` variant **stays** — same error type, raised from two different sites:
-- Stage 1: `pull.rs::pull_one`, when `collect_entrypoints` over the closure being built returns `Err`.
+- Stage 1: `pull.rs::setup_owned`, when `collect_entrypoints` over the closure being built returns `Err`.
 - Stage 2: surfaced from `CollisionReport` by the consuming command (e.g. `ocx exec` aborts; `ocx env` may warn).
 
 ### Naming discipline
@@ -341,7 +341,7 @@ Four commits, in this order, on `feat/package-entry-points`. Each commit ships i
 **Scope:**
 - Delete `EntrypointsIndex`, `IndexOwner`, `acquire_index_lock`, `clear_index_owner`, `restore_index_snapshot`, `SymlinkStore::entrypoints_index*`, and the index-related logic inside `wire_selection`.
 - Add `collect_entrypoints(visible: &[VisiblePackage]) -> Result<BTreeMap<EntrypointName, PinnedIdentifier>, EntrypointNameCollision>` in `visible.rs`.
-- Stage 1 wire-up: in `tasks/pull.rs::pull_one`, after the closure is resolved and before `resolve.json` is written, build the in-memory `Vec<VisiblePackage>` for the just-built closure and call `collect_entrypoints`. On `Err`, abort the pull with `PackageErrorKind::EntrypointNameCollision`. Order matters: this check fires after dependency resolution but before any on-disk artifact for this package becomes reachable.
+- Stage 1 wire-up: in `tasks/pull.rs::setup_owned`, after the closure is resolved and before `resolve.json` is written, build the in-memory `Vec<VisiblePackage>` for the just-built closure and call `collect_entrypoints`. On `Err`, abort the pull with `PackageErrorKind::EntrypointNameCollision`. Order matters: this check fires after dependency resolution but before any on-disk artifact for this package becomes reachable.
 - Stage 2 wire-up: have `apply_visible_packages` populate `CollisionReport.collisions` via `collect_entrypoints` over the same input slice.
 - Update `command/exec.rs` to fail-fast on `CollisionReport.collisions.is_empty() == false`; update `command/env.rs` to surface collisions in its plain/JSON output (warn or include, per command discretion — reviewer to confirm specific behavior in commit body).
 - Delete obsolete `tasks/common.rs::tests` keyed on `EntrypointsIndex`.
@@ -419,7 +419,7 @@ No CLI flags change. No new commands. No metadata schema change.
 |---|---|
 | `tasks/resolve.rs::resolve_env` | Delegates to `import_visible_packages` + `apply_visible_packages` |
 | `tasks/profile_resolve.rs::resolve_profile_env` | Reads `apply_visible_packages` output instead of inlining env composition |
-| `tasks/pull.rs::pull_one` | Calls `collect_entrypoints` over the just-resolved closure before persisting `resolve.json` |
+| `tasks/pull.rs::setup_owned` | Calls `collect_entrypoints` over the just-resolved closure before persisting `resolve.json` |
 | `tasks/common.rs::wire_selection` | Collapses to lock + symlink-write only (no index touch) |
 | `command/exec.rs`, `command/env.rs` | Consume `CollisionReport`; F8c: PATHEXT auto-inject |
 | `command/shell/env.rs`, `command/ci/export.rs`, `command/shell/profile/load.rs` | F8c: PATHEXT warn-once |
@@ -514,8 +514,33 @@ warning: PATHEXT does not include '.cmd' — generated launchers may not resolve
 - `crates/ocx_lib/src/package_manager/tasks/pull.rs` — Stage 1 entry point for `collect_entrypoints`
 - `crates/ocx_lib/src/package/resolved_package.rs` — `ResolvedPackage::with_dependencies` (existing visibility algebra Phase A reuses)
 
+## Update — 2026-04-29 {#update-2026-04-29}
+
+Max-tier review of `feat/package-entry-points` surfaced four implementation realities that deviate from or were absent from the original design sections. Documented here for traceability. Source: plan findings Spec-A1, Spec-A2, Spec-A4, Spec-A5, Arch-A3, Arch-A7.
+
+### Corrected: synthetic-PATH emission order reversed from §Commit 3 spec (Spec-A2) {#update-path-order}
+
+§Commit 3 states the emission order is `[ocx-managed, project, system]`. The implementation at `crates/ocx_lib/src/package_manager/visible.rs:267-307` emits `entrypoints/` PATH entries **before** each package's declared env vars, producing effective order `[entrypoints/, declared-PATH-entries]` which resolves as `[project/bin, entrypoints/]` in PATH — i.e., `[project, system, ocx-managed]` from the consumer's perspective.
+
+Rationale (comment at `visible.rs:272-275`): entrypoints PATH entry is prepended first, then declared `PATH ⊳ ${installPath}/bin` prepends on top. This ensures `bin/` lands earlier in PATH than `entrypoints/`. Without this ordering, `ocx exec file://<pkg>` would find the launcher script in `entrypoints/` before the actual binary in `bin/`, causing infinite recursion. The inversion is intentional and correct.
+
+### Corrected: Stage 1 caller name (Spec-A4) {#update-stage1-caller}
+
+§Commit 2 and the Component Contracts table previously referenced `pull.rs::pull_one`. The actual function is `pull.rs::setup_owned`. References updated in this document to match the implementation.
+
+### Deviation: `apply_visible_packages` returns `Result` not `(Vec, CollisionReport)` (Spec-A1, Spec-A5, Arch-A3) {#update-apply-signature}
+
+§Phase B specified `apply_visible_packages(visible) -> (Vec<AppliedEntry>, CollisionReport)` — a non-aborting pair. The implementation at `crates/ocx_lib/src/package_manager/visible.rs:322-328` returns `Result<(Vec<Entry>, BTreeMap<EntrypointName, PinnedIdentifier>), PackageErrorKind>` — fail-fast on first `EntrypointNameCollision`.
+
+The divergence was chosen because there is currently one call site (`env.rs:51` routes through `resolve_env` which calls `apply_visible_packages`). Fail-fast at the single call site keeps caller logic simple: the env command aborts immediately on a name collision rather than silently emitting partial results that the user would have to interpret. The non-aborting `CollisionReport` design remains the correct target if a future caller (e.g., `ocx env --json` choosing to surface collisions in structured output) needs warn-not-fail semantics. That split would use `emit_env` + `collect_entrypoints` directly. Flagged as follow-up: distinguish `ocx exec` (fail-fast) from `ocx env --json` (include collision in output) at separate call sites.
+
+### Negative consequence addendum: `import_visible_packages` disk-read cost (Arch-A7) {#update-disk-cost}
+
+The §Negative consequences section notes "the walk is cheap (in-memory after the first metadata read)." This understates the actual cost. `import_visible_packages` at `crates/ocx_lib/src/package_manager/visible.rs:137` re-loads `metadata.json` + `resolve.json` and re-runs `ValidMetadata::try_from` for every visible transitive dep on **every** `ocx exec` / `ocx env` / `ocx shell env` call. For a closure with N visible packages this is N × (2 serial disk reads + validation). On closure-heavy workloads (e.g., 20+ transitive deps) this is a measurable N × serial-read bottleneck, not a single amortised read. Two mitigations for a follow-up: (a) parallelize the per-dep reads via `JoinSet`; (b) cache `(metadata, resolved)` keyed by content path in `PackageManager`. Per max-tier review finding Arch-A7.
+
 ## Changelog
 
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-04-26 | worker-architect (opus) | Initial ADR for two-phase visible-package pipeline; covers F8a/F8b/F8c/F9 from review-fix loop on `feat/package-entry-points` |
+| 2026-04-29 | worker-doc-writer (Sonnet 4.6) | Update — document four implementation realities: PATH emission order inversion + recursion-gate rationale (Spec-A2), Stage 1 caller rename pull_one → setup_owned (Spec-A4), apply_visible_packages fail-fast deviation from non-aborting spec (Spec-A1/A5/Arch-A3), import_visible_packages N×serial-disk-read cost undercount (Arch-A7) |

@@ -13,6 +13,21 @@ pub const SLUG_MAX_LEN: usize = 64;
 
 pub static SLUG_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(SLUG_PATTERN_STR).expect("valid slug regex"));
 
+/// Regex matching `${deps.NAME.FIELD}` template tokens.
+///
+/// Capture group 1 = NAME (slug body, anchors stripped from `SLUG_PATTERN_STR` so
+/// the accepted character class stays in sync with `DependencyName` validation).
+/// Capture group 2 = FIELD (`[a-zA-Z]+`).
+///
+/// Built once and reused by `template::TemplateResolver`,
+/// `validation::validate_env_tokens`, and `validation::validate_entrypoints` so
+/// the three sites cannot drift out of sync.
+pub static DEP_TOKEN_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    let slug_body = SLUG_PATTERN_STR.trim_start_matches('^').trim_end_matches('$');
+    let pattern = format!(r"\$\{{deps\.({slug_body})\.([a-zA-Z]+)\}}");
+    Regex::new(&pattern).expect("valid dep-token regex")
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;

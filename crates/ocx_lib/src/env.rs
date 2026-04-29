@@ -13,6 +13,21 @@ pub const PATH_SEPARATOR: &str = ";";
 #[cfg(not(target_os = "windows"))]
 pub const PATH_SEPARATOR: &str = ":";
 
+/// Canonical uppercase form of the OCX launcher extension as it appears in
+/// `PATHEXT`-style export contexts (`PATHEXT=.CMD;.EXE;...`).
+///
+/// PATHEXT matching itself is case-insensitive (see [`pathext_includes_launcher`]),
+/// so this constant is purely a stylistic source of truth for the form OCX
+/// emits when constructing PATHEXT exports, user-facing warnings, or synthetic
+/// env entries. The lowercase form used internally for case-insensitive
+/// matching is exposed via [`launcher_extension`].
+///
+/// Single source of truth: `ocx exec`, `ocx env`, and the
+/// `warn_if_pathext_missing_launcher` user message all reference this constant
+/// instead of inlining the literal `".CMD"`. Renaming the launcher extension
+/// is then a one-site edit.
+pub const LAUNCHER_EXT: &str = ".CMD";
+
 /// Returns the file extension that OCX-generated entry-point launchers carry on
 /// the current platform.
 ///
@@ -20,6 +35,10 @@ pub const PATH_SEPARATOR: &str = ":";
 ///   extension is `.cmd`.
 /// - On all other platforms launchers are plain executables with no extension;
 ///   the function returns `""`.
+///
+/// Returns the **lowercase** form for case-insensitive PATHEXT matching;
+/// see [`LAUNCHER_EXT`] for the uppercase form OCX exports back into
+/// PATHEXT-style strings.
 ///
 /// Callers that only care about Windows behaviour can short-circuit when the
 /// return value is empty:

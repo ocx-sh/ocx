@@ -37,7 +37,7 @@ Only promote user-facing commands to entry points. Internal helpers, wrapper scr
 
 ## Name Rules and Collisions {#collisions}
 
-Names are validated at metadata deserialization time. The regex is `^[a-z0-9][a-z0-9_-]*$` — lowercase slug, digits, `-` and `_` allowed, must start with an alphanumeric. Capital letters, dots, slashes, and leading separators are rejected with a descriptive error so invalid metadata never reaches the registry.
+Names are validated at metadata deserialization time. The regex is `^[a-z0-9][a-z0-9_-]*$` — lowercase slug, digits, `-` and `_` allowed, must start with an alphanumeric — and the name must be at most 64 characters. Capital letters, dots, slashes, leading separators, and names exceeding the limit are rejected with a descriptive error so invalid metadata never reaches the registry.
 
 Uniqueness is enforced at two layers:
 

@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinSet;
@@ -25,7 +26,15 @@ use super::super::PackageManager;
 /// Singleflight group capacity — maximum number of unique
 /// [`PinnedIdentifier`](oci::PinnedIdentifier)s (root packages + transitive
 /// dependencies) tracked across all packages in a single `pull_all` call.
-const MAX_NODES: usize = 1024;
+///
+/// 8192 is the soft worst-case bound for realistic large-closure workloads:
+/// mise-style toolchains with 50+ tools each carrying 30–50 transitive deps
+/// plausibly push peak in-flight key counts above the previous 1024 cap,
+/// which would surface as `singleflight::Error::CapacityExceeded` and abort
+/// the install. The cap is intentionally hard rather than backpressuring —
+/// hitting 8192 in-flight singleflight keys signals a pathological closure
+/// that warrants a publisher-side review, not a silent slow-down.
+const MAX_NODES: usize = 8192;
 
 /// How long a waiter blocks on the singleflight watch channel for a leader
 /// to complete. This is **not** the OCI download timeout — the OCI client
@@ -365,14 +374,16 @@ async fn setup_owned(
     {
         use crate::package::metadata::dependency::DependencyName;
         use crate::package::metadata::env::accumulator::DependencyContext;
-        use std::sync::Arc;
         let dep_contexts: std::collections::HashMap<DependencyName, DependencyContext> = metadata
             .dependencies()
             .iter()
             .zip(dependencies.iter())
             .map(|(decl, info)| {
                 let name = decl.name();
-                let ctx = DependencyContext::full(Arc::new(info.clone()));
+                // `info` is already an `Arc<InstallInfo>` from
+                // `setup_dependencies`; clone the Arc instead of re-allocating
+                // a fresh `Arc::new(info.clone())` (the previous shape).
+                let ctx = DependencyContext::full(Arc::clone(info));
                 (name, ctx)
             })
             .collect();
@@ -403,8 +414,6 @@ async fn setup_owned(
     // same visibility filter as Phase A of the env pipeline, so the collision
     // check covers the complete reachable set — not just direct deps.
     {
-        use std::sync::Arc;
-
         let root_info = InstallInfo {
             identifier: pinned.clone(),
             metadata: metadata.clone(),
@@ -475,13 +484,22 @@ async fn acquire_temp_dir(
 /// the singleflight group internally. Diamond dependencies are deduplicated
 /// automatically — the first task to claim a dependency does the work, and
 /// all others block on the watch channel.
+///
+/// Returns `Vec<Arc<InstallInfo>>` rather than `Vec<InstallInfo>` so the
+/// caller (`setup_owned`) can hand each dep straight to
+/// [`DependencyContext::full(Arc<InstallInfo>)`](crate::package::metadata::env::accumulator::DependencyContext::full)
+/// without re-allocating an `Arc` (and cloning the underlying `InstallInfo`)
+/// per direct dep. The Arc-sharing invariant introduced by the metadata
+/// pipeline (commit 40b001f) is meant to live end-to-end on this path; the
+/// previous `Vec<InstallInfo>` return type forced the consumer to
+/// `Arc::new(info.clone())` and undid the saving.
 async fn setup_dependencies(
     mgr: &PackageManager,
     metadata: &crate::package::metadata::Metadata,
     parent: &oci::PinnedIdentifier,
     platforms: Vec<oci::Platform>,
     groups: SetupGroups,
-) -> Result<Vec<InstallInfo>, PackageErrorKind> {
+) -> Result<Vec<Arc<InstallInfo>>, PackageErrorKind> {
     let deps = metadata.dependencies();
     if deps.is_empty() {
         return Ok(Vec::new());
@@ -502,13 +520,20 @@ async fn setup_dependencies(
         let groups = groups.clone();
         tasks.spawn(async move {
             let info = setup_with_tracker(&mgr, &dep_id, platforms, groups).await?;
-            Ok::<_, PackageErrorKind>((idx, info))
+            Ok::<_, PackageErrorKind>((idx, Arc::new(info)))
         });
     }
 
-    let mut results: Vec<Option<InstallInfo>> = vec![None; deps.len()];
+    let mut results: Vec<Option<Arc<InstallInfo>>> = vec![None; deps.len()];
     while let Some(join_result) = tasks.join_next().await {
-        let (idx, info) = join_result.expect("dependency setup task panicked")?;
+        // Preserve the original task panic for diagnostics: per
+        // `quality-rust.md` Async Patterns, resume_unwind on panic and
+        // panic with the JoinError context on cancellation.
+        let (idx, info) = match join_result {
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("dependency setup task aborted: {e}"),
+            Ok(v) => v,
+        }?;
         results[idx] = Some(info);
     }
 
@@ -610,9 +635,16 @@ async fn extract_layers(
         });
     }
 
-    let mut results: Vec<Option<oci::Digest>> = (0..tasks.len()).map(|_| None).collect();
+    let mut results: Vec<Option<oci::Digest>> = vec![None; tasks.len()];
     while let Some(join_res) = tasks.join_next().await {
-        let (idx, task_res) = join_res.expect("layer extraction task panicked");
+        // Preserve the original task panic for diagnostics: per
+        // `quality-rust.md` Async Patterns, resume_unwind on panic and
+        // panic with the JoinError context on cancellation.
+        let (idx, task_res) = match join_res {
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("layer extraction task aborted: {e}"),
+            Ok(v) => v,
+        };
         results[idx] = Some(task_res?);
     }
     Ok(results.into_iter().flatten().collect())
@@ -763,7 +795,7 @@ async fn extract_layer_inner(
 #[allow(clippy::result_large_err)]
 fn link_dependencies_in_temp(
     pkg: &file_structure::PackageDir,
-    dep_infos: &[InstallInfo],
+    dep_infos: &[Arc<InstallInfo>],
 ) -> Result<(), PackageErrorKind> {
     if dep_infos.is_empty() {
         return Ok(());

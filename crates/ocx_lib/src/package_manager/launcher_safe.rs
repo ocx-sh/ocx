@@ -5,7 +5,12 @@
 //!
 //! Both Unix `.sh` and Windows `.cmd` launchers are generated on every platform
 //! (cross-platform packages), so the unsafe-character set is unified rather than
-//! per-platform.
+//! per-platform. Lives alongside [`super::entrypoints`] (the launcher generator)
+//! because the unsafe-character set encodes a *consumer-layer* shell template
+//! constraint — not a metadata invariant. The publish-time validator
+//! ([`crate::package::metadata::validation`]) still calls into this module via
+//! the crate-visible re-export to surface unsafe characters at publish time as
+//! defense-in-depth.
 
 /// Characters that cannot appear in any string baked into a generated launcher.
 ///
@@ -90,5 +95,22 @@ mod tests {
     fn launcher_safe_string_accepts_path_with_spaces() {
         let s = super::LauncherSafeString::new("/path with spaces/bin/tool").unwrap();
         assert_eq!(s.as_str(), "/path with spaces/bin/tool");
+    }
+
+    /// S3: cross-platform-publisher acceptance for the canonical Windows
+    /// install-path shape — `C:\Program Files\…` with both spaces and
+    /// backslashes. Backslash is intentionally NOT in the unsafe set (see
+    /// `LAUNCHER_UNSAFE_CHARS` doc comment); this test pins the contract so
+    /// a future tightening of the unsafe set cannot silently break Windows
+    /// publishers.
+    #[test]
+    fn launcher_safe_string_accepts_windows_path_with_spaces_and_backslashes() {
+        let p = "C:\\Program Files\\App\\bin\\tool.exe";
+        let s = super::LauncherSafeString::new(p).expect("Windows path with spaces + backslashes must be accepted");
+        assert_eq!(
+            s.as_str(),
+            p,
+            "value must round-trip verbatim — no normalization applied"
+        );
     }
 }

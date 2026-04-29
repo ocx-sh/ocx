@@ -25,7 +25,7 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 | `command/*.rs` | One file per subcommand (30 files) |
 | `api.rs` | `Api` facade: dispatches JSON vs plain text |
 | `api/data/*.rs` | Report data types implementing `Printable` |
-| `options/*.rs` | Shared arg parsing helpers (Identifier, ContentPath, Platform) |
+| `options/*.rs` | Shared arg parsing helpers (Identifier, ContentPath, Platform, PackageRef + `validate_package_root`) |
 
 ## Context Struct
 

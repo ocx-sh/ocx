@@ -26,9 +26,9 @@ use crate::cli::{ClassifyExitCode, ExitCode};
 /// cause.
 ///
 /// Use [`UsageError::with_source`] when the rejection originates from a
-/// structured library error (e.g. a `PackageRefParseError`) — this preserves
-/// the full `source()` chain so diagnostics tools and the exit-code classifier
-/// can walk the inner cause.
+/// structured library error — this preserves the full `source()` chain so
+/// diagnostics tools and the exit-code classifier can walk the inner cause.
+/// (The CLI's `PackageRefParseError`, for example, is wrapped this way.)
 ///
 /// Always classifies to [`ExitCode::UsageError`] (`64`, mirrors `EX_USAGE`).
 #[derive(Debug)]

@@ -180,8 +180,17 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/conten
   <Node name="~/.ocx/symlinks/" icon="🔀" open>
     <Node name="{registry}/" icon="📁" open-icon="📂" open>
       <Node name="{repo}/" icon="📁" open-icon="📂" open>
-        <Node name="current" icon="➡️">
+        <Node name="current" icon="➡️" open>
           <Description>active package root — set by ocx select</Description>
+          <Node name="content/" icon="📂">
+            <Description>package files — binaries, libraries, headers</Description>
+          </Node>
+          <Node name="entrypoints/" icon="🚀">
+            <Description>generated launchers — added to $PATH by ocx shell profile load</Description>
+          </Node>
+          <Node name="metadata.json" icon="📋">
+            <Description>declared env vars and extraction options</Description>
+          </Node>
         </Node>
         <Node name="candidates/" icon="📁" open-icon="📂" open>
           <Node name="3.28" icon="➡️">
@@ -645,10 +654,10 @@ debugging which dependencies actually contribute to the environment:
 ::: details Self-execution path
 All four visibility levels are fully implemented in the propagation algebra and stored in
 `resolve.json`. The consumer-visible axis (`public`, `interface`) controls which deps contribute
-to [`ocx exec`][cmd-exec] and [`ocx env`][cmd-env] today. The self-visible axis (`public`,
-`private`) will activate when self-execution environments (shims, entry points) are added in
-a future release — at that point, `private` deps will contribute to a package's own shim
-execution but remain invisible to consumers.
+to [`ocx exec`][cmd-exec] and [`ocx env`][cmd-env]. The self-visible axis (`public`, `private`)
+controls which deps contribute to a package's own execution environment when a launcher generated
+from its [`entrypoints`][metadata-entry-points] array is invoked — `private` deps are included in
+that self-execution context but remain invisible to consumers.
 :::
 
 ### Inspection {#dependencies-inspection}

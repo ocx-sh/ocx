@@ -96,7 +96,7 @@ impl schemars::JsonSchema for EntrypointName {
 /// A single named entrypoint for a package.
 ///
 /// Declares a named launcher that `ocx install` generates at install time.
-/// The launcher calls `ocx exec --install-dir=<content-path> -- "$@"`, preserving
+/// The launcher calls `ocx exec file://<package-root> -- "$@"`, preserving
 /// clean-env execution semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Entrypoint {
@@ -138,11 +138,13 @@ impl<'de> Deserialize<'de> for Entrypoints {
 impl Entrypoints {
     /// Constructs a validated `Entrypoints`, rejecting duplicate names.
     ///
+    /// Each [`Entrypoint`] is already name-validated by the time it reaches this
+    /// constructor: [`EntrypointName`] enforces the slug regex on construction
+    /// (and on deserialization), so the only remaining invariant to check here
+    /// is uniqueness across the collection.
+    ///
     /// # Errors
     ///
-    /// - [`EntrypointError::InvalidName`] if any name fails the slug regex (returned
-    ///   by deserialization of individual [`EntrypointName`]s, surfaced here on
-    ///   programmatic construction).
     /// - [`EntrypointError::DuplicateName`] if two entries share the same name.
     pub fn new(entries: Vec<Entrypoint>) -> Result<Self, EntrypointError> {
         let mut seen: HashSet<String> = HashSet::new();
@@ -353,6 +355,29 @@ mod tests {
     fn entrypoint_name_deserialization_rejects_invalid() {
         let json = r#"{"name":"","target":"${installPath}/bin/cmake"}"#;
         assert!(serde_json::from_str::<Entrypoint>(json).is_err());
+    }
+
+    /// W6: pin the contract that an `EntrypointName` deserialization error
+    /// message carries enough diagnostic content for users to fix the
+    /// metadata. Specifically, the slug regex pattern must appear in the
+    /// surfaced error so publishers see *why* their name was rejected and
+    /// what shape is expected. Future refactors that reword the error string
+    /// must keep this hint or risk silently degrading UX.
+    #[test]
+    fn entrypoint_name_deserialize_error_message_contains_pattern_hint() {
+        // "Foo Bar" — uppercase + space, both forbidden by `^[a-z0-9][a-z0-9_-]*$`.
+        let json = r#""Foo Bar""#;
+        let err =
+            serde_json::from_str::<EntrypointName>(json).expect_err("invalid entrypoint name must fail to deserialize");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Foo Bar"),
+            "error must echo the rejected name 'Foo Bar': {msg}"
+        );
+        assert!(
+            msg.contains("[a-z0-9]") || msg.contains("must match"),
+            "error must hint at the slug pattern (regex char class or 'must match'): {msg}"
+        );
     }
 
     // ── 3.1 Entrypoints::is_empty ──────────────────────────────────────────

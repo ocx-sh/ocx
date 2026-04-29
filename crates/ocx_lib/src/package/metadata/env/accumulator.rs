@@ -145,6 +145,14 @@ impl<'a> Accumulator<'a> {
             if path.is_relative() {
                 path = self.install_path.join(path);
             }
+            // Sync `path.exists()` is intentional: the entire env-resolution chain
+            // (`apply_visible_packages` -> `emit_env` -> `export_env` -> `Exporter::add`
+            // -> `Accumulator::resolve_var`) is synchronous and called many times per
+            // command invocation. A single `stat(2)` against an already-installed
+            // package's local content tree is a fast filesystem probe; wrapping in
+            // `block_in_place` per call would add scheduler overhead that dominates
+            // the probe itself. Switch to `tokio::fs::try_exists` only if the chain
+            // ever becomes async end-to-end.
             if path_modifier.required && !path.exists() {
                 return Err(crate::package::error::Error::RequiredPathMissing(path).into());
             }
