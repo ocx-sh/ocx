@@ -11,10 +11,9 @@ mapping but currently fail because the product doesn't yet route these error
 paths through `classify_error`. They are `strict=True` so the marker gets
 removed automatically the moment the product catches up:
 
-- 64 (UsageError): clap exits with its own hardcoded `2` before `classify_error`
-  runs. Routing clap errors through the typed taxonomy requires switching from
-  `get_matches()` (which exits internally) to `try_get_matches()` + custom
-  error handling in `app.rs`. Deferred.
+- 64 (UsageError): wired in Phase 6 review-fix Round 1. `app.rs` switched from
+  `get_matches()` to `try_get_matches()` and now surfaces clap parse errors as
+  `UsageError`, which classifies to exit 64 (EX_USAGE).
 - 65 (DataError): the identifier parser is permissive — `not:::valid:::identifier`
   successfully parses and the install fails later as `NotFound` (79). Triggering
   `IdentifierError` at parse time requires either a stricter parser or a test
@@ -46,13 +45,12 @@ class TestExitCodes:
     that triggers it.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="clap exits with hardcoded 2 before classify_error runs; "
-        "routing requires try_get_matches() refactor in app.rs",
-    )
     def test_exit_code_64_usage_error_on_bogus_flag(self, ocx: OcxRunner) -> None:
-        """Unknown flag → clap rejects → exit 64 (EX_USAGE)."""
+        """Unknown flag → clap rejects → exit 64 (EX_USAGE).
+
+        Phase 6 review-fix Round 1: `app.rs` now uses `try_get_matches()` and
+        surfaces clap parse errors as `UsageError`, classifying to exit 64.
+        """
         result = subprocess.run(
             [str(ocx.binary), "install", "--not-a-real-flag", "cmake:3.28"],
             capture_output=True,

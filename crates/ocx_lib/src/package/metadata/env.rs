@@ -3,12 +3,13 @@
 
 use serde::{Deserialize, Serialize};
 
-pub mod accumulator;
 pub mod conflict;
 pub mod constant;
-pub mod exporter;
+pub mod dep_context;
+pub mod entry;
 pub mod modifier;
 pub mod path;
+pub mod resolver;
 pub mod var;
 
 #[derive(Debug, Default, Clone)]
@@ -26,9 +27,21 @@ impl Env {
         install_path: impl AsRef<std::path::Path>,
         env: &mut crate::env::Env,
     ) -> crate::Result<()> {
-        let mut resolver = accumulator::Accumulator::new(install_path, env);
+        use modifier::ModifierKind;
+        let empty_ctx = std::collections::HashMap::new();
+        let r = resolver::EnvResolver::new(install_path.as_ref(), &empty_ctx);
+        // Iterate every var unconditionally. The two-env composer is the
+        // single point where surface partitioning happens; this convenience
+        // wrapper has no consumer context to gate against and emits all
+        // declared vars verbatim (matches the prior `Visibility::PUBLIC`
+        // mask semantics, which trivially admitted every entry-axis value).
         for var in &self.variables {
-            resolver.add(var)?;
+            if let Some(entry) = r.resolve(var)? {
+                match entry.kind {
+                    ModifierKind::Path => env.add_path(&entry.key, &entry.value),
+                    ModifierKind::Constant => env.set(&entry.key, entry.value),
+                }
+            }
         }
         Ok(())
     }

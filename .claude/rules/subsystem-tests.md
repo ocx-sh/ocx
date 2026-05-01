@@ -71,6 +71,8 @@ pkg = make_package(ocx, repo, tag, tmp_path,
 )
 ```
 
+**Default env visibility in tests**: `make_package()` defaults env entries to `"visibility": "public"` (see `test/src/helpers.py` lines 160–165). This matches the convention used by in-tree mirrors and acceptance tests that verify env resolution. Tests asserting on env output in `consumer` mode rely on this default. When writing tests for `private` or `interface` entries, pass explicit `visibility` in the `env` list.
+
 ## Assertion Helpers
 
 - `assert_path_exists(path)` — exists (file, dir, or symlink)

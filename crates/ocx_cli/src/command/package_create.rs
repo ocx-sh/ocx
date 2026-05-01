@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{compression, log, oci, package};
+use ocx_lib::{compression, log, oci, package, prelude::*};
 
 use crate::options;
 
@@ -24,6 +24,7 @@ pub struct PackageCreate {
     /// Force overwrite of output file if it already exists
     #[clap(short, long)]
     force: bool,
+    /// Path to a `metadata.json` file to validate and copy alongside the output bundle
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
     /// Compression level to use for the package bundle
@@ -39,23 +40,24 @@ impl PackageCreate {
         let identifier = options::Identifier::transform_optional(self.identifier.clone(), context.default_registry())?;
         let output = match &self.output {
             Some(output) => {
-                if output.is_dir() || output.ends_with("/") {
-                    output.join(self.infer_filename(&identifier))
+                let is_dir = tokio::fs::metadata(output).await.map(|m| m.is_dir()).unwrap_or(false);
+                if is_dir {
+                    output.join(self.infer_filename(identifier.as_ref()))
                 } else {
                     output.clone()
                 }
             }
-            None => self.infer_filename(&identifier).into(),
+            None => self.infer_filename(identifier.as_ref()).into(),
         };
 
-        if output.exists() && !self.force {
+        if tokio::fs::try_exists(&output).await? && !self.force {
             anyhow::bail!(
-                "Output file {} already exists. Use --force to overwrite.",
+                "output file {} already exists; use --force to overwrite",
                 output.display()
             );
         }
         if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
         let compression_options =
             compression::CompressionOptions::from_level(self.compression_level.into()).with_threads(self.threads);
@@ -75,21 +77,19 @@ impl PackageCreate {
         );
 
         if let Some(metadata_source) = &self.metadata {
+            let metadata = package::metadata::Metadata::read_json(metadata_source.as_path()).await?;
+            package::metadata::ValidMetadata::try_from(metadata)?;
             let metadata_target = crate::conventions::infer_metadata_file(&output)?;
-            std::fs::copy(metadata_source, &metadata_target)?;
+            tokio::fs::copy(metadata_source, &metadata_target).await?;
         }
 
         Ok(ExitCode::SUCCESS)
     }
 
     /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
-    fn infer_filename(&self, identifier: &Option<oci::Identifier>) -> String {
+    fn infer_filename(&self, identifier: Option<&oci::Identifier>) -> String {
         let mut name = match identifier {
-            Some(identifier) => format!(
-                "{}-{}",
-                identifier.name().unwrap_or("package".to_string()),
-                identifier.tag_or_latest()
-            ),
+            Some(identifier) => format!("{}-{}", identifier.name(), identifier.tag_or_latest()),
             None => self
                 .path
                 .file_prefix()

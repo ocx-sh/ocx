@@ -190,6 +190,7 @@ See `quality-core.md` for universal checklist. Rust additions:
 - [ ] Bounded channels; tasks observed; no `MutexGuard` across `.await`
 - [ ] Public APIs use `use<..>` bounds for RPIT in edition 2024
 - [ ] `cargo clippy --workspace` passes; `clippy::correctness` never suppressed
+- [ ] Resolution-affecting CLI flag added (offline / remote / config / index / similar) → forwarded in the project's subprocess-spawn helper (e.g. OCX's `Env::apply_ocx_config`) AND documented in the env-var reference. Presentation flag added (log-level / format / color) → never forwarded via env
 
 ---
 

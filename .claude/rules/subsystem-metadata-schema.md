@@ -23,7 +23,7 @@ Rust types = single source of truth. JSON Schema + docs page = derived artifacts
 
 Change any file under `crates/ocx_lib/src/package/metadata/`:
 
-1. **Ensure `JsonSchema` derives are present.** Every `Serialize`/`Deserialize` struct + enum needs `#[derive(schemars::JsonSchema)]`. Types with custom `Deserialize` or `serde_repr` need manual `impl schemars::JsonSchema` (see `Version`, `Env`).
+1. **Ensure `JsonSchema` derives are present.** Every `Serialize`/`Deserialize` struct + enum needs `#[derive(schemars::JsonSchema)]`. Types with custom `Deserialize` or constrained value sets need manual `impl schemars::JsonSchema` (see `Version`) or a `#[schemars(schema_with = "...")]` field attribute (see `Var.visibility`).
 2. **Regenerate schema.** Run `task schema:generate`, verify output.
 3. **Update docs page.** Added/removed/renamed fields → update `website/src/docs/reference/metadata.md` — tables, examples, descriptions.
 4. **Add doc comments.** Every public field needs `///` doc comment — schemars uses as `description` in JSON Schema.
@@ -35,3 +35,24 @@ Change any file under `crates/ocx_lib/src/package/metadata/`:
 - Build integration: `task schema:generate` auto-runs before `website build`
 - Output: `website/src/public/schemas/metadata/v1.json` (gitignored, regenerated on build)
 - Published URL: `https://ocx.sh/schemas/metadata/v1.json`
+
+## Visibility Type Summary
+
+`Visibility` — two-axis flags: `private` (self-axis) and `interface` (consumer-axis). Four constants: `SEALED` (neither), `PRIVATE` (self only), `INTERFACE` (consumer only), `PUBLIC` (both). Algebra: `merge` (OR per axis, for diamond dedup), `through_edge` (inductive TC composition — if `child_eff.interface` is false → `SEALED`, else pass edge through unchanged). Accessors `has_interface()` / `has_private()` gate surface emission in `composer.rs`. No `intersects` method. Custom serde keeps wire format as four lowercase strings byte-identical.
+
+`Var.visibility` uses `Visibility` directly. `"sealed"` is rejected at parse via
+`#[serde(deserialize_with = "deserialize_entry_visibility")]` on the field. The JSON Schema
+for the field is restricted to `["private", "public", "interface"]` via
+`#[schemars(schema_with = "entry_visibility_schema")]`. Both functions live in `visibility.rs`.
+
+## Custom `JsonSchema` Implementations
+
+One type requires a manual `impl schemars::JsonSchema` — it deviates from default schemars inference:
+
+1. **`Version`** — semver-inspired struct with custom string serialization. Schema hand-authored to match the string pattern accepted by the parser.
+
+One field uses `#[schemars(schema_with = "...")]` to override the inferred schema:
+
+- **`Var.visibility`** — typed as `Visibility` (4 values) but restricted to 3 values at the field level via `entry_visibility_schema`. Use `schema_with` rather than a newtype when the restriction is field-specific and all construction goes through compile-time constants.
+
+When adding a new type that uses `serde_repr`, a custom `Deserialize`, or a constrained value set differing from the full Rust enum, add a manual `impl schemars::JsonSchema` and document it in this list. If the restriction is field-specific, prefer `#[schemars(schema_with = "...")]`.

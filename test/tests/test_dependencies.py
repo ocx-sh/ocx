@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.assertions import assert_not_exists, assert_symlink_exists
-from src.helpers import make_package
+from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
@@ -193,9 +193,9 @@ def test_env_includes_dependency_vars(ocx: OcxRunner, unique_repo: str, tmp_path
     assert env_result is not None
 
     # The leaf sets a {REPO_UPPER}_HOME constant. Check that key is present.
-    # env_result is a list of {"key": "...", "value": "...", "type": "..."}
+    # env_result["entries"] is a list of {"key": "...", "value": "...", "type": "..."}
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert leaf_home_key in env_keys, (
         f"expected {leaf_home_key!r} from leaf dep in env output; got keys: {env_keys}"
     )
@@ -266,8 +266,8 @@ def test_package_without_deps_works(published_package: PackageInfo, ocx: OcxRunn
 # ---------------------------------------------------------------------------
 
 
-def _find_content_path(ocx: OcxRunner, pkg: PackageInfo) -> Path:
-    """Return the content path for an installed package."""
+def _find_package_root(ocx: OcxRunner, pkg: PackageInfo) -> Path:
+    """Return the package root for an installed package."""
     result = ocx.json("find", pkg.short)
     return Path(result[pkg.short])
 
@@ -414,8 +414,8 @@ def test_deps_tree_diamond_marks_repeated(ocx: OcxRunner, unique_repo: str, tmp_
 
 
 def test_deps_flat_evaluation_order(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """--flat JSON shows leaf before root (dependency-first)."""
-    leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
+    """--flat shows leaf before root (dependency-first) on the interface surface."""
+    leaf, app = _setup_leaf_and_app_public(ocx, unique_repo, tmp_path)
 
     result = ocx.json("deps", "--flat", app.short)
     entries = result["entries"]
@@ -426,9 +426,21 @@ def test_deps_flat_evaluation_order(ocx: OcxRunner, unique_repo: str, tmp_path: 
     assert leaf_idx < app_idx, f"leaf ({leaf_idx}) should come before app ({app_idx})"
 
 
+def _setup_chain_public(ocx, unique_repo, tmp_path):
+    """Common setup: push C -> B -> A chain with public deps, install A."""
+    c_repo = f"{unique_repo}_c"
+    b_repo = f"{unique_repo}_b"
+    a_repo = f"{unique_repo}_a"
+    c = _push_leaf(ocx, c_repo, tmp_path)
+    b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, c, visibility="public")])
+    a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, b, visibility="public")])
+    ocx.json("install", "--select", a.short)
+    return c, b, a
+
+
 def test_deps_flat_transitive_chain(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """A->B->C --flat order is C, B, A."""
-    c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
+    """A->B->C --flat order is C, B, A on the interface surface."""
+    c, b, a = _setup_chain_public(ocx, unique_repo, tmp_path)
 
     result = ocx.json("deps", "--flat", a.short)
     identifiers = [e["identifier"] for e in result["entries"]]
@@ -496,9 +508,8 @@ def test_dependency_forward_refs_created(ocx: OcxRunner, unique_repo: str, tmp_p
     """After install, the dependent's deps/ dir contains a forward-ref symlink."""
     leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
-    app_content = _find_content_path(ocx, app)
-    app_obj_dir = app_content.parent
-    deps_dir = app_obj_dir / "refs" / "deps"
+    app_root = _find_package_root(ocx, app)
+    deps_dir = app_root / "refs" / "deps"
     assert deps_dir.exists(), "refs/deps/ directory should exist on dependent object"
 
     dep_entries = list(deps_dir.iterdir())
@@ -521,8 +532,8 @@ def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tm
     assert _count_object_dirs(ocx) == 2
 
     # Verify forward refs restored on app
-    app_content = _find_content_path(ocx, app)
-    deps_dir = app_content.parent / "refs" / "deps"
+    app_root = _find_package_root(ocx, app)
+    deps_dir = app_root / "refs" / "deps"
     assert deps_dir.exists(), "refs/deps/ should be restored after reinstall"
     assert any(e.is_symlink() for e in deps_dir.iterdir()), "forward-ref symlinks should be restored"
 
@@ -596,7 +607,7 @@ def test_env_dependency_order_deps_first(ocx: OcxRunner, unique_repo: str, tmp_p
     ocx.json("install", "--select", app.short)
 
     env_result = ocx.json("env", app.short)
-    keys = [e["key"] for e in env_result]
+    keys = [e["key"] for e in env_result["entries"]]
 
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
     app_home_key = app_repo.upper().replace("-", "_") + "_HOME"
@@ -717,8 +728,7 @@ def test_transitive_ref_chain_integrity(
     """A->B->C: verify deps/ forward-refs at every level of the chain."""
     c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
-    a_content = _find_content_path(ocx, a)
-    a_obj = a_content.parent
+    a_obj = _find_package_root(ocx, a)
 
     # A's deps/ should have exactly 1 entry (pointing to B's content).
     a_deps = _list_dep_targets(a_obj)
@@ -813,16 +823,16 @@ def test_clean_preserves_shared_transitive_dep(
 def test_deps_multi_root_shared_transitive(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """A->B->D and C->B->D: deps on both roots shows B and D once each."""
+    """A->B->D and C->B->D (all public): deps on both roots shows B and D once each."""
     d = _push_leaf(ocx, f"{unique_repo}_d", tmp_path)
     b = _push_with_deps(
-        ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d)]
+        ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d, visibility="public")]
     )
     a = _push_with_deps(
-        ocx, f"{unique_repo}_a", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b)]
+        ocx, f"{unique_repo}_a", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b, visibility="public")]
     )
     c = _push_with_deps(
-        ocx, f"{unique_repo}_c", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b)]
+        ocx, f"{unique_repo}_c", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b, visibility="public")]
     )
 
     ocx.json("install", "--select", a.short)
@@ -1005,7 +1015,7 @@ def test_env_candidate_deduplicates_root_that_is_also_dependency(
     env_result = ocx.json("env", "--candidate", app.short, lib.short)
 
     lib_home_key = lib_repo.upper().replace("-", "_") + "_HOME"
-    occurrences = [e for e in env_result if e["key"] == lib_home_key]
+    occurrences = [e for e in env_result["entries"] if e["key"] == lib_home_key]
     assert len(occurrences) == 1, (
         f"expected {lib_home_key!r} exactly once, got {len(occurrences)} times"
     )
@@ -1029,7 +1039,7 @@ def test_sealed_suppresses_dep_env(
 
     env_result = ocx.json("env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key not in env_keys, (
         f"non-exported dep key {b_home_key!r} should NOT appear in env; got keys: {env_keys}"
     )
@@ -1048,7 +1058,7 @@ def test_public_includes_dep_env(
 
     env_result = ocx.json("env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"exported dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1078,6 +1088,12 @@ def test_sealed_conflicting_deps_coexist(
     result = ocx.run("env", a.short, b.short, check=False)
     assert result.returncode == 0, (
         f"non-exported conflicting deps should not error; stderr: {result.stderr!r}"
+    )
+    # And must not warn — sealed deps never enter the consumer composition,
+    # so their digests cannot collide at runtime. The composer surface gate
+    # in `warn_repo_digest_conflicts` filters them out before recording.
+    assert "conflicting" not in result.stderr.lower(), (
+        f"sealed conflicting deps must not produce a 'conflicting' warning; got stderr: {result.stderr!r}"
     )
 
 
@@ -1127,7 +1143,7 @@ def test_transitive_public_propagates(
 
     env_result = ocx.json("env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert c_home_key in env_keys, (
         f"transitively exported dep key {c_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1150,7 +1166,7 @@ def test_sealed_blocks_transitive_chain(
 
     env_result = ocx.json("env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert c_home_key not in env_keys, (
         f"blocked transitive dep key {c_home_key!r} should NOT appear in env; got keys: {env_keys}"
     )
@@ -1183,14 +1199,17 @@ def test_gc_protects_sealed_dep(
 def test_private_includes_dep_env_for_direct_target(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path,
 ):
-    """A depends on B (visibility: private): ocx env A MUST contain B_HOME.
+    """A depends on B (private edge): ocx env A --mode=self MUST contain B_HOME.
 
-    When A is the direct exec/env target, its private deps are self-visible
-    and should contribute to the environment.
+    Direct exec/env target via the private edge needs self-mode to surface
+    B's env (consumer mode filters Private — see ADR Tension 2). The leaf's
+    own ``B_HOME`` is tagged ``public`` so the entry-axis filter admits it
+    once self-mode includes B in the visible set.
     """
     b_home_key = f"{unique_repo}_B_HOME".upper().replace("-", "_")
     b = _push_leaf(ocx, f"{unique_repo}_b", tmp_path, env=[
-        {"key": b_home_key, "type": "constant", "value": "${installPath}"}
+        {"key": b_home_key, "type": "constant", "value": "${installPath}",
+         "visibility": "public"}
     ])
     _push_with_deps(
         ocx, f"{unique_repo}_app", "1.0.0", tmp_path,
@@ -1198,10 +1217,10 @@ def test_private_includes_dep_env_for_direct_target(
     )
     ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
 
-    env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_result = ocx.json("env", "--self", f"{unique_repo}_app:1.0.0")
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
-        f"private dep key {b_home_key!r} MUST appear in env for direct target; got keys: {env_keys}"
+        f"private dep key {b_home_key!r} MUST appear in env --mode=self for direct target; got keys: {env_keys}"
     )
 
 
@@ -1228,7 +1247,7 @@ def test_private_suppresses_dep_env_for_consumer(
     ocx.json("install", "--select", f"{unique_repo}_root:1.0.0")
 
     env_result = ocx.json("env", f"{unique_repo}_root:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key not in env_keys, (
         f"private transitive dep key {b_home_key!r} should NOT appear for consumer; got keys: {env_keys}"
     )
@@ -1239,12 +1258,15 @@ def test_interface_includes_dep_env(
 ):
     """A depends on B (visibility: interface): ocx env A MUST contain B_HOME.
 
-    Interface behaves like public for consumer env resolution. This test locks
-    in that behavior.
+    Interface behaves like public for consumer env resolution. The leaf's
+    ``B_HOME`` is tagged ``public`` so the per-entry filter admits it under
+    Consumer mode (default-private would filter the leaf's own var even
+    though the edge admits it).
     """
     b_home_key = f"{unique_repo}_B_HOME".upper().replace("-", "_")
     b = _push_leaf(ocx, f"{unique_repo}_b", tmp_path, env=[
-        {"key": b_home_key, "type": "constant", "value": "${installPath}"}
+        {"key": b_home_key, "type": "constant", "value": "${installPath}",
+         "visibility": "public"}
     ])
     _push_with_deps(
         ocx, f"{unique_repo}_app", "1.0.0", tmp_path,
@@ -1253,7 +1275,7 @@ def test_interface_includes_dep_env(
     ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
 
     env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
-    env_keys = [e["key"] for e in env_result]
+    env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"interface dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1314,16 +1336,18 @@ def _find_object_dir(ocx: OcxRunner, reg_slug: str, repo: str) -> Path:
     """Find the single package directory for a given repo in the package store.
 
     Package dirs are sharded by registry + digest only (no repo in the path),
-    so ``find`` is the authoritative way to resolve a repo name to a content
-    path. For transitive deps (not installed directly and thus without an
+    so ``find`` is the authoritative way to resolve a repo name to a package
+    root. For transitive deps (not installed directly and thus without an
     install symlink) we fall back to the bare repo name so ``ocx find``
     resolves via the local index.
     """
     find_result = ocx.json("find", repo)
     key = next(iter(find_result))
-    content_path = Path(find_result[key]).resolve()
-    assert content_path.name == "content", f"unexpected find target: {content_path}"
-    return content_path.parent
+    package_root = Path(find_result[key]).resolve()
+    assert (package_root / "content").is_dir(), (
+        f"unexpected find target: {package_root}"
+    )
+    return package_root
 
 
 def _list_dep_targets(obj_dir: Path) -> list[Path]:
@@ -1332,3 +1356,165 @@ def _list_dep_targets(obj_dir: Path) -> list[Path]:
     if not deps_dir.exists():
         return []
     return sorted(entry.resolve() for entry in deps_dir.iterdir() if entry.is_symlink())
+
+
+# ---------------------------------------------------------------------------
+# Tests: Entrypoint visibility in dependency env
+# ---------------------------------------------------------------------------
+
+
+def test_public_dep_entrypoints_appear_in_consumer_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A's env must include B's entrypoints/ in PATH when B is a public dependency.
+
+    The visible-package pipeline emits a synthetic `PATH ⊳ <B_pkg_root>/entrypoints`
+    for every visible package that has non-empty entrypoints.  When A depends on B
+    publicly, B is visible to A — so B's entrypoints/ must appear in `ocx env A`.
+    """
+    b_repo = f"{unique_repo}_b"
+    a_repo = f"{unique_repo}_a"
+
+    pkg_b = make_package_with_entrypoints(
+        ocx,
+        b_repo,
+        tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="b",
+    )
+
+    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_entry = {
+        "identifier": f"{pkg_b.fq}@{dep_digest}",
+        "visibility": "public",
+    }
+    pkg_a = make_package(ocx, a_repo, "1.0.0", tmp_path, dependencies=[dep_entry])
+    ocx.plain("install", "--select", pkg_a.short)
+
+    env_result = ocx.json("env", pkg_a.short)
+    path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
+
+    assert any("entrypoints" in v for v in path_values), (
+        f"expected B's entrypoints/ in PATH for public dep; PATH values: {path_values}"
+    )
+
+
+def test_sealed_dep_entrypoints_excluded_from_consumer_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A's env must NOT include B's entrypoints/ in PATH when B is a sealed dependency.
+
+    Sealed (non-exported) dependencies are not visible to A's consumers — the
+    synthetic entrypoints/ PATH entry for B must not appear in `ocx env A`.
+    """
+    b_repo = f"{unique_repo}_b"
+    a_repo = f"{unique_repo}_a"
+
+    pkg_b = make_package_with_entrypoints(
+        ocx,
+        b_repo,
+        tmp_path,
+        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        bins=["cmake"],
+        tag="1.0.0",
+        file_prefix="b",
+    )
+
+    dep_digest = fetch_manifest_digest(ocx.registry, b_repo, "1.0.0")
+    dep_entry = {
+        "identifier": f"{pkg_b.fq}@{dep_digest}",
+        "visibility": "sealed",
+    }
+    pkg_a = make_package(ocx, a_repo, "1.0.0", tmp_path, dependencies=[dep_entry])
+    ocx.plain("install", "--select", pkg_a.short)
+
+    env_result = ocx.json("env", pkg_a.short)
+    path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
+
+    # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
+    b_find = ocx.json("find", pkg_b.short)
+    b_pkg_root = str(Path(next(iter(b_find.values()))))
+
+    assert not any(v.startswith(b_pkg_root) and "entrypoints" in v for v in path_values), (
+        f"sealed dep B's entrypoints/ must NOT appear in consumer PATH; PATH values: {path_values}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests: ocx deps --flat surface-gating consistency (#6)
+# ---------------------------------------------------------------------------
+
+
+def test_deps_flat_surface_gating_without_self(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """--flat without --self must exclude sealed/private-only deps (interface surface).
+
+    When a leaf is pulled via a sealed edge (visibility=sealed), it has no
+    interface-axis exposure.  The default ``--flat`` output (interface surface)
+    must not include it, because it would not contribute to a consumer's env.
+
+    This is the regression test for the ``--flat`` ignoring ``--self`` bug (#6):
+    the previous implementation emitted all TC entries regardless of
+    ``self_view``, so sealed deps leaked into the default flat listing.
+    """
+    leaf_repo = f"{unique_repo}_leaf"
+    app_repo = f"{unique_repo}_app"
+
+    leaf = _push_leaf(ocx, leaf_repo, tmp_path)
+    # Sealed edge: leaf is internal to app, not visible on the interface surface.
+    dep = _dep_entry(ocx, leaf, visibility="sealed")
+    app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
+    ocx.json("install", "--select", app.short)
+
+    result = ocx.json("deps", "--flat", app.short)
+    identifiers = [e["identifier"] for e in result["entries"]]
+
+    # App root is always included (public sentinel).
+    assert any(app_repo in ident for ident in identifiers), (
+        f"expected app root in flat output; got: {identifiers}"
+    )
+    # Sealed dep must not appear on the interface surface.
+    assert not any(leaf_repo in ident for ident in identifiers), (
+        f"sealed dep {leaf_repo!r} must NOT appear in default --flat output "
+        f"(interface surface); got: {identifiers}"
+    )
+
+
+def test_deps_flat_surface_gating_with_self(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """--flat --self must include private deps (private surface).
+
+    A leaf pulled via a private edge (visibility=private) has private-axis
+    exposure only.  Without ``--self`` it would be excluded from ``--flat``
+    (interface surface).  With ``--self`` it must appear because it contributes
+    to the package's own runtime environment.
+    """
+    leaf_repo = f"{unique_repo}_leaf"
+    app_repo = f"{unique_repo}_app"
+
+    leaf = _push_leaf(ocx, leaf_repo, tmp_path)
+    # Private edge: leaf is visible to app itself (private surface) but not to
+    # app's consumers (interface surface).
+    dep = _dep_entry(ocx, leaf, visibility="private")
+    app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
+    ocx.json("install", "--select", app.short)
+
+    # Interface surface (no --self): private dep must not appear.
+    result_consumer = ocx.json("deps", "--flat", app.short)
+    ids_consumer = [e["identifier"] for e in result_consumer["entries"]]
+    assert not any(leaf_repo in ident for ident in ids_consumer), (
+        f"private dep {leaf_repo!r} must NOT appear in default --flat (interface surface); "
+        f"got: {ids_consumer}"
+    )
+
+    # Private surface (--self): private dep must appear.
+    result_self = ocx.json("deps", "--flat", "--self", app.short)
+    ids_self = [e["identifier"] for e in result_self["entries"]]
+    assert any(leaf_repo in ident for ident in ids_self), (
+        f"private dep {leaf_repo!r} MUST appear in --flat --self (private surface); "
+        f"got: {ids_self}"
+    )

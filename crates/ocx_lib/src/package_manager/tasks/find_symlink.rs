@@ -4,10 +4,11 @@
 use tracing::info_span;
 
 use crate::{
-    file_structure::SymlinkKind,
+    file_structure::{PackageDir, SymlinkKind},
     log, oci,
     package::install_info::InstallInfo,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
+    utility,
 };
 
 use super::super::PackageManager;
@@ -45,7 +46,7 @@ impl PackageManager {
 
         let symlink_path = self.file_structure().symlinks.symlink(package, kind);
 
-        if !symlink_path.exists() {
+        if !utility::fs::path_exists_lossy(&symlink_path).await {
             return Err(PackageErrorKind::SymlinkNotFound(kind));
         }
 
@@ -64,12 +65,15 @@ impl PackageManager {
             symlink_path.display()
         );
 
-        Ok(InstallInfo {
-            identifier,
-            metadata,
-            resolved,
-            content: symlink_path,
-        })
+        // Install symlinks target the package root (post-flatten layout). The
+        // env-resolution layer derives `${installPath}` from
+        // `info.dir().content()` so traversal stays stable through the symlink
+        // while landing in the right subdir.
+        let dir = PackageDir {
+            dir: symlink_path.to_path_buf(),
+        };
+
+        Ok(InstallInfo::new(identifier, metadata, resolved, dir))
     }
 
     pub async fn find_symlink_all(

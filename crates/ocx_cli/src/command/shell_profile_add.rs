@@ -72,14 +72,14 @@ impl ShellProfileAdd {
                 // For content mode, bake the digest into the identifier for direct
                 // object store resolution without re-querying the index.
                 let identifier = if mode == profile::ProfileMode::Content {
-                    identifier.clone_with_digest(info.identifier.digest())
+                    identifier.clone_with_digest(info.identifier().digest())
                 } else {
                     identifier
                 };
                 profile::ProfileAddInput {
                     identifier,
                     mode,
-                    content_path: info.content,
+                    content_path: info.dir().content(),
                 }
             })
             .collect();

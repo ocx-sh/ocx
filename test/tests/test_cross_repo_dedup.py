@@ -53,9 +53,7 @@ def test_cross_repo_dedup_preserves_query_repository(
     metadata.write_text(
         json.dumps(
             {
-                "type": "bundle",
-                "version": 1,
-                "env": [
+                "type": "bundle", "version": 1, "env": [
                     {
                         "key": "PATH",
                         "type": "path",

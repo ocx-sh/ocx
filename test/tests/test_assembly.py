@@ -64,9 +64,13 @@ from src.runner import OcxRunner, current_platform
 
 
 def _find_content_path(ocx: OcxRunner, short: str) -> Path:
-    """Return the content/ path for an installed package via `ocx find`."""
+    """Return the content/ path for an installed package via `ocx find`.
+
+    `ocx find` reports the package root; this helper traverses into `content/`
+    so call sites that exercise installed files keep their natural shape.
+    """
     result = ocx.json("find", short)
-    return Path(result[short])
+    return Path(result[short]) / "content"
 
 
 def _build_fixed_pkg_dir(tmp_path: Path, subdir: str) -> Path:
@@ -98,9 +102,7 @@ def _write_minimal_metadata(path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "type": "bundle",
-                "version": 1,
-                "env": [
+                "type": "bundle", "version": 1, "env": [
                     {
                         "key": "PATH",
                         "type": "path",
@@ -156,9 +158,7 @@ def _write_repo_metadata(path: Path, repo: str) -> None:
     path.write_text(
         json.dumps(
             {
-                "type": "bundle",
-                "version": 1,
-                "env": [
+                "type": "bundle", "version": 1, "env": [
                     {
                         "key": "PATH",
                         "type": "path",

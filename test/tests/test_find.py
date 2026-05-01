@@ -3,7 +3,7 @@ from pathlib import Path
 from src import OcxRunner, PackageInfo, registry_dir
 
 
-def test_find_returns_content_path(
+def test_find_returns_package_root(
     ocx: OcxRunner, published_package: PackageInfo
 ):
     """ocx install <pkg>; ocx find <pkg>"""
@@ -12,10 +12,13 @@ def test_find_returns_content_path(
     candidate = Path(install_result[pkg.short]["path"])
 
     find_result = ocx.json("find", pkg.short)
-    # find (default) returns the package-store content path;
-    # the candidate symlink points to the same content path.
+    # find (default) returns the package-store package root; the candidate
+    # symlink also targets the package root, so resolving the symlink
+    # yields the same path.
     find_path = Path(find_result[pkg.short])
     assert find_path == candidate.resolve()
+    assert (find_path / "content").is_dir()
+    assert (find_path / "metadata.json").is_file()
 
 
 def test_find_candidate_returns_candidate_symlink(
@@ -88,11 +91,11 @@ def test_find_returns_package_path_not_layer(
     find_path = Path(find_result[pkg.short])
 
     # `ocx find` (without `--candidate`/`--current`) returns the raw
-    # package-store content path directly — it is built from OCX_HOME by
-    # path join, with no symlinks of its own.  `is_relative_to` is a lexical
-    # prefix check, so we compare against OCX_HOME-derived paths without any
-    # canonicalization: both sides inherit the same (possibly non-canonical)
-    # OCX_HOME prefix.
+    # package-store package-root path directly — it is built from OCX_HOME
+    # by path join, with no symlinks of its own.  `is_relative_to` is a
+    # lexical prefix check, so we compare against OCX_HOME-derived paths
+    # without any canonicalization: both sides inherit the same (possibly
+    # non-canonical) OCX_HOME prefix.
     ocx_home = Path(ocx.env["OCX_HOME"])
     packages_root = ocx_home / "packages"
     layers_root = ocx_home / "layers"
@@ -100,12 +103,12 @@ def test_find_returns_package_path_not_layer(
     # Must be inside the packages/ tree
     assert find_path.is_relative_to(packages_root), (
         f"`ocx find` returned {find_path}, which is outside packages/ "
-        f"({packages_root}).  Expected the package content/ directory."
+        f"({packages_root}).  Expected the package root directory."
     )
 
     # Must NOT be inside the layers/ tree (regression guard for symlink assembly)
     assert not find_path.is_relative_to(layers_root), (
         f"`ocx find` returned {find_path}, which is inside layers/ "
-        f"({layers_root}).  With hardlink assembly, package content/ must be "
-        f"a real directory under packages/, not a symlink into layers/."
+        f"({layers_root}).  With hardlink assembly, the package root must "
+        f"live under packages/, not symlinked into layers/."
     )

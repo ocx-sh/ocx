@@ -28,7 +28,7 @@ impl ShellProfileList {
                     entry.identifier.to_string(),
                     entry.mode,
                     api::data::profile::ProfileStatus::Active,
-                    Some(entry.content_path),
+                    Some(entry.dir.root().to_path_buf()),
                 ),
                 ProfileEntryResolution::Broken {
                     identifier, mode, path, ..

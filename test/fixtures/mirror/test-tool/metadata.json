@@ -1,7 +1,5 @@
 {
-  "type": "bundle",
-  "version": 1,
-  "env": [
+  "type": "bundle", "version": 1, "env": [
     {
       "key": "PATH",
       "type": "path",

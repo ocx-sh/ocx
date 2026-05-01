@@ -30,6 +30,10 @@ for disabling an option.
 
 ## Internal
 
+::: info Presentation flags do not propagate
+The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by design — they have no `OCX_*` counterpart and never propagate from a parent ocx into a subprocess (such as a generated [entrypoint launcher][entrypoints-ref]). Carrying them through env would leak ocx's own logging, JSON output, or ANSI color choices into the launcher's child stream. Only resolution-affecting policy (binary path, offline, remote, config file, index) propagates.
+:::
+
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 
 The authentication type for the registry.
@@ -54,19 +58,29 @@ For `basic` authentication, this value will be used as the password.
 
 This value is ignored if the `OCX_AUTH_<REGISTRY>_TYPE` is not set to `bearer` or `basic`.
 
-### `OCX_CONFIG_FILE` {#ocx-config-file}
+### `OCX_BINARY_PIN` {#ocx-binary-pin}
+
+Absolute path to an `ocx` executable. Set automatically by the running ocx on every subprocess it spawns so child ocx invocations — most importantly, the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref] — pin to the same binary that installed the package, instead of falling back to whatever `$PATH` happens to resolve at the launcher site.
+
+```sh
+export OCX_BINARY_PIN=/usr/local/bin/ocx
+```
+
+When `OCX_BINARY_PIN` is unset, generated launchers fall back to `$PATH`-resolved `ocx`. Set it manually only when running a launcher outside an outer ocx invocation and you want to pin a specific binary (typical use: a wrapper that records arguments, or a release-candidate binary tested side-by-side with the installed one).
+
+### `OCX_CONFIG` {#ocx-config}
 
 Path to an extra [configuration file][config-ref] to load. The file layers on top of the discovered tier chain (system, user, `$OCX_HOME/config.toml`) at highest file-tier precedence — it does not replace them. Use it to refine ambient config without rewriting it, or combine with [`OCX_NO_CONFIG`](#ocx-no-config) for a fully hermetic load.
 
 Equivalent to the `--config` CLI flag, but injectable via environment — the intended use is CI and Docker setups where the env is controlled but the command line is not.
 
 ```sh
-export OCX_CONFIG_FILE=/etc/ocx/ci.toml
+export OCX_CONFIG=/etc/ocx/ci.toml
 ```
 
-If both `OCX_CONFIG_FILE` and `--config` are set, both load — `--config` sits at the highest file-tier precedence and wins on conflicting scalars. Missing files produce a clear error with the path.
+If both `OCX_CONFIG` and `--config` are set, both load — `--config` sits at the highest file-tier precedence and wins on conflicting scalars. Missing files produce a clear error with the path.
 
-**Escape hatch**: setting this to the empty string (`OCX_CONFIG_FILE=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
+**Escape hatch**: setting this to the empty string (`OCX_CONFIG=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
 
 ### `OCX_DEFAULT_REGISTRY` {#ocx-default-registry}
 
@@ -88,7 +102,7 @@ If not set, defaults to `~/.ocx`.
 export OCX_HOME="/opt/ocx"
 ```
 
-OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [OCX home tier in the Configuration reference][config-home-tier].
+OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [OCX home tier in the Configuration in-depth page][config-home-tier].
 
 ### `OCX_INDEX` {#ocx-index}
 
@@ -132,7 +146,7 @@ If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) 
 
 ### `OCX_NO_CONFIG` {#ocx-no-config}
 
-When set to a [truthy value](#truthy-values), OCX skips the **discovered** [configuration][config-ref] chain — no system, user, or `$OCX_HOME/config.toml` is loaded. Explicit paths supplied via [`--config`][arg-config] or [`OCX_CONFIG_FILE`](#ocx-config-file) still load, because they represent deliberate intent rather than ambient environment.
+When set to a [truthy value](#truthy-values), OCX skips the **discovered** [configuration][config-ref] chain — no system, user, or `$OCX_HOME/config.toml` is loaded. Explicit paths supplied via [`--config`][arg-config] or [`OCX_CONFIG`](#ocx-config) still load, because they represent deliberate intent rather than ambient environment.
 
 Use this for CI reproducibility: locked workflows should ignore any ambient config that might leak in from the runner image or a mounted home directory.
 
@@ -264,9 +278,13 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-offline]: command-line.md#arg-offline
 [arg-remote]: command-line.md#arg-remote
 
+<!-- in-depth -->
+[exec-modes-ref]: ../in-depth/environments.md#visibility-views
+[entrypoints-ref]: ../in-depth/entry-points.md
+
 <!-- reference -->
 [config-ref]: ./configuration.md
-[config-home-tier]: ./configuration.md#config-home-tier
+[config-home-tier]: ../in-depth/configuration.md#tier-ocx-home
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote

@@ -7,14 +7,18 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// A single resolved package → content-path entry.
+/// A single resolved package → package-root entry.
+///
+/// `path` is the package root directory (parent of `content/` and
+/// `entrypoints/`). Consumers traverse into `<path>/content/` for the
+/// installed files or `<path>/entrypoints/` for generated launchers.
 #[derive(Serialize)]
 pub struct PathEntry {
     pub package: String,
     pub path: PathBuf,
 }
 
-/// Ordered list of resolved content paths, one per requested package.
+/// Ordered list of resolved package roots, one per requested package.
 ///
 /// Plain format: two-column table (Package | Path).
 ///

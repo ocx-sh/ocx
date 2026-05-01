@@ -58,7 +58,7 @@ pub enum Error {
     Config(#[from] crate::config::error::Error),
     /// A package operation failed.
     #[error(transparent)]
-    Package(#[from] crate::package::error::Error),
+    Package(Box<crate::package::error::Error>),
     /// A shell operation failed.
     #[error(transparent)]
     Shell(#[from] crate::shell::error::Error),
@@ -78,6 +78,64 @@ pub enum Error {
     /// A pinned identifier validation failed.
     #[error(transparent)]
     PinnedIdentifier(#[from] crate::oci::pinned_identifier::PinnedIdentifierError),
+
+    /// An entrypoint's `target` template could not be resolved at install time.
+    ///
+    /// Distinct from [`crate::package::error::Error::EntrypointTargetInvalid`],
+    /// which fires during publish-time validation. This variant signals a
+    /// failure that surfaced only when the launcher generator tried to bake
+    /// the resolved target on the consumer's host.
+    #[error("entrypoint '{name}' has invalid target: {source}")]
+    EntrypointInstallFailed {
+        name: String,
+        #[source]
+        source: Box<crate::package::metadata::template::TemplateError>,
+    },
+
+    /// A string baked into an install-time launcher contains a character that
+    /// cannot be safely embedded in either the Unix `.sh` or Windows `.cmd`
+    /// template (single-quote, percent, double-quote, NUL, CR, LF). The unsafe
+    /// set is owned by `crate::package_manager::launcher`.
+    #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
+    LauncherUnsafeCharacter { value: String, character: char },
+}
+
+fn launcher_unsafe_hint(c: char) -> &'static str {
+    match c {
+        '\'' => {
+            "single quotes cannot appear in installation paths — relocate $OCX_HOME to a directory whose absolute path has no apostrophe"
+        }
+        '"' => "double quotes break Windows launcher quoting — relocate the path to a directory without `\"`",
+        '%' => "percent triggers cmd.exe variable expansion — relocate the path to a directory without `%`",
+        '\n' | '\r' | '\0' => "control characters cannot be embedded in launcher scripts",
+        _ => "remove the offending character from the path",
+    }
+}
+
+impl From<crate::package::error::Error> for Error {
+    fn from(e: crate::package::error::Error) -> Self {
+        Error::Package(Box::new(e))
+    }
+}
+
+impl From<crate::package_manager::error::PackageErrorKind> for Error {
+    fn from(kind: crate::package_manager::error::PackageErrorKind) -> Self {
+        use crate::package_manager::error::PackageErrorKind;
+        match kind {
+            PackageErrorKind::Internal(e) => e,
+            other => {
+                // Wrap non-internal kinds in a single-entry ResolveFailed batch.
+                // The error message is preserved via `PackageError::Display`.
+                let batch_err = crate::package_manager::error::Error::ResolveFailed(vec![
+                    crate::package_manager::error::PackageError::new(
+                        crate::oci::Identifier::new_registry("", ""),
+                        other,
+                    ),
+                ]);
+                Error::PackageManager(batch_err)
+            }
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -146,7 +204,7 @@ impl ClassifyExitCode for Error {
             Self::Compression(e) => e.classify(),
             Self::Ci(e) => e.classify(),
             Self::Config(e) => e.classify(),
-            Self::Package(e) => e.classify(),
+            Self::Package(e) => e.as_ref().classify(),
             // Shell errors have no specific exit code yet; defer to chain walker.
             Self::Shell(_) => None,
             Self::OciIndex(e) => e.classify(),
@@ -154,6 +212,8 @@ impl ClassifyExitCode for Error {
             Self::Digest(e) => e.classify(),
             Self::Dependency(e) => e.classify(),
             Self::PinnedIdentifier(e) => e.classify(),
+            Self::EntrypointInstallFailed { source, .. } => source.classify(),
+            Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
         }
     }
 }

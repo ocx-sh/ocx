@@ -26,6 +26,7 @@ pub struct Context {
     default_index: oci::index::Index,
     manager: package_manager::PackageManager,
     default_registry: String,
+    config_view: env::OcxConfigView,
 }
 
 impl Context {
@@ -63,7 +64,7 @@ impl Context {
         let tag_root = options
             .index
             .clone()
-            .or_else(|| env::var("OCX_INDEX").map(std::path::PathBuf::from))
+            .or_else(|| env::var(env::keys::OCX_INDEX).map(std::path::PathBuf::from))
             .unwrap_or_else(|| file_structure.tags.root().to_path_buf());
         let local_index = index::LocalIndex::new(index::LocalConfig {
             tag_store: TagStore::new(tag_root),
@@ -106,6 +107,18 @@ impl Context {
             &default_registry,
         );
 
+        // Capture the absolute path of the running ocx so subprocess spawns
+        // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
+        // on whatever `$PATH` resolves at the launcher site. Falling back to
+        // the canonical `ocx` name lets ocx still operate when `current_exe()`
+        // fails (e.g. binary deleted under a long-running process); the child
+        // launcher's `${OCX_BINARY_PIN:-ocx}` form then degrades to `$PATH`-lookup.
+        let self_exe = std::env::current_exe().unwrap_or_else(|e| {
+            log::warn!("Could not resolve current exe: {e}");
+            std::path::PathBuf::from("ocx")
+        });
+        let config_view = options.as_view(self_exe);
+
         Ok(Context {
             remote_client,
             remote_index,
@@ -116,6 +129,7 @@ impl Context {
             default_index: selected_index,
             manager,
             default_registry,
+            config_view,
         })
     }
 
@@ -153,5 +167,12 @@ impl Context {
 
     pub fn manager(&self) -> &package_manager::PackageManager {
         &self.manager
+    }
+
+    /// Resolution-affecting policy snapshot to forward to subprocess spawns
+    /// via [`env::Env::apply_ocx_config`]. Built from parsed `ContextOptions`
+    /// at init time — beats stale parent-shell `OCX_*` exports.
+    pub fn config_view(&self) -> &env::OcxConfigView {
+        &self.config_view
     }
 }

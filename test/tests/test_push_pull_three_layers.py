@@ -30,9 +30,7 @@ def _bundle_layer(ocx: OcxRunner, layer_dir: Path, tmp_path: Path, *, ext: str =
     bundle = tmp_path / f"{layer_dir.name}.{ext}"
     metadata_path = tmp_path / f"{layer_dir.name}-meta.json"
     metadata_path.write_text(json.dumps({
-        "type": "bundle",
-        "version": 1,
-        "env": [
+        "type": "bundle", "version": 1, "env": [
             {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         ],
     }))
@@ -58,9 +56,7 @@ def test_push_pull_three_layers(ocx: OcxRunner, unique_repo: str, tmp_path: Path
 
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle",
-        "version": 1,
-        "env": [
+        "type": "bundle", "version": 1, "env": [
             {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         ],
     }))
@@ -75,7 +71,7 @@ def test_push_pull_three_layers(ocx: OcxRunner, unique_repo: str, tmp_path: Path
     ocx.plain("index", "update", short)
 
     result = ocx.json("install", short)
-    content = Path(result[short]["path"])
+    content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)
     assert (content / "lib" / "liba.so").exists(), "Layer A file missing"

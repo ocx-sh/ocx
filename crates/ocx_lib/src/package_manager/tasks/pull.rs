@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinSet;
@@ -11,7 +12,10 @@ use tracing::{Instrument, info_span};
 use crate::{
     MEDIA_TYPE_PACKAGE_V1, file_structure, log, media_type_select_some, oci,
     package::{install_info::InstallInfo, install_status::InstallStatus, metadata, resolved_package::ResolvedPackage},
-    package_manager::{self, error::PackageError, error::PackageErrorKind},
+    package_manager::{
+        self, composer,
+        error::{PackageError, PackageErrorKind},
+    },
     prelude::SerdeExt,
     utility::{self, singleflight},
 };
@@ -21,7 +25,15 @@ use super::super::PackageManager;
 /// Singleflight group capacity — maximum number of unique
 /// [`PinnedIdentifier`](oci::PinnedIdentifier)s (root packages + transitive
 /// dependencies) tracked across all packages in a single `pull_all` call.
-const MAX_NODES: usize = 1024;
+///
+/// 8192 is the soft worst-case bound for realistic large-closure workloads:
+/// mise-style toolchains with 50+ tools each carrying 30–50 transitive deps
+/// plausibly push peak in-flight key counts above the previous 1024 cap,
+/// which would surface as `singleflight::Error::CapacityExceeded` and abort
+/// the install. The cap is intentionally hard rather than backpressuring —
+/// hitting 8192 in-flight singleflight keys signals a pathological closure
+/// that warrants a publisher-side review, not a silent slow-down.
+const MAX_NODES: usize = 8192;
 
 /// How long a waiter blocks on the singleflight watch channel for a leader
 /// to complete. This is **not** the OCI download timeout — the OCI client
@@ -201,7 +213,7 @@ async fn setup_impl(
             // so overlapping entries are no-ops; only the unique entries
             // (e.g., the waiter's distinct image-index digest) get linked.
             super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.content, &resolved.chain)
+                .link_blobs(&info.dir().content(), &resolved.chain)
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
@@ -243,7 +255,7 @@ async fn setup_owned(
             // resolved via a different image-index path (alias tag). See
             // the waiter branch in `setup_impl` for the same invariant.
             super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.content, &resolved.chain)
+                .link_blobs(&info.dir().content(), &resolved.chain)
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
@@ -273,7 +285,7 @@ async fn setup_owned(
                 pinned
             );
             super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.content, &resolved.chain)
+                .link_blobs(&info.dir().content(), &resolved.chain)
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
@@ -285,6 +297,12 @@ async fn setup_owned(
     let client = mgr.client().map_err(PackageErrorKind::Internal)?;
     let manifest = resolved.final_manifest.clone();
     let metadata = client.pull_metadata(pinned, Some(&manifest)).await?;
+    // Reject malformed metadata at the ingress boundary — refuse to write
+    // unvalidated metadata to disk so the consumption-side `load_object_data`
+    // validation never has to deal with publisher-side bugs after the fact.
+    let metadata: metadata::Metadata = metadata::ValidMetadata::try_from(metadata)
+        .map_err(PackageErrorKind::Internal)?
+        .into();
 
     // Validate manifest before any extraction work. Zero layers is valid —
     // the package is a config-only artifact whose `content/` is the empty
@@ -343,6 +361,40 @@ async fn setup_owned(
         .await
         .map_err(PackageErrorKind::Internal)?;
 
+    // Entry point launcher generation.
+    // Launchers are written into pkg.entrypoints() — the temp dir's entrypoints/ sibling —
+    // BEFORE post_download_actions so they are carried by the existing atomic move.
+    // The launcher BAKES THE FINAL packages/<digest>/ package-root path (resolved via
+    // `fs.packages.path(pinned)`), NOT the temp staging path: the launcher file
+    // moves atomically with the package, but the path it bakes must reference the
+    // post-move location to remain valid after the move.
+    if let Some(entrypoints) = metadata.entrypoints()
+        && !entrypoints.is_empty()
+    {
+        use crate::package::metadata::dependency::DependencyName;
+        use crate::package::metadata::env::dep_context::DependencyContext;
+        let dep_contexts: std::collections::HashMap<DependencyName, DependencyContext> = metadata
+            .dependencies()
+            .iter()
+            .zip(dependencies.iter())
+            .map(|(decl, info)| {
+                let name = decl.name();
+                // `info` is already an `Arc<InstallInfo>` from
+                // `setup_dependencies`; clone the Arc instead of re-allocating
+                // a fresh `Arc::new(info.clone())` (the previous shape).
+                let ctx = DependencyContext::full(Arc::clone(info));
+                (name, ctx)
+            })
+            .collect();
+        let dest = pkg.entrypoints();
+        // Bake the post-move package-root path into the launcher so it remains
+        // valid after the temp→final atomic rename.
+        let final_pkg_root = fs.packages.path(pinned);
+        crate::package_manager::launcher::generate(&final_pkg_root, entrypoints, &dep_contexts, &dest)
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+    }
+
     // Build resolved package and enrich temp dir.
     // Order invariant: setup_dependencies returns results in declaration order.
     let resolved_package = ResolvedPackage::new().with_dependencies(
@@ -350,8 +402,29 @@ async fn setup_owned(
             .dependencies()
             .iter()
             .zip(dependencies.iter())
-            .map(|(decl, info)| (info.identifier.clone(), info.resolved.clone(), decl.visibility)),
+            .map(|(decl, info)| (info.identifier().clone(), info.resolved().clone(), decl.visibility)),
     );
+
+    // Stage 1 entrypoint collision check — runs against the interface
+    // projection of the transitive closure, before `resolve.json` is
+    // persisted. Catches user-facing duplicate launcher names at install
+    // time so the bad state never reaches disk.
+    //
+    // Scope: interface-projection only (`tc_entry.visibility.has_interface()`).
+    // Private-surface duplicates that arise when a private-edge dep
+    // contributes its own entrypoint synth-PATH under `--self` are
+    // deliberately tolerated and resolved at runtime by topological PATH
+    // order (root prepends last so root wins). See `adr_two_env_composition.md`.
+    {
+        let root_info = Arc::new(InstallInfo::new(
+            pinned.clone(),
+            metadata.clone(),
+            resolved_package.clone(),
+            pkg.clone(),
+        ));
+        composer::check_entrypoints(std::slice::from_ref(&root_info), &fs.packages).await?;
+    }
+
     post_download_actions(&pkg, pinned, &resolved_package).await?;
 
     // Create remaining forward-ref symlinks in temp dir BEFORE move — targets
@@ -410,13 +483,22 @@ async fn acquire_temp_dir(
 /// the singleflight group internally. Diamond dependencies are deduplicated
 /// automatically — the first task to claim a dependency does the work, and
 /// all others block on the watch channel.
+///
+/// Returns `Vec<Arc<InstallInfo>>` rather than `Vec<InstallInfo>` so the
+/// caller (`setup_owned`) can hand each dep straight to
+/// [`DependencyContext::full(Arc<InstallInfo>)`](crate::package::metadata::env::dep_context::DependencyContext::full)
+/// without re-allocating an `Arc` (and cloning the underlying `InstallInfo`)
+/// per direct dep. The Arc-sharing invariant introduced by the metadata
+/// pipeline (commit 40b001f) is meant to live end-to-end on this path; the
+/// previous `Vec<InstallInfo>` return type forced the consumer to
+/// `Arc::new(info.clone())` and undid the saving.
 async fn setup_dependencies(
     mgr: &PackageManager,
     metadata: &crate::package::metadata::Metadata,
     parent: &oci::PinnedIdentifier,
     platforms: Vec<oci::Platform>,
     groups: SetupGroups,
-) -> Result<Vec<InstallInfo>, PackageErrorKind> {
+) -> Result<Vec<Arc<InstallInfo>>, PackageErrorKind> {
     let deps = metadata.dependencies();
     if deps.is_empty() {
         return Ok(Vec::new());
@@ -437,13 +519,20 @@ async fn setup_dependencies(
         let groups = groups.clone();
         tasks.spawn(async move {
             let info = setup_with_tracker(&mgr, &dep_id, platforms, groups).await?;
-            Ok::<_, PackageErrorKind>((idx, info))
+            Ok::<_, PackageErrorKind>((idx, Arc::new(info)))
         });
     }
 
-    let mut results: Vec<Option<InstallInfo>> = vec![None; deps.len()];
+    let mut results: Vec<Option<Arc<InstallInfo>>> = vec![None; deps.len()];
     while let Some(join_result) = tasks.join_next().await {
-        let (idx, info) = join_result.expect("dependency setup task panicked")?;
+        // Preserve the original task panic for diagnostics: per
+        // `quality-rust.md` Async Patterns, resume_unwind on panic and
+        // panic with the JoinError context on cancellation.
+        let (idx, info) = match join_result {
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("dependency setup task aborted: {e}"),
+            Ok(v) => v,
+        }?;
         results[idx] = Some(info);
     }
 
@@ -488,7 +577,7 @@ async fn move_temp_to_object_store(
 ) -> Result<InstallInfo, PackageErrorKind> {
     let output_path = fs.packages.path(identifier);
     let temp_path = temp.dir.dir.clone();
-    let content = fs.packages.content(identifier);
+    let pkg = fs.packages.package_dir(identifier);
 
     crate::utility::fs::move_dir(&temp_path, &output_path)
         .await
@@ -496,12 +585,7 @@ async fn move_temp_to_object_store(
 
     drop(temp);
 
-    Ok(InstallInfo {
-        identifier: identifier.clone(),
-        metadata: metadata.clone(),
-        resolved,
-        content,
-    })
+    Ok(InstallInfo::new(identifier.clone(), metadata.clone(), resolved, pkg))
 }
 
 /// Extracts all layers referenced by a manifest in parallel, returning their
@@ -545,9 +629,16 @@ async fn extract_layers(
         });
     }
 
-    let mut results: Vec<Option<oci::Digest>> = (0..tasks.len()).map(|_| None).collect();
+    let mut results: Vec<Option<oci::Digest>> = vec![None; tasks.len()];
     while let Some(join_res) = tasks.join_next().await {
-        let (idx, task_res) = join_res.expect("layer extraction task panicked");
+        // Preserve the original task panic for diagnostics: per
+        // `quality-rust.md` Async Patterns, resume_unwind on panic and
+        // panic with the JoinError context on cancellation.
+        let (idx, task_res) = match join_res {
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("layer extraction task aborted: {e}"),
+            Ok(v) => v,
+        };
         results[idx] = Some(task_res?);
     }
     Ok(results.into_iter().flatten().collect())
@@ -695,9 +786,10 @@ async fn extract_layer_inner(
 /// The caller is responsible for pre-creating `pkg.refs_deps_dir()` via an
 /// async `tokio::fs::create_dir_all` — this helper stays sync so it does not
 /// introduce blocking I/O into an async context.
+#[allow(clippy::result_large_err)]
 fn link_dependencies_in_temp(
     pkg: &file_structure::PackageDir,
-    dep_infos: &[InstallInfo],
+    dep_infos: &[Arc<InstallInfo>],
 ) -> Result<(), PackageErrorKind> {
     if dep_infos.is_empty() {
         return Ok(());
@@ -706,10 +798,10 @@ fn link_dependencies_in_temp(
     for info in dep_infos {
         // The dep's digest is already in hand via its pinned identifier —
         // no path-based recovery needed.
-        let dep_digest = info.identifier.digest();
+        let dep_digest = info.identifier().digest();
         let name = crate::file_structure::cas_ref_name(&dep_digest);
         let link_path = deps_dir.join(name);
-        crate::symlink::create(&info.content, &link_path).map_err(PackageErrorKind::Internal)?;
+        crate::symlink::create(info.dir().content(), &link_path).map_err(PackageErrorKind::Internal)?;
     }
     Ok(())
 }
@@ -724,6 +816,7 @@ fn link_dependencies_in_temp(
 /// The caller is responsible for pre-creating `pkg.refs_layers_dir()` via an
 /// async `tokio::fs::create_dir_all` — this helper stays sync so it does not
 /// introduce blocking I/O into an async context.
+#[allow(clippy::result_large_err)]
 fn link_layers_in_temp(
     pkg: &file_structure::PackageDir,
     registry: &str,

@@ -15,6 +15,10 @@ use crate::{api, conventions::platforms_or_default, options};
 /// current symlinks — it only populates the content-addressed object store.
 /// This is the recommended primitive for CI environments where reproducibility
 /// matters and symlink management is unnecessary.
+///
+/// Reports the package root directory for each package — the parent of
+/// `content/` and `entrypoints/`. Traverse into `<root>/content/` for the
+/// installed files or `<root>/entrypoints/` for generated launchers.
 #[derive(Parser, Clone)]
 pub struct PackagePull {
     #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
@@ -39,7 +43,7 @@ impl PackagePull {
             .zip(install_infos.iter())
             .map(|(raw, info)| api::data::paths::PathEntry {
                 package: raw.raw().to_string(),
-                path: info.content.clone(),
+                path: info.dir().root().to_path_buf(),
             })
             .collect();
         let paths = api::data::paths::Paths::new(entries);

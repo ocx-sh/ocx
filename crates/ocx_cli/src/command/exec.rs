@@ -4,76 +4,103 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{env, oci};
+use ocx_lib::env;
+use ocx_lib::env::OcxConfigView;
+use ocx_lib::package::metadata::env::entry::Entry as EnvEntry;
+use ocx_lib::package_manager::launcher;
+use ocx_lib::utility::child_process;
 
 use crate::{conventions::*, options};
 
 /// Runs installed packages.
+///
+/// Each positional accepts an OCI identifier (e.g. `node:20`).
+/// Packages are resolved through the index and auto-installed when missing.
 #[derive(Parser)]
 pub struct Exec {
-    /// Run in interactive mode, which will keep the environment variables set after the command finishes.
-    ///
-    /// This is useful for shells that support it, such as PowerShell and Elvish. For other shells, this flag will be ignored.
-    #[clap(short = 'i', long = "interactive", default_value_t = false)]
-    interactive: bool,
-
     /// Start with a clean environment containing only the package variables, instead of inheriting the current shell environment.
     #[clap(long = "clean", default_value_t = false)]
     clean: bool,
 
-    /// Target platforms to consider when resolving packages. If not specified, only supported platforms will be considered.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM", num_args = 0..)]
-    platforms: Vec<oci::Platform>,
+    /// Expose the package's full env, including its private (self-only)
+    /// entries. Off by default: only public + interface entries are loaded
+    /// (the consumer view). Generated launchers use `ocx launcher exec` which
+    /// enables self-view internally.
+    ///
+    /// See https://ocx.sh/docs/in-depth/environments#visibility-views for the full view semantics.
+    #[clap(long = "self", default_value_t = false)]
+    self_view: bool,
 
-    /// Package identifiers to install.
+    #[clap(flatten)]
+    platforms: options::Platforms,
+
+    /// Package identifiers to layer environment from.
+    ///
+    /// Each value is a bare OCI identifier (e.g. `node:20`); identifiers are
+    /// resolved through the index and auto-installed when missing.
     #[clap(required = true, num_args = 1.., value_terminator = "--")]
     packages: Vec<options::Identifier>,
 
     /// Command to execute, with arguments. The command will be executed with the environment with the packages.
-    #[clap(allow_hyphen_values = true, num_args = 1..)]
+    ///
+    /// `required = true` + `num_args = 1..` means clap rejects the invocation
+    /// before [`Self::execute`] runs when the slice would be empty, so the
+    /// `.split_first().expect(...)` below is sound: clap is the single source
+    /// of truth for non-emptiness, and we depend on its guarantee rather than
+    /// duplicating the check.
+    #[clap(allow_hyphen_values = true, required = true, num_args = 1..)]
     command: Vec<String>,
 }
 
 impl Exec {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let platforms = platforms_or_default(&self.platforms);
-        let identifier = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
-
         let manager = context.manager();
-        let info = manager.find_or_install_all(identifier, platforms).await?;
+        let platforms = platforms_or_default(self.platforms.as_slice());
 
-        let entries = manager.resolve_env(&info).await?;
+        let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
+        let infos = manager.find_or_install_all(identifiers, platforms).await?;
+        let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
+            infos.into_iter().map(std::sync::Arc::new).collect();
+        let entries = manager.resolve_env(&install_infos, self.self_view).await?;
+        self.run_with_env(entries, context.config_view()).await
+    }
+
+    /// Run the configured command with the given resolved environment.
+    ///
+    /// `child_process::exec` diverges on success on every platform —
+    /// Unix `execvp(2)`s, Windows spawns + waits + `process::exit`s — so
+    /// this function only returns when start-up itself fails. The
+    /// `anyhow::Result<ExitCode>` shape is kept for symmetry with sibling
+    /// commands; the `Ok` arm is unreachable.
+    async fn run_with_env(&self, entries: Vec<EnvEntry>, config_view: &OcxConfigView) -> anyhow::Result<ExitCode> {
         let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
         process_env.apply_entries(&entries);
+        // Forward the running ocx's resolution-affecting config (binary path,
+        // offline/remote, config file, index) to any child ocx (e.g. through
+        // a generated entrypoint launcher). Runs after `Env::clean()` /
+        // `Env::new()` so the outer ocx's parsed state is the sole authority
+        // for `OCX_*` keys on the child env — no ambient parent-shell export
+        // can override it.
+        process_env.apply_ocx_config(config_view);
+        // Ensure the child PATHEXT lists the OCX launcher extension so generated
+        // `.cmd` shims are resolvable. No-op on non-Windows.
+        launcher::emplace_pathext(&mut process_env);
 
-        use std::process::Stdio;
-        use tokio::process::Command;
-
-        let Some((command, args)) = self.command.split_first() else {
-            return Err(anyhow::anyhow!("No command provided to execute."));
-        };
+        // clap enforces `required = true, num_args = 1..` on the `command`
+        // field — `self.command` is always non-empty at this point.
+        let (command, args) = self
+            .command
+            .split_first()
+            .expect("clap required=true guarantees at least one command element");
 
         let resolved = process_env.resolve_command(command);
 
-        let mut child_process = Command::new(&resolved)
-            .args(args)
-            .stdin(if self.interactive {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
-            })
-            .stderr(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .envs(process_env)
-            .spawn()?;
-
-        let status = child_process.wait().await?;
-        if !status.success() {
-            match status.code() {
-                Some(code) => return Ok(ExitCode::from(code as u8)),
-                None => return Ok(ExitCode::FAILURE),
-            }
-        }
-        Ok(ExitCode::SUCCESS)
+        // Replace this process with the child on Unix (PID inherited via
+        // `execvp(2)`); on Windows spawn+wait then `process::exit`, since
+        // `CreateProcess` has no exec equivalent. Either way the helper
+        // diverges on success — only start-up failures fall through to
+        // the error-wrapping path below.
+        let err = child_process::exec(&resolved, args, process_env);
+        Err(anyhow::Error::from(err).context(format!("failed to run '{}'", resolved.display())))
     }
 }

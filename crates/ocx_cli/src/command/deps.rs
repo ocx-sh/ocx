@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
 use ocx_lib::{
@@ -12,9 +13,10 @@ use ocx_lib::{
     oci,
     package::{
         install_info::InstallInfo,
-        metadata::{Metadata, visibility::Visibility},
+        metadata::{Metadata, ValidMetadata, visibility::Visibility},
         resolved_package::ResolvedPackage,
     },
+    package_manager::composer,
     prelude::SerdeExt,
     utility,
 };
@@ -30,6 +32,17 @@ use crate::{api, conventions::platforms_or_default, options};
 /// Operates on locally-present packages only — no auto-install.
 #[derive(Parser)]
 pub struct Deps {
+    /// Expose the package's full dep set, including private (self-only)
+    /// edges. Affects `--flat` (the resolved evaluation order is filtered
+    /// through `tc_entry.visibility.has_private()` instead of
+    /// `has_interface()`). See `ocx exec --help` for the full surface
+    /// semantics.
+    ///
+    /// Generated launchers embed `--self` automatically; avoid passing it
+    /// directly unless building a launcher equivalent.
+    #[clap(long = "self", default_value_t = false)]
+    self_view: bool,
+
     /// Show the flattened evaluation order instead of the tree.
     #[clap(long, conflicts_with = "why")]
     flat: bool,
@@ -42,9 +55,8 @@ pub struct Deps {
     #[clap(long, value_name = "N", conflicts_with_all = ["flat", "why"])]
     depth: Option<usize>,
 
-    /// Target platforms to consider when resolving packages.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::Platforms,
 
     /// Package identifiers to inspect.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -53,7 +65,7 @@ pub struct Deps {
 
 impl Deps {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let platforms = platforms_or_default(&self.platforms);
+        let platforms = platforms_or_default(self.platforms.as_slice());
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();
@@ -61,16 +73,50 @@ impl Deps {
         let fs = manager.file_structure();
 
         if self.flat {
-            // Validate no conflicts among visible deps.
-            manager.resolve_visible_set(&infos).await?;
+            // Walk each info's pre-built TC and emit entries that belong to
+            // the requested surface:
+            //
+            //   --self off (default): interface surface — emit entries where
+            //     `dep.visibility.has_interface()` is true (PUBLIC + INTERFACE
+            //     edges). This mirrors what `ocx exec` and `ocx env` see.
+            //
+            //   --self on: private surface — emit entries where
+            //     `dep.visibility.has_private()` is true (PUBLIC + PRIVATE
+            //     edges). This is the full self-runtime view used by generated
+            //     launchers.
+            //
+            // Before listing, scan the surface-projected union TC for digest
+            // conflicts on the same `registry/repo` so users see a
+            // `conflicting` warning when multiple roots pull incompatible
+            // versions of the same package that actually contribute to the
+            // active surface (W11 contract — see
+            // test_deps_flat_conflicting_digests_reports_error). Sealed-edge
+            // TC entries that cannot collide at runtime are excluded.
+            //
+            // Reuse the composer's helper so env-time and deps-time conflict
+            // detection follow the same first-seen-wins rule under the same
+            // surface gate.
+            let info_arcs: Vec<Arc<InstallInfo>> = infos.iter().cloned().map(Arc::new).collect();
+            composer::warn_repo_digest_conflicts(&info_arcs, self.self_view);
 
+            // Dedup key: strip the advisory tag so two identifiers for the
+            // same registry/repo/digest (one tagged, one bare) collapse to one
+            // entry. Using only `digest()` would incorrectly merge two
+            // distinct registry/repo packages that share a manifest digest.
             let mut seen = HashSet::new();
             let mut entries = Vec::new();
             for info in &infos {
-                // Process resolved deps (accessing .identifier through ResolvedDependency),
-                // then the root package itself.
-                for dep in &info.resolved.dependencies {
-                    if seen.insert(dep.identifier.digest()) {
+                for dep in &info.resolved().dependencies {
+                    // Surface gate: skip entries not visible on the requested surface.
+                    let visible = if self.self_view {
+                        dep.visibility.has_private()
+                    } else {
+                        dep.visibility.has_interface()
+                    };
+                    if !visible {
+                        continue;
+                    }
+                    if seen.insert(dep.identifier.strip_advisory()) {
                         entries.push(api::data::deps::FlatDependency {
                             identifier: oci::Identifier::from(dep.identifier.clone()),
                             visibility: dep.visibility,
@@ -78,10 +124,10 @@ impl Deps {
                     }
                 }
                 // Root packages are always public — they are the roots of env resolution.
-                if seen.insert(info.identifier.digest()) {
+                if seen.insert(info.identifier().strip_advisory()) {
                     entries.push(api::data::deps::FlatDependency {
-                        identifier: oci::Identifier::from(info.identifier.clone()),
-                        visibility: ocx_lib::package::metadata::visibility::Visibility::Public,
+                        identifier: oci::Identifier::from(info.identifier().clone()),
+                        visibility: Visibility::PUBLIC,
                     });
                 }
             }
@@ -92,12 +138,12 @@ impl Deps {
             let mut all_paths = Vec::new();
 
             for info in &infos {
-                let mut current_path = vec![oci::Identifier::from(info.identifier.clone())];
+                let mut current_path = vec![oci::Identifier::from(info.identifier().clone())];
                 find_paths_to(fs, info, &why_id, &mut current_path, &mut all_paths).await;
             }
 
             if all_paths.is_empty() {
-                let root_names: Vec<_> = infos.iter().map(|r| r.identifier.to_string()).collect();
+                let root_names: Vec<_> = infos.iter().map(|r| r.identifier().to_string()).collect();
                 let msg = format!("{} is not a dependency of {}", why_id, root_names.join(", "));
                 let data = api::data::deps::DependenciesTrace {
                     paths: vec![],
@@ -136,7 +182,7 @@ fn build_tree_node<'a>(
     seen: &'a mut HashSet<String>,
 ) -> Pin<Box<dyn Future<Output = api::data::deps::Dependency> + 'a>> {
     Box::pin(async move {
-        let key = info.identifier.to_string();
+        let key = info.identifier().to_string();
         let is_repeated = !seen.insert(key);
 
         let children = if is_repeated || current_depth >= max_depth {
@@ -144,9 +190,9 @@ fn build_tree_node<'a>(
         } else {
             // Resolve declared deps to content paths via resolve.json (not deps/ symlinks).
             // The resolved transitive closure maps (registry, repo) → platform-specific identifier.
-            let resolved_map = resolved_dep_map(&info.resolved);
+            let resolved_map = resolved_dep_map(info.resolved());
             let mut children = Vec::new();
-            for dep in info.metadata.dependencies() {
+            for dep in info.metadata().dependencies() {
                 if let Some(dep_info) = resolve_dep_via_metadata(fs, &dep.identifier, &resolved_map).await {
                     children.push(
                         build_tree_node(fs, &dep_info, Some(dep.visibility), max_depth, current_depth + 1, seen).await,
@@ -157,7 +203,7 @@ fn build_tree_node<'a>(
         };
 
         api::data::deps::Dependency {
-            identifier: info.identifier.clone().into(),
+            identifier: info.identifier().clone().into(),
             repeated: is_repeated,
             visibility,
             dependencies: children,
@@ -176,13 +222,13 @@ fn find_paths_to<'a>(
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async move {
         // Resolve declared deps via resolve.json (not deps/ symlinks).
-        let resolved_map = resolved_dep_map(&info.resolved);
+        let resolved_map = resolved_dep_map(info.resolved());
 
-        for dep in info.metadata.dependencies() {
+        for dep in info.metadata().dependencies() {
             let dep_id = &dep.identifier;
             current_path.push(dep_id.clone().into());
 
-            if oci::Repository::from(&**dep_id) == oci::Repository::from(target) {
+            if oci::Repository::from(dep_id.as_identifier()) == oci::Repository::from(target) {
                 all_paths.push(current_path.clone());
             }
 
@@ -238,12 +284,93 @@ async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),
     );
-    let metadata = metadata.ok()?;
-    let resolved = resolved.ok()?;
-    Some(InstallInfo {
-        identifier,
-        metadata,
-        resolved,
-        content,
-    })
+    // Enforce the ValidMetadata typestate: tampered or invalid metadata is
+    // skipped rather than fed to downstream graph traversal, but the failure
+    // is surfaced as a warning so the user knows a corrupted install exists.
+    let raw_metadata = match metadata {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                package = %identifier,
+                error = %err,
+                "skipping corrupted install: failed to read metadata.json"
+            );
+            return None;
+        }
+    };
+    let metadata = match ValidMetadata::try_from(raw_metadata) {
+        Ok(m) => m.into(),
+        Err(err) => {
+            tracing::warn!(
+                package = %identifier,
+                error = %err,
+                "skipping corrupted install: metadata.json failed validation"
+            );
+            return None;
+        }
+    };
+    let resolved = match resolved {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(
+                package = %identifier,
+                error = %err,
+                "skipping corrupted install: failed to read resolve.json"
+            );
+            return None;
+        }
+    };
+    let dir = ocx_lib::file_structure::PackageDir {
+        dir: content
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| content.clone()),
+    };
+    Some(InstallInfo::new(identifier, metadata, resolved, dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(n: u8) -> String {
+        format!("{:x}", n).repeat(64).chars().take(64).collect()
+    }
+
+    /// `load_install_info` must return `None` when `metadata.json` contains metadata
+    /// that fails `ValidMetadata` validation (e.g. an env token referencing a dep name
+    /// absent from the dependency list).
+    #[tokio::test]
+    async fn load_install_info_returns_none_for_invalid_metadata() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let content = dir.path().join("content");
+        tokio::fs::create_dir_all(&content).await.expect("create content dir");
+
+        // Build metadata that references "ninja" in an env token but declares no such dep.
+        // ValidMetadata::try_from rejects this with an UnknownDependencyRef error.
+        let h = hex(1);
+        let metadata_json = format!(
+            r#"{{"type":"bundle","version":1,"dependencies":[{{"identifier":"ocx.sh/cmake:1@sha256:{h}"}}],"env":[{{"key":"PATH","type":"constant","value":"${{deps.ninja.installPath}}/bin"}}]}}"#
+        );
+        tokio::fs::write(content.with_file_name("metadata.json"), &metadata_json)
+            .await
+            .expect("write metadata.json");
+
+        // Write a valid resolve.json so the only failure comes from metadata validation.
+        // ResolvedPackage uses #[serde(deny_unknown_fields)] — passing a `version` field
+        // would short-circuit the test before it reaches the ValidMetadata gate.
+        let resolve_json = r#"{"dependencies":[]}"#;
+        tokio::fs::write(content.with_file_name("resolve.json"), resolve_json)
+            .await
+            .expect("write resolve.json");
+
+        let identifier: oci::Identifier = format!("ocx.sh/cmake:1@sha256:{h}").parse().expect("valid identifier");
+        let pinned = oci::PinnedIdentifier::try_from(identifier).expect("identifier has digest");
+
+        let result = load_install_info(pinned, content).await;
+        assert!(
+            result.is_none(),
+            "load_install_info must return None for invalid metadata"
+        );
+    }
 }

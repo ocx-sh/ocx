@@ -60,13 +60,13 @@ Every item below maps to a reviewer finding or an explicit user directive. Defer
 | 2 | `Error::Io` variant missing from Error Reference table | doc-reviewer | Warn | Phase 5 |
 | 3 | `OCX_HOME` entry doesn't mention config discovery | doc-reviewer | Warn | Phase 5 |
 | 4 | `command-line.md:75–81` `--config` section under-documented | doc-reviewer | Warn | Phase 5 |
-| 5 | Help text omits `OCX_CONFIG_FILE` and `OCX_NO_CONFIG` | cli-ux | Warn | Phase 4 |
+| 5 | Help text omits `OCX_CONFIG` and `OCX_NO_CONFIG` | cli-ux | Warn | Phase 4 |
 | 6 | ~~`-c` short flag collides with `package push --cascade`~~ — **false positive**, Round 4: `ContextOptions` is `#[command(flatten)]` at the root (no `global = true`), so `-c` on `--config` is consumed before the subcommand and does not collide with `-c` on `--cascade` inside `package push`. No change needed | cli-ux | ~~Warn~~ | dropped |
 | 7 | `RegistryDefaults` not re-exported from `lib.rs` (after rename) | rust-quality + user | Warn | Phase 4 |
 | 8 | `#[must_use]` missing on `Config::resolved_default_registry` | rust-quality | Suggest→Actionable | Phase 4 |
 | 9 | `join_all` for `try_exists` in `discover_paths` | perf | Warn | Phase 4 |
 | 10 | Acceptance test gap: `FileTooLarge` error UX | test-coverage | Warn | Phase 3 |
-| 11 | Acceptance test gap: `--config` overrides `OCX_CONFIG_FILE` (both set, no `OCX_NO_CONFIG`) | test-coverage | Warn | Phase 3 |
+| 11 | Acceptance test gap: `--config` overrides `OCX_CONFIG` (both set, no `OCX_NO_CONFIG`) | test-coverage | Warn | Phase 3 |
 | 12 | Acceptance test gap: layered merge precedence ($OCX_HOME + `--config`) | test-coverage | Warn | Phase 3 |
 | 13 | Unit test gap: `RegistryConfig::merge` None-preserves | test-coverage | Warn | Phase 3 |
 | 14 | Tighten `load_and_merge_rejects_non_regular_file` assertion | test-coverage | Warn | Phase 3 |
@@ -87,7 +87,7 @@ Every item below maps to a reviewer finding or an explicit user directive. Defer
 - **`#[must_use]`** on `Config::resolved_default_registry`
 - **`discover_paths`** perf fix: parallel `try_exists` via `futures::future::join_all` (preserving vector order)
 - **Error message normalization pass** across all `ocx_lib` error modules identified in `research_rust_error_messages.md` (error.rs, auth/error.rs, oci/client/error.rs, oci/index/error.rs, oci/digest/error.rs, package_manager/error.rs, file_structure/error.rs, archive/error.rs, compression/error.rs, ci/error.rs, package/error.rs). Acronyms (JSON, TOML, CI, HTTP, I/O) retain canonical case
-- **Help text expansion** for `--config` to mention `OCX_CONFIG_FILE` and `OCX_NO_CONFIG`
+- **Help text expansion** for `--config` to mention `OCX_CONFIG` and `OCX_NO_CONFIG`
 - **`-c` short flag collision resolution**: drop the short from `--config` (keep long-only). Cascade keeps `-c` because it is the higher-frequency interactive flag within `package push`
 - **Unit test additions**: `RegistryConfig::merge` None-preserves, tightened non-regular-file assertion
 - **Acceptance test additions**: FileTooLarge, layered merge, `--config` wins over env
@@ -216,12 +216,12 @@ pub use config::loader::{ConfigInputs, ConfigLoader};
 | User Action | Expected Outcome | Error Cases |
 |---|---|---|
 | `ocx install cmake:3.28` (happy path) | Exit 0 | — |
-| `ocx --config /bad/path.toml install cmake:3.28` | Exit **79** `NotFound`; stderr: `config file not found: /bad/path.toml (check --config or OCX_CONFIG_FILE)` | — |
+| `ocx --config /bad/path.toml install cmake:3.28` | Exit **79** `NotFound`; stderr: `config file not found: /bad/path.toml (check --config or OCX_CONFIG)` | — |
 | `ocx --config huge.toml install cmake:3.28` where huge.toml > 64 KiB | Exit **78** `ConfigError`; stderr: `config file huge.toml exceeds maximum allowed size (N bytes > 65536 bytes); OCX config files are typically under 1 KiB — did you point at the wrong file?` | — |
 | `ocx --config bad.toml install cmake:3.28` with TOML parse error | Exit **78** `ConfigError`; stderr: `invalid TOML at bad.toml: <parse error>` | — |
-| `OCX_CONFIG_FILE=a.toml ocx --config b.toml install cmake:3.28` with conflicting `[registry] default` in each | Exit 0; `b.toml`'s value wins (acceptance test Added) | — |
+| `OCX_CONFIG=a.toml ocx --config b.toml install cmake:3.28` with conflicting `[registry] default` in each | Exit 0; `b.toml`'s value wins (acceptance test Added) | — |
 | `OCX_NO_CONFIG=1 ocx install cmake:3.28` | Exit 0; discovered chain fully suppressed | — |
-| `ocx --help` | `--config <FILE>` appears in global options with doc comment: "Path to the ocx configuration file. Can also be set via `OCX_CONFIG_FILE`. To disable discovery entirely, set `OCX_NO_CONFIG=1`." | — |
+| `ocx --help` | `--config <FILE>` appears in global options with doc comment: "Path to the ocx configuration file. Can also be set via `OCX_CONFIG`. To disable discovery entirely, set `OCX_NO_CONFIG=1`." | — |
 | `ocx package push --cascade foo bar` | `-c` is the short for `--cascade`; `--config` has no short | — |
 | `ocx install nonexistent_pkg:0` | Exit **79** `NotFound`; stderr: `package not found: nonexistent_pkg` (normalized message) | — |
 | `ocx install cmake:3.28 --offline` when package not cached | Exit **81** `OfflineBlocked`; stderr: `network operation attempted in offline mode` (normalized message) | — |
@@ -368,7 +368,7 @@ Pure API-surface scaffolding. Bodies are `unimplemented!()` where dispatch logic
     ```rust
     /// Path to the ocx configuration file.
     ///
-    /// Can also be set via the `OCX_CONFIG_FILE` environment variable.
+    /// Can also be set via the `OCX_CONFIG` environment variable.
     /// To disable config discovery entirely, set `OCX_NO_CONFIG=1`.
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<std::path::PathBuf>,
@@ -421,7 +421,7 @@ Launch `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) to verif
 
 - [ ] **Test 3.2.1** — `test_file_too_large_errors_with_helpful_message`: write 65 KiB+1 of `#` comments to `$OCX_HOME/config.toml`, run `ocx install nonexistent:0`, assert exit code **78** and stderr contains `"exceeds maximum allowed size"` and `"did you point at the wrong file"`.
   - File: `test/tests/test_config.py`
-- [ ] **Test 3.2.2** — `test_explicit_config_overrides_env_var_config_file`: set `OCX_CONFIG_FILE=env.toml` with `default = "env.example"` AND pass `--config cli.toml` with `default = "cli.example"`, assert `cli.example` wins. **Do not set `OCX_NO_CONFIG`.**
+- [ ] **Test 3.2.2** — `test_explicit_config_overrides_env_var_config_file`: set `OCX_CONFIG=env.toml` with `default = "env.example"` AND pass `--config cli.toml` with `default = "cli.example"`, assert `cli.example` wins. **Do not set `OCX_NO_CONFIG`.**
   - File: `test/tests/test_config.py`
 - [ ] **Test 3.2.3** — `test_layered_merge_home_tier_and_explicit_config`: write `$OCX_HOME/config.toml` with one `[registries.shared]` entry and pass `--config extra.toml` with a different `[registries.other]` entry, assert **both** are resolvable in the merged config. This proves additive layering (not suppression).
   - File: `test/tests/test_config.py`
@@ -432,7 +432,7 @@ Launch `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) to verif
 - [ ] **Test 3.2.6** — `test_exit_code_on_offline_blocks_fetch`: run `ocx --offline install nonexistent:0` with no cached package, assert exit code **81** (`OfflineBlocked`).
   - File: `test/tests/test_offline.py` (or new file `test_exit_codes.py`)
 - [ ] **Test 3.2.7** — `test_exit_code_on_auth_failure`: simulated via a registry serving 401 for a bogus-auth attempt; assert exit code **80** (`AuthError`). *(If the existing registry fixture cannot easily simulate auth failures, defer to a follow-up issue with a link.)*
-- [ ] **Test 3.2.8** — `test_cli_help_mentions_config_env_vars`: run `ocx --help`, assert the `--config` block contains both `OCX_CONFIG_FILE` and `OCX_NO_CONFIG` strings.
+- [ ] **Test 3.2.8** — `test_cli_help_mentions_config_env_vars`: run `ocx --help`, assert the `--config` block contains both `OCX_CONFIG` and `OCX_NO_CONFIG` strings.
   - File: `test/tests/test_config.py`
 - [ ] **Test 3.2.9** — `test_no_config_env_var_suppresses_discovery`: write a home config with `default = "should-be-ignored.example"`, set `OCX_NO_CONFIG=1`, run `ocx install nonexistent:0`, assert `should-be-ignored.example` does NOT appear in output. Locks in the kill-switch scenario from the UX table.
   - File: `test/tests/test_config.py` (may already partially exist — extend if so)
@@ -585,7 +585,7 @@ Order matters: perf refactor → audit → normalize → dispatch → mirror →
 - [ ] **Step 5.3** `website/src/docs/user-guide.md`:
   - **Line 644 (Configuration section table)**: add the macOS platform note.
 - [ ] **Step 5.4** `website/src/docs/reference/command-line.md`:
-  - **Line 75–81 (`--config {#arg-config}`)**: expand from one sentence to: (a) what it does (path to config file), (b) layering behavior (layers on top of discovered tiers, does NOT replace them), (c) existence requirement (missing file is an error), (d) env equivalent (`OCX_CONFIG_FILE`), (e) link to Configuration reference for full precedence rules.
+  - **Line 75–81 (`--config {#arg-config}`)**: expand from one sentence to: (a) what it does (path to config file), (b) layering behavior (layers on top of discovered tiers, does NOT replace them), (c) existence requirement (missing file is an error), (d) env equivalent (`OCX_CONFIG`), (e) link to Configuration reference for full precedence rules.
 - [ ] **Step 5.5** `website/src/docs/getting-started.md`:
   - **Line 209+ (Config file subsection)**: no changes needed — the existing `$OCX_HOME/config.toml` example is platform-neutral.
 - [ ] **Step 5.6** No new doc pages. All changes are edits to existing pages.
@@ -607,7 +607,7 @@ Order matters: perf refactor → audit → normalize → dispatch → mirror →
   - `perf(config): parallelize tier discovery with futures::future::join_all` — Step 4.0
   - `refactor(lib): normalize error messages to Rust API Guidelines style` — Steps 4.1, 4.4, 4.7
   - `refactor(mirror): normalize MirrorError display messages to lowercase rule` — Step 4.6
-  - `docs(cli): expand --config help text to mention OCX_CONFIG_FILE and OCX_NO_CONFIG` — Step 1.5
+  - `docs(cli): expand --config help text to mention OCX_CONFIG and OCX_NO_CONFIG` — Step 1.5
   - `docs(config): correct macOS user-tier path; expand --config and environment references` — Step 5.1–5.5
   - `test(config): add FileTooLarge, merge-precedence, exit-code, help-text, kill-switch acceptance tests` — Phase 3
   - `docs(rules): add quality-rust-errors and quality-rust-exit_codes rule files` — separate commit capturing the extracted quality rules
@@ -632,13 +632,13 @@ Order matters: perf refactor → audit → normalize → dispatch → mirror →
 | User Action | Expected Outcome | Error Cases |
 |---|---|---|
 | Huge config file | Exit 78, hint message | 64 KiB + 1 byte boundary |
-| `--config` + `OCX_CONFIG_FILE` both set | `--config` wins on conflict | Both load (additive) |
+| `--config` + `OCX_CONFIG` both set | `--config` wins on conflict | Both load (additive) |
 | `$OCX_HOME/config.toml` + `--config` | Both merge; disjoint keys survive | Additive layering |
 | Missing `--config` path | Exit 79 | Path in error message |
 | Malformed config TOML | Exit 78 | Path in error |
 | Offline blocked fetch | Exit 81 | Uncached package |
 | Auth failure (if testable) | Exit 80 | 401 registry response |
-| `ocx --help` | Mentions `OCX_CONFIG_FILE`, `OCX_NO_CONFIG` | Regex match in stdout |
+| `ocx --help` | Mentions `OCX_CONFIG`, `OCX_NO_CONFIG` | Regex match in stdout |
 | `ocx -c ...` | Exit 64, clap usage error | `-c` is no longer bound globally |
 
 ### Manual Testing

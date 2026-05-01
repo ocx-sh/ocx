@@ -30,18 +30,18 @@ Concise index of all `ocx` CLI commands. User-facing per-command docs live in [`
 | `find PKGS...` | Resolve installed packages to paths | No | `--candidate`, `--current`, `-p` |
 | `select PKGS...` | Set `current` symlink | No | `-p` |
 | `deselect PKGS...` | Remove `current` symlink | No | — |
-| `deps PKGS...` | Show dependency tree/flat/why | No | `--flat`, `--why`, `--depth`, `-p` |
+| `deps PKGS...` | Show dependency tree/flat/why | No | `--flat`, `--why`, `--depth`, `-p`, `--mode` |
 | `uninstall PKGS...` | Remove candidate symlink | No | `-d/--deselect`, `--purge` |
 | `clean` | GC unreferenced objects | No | `--dry-run` |
-| `env PKGS...` | Print resolved env vars | **Yes** | `--candidate`, `--current`, `-p` |
-| `exec PKGS... -- CMD` | Run command with package env | **Yes** | `-i`, `--clean`, `-p` |
-| `shell env PKGS...` | Shell-specific export lines | No | `-s/--shell`, `-p`, `--candidate/--current` |
+| `env PKGS...` | Print resolved env vars | **Yes** | `--candidate`, `--current`, `-p`, `--mode` |
+| `exec PKGS... -- CMD` | Run command with package env | **Yes** | `-i`, `--clean`, `-p`, `--mode` |
+| `shell env PKGS...` | Shell-specific export lines | No | `-s/--shell`, `-p`, `--candidate/--current`, `--mode` |
 | `shell completion` | Generate completions | No | `--shell` |
 | `shell profile add PKGS...` | Add to shell profile manifest | No | `--candidate`, `--current` |
 | `shell profile remove PKGS...` | Remove from shell profile | No | — |
 | `shell profile list` | List profiled packages | No | — |
-| `shell profile load` | Output profile export lines | No | `-s/--shell` |
-| `index catalog` | List known repositories | No | `--with-tags` |
+| `shell profile load` | Output profile export lines | No | `-s/--shell`, `--mode` |
+| `index catalog` | List known repositories | No | `--tags` |
 | `index list PKGS...` | List tags for packages | No | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote | No | — |
 | `package pull PKGS...` | Download to object store only | N/A (is pull) | `-p` |
@@ -49,7 +49,7 @@ Concise index of all `ocx` CLI commands. User-facing per-command docs live in [`
 | `package push ID CONTENT` | Publish archive to registry | No | `-c/--cascade`, `-n`, `-m`, `-p` |
 | `package describe ID` | Push description metadata | No | `--readme`, `--logo`, `--title` |
 | `package info ID` | Display description metadata | No | `--save-readme`, `--save-logo` |
-| `ci export PKGS...` | Export env to CI system | No | `-p`, `--flavor`, `--candidate/--current` |
+| `ci export PKGS...` | Export env to CI system | No | `-p`, `--flavor`, `--candidate/--current`, `--mode` |
 | `version` | Print version | No | — |
 | `info` | Print version + platform + shell | No | — |
 
@@ -93,3 +93,7 @@ Design intent not visible from flag table — read before changing CLI behavior 
 - **`package describe` / `package info`**: identifier is repository only, tag ignored. `describe` requires at least one of `--readme`, `--logo`, `--title`, `--description`, `--keywords` — no-op invocation rejected, not silently accepted.
 - **`shell profile load`**: silently skips broken entries (no error output). Designed for shell init file as `eval "$(ocx --offline shell profile load)"` — `--offline` essential because env file runs every shell startup, must not touch network.
 - **`env` vs `shell env`**: `env` auto-installs missing packages (`find_or_install_all`); `shell env` does not (`find_all`). Split exists because `shell env` wired into shell init paths where surprise downloads hostile.
+- **`--self` flag** (shared by `exec`, `env`, `shell env`, `shell profile load`, `ci export`, `deps`): selects the private surface — emits vars where `has_private()` is true (`private` and `public`). Default (off) selects the interface surface — emits vars where `has_interface()` is true (`public` and `interface`). See `subsystem-cli.md` Cross-Cutting section.
+- **`exec` identifier form**: `ocx exec` accepts only bare OCI identifiers (e.g. `node:20`); identifiers resolve through the index and auto-install when missing. The former `file://` URI form was removed (generated launchers re-enter via `ocx launcher exec` instead). The `oci://` scheme is not parsed by `oci::Identifier::from_str`.
+- **`launcher exec` internal subcommand**: hidden from `--help` (`#[command(hide = true)]`). Wire ABI is `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Forces `self_view=true` internally. Validates `pkg-root`: must be absolute, canonical inside `$OCX_HOME/packages/`, and contain `metadata.json`. Exits 64 (UsageError) on any validation failure.
+- **Entrypoint collision behavior**: Within a single package, duplicate entrypoint names are rejected at deserialization (`EntrypointError::DuplicateName`). Cross-package collisions (two currently-selected packages with the same entrypoint name on the interface surface) are detected by `composer.rs` at compose time and surface as `PackageErrorKind::EntrypointCollision { name, owners }` (exit code `DataError` = 65). Entries that do not enter the active surface (e.g., `private` entries when composing the interface surface) are excluded from collision detection — they cannot collide at runtime under that surface.

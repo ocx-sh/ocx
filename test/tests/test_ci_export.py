@@ -73,8 +73,13 @@ def test_ci_export_path_accumulation(ocx: OcxRunner, unique_repo: str, tmp_path)
         tmp_path,
         new=True,
         env=[
-            {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-            {"key": "LD_LIBRARY_PATH", "type": "path", "required": False, "value": "${installPath}/lib"},
+            # Tagged ``public`` so the v2 default-private + Consumer-mode
+            # filter admits these entries when the CI export pipeline reads
+            # them. See ADR `adr_visibility_two_axis_and_exec_modes.md`.
+            {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+             "visibility": "public"},
+            {"key": "LD_LIBRARY_PATH", "type": "path", "required": False, "value": "${installPath}/lib",
+             "visibility": "public"},
         ],
     )
     pkg2 = make_package(
@@ -84,8 +89,10 @@ def test_ci_export_path_accumulation(ocx: OcxRunner, unique_repo: str, tmp_path)
         tmp_path,
         new=True,
         env=[
-            {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-            {"key": "LD_LIBRARY_PATH", "type": "path", "required": False, "value": "${installPath}/lib64"},
+            {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+             "visibility": "public"},
+            {"key": "LD_LIBRARY_PATH", "type": "path", "required": False, "value": "${installPath}/lib64",
+             "visibility": "public"},
         ],
     )
 

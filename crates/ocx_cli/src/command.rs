@@ -19,6 +19,7 @@ pub mod index_list;
 pub mod index_update;
 pub mod info;
 pub mod install;
+pub mod launcher;
 pub mod package;
 pub mod package_create;
 pub mod package_describe;
@@ -63,6 +64,9 @@ pub enum Command {
     Exec(exec::Exec),
     /// Print resolved environment variables for one or more packages.
     Env(env::Env),
+    /// Internal subcommands used by generated entry-point launchers (hidden).
+    #[command(subcommand)]
+    Launcher(launcher::Launcher),
     /// Operations related to packages (e.g. bundling or deploying)
     #[command(subcommand)]
     Package(package::Package),
@@ -88,6 +92,7 @@ impl Command {
             Command::Uninstall(uninstall) => uninstall.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,
             Command::Env(env) => env.execute(context).await,
+            Command::Launcher(launcher) => launcher.execute(context).await,
             Command::Package(package) => package.execute(context).await,
             Command::Select(select) => select.execute(context).await,
             Command::Shell(shell) => shell.execute(context).await,

@@ -1,0 +1,247 @@
+{
+  "$defs": {
+    "Bundle": {
+      "description": "Bundle package metadata.\n\nDeclares the format version, optional extraction options, environment variables,\ndependencies, and entrypoints that OCX should expose when running commands with\nthis package.",
+      "properties": {
+        "dependencies": {
+          "$ref": "#/$defs/Dependencies",
+          "description": "Ordered list of package dependencies, pinned by digest.\nArray order defines environment import order."
+        },
+        "entrypoints": {
+          "$ref": "#/$defs/Entrypoints",
+          "description": "Named entrypoints that `ocx install` generates launchers for.\n\nEach entry produces a Unix `.sh` script and a Windows `.cmd` batch file\nunder the package's `entrypoints/` sibling directory at install time.\nAbsent or empty means no launchers are generated (backward-compat default)."
+        },
+        "env": {
+          "$ref": "#/$defs/Env"
+        },
+        "strip_components": {
+          "description": "Number of leading path components to strip when extracting the bundle.\nThis is a convenient feature for archives not created by OCX, which often contain a single top-level directory.\nBy default, OCX will not strip any components, and will extract the archive as-is.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "The version of the bundle metadata format.\nReserved for future schema evolution."
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "type": "object"
+    },
+    "Constant": {
+      "description": "A constant-type environment variable.\n\nConstant variables replace any existing value of the environment variable.\nThe `${installPath}` template is replaced with the package's content directory at resolution time.",
+      "properties": {
+        "value": {
+          "description": "The value template. Use `${installPath}` to reference the package content directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "Dependencies": {
+      "items": {
+        "$ref": "#/$defs/Dependency"
+      },
+      "type": "array"
+    },
+    "Dependency": {
+      "description": "A pinned dependency descriptor.\n\nThe digest references either an OCI Image Index (for platform-aware\nresolution) or a single manifest (for explicit platform pinning).\nFor cross-compilation, pin the platform-specific manifest digest directly.",
+      "properties": {
+        "identifier": {
+          "$ref": "#/$defs/PinnedIdentifier",
+          "description": "Fully qualified pinned OCX identifier with required explicit registry\nand digest. The tag portion is advisory (for update tooling) — only\nthe digest is used for resolution."
+        },
+        "name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DependencyName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional name for this dependency used in `${deps.NAME.installPath}` interpolation.\n\nWhen set, overrides the default name (last path segment of the OCI repository).\nUse to resolve collisions when two dependencies share the same repository basename."
+        },
+        "visibility": {
+          "$ref": "#/$defs/Visibility",
+          "default": "sealed",
+          "description": "Controls how this dependency's environment variables propagate.\nDefault: `Sealed` — no env contribution. See [`Visibility`] for the\nfour levels and their semantics."
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "type": "object"
+    },
+    "DependencyName": {
+      "description": "Interpolation name for this dependency. Must match ^[a-z0-9][a-z0-9_-]*$ (max 64 chars).",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "type": "string"
+    },
+    "EntryVisibility": {
+      "description": "Entry-axis visibility on a `Var` entry: `private` (self-only), `public` (consumer + self), `interface` (consumer-only). `sealed` is rejected for entries — entries always belong to at least the package's own runtime. See https://ocx.sh/docs/reference/metadata for the full two-axis visibility model.",
+      "enum": [
+        "private",
+        "public",
+        "interface"
+      ],
+      "type": "string"
+    },
+    "Entrypoint": {
+      "description": "A single named entrypoint for a package.\n\nDeclares a named launcher that `ocx install` generates at install time.\nThe launcher re-enters via `ocx launcher exec '<package-root>' -- <argv0> [args...]`,\npreserving clean-env execution semantics.",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/EntrypointName",
+          "description": "The name users will invoke (e.g. `\"cmake\"`). Must match `^[a-z0-9][a-z0-9_-]*$`."
+        },
+        "target": {
+          "description": "Template string for the binary target within the package content.\n\nValidated at publish time to resolve under `${installPath}` or\n`${deps.NAME.installPath}`. Example: `\"${installPath}/bin/cmake\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "target"
+      ],
+      "type": "object"
+    },
+    "EntrypointName": {
+      "description": "Entrypoint name for invocation by users. Must match ^[a-z0-9][a-z0-9_-]*$ and be at most 64 characters.",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "type": "string"
+    },
+    "Entrypoints": {
+      "description": "Ordered, uniqueness-validated list of entrypoints for a package.\n\nSerializes as a JSON array (transparent wrapper over `Vec<Entrypoint>`).\n`#[serde(default)]` means an absent `entrypoints` field deserializes\nto an empty list; `skip_serializing_if = \"Entrypoints::is_empty\"` means an\nempty list is omitted on serialization (additive-optional, forward-compat).\n\nDeserialization enforces uniqueness via [`Entrypoints::new`] — duplicate\nnames are rejected with a descriptive error.",
+      "items": {
+        "$ref": "#/$defs/Entrypoint"
+      },
+      "type": "array"
+    },
+    "Env": {
+      "items": {
+        "$ref": "#/$defs/Var"
+      },
+      "type": "array"
+    },
+    "Path": {
+      "description": "A path-type environment variable.\n\nPath variables are prepended to any existing value of the environment variable.\nThe `${installPath}` template is replaced with the package's content directory at resolution time.",
+      "properties": {
+        "required": {
+          "default": false,
+          "description": "Whether the resolved path must exist on disk. If `true` and the path is missing, installation fails.\nDefaults to `false`.",
+          "type": "boolean"
+        },
+        "value": {
+          "description": "The value template. Use `${installPath}` to reference the package content directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "PinnedIdentifier": {
+      "description": "Pinned OCI identifier with a required digest and an optional advisory tag: 'registry/repository[:tag]@digest'.",
+      "examples": [
+        "ocx.sh/cmake:3.28@sha256:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9",
+        "ocx.sh/cmake@sha256:43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9"
+      ],
+      "type": "string"
+    },
+    "Var": {
+      "description": "An environment variable declaration.\n\nEach variable has a key (the variable name), a [modifier](Modifier) that\ndetermines how the value is resolved, and a [visibility](EntryVisibility)\nthat controls which exec modes load the entry. The modifier's type and\nfields are flattened into this object in JSON.\n\n`visibility` defaults to [`EntryVisibility::private`] per ADR\n`adr_visibility_two_axis_and_exec_modes.md` Tension 1 (A): publishers must\nopt in explicitly to expose entries on the consumer axis.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Path",
+          "description": "A path variable is prepended to any existing value of the environment variable.",
+          "properties": {
+            "type": {
+              "const": "path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Constant",
+          "description": "A constant variable replaces any existing value of the environment variable.",
+          "properties": {
+            "type": {
+              "const": "constant",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "key": {
+          "description": "The environment variable name (e.g. `PATH`, `JAVA_HOME`).",
+          "type": "string"
+        },
+        "visibility": {
+          "$ref": "#/$defs/EntryVisibility",
+          "default": "private",
+          "description": "Visibility on the entry axis — controls which exec surface (interface vs private)\nsees this entry; see [`crate::package_manager::composer`]. Defaults to\n[`EntryVisibility::private`] — publishers explicitly mark contract entries as\n`public` or `interface` to expose them to consumers."
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "Version": {
+      "description": "Bundle metadata format version.",
+      "enum": [
+        1
+      ],
+      "type": "integer"
+    },
+    "Visibility": {
+      "enum": [
+        "sealed",
+        "private",
+        "public",
+        "interface"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://ocx.sh/schemas/metadata/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "OCX package metadata.\n\nDeclares a package's type, extraction options, environment variables, and\ndependencies. Currently only the `bundle` type is supported.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Bundle",
+      "properties": {
+        "type": {
+          "const": "bundle",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Metadata"
+}

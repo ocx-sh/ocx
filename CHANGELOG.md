@@ -10,17 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Multi-layer package push and pull. `ocx package push` now accepts multiple layer arguments, each either a file path or a `sha256:<hex>.tar.gz` digest reference. *(package)*
-- Layered configuration from `/etc/ocx/config.toml`, `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml` with `--config` / `OCX_CONFIG_FILE` overrides and `OCX_NO_CONFIG` kill-switch. *(config)*
+- Layered configuration from `/etc/ocx/config.toml`, `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml` with `--config` / `OCX_CONFIG` overrides and `OCX_NO_CONFIG` kill-switch. *(config)*
 - Typed `ExitCode` taxonomy aligned with BSD sysexits (64/65/69/74/75/77/78/79/80/81). Scripts can now `case $?` reliably. *(cli)*
+- `entrypoints` field in package metadata. Publishers declare named launchers (e.g. `cmake`, `ctest`); `ocx install` generates per-platform launchers under `<package>/entrypoints/<name>` (POSIX) and `<package>/entrypoints/<name>.cmd` (Windows) that delegate to `ocx exec` against a baked `file://<package-root>` URI. *(package)*
+- `${deps.NAME.installPath}` template interpolation in env-var values. Entrypoint `target` strings and env modifier values can now reference dependency install paths. Unrecognized `${...}` tokens are rejected at publish time. *(package)*
+- `name` field on `Dependency`. Lets a package import a dependency under a different name, disambiguating basename collisions when two deps would otherwise resolve to the same launcher slot. *(package)*
+- `ocx exec` accepts a `file://<absolute-package-root>` URI. Generated entrypoint launchers bake this URI into a single `ocx exec 'file://<root>' -- "$(basename $0)"` form so they survive a re-`select` to a different version (the symlink target moves; the URI does not). *(cli)*
+- Flat install layout: `current` and `candidates/{tag}` target the package root, so generated launchers are reachable through `current/entrypoints/`. The previous `entrypoints-current` symlink is gone; selection state lives on a single per-repo `current` anchor. *(file-structure)*
+- `ValidMetadata` typestate on package metadata. Publish-time validation rejects bundles with malformed entry points, undeclared dep references, or duplicate launcher names; downstream code consumes only validated metadata. *(package)*
+- `EntrypointNameCollision` structured error at `install --select` / `select` and at consumption time (`ocx env`, `ocx exec`) when two packages in the same visible closure declare the same entrypoint `name`. Surfaces with exit code 65 (`DataError`); recovery: deselect one package before selecting the other. *(package-manager)*
+- Synthetic `PATH ⊳ <pkg-root>/entrypoints` entry emitted per visible package with a non-empty `entrypoints` array, so generated launchers are reachable through `ocx env` / `ocx exec` / `ocx shell env` without manual PATH wiring. *(env)*
+- Windows-only synthetic `PATHEXT ⊳ .CMD` prepend on `ocx env` and auto-injected by `ocx exec` so generated `.cmd` launchers are discoverable when the host shell's `PATHEXT` does not already include `.CMD`. Consumer-boundary commands (`install`, `select`, `shell env`, `ci export`, `shell profile load`) emit a stderr warning when `PATHEXT` is missing `.CMD`. *(cli)*
 
 ### Changed
 
 - **Breaking:** `--remote` / `OCX_REMOTE` semantics narrowed — tag and catalog lookups now bypass the local tag store and query the registry directly, but digest-addressed blob reads still use the local cache with write-through to `$OCX_HOME/blobs/`. Previously, `--remote` routed all operations to the registry. Only `$OCX_HOME/tags/` is no longer updated under `--remote`. *(oci)*
 - **Breaking:** `ocx index update` no longer pre-fetches manifest or layer blobs. It writes only tag→digest pointers to `$OCX_HOME/tags/`. Run `ocx install <pkg>` online first to populate the blob cache before using `--offline`. *(index)*
+- **Breaking:** `ocx env --format json` and `ocx ci export --format json` now emit `{"entries": [{"key": ..., "value": ..., "type": ...}, ...]}` (canonical envelope) instead of a bare top-level array. Update consumers that deserialize JSON output to read the `entries` field. The shape is shared across env-related JSON outputs for forward compatibility. *(cli)*
 - Error messages normalized across 11 modules per Rust API Guidelines `C-GOOD-ERR` (lowercase, no trailing punctuation). *(error)*
 
 ### Breaking
 
+- **Breaking:** Package metadata field renamed from `entry_points` to `entrypoints`. Publishers must update `metadata.json` files; bundles using the old field name fail validation at `package create`. *(package)*
+- **Breaking:** Dependency JSON field key renamed from `alias` to `name`. Existing bundles must be re-published with `"name"` in place of `"alias"`. The `${deps.NAME.installPath}` template token is unchanged — `NAME` was always the placeholder keyword, never the literal field name. *(package)*
 - **Breaking:** `ocx-mirror` exit codes changed from `0/2/3/4` to `0/65/79/1/69` to align with the sysexits-based taxonomy. Wrapper scripts matching historic codes must be updated. *(mirror)*
 
 ### Fixed
@@ -30,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Pulled layer blobs are verified against the claimed digest before extraction; mismatched blobs are deleted and fail the pull with a clear error. *(oci)*
+- Hardened the Windows `.cmd` launcher template by adding `DisableDelayedExpansion` to the `SETLOCAL` directive to mitigate registry-level `!`-expansion vectors when forwarding untrusted argv (`BatBadBut` interim mitigation). The `%*` parameter remains unescaped at the `.cmd` level — see `.claude/artifacts/adr_windows_cmd_argv_injection.md` for the threat model and tracked compiled-shim follow-up. *(package)*
+
+### Breaking (v2 schema and exec-mode defaults)
+
+- **Breaking:** `Var.visibility` field added to package metadata `env` entries. Default is `"private"` — env entries declared without an explicit `visibility` field are now treated as private (self-mode only) in consumer-mode execution. Publishers must add `"visibility": "public"` to any env entry meant to be visible to direct consumers (`ocx exec PKG -- cmd`, `ocx env PKG`). *(package)*
+- **Breaking:** `ExecMode::Consumer` is now the default for `ocx exec`, `ocx env`, `ocx shell env`, `ocx shell profile load`, `ocx ci export`, and `ocx deps`. The previous behavior was a union of all non-sealed visibility levels (equivalent to `--mode=full`). Packages that relied on private dep env being visible at direct exec must either declare those binaries as entry points (which routes through `--mode=self` automatically) or elevate the relevant dep to `visibility: "public"`. *(cli)*
 
 ## [0.2.1] - 2026-03-24
 

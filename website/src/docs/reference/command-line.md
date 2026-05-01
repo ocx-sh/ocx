@@ -95,7 +95,7 @@ The file layers **on top of** the discovered tier chain — it does not replace 
 
 The specified file **must exist** — a missing path is an error ([exit code 79 / NotFound][exit-codes]). This is different from the three discovered tiers, which silently skip missing files.
 
-The same override can be set persistently via [`OCX_CONFIG_FILE`][env-config-file]. When both are set, the `--config` file sits at highest file-tier precedence and wins on conflicting scalars.
+The same override can be set persistently via [`OCX_CONFIG`][env-config]. When both are set, the `--config` file sits at highest file-tier precedence and wins on conflicting scalars.
 
 See the [Configuration reference][config-ref] for the full precedence table, merge rules, and error messages.
 
@@ -145,21 +145,29 @@ esac
 
 ### `--candidate` / `--current` {#path-resolution}
 
-The `--candidate` and `--current` flags are available on commands that resolve a package's content
-path, for example [`env`](#env), [`find`](#find), or [`shell env`](#shell-env).
+The `--candidate` and `--current` flags are available on commands that resolve a package's
+location on disk, for example [`env`](#env), [`find`](#find), or [`shell env`](#shell-env).
 
-By default these commands use the content-addressed path in the
-[object store](../user-guide.md#file-structure-objects) — a hash-derived directory that changes
+Every mode returns a **package root** — the directory that contains the package's `content/` and
+`entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package
+files. The mode controls only the *shape* of the path that names that root.
+
+By default these commands return the content-addressed path in the
+[object store](../user-guide.md#file-structure-packages) — a hash-derived directory that changes
 whenever the package is reinstalled at a different version. Use `--candidate` or `--current` to
-resolve via a [stable install symlink](../user-guide.md#path-resolution) instead, whose path never changes regardless of the underlying
-object. This is useful for paths embedded in editor configs, Makefiles, or shell profiles that
-should survive package updates.
+resolve via a [stable install symlink](../user-guide.md#path-resolution) instead, whose path never
+changes regardless of the underlying object. This is useful for paths embedded in editor configs,
+Makefiles, or shell profiles that should survive package updates.
 
-| Mode | Flag | Path |
+| Mode | Flag | Path returned |
 |------|------|------|
-| Object store (default) | _(none)_ | `~/.ocx/objects/…/{digest}/content` |
-| Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/{tag}/content` |
-| Current symlink | `--current` | `~/.ocx/symlinks/…/current/content` |
+| Object store (default) | _(none)_ | `~/.ocx/packages/…/{digest}/` |
+| Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/{tag}` |
+| Current symlink | `--current` | `~/.ocx/symlinks/…/current` |
+
+All three paths name the same package root: the install symlinks target the object-store package
+directory directly. Consumers that need installed files traverse into `<root>/content/`, launcher
+consumers traverse into `<root>/entrypoints/`, and metadata readers open `<root>/metadata.json`.
 
 **Constraints**
 
@@ -217,6 +225,7 @@ ocx deps [OPTIONS] <PACKAGE>...
   packages to `<DEP>`. Mutually exclusive with `--flat`.
 - `--depth <N>`: Limit tree depth. `--depth 1` shows direct dependencies only.
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
+- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 - `-h`, `--help`: Print help information.
 
 **Default output** is a logical tree showing declared dependencies. Diamond dependencies
@@ -250,7 +259,9 @@ myapp:1.0 → ocx.sh/cmake:3.28 → ocx.sh/gcc:13
 
 Removes the current-version symlink for one or more packages.
 
-The package is deselected but not uninstalled: its [candidate symlink](../user-guide.md#path-resolution) and object-store content remain intact. To also remove the installed files, use [`uninstall`](#uninstall).
+The package is deselected but not uninstalled: its [candidate symlink][fs-symlinks] and object-store content remain intact. To also remove the installed files, use [`uninstall`](#uninstall).
+
+When the deselected package declares [entry points][guide-entry-points], the launchers stop being reachable through `current/entrypoints/` as soon as the `current` symlink is removed. The symlink removal is idempotent — an already-absent link is not an error.
 
 **Usage**
 
@@ -292,37 +303,59 @@ ocx env [OPTIONS] <PACKAGE>...
 
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
+- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 - `-h`, `--help`: Print help information.
+
+::: info Windows: synthetic `PATHEXT ⊳ .CMD`
+On Windows, `env` prepends `.CMD` to `PATHEXT` in its output when the host shell's `PATHEXT` does not already include it. Generated entrypoint launchers are `.cmd` files; this prepend lets callers that adopt the printed env (e.g. by piping it into a child process) find launchers by bare name without further configuration. The host `PATHEXT` is left untouched if it already includes `.CMD`. `ocx exec` auto-injects the same prepend silently into the child environment.
+:::
 
 ### `exec` {#exec}
 
 Executes a command within the environment of one or more packages.
-Packages are auto-installed if not already available locally (unless [`--offline`](#arg-offline) is set). If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables.
+
+Each positional accepts a bare OCI identifier (e.g. `node:20`); identifiers are resolved through the index and auto-installed when missing (unless [`--offline`](#arg-offline) is set).
+
+If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables. Env entries layer in the order identifiers appear on the command line.
+
+::: tip Generated launchers use `ocx launcher exec`, not `ocx exec`
+Entry-point launchers generated by `ocx install` call the internal `ocx launcher exec '<pkg-root>' -- <argv0> [args...]` subcommand, not `ocx exec`. That subcommand validates the package root, forces the self view internally, and executes the resolved entrypoint. See the [Entry Points][entry-points] guide for the launcher ABI.
+:::
 
 **Usage**
 
 ```shell
-ocx exec [OPTIONS] <PACKAGE>... -- <COMMAND> [ARGS...]
+ocx exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 ```
 
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to run within.
+- `<PACKAGES>`: Bare OCI identifiers (e.g. `node:20`).
 - `<COMMAND>`: The command to execute within the package environment.
 - `[ARGS...]`: Arguments to pass to the command.
 
 **Options**
 
 - `-p`, `--platform`: Specify the platforms to use.
-- `-i`, `--interactive`: Run in interactive mode, forwarding stdin to the child process.
-- `--clean`: Start with a clean environment containing only the package-defined variables, instead of inheriting the current shell environment.
+- `--clean`: Start with a clean environment containing only the package-defined variables, instead of inheriting the current shell environment. Resolution-affecting `OCX_*` variables (binary path, offline, remote, config file, index) are still written explicitly from the running ocx's parsed state — see [OCX Configuration Forwarding][env-composition-forwarding].
+- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries. Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 - `-h`, `--help`: Print help information.
+
+::: info Stdin always inherits
+`ocx exec` always inherits the parent's stdin so piped input flows into the child unchanged (`echo hi | ocx exec pkg -- cat` prints `hi`). There is no opt-out — the previous `--interactive` flag was removed; matching standard shell exec semantics is the default.
+:::
+
+::: info Process replacement on Unix
+On Unix, `ocx exec` hands the current process image off to the target via `execvp(2)`, so the child inherits ocx's PID. Signals reach the target without an ocx forwarder, `pgrep <name>` shows the wrapped binary, and the process tree drops the ocx layer entirely — matching the same semantics shells use when chaining `exec "$@"` in entry-point scripts. On Windows, `ocx exec` spawns the target and waits for it, since `CreateProcess` has no exec equivalent; the propagated exit code is forwarded as ocx's own exit code.
+:::
 
 ### `find` {#find}
 
-Resolves one or more packages and prints their content directory paths.
+Resolves one or more packages and prints their package root paths.
 
-Resolves the content directory for each package. See [Path Resolution](#path-resolution) for the difference between the default object-store path and the stable symlink modes.
+The package root is the directory containing the package's `content/` and `entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package files. Consumers traverse into `<root>/content/` for installed files or `<root>/entrypoints/` for generated launchers — both stay one path join away.
+
+By default the content-addressed object-store package root is returned. The `--candidate` and `--current` modes return the stable install symlink path; those symlinks themselves target the package root, so traversal works the same through them. See [Path Resolution](#path-resolution) for the trade-off between modes.
 
 No downloading is performed — the package must already be installed.
 
@@ -421,7 +454,7 @@ ocx info
 
 Downloads and installs one or more packages into the local object store.
 
-Installs packages into the [object store](../user-guide.md#file-structure-objects) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
+Installs packages into the [object store](../user-guide.md#file-structure-packages) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
 
 **Usage**
 
@@ -438,6 +471,10 @@ ocx install [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider.
 - `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
 - `-h`, `--help`: Print help information.
+
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows, `install` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. Generated entrypoint launchers are `.cmd` files and require `PATHEXT` to advertise that extension before bare-name lookup (e.g. `cmake`) can find them. Add `.CMD` to `PATHEXT` (typically via your shell profile) or invoke launchers with their full filename.
+:::
 
 ### `select` {#select}
 
@@ -461,11 +498,25 @@ ocx select [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
 - `-h`, `--help`: Print help information.
 
+::: warning Windows: `PATHEXT` must include `.CMD`
+Same `PATHEXT` warning as `install` — see [`install`](#install). `select` flips `current` so generated launchers become reachable through `current/entrypoints/`; bare-name resolution requires `.CMD` in `PATHEXT`.
+:::
+
 ::: tip
 `ocx install --select` installs and selects in one step.
 :::
 
 See [path resolution modes](../user-guide.md#path-resolution) for how the `current` symlink is used downstream.
+
+#### Entry-point name collisions {#select-entry-point-collision}
+
+[Entry point](../in-depth/entry-points.md) name collisions are checked at two distinct points; `select` itself performs no collision check, since flipping `current` does not compose environments.
+
+The first gate is **at install time**, scoped to a single package's interface closure. When `install` (with or without `--select`) downloads a package whose own bundle plus its interface-visible transitive deps declare the same entry-point name twice, the install aborts before the temp→object-store atomic move and exits with `EntrypointCollision` (exit code `65`, `DataError`). All N owning packages are listed so the publisher can deselect the right one.
+
+The second gate is **at consumption time**, invoked whenever `ocx env` or `ocx exec` is given two or more roots. The compose-time check projects each root's interface surface (bundle entry points plus interface-visible TC entries) and reports the same `EntrypointCollision` error if two roots claim the same name. This catches conflicts that the per-package install gate cannot see — two roots installed independently without `--select` and combined only at exec time.
+
+`select` is symlink-only: it flips `current` for a single package and never composes the environment, so it has no entry-point collision check. See [Exit codes](#exit-codes) for the full taxonomy.
 
 ### `shell` {#shell}
 
@@ -496,6 +547,11 @@ ocx shell env [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider. Auto-detected by default.
 - `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
+- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
+
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows, `shell env` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. The exported lines do not modify `PATHEXT`; the consuming shell must already advertise `.CMD` for bare-name resolution of generated launchers to work.
+:::
 
 #### `completion` {#shell-completion}
 
@@ -581,12 +637,19 @@ ocx shell profile load [OPTIONS]
 **Options**
 
 - `-s`, `--shell <SHELL>`: Shell to generate exports for. Auto-detected if not specified.
+- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 
 Reads `$OCX_HOME/profile.json` and emits shell-specific export lines for each package's declared environment variables. Broken entries are silently skipped. This command is intended to be called from the env file via `eval`:
 
 ```shell
 eval "$(ocx --offline shell profile load)"
 ```
+
+For each profile entry whose package declares a non-empty `entrypoints` array and whose `current` symlink exists under `$OCX_HOME/symlinks/{registry}/{repo}/`, an additional `PATH` export line is emitted that prepends `current/entrypoints/`. Entries without `entrypoints` produce only their declared environment variables; entries that have not yet been selected (no `current` symlink) are silently skipped, so profile load never points `$PATH` at a missing directory.
+
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows, `shell profile load` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. The emitted exports do not modify `PATHEXT`; add `.CMD` to your shell profile alongside the env-file `eval` so generated launchers resolve by bare name.
+:::
 
 ### `uninstall` {#uninstall}
 
@@ -606,7 +669,7 @@ ocx uninstall [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution). Equivalent to running `ocx deselect` after uninstall.
+- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution). Equivalent to running `ocx deselect` after uninstall — see [`deselect`](#deselect) for the full cleanup behavior.
 - `--purge`: Delete the object from the store when no other references remain after uninstall.
 - `-h`, `--help`: Print help information.
 
@@ -631,6 +694,10 @@ runtime files. For [GitHub Actions][github-actions-docs], this appends path entr
 The CI flavor is auto-detected from the environment (e.g. `GITHUB_ACTIONS=true`) but can be
 overridden with `--flavor`.
 
+Plain format writes directly to the CI runtime files and prints nothing to stdout.
+JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}` —
+the same canonical envelope as [`env`](#env).
+
 This command does not auto-install packages — if a package is not already available locally it
 will fail with an error. In CI workflows, use [`package pull`](#package-pull) before `ci export`.
 
@@ -649,7 +716,18 @@ ocx ci export [OPTIONS] <PACKAGE>...
 - `--flavor <FLAVOR>`: CI system to target. Currently supported: `github-actions`. Auto-detected if omitted.
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
+- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 - `-h`, `--help`: Print help information.
+
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows runners, `ci export` prints a stderr warning when `PATHEXT` is missing `.CMD`. Generated `.cmd` launchers exported via `$GITHUB_PATH` only resolve by bare name when `PATHEXT` advertises `.CMD`; configure the runner shell or invoke launchers with their full filename.
+:::
+
+For packages that declare [entry points][guide-entry-points], `ci export` includes a synthetic PATH
+entry pointing at the package's `entrypoints/` directory. This entry is placed before any
+`bin/`-style paths declared by the package's `env` metadata, so installed launchers take
+precedence over raw binaries when both are on the exported PATH. See the
+[entry-points guide][guide-entry-points] for the rationale behind this ordering.
 
 ::: tip
 Pair with [`package pull`](#package-pull) for a minimal CI setup:
@@ -713,9 +791,10 @@ ocx package pull [OPTIONS] <PACKAGE>...
 - `-h`, `--help`: Print help information.
 
 ::: tip
-`package pull` reports the content-addressed object store path for each package — the same
-digest-derived path that [`find`](#find) and [`exec`](#exec) resolve to. Two pulls of the same
-digest are safe to run concurrently.
+`package pull` reports the package root for each package — the same
+digest-derived directory that [`find`](#find) and [`exec`](#exec) resolve to.
+The package root contains `content/` and `entrypoints/` as siblings; consumers
+traverse one level in. Two pulls of the same digest are safe to run concurrently.
 :::
 
 #### `push` {#package-push}
@@ -815,21 +894,27 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [devcontainer-features]: https://containers.dev/implementors/features/
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
 
+<!-- in-depth -->
+[exec-modes]: ../in-depth/environments.md#visibility-views
+[env-composition-forwarding]: ../in-depth/environments.md#ocx-forwarding
+
 <!-- environment -->
 [env-no-color]: ./environment.md#external-no-color
 [env-clicolor]: ./environment.md#external-clicolor
 [env-clicolor-force]: ./environment.md#external-clicolor-force
 [env-ocx-index]: ./environment.md#ocx-index
 [env-no-config]: ./environment.md#ocx-no-config
-[env-config-file]: ./environment.md#ocx-config-file
+[env-config]: ./environment.md#ocx-config
 
 <!-- reference -->
 [config-ref]: ./configuration.md
 
 <!-- internal -->
+[entry-points]: ./metadata.md#entry-points
+[guide-entry-points]: ../in-depth/entry-points.md
 [exit-codes]: #exit-codes
-[fs-objects]: ../user-guide.md#file-structure-objects
+[fs-objects]: ../user-guide.md#file-structure-packages
 [fs-symlinks]: ../user-guide.md#file-structure-symlinks
-[fs-index]: ../user-guide.md#file-structure-index
+[fs-index]: ../user-guide.md#indices-local
 [ug-dependencies]: ../user-guide.md#dependencies
 [ug-deps-env]: ../user-guide.md#dependencies-environment

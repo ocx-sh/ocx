@@ -115,6 +115,11 @@ def make_package(
     env:
         Custom metadata env entries.  Defaults to PATH + ``{REPO}_HOME``
         (derived from the repo name, e.g. ``cmake`` → ``CMAKE_HOME``).
+
+        Each item is a dict accepting arbitrary keys; the v2 schema field
+        ``"visibility"`` (one of ``"private"`` (default) | ``"public"`` |
+        ``"interface"``) controls which ``--mode`` includes the entry. See
+        ``adr_visibility_two_axis_and_exec_modes.md`` Tension 1 + 3.
     outputs:
         Maps binary name to ``{args: output}`` pairs.  When provided, the
         trap binary uses a ``case`` block to reproduce exact command output
@@ -152,23 +157,29 @@ def make_package(
     # Write metadata
     metadata_path = tmp_path / f"metadata-{repo}-{tag}.json"
     home_key = repo.upper().replace("-", "_") + "_HOME"
+    # Default env is tagged ``"visibility": "public"`` so the per-entry
+    # filter under ``ExecMode::Consumer`` (the default since the v2 flip)
+    # admits PATH and {REPO}_HOME — matching the in-tree bare-binary mirror
+    # convention (`mirrors/uv`, `mirrors/cpython`, etc.). Tests that want
+    # to exercise default-`private` behaviour pass an explicit ``env=[...]``
+    # without ``visibility`` keys.
     metadata_env = env or [
         {
             "key": "PATH",
             "type": "path",
             "required": True,
             "value": "${installPath}/bin",
+            "visibility": "public",
         },
         {
             "key": home_key,
             "type": "constant",
             "value": "${installPath}",
+            "visibility": "public",
         },
     ]
     metadata_obj: dict = {
-        "type": "bundle",
-        "version": 1,
-        "env": metadata_env,
+        "type": "bundle", "version": 1, "env": metadata_env,
     }
     if dependencies:
         metadata_obj["dependencies"] = dependencies
@@ -205,6 +216,92 @@ def make_package(
 
     return PackageInfo(
         repo=repo,
+        tag=tag,
+        short=short,
+        fq=fq,
+        content_dir=pkg_dir,
+        marker=marker,
+        platform=plat,
+    )
+
+
+def make_package_with_entrypoints(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    entrypoints: list[dict],
+    bins: list[str] | None = None,
+    tag: str = "1.0.0",
+    *,
+    file_prefix: str = "ep",
+    dependencies: list[dict] | None = None,
+    env: list[dict] | None = None,
+) -> PackageInfo:
+    """Publish a test package whose metadata declares ``entrypoints``.
+
+    Shared by ``test_entrypoints*`` modules so the suite has one construction
+    path. ``file_prefix`` keeps temp filenames distinct when a single
+    ``tmp_path`` hosts multiple packages.
+
+    Parameters
+    ----------
+    dependencies:
+        Optional list of dependency descriptors to embed in metadata.  Each
+        entry must be a dict with at least an ``identifier`` key (same shape
+        as ``make_package``'s ``dependencies`` parameter).
+    env:
+        Optional override for the metadata env entries. Defaults to a single
+        ``PATH = ${installPath}/bin`` entry (no visibility — picks up the
+        v2 default `private`). Pass an explicit list when a test needs
+        consumer-visible PATH or other env shapes.
+    """
+    bin_names = bins or ["hello"]
+    if env is None:
+        env = [
+            {
+                "key": "PATH",
+                "type": "path",
+                "required": True,
+                "value": "${installPath}/bin",
+            },
+        ]
+    pkg_dir = tmp_path / f"pkg-{file_prefix}-{unique_repo}-{tag}"
+    bin_dir = pkg_dir / "bin"
+    bin_dir.mkdir(parents=True)
+    marker = f"marker-{uuid4().hex[:12]}"
+    for name in bin_names:
+        script = bin_dir / name
+        if sys.platform == "win32":
+            script = script.with_suffix(".bat")
+            script.write_text(f"@echo entry-point-{name} {marker} %*\n")
+        else:
+            script.write_text(
+                f'#!/bin/sh\necho "entry-point-{name} {marker} $@"\n'
+            )
+            script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    metadata_path = tmp_path / f"metadata-{file_prefix}-{unique_repo}-{tag}.json"
+    metadata_obj: dict = {
+        "type": "bundle", "version": 1, "env": env,
+        "entrypoints": entrypoints,
+    }
+    if dependencies:
+        metadata_obj["dependencies"] = dependencies
+    metadata_path.write_text(json.dumps(metadata_obj))
+
+    bundle = tmp_path / f"bundle-{file_prefix}-{unique_repo}-{tag}.tar.xz"
+    ocx.plain("package", "create", "-m", str(metadata_path), "-o", str(bundle), str(pkg_dir))
+
+    plat = current_platform()
+    fq = f"{ocx.registry}/{unique_repo}:{tag}"
+    ocx.plain(
+        "package", "push", "-p", plat, "-m", str(metadata_path), "-n", "--cascade", fq, str(bundle),
+    )
+    short = f"{unique_repo}:{tag}"
+    ocx.plain("index", "update", unique_repo)
+
+    return PackageInfo(
+        repo=unique_repo,
         tag=tag,
         short=short,
         fq=fq,

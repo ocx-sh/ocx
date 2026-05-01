@@ -23,6 +23,12 @@ pub struct EnvEntry {
 ///
 /// An ordered list (rather than type-keyed maps) preserves declaration order, allows multiple
 /// entries per key with different kinds, and naturally accommodates future modifier types.
+///
+/// JSON format: `{"entries": [{"key": "...", "value": "...", "type": "constant"|"path"}, ...]}`.
+/// The `entries` envelope is the canonical shape shared with `ci export` so consumers
+/// can branch on a single shape and so future top-level fields (e.g. `entrypoints`)
+/// can be added without breaking the wire format.
+#[derive(Serialize)]
 pub struct EnvVars {
     pub entries: Vec<EnvEntry>,
 }
@@ -30,15 +36,6 @@ pub struct EnvVars {
 impl EnvVars {
     pub fn new(entries: Vec<EnvEntry>) -> Self {
         Self { entries }
-    }
-}
-
-impl Serialize for EnvVars {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.entries.serialize(serializer)
     }
 }
 

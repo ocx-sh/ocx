@@ -11,6 +11,13 @@ src/.vitepress/dist
 .task/
 src/public/casts
 src/public/data
-src/public/schemas
+# Schema artifacts are regenerated on every build (see website/schema.taskfile.yml).
+# Exception: metadata/v1.json is frozen — committed as the canonical legacy
+# schema after the v2 cutover (see adr_visibility_two_axis_and_exec_modes.md).
+# Other schemas (v2.json, profile/v1.json, config/v1.json) remain ignored.
+src/public/schemas/**
+!src/public/schemas/
+!src/public/schemas/metadata/
+!src/public/schemas/metadata/v1.json
 src/docs/reference/dependencies.md
 src/docs/catalog/

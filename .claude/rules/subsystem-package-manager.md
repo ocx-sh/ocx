@@ -30,7 +30,7 @@ Facade = single coord point for all package ops. Hide store + index + client com
 | `package_manager.rs` | `PackageManager` facade struct + accessors only |
 | `error.rs` | Three-layer error model |
 | `tasks/common.rs` | Shared free functions for task modules |
-| `tasks/resolve.rs` | `resolve()`, `resolve_all()`, `resolve_env()` — index + env resolution |
+| `tasks/resolve.rs` | `resolve()`, `resolve_all()`, `resolve_env(packages, self_view: bool)` — index + env resolution; `self_view` bool selects interface surface (`false`) or private surface (`true`) via `composer::compose` |
 | `tasks/find.rs` | `find()`, `find_plain()`, `find_all()` — resolve installed packages |
 | `tasks/find_symlink.rs` | `find_symlink()`, `find_symlink_all()` — resolve via candidate/current |
 | `tasks/find_or_install.rs` | `find_or_install()`, `find_or_install_all()` — auto-install on miss |
@@ -40,6 +40,7 @@ Facade = single coord point for all package ops. Hide store + index + client com
 | `tasks/deselect.rs` | `deselect()`, `deselect_all()` — remove current symlink |
 | `tasks/clean.rs` | `clean()` — GC unreferenced objects + stale temps |
 | `tasks/profile_resolve.rs` | Profile-related resolution |
+| `composer.rs` | Two-env composition: `compose(roots, store, self_view: bool) -> Vec<Entry>` (flat iteration over each root's pre-built TC with cross-root dedup, surface-gated via `has_interface()`/`has_private()`); `check_entrypoints(roots, store)` (interface-projection collision gate over 1..N roots, reports all N owners) |
 
 ## Facade Pattern
 
@@ -132,6 +133,12 @@ TOCTOU `!target.exists()` pre-check intentionally absent — eventual consistenc
 - Parallel tasks (`JoinSet`): each task spawned with `.instrument(span)` carrying package name
 - Sequential tasks: `.entered()` guard inside loop
 - No custom progress abstraction
+
+## OCX Configuration Forwarding
+
+Generated entrypoint launchers re-enter ocx via `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Any subprocess spawn site that may chain back into ocx MUST forward the running ocx's resolution-affecting config onto the child env via `env::Env::apply_ocx_config(ctx.config_view())`. Full rule + Block-tier review criteria live in `subsystem-cli.md` "Cross-Cutting: OCX Configuration Forwarding".
+
+The stable wire ABI is the `launcher` + `exec` subcommand name pair and positional shape. Byte-exact golden tests at `body.rs::tests` act as canaries — any template change that changes the launcher body must update the golden strings there.
 
 ## Quality Gate
 

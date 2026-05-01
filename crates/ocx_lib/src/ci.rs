@@ -5,7 +5,7 @@ pub mod error;
 pub(crate) mod flavor;
 mod github_flavor;
 
-use crate::package::metadata::env::exporter;
+use crate::package::metadata::env::entry;
 
 use flavor::Flavor;
 
@@ -26,7 +26,7 @@ impl CiFlavor {
     }
 
     /// Writes pre-resolved environment variable entries into the CI system's runtime files.
-    pub fn export(self, entries: &[exporter::Entry]) -> crate::Result<()> {
+    pub fn export(self, entries: &[entry::Entry]) -> crate::Result<()> {
         let mut target: Box<dyn Flavor> = match self {
             Self::GitHubActions => Box::new(github_flavor::GitHubFlavor::from_env()?),
         };

@@ -28,6 +28,10 @@ impl fmt::Display for ProfileStatus {
 
 /// A single entry in the profile list report.
 ///
+/// `path` is the package root directory (parent of `content/` and
+/// `entrypoints/`) for active entries, or the path that failed to resolve
+/// for broken entries. `None` when the entry could not be located at all.
+///
 /// Plain format: four-column table (Package | Mode | Status | Path).
 ///
 /// JSON format: array of `{ package, mode, status, path }` objects.

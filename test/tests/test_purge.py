@@ -43,11 +43,6 @@ def _count_object_dirs(ocx: OcxRunner) -> int:
     return sum(1 for p in objects_root.rglob("content") if p.is_dir())
 
 
-def _find_content_path(ocx: OcxRunner, pkg: PackageInfo) -> Path:
-    result = ocx.json("find", pkg.short)
-    return Path(result[pkg.short])
-
-
 # ---------------------------------------------------------------------------
 # Basic purge
 # ---------------------------------------------------------------------------
@@ -319,10 +314,10 @@ def test_purge_preserves_shared_layer_inodes(
 
     result_a = ocx.json("find", short_a)
     result_b = ocx.json("find", short_b)
-    content_a = Path(result_a[short_a])
-    content_b = Path(result_b[short_b])
-    file_a = content_a / shared_file_rel
-    file_b = content_b / shared_file_rel
+    root_a = Path(result_a[short_a])
+    root_b = Path(result_b[short_b])
+    file_a = root_a / "content" / shared_file_rel
+    file_b = root_b / "content" / shared_file_rel
 
     assert file_a.exists(), f"Package A file not found before purge: {file_a}"
     assert file_b.exists(), f"Package B file not found before purge: {file_b}"
@@ -338,13 +333,13 @@ def test_purge_preserves_shared_layer_inodes(
     # Purge package A (removes its candidate symlink and content directory)
     ocx.plain("uninstall", "--purge", "-d", short_a)
 
-    # Behaviour-centric assertions: A's content path must disappear, B's must
+    # Behaviour-centric assertions: A's package root must disappear, B's must
     # survive with its hardlink intact (same inode as before the purge).
-    assert not content_a.exists(), (
-        f"A's content must be gone after purge: {content_a}"
+    assert not root_a.exists(), (
+        f"A's package root must be gone after purge: {root_a}"
     )
-    assert content_b.exists(), (
-        f"B's content must survive A's purge: {content_b}"
+    assert root_b.exists(), (
+        f"B's package root must survive A's purge: {root_b}"
     )
     assert file_b.exists(), f"Package B file vanished after purging A: {file_b}"
 
