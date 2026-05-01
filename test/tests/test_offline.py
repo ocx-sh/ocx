@@ -133,8 +133,14 @@ def test_deps_flat_offline_shows_topological_order(
 ):
     """Install A->B->C online, then offline deps --flat shows C, B, A order."""
     c = _push_leaf(ocx, f"{unique_repo}_c", tmp_path)
-    b = _push_with_deps(ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, c)])
-    a = _push_with_deps(ocx, f"{unique_repo}_a", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b)])
+    b = _push_with_deps(
+        ocx, f"{unique_repo}_b", "1.0.0", tmp_path,
+        deps=[_dep_entry(ocx, c, visibility="public")],
+    )
+    a = _push_with_deps(
+        ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
+        deps=[_dep_entry(ocx, b, visibility="public")],
+    )
 
     ocx.json("install", "--select", a.short)
 

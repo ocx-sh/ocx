@@ -95,7 +95,7 @@ def run_ocx(binary: str, args: list[str], *, remote: bool = False) -> str:
 
 def get_catalog_with_tags(binary: str, *, remote: bool) -> dict[str, list[str]]:
     """Get all repos and their tags from the registry."""
-    output = run_ocx(binary, ["index", "catalog", "--with-tags"], remote=remote)
+    output = run_ocx(binary, ["index", "catalog", "--tags"], remote=remote)
     data = json.loads(output)
     # JSON wraps in {"repositories": {...}}
     repos = data.get("repositories", data) if isinstance(data, dict) else data

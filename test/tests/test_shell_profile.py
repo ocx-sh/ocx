@@ -447,8 +447,8 @@ def test_profile_list_broken_content(
     # Cannot use --purge because the profile content-mode entry protects
     # the object from GC.
     result = ocx.json("find", pkg.short)
-    content_path = Path(result[pkg.short]).resolve()
-    shutil.rmtree(content_path.parent)
+    package_root = Path(result[pkg.short]).resolve()
+    shutil.rmtree(package_root)
 
     result = ocx.json("shell", "profile", "list")
     assert len(result) == 1
@@ -670,8 +670,8 @@ def test_profile_load_skips_broken_content(
     # Cannot use --purge because the profile content-mode entry protects
     # the object from GC.
     result = ocx.json("find", pkg.short)
-    content_path = Path(result[pkg.short]).resolve()
-    shutil.rmtree(content_path.parent)
+    package_root = Path(result[pkg.short]).resolve()
+    shutil.rmtree(package_root)
 
     result = ocx.run(
         "shell", "profile", "load", "--shell", "bash", format=None

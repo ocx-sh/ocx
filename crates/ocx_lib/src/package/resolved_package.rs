@@ -9,7 +9,7 @@ use crate::package::metadata::visibility::Visibility;
 /// A dependency in the transitive closure with its pre-computed visibility.
 ///
 /// The `visibility` field encodes the effective visibility from the root
-/// package's perspective, computed via [`Visibility::propagate`] through
+/// package's perspective, computed via [`Visibility::through_edge`] through
 /// the dependency chain. Diamond deps use [`Visibility::merge`] (OR on
 /// each axis) — if ANY path makes a dep visible, it stays visible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,9 +50,10 @@ impl ResolvedPackage {
     /// carries its own root identifier — that would couple shared package
     /// directories to whichever installer won the cross-repo race.
     ///
-    /// Propagation rule: if the child exports (consumer-visible), result =
-    /// edge; otherwise Sealed. Diamond deps use [`Visibility::merge`] — if any
-    /// path makes a dep visible, the final visibility is the most open.
+    /// Edge composition rule: if the child exports (consumer-visible), result =
+    /// edge via [`Visibility::through_edge`]; otherwise Sealed. Diamond deps
+    /// use [`Visibility::merge`] — if any path makes a dep visible, the final
+    /// visibility is the most open.
     ///
     /// Preserves topological order (deps before dependents) and deduplicates
     /// by identity (advisory tags stripped).
@@ -66,7 +67,7 @@ impl ResolvedPackage {
         for (dep_id, dep, edge) in deps {
             // Bubble up transitive deps first (preserves topological order).
             for transitive in dep.dependencies {
-                let propagated = edge.propagate(transitive.visibility);
+                let propagated = edge.through_edge(transitive.visibility);
                 let key = transitive.identifier.strip_advisory();
                 if let Some(&idx) = seen.get(&key) {
                     // Diamond merge: take the most open visibility.
@@ -173,7 +174,7 @@ mod tests {
     fn serde_roundtrip_visibility_public() {
         let dep = ResolvedDependency {
             identifier: make_dep_pinned(),
-            visibility: Visibility::Public,
+            visibility: Visibility::PUBLIC,
         };
         let pkg = ResolvedPackage {
             dependencies: vec![dep.clone()],
@@ -188,14 +189,14 @@ mod tests {
     fn serde_roundtrip_visibility_sealed() {
         let dep = ResolvedDependency {
             identifier: make_dep_pinned(),
-            visibility: Visibility::Sealed,
+            visibility: Visibility::SEALED,
         };
         let pkg = ResolvedPackage {
             dependencies: vec![dep.clone()],
         };
         let json = serde_json::to_string(&pkg).unwrap();
         let deserialized: ResolvedPackage = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.dependencies[0].visibility, Visibility::Sealed);
+        assert_eq!(deserialized.dependencies[0].visibility, Visibility::SEALED);
     }
 
     #[test]
@@ -203,11 +204,11 @@ mod tests {
         let deps = vec![
             ResolvedDependency {
                 identifier: make_dep_pinned(),
-                visibility: Visibility::Public,
+                visibility: Visibility::PUBLIC,
             },
             ResolvedDependency {
                 identifier: make_pinned_repo("other", 'c'),
-                visibility: Visibility::Sealed,
+                visibility: Visibility::SEALED,
             },
         ];
         let pkg = ResolvedPackage {
@@ -274,72 +275,72 @@ mod tests {
 
     #[test]
     fn single_public_dep() {
-        let resolved = leaf("root", 'a').with_dependencies([(leaf("x", 'b'), Visibility::Public)]);
+        let resolved = leaf("root", 'a').with_dependencies([(leaf("x", 'b'), Visibility::PUBLIC)]);
         assert_eq!(resolved.dependencies.len(), 1);
-        assert_dep(&resolved.dependencies, 0, "x", Visibility::Public);
+        assert_dep(&resolved.dependencies, 0, "x", Visibility::PUBLIC);
     }
 
     #[test]
     fn single_sealed_dep() {
-        let resolved = leaf("root", 'a').with_dependencies([(leaf("x", 'b'), Visibility::Sealed)]);
+        let resolved = leaf("root", 'a').with_dependencies([(leaf("x", 'b'), Visibility::SEALED)]);
         assert_eq!(resolved.dependencies.len(), 1);
-        assert_dep(&resolved.dependencies, 0, "x", Visibility::Sealed);
+        assert_dep(&resolved.dependencies, 0, "x", Visibility::SEALED);
     }
 
     #[test]
     fn all_public_chain() {
         // Root→A(Public)→B(Public)→C(Public)
         let c_resolved = leaf("c", 'c').with_dependencies([]);
-        let b_resolved = leaf("b", 'b').with_dependencies([(c_resolved, Visibility::Public)]);
-        let a_resolved = leaf("a", 'a').with_dependencies([(b_resolved, Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a_resolved, Visibility::Public)]);
+        let b_resolved = leaf("b", 'b').with_dependencies([(c_resolved, Visibility::PUBLIC)]);
+        let a_resolved = leaf("a", 'a').with_dependencies([(b_resolved, Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a_resolved, Visibility::PUBLIC)]);
 
         assert_eq!(root.dependencies.len(), 3);
-        assert_dep(&root.dependencies, 0, "c", Visibility::Public);
-        assert_dep(&root.dependencies, 1, "b", Visibility::Public);
-        assert_dep(&root.dependencies, 2, "a", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "c", Visibility::PUBLIC);
+        assert_dep(&root.dependencies, 1, "b", Visibility::PUBLIC);
+        assert_dep(&root.dependencies, 2, "a", Visibility::PUBLIC);
     }
 
     #[test]
     fn break_at_root_edge() {
         // Root→A(Sealed)→B(Public)→C(Public): all become sealed
         let c_resolved = leaf("c", 'c');
-        let b_resolved = leaf("b", 'b').with_dependencies([(c_resolved, Visibility::Public)]);
-        let a_resolved = leaf("a", 'a').with_dependencies([(b_resolved, Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a_resolved, Visibility::Sealed)]);
+        let b_resolved = leaf("b", 'b').with_dependencies([(c_resolved, Visibility::PUBLIC)]);
+        let a_resolved = leaf("a", 'a').with_dependencies([(b_resolved, Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a_resolved, Visibility::SEALED)]);
 
         assert_eq!(root.dependencies.len(), 3);
-        assert_dep(&root.dependencies, 0, "c", Visibility::Sealed);
-        assert_dep(&root.dependencies, 1, "b", Visibility::Sealed);
-        assert_dep(&root.dependencies, 2, "a", Visibility::Sealed);
+        assert_dep(&root.dependencies, 0, "c", Visibility::SEALED);
+        assert_dep(&root.dependencies, 1, "b", Visibility::SEALED);
+        assert_dep(&root.dependencies, 2, "a", Visibility::SEALED);
     }
 
     #[test]
     fn break_in_middle() {
         // Root→A(Public)→B(Sealed)→C(Public): B and C become sealed
         let c_resolved = leaf("c", 'c');
-        let b_resolved = leaf("b", 'b').with_dependencies([(c_resolved, Visibility::Public)]);
-        let a_resolved = leaf("a", 'a').with_dependencies([(b_resolved, Visibility::Sealed)]);
-        let root = leaf("root", 'r').with_dependencies([(a_resolved, Visibility::Public)]);
+        let b_resolved = leaf("b", 'b').with_dependencies([(c_resolved, Visibility::PUBLIC)]);
+        let a_resolved = leaf("a", 'a').with_dependencies([(b_resolved, Visibility::SEALED)]);
+        let root = leaf("root", 'r').with_dependencies([(a_resolved, Visibility::PUBLIC)]);
 
         assert_eq!(root.dependencies.len(), 3);
-        assert_dep(&root.dependencies, 0, "c", Visibility::Sealed);
-        assert_dep(&root.dependencies, 1, "b", Visibility::Sealed);
-        assert_dep(&root.dependencies, 2, "a", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "c", Visibility::SEALED);
+        assert_dep(&root.dependencies, 1, "b", Visibility::SEALED);
+        assert_dep(&root.dependencies, 2, "a", Visibility::PUBLIC);
     }
 
     #[test]
     fn break_at_leaf_edge() {
         // Root→A(Public)→B(Public)→C(Sealed)
         let c_resolved = leaf("c", 'c');
-        let b_resolved = leaf("b", 'b').with_dependencies([(c_resolved, Visibility::Sealed)]);
-        let a_resolved = leaf("a", 'a').with_dependencies([(b_resolved, Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a_resolved, Visibility::Public)]);
+        let b_resolved = leaf("b", 'b').with_dependencies([(c_resolved, Visibility::SEALED)]);
+        let a_resolved = leaf("a", 'a').with_dependencies([(b_resolved, Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a_resolved, Visibility::PUBLIC)]);
 
         assert_eq!(root.dependencies.len(), 3);
-        assert_dep(&root.dependencies, 0, "c", Visibility::Sealed);
-        assert_dep(&root.dependencies, 1, "b", Visibility::Public);
-        assert_dep(&root.dependencies, 2, "a", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "c", Visibility::SEALED);
+        assert_dep(&root.dependencies, 1, "b", Visibility::PUBLIC);
+        assert_dep(&root.dependencies, 2, "a", Visibility::PUBLIC);
     }
 
     // ── Diamond — direct deps share a child ─────────────────────────
@@ -347,9 +348,9 @@ mod tests {
     #[test]
     fn diamond_both_paths_public() {
         // Root→A(Public)→C(Public), Root→B(Public)→C(Public)
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (b, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (b, Visibility::PUBLIC)]);
 
         assert_eq!(root.dependencies.len(), 3);
         let c_dep = root
@@ -357,42 +358,42 @@ mod tests {
             .iter()
             .find(|d| d.identifier.repository() == "c")
             .unwrap();
-        assert_eq!(c_dep.visibility, Visibility::Public);
+        assert_eq!(c_dep.visibility, Visibility::PUBLIC);
     }
 
     #[test]
     fn diamond_one_parent_sealed() {
         // Root→A(Public)→C(Public), Root→B(Sealed)→C(Public) → C=Public via A
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (b, Visibility::Sealed)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (b, Visibility::SEALED)]);
 
         let c_dep = root
             .dependencies
             .iter()
             .find(|d| d.identifier.repository() == "c")
             .unwrap();
-        assert_eq!(c_dep.visibility, Visibility::Public, "C should be Public via A path");
+        assert_eq!(c_dep.visibility, Visibility::PUBLIC, "C should be Public via A path");
         let a_dep = root
             .dependencies
             .iter()
             .find(|d| d.identifier.repository() == "a")
             .unwrap();
-        assert_eq!(a_dep.visibility, Visibility::Public);
+        assert_eq!(a_dep.visibility, Visibility::PUBLIC);
         let b_dep = root
             .dependencies
             .iter()
             .find(|d| d.identifier.repository() == "b")
             .unwrap();
-        assert_eq!(b_dep.visibility, Visibility::Sealed);
+        assert_eq!(b_dep.visibility, Visibility::SEALED);
     }
 
     #[test]
     fn diamond_one_child_edge_sealed() {
         // Root→A(Public)→C(Sealed), Root→B(Public)→C(Public) → C=Public (merge: Sealed|Public)
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Sealed)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (b, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::SEALED)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (b, Visibility::PUBLIC)]);
 
         let c_dep = root
             .dependencies
@@ -401,7 +402,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             c_dep.visibility,
-            Visibility::Public,
+            Visibility::PUBLIC,
             "C should be Public via B path (merge semantics)"
         );
     }
@@ -409,29 +410,29 @@ mod tests {
     #[test]
     fn diamond_both_child_edges_sealed() {
         // Root→A(Public)→C(Sealed), Root→B(Public)→C(Sealed) → C=Sealed
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Sealed)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Sealed)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (b, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::SEALED)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::SEALED)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (b, Visibility::PUBLIC)]);
 
         let c_dep = root
             .dependencies
             .iter()
             .find(|d| d.identifier.repository() == "c")
             .unwrap();
-        assert_eq!(c_dep.visibility, Visibility::Sealed);
+        assert_eq!(c_dep.visibility, Visibility::SEALED);
     }
 
     #[test]
     fn diamond_both_parents_sealed() {
         // Root→A(Sealed)→C(Public), Root→B(Sealed)→C(Public) → all Sealed
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Sealed), (b, Visibility::Sealed)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::SEALED), (b, Visibility::SEALED)]);
 
         for dep in &root.dependencies {
             assert_eq!(
                 dep.visibility,
-                Visibility::Sealed,
+                Visibility::SEALED,
                 "{} should be Sealed",
                 dep.identifier.repository()
             );
@@ -441,9 +442,9 @@ mod tests {
     #[test]
     fn diamond_mixed_one_parent_blocks_other_exports() {
         // Root→A(Sealed)→C(Public), Root→B(Public)→C(Public) → A=Sealed, B=Public, C=Public (via B)
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Sealed), (b, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::SEALED), (b, Visibility::PUBLIC)]);
 
         let a_dep = root
             .dependencies
@@ -460,9 +461,9 @@ mod tests {
             .iter()
             .find(|d| d.identifier.repository() == "c")
             .unwrap();
-        assert_eq!(a_dep.visibility, Visibility::Sealed);
-        assert_eq!(b_dep.visibility, Visibility::Public);
-        assert_eq!(c_dep.visibility, Visibility::Public, "C Public via B path");
+        assert_eq!(a_dep.visibility, Visibility::SEALED);
+        assert_eq!(b_dep.visibility, Visibility::PUBLIC);
+        assert_eq!(c_dep.visibility, Visibility::PUBLIC, "C Public via B path");
     }
 
     // ── Diamond — merge ordering ──────────────────────────────────
@@ -470,9 +471,9 @@ mod tests {
     #[test]
     fn diamond_merge_sealed_then_public() {
         // Root→A(Public)→C(Sealed), Root→B(Public)→C(Public): A first sets C=Sealed, B merges to Public
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Sealed)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (b, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::SEALED)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (b, Visibility::PUBLIC)]);
 
         let c_dep = root
             .dependencies
@@ -481,7 +482,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             c_dep.visibility,
-            Visibility::Public,
+            Visibility::PUBLIC,
             "C should merge from Sealed to Public via B"
         );
     }
@@ -489,9 +490,9 @@ mod tests {
     #[test]
     fn diamond_merge_public_then_sealed() {
         // Root→A(Public)→C(Public), Root→B(Public)→C(Sealed): A first sets C=Public, stays Public
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Sealed)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (b, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::SEALED)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (b, Visibility::PUBLIC)]);
 
         let c_dep = root
             .dependencies
@@ -500,7 +501,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             c_dep.visibility,
-            Visibility::Public,
+            Visibility::PUBLIC,
             "C should stay Public (merge with Sealed)"
         );
     }
@@ -511,58 +512,58 @@ mod tests {
     fn deep_diamond_shared_grandchild_one_path_exports() {
         // Root→A(Public)→B(Public)→D(Public), Root→C(Public)→D(Sealed) → D=Public via A→B
         let d1 = leaf("d", 'd');
-        let b = leaf("b", 'b').with_dependencies([(d1, Visibility::Public)]);
-        let a = leaf("a", 'a').with_dependencies([(b, Visibility::Public)]);
+        let b = leaf("b", 'b').with_dependencies([(d1, Visibility::PUBLIC)]);
+        let a = leaf("a", 'a').with_dependencies([(b, Visibility::PUBLIC)]);
 
         let d2 = leaf("d", 'd');
-        let c = leaf("c", 'c').with_dependencies([(d2, Visibility::Sealed)]);
+        let c = leaf("c", 'c').with_dependencies([(d2, Visibility::SEALED)]);
 
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (c, Visibility::Public)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (c, Visibility::PUBLIC)]);
 
         let d_dep = root
             .dependencies
             .iter()
             .find(|d| d.identifier.repository() == "d")
             .unwrap();
-        assert_eq!(d_dep.visibility, Visibility::Public, "D Public via A→B path");
+        assert_eq!(d_dep.visibility, Visibility::PUBLIC, "D Public via A→B path");
     }
 
     #[test]
     fn deep_diamond_shared_grandchild_neither_path_exports() {
         // Root→A(Public)→B(Sealed)→D(Public), Root→C(Public)→D(Sealed) → D=Sealed
         let d1 = leaf("d", 'd');
-        let b = leaf("b", 'b').with_dependencies([(d1, Visibility::Public)]);
-        let a = leaf("a", 'a').with_dependencies([(b, Visibility::Sealed)]);
+        let b = leaf("b", 'b').with_dependencies([(d1, Visibility::PUBLIC)]);
+        let a = leaf("a", 'a').with_dependencies([(b, Visibility::SEALED)]);
 
         let d2 = leaf("d", 'd');
-        let c = leaf("c", 'c').with_dependencies([(d2, Visibility::Sealed)]);
+        let c = leaf("c", 'c').with_dependencies([(d2, Visibility::SEALED)]);
 
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (c, Visibility::Public)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (c, Visibility::PUBLIC)]);
 
         let d_dep = root
             .dependencies
             .iter()
             .find(|d| d.identifier.repository() == "d")
             .unwrap();
-        assert_eq!(d_dep.visibility, Visibility::Sealed, "D not exported via either path");
+        assert_eq!(d_dep.visibility, Visibility::SEALED, "D not exported via either path");
     }
 
     #[test]
     fn deep_diamond_shared_grandchild_both_paths_export() {
         // Root→A(Public)→B(Public)→D(Public), Root→C(Public)→D(Public) → all Public
         let d1 = leaf("d", 'd');
-        let b = leaf("b", 'b').with_dependencies([(d1, Visibility::Public)]);
-        let a = leaf("a", 'a').with_dependencies([(b, Visibility::Public)]);
+        let b = leaf("b", 'b').with_dependencies([(d1, Visibility::PUBLIC)]);
+        let a = leaf("a", 'a').with_dependencies([(b, Visibility::PUBLIC)]);
 
         let d2 = leaf("d", 'd');
-        let c = leaf("c", 'c').with_dependencies([(d2, Visibility::Public)]);
+        let c = leaf("c", 'c').with_dependencies([(d2, Visibility::PUBLIC)]);
 
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (c, Visibility::Public)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (c, Visibility::PUBLIC)]);
 
         for dep in &root.dependencies {
             assert_eq!(
                 dep.visibility,
-                Visibility::Public,
+                Visibility::PUBLIC,
                 "{} should be Public",
                 dep.identifier.repository()
             );
@@ -575,30 +576,30 @@ mod tests {
     fn four_level_chain_break_at_level_2() {
         // Root→A(Public)→B(Sealed)→C(Public)→D(Public) → A=Public, B=Sealed, C=Sealed, D=Sealed
         let d = leaf("d", 'd');
-        let c = leaf("c", 'c').with_dependencies([(d, Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(c, Visibility::Public)]);
-        let a = leaf("a", 'a').with_dependencies([(b, Visibility::Sealed)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public)]);
+        let c = leaf("c", 'c').with_dependencies([(d, Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(c, Visibility::PUBLIC)]);
+        let a = leaf("a", 'a').with_dependencies([(b, Visibility::SEALED)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC)]);
 
-        assert_dep(&root.dependencies, 0, "d", Visibility::Sealed);
-        assert_dep(&root.dependencies, 1, "c", Visibility::Sealed);
-        assert_dep(&root.dependencies, 2, "b", Visibility::Sealed);
-        assert_dep(&root.dependencies, 3, "a", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "d", Visibility::SEALED);
+        assert_dep(&root.dependencies, 1, "c", Visibility::SEALED);
+        assert_dep(&root.dependencies, 2, "b", Visibility::SEALED);
+        assert_dep(&root.dependencies, 3, "a", Visibility::PUBLIC);
     }
 
     #[test]
     fn four_level_chain_break_at_level_3() {
         // Root→A(Public)→B(Public)→C(Sealed)→D(Public) → A=Public, B=Public, C=Sealed, D=Sealed
         let d = leaf("d", 'd');
-        let c = leaf("c", 'c').with_dependencies([(d, Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(c, Visibility::Sealed)]);
-        let a = leaf("a", 'a').with_dependencies([(b, Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public)]);
+        let c = leaf("c", 'c').with_dependencies([(d, Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(c, Visibility::SEALED)]);
+        let a = leaf("a", 'a').with_dependencies([(b, Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC)]);
 
-        assert_dep(&root.dependencies, 0, "d", Visibility::Sealed);
-        assert_dep(&root.dependencies, 1, "c", Visibility::Sealed);
-        assert_dep(&root.dependencies, 2, "b", Visibility::Public);
-        assert_dep(&root.dependencies, 3, "a", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "d", Visibility::SEALED);
+        assert_dep(&root.dependencies, 1, "c", Visibility::SEALED);
+        assert_dep(&root.dependencies, 2, "b", Visibility::PUBLIC);
+        assert_dep(&root.dependencies, 3, "a", Visibility::PUBLIC);
     }
 
     // ── Deduplication with visibility ───────────────────────────────
@@ -606,9 +607,9 @@ mod tests {
     #[test]
     fn diamond_dedup_preserves_topological_order_and_count() {
         // Root→A(Public)→C(Public), Root→B(Public)→C(Public) → C appears once, before A and B
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (b, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (b, Visibility::PUBLIC)]);
 
         let c_count = root
             .dependencies
@@ -617,7 +618,7 @@ mod tests {
             .count();
         assert_eq!(c_count, 1, "C should appear exactly once");
         // C first (dep before dependent), then A, then B
-        assert_dep(&root.dependencies, 0, "c", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "c", Visibility::PUBLIC);
     }
 
     // ── Edge: public dep with sealed subdeps ────────────────────────
@@ -625,12 +626,12 @@ mod tests {
     #[test]
     fn public_parent_sealed_child() {
         // Root→A(Public)→B(Sealed) → A=Public, B=Sealed
-        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::Sealed)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::SEALED)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC)]);
 
         assert_eq!(root.dependencies.len(), 2);
-        assert_dep(&root.dependencies, 0, "b", Visibility::Sealed);
-        assert_dep(&root.dependencies, 1, "a", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "b", Visibility::SEALED);
+        assert_dep(&root.dependencies, 1, "a", Visibility::PUBLIC);
     }
 
     // ── Visibility propagation with Private/Interface ───────────────
@@ -638,53 +639,53 @@ mod tests {
     #[test]
     fn propagation_public_then_private_is_sealed() {
         // Root→(Public)→A→(Private)→B: Private doesn't export, so B is Sealed from Root
-        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::Private)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::PRIVATE)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC)]);
 
         assert_eq!(root.dependencies.len(), 2);
-        assert_dep(&root.dependencies, 0, "b", Visibility::Sealed);
-        assert_dep(&root.dependencies, 1, "a", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "b", Visibility::SEALED);
+        assert_dep(&root.dependencies, 1, "a", Visibility::PUBLIC);
     }
 
     #[test]
     fn propagation_private_then_public_is_private() {
         // Root→(Private)→A→(Public)→B: Public exports, result = edge = Private
-        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Private)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PRIVATE)]);
 
         assert_eq!(root.dependencies.len(), 2);
-        assert_dep(&root.dependencies, 0, "b", Visibility::Private);
-        assert_dep(&root.dependencies, 1, "a", Visibility::Private);
+        assert_dep(&root.dependencies, 0, "b", Visibility::PRIVATE);
+        assert_dep(&root.dependencies, 1, "a", Visibility::PRIVATE);
     }
 
     #[test]
     fn propagation_interface_then_public_is_interface() {
         // Root→(Interface)→A→(Public)→B: Public exports, result = edge = Interface
-        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Interface)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::INTERFACE)]);
 
         assert_eq!(root.dependencies.len(), 2);
-        assert_dep(&root.dependencies, 0, "b", Visibility::Interface);
-        assert_dep(&root.dependencies, 1, "a", Visibility::Interface);
+        assert_dep(&root.dependencies, 0, "b", Visibility::INTERFACE);
+        assert_dep(&root.dependencies, 1, "a", Visibility::INTERFACE);
     }
 
     #[test]
     fn propagation_public_then_interface_is_public() {
         // Root→(Public)→A→(Interface)→B: Interface exports (consumer-visible), result = edge = Public
-        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::Interface)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("b", 'b'), Visibility::INTERFACE)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC)]);
 
         assert_eq!(root.dependencies.len(), 2);
-        assert_dep(&root.dependencies, 0, "b", Visibility::Public);
-        assert_dep(&root.dependencies, 1, "a", Visibility::Public);
+        assert_dep(&root.dependencies, 0, "b", Visibility::PUBLIC);
+        assert_dep(&root.dependencies, 1, "a", Visibility::PUBLIC);
     }
 
     #[test]
     fn diamond_merge_private_and_interface_gives_public() {
         // Two paths to C: one Private, one Interface → merge = Public (self|consumer both true)
-        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::Private)]);
-        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::Interface)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Public), (b, Visibility::Public)]);
+        let a = leaf("a", 'a').with_dependencies([(leaf("c", 'c'), Visibility::PRIVATE)]);
+        let b = leaf("b", 'b').with_dependencies([(leaf("c", 'c'), Visibility::INTERFACE)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PUBLIC), (b, Visibility::PUBLIC)]);
 
         let c_dep = root
             .dependencies
@@ -693,36 +694,62 @@ mod tests {
             .unwrap();
         // Private is (self=T, consumer=F), Interface is (self=F, consumer=T)
         // merge OR on each axis: (T, T) = Public
-        assert_eq!(c_dep.visibility, Visibility::Public, "Private | Interface = Public");
+        assert_eq!(c_dep.visibility, Visibility::PUBLIC, "Private | Interface = Public");
+    }
+
+    #[test]
+    fn sealed_inside_public_inside_interface_chain() {
+        // Root→(Interface)→A→(Public)→B→(Sealed)→C
+        //
+        // Walk from leaf upward:
+        //   C@B          = Sealed (edge)
+        //   C@A          = Public.through_edge(Sealed)     = Sealed (Sealed never exports)
+        //   C@Root       = Interface.through_edge(Sealed)  = Sealed
+        //   B@A          = Public (edge)
+        //   B@Root       = Interface.through_edge(Public)  = Interface
+        //   A@Root       = Interface (edge)
+        //
+        // C must stay Sealed under Root regardless of the outer Interface
+        // wrapper, and the intermediate Public hop is what enforces it: a
+        // Sealed grandchild cannot leak through Public→Interface chaining.
+        let c = leaf("c", 'c');
+        let b = leaf("b", 'b').with_dependencies([(c, Visibility::SEALED)]);
+        let a = leaf("a", 'a').with_dependencies([(b, Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::INTERFACE)]);
+
+        assert_eq!(root.dependencies.len(), 3);
+        assert_dep(&root.dependencies, 0, "c", Visibility::SEALED);
+        assert_dep(&root.dependencies, 1, "b", Visibility::INTERFACE);
+        assert_dep(&root.dependencies, 2, "a", Visibility::INTERFACE);
     }
 
     #[test]
     fn four_level_chain_mixed_visibility() {
         // Root→(Private)→A→(Public)→B→(Interface)→C→(Public)→D
-        // D's visibility from C: Interface.propagate(Public) = Interface (Public exports, result=edge)
+        // D's visibility from C: Interface.through_edge(Public) = Interface (Public exports, result=edge)
         // C's visibility from B: resolved as Interface edge
-        // C and D from A: Private.propagate(Interface) = Private (Interface exports, result=edge)
-        //                 Private.propagate(Interface) = Private for D too
+        // C and D from A: Private.through_edge(Interface) = Private (Interface exports, result=edge)
+        //                 Private.through_edge(Interface) = Private for D too
         // From Root: Private edge, so A=Private, and transitives through A are Private
         let d = leaf("d", 'd');
-        let c = leaf("c", 'c').with_dependencies([(d, Visibility::Public)]);
-        let b = leaf("b", 'b').with_dependencies([(c, Visibility::Interface)]);
-        let a = leaf("a", 'a').with_dependencies([(b, Visibility::Public)]);
-        let root = leaf("root", 'r').with_dependencies([(a, Visibility::Private)]);
+        let c = leaf("c", 'c').with_dependencies([(d, Visibility::PUBLIC)]);
+        let b = leaf("b", 'b').with_dependencies([(c, Visibility::INTERFACE)]);
+        let a = leaf("a", 'a').with_dependencies([(b, Visibility::PUBLIC)]);
+        let root = leaf("root", 'r').with_dependencies([(a, Visibility::PRIVATE)]);
 
         assert_eq!(root.dependencies.len(), 4);
         // Walk the chain:
         // C declares D as Public → D is Public within C's resolution
-        // B declares C as Interface → Interface.propagate(Public for D) = Interface (Public exports, result=Interface)
+        // B declares C as Interface → Interface.through_edge(Public for D) = Interface (Public exports, result=Interface)
         //   So from B: D=Interface, C=Interface
-        // A declares B as Public → Public.propagate(Interface for D) = Public (Interface exports, result=Public)
-        //   Public.propagate(Interface for C) = Public
+        // A declares B as Public → Public.through_edge(Interface for D) = Public (Interface exports, result=Public)
+        //   Public.through_edge(Interface for C) = Public
         //   So from A: D=Public, C=Public, B=Public
-        // Root declares A as Private → Private.propagate(Public for D) = Private
+        // Root declares A as Private → Private.through_edge(Public for D) = Private
         //   So from Root: D=Private, C=Private, B=Private, A=Private
-        assert_dep(&root.dependencies, 0, "d", Visibility::Private);
-        assert_dep(&root.dependencies, 1, "c", Visibility::Private);
-        assert_dep(&root.dependencies, 2, "b", Visibility::Private);
-        assert_dep(&root.dependencies, 3, "a", Visibility::Private);
+        assert_dep(&root.dependencies, 0, "d", Visibility::PRIVATE);
+        assert_dep(&root.dependencies, 1, "c", Visibility::PRIVATE);
+        assert_dep(&root.dependencies, 2, "b", Visibility::PRIVATE);
+        assert_dep(&root.dependencies, 3, "a", Visibility::PRIVATE);
     }
 }

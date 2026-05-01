@@ -52,9 +52,7 @@ def _bundle_layer(
     bundle = tmp_path / f"{layer_dir.name}.{ext}"
     metadata_path = tmp_path / f"{layer_dir.name}-meta.json"
     metadata_path.write_text(json.dumps({
-        "type": "bundle",
-        "version": 1,
-        "env": [
+        "type": "bundle", "version": 1, "env": [
             {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
         ],
     }))
@@ -81,9 +79,7 @@ def _push_multi_layer(
     if metadata_path is None:
         metadata_path = tmp_path / f"meta-{repo}-{tag}.json"
         metadata_path.write_text(json.dumps({
-            "type": "bundle",
-            "version": 1,
-            "env": [
+            "type": "bundle", "version": 1, "env": [
                 {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
             ],
         }))
@@ -137,8 +133,7 @@ def test_push_zero_layers_succeeds_with_metadata(
     manifests). Verify it round-trips via the registry manifest API."""
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1,
-        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+        "type": "bundle", "version": 1, "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
@@ -186,8 +181,7 @@ def test_round_trip_zero_layers(
     verify the install succeeds and produces an empty content/ directory."""
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps({
-        "type": "bundle", "version": 1,
-        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+        "type": "bundle", "version": 1, "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     plat = current_platform()
     short = f"{unique_repo}:1.0.0"
@@ -196,7 +190,7 @@ def test_round_trip_zero_layers(
     ocx.plain("index", "update", short)
 
     result = ocx.json("install", short)
-    content = Path(result[short]["path"])
+    content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)
     assert list(content.iterdir()) == [], (
@@ -217,7 +211,7 @@ def test_round_trip_multi_layer(
     _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a), str(bundle_b)], tmp_path)
     ocx.plain("index", "update", short)
     result = ocx.json("install", short)
-    content = Path(result[short]["path"])
+    content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)
     assert (content / "lib" / "liba.so").exists(), "File from layer A missing"
@@ -238,7 +232,7 @@ def test_round_trip_shared_directory(
     _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a), str(bundle_b)], tmp_path)
     ocx.plain("index", "update", short)
     result = ocx.json("install", short)
-    content = Path(result[short]["path"])
+    content = Path(result[short]["path"]) / "content"
 
     assert (content / "bin" / "tool_a").exists(), "File from layer A missing in shared dir"
     assert (content / "bin" / "tool_b").exists(), "File from layer B missing in shared dir"
@@ -305,7 +299,7 @@ def test_push_digest_layer_reuse(
     ocx.plain("index", "update", f"{unique_repo}:2.0.0")
 
     result = ocx.json("install", f"{unique_repo}:2.0.0")
-    content = Path(result[f"{unique_repo}:2.0.0"]["path"])
+    content = Path(result[f"{unique_repo}:2.0.0"]["path"]) / "content"
     assert (content / "lib" / "shared.so").exists(), "Digest-referenced layer A missing"
     assert (content / "bin" / "new_tool").exists(), "File layer B missing"
 
@@ -356,7 +350,7 @@ def test_push_digest_layer_reuse_tar_xz(
     )
 
     result = ocx.json("install", f"{unique_repo}:2.0.0")
-    content = Path(result[f"{unique_repo}:2.0.0"]["path"])
+    content = Path(result[f"{unique_repo}:2.0.0"]["path"]) / "content"
     assert (content / "lib" / "liba.so").exists(), "xz layer A not extracted on consumer"
     assert (content / "lib" / "liba.so").read_text() == "xz-shared"
     assert (content / "bin" / "tool").exists(), "File layer B missing"
@@ -372,8 +366,7 @@ def test_push_bare_digest_is_rejected(
     bundle_b = _bundle_layer(ocx, layer_b, tmp_path)
 
     (tmp_path / "meta.json").write_text(json.dumps({
-        "type": "bundle", "version": 1,
-        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+        "type": "bundle", "version": 1, "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     bare_digest = "sha256:" + "0" * 64
     result = ocx.run(
@@ -402,8 +395,7 @@ def test_push_digest_layer_not_found(
     bundle_b = _bundle_layer(ocx, layer_b, tmp_path)
 
     (tmp_path / "meta.json").write_text(json.dumps({
-        "type": "bundle", "version": 1,
-        "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
+        "type": "bundle", "version": 1, "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }))
     result = ocx.run(
         "package", "push", "-p", current_platform(),

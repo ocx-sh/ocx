@@ -18,18 +18,22 @@ pub enum SymlinkKind {
 
 /// Manages symlinks for installed packages.
 ///
-/// Symlink store provides stable, human-readable paths to package content
+/// Symlink store provides stable, human-readable paths to package roots
 /// that remain constant across version upgrades, making them safe to embed in
-/// shell profiles or toolchain configurations.
+/// shell profiles or toolchain configurations. Both `current` and
+/// `candidates/{tag}` target the **package root** (not `content/`) so a single
+/// per-repo symlink covers every consumer: tools that need files traverse
+/// `<symlink>/content`, shell PATH integrations traverse `<symlink>/entrypoints`,
+/// and metadata consumers read `<symlink>/metadata.json`.
 ///
 /// Layout:
 /// ```text
 /// {root}/
 ///   {registry}/
 ///     {repository}/
-///       current               — symlink (written by `ocx select`)
+///       current               — symlink → packages/{...}/        (package root)
 ///       candidates/
-///         {tag}               — symlink (written by `ocx install`)
+///         {tag}               — symlink → packages/{...}/        (package root)
 /// ```
 #[derive(Debug, Clone)]
 pub struct SymlinkStore {
@@ -53,6 +57,10 @@ impl SymlinkStore {
     }
 
     /// Returns the `current` symlink path for the given identifier.
+    ///
+    /// Targets the package root: `packages/{registry}/{algorithm}/{2hex}/{30hex}`.
+    /// Consumers traverse into `<current>/content/`, `<current>/entrypoints/`,
+    /// or `<current>/metadata.json` as needed.
     pub fn current(&self, identifier: &oci::Identifier) -> PathBuf {
         self.base(identifier).join("current")
     }
@@ -73,6 +81,21 @@ impl SymlinkStore {
             SymlinkKind::Candidate => self.candidate(identifier),
             SymlinkKind::Current => self.current(identifier),
         }
+    }
+
+    /// Returns the per-repo selection lock path: `{base}/.select.lock`.
+    ///
+    /// Serializes `current` symlink updates across `install --select`,
+    /// `deselect`, `uninstall --deselect`, and the standalone `select`
+    /// command so concurrent invocations cannot interleave a symlink
+    /// rewrite with the per-registry entry-points index update.
+    pub fn select_lock(&self, identifier: &oci::Identifier) -> PathBuf {
+        self.base(identifier).join(".select.lock")
+    }
+
+    /// Returns the per-registry directory: `{root}/{registry_slug}/`.
+    pub fn registry_dir(&self, registry: &str) -> PathBuf {
+        self.root.join(super::slugify(registry))
     }
 }
 
@@ -185,4 +208,7 @@ mod tests {
         let store = SymlinkStore::new("/symlinks");
         assert_eq!(store.root(), Path::new("/symlinks"));
     }
+
+    // ── collision check — drives entrypoint collision check ───────────────
+    // Tests for select-time collision check live in tasks/install.rs tests.
 }

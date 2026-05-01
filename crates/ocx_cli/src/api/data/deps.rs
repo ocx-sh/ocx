@@ -15,11 +15,11 @@ const STYLE_DIGEST: console::Style = console::Style::new().color256(117); // lig
 const STYLE_REPEATED: console::Style = console::Style::new().italic().dim();
 
 const fn visibility_style(vis: Visibility) -> console::Style {
-    match vis {
-        Visibility::Public => console::Style::new().color256(114), // soft green
-        Visibility::Private => console::Style::new().italic().color256(179), // warm amber
-        Visibility::Interface => console::Style::new().italic().color256(141), // lavender
-        Visibility::Sealed => console::Style::new().italic().dim().color256(245), // muted gray
+    match (vis.private, vis.interface) {
+        (true, true) => console::Style::new().color256(114), // public — soft green
+        (true, false) => console::Style::new().italic().color256(179), // private — warm amber
+        (false, true) => console::Style::new().italic().color256(141), // interface — lavender
+        (false, false) => console::Style::new().italic().dim().color256(245), // sealed — muted gray
     }
 }
 
@@ -172,7 +172,7 @@ mod tests {
         Dependency {
             identifier: make_identifier(identifier).clone_with_digest(digest),
             repeated,
-            visibility: Some(Visibility::Public),
+            visibility: Some(Visibility::PUBLIC),
             dependencies: deps,
         }
     }
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn tree_node_sealed_annotation() {
         let mut node = make_node("pkg", make_digest('a'), false, vec![]);
-        node.visibility = Some(Visibility::Sealed);
+        node.visibility = Some(Visibility::SEALED);
         let texts = annotation_texts(&node);
         assert!(texts.contains(&"sealed".to_string()));
     }
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn tree_node_repeated_and_sealed_shows_both() {
         let mut node = make_node("pkg", make_digest('a'), true, vec![]);
-        node.visibility = Some(Visibility::Sealed);
+        node.visibility = Some(Visibility::SEALED);
         let texts = annotation_texts(&node);
         assert!(texts.contains(&"repeated".to_string()));
         assert!(texts.contains(&"sealed".to_string()));
@@ -240,21 +240,21 @@ mod tests {
     #[test]
     fn tree_node_private_annotation() {
         let mut node = make_node("pkg", make_digest('a'), false, vec![]);
-        node.visibility = Some(Visibility::Private);
+        node.visibility = Some(Visibility::PRIVATE);
         assert!(annotation_texts(&node).contains(&"private".to_string()));
     }
 
     #[test]
     fn tree_node_interface_annotation() {
         let mut node = make_node("pkg", make_digest('a'), false, vec![]);
-        node.visibility = Some(Visibility::Interface);
+        node.visibility = Some(Visibility::INTERFACE);
         assert!(annotation_texts(&node).contains(&"interface".to_string()));
     }
 
     #[test]
     fn tree_node_repeated_and_private_shows_both() {
         let mut node = make_node("pkg", make_digest('a'), true, vec![]);
-        node.visibility = Some(Visibility::Private);
+        node.visibility = Some(Visibility::PRIVATE);
         let texts = annotation_texts(&node);
         assert!(texts.contains(&"repeated".to_string()));
         assert!(texts.contains(&"private".to_string()));

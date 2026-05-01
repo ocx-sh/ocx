@@ -3,6 +3,7 @@
 
 use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
+use crate::package::metadata::entrypoint::EntrypointName;
 use crate::{file_structure, oci};
 
 /// Task-level error for package manager operations.
@@ -118,6 +119,21 @@ pub enum PackageErrorKind {
     /// The identifier has no digest after resolution.
     #[error("identifier has no digest after resolution")]
     DigestMissing,
+    /// An entrypoint name collision was detected in the interface surface of the
+    /// transitive closure. Raised at install time when N≥2 packages in the
+    /// interface projection declare the same entrypoint `name`. Reports all
+    /// owners so the user can deselect the right one. Supersedes the
+    /// 2-owner `EntrypointNameCollision` variant (see `adr_two_env_composition.md`).
+    #[error(
+        "entrypoint name collision: '{name}' declared by {} packages: {}; deselect one before selecting another",
+        owners.len(),
+        owners.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    EntrypointCollision {
+        name: EntrypointName,
+        owners: Vec<oci::PinnedIdentifier>,
+    },
+
     /// An underlying internal error (I/O, OCI, network, etc.).
     #[error(transparent)]
     Internal(#[from] crate::Error),
@@ -186,7 +202,10 @@ impl ClassifyExitCode for PackageErrorKind {
         Some(match self {
             Self::NotFound | Self::SymlinkNotFound(_) | Self::BlobNotFound(_) => ExitCode::NotFound,
             Self::OfflineManifestMissing(_) => ExitCode::OfflineBlocked,
-            Self::SelectionAmbiguous(_) | Self::SymlinkRequiresTag | Self::DigestMissing => ExitCode::DataError,
+            Self::SelectionAmbiguous(_)
+            | Self::SymlinkRequiresTag
+            | Self::DigestMissing
+            | Self::EntrypointCollision { .. } => ExitCode::DataError,
             Self::TaskPanicked => ExitCode::Failure,
             // Internal wraps a full `crate::Error` — walk through classify_error
             // so the inner chain is inspected via the generic entry point.
@@ -197,10 +216,14 @@ impl ClassifyExitCode for PackageErrorKind {
 
 impl ClassifyExitCode for DependencyError {
     fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Conflict { .. } => ExitCode::DataError,
-            Self::SetupFailed(_) => ExitCode::Failure,
-        })
+        match self {
+            Self::Conflict { .. } => Some(ExitCode::DataError),
+            // Defer to the wrapped singleflight error's source chain so the
+            // underlying classifiable variant (e.g. `EntrypointCollision`)
+            // wins over the generic "setup failed" wrapper. The chain walker
+            // re-enters `try_classify` on the next cause.
+            Self::SetupFailed(_) => None,
+        }
     }
 }
 

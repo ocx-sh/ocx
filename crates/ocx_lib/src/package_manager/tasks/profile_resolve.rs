@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use crate::{
+    file_structure::PackageDir,
     log, oci,
     package::{
         install_info::InstallInfo,
@@ -11,6 +12,7 @@ use crate::{
         resolved_package::ResolvedPackage,
     },
     profile::{ProfileEntry, ProfileMode},
+    utility,
 };
 
 use super::super::PackageManager;
@@ -22,8 +24,10 @@ pub struct ResolvedProfileEntry {
     pub identifier: oci::PinnedIdentifier,
     /// The resolution mode used.
     pub mode: ProfileMode,
-    /// The resolved content path (object store or symlink depending on mode).
-    pub content_path: PathBuf,
+    /// The package directory anchor (object-store package root or install
+    /// symlink target — both expose the same `content/` / `entrypoints/`
+    /// layout).
+    pub dir: PackageDir,
     /// The package metadata loaded from the object store.
     pub metadata: metadata::Metadata,
     /// The resolved dependency closure.
@@ -32,12 +36,12 @@ pub struct ResolvedProfileEntry {
 
 impl From<&ResolvedProfileEntry> for InstallInfo {
     fn from(entry: &ResolvedProfileEntry) -> Self {
-        Self {
-            identifier: entry.identifier.clone(),
-            metadata: entry.metadata.clone(),
-            resolved: entry.resolved.clone(),
-            content: entry.content_path.clone(),
-        }
+        InstallInfo::new(
+            entry.identifier.clone(),
+            entry.metadata.clone(),
+            entry.resolved.clone(),
+            entry.dir.clone(),
+        )
     }
 }
 
@@ -104,10 +108,10 @@ impl PackageManager {
                 ProfileEntryResolution::Resolved(entry) => {
                     // Track constant env vars for conflict detection
                     if let Some(env) = entry.metadata.env() {
+                        let install_path = entry.dir.content();
                         for var in env {
                             if let metadata::env::modifier::Modifier::Constant(c) = &var.modifier {
-                                let resolved_value =
-                                    c.value.replace("${installPath}", &entry.content_path.to_string_lossy());
+                                let resolved_value = c.value.replace("${installPath}", &install_path.to_string_lossy());
                                 if let Some(conflict) =
                                     tracker.track(&entry.identifier.to_string(), &var.key, &resolved_value)
                                 {
@@ -160,7 +164,7 @@ async fn resolve_symlink_entry(
     symlink_path: &std::path::Path,
     kind: crate::file_structure::SymlinkKind,
 ) -> ProfileEntryResolution {
-    if !symlink_path.exists() {
+    if !utility::fs::path_exists_lossy(symlink_path).await {
         return ProfileEntryResolution::broken(
             entry,
             Some(symlink_path.to_path_buf()),
@@ -178,10 +182,15 @@ async fn resolve_symlink_entry(
                         return ProfileEntryResolution::broken(entry, Some(symlink_path.to_path_buf()), e.to_string());
                     }
                 };
+            // Install symlinks target the package root (post-flatten layout);
+            // store the symlink path itself so traversal stays stable through
+            // the symlink for both `content/` and `entrypoints/` siblings.
             ProfileEntryResolution::Resolved(ResolvedProfileEntry {
                 identifier,
                 mode: entry.mode,
-                content_path: symlink_path.to_path_buf(),
+                dir: PackageDir {
+                    dir: symlink_path.to_path_buf(),
+                },
                 metadata,
                 resolved,
             })
@@ -196,19 +205,20 @@ async fn resolve_symlink_entry(
 async fn resolve_content_entry(mgr: &PackageManager, entry: &ProfileEntry) -> ProfileEntryResolution {
     // Digest is on the identifier — resolve directly from the object store.
     if let Ok(pinned) = oci::PinnedIdentifier::try_from(entry.identifier.clone()) {
-        let content_path = mgr.file_structure().packages.content(&pinned);
-        if content_path.exists() {
+        let pkg = mgr.file_structure().packages.package_dir(&pinned);
+        let content_path = pkg.content();
+        if utility::fs::path_exists_lossy(&content_path).await {
             return match super::common::load_object_data(&mgr.file_structure().packages, &content_path).await {
                 Ok((metadata, resolved)) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
                     identifier: pinned,
                     mode: entry.mode,
-                    content_path,
+                    dir: pkg.clone(),
                     metadata,
                     resolved,
                 }),
                 Err(e) => {
                     log::debug!("Failed to resolve content entry '{}': {}", entry.identifier, e);
-                    ProfileEntryResolution::broken(entry, Some(content_path), e.to_string())
+                    ProfileEntryResolution::broken(entry, Some(pkg.root().to_path_buf()), e.to_string())
                 }
             };
         }
@@ -222,11 +232,11 @@ async fn resolve_content_entry(mgr: &PackageManager, entry: &ProfileEntry) -> Pr
     platforms.push(oci::Platform::any());
     match mgr.find(&entry.identifier, platforms).await {
         Ok(info) => ProfileEntryResolution::Resolved(ResolvedProfileEntry {
-            identifier: info.identifier,
+            identifier: info.identifier().clone(),
             mode: entry.mode,
-            content_path: info.content,
-            metadata: info.metadata,
-            resolved: info.resolved,
+            dir: info.dir().clone(),
+            metadata: info.metadata().clone(),
+            resolved: info.resolved().clone(),
         }),
         Err(e) => {
             log::debug!("Failed to find entry '{}': {}", entry.identifier, e);

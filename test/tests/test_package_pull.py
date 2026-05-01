@@ -10,9 +10,12 @@ def test_package_pull_populates_object_store(
     """ocx package pull <pkg> downloads to the object store."""
     result = ocx.json("package", "pull", published_package.short)
 
-    content = Path(result[published_package.short])
-    assert_dir_exists(content)
-    assert "packages" in str(content), f"Expected package store path, got: {content}"
+    root = Path(result[published_package.short])
+    assert_dir_exists(root)
+    assert "packages" in str(root), f"Expected package store path, got: {root}"
+    # The reported path is the package root — children are content/ and metadata.json.
+    assert (root / "content").is_dir()
+    assert (root / "metadata.json").is_file()
 
 
 def test_package_pull_does_not_create_candidate_symlink(

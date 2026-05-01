@@ -6,7 +6,7 @@ Covers: plan_configuration_system.md Step 3.4 — all user-experience scenarios
 in the plan's "User Experience Scenarios" table and "Edge Cases" section.
 
 Each test writes a config file into $OCX_HOME (the per-test isolated temp dir)
-or passes it via --config / OCX_CONFIG_FILE, then runs an ocx command and
+or passes it via --config / OCX_CONFIG, then runs an ocx command and
 asserts the observable outcome.
 
 Strategy for detecting which registry was resolved:
@@ -320,7 +320,7 @@ def test_info_still_requires_valid_config_when_ambient_broken(ocx: OcxRunner) ->
 
 
 # ---------------------------------------------------------------------------
-# Tests: --config flag and OCX_CONFIG_FILE env var (Step 3.4)
+# Tests: --config flag and OCX_CONFIG env var (Step 3.4)
 # ---------------------------------------------------------------------------
 
 
@@ -348,15 +348,15 @@ def test_explicit_config_flag_loads_file(ocx: OcxRunner, tmp_path: Path) -> None
 
 
 def test_ocx_config_file_env_loads_file(ocx: OcxRunner, tmp_path: Path) -> None:
-    """OCX_CONFIG_FILE env var loads only that config file.
+    """OCX_CONFIG env var loads only that config file.
 
-    Plan: UX scenario — `OCX_CONFIG_FILE=/path/to/ci.toml ocx install cmake:3.28`.
+    Plan: UX scenario — `OCX_CONFIG=/path/to/ci.toml ocx install cmake:3.28`.
     """
     ci_config = tmp_path / "ci.toml"
     ci_config.write_text('[registry]\ndefault = "ci-env.example"\n')
 
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
-    env["OCX_CONFIG_FILE"] = str(ci_config)
+    env["OCX_CONFIG"] = str(ci_config)
     result = subprocess.run(
         [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
@@ -366,7 +366,7 @@ def test_ocx_config_file_env_loads_file(ocx: OcxRunner, tmp_path: Path) -> None:
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
     assert "ci-env.example" in combined, (
-        f"expected 'ci-env.example' from OCX_CONFIG_FILE, "
+        f"expected 'ci-env.example' from OCX_CONFIG, "
         f"got stdout={result.stdout!r} stderr={result.stderr!r}"
     )
 
@@ -470,9 +470,9 @@ def test_named_registry_with_no_url_falls_back_to_literal_name(ocx: OcxRunner) -
 
 
 def test_empty_ocx_config_file_is_escape_hatch(ocx: OcxRunner) -> None:
-    """OCX_CONFIG_FILE="" is treated as unset, not as an error.
+    """OCX_CONFIG="" is treated as unset, not as an error.
 
-    This is the escape hatch for users with an ambient OCX_CONFIG_FILE in
+    This is the escape hatch for users with an ambient OCX_CONFIG in
     their shell environment that they want to disable for a single
     invocation without unsetting the variable.
     """
@@ -480,7 +480,7 @@ def test_empty_ocx_config_file_is_escape_hatch(ocx: OcxRunner) -> None:
 
     # Remove OCX_DEFAULT_REGISTRY so the config value is observable.
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
-    env["OCX_CONFIG_FILE"] = ""
+    env["OCX_CONFIG"] = ""
     result = subprocess.run(
         [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
@@ -490,7 +490,7 @@ def test_empty_ocx_config_file_is_escape_hatch(ocx: OcxRunner) -> None:
     assert result.returncode != 0, "install of bogus package should fail"
     combined = result.stdout + result.stderr
     assert "home.example" in combined, (
-        f"expected 'home.example' from $OCX_HOME config when OCX_CONFIG_FILE is empty, "
+        f"expected 'home.example' from $OCX_HOME config when OCX_CONFIG is empty, "
         f"got stdout={result.stdout!r} stderr={result.stderr!r}"
     )
 
@@ -522,9 +522,9 @@ def test_explicit_config_nonexistent_file_errors(ocx: OcxRunner) -> None:
 
 
 def test_ocx_config_file_nonexistent_errors(ocx: OcxRunner) -> None:
-    """OCX_CONFIG_FILE pointing to nonexistent file → non-zero exit with path in error.
+    """OCX_CONFIG pointing to nonexistent file → non-zero exit with path in error.
 
-    Plan: UX scenario row 6 — `OCX_CONFIG_FILE=/path/to/ci.toml` → file not
+    Plan: UX scenario row 6 — `OCX_CONFIG=/path/to/ci.toml` → file not
     found → "same error as --config".
     """
     nonexistent = "/tmp/ocx-test-missing-env-config-99999.toml"
@@ -532,9 +532,9 @@ def test_ocx_config_file_nonexistent_errors(ocx: OcxRunner) -> None:
         ocx,
         "index",
         "catalog",
-        extra_env={"OCX_CONFIG_FILE": nonexistent},
+        extra_env={"OCX_CONFIG": nonexistent},
     )
-    assert result.returncode != 0, "missing OCX_CONFIG_FILE should fail"
+    assert result.returncode != 0, "missing OCX_CONFIG should fail"
     combined = result.stdout + result.stderr
     assert "ocx-test-missing-env-config-99999.toml" in combined, (
         f"error message should contain the missing file path, "
@@ -607,9 +607,9 @@ def test_file_too_large_errors_with_helpful_message(ocx: OcxRunner) -> None:
 
 
 def test_explicit_config_overrides_env_var_config_file(ocx: OcxRunner, tmp_path: Path) -> None:
-    """--config CLI flag beats OCX_CONFIG_FILE when both are set.
+    """--config CLI flag beats OCX_CONFIG when both are set.
 
-    Plan Test 3.2.2: explicit --config overrides OCX_CONFIG_FILE env var.
+    Plan Test 3.2.2: explicit --config overrides OCX_CONFIG env var.
     Both config files set different default registries; the CLI-provided file wins.
     OCX_NO_CONFIG is NOT set (distinguishing this from the kill-switch test).
     """
@@ -620,7 +620,7 @@ def test_explicit_config_overrides_env_var_config_file(ocx: OcxRunner, tmp_path:
     cli_config.write_text('[registry]\ndefault = "cli.example"\n')
 
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
-    env["OCX_CONFIG_FILE"] = str(env_config)
+    env["OCX_CONFIG"] = str(env_config)
 
     result = subprocess.run(
         [str(ocx.binary), "--config", str(cli_config), "install", "nonexistent_pkg_ocx_test:0"],
@@ -631,11 +631,11 @@ def test_explicit_config_overrides_env_var_config_file(ocx: OcxRunner, tmp_path:
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
     assert "cli.example" in combined, (
-        f"--config file should win over OCX_CONFIG_FILE; expected 'cli.example', "
+        f"--config file should win over OCX_CONFIG; expected 'cli.example', "
         f"got stdout={result.stdout!r} stderr={result.stderr!r}"
     )
     assert "env.example" not in combined, (
-        f"OCX_CONFIG_FILE registry must NOT appear when --config overrides it; "
+        f"OCX_CONFIG registry must NOT appear when --config overrides it; "
         f"got stdout={result.stdout!r} stderr={result.stderr!r}"
     )
 
@@ -710,7 +710,7 @@ def test_exit_code_on_config_parse_error(ocx: OcxRunner) -> None:
 
 
 def test_cli_help_mentions_config_env_vars(ocx: OcxRunner) -> None:
-    """ocx --help stdout mentions OCX_CONFIG_FILE and OCX_NO_CONFIG.
+    """ocx --help stdout mentions OCX_CONFIG and OCX_NO_CONFIG.
 
     Plan Test 3.2.8: help text expansion — both env vars must appear after
     Phase 4 adds them to the --config flag's long help.
@@ -723,8 +723,8 @@ def test_cli_help_mentions_config_env_vars(ocx: OcxRunner) -> None:
     )
     assert result.returncode == 0, f"--help should exit 0, got {result.returncode}"
     combined = result.stdout + result.stderr
-    assert "OCX_CONFIG_FILE" in combined, (
-        f"--help should mention OCX_CONFIG_FILE; got: {combined!r}"
+    assert "OCX_CONFIG" in combined, (
+        f"--help should mention OCX_CONFIG; got: {combined!r}"
     )
     assert "OCX_NO_CONFIG" in combined, (
         f"--help should mention OCX_NO_CONFIG; got: {combined!r}"

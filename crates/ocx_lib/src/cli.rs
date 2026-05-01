@@ -9,7 +9,9 @@
 //! - [`ExitCode`] — typed process exit codes aligned with BSD `sysexits.h`
 //! - [`classify_error`] — free function mapping a [`std::error::Error`] chain to [`ExitCode`]
 
+pub mod clap;
 pub mod classify;
+pub mod error;
 pub mod exit_code;
 mod log_level;
 mod log_settings;
@@ -18,6 +20,7 @@ mod printer;
 mod styles;
 
 pub use classify::{ClassifyExitCode, classify_error};
+pub use error::UsageError;
 pub use exit_code::ExitCode;
 pub use log_level::LogLevel;
 pub use log_settings::LogSettings;

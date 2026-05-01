@@ -49,8 +49,20 @@ export default defineConfig({
           link: "/docs/user-guide",
         },
         {
-          text: "FAQ",
-          link: "/docs/faq",
+          text: "Guides",
+          collapsed: true,
+          items: [
+            { text: "Authoring Packages", link: "/docs/guide/authoring-packages" },
+          ],
+        },
+        {
+          text: "In Depth",
+          collapsed: true,
+          items: [
+            { text: "Configuration", link: "/docs/in-depth/configuration" },
+            { text: "Environments", link: "/docs/in-depth/environments" },
+            { text: "Entry Points", link: "/docs/in-depth/entry-points" },
+          ],
         },
         {
           text: "Reference",
@@ -61,6 +73,10 @@ export default defineConfig({
             { text: "Environment", link: "/docs/reference/environment" },
             { text: "Metadata", link: "/docs/reference/metadata" },
           ],
+        },
+        {
+          text: "FAQ",
+          link: "/docs/faq",
         },
         {
           text: "Changelog",

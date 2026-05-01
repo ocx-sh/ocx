@@ -48,7 +48,7 @@ impl PackageManager {
         // — idempotent, covers legacy installs and alt-tag resolves that walked
         // through a different image index than the one originally pulled.
         super::common::reference_manager(self.file_structure())
-            .link_blobs(&info.content, &resolved.chain)
+            .link_blobs(&info.dir().content(), &resolved.chain)
             .await
             .map_err(PackageErrorKind::Internal)?;
 
@@ -146,9 +146,9 @@ mod tests {
         let result = mgr.find_plain(&test_pinned()).await.unwrap();
         assert!(result.is_some());
         let info = result.unwrap();
-        assert_eq!(info.identifier, test_pinned());
-        assert_eq!(info.content, pkg.content());
-        assert!(info.resolved.dependencies.is_empty());
+        assert_eq!(info.identifier(), &test_pinned());
+        assert_eq!(info.dir().content(), pkg.content());
+        assert!(info.resolved().dependencies.is_empty());
     }
 
     #[tokio::test]

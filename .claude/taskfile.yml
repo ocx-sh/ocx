@@ -58,7 +58,7 @@ tasks:
     cmds:
       - mkdir -p {{.REPORTS_DIR}}
       - >
-        ocx exec ocx.sh/lychee:0 --
+        ocx exec --self ocx.sh/lychee:0 --
         lychee --offline --no-progress --include-verbatim
         --exclude-path artifacts
         --exclude-path tests/.venv

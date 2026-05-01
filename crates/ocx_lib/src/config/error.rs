@@ -22,9 +22,9 @@ pub enum Error {
         source: toml::de::Error,
     },
 
-    /// An explicit config file (`--config` or `OCX_CONFIG_FILE`) was
+    /// An explicit config file (`--config` or `OCX_CONFIG`) was
     /// specified but does not exist.
-    #[error("config file not found: {} (check --config or OCX_CONFIG_FILE)", path.display())]
+    #[error("config file not found: {} (check --config or OCX_CONFIG)", path.display())]
     FileNotFound { path: PathBuf },
 
     /// I/O failure while reading a config file (permission denied,

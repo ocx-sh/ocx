@@ -3,7 +3,7 @@
 
 use ocx_lib::{Result, oci};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Identifier {
     raw: String,
 }
@@ -43,9 +43,9 @@ impl std::fmt::Display for Identifier {
 }
 
 impl std::str::FromStr for Identifier {
-    type Err = ocx_lib::Error;
+    type Err = oci::IdentifierError;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         oci::Identifier::from_str(s)?;
         Ok(Self { raw: s.to_string() })
     }

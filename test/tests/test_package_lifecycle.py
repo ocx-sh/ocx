@@ -32,9 +32,7 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     metadata.write_text(
         json.dumps(
             {
-                "type": "bundle",
-                "version": 1,
-                "env": [
+                "type": "bundle", "version": 1, "env": [
                     {
                         "key": "PATH",
                         "type": "path",
@@ -65,5 +63,8 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     assert candidate.is_dir()
 
     # --- Find ---
+    # `find` (default) returns the package root; `install` reports the
+    # candidate symlink which also targets the package root, so resolving
+    # the symlink lands on the same directory.
     find_result = ocx.json("find", short)
     assert Path(find_result[short]) == candidate.resolve()

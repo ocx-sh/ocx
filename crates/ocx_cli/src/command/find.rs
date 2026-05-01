@@ -4,16 +4,22 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::oci;
 
 use crate::{api, conventions::platforms_or_default, options};
 
-/// Resolve one or more packages and print their content directory paths.
+/// Resolve one or more packages and print their package root paths.
 ///
-/// By default, the content-addressed object-store path is returned.  Use
-/// `--candidate` or `--current` to return the stable install symlink path
+/// The package root is the directory containing the package's `content/` and
+/// `entrypoints/` subdirectories (alongside `metadata.json`, `manifest.json`,
+/// and other per-package files). Consumers traverse into `<root>/content/`
+/// for installed files or `<root>/entrypoints/` for generated launchers.
+///
+/// By default, the content-addressed object-store package root is returned.
+/// Use `--candidate` or `--current` to return the stable install symlink path
 /// instead — useful when the path is embedded in editor configs, Makefiles,
-/// or shell scripts that should not change on every package update.
+/// or shell scripts that should not change on every package update. The
+/// install symlinks themselves target the package root, so traversal into
+/// `content/` or `entrypoints/` works identically through them.
 ///
 /// No downloading is performed — the package must already be installed.
 ///
@@ -22,10 +28,8 @@ use crate::{api, conventions::platforms_or_default, options};
 ///   cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 #[derive(Parser)]
 pub struct Find {
-    /// Platforms to consider when resolving the package. Defaults to the current platform.
-    /// Ignored when `--candidate` or `--current` is used.
-    #[clap(short = 'p', long = "platform", value_delimiter = ',', value_name = "PLATFORM")]
-    platforms: Vec<oci::Platform>,
+    #[clap(flatten)]
+    platforms: options::Platforms,
 
     #[clap(flatten)]
     content_path: options::ContentPath,
@@ -40,23 +44,34 @@ impl Find {
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let manager = context.manager();
+        let fs = context.file_structure();
 
-        let infos = if let Some(kind) = self.content_path.symlink_kind() {
-            manager.find_symlink_all(identifiers, kind).await?
+        let entries: Vec<api::data::paths::PathEntry> = if let Some(kind) = self.content_path.symlink_kind() {
+            // Validate the symlink resolves and the package is installed,
+            // then report the symlink anchor itself (the stable per-repo
+            // path that targets the package root). Consumers traverse into
+            // `<anchor>/content` or `<anchor>/entrypoints` as needed.
+            let _ = manager.find_symlink_all(identifiers.clone(), kind).await?;
+            self.packages
+                .iter()
+                .zip(identifiers.iter())
+                .map(|(raw, id)| api::data::paths::PathEntry {
+                    package: raw.raw().to_string(),
+                    path: fs.symlinks.symlink(id, kind),
+                })
+                .collect()
         } else {
-            let platforms = platforms_or_default(&self.platforms);
-            manager.find_all(identifiers, platforms).await?
+            let platforms = platforms_or_default(self.platforms.as_slice());
+            let infos = manager.find_all(identifiers, platforms).await?;
+            self.packages
+                .iter()
+                .zip(infos)
+                .map(|(raw, info)| api::data::paths::PathEntry {
+                    package: raw.raw().to_string(),
+                    path: info.dir().root().to_path_buf(),
+                })
+                .collect()
         };
-
-        let entries = self
-            .packages
-            .iter()
-            .zip(infos)
-            .map(|(raw, info)| api::data::paths::PathEntry {
-                package: raw.raw().to_string(),
-                path: info.content,
-            })
-            .collect();
 
         context.api().report(&api::data::paths::Paths::new(entries))?;
 

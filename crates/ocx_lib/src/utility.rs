@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 pub mod boolean_string;
+pub mod child_process;
 pub mod fs;
 pub mod result_ext;
 pub mod serde_ext;

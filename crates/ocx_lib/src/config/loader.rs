@@ -42,12 +42,12 @@ impl ConfigLoader {
     ///
     /// Layering (lowest → highest precedence):
     /// 1. system / user / `$OCX_HOME` tiers — skipped when `OCX_NO_CONFIG=1`
-    /// 2. `OCX_CONFIG_FILE` — if set and non-empty
+    /// 2. `OCX_CONFIG` — if set and non-empty
     /// 3. `--config FILE` (via [`ConfigInputs::explicit_path`])
     ///
     /// Explicit paths (both env-var and CLI) always load if set; they layer
     /// on top of the discovered chain (or on top of nothing, if
-    /// `OCX_NO_CONFIG=1` pruned it). Empty `OCX_CONFIG_FILE=""` is treated
+    /// `OCX_NO_CONFIG=1` pruned it). Empty `OCX_CONFIG=""` is treated
     /// as unset — an escape hatch so users can disable ambient env-var
     /// config without unsetting it.
     ///
@@ -59,9 +59,9 @@ impl ConfigLoader {
     /// parse failure.
     pub async fn load(inputs: ConfigInputs<'_>) -> Result<Config> {
         let no_config = crate::env::flag("OCX_NO_CONFIG", false);
-        let raw_env_config_file = crate::env::var("OCX_CONFIG_FILE");
+        let raw_env_config_file = crate::env::var("OCX_CONFIG");
         if raw_env_config_file.as_deref() == Some("") {
-            log::debug!("OCX_CONFIG_FILE is set to empty string — skipped via escape hatch");
+            log::debug!("OCX_CONFIG is set to empty string — skipped via escape hatch");
         }
         let env_config_file = raw_env_config_file.filter(|s| !s.is_empty());
 
@@ -93,7 +93,7 @@ impl ConfigLoader {
     /// `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml`) could otherwise
     /// point the link at any readable file and surface its contents via a
     /// parse-error message or provoke unexpected side effects on load.
-    /// Explicit paths (`--config`, `OCX_CONFIG_FILE`) are trusted caller
+    /// Explicit paths (`--config`, `OCX_CONFIG`) are trusted caller
     /// input and are not subject to this check. Other I/O errors (permission
     /// denied, stale NFS handle, EIO) are logged as warnings and the
     /// candidate is still skipped — discovery never fails the whole process,
@@ -435,7 +435,7 @@ mod tests {
     async fn load_with_no_config_returns_default() {
         let env = crate::test::env::lock();
         env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG_FILE");
+        env.remove("OCX_CONFIG");
         let inputs = ConfigInputs {
             explicit_path: None,
             cwd: None,
@@ -456,7 +456,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "hermetic.toml", "[registry]\ndefault = \"hermetic.example\"");
         env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG_FILE");
+        env.remove("OCX_CONFIG");
         let inputs = ConfigInputs {
             explicit_path: Some(&path),
             cwd: None,
@@ -473,7 +473,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_with_no_config_and_env_path_still_loads_env_path() {
-        // OCX_NO_CONFIG=1 with OCX_CONFIG_FILE → env-var path still loads.
+        // OCX_NO_CONFIG=1 with OCX_CONFIG → env-var path still loads.
         let env = crate::test::env::lock();
         let dir = TempDir::new().unwrap();
         let path = write_config(
@@ -482,14 +482,14 @@ mod tests {
             "[registry]\ndefault = \"env-hermetic.example\"",
         );
         env.set("OCX_NO_CONFIG", "1");
-        env.set("OCX_CONFIG_FILE", path.to_str().unwrap());
+        env.set("OCX_CONFIG", path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
             .await
-            .expect("OCX_NO_CONFIG=1 with OCX_CONFIG_FILE should load the env file");
+            .expect("OCX_NO_CONFIG=1 with OCX_CONFIG should load the env file");
         assert_eq!(
             config.registry.as_ref().and_then(|r| r.default.as_deref()),
             Some("env-hermetic.example"),
@@ -499,28 +499,25 @@ mod tests {
 
     #[tokio::test]
     async fn load_with_empty_ocx_config_file_treats_as_unset() {
-        // OCX_CONFIG_FILE="" is the escape hatch — treated as unset, not an error.
+        // OCX_CONFIG="" is the escape hatch — treated as unset, not an error.
         let env = crate::test::env::lock();
         env.set("OCX_NO_CONFIG", "1");
-        env.set("OCX_CONFIG_FILE", "");
+        env.set("OCX_CONFIG", "");
         let inputs = ConfigInputs {
             explicit_path: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
             .await
-            .expect("empty OCX_CONFIG_FILE should be treated as unset");
-        assert!(
-            config.registry.is_none(),
-            "empty OCX_CONFIG_FILE must not load anything"
-        );
+            .expect("empty OCX_CONFIG should be treated as unset");
+        assert!(config.registry.is_none(), "empty OCX_CONFIG must not load anything");
     }
 
     #[tokio::test]
     async fn load_with_nonexistent_explicit_path_errors() {
         let env = crate::test::env::lock();
         env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG_FILE");
+        env.remove("OCX_CONFIG");
         let nonexistent = PathBuf::from("/tmp/ocx-test-nonexistent-config-99999.toml");
         let inputs = ConfigInputs {
             explicit_path: Some(&nonexistent),
@@ -541,14 +538,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "ci.toml", "[registry]\ndefault = \"ci.example\"");
         env.set("OCX_NO_CONFIG", "1");
-        env.set("OCX_CONFIG_FILE", path.to_str().unwrap());
+        env.set("OCX_CONFIG", path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
             cwd: None,
         };
-        let config = ConfigLoader::load(inputs)
-            .await
-            .expect("OCX_CONFIG_FILE should succeed");
+        let config = ConfigLoader::load(inputs).await.expect("OCX_CONFIG should succeed");
         assert_eq!(
             config.registry.as_ref().and_then(|r| r.default.as_deref()),
             Some("ci.example")
@@ -557,14 +552,14 @@ mod tests {
 
     #[tokio::test]
     async fn load_with_explicit_path_layers_on_top_of_env_path() {
-        // Both OCX_CONFIG_FILE and --config set → both load; --config (highest
+        // Both OCX_CONFIG and --config set → both load; --config (highest
         // file-tier precedence) wins on conflicting scalars.
         let env = crate::test::env::lock();
         let dir = TempDir::new().unwrap();
         let env_file = write_config(&dir, "env.toml", "[registry]\ndefault = \"env.example\"");
         let explicit_file = write_config(&dir, "explicit.toml", "[registry]\ndefault = \"explicit.example\"");
         env.set("OCX_NO_CONFIG", "1");
-        env.set("OCX_CONFIG_FILE", env_file.to_str().unwrap());
+        env.set("OCX_CONFIG", env_file.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: Some(&explicit_file),
             cwd: None,
@@ -575,7 +570,7 @@ mod tests {
         assert_eq!(
             config.registry.as_ref().and_then(|r| r.default.as_deref()),
             Some("explicit.example"),
-            "--config should layer on top of OCX_CONFIG_FILE and win on conflict"
+            "--config should layer on top of OCX_CONFIG and win on conflict"
         );
     }
 
@@ -641,7 +636,7 @@ mod tests {
         std::fs::set_permissions(&locked_home, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         env.set("OCX_HOME", locked_home.to_str().unwrap());
-        env.remove("OCX_CONFIG_FILE");
+        env.remove("OCX_CONFIG");
         env.remove("OCX_NO_CONFIG");
 
         let inputs = ConfigInputs {
@@ -666,7 +661,7 @@ mod tests {
         // Security: a discovered-tier `config.toml` that is a symlink is
         // rejected to prevent a writer with control over one of the
         // tier directories from aiming the link at an arbitrary readable
-        // file. Explicit paths (--config, OCX_CONFIG_FILE) are out of scope
+        // file. Explicit paths (--config, OCX_CONFIG) are out of scope
         // for this check — those are trusted caller input.
         let env = crate::test::env::lock();
         let dir = TempDir::new().unwrap();
@@ -679,7 +674,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &symlink_path).expect("create symlink");
 
         env.set("OCX_HOME", home.to_str().unwrap());
-        env.remove("OCX_CONFIG_FILE");
+        env.remove("OCX_CONFIG");
         env.remove("OCX_NO_CONFIG");
 
         let inputs = ConfigInputs {

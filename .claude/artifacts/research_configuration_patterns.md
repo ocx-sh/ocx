@@ -77,9 +77,9 @@ The string `"CUSTOM"` is an **env var name**, resolved at runtime. The config ne
 **Strong recommendation: defer indefinitely. The multi-tier model already provides layering for free.**
 
 Reasons to defer:
-1. **Multi-tier solves the same problem.** System → user → OCX_HOME + `OCX_CONFIG_FILE` covers every real composition need OCX has.
+1. **Multi-tier solves the same problem.** System → user → OCX_HOME + `OCX_CONFIG` covers every real composition need OCX has.
 2. **High implementation complexity.** Cycle detection, relative path resolution, error attribution across files, optional vs. required, recursion limits. Cargo spent years stabilizing it.
-3. **Wrong target audience.** OCX is automation-first; CI uses `OCX_CONFIG_FILE` to a single explicit file. `include` is a human-ergonomics feature.
+3. **Wrong target audience.** OCX is automation-first; CI uses `OCX_CONFIG` to a single explicit file. `include` is a human-ergonomics feature.
 4. **Drop-in directories (`config.d/*.toml`) are even lower value** for OCX — they solve coordination between many uncoordinated contributors, which OCX doesn't have.
 
 **If added later** (e.g., for enterprise OCX_HOME bundles), follow Cargo's model exactly:
@@ -97,7 +97,7 @@ Reasons to defer:
 **Recommendations for the future #33 `ocx.toml` project tier**:
 
 1. **Walk start**: CWD at invocation
-2. **Walk stop**: Filesystem root, with optional `OCX_CEILING_PATH` env var (mise's pattern) for CI/Docker reproducibility
+2. **Walk stop**: Filesystem root, with optional `OCX_CEILING` env var (mise's pattern) for CI/Docker reproducibility
 3. **Load strategy**: NEAREST `ocx.toml` only (uv model), not all files in chain
    - Rationale: OCX is a backend tool — surprising cascading is hard to debug
    - Composition across tiers happens via system/user/OCX_HOME, not stacked `ocx.toml`

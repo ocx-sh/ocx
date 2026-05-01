@@ -25,7 +25,7 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 | `command/*.rs` | One file per subcommand (30 files) |
 | `api.rs` | `Api` facade: dispatches JSON vs plain text |
 | `api/data/*.rs` | Report data types implementing `Printable` |
-| `options/*.rs` | Shared arg parsing helpers (Identifier, ContentPath, Platform) |
+| `options/*.rs` | Shared arg parsing helpers (Identifier, ContentPath, Platform, PackageRef + `validate_package_root`) |
 
 ## Context Struct
 
@@ -82,6 +82,30 @@ pub trait Printable: serde::Serialize {
 4. Call from `command/{name}.rs` with data built from task results
 
 See `subsystem-cli-api.md` for full contract. `subsystem-cli-commands.md` for quick reference. User-facing per-command docs at `website/src/docs/reference/command-line.md`.
+
+## Cross-Cutting: `--self` Flag
+
+Six env-consuming commands (`exec`, `env`, `shell env`, `shell profile load`, `ci export`, `deps`) share a single boolean `--self` flag (default off) that selects which env surface `ocx exec` emits:
+
+- **Off (default)** — interface surface: emits the consumer-visible env (vars where `has_interface()` is true). What a human or CI script sees when using a package.
+- **On (`--self`)** — private surface: emits the package's own runtime env (vars where `has_private()` is true). The `ocx launcher exec` subcommand forces `self_view=true` internally so generated launchers do not need to bake any flag.
+
+`ExecMode` and `ExecModeFlag` no longer exist. The lib accepts a plain `self_view: bool`. Pattern:
+
+- Add `#[clap(long = "self", default_value_t = false)] self_view: bool` to the command's clap `Args` struct.
+- Pass `self_view` to the manager task: `resolve_env(packages, self_view)`.
+
+The manager calls `composer::compose(roots, store, self_view)` which gates TC entry emission via `tc_entry.visibility.has_interface()` (false) or `has_private()` (true).
+
+## Cross-Cutting: OCX Configuration Forwarding
+
+Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env (whether `Env::new()` or `Env::clean()`) and before `Command::envs()`. `apply_ocx_config` is the **sole** path that lands `OCX_*` keys on a child env — the running ocx's parsed config is authoritative, never ambient parent-shell exports.
+
+New resolution-affecting `ContextOptions` fields (offline / remote / config / index / similar) MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env — they leak into entrypoint child streams. PR review:
+- Adding a resolution flag without all three updates → **Block-tier**
+- Routing a presentation flag through `apply_ocx_config` → **Block-tier**
+
+The `--interactive` flag on `ocx exec` was removed: stdin always inherits, matching shell exec semantics. Do not reintroduce a stdin-gating flag.
 
 ## Quality Gate
 

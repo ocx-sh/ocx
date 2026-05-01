@@ -44,10 +44,15 @@ impl App {
         color_config.apply();
 
         let styles = cli::clap_styles(color_config.stdout);
-        let matches = Cli::command()
-            .color(color_mode.into())
-            .styles(styles.clone())
-            .get_matches();
+        // Route every clap failure (value-validation, missing args, unknown
+        // flags) through `cli::clap::parse` so backend tools see typed exit
+        // codes (`EX_USAGE` = 64) instead of clap's default `2`. Help, version
+        // and `DisplayHelpOnMissingArgumentOrSubcommand` paths still print
+        // and exit `0` via clap's renderer inside the helper.
+        let matches = match cli::clap::parse(Cli::command().color(color_mode.into()).styles(styles.clone())) {
+            Ok(matches) => matches,
+            Err(code) => return Ok(code.into()),
+        };
         let cli = Cli::from_arg_matches(&matches)?;
 
         // Static commands dispatch without constructing a Context so they

@@ -47,6 +47,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
 | Error type design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md) |
 | CLI exit code design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) |
+| Env composition / visibility / entrypoints | [subsystem-package-manager.md](./rules/subsystem-package-manager.md), [subsystem-package.md](./rules/subsystem-package.md), website `reference/env-composition.md` |
 | Mirror / bundling | [subsystem-mirror.md](./rules/subsystem-mirror.md) |
 | Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
 | Releases | [workflow-release.md](./rules/workflow-release.md) |

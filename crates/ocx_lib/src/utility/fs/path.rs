@@ -20,7 +20,24 @@ use crate::prelude::*;
 ///
 /// Preserves leading `..` components when they would escape past the logical
 /// root, so that [`escapes_root`] can detect them.
+///
+/// Backslashes (`\`) are treated as path separators on all platforms.
+/// This ensures that Windows-style paths embedded in archive metadata or
+/// user input are correctly split into components even on Unix build hosts.
 pub fn lexical_normalize(path: &Path) -> PathBuf {
+    // Pre-pass: normalize backslash separators to forward slash so that
+    // `Path::components()` splits them correctly on all platforms.
+    // On Linux, `\` is a legal filename character, not a separator, so
+    // without this step `foo\bar` would be a single component.
+    let normalized_sep;
+    let path: &Path = if path.as_os_str().as_encoded_bytes().contains(&b'\\') {
+        let s = path.to_string_lossy().replace('\\', "/");
+        normalized_sep = PathBuf::from(s);
+        &normalized_sep
+    } else {
+        path
+    };
+
     let mut components = Vec::new();
     for component in path.components() {
         match component {
@@ -125,5 +142,57 @@ mod tests {
     fn escapes_root_rejects_parent_past_absolute_root() {
         // Absolute path `..` clamps, so this is safe.
         assert!(!escapes_root(Path::new("/a/../b")));
+    }
+
+    // ── Backslash separator tests ────────────────────────────────────────────
+
+    #[test]
+    fn lexical_normalize_backslash_parent_collapses() {
+        // `foo\..\bar` must collapse to `bar` even on Linux.
+        assert_eq!(lexical_normalize(Path::new("foo\\..\\bar")), PathBuf::from("bar"));
+    }
+
+    #[test]
+    fn escapes_root_backslash_escape_detected() {
+        // `..\..\secret` escapes root regardless of separator.
+        assert!(escapes_root(Path::new("..\\..\\secret")));
+    }
+
+    #[test]
+    fn lexical_normalize_backslash_parent_no_trailing_segment() {
+        // `foo\..` — parent-dir segment with no trailing component must
+        // collapse to an empty path, not a literal single component named
+        // `foo\..`. Without the collapse, `escapes_root` could miss it as a
+        // current-directory equivalent.
+        assert_eq!(lexical_normalize(Path::new("foo\\..")), PathBuf::new());
+        assert!(!escapes_root(Path::new("foo\\..")));
+    }
+
+    #[test]
+    fn lexical_normalize_backslash_two_components() {
+        // `foo\bar` must be two components yielding `foo/bar`, not a single
+        // component named `foo\bar`.
+        let result = lexical_normalize(Path::new("foo\\bar"));
+        let mut iter = result.components();
+        assert_eq!(iter.next(), Some(Component::Normal("foo".as_ref())));
+        assert_eq!(iter.next(), Some(Component::Normal("bar".as_ref())));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn lexical_normalize_mixed_separators_three_components() {
+        // `foo\bar/baz` — mix of `\` and `/` — must yield three components.
+        let result = lexical_normalize(Path::new("foo\\bar/baz"));
+        let components: Vec<_> = result.components().collect();
+        assert_eq!(components.len(), 3);
+        assert_eq!(components[0], Component::Normal("foo".as_ref()));
+        assert_eq!(components[1], Component::Normal("bar".as_ref()));
+        assert_eq!(components[2], Component::Normal("baz".as_ref()));
+    }
+
+    #[test]
+    fn lexical_normalize_forward_slash_unchanged() {
+        // Forward-slash behaviour must be identical to before this change.
+        assert_eq!(lexical_normalize(Path::new("a/b/../c")), PathBuf::from("a/c"));
     }
 }

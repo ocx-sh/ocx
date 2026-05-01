@@ -54,6 +54,9 @@ When ocx installs a package, the actual files land in `packages/`. The critical 
         <Node name="content/" icon="📂">
           <Description>package files — binaries, libraries, headers</Description>
         </Node>
+        <Node name="entrypoints/" icon="🚀">
+          <Description>generated launchers for declared entry points — one script per name</Description>
+        </Node>
         <Node name="metadata.json" icon="📋">
           <Description>declared env vars and extraction options</Description>
         </Node>
@@ -73,6 +76,8 @@ This <Tooltip term="content-addressed layout">A storage scheme where every item'
 ::: info Similar to the Nix store and Git objects
 The [Nix package manager][nix] stores every package at `/nix/store/{hash}-name/` using the same principle: the path is a function of the content. This is what makes Nix derivations reproducible across machines — the same hash always means the same files. Git's internal object store (`.git/objects/`) works identically. ocx applies this model to OCI-distributed binaries.
 :::
+
+**Generated launchers in `entrypoints/`.** When a package's [`metadata.json`][metadata-ref] declares an [`entrypoints`][metadata-entry-points] array, ocx materializes a sibling `entrypoints/` directory at install time with one script per entry — a POSIX `.sh` launcher for Unix shells and a `.cmd` launcher for Windows. Each launcher bakes the digest-addressed `content/` path and re-enters via [`ocx launcher exec`][cmd-launcher-exec], so every invocation runs under the same clean-environment guarantee as [`ocx exec <package>`][cmd-exec]. Packages that declare no entrypoints never get an `entrypoints/` directory. See the [entry points guide][guide-entry-points] for the publisher workflow.
 
 **Garbage collection via `refs/`.** The `refs/symlinks/` subdirectory inside each package tracks every install symlink that currently points to it. That directory is the GC root signal — [`ocx clean`][cmd-clean] starts a reachability walk from every package with a live `refs/symlinks/` entry and follows forward-refs through all three tiers.
 
@@ -175,15 +180,24 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/conten
   <Node name="~/.ocx/symlinks/" icon="🔀" open>
     <Node name="{registry}/" icon="📁" open-icon="📂" open>
       <Node name="{repo}/" icon="📁" open-icon="📂" open>
-        <Node name="current" icon="➡️">
-          <Description>active version — set by ocx select</Description>
+        <Node name="current" icon="➡️" open>
+          <Description>active package root — set by ocx select</Description>
+          <Node name="content/" icon="📂">
+            <Description>package files — binaries, libraries, headers</Description>
+          </Node>
+          <Node name="entrypoints/" icon="🚀">
+            <Description>generated launchers — added to $PATH by ocx shell profile load</Description>
+          </Node>
+          <Node name="metadata.json" icon="📋">
+            <Description>declared env vars and extraction options</Description>
+          </Node>
         </Node>
         <Node name="candidates/" icon="📁" open-icon="📂" open>
           <Node name="3.28" icon="➡️">
-            <Description>pinned install — created by ocx install cmake:3.28</Description>
+            <Description>pinned package root — created by ocx install cmake:3.28</Description>
           </Node>
           <Node name="3.30" icon="➡️">
-            <Description>pinned install — created by ocx install cmake:3.30</Description>
+            <Description>pinned package root — created by ocx install cmake:3.30</Description>
           </Node>
         </Node>
       </Node>
@@ -191,11 +205,11 @@ Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/conten
   </Node>
 </Tree>
 
-There are two symlink levels, for two different use cases:
+Two symlink entries cover every use case. Both target the **package root** (`packages/{registry}/{algorithm}/{2hex}/{30hex}/`) rather than the `content/` subdirectory; consumers traverse into `…/content/` for files, `…/entrypoints/` for launcher scripts, or read `…/metadata.json` directly:
 
 **`candidates/{tag}`** — pinned to a specific version. Created by `ocx install` and pointed at the exact digest that tag resolved to at install time. You can have cmake 3.28 and 3.30 installed side by side; both candidates coexist until you explicitly uninstall one. Even if the registry later re-pushes the `3.28` tag with a different binary, your candidate still points to the build you originally installed.
 
-**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you update the tag store. This is intentional: tools referencing `current` should only change behavior when *you* decide they should.
+**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you update the tag store. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], [`ocx shell profile load`][cmd-shell-profile] adds `{repo}/current/entrypoints` to `$PATH` so every declared launcher becomes a top-level command. See the [entry points guide][guide-entry-points] for how launchers, PATH, and clean-env execution compose.
 
 ::: info Inspired by SDKMAN and Homebrew
 [SDKMAN][sdkman] (the Java SDK manager) uses the same two-level pattern: `~/.sdkman/candidates/{tool}/{version}/` for pinned installs and a `current` symlink updated by `sdk default {version}`. [Homebrew][homebrew] does the same with its `Cellar/{formula}/{version}/` store and a stable `opt/{formula}` symlink pointing at the active version. Linux's `update-alternatives` is the system-level equivalent, managing tools like `java` and `python3` via a layer of stable symlinks in `/etc/alternatives/`.
@@ -226,20 +240,26 @@ When you later run `ocx install --select cmake:3.32`, `current` is re-pointed. Y
 
 ### Path Resolution {#path-resolution}
 
-Several commands resolve package content to a filesystem path that is embedded in their output.
+Several commands resolve a package to a filesystem path that is embedded in their output.
 The path you receive determines how stable that output is across future package updates.
+
+Every mode names the **package root** — the directory that contains the package's `content/` and
+`entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package
+files. Consumers traverse one level in: `<root>/content/` for installed files, `<root>/entrypoints/`
+for generated launchers.
 
 | Mode | Flag | Path used | Auto-install | Use case |
 |---|---|---|---|---|
-| Package store *(default)* | *(none)* | `~/.ocx/packages/…/<digest>/content` | yes (online) | CI, scripts, one-shot queries |
-| Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/<tag>/content` | **no** | Pinning to a specific tag in editor or IDE config |
-| Current symlink | `--current` | `~/.ocx/symlinks/…/current/content` | **no** | "Always selected" path in shell profiles or IDE settings |
+| Package store *(default)* | *(none)* | `~/.ocx/packages/…/<digest>/` | yes (online) | CI, scripts, one-shot queries |
+| Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/<tag>` | **no** | Pinning to a specific tag in editor or IDE config |
+| Current symlink | `--current` | `~/.ocx/symlinks/…/current` | **no** | "Always selected" path in shell profiles or IDE settings |
 
 **Package store** paths are content-addressed and change whenever the package digest changes (i.e. on every update).
 They are precise and self-verifying but unsuitable for static configuration.
 
-**Candidate** and **Current** paths go through symlinks managed by ocx.
-Because the symlink path itself does not change, any tool that hardcodes the path continues to work after the package is updated — only the symlink target is re-pointed.
+**Candidate** and **Current** paths go through symlinks managed by ocx that target the package
+root directly. Because the symlink path itself does not change, any tool that hardcodes the path
+continues to work after the package is updated — only the symlink target is re-pointed.
 
 - `--candidate` requires the package to be installed (the candidate symlink must exist).
   A digest component in the identifier is rejected; use a tag-only identifier.
@@ -255,6 +275,7 @@ They never attempt to install or select a package as a side effect.
 ```jsonc
 {
   // This path remains valid across package updates — only the symlink target changes.
+  // The `current` symlink targets the package root; clangd lives under `content/bin/`.
   "clangd.path": "/home/user/.ocx/symlinks/ocx.sh/clangd/current/content/bin/clangd"
 }
 ```
@@ -265,7 +286,7 @@ ocx env --current clangd
 ```
 :::
 
-Use [`ocx find`][cmd-find] to print the resolved content path directly, without setting environment variables. Supports the same `--candidate` and `--current` modes and is useful for scripting.
+Use [`ocx find`][cmd-find] to print the resolved package root directly, without setting environment variables. Supports the same `--candidate` and `--current` modes and is useful for scripting.
 
 ## Versioning {#versioning}
 
@@ -597,53 +618,45 @@ This is especially common with the [shell profile][cmd-shell-profile]. If you ad
 
 ### Visibility {#dependencies-visibility}
 
-Not every dependency's environment should leak to consumers. A build tool that wraps a compiler
-might need `CC` and `LD_LIBRARY_PATH` internally, but users of the build tool shouldn't see those
-variables in their own environment. Conversely, a meta-package that bundles a runtime stack
-should forward everything to whoever depends on it.
+Every package owns two environment surfaces: an **interface surface** (what consumers see by default) and a **private surface** (what the package's own launchers see at runtime). A build tool that wraps a compiler might need `CC` and `LD_LIBRARY_PATH` internally — those belong on the private surface. A shared Java runtime that every consumer needs goes on the interface surface.
 
-The `visibility` field on each dependency entry controls this. It has four levels:
+The `visibility` field on each dependency entry controls which surface that dep's env reaches:
 
-| Level | Self | Export | Example |
+| Value | Private surface (`--self`) | Interface surface (default) | Example |
 |---|---|---|---|
-| `sealed` *(default)* | No | No | Structural dep — accessed by path, not env. |
-| `private` | Yes | No | Internal tool needed for own shims/entry points. |
+| `sealed` *(default)* | No | No | Structural dep — accessed by path only. |
+| `private` | Yes | No | Internal tool for own shims/launchers. |
 | `public` | Yes | Yes | Shared runtime both sides need (e.g. Java). |
 | `interface` | No | Yes | Meta-package that composes env for consumers. |
 
 ```json
 {
   "dependencies": [
-    { "identifier": "ocx.sh/java:21", "digest": "sha256:a1b2…", "visibility": "private" },
-    { "identifier": "ocx.sh/maven:3",  "digest": "sha256:c3d4…", "visibility": "public" }
+    { "identifier": "ocx.sh/java:21@sha256:a1b2…", "visibility": "private" },
+    { "identifier": "ocx.sh/maven:3@sha256:c3d4…",  "visibility": "public" }
   ]
 }
 ```
 
-In this example, `java` is private — the package needs it internally but consumers don't get
-`JAVA_HOME`. `maven` is public — both the package and its consumers see Maven's environment.
+In this example, `java` is private — the package needs it internally but consumers don't get `JAVA_HOME`. `maven` is public — both the package and its consumers see Maven's environment.
 
-When dependencies form chains, visibility propagates using a simple rule: **if the child exports
-(public or interface), the result equals the parent's edge; otherwise sealed.** When two paths
-reach the same dependency through a diamond, the most open visibility wins.
+When dependencies form chains, visibility propagates inductively: **if the child's effective visibility exports to consumers, the result equals the parent's edge; otherwise sealed.** When two paths reach the same dependency through a diamond, the most open visibility wins (OR per axis).
 
-The tree view annotates non-public dependencies so you can see visibility at a glance — `(private)`
-deps are used internally, `(sealed)` deps are structural only, and `public` deps have no annotation:
+The tree view annotates non-public dependencies so you can see visibility at a glance — `(private)` deps are used internally, `(sealed)` deps are structural only, and `public` deps have no annotation:
 
 <Terminal src="/casts/deps.cast" title="Dependency tree with visibility" collapsed />
 
-The flat view shows the effective visibility in its own column — this is the primary tool for
-debugging which dependencies actually contribute to the environment:
+The flat view shows the effective visibility in its own column — this is the primary tool for debugging which dependencies actually contribute to the environment:
 
 <Terminal src="/casts/deps-flat.cast" title="Flat view with visibility column" collapsed />
 
-::: details Self-execution path
-All four visibility levels are fully implemented in the propagation algebra and stored in
-`resolve.json`. The consumer-visible axis (`public`, `interface`) controls which deps contribute
-to [`ocx exec`][cmd-exec] and [`ocx env`][cmd-env] today. The self-visible axis (`public`,
-`private`) will activate when self-execution environments (shims, entry points) are added in
-a future release — at that point, `private` deps will contribute to a package's own shim
-execution but remain invisible to consumers.
+::: details Surface selection: `--self` flag
+The `--self` flag selects which surface `ocx exec` emits:
+
+- **Off (default)** — interface surface: only `public` and `interface` deps contribute env vars. This is what `ocx exec`, `ocx env`, `ocx shell env`, `ocx shell profile load`, `ocx ci export`, and `ocx deps` use when you invoke them directly.
+- **`--self`** — private surface: `public` and `private` deps contribute. Generated [launchers][guide-entry-points] embed `--self` automatically so a package's own binary runs with its full internal environment.
+
+Pass `--self` to any env-consuming command. See [Visibility Views][exec-modes-ref] for the full truth table and [Env Composition][env-composition-ref] for the complete algorithm.
 :::
 
 ### Inspection {#dependencies-inspection}
@@ -701,9 +714,9 @@ Config files are in [TOML][toml] format and live in three locations:
 
 Files are loaded lowest-to-highest and merged. Missing files are silently skipped. No config file is required.
 
-**Explicit additions.** [`--config`][arg-config] `FILE` or [`OCX_CONFIG_FILE`][env-config-file]`=/path/to/file.toml` layers an extra file on top of the discovered chain — useful for refining ambient config without rewriting it. Both can be set together ([`--config`][arg-config] sits at highest file-tier precedence). The specified file must exist. To disable an ambient [`OCX_CONFIG_FILE`][env-config-file] without unsetting it, set it to the empty string.
+**Explicit additions.** [`--config`][arg-config] `FILE` or [`OCX_CONFIG`][env-config]`=/path/to/file.toml` layers an extra file on top of the discovered chain — useful for refining ambient config without rewriting it. Both can be set together ([`--config`][arg-config] sits at highest file-tier precedence). The specified file must exist. To disable an ambient [`OCX_CONFIG`][env-config] without unsetting it, set it to the empty string.
 
-**Kill switch.** [`OCX_NO_CONFIG`][env-no-config]`=1` skips the discovered chain (system, user, [`$OCX_HOME`][env-ocx-home]) but leaves explicit paths intact. Combine with [`--config`][arg-config] or [`OCX_CONFIG_FILE`][env-config-file] for a fully hermetic CI load: `OCX_NO_CONFIG=1 ocx --config ci.toml ...`.
+**Kill switch.** [`OCX_NO_CONFIG`][env-no-config]`=1` skips the discovered chain (system, user, [`$OCX_HOME`][env-ocx-home]) but leaves explicit paths intact. Combine with [`--config`][arg-config] or [`OCX_CONFIG`][env-config] for a fully hermetic CI load: `OCX_NO_CONFIG=1 ocx --config ci.toml ...`.
 
 See the [Configuration reference][config-ref] for the full list of config keys, merge rules, examples, and error messages.
 
@@ -769,6 +782,7 @@ digest-derived.
 [cmd-deselect]: ./reference/command-line.md#deselect
 [cmd-find]: ./reference/command-line.md#find
 [cmd-exec]: ./reference/command-line.md#exec
+[cmd-launcher-exec]: ./reference/command-line.md#exec
 [cmd-install]: ./reference/command-line.md#install
 [cmd-select]: ./reference/command-line.md#select
 [cmd-uninstall]: ./reference/command-line.md#uninstall
@@ -789,7 +803,7 @@ digest-derived.
 <!-- environment -->
 [env-ocx-home]: ./reference/environment.md#ocx-home
 [env-ocx-index]: ./reference/environment.md#ocx-index
-[env-config-file]: ./reference/environment.md#ocx-config-file
+[env-config]: ./reference/environment.md#ocx-config
 [env-no-config]: ./reference/environment.md#ocx-no-config
 [env-auth-type]: ./reference/environment.md#ocx-auth-registry-type
 [env-auth-user]: ./reference/environment.md#ocx-auth-registry-user
@@ -799,6 +813,13 @@ digest-derived.
 
 <!-- reference pages -->
 [config-ref]: ./reference/configuration.md
+[metadata-ref]: ./reference/metadata.md
+[metadata-entry-points]: ./reference/metadata.md#entry-points
+[exec-modes-ref]: ./in-depth/environments.md#visibility-views
+[env-composition-ref]: ./in-depth/environments.md
+
+<!-- in-depth -->
+[guide-entry-points]: ./in-depth/entry-points.md
 
 <!-- internal -->
 [versioning-variants]: #versioning-variants

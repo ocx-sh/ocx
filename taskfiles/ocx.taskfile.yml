@@ -32,7 +32,7 @@ tasks:
     preconditions:
       - sh: '[ -n "$(git ls-files "{{.GLOB}}")" ]'
         msg: 'No {{.GLOB}} files found, skipping {{.TOOL}}'
-    cmd: ocx exec {{.PACKAGE}} -- {{.TOOL}} {{.ARGS}} {{.FILES}}
+    cmd: ocx exec --self {{.PACKAGE}} -- {{.TOOL}} {{.ARGS}} {{.FILES}}
     vars:
       ARGS: '{{.ARGS | default ""}}'
       FILES:
