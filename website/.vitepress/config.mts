@@ -2,6 +2,14 @@ import { defineConfig } from 'vitepress'
 import { groupIconMdPlugin, groupIconVitePlugin } from 'vitepress-plugin-group-icons'
 import licensedAssetFallback from './plugins/licensed-asset-fallback.mts'
 
+const deployTarget = process.env.OCX_DEPLOY_TARGET === 'prod' ? 'prod' : 'dev'
+
+const devBannerStyle: [string, Record<string, string>, string] = [
+  'style',
+  {},
+  ':root{--vp-layout-top-height:40px}@media (max-width:768px){:root{--vp-layout-top-height:56px}}',
+]
+
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
   srcDir: "src",
@@ -10,6 +18,7 @@ export default defineConfig({
   description: "the simple package manager",
 
   head: [
+    ...(deployTarget === 'dev' ? [devBannerStyle] : []),
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }],
     ['link', { rel: 'icon', type: 'image/png', sizes: '96x96', href: '/icons/favicon-96x96.png' }],
     ['link', { rel: 'icon', type: 'image/png', sizes: '32x32', href: '/icons/favicon-32x32.png' }],
@@ -22,6 +31,7 @@ export default defineConfig({
 
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
+    deployTarget,
     logo: '/logo.svg',
     nav: [
       { text: 'Home', link: '/' },

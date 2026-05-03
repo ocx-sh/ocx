@@ -32,9 +32,10 @@ VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast stat
 ## Task Commands
 
 ```bash
-task website:serve     # Dev server (localhost:5173)
-task website:build     # Full build (generates schema, recordings, sbom, catalog, then VitePress)
-task website:deploy    # rsync to production (requires DEPLOY_HOST)
+task website:serve              # Dev server (localhost:5173)
+task website:build              # Full build (generates schema, recordings, sbom, catalog, then VitePress)
+task website:deploy               # rsync to dev (default; SSH host alias `dev.ocx.sh`)
+task website:deploy TARGET=prod   # rsync to prod (SSH host alias `ocx.sh`)
 ```
 
 Build chain: `schema:generate` → `recordings:build` → `sbom:generate:page` → `catalog:generate` → `vitepress build`.

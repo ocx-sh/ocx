@@ -16,9 +16,6 @@ includes:
     taskfile: ./recordings.taskfile.yml
     internal: true
 
-vars:
-  DEPLOY_HOST: '{{.DEPLOY_HOST | default "ocx-deploy"}}'
-
 tasks:
   install:
     cmd: bun install
@@ -30,6 +27,10 @@ tasks:
     cmd: bunx vitepress dev
 
   build:
+    vars:
+      OCX_DEPLOY_TARGET: '{{.OCX_DEPLOY_TARGET | default "dev"}}'
+    env:
+      OCX_DEPLOY_TARGET: '{{.OCX_DEPLOY_TARGET}}'
     deps:
       - install
     cmds:
@@ -40,14 +41,29 @@ tasks:
       - bunx vitepress build
 
   deploy:
-    desc: Deploy site via rsync (preserves licensed assets on server)
-    deps:
-      - build
+    desc: Deploy site via rsync (TARGET=dev|prod, default dev)
+    vars:
+      TARGET: '{{.TARGET | default "dev"}}'
+      DEPLOY_HOST: '{{if eq .TARGET "prod"}}ocx.sh{{else}}dev.ocx.sh{{end}}'
+    requires:
+      vars:
+        - name: TARGET
+          enum: [dev, prod]
     cmds:
+      - task: build
+        vars:
+          OCX_DEPLOY_TARGET: '{{.TARGET}}'
       - rsync -avz --delete --exclude=/licensed/ .vitepress/dist/ "{{.DEPLOY_HOST}}:"
 
   deploy:licensed:
-    desc: Push licensed assets (icons8 etc.) to server
+    desc: Push licensed assets (icons8 etc.) to server (TARGET=dev|prod, default dev)
+    vars:
+      TARGET: '{{.TARGET | default "dev"}}'
+      DEPLOY_HOST: '{{if eq .TARGET "prod"}}ocx.sh{{else}}dev.ocx.sh{{end}}'
+    requires:
+      vars:
+        - name: TARGET
+          enum: [dev, prod]
     preconditions:
       - sh: '[ -d src/public/licensed ]'
         msg: "No licensed assets found in src/public/licensed/"

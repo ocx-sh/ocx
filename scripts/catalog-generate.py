@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -79,6 +80,12 @@ def parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Force regeneration even if catalog.json exists",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=min(32, (os.cpu_count() or 4) * 4),
+        help="Parallel workers for per-package fetches (default: cpu_count*4, max 32)",
     )
     return parser.parse_args()
 
@@ -321,28 +328,35 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Process each package
+    # Process each package (parallel — subprocess + network bound)
+    def _build(item: tuple[str, list[str]]) -> dict:
+        repo, tags = item
+        return build_package_data(
+            args.ocx_binary, repo, tags, output_dir,
+            remote=args.remote, registry=args.registry,
+        )
+
     summaries: list[dict] = []
     if existing_catalog and args.packages:
         existing_by_repo = {
             p["repository"]: p for p in existing_catalog.get("packages", [])
         }
-        for repo, tags in all_repos.items():
-            if repo in repos_to_process:
-                summary = build_package_data(
-                    args.ocx_binary, repo, tags, output_dir, remote=args.remote,
-                    registry=args.registry,
-                )
-                summaries.append(summary)
+        targets = [
+            (repo, tags) for repo, tags in all_repos.items()
+            if repo in repos_to_process
+        ]
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            built = list(pool.map(_build, targets))
+        # Preserve original repo iteration order, splicing in fresh data
+        built_by_repo = {s["repository"]: s for s in built}
+        for repo, _tags in all_repos.items():
+            if repo in built_by_repo:
+                summaries.append(built_by_repo[repo])
             elif repo in existing_by_repo:
                 summaries.append(existing_by_repo[repo])
     else:
-        for repo, tags in repos_to_process.items():
-            summary = build_package_data(
-                args.ocx_binary, repo, tags, output_dir, remote=args.remote,
-                registry=args.registry,
-            )
-            summaries.append(summary)
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            summaries = list(pool.map(_build, repos_to_process.items()))
 
     # Sort by name
     summaries.sort(key=lambda s: s["name"].lower())

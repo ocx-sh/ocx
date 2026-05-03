@@ -24,7 +24,7 @@ source-tarball = false
 # Plan jobs to run in CI
 plan-jobs = ["./verify-version"]
 # Post-announce jobs to run in CI
-post-announce-jobs = ["./post-release-oci-publish", "./deploy-website"]
+post-announce-jobs = ["./post-release-oci-publish", "./deploy-website-release"]
 # Whether to embed dependency information using cargo-auditable
 cargo-auditable = true
 # Whether to use cargo-cyclonedx to generate an SBOM

@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import DefaultTheme from 'vitepress/theme'
+import DevBanner from './components/DevBanner.vue'
 
 const { Layout } = DefaultTheme
 </script>
 
 <template>
   <Layout>
+    <template #layout-top>
+      <DevBanner />
+    </template>
     <template #home-features-before>
       <div class="early-dev-banner-wrapper">
         <div class="early-dev-banner">
