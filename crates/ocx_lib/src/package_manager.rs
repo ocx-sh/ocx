@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 pub mod composer;
+pub mod concurrency;
 pub mod error;
 pub mod launcher;
 
@@ -239,11 +240,12 @@ mod install_info_identifier_tests {
 }
 
 // Re-export types needed by other modules and CLI commands.
+pub use concurrency::Concurrency;
 pub use error::DependencyError;
+pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
-pub use tasks::profile_resolve::{ProfileEntryResolution, ResolvedProfileEntry};
 
-use crate::{file_structure, oci, profile::ProfileManager};
+use crate::{file_structure, oci};
 
 /// Central facade for package operations (find, install, uninstall, etc.).
 ///
@@ -261,7 +263,6 @@ pub struct PackageManager {
     index: oci::index::Index,
     client: Option<oci::Client>,
     default_registry: String,
-    profile: ProfileManager,
 }
 
 impl PackageManager {
@@ -272,13 +273,11 @@ impl PackageManager {
         default_registry: impl Into<String>,
     ) -> Self {
         let default_registry = default_registry.into();
-        let profile = ProfileManager::new(file_structure.clone());
         Self {
             file_structure,
             index,
             client,
             default_registry,
-            profile,
         }
     }
 
@@ -297,10 +296,6 @@ impl PackageManager {
 
     pub fn default_registry(&self) -> &str {
         &self.default_registry
-    }
-
-    pub fn profile(&self) -> &ProfileManager {
-        &self.profile
     }
 
     pub fn is_offline(&self) -> bool {
@@ -412,5 +407,34 @@ impl PackageManager {
     ) -> crate::Result<Vec<crate::package::metadata::env::entry::Entry>> {
         let info = self.install_info_from_package_root(pkg_root).await?;
         self.resolve_env(&[std::sync::Arc::new(info)], self_view).await
+    }
+
+    /// Boundary primitive for hook-style commands (`shell-hook`, `hook-env`,
+    /// future `generate direnv`) that must NOT contact any registry,
+    /// regardless of the global `--remote` / `--offline` flags.
+    ///
+    /// Builds a fresh [`PackageManager`] using the supplied local cache
+    /// `local_index` as the *only* index source: chain mode is forced to
+    /// [`oci::index::ChainMode::Offline`], and the OCI client is dropped to
+    /// `None`. Any incidental tag/manifest lookup short-circuits to the
+    /// local cache; an attempt to use the (now-absent) client surfaces as
+    /// `Error::OfflineMode`. This is the layer the security boundary docs
+    /// in ADR §5B (decision 5B) reference — see
+    /// `.claude/artifacts/adr_project_toolchain_config.md`.
+    ///
+    /// Caller passes the local-index handle separately because the manager
+    /// holds a type-erased `Index` (which may be `Default`, `Remote`, or
+    /// already `Offline`); reaching back through the type-erased boundary
+    /// would couple this primitive to `ChainedIndex` internals. The CLI
+    /// `Context` already exposes `local_index().clone()`, so the call site
+    /// is `context.manager().offline_view(context.local_index().clone())`.
+    pub fn offline_view(&self, local_index: oci::index::LocalIndex) -> Self {
+        let offline_index = oci::index::Index::from_chained(local_index, Vec::new(), oci::index::ChainMode::Offline);
+        Self {
+            file_structure: self.file_structure.clone(),
+            index: offline_index,
+            client: None,
+            default_registry: self.default_registry.clone(),
+        }
     }
 }

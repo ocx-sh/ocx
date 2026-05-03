@@ -72,11 +72,6 @@ impl FileStructure {
     pub fn root(&self) -> &std::path::Path {
         &self.root
     }
-
-    /// Returns the path to the profile manifest file (`$OCX_HOME/profile.json`).
-    pub fn profile_manifest(&self) -> std::path::PathBuf {
-        self.root.join("profile.json")
-    }
 }
 
 /// Returns the OCX data root directory.

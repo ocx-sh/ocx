@@ -127,7 +127,8 @@ impl TempStore {
     pub fn try_acquire(&self, path: &Path) -> Result<Option<TempAcquireResult>> {
         let file = Self::prepare_lock_file(path)?;
         match file_lock::FileLock::try_exclusive(file) {
-            Ok(lock) => Ok(Some(Self::finish_acquire(path, lock)?)),
+            Ok(Some(lock)) => Ok(Some(Self::finish_acquire(path, lock)?)),
+            Ok(None) => Ok(None),
             Err(_) => Ok(None),
         }
     }
@@ -454,8 +455,9 @@ mod tests {
         std::fs::write(TempStore::lock_path_for(&b), b"").unwrap();
 
         let store = TempStore::new(dir.path());
-        let _lock =
-            file_lock::FileLock::try_exclusive(std::fs::File::open(TempStore::lock_path_for(&a)).unwrap()).unwrap();
+        let _lock = file_lock::FileLock::try_exclusive(std::fs::File::open(TempStore::lock_path_for(&a)).unwrap())
+            .unwrap()
+            .unwrap();
 
         let stale = store.stale_entries().unwrap();
         assert_eq!(stale.len(), 1);

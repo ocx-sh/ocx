@@ -6,7 +6,7 @@ tasks:
   generate:
     desc: Generate package catalog data and pages for the website
     cmds:
-      - unset OCX_INDEX && uv run {{.ROOT_DIR}}/scripts/catalog-generate.py
+      - uv run {{.ROOT_DIR}}/scripts/catalog-generate.py
           --ocx-binary {{.ROOT_DIR}}/target/release/ocx
           --output-dir {{.ROOT_DIR}}/website/src/public/data/catalog
           --pages-dir {{.ROOT_DIR}}/website/src/docs/catalog

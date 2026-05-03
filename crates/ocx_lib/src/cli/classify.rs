@@ -89,7 +89,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::oci::platform::error::PlatformError;
     use crate::package::error::Error as PackageError;
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
-    use crate::profile::ProfileError;
+    use crate::project::error::Error as ProjectError;
 
     macro_rules! try_downcast {
         ($ty:ty) => {
@@ -119,7 +119,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(CompressionError);
     try_downcast!(CiError);
     try_downcast!(PackageError);
-    try_downcast!(ProfileError);
+    try_downcast!(ProjectError);
 
     // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
     // for it (orphan rule). Only `PermissionDenied` maps to a specific code;
@@ -138,7 +138,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::error::Error as ConfigError;
+    use crate::config::error::{ConfigSource, Error as ConfigError};
     use crate::oci::client::error::ClientError;
     use crate::package_manager::error::{DependencyError, PackageError, PackageErrorKind};
 
@@ -156,8 +156,41 @@ mod tests {
         // Plan taxonomy: config::Error::FileNotFound → NotFound (79)
         let err = ConfigError::FileNotFound {
             path: PathBuf::from("/nonexistent.toml"),
+            tier: ConfigSource::Config,
         };
         assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn project_file_not_found_maps_to_not_found() {
+        // Symmetry: project-tier `FileNotFound` also maps to NotFound (79).
+        // Both `--config` and `--project` should exit 79 when the named file
+        // is missing.
+        let err = ConfigError::FileNotFound {
+            path: PathBuf::from("/nonexistent.project.toml"),
+            tier: ConfigSource::Project,
+        };
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn project_file_not_found_error_message_points_at_project_flag() {
+        // Regression guard: a missing `--project` file must cite the project
+        // flag/env var, not the config ones. Rendering the Display output
+        // matters because this string is what users see on exit.
+        let err = ConfigError::FileNotFound {
+            path: PathBuf::from("/missing.toml"),
+            tier: ConfigSource::Project,
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--project") && rendered.contains("OCX_PROJECT"),
+            "project-tier FileNotFound must cite --project flag/env, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("--config") && !rendered.contains("OCX_CONFIG"),
+            "project-tier FileNotFound must NOT misdirect to --config, got: {rendered}"
+        );
     }
 
     #[test]
@@ -187,6 +220,7 @@ mod tests {
         // Plan taxonomy: config::Error::Io → IoError (74)
         let err = ConfigError::Io {
             path: PathBuf::from("/config.toml"),
+            tier: ConfigSource::Config,
             source: std::io::Error::other("read failure"),
         };
         assert_eq!(classify(err), ExitCode::IoError);

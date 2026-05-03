@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::{Result, file_structure::BlobStore, log, oci, package::tag::Tag};
 
-use super::index_impl;
+use super::{IndexOperation, index_impl};
 
 mod cache;
 mod config;
@@ -44,23 +44,22 @@ impl LocalIndex {
         self.tags.refresh(identifier, source).await
     }
 
-    /// Fetches the manifest chain from `source` and, if successful, commits
-    /// the tag pointer via [`TagManager::commit`] so that subsequent cache
-    /// reads short-circuit the chain walk. Digest-only identifiers are
-    /// fully addressed by the digest itself and skip the tag commit.
+    /// Persist the full manifest chain (image index + per-platform
+    /// manifests) returned by `source` to the local blob store and return
+    /// the head digest. Content-addressed only — does **not** commit a tag
+    /// pointer.
     ///
-    /// Returns `Ok(true)` when the chain was persisted, `Ok(false)` when
-    /// the source cleanly does not have the identifier, and `Err` on source
-    /// failure.
-    ///
-    /// The single entry point used by `ChainedIndex` on cache miss. Chain
-    /// persistence and tag commit are exposed as one atomic operation to
-    /// keep the write-through sequence inside the cache facade.
-    pub async fn write_chain_and_commit_tag(
+    /// Returns `Ok(None)` when the source has no manifest for `identifier`,
+    /// `Err` on source failure. The persist path used by both tag-addressed
+    /// pulls (which then call [`Self::commit_tag`]) and digest-addressed
+    /// pulls (which leave the tag store untouched because `ocx.lock` is
+    /// canonical). Returning the digest avoids a round-trip back to the
+    /// source for the caller that needs to compose `commit_tag`.
+    pub async fn persist_manifest_chain(
         &self,
         source: &super::Index,
         identifier: &oci::Identifier,
-    ) -> Result<bool> {
+    ) -> Result<Option<oci::Digest>> {
         // `depth = 0` at the top-level entry. Child manifests inside an
         // image index are written inline (not via recursion) because the
         // OCI spec does not describe a nested image index — the inline
@@ -69,17 +68,26 @@ impl LocalIndex {
         // processing through this function recursively, it must pass
         // `depth + 1`, and the guard at the top of `_inner` will catch
         // any unsupported nesting before a corrupt cache entry is written.
-        let Some(digest) = self.persist_manifest_chain_inner(source, identifier, 0).await? else {
-            return Ok(false);
-        };
-        // Digest-only inputs have no tag to pin — the chain is fully addressed by
-        // the digest itself, so we skip the tag commit. Tag-bearing inputs (the
-        // common path from `walk_chain`'s `tag_or_latest()` normalisation) commit
-        // the tag pointer so subsequent cache reads short-circuit the chain walk.
-        if let Some(tag) = identifier.tag() {
-            self.tags.commit(identifier, tag, &digest).await?;
-        }
-        Ok(true)
+        self.persist_manifest_chain_inner(source, identifier, 0).await
+    }
+
+    /// Commit a tag → digest pointer for `identifier` to the local tag
+    /// store.
+    ///
+    /// `commit_tag` is the only tag-pointer writer outside of
+    /// [`Self::refresh_tags`] (which serves `ocx index update`). Caller
+    /// must ensure `identifier.tag()` is `Some` — this entry is meaningful
+    /// only for tag-addressed pulls. Digest-addressed (pinned-id) pulls
+    /// skip this step because `ocx.lock` is the canonical record.
+    /// Visibility is `pub(super)` so the only call site is
+    /// [`super::chained_index::ChainedIndex::fetch_and_persist_chain`];
+    /// keeping the surface narrow lets the structural test in
+    /// `chained_index.rs` assert that no other path writes the tag store.
+    pub(super) async fn commit_tag(&self, identifier: &oci::Identifier, digest: &oci::Digest) -> Result<()> {
+        let tag = identifier
+            .tag()
+            .expect("commit_tag invariant: identifier must carry a tag");
+        self.tags.commit(identifier, tag, digest).await
     }
 
     async fn persist_manifest_chain_inner(
@@ -97,7 +105,7 @@ impl LocalIndex {
             return Err(super::error::Error::NestedImageIndex { digest }.into());
         }
 
-        let Some((digest, manifest)) = source.fetch_manifest(identifier).await? else {
+        let Some((digest, manifest)) = source.fetch_manifest(identifier, IndexOperation::Resolve).await? else {
             return Ok(None);
         };
 
@@ -109,7 +117,7 @@ impl LocalIndex {
                 let child_digest: oci::Digest = entry.digest.clone().try_into()?;
                 let child_id = identifier.clone_with_digest(child_digest.clone());
                 let (_, child_manifest) = source
-                    .fetch_manifest(&child_id)
+                    .fetch_manifest(&child_id, IndexOperation::Resolve)
                     .await?
                     .ok_or_else(|| super::error::Error::RemoteManifestNotFound(child_id.to_string()))?;
                 // An image index nested inside an image index is not a
@@ -212,7 +220,11 @@ impl index_impl::IndexImpl for LocalIndex {
             .map(|tags| tags.into_keys().filter(|t| !Tag::is_internal_str(t)).collect()))
     }
 
-    async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+    async fn fetch_manifest(
+        &self,
+        identifier: &oci::Identifier,
+        _op: IndexOperation,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         log::trace!("Fetching manifest for identifier '{}'.", identifier);
         let queried_digest = identifier.digest();
         let queried_tag = if queried_digest.is_some() {
@@ -246,7 +258,11 @@ impl index_impl::IndexImpl for LocalIndex {
         Ok(None)
     }
 
-    async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
+    async fn fetch_manifest_digest(
+        &self,
+        identifier: &oci::Identifier,
+        _op: IndexOperation,
+    ) -> Result<Option<oci::Digest>> {
         let queried_digest = identifier.digest();
         let queried_tag = if queried_digest.is_some() {
             identifier.tag()
@@ -335,14 +351,22 @@ mod spec_tests {
         async fn list_tags(&self, _: &oci::Identifier) -> crate::Result<Option<Vec<String>>> {
             Ok(Some(self.known_tags.keys().cloned().collect()))
         }
-        async fn fetch_manifest(&self, identifier: &oci::Identifier) -> crate::Result<Option<(oci::Digest, Manifest)>> {
+        async fn fetch_manifest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: super::super::IndexOperation,
+        ) -> crate::Result<Option<(oci::Digest, Manifest)>> {
             let tag = identifier.tag_or_latest();
             Ok(self
                 .known_tags
                 .get(tag)
                 .map(|d| (d.clone(), Manifest::Image(ImageManifest::default()))))
         }
-        async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: super::super::IndexOperation,
+        ) -> crate::Result<Option<oci::Digest>> {
             Ok(self.known_tags.get(identifier.tag_or_latest()).cloned())
         }
         fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
@@ -369,14 +393,22 @@ mod spec_tests {
         async fn list_tags(&self, _: &oci::Identifier) -> crate::Result<Option<Vec<String>>> {
             Ok(Some(self.known.keys().cloned().collect()))
         }
-        async fn fetch_manifest(&self, identifier: &oci::Identifier) -> crate::Result<Option<(oci::Digest, Manifest)>> {
+        async fn fetch_manifest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: super::super::IndexOperation,
+        ) -> crate::Result<Option<(oci::Digest, Manifest)>> {
             let tag = identifier.tag_or_latest();
             Ok(self
                 .known
                 .get(tag)
                 .map(|d| (d.clone(), Manifest::Image(ImageManifest::default()))))
         }
-        async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: super::super::IndexOperation,
+        ) -> crate::Result<Option<oci::Digest>> {
             Ok(self.known.get(identifier.tag_or_latest()).cloned())
         }
         fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
@@ -498,7 +530,10 @@ mod spec_tests {
 
         let cache_clone = cache.clone();
         let chained = super::super::Index::from_chained(cache_clone, vec![source], super::super::ChainMode::Default);
-        let _ = chained.fetch_manifest(&id).await.unwrap();
+        let _ = chained
+            .fetch_manifest(&id, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         let expected = cache.blob_store.data(REGISTRY, &d);
         assert!(
@@ -533,10 +568,18 @@ mod spec_tests {
             async fn list_tags(&self, _: &oci::Identifier) -> crate::Result<Option<Vec<String>>> {
                 Ok(None)
             }
-            async fn fetch_manifest(&self, _: &oci::Identifier) -> crate::Result<Option<(oci::Digest, Manifest)>> {
+            async fn fetch_manifest(
+                &self,
+                _: &oci::Identifier,
+                _op: super::super::IndexOperation,
+            ) -> crate::Result<Option<(oci::Digest, Manifest)>> {
                 Ok(Some((self.d.clone(), Manifest::Image(ImageManifest::default()))))
             }
-            async fn fetch_manifest_digest(&self, _: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
+            async fn fetch_manifest_digest(
+                &self,
+                _: &oci::Identifier,
+                _op: super::super::IndexOperation,
+            ) -> crate::Result<Option<oci::Digest>> {
                 Ok(Some(self.d.clone()))
             }
             fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
@@ -549,7 +592,10 @@ mod spec_tests {
 
         let cache_clone = cache.clone();
         let chained = super::super::Index::from_chained(cache_clone, vec![source], super::super::ChainMode::Default);
-        let result = chained.fetch_manifest(&id).await.unwrap();
+        let result = chained
+            .fetch_manifest(&id, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(
             result.is_some(),
             "digest-only fetch_manifest must walk the chain and return Some"
@@ -594,6 +640,7 @@ mod spec_tests {
             async fn fetch_manifest(
                 &self,
                 identifier: &oci::Identifier,
+                _op: super::super::IndexOperation,
             ) -> crate::Result<Option<(oci::Digest, Manifest)>> {
                 // Tag-only lookups (no digest) return the parent image index;
                 // digest-bearing lookups (child recursion) return a leaf image
@@ -618,7 +665,11 @@ mod spec_tests {
                     Ok(Some((self.child.clone(), Manifest::Image(ImageManifest::default()))))
                 }
             }
-            async fn fetch_manifest_digest(&self, _: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
+            async fn fetch_manifest_digest(
+                &self,
+                _: &oci::Identifier,
+                _op: super::super::IndexOperation,
+            ) -> crate::Result<Option<oci::Digest>> {
                 Ok(Some(self.parent.clone()))
             }
             fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
@@ -635,7 +686,10 @@ mod spec_tests {
 
         let cache_clone = cache.clone();
         let chained = super::super::Index::from_chained(cache_clone, vec![source], super::super::ChainMode::Default);
-        let _ = chained.fetch_manifest(&id).await.unwrap();
+        let _ = chained
+            .fetch_manifest(&id, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         let parent_path = cache.blob_store.data(REGISTRY, &parent_digest);
         let child_path = cache.blob_store.data(REGISTRY, &child_digest);
@@ -665,7 +719,10 @@ mod spec_tests {
 
         let cache_clone = cache.clone();
         let chained = super::super::Index::from_chained(cache_clone, vec![source], super::super::ChainMode::Default);
-        let _ = chained.fetch_manifest(&id).await.unwrap();
+        let _ = chained
+            .fetch_manifest(&id, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
 
         let digest_file = cache.blob_store.digest_file(REGISTRY, &d);
         assert!(
@@ -735,7 +792,10 @@ mod spec_tests {
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
         // Step 4: fetch_manifest must re-fetch and return Some.
-        let result = chained.fetch_manifest(&id).await.unwrap();
+        let result = chained
+            .fetch_manifest(&id, super::IndexOperation::Resolve)
+            .await
+            .unwrap();
         assert!(
             result.is_some(),
             "latent-bug fix: fetch_manifest with tag cached but blob missing must re-fetch and return Some"
@@ -816,7 +876,11 @@ mod concurrency_tests {
             Ok(Some(self.known_tags.keys().cloned().collect()))
         }
 
-        async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, Manifest)>> {
+        async fn fetch_manifest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: super::super::IndexOperation,
+        ) -> Result<Option<(oci::Digest, Manifest)>> {
             let tag = identifier.tag_or_latest();
             Ok(self
                 .known_tags
@@ -824,7 +888,11 @@ mod concurrency_tests {
                 .map(|d| (d.clone(), Manifest::Image(ImageManifest::default()))))
         }
 
-        async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: super::super::IndexOperation,
+        ) -> Result<Option<oci::Digest>> {
             Ok(self.known_tags.get(identifier.tag_or_latest()).cloned())
         }
 

@@ -7,7 +7,7 @@ use tracing::{Instrument, info_span};
 use crate::{
     log, oci,
     package::install_info::InstallInfo,
-    package_manager::{self, error::PackageError, error::PackageErrorKind},
+    package_manager::{self, concurrency::Concurrency, error::PackageError, error::PackageErrorKind},
 };
 
 use super::super::PackageManager;
@@ -35,10 +35,15 @@ impl PackageManager {
 
     /// Finds each package locally and, when a package is absent and the manager
     /// is online, installs it automatically.
+    ///
+    /// `concurrency` caps the outer dispatch in the multi-package case (matches
+    /// [`pull_all`](PackageManager::pull_all) semantics). Single-package fast
+    /// path is naturally serial and ignores the cap.
     pub async fn find_or_install_all(
         &self,
         packages: Vec<oci::Identifier>,
         platforms: Vec<oci::Platform>,
+        concurrency: Concurrency,
     ) -> Result<Vec<InstallInfo>, package_manager::error::Error> {
         if packages.is_empty() {
             return Ok(Vec::new());
@@ -57,16 +62,19 @@ impl PackageManager {
             return Ok(vec![info]);
         }
 
+        let semaphore = concurrency.semaphore();
         let mut tasks: JoinSet<(oci::Identifier, Result<InstallInfo, PackageErrorKind>)> = JoinSet::new();
 
         for package in &packages {
             let mgr = self.clone();
             let pkg = package.clone();
             let plat = platforms.clone();
+            let sem = semaphore.clone();
 
             let span = crate::cli::progress::spinner_span(info_span!("Resolving", package = %pkg), &pkg);
             tasks.spawn(
                 async move {
+                    let _permit = super::super::concurrency::acquire_permit(&sem).await;
                     let result = mgr.find_or_install(&pkg, plat).await;
                     (pkg, result)
                 }

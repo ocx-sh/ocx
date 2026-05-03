@@ -82,6 +82,7 @@ CLI command (clap parse)
 | `adr_sbom_strategy.md` | SBOM gen approach |
 | `adr_version_build_separator.md` | Underscore as build separator in version tags |
 | `adr_three_tier_cas_storage.md` | Three-tier content-addressed storage (blobs + layers + packages) |
+| `adr_index_routing_semantics.md` | `IndexOperation::{Query, Resolve}` enum; pinned-id pulls skip tag commit |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 
@@ -106,6 +107,7 @@ Project-wide conventions enforced by reviewer:
 | New index operation | `crates/ocx_lib/src/oci/index/` | Impl on `IndexImpl` trait |
 | New metadata field | `crates/ocx_lib/src/package/metadata/` | Update types + schema + docs |
 | New acceptance test | `test/tests/test_*.py` | Use fixtures, maintain test isolation |
+| Project config mutation | `crates/ocx_lib/src/project/mutate.rs` | `add_binding` / `remove_binding` / `init_project` — atomic read-modify-write under `.ocx-lock` sentinel |
 
 ## Cross-Cutting Modules
 
@@ -116,7 +118,6 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | `archive/` | Tar/zip extraction + bundling with pluggable backends | Mirror pipeline, package creation |
 | `auth/` | `AuthType` enum with env var + docker cred fallback | OCI Client |
 | `ci/` | CI flavor dispatch (GitHub Actions export) | `ci export` command |
-| `profile/` | `ProfileManager` + `ProfileManifest` for shell profiles | Shell profile commands |
 | `shell/` | `ShellProfileBuilder` — shell-specific export gen | Shell commands |
 | `utility/` | Extension traits + async + fs helpers — see [Utility Catalog](#utility-catalog) below | Everywhere (prelude for extension traits) |
 | `compression/` | Compression level config | Archive, OCI push |

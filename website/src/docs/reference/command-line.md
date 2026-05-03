@@ -32,8 +32,10 @@ The available data depends on the command being executed.
 
 ### `--offline` {#arg-offline}
 
-When set, ocx will run in offline mode and will not attempt to fetch any remote information.
-If any command requires information that is not already available locally, it will fail with an error.
+Disables all network access for this invocation. Tag→digest resolution must
+be satisfied by the local index or by a digest-pinned identifier; unpinned
+tags missing from the local index error immediately rather than triggering
+a registry query. Useful for hermetic CI runs and air-gapped environments.
 
 ::: warning
 Running `ocx --offline install <pkg>` after a bare `ocx index update <pkg>` (without a prior
@@ -44,12 +46,37 @@ Run `ocx install <pkg>` online first to populate the blob cache, then offline in
 
 ### `--remote` {#arg-remote}
 
-When set, tag and catalog lookups query the registry directly, bypassing the local tag store.
-Digest-addressed blob reads (manifests and layers already identified by a content digest) still
-use the local cache and write newly fetched blobs through to `$OCX_HOME/blobs/`.
-Only `$OCX_HOME/tags/` is not updated — the persistent local tag snapshot is left unchanged.
+Routes mutable lookups (tag list, catalog, tag→manifest resolution) to the
+remote registry instead of the local index. Pure-query commands
+([`ocx index list`](#index-list), [`ocx index catalog`](#index-catalog),
+[`ocx package info`](#package-info)) do **not** persist the result to the
+local index — to refresh the persistent snapshot, run
+[`ocx index update`](#index-update) explicitly. Implies network access.
 
-Combining this flag with [`--offline`](#arg-offline) will result in an error.
+Digest-addressed reads (manifests and layers already identified by a content
+digest) still consult the local index first and write newly fetched blobs
+through to `$OCX_HOME/blobs/` — content-addressed data is immutable, so
+caching is safe regardless of mode.
+
+Combining this flag with [`--offline`](#arg-offline) is **accepted** as
+"pinned-only mode" — see [Pinned-only mode](#pinned-only-mode) below.
+
+### Pinned-only mode {#pinned-only-mode}
+
+Setting both [`--offline`](#arg-offline) and [`--remote`](#arg-remote)
+together produces a deliberately strict mode: no source contact, no local
+writes, and any tag-addressed resolution that cannot be satisfied locally
+errors instead of silently falling back. The CLI emits an `info` log to
+confirm the mode is active.
+
+Use it in CI to assert every project dependency is digest-pinned:
+
+```sh
+ocx --offline --remote exec -- my-build-script
+```
+
+If any tool resolution falls back to a floating tag, the command fails — a
+hermetic-build sanity check without round-tripping to the registry.
 
 ### `--index` {#arg-index}
 
@@ -70,6 +97,56 @@ The flag has no effect when [`--remote`](#arg-remote) is set.
 The same override can be set persistently via the [`OCX_INDEX`][env-ocx-index] environment
 variable. The `--index` flag takes precedence when both are set.
 
+### `--quiet` {#arg-quiet}
+
+Alias: `-q`.
+
+Suppresses the structured stdout report that every command emits — tables in plain
+mode, the JSON document in `--format json` mode. Errors, warnings, and progress
+spinners continue to surface on stderr.
+
+Quiet is opt-in and orthogonal to [`--format`](#arg-format). Use it when calling
+ocx as a step in a larger pipeline that only cares about the exit code, or when
+chaining commands where intermediate output would clutter logs.
+
+```shell
+# Pre-warm the project store in CI without dumping a table per package.
+ocx --quiet pull
+```
+
+The same toggle is available via the [`OCX_QUIET`][env-ocx-quiet] environment
+variable; the flag wins when both are set.
+
+### `--jobs` {#arg-jobs}
+
+Caps the number of root packages pulled in parallel. Applies to every command
+that fans out through `pull_all` — `install`, `pull`, `package pull`, `exec`
+(when it auto-installs missing tools), and the env-composition path of `env`.
+
+The cap acts on the **outer dispatch only**: transitive dependencies and OCI
+layer extraction stay unbounded so a child pull never deadlocks waiting for a
+permit held by its own ancestor. Singleflight dedup and per-package file locks
+already protect the registry against duplicate work.
+
+| Value | Meaning |
+|-------|---------|
+| (unset) | Unbounded. Every root package spawns immediately — legacy behavior. |
+| `0` | Use all logical cores (matches [GNU `parallel -j 0`][gnu-parallel-j0]). |
+| `N > 0` | Cap at `N` concurrent root pulls. |
+| Negative | Rejected at parse time. |
+
+OCX intentionally diverges from Cargo on `--jobs 0`: GNU Parallel's "saturate
+this machine" convention is more useful in CI matrices where the runner has a
+variable CPU count and the user wants the cap computed for them.
+
+The same value can be set persistently via [`OCX_JOBS`][env-ocx-jobs]. The CLI
+flag wins when both are set.
+
+```shell
+# Cap parallelism on a constrained runner.
+ocx --jobs 2 install cmake:3.28 ripgrep:14
+```
+
 ### `--color` {#arg-color}
 
 Controls when to use <Tooltip term="ANSI colors">Escape sequences defined by ECMA-48 / ISO 6429, supported by virtually all modern terminals.</Tooltip> in output.
@@ -82,6 +159,18 @@ Controls when to use <Tooltip term="ANSI colors">Escape sequences defined by ECM
 The `--color` flag takes the highest precedence over all
 color-related environment variables ([`NO_COLOR`][env-no-color],
 [`CLICOLOR`][env-clicolor], [`CLICOLOR_FORCE`][env-clicolor-force]).
+
+### `--project` {#arg-project}
+
+Path to the project-level `ocx.toml` (project-tier toolchain config).
+
+When set, OCX reads this file as the project tier and skips the CWD walk entirely. Any filename is accepted (not just `ocx.toml`), which is useful for fixtures and integration tests.
+
+The same override can be set persistently via the [`OCX_PROJECT`][env-project] environment variable. To disable project-file discovery entirely — including the `OCX_PROJECT` variable but not an explicit `--project` flag — set [`OCX_NO_PROJECT`][env-no-project]`=1`.
+
+**Symlink policy:** Paths supplied via `--project` or `OCX_PROJECT` are trusted and followed through symlinks. Paths discovered by the CWD walk reject symlinks to prevent directory-traversal redirection.
+
+**Error cases:** A missing explicit path exits with code 79 ([`NotFound`][exit-codes]). A path that exists but cannot be read (permission denied, not a regular file) exits with code 74 ([`IoError`][exit-codes]).
 
 ### `--config` {#arg-config}
 
@@ -177,11 +266,49 @@ consumers traverse into `<root>/entrypoints/`, and metadata readers open `<root>
 
 ## Commands
 
+### `add` {#add}
+
+Appends a tool binding to the nearest `ocx.toml`, resolves its digest into `ocx.lock`, and installs the package in one step.
+
+The command locates the project `ocx.toml` by walking the directory tree from the current working directory upward (same discovery as [`ocx lock`](#lock) and [`ocx pull`](#pull)). It fails with exit code 64 if no `ocx.toml` is found — it does **not** scaffold one implicitly. To create a project file first, run [`ocx init`](#init).
+
+After mutating `ocx.toml`, `ocx add` performs a partial lock update (preserving existing entries) followed by an install of the newly added tool.
+
+**Usage**
+
+```shell
+ocx add [OPTIONS] <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Fully-qualified tool identifier to add (e.g. `ocx.sh/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/cmake:latest"`), following the same convention as `docker pull`. See [Unit 3 bare-identifier default][user-guide-toml] for the design rationale.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
+| `--help` | `-h` | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Binding added, lock updated, tool installed. |
+| 64 | No `ocx.toml` found, binding already exists, or invalid `--group` name. |
+| 69 | Registry unreachable while resolving the new tag. |
+| 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
+| 75 | Another `ocx` process holds the project lock sentinel (`.ocx-lock`). Retry with backoff. |
+| 78 | `ocx.toml` schema invalid or TOML parse error. |
+| 79 | Tag not found in the registry. |
+| 80 | Authentication failure against the registry. |
+
 ### `clean` {#clean}
 
 Removes unreferenced objects from the local object store.
 
-An object is unreferenced when nothing points to it — no candidate or current symlink, and no other installed package depends on it. This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
+An object is unreferenced when nothing points to it — no candidate or current symlink, no other installed package depends on it, and no project's `ocx.lock` (registered in `$OCX_HOME/projects.json`) pins it. This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
 
 ::: danger
 Do not run `clean` concurrently with other OCX commands. A concurrent install may reference an object that `clean` is about to remove, causing the install to fail.
@@ -195,8 +322,54 @@ ocx clean [OPTIONS]
 
 **Options**
 
-- `--dry-run`: Show what would be removed without making any changes.
-- `-h`, `--help`: Print help information.
+| Name | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--dry-run` | — | Show what would be removed without making any changes. | false |
+| `--force` | — | Bypass the project registry and collect packages held only by other projects' `ocx.lock` files. Live install symlinks are still honoured. | false |
+| `--help` | `-h` | Print help information. | — |
+
+**JSON output schema** (`--format json`)
+
+`ocx clean --format json` emits an array of objects, one per candidate entry:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | `"object"` \| `"temp"` | Storage tier of the entry. |
+| `dry_run` | boolean | `true` when `--dry-run` was passed; `false` on a live run. |
+| `path` | string | Absolute path to the package or temp directory. |
+| `held_by` | array of strings | Absolute paths to `ocx.lock` files that pin this package. Populated only in dry-run mode, only for entries the registry retained (never collected). Empty array when nothing holds the entry. |
+
+```json
+[
+  {
+    "kind": "object",
+    "dry_run": true,
+    "path": "/home/alice/.ocx/packages/.../sha256/ab/cdef.../",
+    "held_by": ["/home/alice/dev/proj-a/ocx.lock"]
+  },
+  {
+    "kind": "object",
+    "dry_run": true,
+    "path": "/home/alice/.ocx/packages/.../sha256/12/3456.../",
+    "held_by": []
+  }
+]
+```
+
+**Plain output**
+
+Dry-run output is a table. When any entry has a non-empty `held_by`, the table gains a `Held By` column:
+
+```
+Type    Held By                     Path
+object  /home/alice/dev/proj-a/ocx.lock  /home/alice/.ocx/packages/.../
+object                              /home/alice/.ocx/packages/.../
+temp                                /home/alice/.ocx/temp/abc.../
+```
+
+A blank `Held By` cell means the entry is unreferenced and will be collected. A populated cell lists the project(s) holding it. The `Held By` column is omitted when no entries are held. `temp` entries are never governed by the registry and never show a `Held By` value.
+
+Non-dry-run output is always 2-column (`Type | Path`): held entries are never collected and therefore never appear.
 
 ### `deps` {#deps}
 
@@ -349,6 +522,13 @@ ocx exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 On Unix, `ocx exec` hands the current process image off to the target via `execvp(2)`, so the child inherits ocx's PID. Signals reach the target without an ocx forwarder, `pgrep <name>` shows the wrapped binary, and the process tree drops the ocx layer entirely — matching the same semantics shells use when chaining `exec "$@"` in entry-point scripts. On Windows, `ocx exec` spawns the target and waits for it, since `CreateProcess` has no exec equivalent; the propagated exit code is forwarded as ocx's own exit code.
 :::
 
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Command exited successfully (`exec` propagates the wrapped command's exit code). |
+| _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
+
 ### `find` {#find}
 
 Resolves one or more packages and prints their package root paths.
@@ -383,6 +563,45 @@ cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.2
 ```
 :::
 
+### `generate` {#generate}
+
+Parent command for project-tier generators. Each subcommand writes a single configuration file in the current directory based on the project's `ocx.toml`.
+
+**Usage**
+
+```shell
+ocx generate <SUBCOMMAND> [OPTIONS]
+```
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+The only subcommand today is [`direnv`](#generate-direnv); additional generators (e.g. `gitignore`, `editorconfig`) may land in future releases.
+
+#### `direnv` {#generate-direnv}
+
+Writes a `.envrc` file in the current directory that wires [`ocx shell direnv`](#shell-direnv) into [direnv](https://direnv.net/). After running `ocx generate direnv`, run `direnv allow` in the same directory to activate the hook. The generated `.envrc` watches `ocx.toml` and `ocx.lock`, so direnv re-runs the hook whenever either file changes.
+
+**Usage**
+
+```shell
+ocx generate direnv [OPTIONS]
+```
+
+**Options**
+
+- `--force`: Overwrite an existing `.envrc` in the current directory. Without this flag, an existing file causes the command to exit with a `ConfigError` (78) and leave the file untouched.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | `.envrc` written successfully. |
+| 74 | I/O error writing `.envrc`. |
+| 78 | `.envrc` already exists and `--force` was not given. |
+
 ### `index` {#index}
 
 #### `catalog` {#index-catalog}
@@ -391,7 +610,7 @@ cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.2
 ocx index catalog [OPTIONS] [REGISTRY...]
 ```
 
-Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/cmake`).
+Lists all packages available in the index. Uses the local index by default; pass [`--remote`](#arg-remote) to query the registry directly without writing through to the local snapshot. Repository names are always prefixed with their registry in the output (e.g., `ocx.sh/cmake`).
 
 **Arguments**
 
@@ -409,9 +628,15 @@ ocx index list [OPTIONS] <PACKAGE>...
 
 Lists available tags for one or more packages.
 
+Identifiers carrying a digest (`@sha256:...`) are rejected with a usage
+error — `index list` enumerates tags, and a digest narrows nothing. Use
+[`ocx package info <pkg>@<digest>`](#package-info) for a single artifact, or
+drop the `@digest` suffix. Tag-only identifiers (`<pkg>:<tag>`) still work
+as a tag filter on the returned list.
+
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to list tags for.
+- `<PACKAGE>`: Package identifiers to list tags for. Must not include a digest suffix.
 
 **Options**
 
@@ -419,14 +644,23 @@ Lists available tags for one or more packages.
 - `--variants`: Lists unique variant names found in the tags.
 - `-h`, `--help`: Print help information.
 
+::: tip
+`index list` is a pure-query command — under [`--remote`](#arg-remote) it
+contacts the registry without writing the local tag store. To refresh the
+persistent snapshot, run [`ocx index update`](#index-update) explicitly.
+:::
+
 #### `update` {#index-update}
 
 ```bash
 ocx index update <PACKAGE>...
 ```
 
-Writes tag→digest pointers to `$OCX_HOME/tags/` for the specified packages by querying the
-registry directly. No manifest or layer blobs are written to `$OCX_HOME/blobs/`.
+Explicitly refresh the local index from the remote registry. **The only
+command that writes tag pointers to `$OCX_HOME/tags/` outside of
+`ocx install` / `ocx package pull`** (the install/pull path commits via
+`LocalIndex::commit_tag`, gated to skip pinned-id pulls). No manifest or
+layer blobs are written to `$OCX_HOME/blobs/` by `index update`.
 
 When a tagged identifier is used (e.g., `cmake:3.28`), only that single tag's digest pointer is
 recorded — the remote tag listing is skipped entirely. This is ideal for lockfile workflows where
@@ -449,6 +683,28 @@ Prints build information: the ocx version, supported platforms, and the detected
 ```shell
 ocx info
 ```
+
+### `init` {#init}
+
+Creates a minimal `ocx.toml` in the current directory.
+
+The generated file contains a commented-out `registry` declaration and an empty `[tools]` table — a non-interactive skeleton following the "backend-first, minimal output" design. Once the file exists, use [`ocx add`](#add) to append tool bindings or edit it directly.
+
+The command is an idempotent failure: if `ocx.toml` already exists (or a symlink at that path exists), it exits with code 64 without overwriting the existing file.
+
+**Usage**
+
+```shell
+ocx init
+```
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | `ocx.toml` created successfully. |
+| 64 | `ocx.toml` already exists at the target path. |
+| 74 | I/O error writing the new file. |
 
 ### `install` {#install}
 
@@ -475,6 +731,125 @@ ocx install [OPTIONS] <PACKAGE>...
 ::: warning Windows: `PATHEXT` must include `.CMD`
 On Windows, `install` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. Generated entrypoint launchers are `.cmd` files and require `PATHEXT` to advertise that extension before bare-name lookup (e.g. `cmake`) can find them. Add `.CMD` to `PATHEXT` (typically via your shell profile) or invoke launchers with their full filename.
 :::
+
+### `lock` {#lock}
+
+Resolves every tool tag in the nearest `ocx.toml` to a pinned OCI manifest digest and writes the result to `ocx.lock` next to it. The command is fully transactional — either every tool resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
+
+The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) of `ocx.toml`. Downstream commands ([`ocx pull`](#pull), [`ocx exec`](#exec)) consult this hash to detect when the lock is stale relative to the source declaration. When the resolved content of every tool is unchanged between two `ocx lock` runs, the file's `generated_at` timestamp is preserved verbatim — the byte-stable output keeps version-control diffs minimal.
+
+After a successful write, the command checks whether the project's `.gitattributes` declares `ocx.lock merge=union` and emits a one-line stderr advisory when it does not, helping prevent merge conflicts on team projects.
+
+**Usage**
+
+```shell
+ocx lock [OPTIONS]
+```
+
+**Options**
+
+- `-g`, `--group <NAME>`: Restrict resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every `[tools]` and `[group.*]` entry is resolved.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | `ocx.lock` written (or preserved if content was unchanged). |
+| 64 | Missing `ocx.toml`, unknown `--group` name, or empty comma segment. |
+| 69 | Registry unreachable while resolving advisory tags. |
+| 74 | I/O error writing `ocx.lock`. |
+| 78 | Existing `ocx.lock` is malformed (parse error) or `ocx.toml` schema-invalid. |
+| 79 | Tag unresolvable during resolution (package not found in registry after retries). |
+| 80 | Authentication failure against the registry. |
+
+Concurrent invocations of `ocx lock` and `ocx update` are serialized via a hidden `.ocx-lock` sentinel in the project root. Readers (`ocx pull`, `git`, IDE tooling) never acquire this sentinel and are never blocked by a running `ocx lock`.
+
+### `pull` {#pull}
+
+Pre-warms the [object store][fs-objects] from the project `ocx.lock` without
+creating [install symlinks][fs-symlinks]. Distinct from
+[`package pull`](#package-pull): this is the **project-tier** entry point — every
+tool comes from the digest-pinned lock, never from the index — making it the
+recommended primitive for reproducible CI setups.
+
+`ocx pull` is read-only on `ocx.lock`. Re-resolution lives in `ocx update`;
+rewriting from the config lives in `ocx lock`.
+
+**Usage**
+
+```shell
+ocx pull [OPTIONS]
+```
+
+**Options**
+
+- `-g`, `--group <NAME>`: Restrict the pull to one or more named groups. Repeatable
+  and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects
+  the top-level `[tools]` table. When omitted, every entry from the lock is pulled.
+- `--dry-run`: Print which locked tools are already cached vs. would be fetched,
+  then exit without writing to the store.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (or empty group filter — nothing to pull). |
+| 64 | Missing `ocx.toml`, unknown `--group` name, or empty comma segment. |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
+| 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. |
+
+#### Dry-run preview {#pull-dry-run}
+
+`ocx pull --dry-run` resolves each locked tool through the local index
+(cache-first, like the real pull does) and reports whether it is already in the
+store. The store is never modified. Combine with [`--offline`](#arg-offline) to
+forbid the cache-miss network probe entirely.
+
+```shell
+$ ocx pull --dry-run
+Package                         Status       Path
+localhost:5000/cmake@sha256:... cached       /home/me/.ocx/packages/.../content
+localhost:5000/ripgrep@sha256:..would-fetch  -
+```
+
+The staleness gate fires ahead of the dry-run branch, so a stale lock still
+exits 65 — the preview is not a way to bypass `declaration_hash` validation.
+The output respects [`--format json`](#arg-format) and [`--quiet`](#arg-quiet).
+
+### `remove` {#remove}
+
+Removes a tool binding from `ocx.toml`, rewrites `ocx.lock`, and uninstalls the tool.
+
+The command accepts either a bare binding name (`cmake`), a name with a tag (`cmake:3.28`), or a fully-qualified identifier (`ocx.sh/cmake:3.28`). The binding key is always the repository basename — the tag and registry are used only to locate the correct entry and the installed package; the key match is against the TOML map key. Fails with exit code 79 if no matching binding is found.
+
+**Usage**
+
+```shell
+ocx remove <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Binding name or fully-qualified identifier to remove (e.g. `cmake`, `cmake:3.28`, or `ocx.sh/cmake:3.28`).
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--help` | `-h` | Print help information. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Binding removed, lock rewritten. |
+| 64 | No `ocx.toml` found in scope. |
+| 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
+| 75 | Another `ocx` process holds the project lock sentinel (`.ocx-lock`). Retry with backoff. |
+| 78 | `ocx.toml` schema invalid or TOML parse error. |
+| 79 | Binding not found in any group in `ocx.toml`. |
 
 ### `select` {#select}
 
@@ -520,9 +895,61 @@ The second gate is **at consumption time**, invoked whenever `ocx env` or `ocx e
 
 ### `shell` {#shell}
 
-Shell-specific export emission, completion script generation, and persistent shell profile management.
+#### `hook` {#shell-hook}
 
-`shell env` and `shell profile load` print export statements meant for `eval`. `shell completion` emits a completion script for sourcing into the running shell. `shell profile add`/`remove`/`list` manage `$OCX_HOME/profile.json` — the manifest read by `shell profile load` at shell startup.
+Stateful prompt-hook entry point for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, walks the actually-installed default-group tools, and emits shell export lines only when the resolved set has changed since the last invocation. The fingerprint that drives the fast path lives in the `_OCX_APPLIED` environment variable (a `v1:<sha256-hex>` token); when the fingerprint matches the previous invocation's value, the command exits 0 with no output.
+
+The command is invoked from the shell's prompt-hook mechanism — see [`ocx shell init`](#shell-init) for the per-shell wiring snippet. It never contacts the network and never installs missing tools; tools that are declared in the lock but not present in the object store produce a one-line stderr note ("# ocx: cmake not installed; run `ocx pull` to fetch") and are skipped.
+
+**Usage**
+
+```shell
+ocx shell hook [OPTIONS]
+```
+
+**Options**
+
+- `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (no project, fast path, or fresh export emitted). |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
+| 74 | I/O error during resolution. |
+| 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
+
+#### `direnv` {#shell-direnv}
+
+Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints shell-specific export lines for the resolved environment. Unlike [`shell hook`](#shell-hook), this command does not consult or update `_OCX_APPLIED` — it emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)).
+
+The command never contacts the network and never installs missing tools. Tools missing from the object store produce a one-line stderr note and are skipped; a stale lock produces a stderr warning but the stale digests are still used. When no project `ocx.toml` is found in scope, the command exits 0 with no output.
+
+**Usage**
+
+```shell
+ocx shell direnv [OPTIONS]
+```
+
+**Options**
+
+- `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (no project, or exports emitted). |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
+| 74 | I/O error during resolution. |
+| 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
+
+Shell-specific export emission, completion script generation, project-toolchain hooks, and persistent shell profile management.
+
+`shell env` and `shell profile load` print export statements meant for `eval`. `shell completion` emits a completion script for sourcing into the running shell. `shell hook` and `shell direnv` emit exports for the resolved project toolchain. `shell profile add`/`remove`/`list` manage `$OCX_HOME/profile.json` — the manifest read by `shell profile load` at shell startup.
 
 #### `env` {#shell-env}
 
@@ -597,89 +1024,31 @@ ocx shell completion --shell powershell | Out-String | Invoke-Expression
 
 :::
 
-#### `profile` {#shell-profile}
+#### `init` {#shell-init}
 
-Manage the shell profile — packages whose environment variables are loaded into every new shell session.
+Prints a shell-specific init snippet that wires [`ocx shell hook`](#shell-hook) into the shell's prompt cycle. The snippet is a pure code generator — it never reads the project, never touches disk, and never contacts the network. Source the output once from your shell rc (or pipe directly via `>>`), and every subsequent prompt re-evaluates the project toolchain.
 
-The profile is stored in `$OCX_HOME/profile.json`. The env file (sourced by your shell profile) calls `ocx --offline shell profile load` at startup to resolve all profiled packages and emit shell exports.
-
-##### `add` {#shell-profile-add}
-
-Add one or more packages to the shell profile.
+The exact mechanism differs per shell: Bash inserts into `PROMPT_COMMAND`, Zsh registers a `precmd` hook via `add-zsh-hook`, Fish defines a function `--on-event fish_prompt`, and Nushell writes a closure into `$env.config.hooks.pre_prompt` (saved to `$env.NU_VENDOR_AUTOLOAD_DIR/ocx.nu`). All four are idempotent — sourcing the snippet repeatedly does not duplicate the hook.
 
 **Usage**
 
 ```shell
-ocx shell profile add [OPTIONS] <PACKAGE>...
+ocx shell init <SHELL>
 ```
 
 **Arguments**
 
-- `<PACKAGE>`: Package identifiers to add to the profile.
+- `<SHELL>`: Target shell. Required. Accepts `bash`, `zsh`, `fish`, `nushell`. Other recognized shells (`ash`, `ksh`, `dash`, `elvish`, `powershell`, `batch`) print a `# ocx shell init does not yet ship a prompt-hook snippet for this shell` placeholder.
 
 **Options**
 
-- `--candidate`: Resolve via the `candidates/{tag}` symlink (default, pinned). Requires a tag in the identifier.
-- `--current`: Resolve via the `current` symlink (floating pointer set by `ocx select`).
-- `--content`: Resolve via the content-addressed object store path. The path changes whenever the package is reinstalled at a different version.
-- `-p`, `--platform <PLATFORM>`: Target platforms to consider when resolving packages. Comma-separated. Auto-detected by default.
+- `-h`, `--help`: Print help information.
 
-Packages that are not yet installed will be auto-installed. For `--current` mode, install with `--select` first to create the `current` symlink (`ocx install --select <pkg>`).
+**Exit codes**
 
-##### `remove` {#shell-profile-remove}
-
-Remove one or more packages from the shell profile.
-
-**Usage**
-
-```shell
-ocx shell profile remove <PACKAGE>...
-```
-
-**Arguments**
-
-- `<PACKAGE>`: Package identifiers to remove from the profile.
-
-This does not uninstall the package — it only removes it from the profile manifest.
-
-##### `list` {#shell-profile-list}
-
-List all packages in the shell profile with their status.
-
-**Usage**
-
-```shell
-ocx shell profile list
-```
-
-Shows each profiled package with its resolution mode (`candidate`, `current`, or `content`), status (`active` or `broken`), and resolved path.
-
-##### `load` {#shell-profile-load}
-
-Output shell export statements for all profiled packages.
-
-**Usage**
-
-```shell
-ocx shell profile load [OPTIONS]
-```
-
-**Options**
-
-- `-s`, `--shell <SHELL>`: Shell to generate exports for. Auto-detected if not specified.
-- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
-
-Reads `$OCX_HOME/profile.json` and emits shell-specific export lines for each package's declared environment variables. Broken entries are silently skipped. This command is intended to be called from the env file via `eval`:
-
-```shell
-eval "$(ocx --offline shell profile load)"
-```
-
-For each profile entry whose package declares a non-empty `entrypoints` array and whose `current` symlink exists under `$OCX_HOME/symlinks/{registry}/{repo}/`, an additional `PATH` export line is emitted that prepends `current/entrypoints/`. Entries without `entrypoints` produce only their declared environment variables; entries that have not yet been selected (no `current` symlink) are silently skipped, so profile load never points `$PATH` at a missing directory.
-
-::: warning Windows: `PATHEXT` must include `.CMD`
-On Windows, `shell profile load` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. The emitted exports do not modify `PATHEXT`; add `.CMD` to your shell profile alongside the env-file `eval` so generated launchers resolve by bare name.
-:::
+| Code | Meaning |
+|------|---------|
+| 0 | Snippet printed (or placeholder comment for unsupported shells — always 0; the command is pure code generation). |
 
 ### `uninstall` {#uninstall}
 
@@ -825,6 +1194,9 @@ ocx package pull [OPTIONS] <PACKAGE>...
 digest-derived directory that [`find`](#find) and [`exec`](#exec) resolve to.
 The package root contains `content/` and `entrypoints/` as siblings; consumers
 traverse one level in. Two pulls of the same digest are safe to run concurrently.
+
+For project-tier setups driven by `ocx.lock`, use [`pull`](#pull) instead — it consumes the
+lockfile directly and ignores the index.
 :::
 
 #### `push` {#package-push}
@@ -923,6 +1295,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
+[gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views
@@ -935,6 +1308,10 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [env-ocx-index]: ./environment.md#ocx-index
 [env-no-config]: ./environment.md#ocx-no-config
 [env-config]: ./environment.md#ocx-config
+[env-project]: ./environment.md#ocx-project
+[env-no-project]: ./environment.md#ocx-no-project
+[env-ocx-quiet]: ./environment.md#ocx-quiet
+[env-ocx-jobs]: ./environment.md#ocx-jobs
 
 <!-- reference -->
 [config-ref]: ./configuration.md

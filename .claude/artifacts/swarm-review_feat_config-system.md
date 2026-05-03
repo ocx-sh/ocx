@@ -20,7 +20,7 @@
 
 Spec-compliance review reports **Pass** against both plan artifacts:
 
-- `plan_configuration_system.md` — 5/5 items covered (precedence chain, `OCX_NO_CONFIG` pruning, `OCX_CONFIG_FILE=""` handling, `deny_unknown_fields` asymmetry, `resolved_default_registry` resolution).
+- `plan_configuration_system.md` — 5/5 items covered (precedence chain, `OCX_NO_CONFIG` pruning, `OCX_CONFIG=""` handling, `deny_unknown_fields` asymmetry, `resolved_default_registry` resolution).
 - `plan_config_review_cleanup.md` — 13/13 items covered (`ExitCode` enum shape, `classify_error` free function, `RegistryGlobals → RegistryDefaults` rename complete, re-exports present, `#[must_use]`, `futures::future::join_all`, error-message normalization applied across 11 files, help-text changes, `-c` short-flag decision, acceptance tests, unit tests, malformed-ambient-config fix).
 - `MirrorError::kind_exit_code` overlay is in place with documented `ExecutionFailed → Failure(1)` lock-in.
 
@@ -100,13 +100,13 @@ Clean results:
 |---|---|---|
 | **D-1** | Block | **Exit-code table entirely absent from public docs.** `ExitCode` enum is a new public scripting contract with 11 variants. Only incidental mention at `command-line.md:96` (`"exit code 79"`). Scripts consuming `$?` cannot discover the taxonomy without reading Rust source. Fix: add "Exit codes" table in `reference/command-line.md` listing all variants, numeric values, sysexits alignment, and a `case $?` example. |
 | **D-2** | High | `-c` short form undocumented for `--config`. `context_options.rs:15` uses `#[arg(short, long)]`. `command-line.md:86` heading doesn't mention `-c`. |
-| **D-3** | High | `CHANGELOG.md` has no unreleased entry for the new config system, `OCX_CONFIG_FILE`, `OCX_NO_CONFIG`, the `--config` wiring (was a no-op), the `ExitCode` public contract, or the error-message normalization pass. The `ocx_mirror` exit-code change is a **breaking change** (plan flagged this explicitly) and needs a changelog entry. |
+| **D-3** | High | `CHANGELOG.md` has no unreleased entry for the new config system, `OCX_CONFIG`, `OCX_NO_CONFIG`, the `--config` wiring (was a no-op), the `ExitCode` public contract, or the error-message normalization pass. The `ocx_mirror` exit-code change is a **breaking change** (plan flagged this explicitly) and needs a changelog entry. |
 | D-4 | High | Internal AI config drift: `.claude/rules/subsystem-mirror.md:79` documents stale integer exit codes (`0/2/3/4`); actual values are now `0/65/79/1/69`. Needs a follow-up commit (out of diff scope). |
 | W-1 | Warn | `reference/command-line.md:96` inline "exit code 79" stranded without cross-reference to the (not-yet-existing) table. |
 | W-2 | Warn | `reference/configuration.md:215-224` Error Reference table doesn't surface `Error::Io` as a distinct type (plan finding #2 not fully resolved). |
-| Suggest | S | `--config`/`OCX_CONFIG_FILE` interaction note: "wins" is slightly imprecise; "merges on top of" would be clearer. |
+| Suggest | S | `--config`/`OCX_CONFIG` interaction note: "wins" is slightly imprecise; "merges on top of" would be clearer. |
 
-Prior plan findings (confirmed resolved): macOS path in 4 pages, `OCX_HOME` mentions config discovery, `--config` flag section expanded, `OCX_NO_CONFIG` rationale documented, help text mentions `OCX_CONFIG_FILE` + `OCX_NO_CONFIG`.
+Prior plan findings (confirmed resolved): macOS path in 4 pages, `OCX_HOME` mentions config discovery, `--config` flag section expanded, `OCX_NO_CONFIG` rationale documented, help text mentions `OCX_CONFIG` + `OCX_NO_CONFIG`.
 
 ### Architecture
 
