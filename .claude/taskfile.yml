@@ -62,6 +62,7 @@ tasks:
         lychee --offline --no-progress --include-verbatim
         --exclude-path artifacts
         --exclude-path tests/.venv
+        --exclude-path worktrees
         --format json --output {{.REPORTS_DIR}}/lint-links.json
         ../CLAUDE.md ../AGENTS.md .
     sources: *claude-sources

@@ -701,6 +701,8 @@ class TestRuleCatalog:
                 continue  # historical/ephemeral — preserves old references
             if "tests" in md.parts:
                 continue  # test file itself doesn't reference rule files
+            if "worktrees" in md.parts or "node_modules" in md.parts:
+                continue  # nested worktrees + their node_modules are not OCX config
             targets.append(md)
 
         missing: list[tuple[str, str]] = []
