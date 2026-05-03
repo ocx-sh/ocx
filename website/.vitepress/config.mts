@@ -69,6 +69,10 @@ export default defineConfig({
           text: "In Depth",
           collapsed: true,
           items: [
+            { text: "Storage", link: "/docs/in-depth/storage" },
+            { text: "Versioning", link: "/docs/in-depth/versioning" },
+            { text: "Indices", link: "/docs/in-depth/indices" },
+            { text: "Dependencies", link: "/docs/in-depth/dependencies" },
             { text: "Configuration", link: "/docs/in-depth/configuration" },
             { text: "Environments", link: "/docs/in-depth/environments" },
             { text: "Entry Points", link: "/docs/in-depth/entry-points" },
