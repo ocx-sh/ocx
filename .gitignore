@@ -36,6 +36,11 @@ CLAUDE.local.md
 .claude/state/
 
 # =============================================================================
+# Claude Agent Worktrees — ephemeral working copies spawned by agents.
+# =============================================================================
+.claude/worktrees/
+
+# =============================================================================
 # Claude Lint Reports — build artifacts from `task claude:lint:links`, etc.
 # =============================================================================
 .claude/reports/
