@@ -8,7 +8,7 @@ use tracing::{Instrument, info_span};
 
 use crate::{
     oci,
-    oci::index::SelectResult,
+    oci::index::{IndexOperation, SelectResult},
     package::install_info::InstallInfo,
     package_manager::{self, composer, error::PackageError, error::PackageErrorKind},
 };
@@ -55,7 +55,7 @@ impl PackageManager {
         };
         let (top_digest, top_manifest) = match self
             .index()
-            .fetch_manifest(&top_id)
+            .fetch_manifest(&top_id, IndexOperation::Resolve)
             .await
             .map_err(PackageErrorKind::Internal)?
         {
@@ -69,7 +69,7 @@ impl PackageManager {
                 // the blob is missing rather than the tag is unknown.
                 if let Some(digest) = self
                     .index()
-                    .fetch_manifest_digest(&top_id)
+                    .fetch_manifest_digest(&top_id, IndexOperation::Resolve)
                     .await
                     .map_err(PackageErrorKind::Internal)?
                 {
@@ -101,7 +101,7 @@ impl PackageManager {
             // fetch the selected child to append it to the chain and return
             // its manifest as `final_manifest`.
             oci::Manifest::ImageIndex(_) => {
-                let pinned = match self.index().select(&top_id, platforms).await {
+                let pinned = match self.index().select(&top_id, platforms, IndexOperation::Resolve).await {
                     Ok(SelectResult::Found(id)) => {
                         oci::PinnedIdentifier::try_from(id).map_err(|_| PackageErrorKind::DigestMissing)?
                     }
@@ -113,7 +113,7 @@ impl PackageManager {
                 let child_id = top_id.clone_with_digest(pinned.digest());
                 let (child_digest, child_manifest) = match self
                     .index()
-                    .fetch_manifest(&child_id)
+                    .fetch_manifest(&child_id, IndexOperation::Resolve)
                     .await
                     .map_err(PackageErrorKind::Internal)?
                 {

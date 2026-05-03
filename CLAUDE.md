@@ -6,6 +6,10 @@ This file guide Claude Code (claude.ai/code) when work in this repo.
 
 OCX = Rust package manager. Use OCI registries (Docker Hub, GHCR, private) as storage for pre-built binaries. "Backend tool" for other tools (GitHub Actions, Bazel, Python scripts), not end users. Binary named `ocx`.
 
+## Current State
+
+The project is in early stages. Core library and CLI implemented with basic functionality. We do not enforce a stable API, CLI or config yet. For refactors we often expect the user to just delete all and start over. The same does not hold true for published packages. The metadata and OCI manifest should be backward compatible.
+
 ## Project Identity
 
 Full product vision, competitive positioning ("why not Homebrew / Nix / ORAS / mise"), target users, differentiators, use cases → [`product-context.md`](./.claude/rules/product-context.md). Consult when reason about project direction, scope trade-offs, ADR motivation, research framing, or anywhere product context shape technical decision. Canonical OCX product context — keep current (update protocol at bottom of same file).
@@ -88,10 +92,12 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 | `OCX_HOME` | Root data directory | `~/.ocx` |
 | `OCX_DEFAULT_REGISTRY` | Default registry for short identifiers | `ocx.sh` |
 | `OCX_INSECURE_REGISTRIES` | Comma-separated HTTP-only registries | (empty) |
-| `OCX_OFFLINE` | Offline mode flag | false |
-| `OCX_REMOTE` | Use remote index directly | false |
+| `OCX_OFFLINE` | Disable all network access; tag→digest must resolve locally or be pinned | false |
+| `OCX_REMOTE` | Route mutable lookups to remote registry; pure queries never write local index | false |
 | `OCX_CONFIG` | Path to an extra config file layered on top of the discovered tier chain | (unset) |
 | `OCX_NO_CONFIG` | Skip the discovered config chain (system/user/home); explicit `--config` paths still load | false |
+| `OCX_PROJECT` | Path to an explicit `ocx.toml` (overrides CWD walk) | (unset) |
+| `OCX_NO_PROJECT` | Skip CWD walk + `OCX_PROJECT`; explicit `--project` paths still load | false |
 | `OCX_INDEX` | Override local index directory path | (unset → `$OCX_HOME/index/`) |
 | `OCX_BINARY_PIN` | Absolute path to the running `ocx`; set on every subprocess spawn so a child ocx (e.g. via a generated launcher) pins to the same binary | (unset → PATH lookup) |
 | `OCX_NO_UPDATE_CHECK` | Disable update check notification | false |

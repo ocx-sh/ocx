@@ -46,6 +46,7 @@ impl Install {
                 platforms_or_default(self.platforms.as_slice()),
                 true,
                 self.select,
+                context.concurrency(),
             )
             .await?;
 

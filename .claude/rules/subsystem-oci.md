@@ -44,19 +44,36 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 ```rust
 #[non_exhaustive]
 pub enum ChainMode {
-    Default,  // Local index only for queries. Tag-addressed fetch_manifest still walks chain on miss (write-through). Normal online operation.
-    Remote,   // Mutable lookups (tag list, catalog) hit source directly with NO write-through. Immutable (digest) lookups still cache. Used for `--remote`.
+    Default,  // Local index first for queries. `Op::Resolve` walks chain on miss; `Op::Query` returns None. Normal online operation.
+    Remote,   // Mutable lookups (tag list, catalog, tag-addressed manifest) hit source directly. Digest-addressed lookups still consult local index. Used for `--remote`.
     Offline,  // Local index only; source never consulted; miss returns None. Used for `--offline`.
 }
 ```
 
-| Mode | Tag list / catalog (pure query) | Tag-addressed `fetch_manifest` | Digest-addressed `fetch_manifest` | Local index mutated by query? |
-|------|----------------------------------|----------------------------------|------------------------------------|-------------------------------|
-| `Default` | Local only | Local first, miss → walk chain (write-through) | Local first, miss → fetch (write-through) | No (queries); install/pull do |
-| `Remote` | **Source only, no write-through** | Source only (write-through still happens — split planned, see `feedback_index_routing_semantics.md` M3) | Local first (immutable, safe to cache) | No for tag list/catalog; tag-addressed `fetch_manifest` still writes (pre-M3) |
-| `Offline` | Local only | Local only | Local only | No |
+### IndexOperation
 
-**Design note — write paths.** Local index mutation is owned by two explicit entry points: `LocalIndex::refresh_tags` (called from `ocx index update`) and `LocalIndex::write_chain_and_commit_tag` (called from install/pull during chain walk). Pure query paths (`list_repositories`, `list_tags`) must never trigger either. Tag-addressed `fetch_manifest` currently piggybacks on the write path because the trait conflates query and update intent — this is the M3 follow-up tracked in `feedback_index_routing_semantics.md`.
+`IndexImpl::fetch_manifest{,_digest}` (and the `Index` wrapper's `select` / `fetch_candidates`) take an `IndexOperation` argument that declares caller intent:
+
+```rust
+#[non_exhaustive]
+pub enum IndexOperation {
+    Query,    // pure read; ChainedIndex returns None on miss, never walks the chain
+    Resolve,  // install / pull; ChainedIndex walks the chain + persists on miss
+}
+```
+
+The enum exists because the trait used to conflate query and update — a cache miss in `ChainedIndex::fetch_manifest` would silently walk the source chain and persist the result, leaking writes through query paths. Making intent explicit at every call site rules out that class of bug. See `adr_index_routing_semantics.md`.
+
+### Routing matrix
+
+| Operation | `--remote` | `--offline` | `--offline --remote` | Default |
+|-----------|-----------|-------------|----------------------|---------|
+| `list_repositories`, `list_tags`, `fetch_manifest` tag+`Op::Query` | source only, no write | local only | local only (info log) | local only |
+| `fetch_manifest` tag+`Op::Resolve` | source only, write blobs+tag | local only (errors if missing) | local only (errors) | local first, miss → fetch+write |
+| `fetch_manifest` digest, any op | local first | local only | local only | local first |
+| `fetch_manifest` digest+`Op::Resolve` (pinned-id pull) | source on miss, write blobs only, **no tag** | local only | local only | local first, miss → fetch blobs only |
+
+**Design note — write paths.** Local index mutation is owned by exactly three entry points: `LocalIndex::refresh_tags` (called from `ocx index update`), `LocalIndex::persist_manifest_chain` (content-addressed blob writes from install/pull), and `LocalIndex::commit_tag` (`pub(super)`, the only tag-pointer writer outside `refresh_tags`; called only from `ChainedIndex::fetch_and_persist_chain`). Pure query paths must never reach any of them. The structural test `chain_refs_tests::op_query_never_walks_source_in_any_mode` enforces this for `Op::Query`. Pinned-id pulls (`tag+digest`) skip the `commit_tag` step because `ocx.lock` is canonical.
 
 ### Identifier
 
@@ -94,20 +111,21 @@ pub enum SelectResult {
 ```rust
 async fn list_repositories(&self, registry: &str) -> Result<Vec<String>>;
 async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>>;
-async fn fetch_manifest(&self, id: &Identifier) -> Result<Option<(Digest, Manifest)>>;
-async fn fetch_manifest_digest(&self, id: &Identifier) -> Result<Option<Digest>>;
+async fn fetch_manifest(&self, id: &Identifier, op: IndexOperation) -> Result<Option<(Digest, Manifest)>>;
+async fn fetch_manifest_digest(&self, id: &Identifier, op: IndexOperation) -> Result<Option<Digest>>;
 ```
+
+`list_tags` / `list_repositories` are query-only by definition and do **not** take `op`. `fetch_manifest{,_digest}` callers must pass `Op::Query` for pure reads or `Op::Resolve` for install/pull paths.
 
 **Return convention**: `Result<Option<T>>` — `None` = not found (not error), `Err` = network/IO failure.
 
 ### LocalIndex
 
-File-backed snapshot of registry metadata. High-level public entry points:
+File-backed snapshot of registry metadata. Three public entry points, each narrowly scoped:
 
-- `refresh_tags(source, identifier)` — fetch tags from `source`, persist to `$OCX_HOME/tags/`; used by `ChainedIndex` for tag/catalog ops
-- `write_chain_and_commit_tag(source, identifier)` — orchestrate full chain walk (image index → manifest), persist all blobs to `$OCX_HOME/blobs/`, then commit tag pointer; called by `ChainedIndex` after source fetch
-
-Internal helpers `persist_manifest_chain` and `commit_tag` private — callers always go through these two high-level methods.
+- `refresh_tags(source, identifier)` — explicit refresh path; only `ocx index update` calls it.
+- `persist_manifest_chain(source, identifier)` — content-addressed write of the manifest chain (image index + per-platform manifests). Returns the head digest. Used by both tag- and digest-addressed pulls.
+- `commit_tag(identifier, digest)` — `pub(super)`. The single tag-pointer writer outside `refresh_tags`. Visibility narrowed so `ChainedIndex::fetch_and_persist_chain` is the sole caller; pinned-id pulls (`tag+digest`) skip it because `ocx.lock` is canonical.
 
 ### LocalIndex vs RemoteIndex
 

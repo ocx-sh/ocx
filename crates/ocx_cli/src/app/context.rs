@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::path::{Path, PathBuf};
+
 use ocx_lib::{
     ConfigInputs, ConfigLoader,
     cli::{ColorModeConfig, Printer},
@@ -18,6 +20,7 @@ use super::ContextOptions;
 #[derive(Clone)]
 pub struct Context {
     offline: bool,
+    project_path: Option<PathBuf>,
     remote_client: Option<oci::Client>,
     remote_index: Option<oci::index::RemoteIndex>,
     local_index: oci::index::LocalIndex,
@@ -27,6 +30,7 @@ pub struct Context {
     manager: package_manager::PackageManager,
     default_registry: String,
     config_view: env::OcxConfigView,
+    concurrency: package_manager::Concurrency,
 }
 
 impl Context {
@@ -43,13 +47,32 @@ impl Context {
 
         log::debug!("Creating context with options: {:?}", options);
 
+        if options.offline && options.remote {
+            // `--offline --remote` = pinned-only mode. Both flags accepted
+            // together because the routing matrix collapses cleanly:
+            // `--offline` overrides `--remote` to no-source-contact, and
+            // any tag-addressed resolution must succeed locally or error.
+            // Documented in user-guide §Routing and command-line.md.
+            log::info!(
+                "--offline --remote: pinned-only mode — tag and catalog lookups will not contact a source. \
+                 Tag-addressed resolution attempts must be satisfied locally or by digest-pinned identifiers."
+            );
+        }
+
+        // Capture the explicit project path before consuming `options` into other
+        // init calls. `lock` and similar commands need it for the precedence
+        // chain: explicit flag > env > CWD walk > home fallback.
+        let project_path = options.project.clone();
+
+        let cwd = env::current_dir()?;
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: options.config.as_deref(),
-            cwd: None,
+            explicit_project_path: options.project.as_deref(),
+            cwd: Some(&cwd),
         })
         .await?;
 
-        let api = api::Api::new(options.format, Printer::new(color_config.stdout));
+        let api = api::Api::new(options.format, Printer::new(color_config.stdout), options.quiet);
 
         let (remote_client, remote_index) = if options.offline {
             (None, None)
@@ -118,11 +141,13 @@ impl Context {
             std::path::PathBuf::from("ocx")
         });
         let config_view = options.as_view(self_exe);
+        let concurrency = resolve_concurrency(options.jobs);
 
         Ok(Context {
             remote_client,
             remote_index,
             offline: options.offline,
+            project_path,
             file_structure,
             api,
             local_index,
@@ -130,11 +155,20 @@ impl Context {
             manager,
             default_registry,
             config_view,
+            concurrency,
         })
     }
 
     pub fn is_offline(&self) -> bool {
         self.offline
+    }
+
+    /// Returns the explicit `--project` / `OCX_PROJECT` override path, if
+    /// one was supplied. Commands that need project-level resolution (e.g. `lock`)
+    /// should pass this to `ProjectConfig::resolve` as the explicit override so
+    /// the flag is not silently discarded.
+    pub fn project_path(&self) -> Option<&Path> {
+        self.project_path.as_deref()
     }
 
     pub fn remote_client(&self) -> ocx_lib::Result<&oci::Client> {
@@ -174,5 +208,37 @@ impl Context {
     /// at init time — beats stale parent-shell `OCX_*` exports.
     pub fn config_view(&self) -> &env::OcxConfigView {
         &self.config_view
+    }
+
+    /// Concurrency cap for parallel pulls, derived from `--jobs` (CLI),
+    /// `OCX_JOBS` (env), or unbounded by default.
+    pub fn concurrency(&self) -> package_manager::Concurrency {
+        self.concurrency
+    }
+}
+
+/// Resolves `--jobs` / `OCX_JOBS` into a `Concurrency` value.
+///
+/// Precedence: CLI flag > env var > unbounded. `0` (from either source)
+/// resolves to logical-core count (GNU Parallel convention). Invalid env
+/// values are logged and ignored — the env path is best-effort.
+fn resolve_concurrency(jobs: Option<usize>) -> package_manager::Concurrency {
+    use std::num::NonZeroUsize;
+
+    let raw = match jobs {
+        Some(n) => Some(n),
+        None => env::var("OCX_JOBS").and_then(|v| match v.parse::<usize>() {
+            Ok(n) => Some(n),
+            Err(e) => {
+                log::warn!("ignoring invalid OCX_JOBS value {v:?}: {e}");
+                None
+            }
+        }),
+    };
+
+    match raw {
+        None => package_manager::Concurrency::Unbounded,
+        Some(0) => package_manager::Concurrency::cores(),
+        Some(n) => package_manager::Concurrency::Limit(NonZeroUsize::new(n).expect("n > 0 covered above")),
     }
 }

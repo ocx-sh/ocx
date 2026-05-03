@@ -52,6 +52,13 @@ impl Identifier {
     /// contain an explicit registry (e.g. `"cmake:3.28"` or `"myorg/tool"`).
     /// Returns [`IdentifierErrorKind::DirectoryTraversal`] if any path segment
     /// is `.` or `..`.
+    ///
+    /// This parser does **not** inject `"latest"` when the input has no tag
+    /// — bare-repo inputs like `"ocx.sh/cmake"` parse to `tag = None`. The
+    /// project-config layer ([`crate::project::ProjectConfig::from_toml_str`])
+    /// applies its own `:latest` default at the schema boundary so an
+    /// `ocx.toml` entry without a tag resolves predictably; that default
+    /// does not apply to other [`Identifier::parse`] callers.
     pub fn parse(input: &str) -> Result<Self, IdentifierError> {
         validate_segments(input)?;
         if !has_explicit_registry(input) {

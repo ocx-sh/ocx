@@ -34,6 +34,16 @@ for disabling an option.
 The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by design — they have no `OCX_*` counterpart and never propagate from a parent ocx into a subprocess (such as a generated [entrypoint launcher][entrypoints-ref]). Carrying them through env would leak ocx's own logging, JSON output, or ANSI color choices into the launcher's child stream. Only resolution-affecting policy (binary path, offline, remote, config file, index) propagates.
 :::
 
+### `_OCX_APPLIED` {#ocx-applied}
+
+Internal fingerprint set by [`ocx shell hook`][cmd-shell-hook] on each successful prompt-cycle invocation and read by the next one. The value is a `v1:<sha256-hex>` token — `v1:` is a forward-compatibility prefix so future hook revisions can rotate the fingerprint format without confusing older shells, and the hex segment hashes the resolved tool set (digests, env entries, lock metadata) `shell hook` computed on its previous run.
+
+When the next `shell hook` invocation recomputes the fingerprint and finds it identical to `$_OCX_APPLIED`, it exits zero with no output — the prompt stays cheap because no exports are re-emitted. When the fingerprint differs (lock changed, group selection changed, tool set drifted on disk), the command prints fresh export lines and updates the variable.
+
+This variable is machine-managed: never set it by hand. The only legitimate user touch is the **escape hatch** — `unset _OCX_APPLIED` forces a full re-export on the next prompt, useful when debugging hook output or after manually editing `ocx.lock`.
+
+The leading underscore signals that the variable is a private contract between `ocx shell hook` invocations, following the convention used by other tool-managed shell variables (e.g. direnv's `DIRENV_*` family).
+
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 
 The authentication type for the registry.
@@ -120,6 +130,23 @@ rather than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub A
 The command line option [`--index`][arg-index] takes precedence over this variable.
 This variable has no effect when [`--remote`][arg-remote] or [`OCX_REMOTE`][env-ocx-remote] is set.
 
+### `OCX_JOBS` {#ocx-jobs}
+
+Caps the number of root packages pulled in parallel — applies to every command
+that fans out through the package manager (`install`, `pull`, `package pull`,
+`exec`, `env`).
+
+```sh
+export OCX_JOBS=4
+```
+
+`0` means "use all logical cores" (matches [GNU `parallel -j 0`][gnu-parallel-j0])
+and diverges from Cargo's `--jobs 0`, which errors. Negative or non-numeric
+values are ignored with a warning. Unset = unbounded (legacy default).
+
+The command line option [`--jobs`][arg-jobs] takes precedence over this
+variable.
+
 ### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
 
 A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
@@ -169,6 +196,20 @@ The update check is also automatically suppressed when:
 - stderr is not a terminal (e.g., piped or redirected)
 - the command is `version`, `info`, or `shell completion`
 
+### `OCX_NO_PROJECT` {#ocx-no-project}
+
+When set to a [truthy value](#truthy-values), OCX skips project-tier discovery — the CWD walk for `ocx.toml` is pruned and [`OCX_PROJECT`](#ocx-project-file) is ignored. Explicit paths supplied via [`--project`][arg-project] still load, because they represent deliberate intent rather than ambient environment.
+
+Use this for CI reproducibility when you want to run `ocx` inside a repository without the project-tier toolchain influencing the invocation.
+
+Combined with an explicit path, this mirrors the hermetic pattern used for [`OCX_NO_CONFIG`](#ocx-no-config):
+
+```sh
+OCX_NO_PROJECT=1 ocx --project /ci/ocx.toml exec -- cmake --version
+```
+
+`OCX_NO_PROJECT` is available only as an environment variable. A `--no-project` CLI flag would duplicate surface without solving a new problem — the hermetic-CI use case is best expressed via env vars, matching the [`OCX_NO_CONFIG`](#ocx-no-config) pattern.
+
 ### `OCX_NO_MODIFY_PATH` {#ocx-no-modify-path}
 
 When set to a [truthy value](#truthy-values), the install scripts (`install.sh` and `install.ps1`) will skip modifying shell profile files.
@@ -185,18 +226,43 @@ See the [FAQ][faq-codesign] for details on why this is necessary and how it work
 
 This variable has no effect on non-macOS systems.
 
+### `OCX_QUIET` {#ocx-quiet}
+
+When set to a [truthy value](#truthy-values), OCX suppresses the structured
+stdout report that every command emits — tables in plain mode, the JSON
+document in `--format json` mode. Errors, warnings, and progress on stderr are
+unaffected.
+
+The command line option [`--quiet`][arg-quiet] takes precedence over this
+variable.
+
 ### `OCX_OFFLINE` {#ocx-offline}
 
-When set to a [truthy value](#truthy-values), OCX will run in offline mode, which will not attempt to fetch any remote information.
-The command line option [`--offline`][arg-offline] takes precedence over this variable.
+When set to a [truthy value](#truthy-values), OCX disables all network access. Tag→digest resolution must be satisfied by the local index or by a digest-pinned identifier; unpinned tags missing from the local index error immediately. Useful for hermetic CI runs and air-gapped environments. The command line option [`--offline`][arg-offline] takes precedence over this variable.
+
+Combined with [`OCX_REMOTE`](#ocx-remote), enables [pinned-only mode][cmd-pinned-only-mode]: no source contact, no local writes, and any tag-addressed resolution that cannot be satisfied locally errors instead of falling back.
+
+### `OCX_PROJECT` {#ocx-project-file}
+
+Path to a project-tier `ocx.toml` to load. Bypasses the CWD walk — the named file is used directly. Not part of the ambient configuration chain: the project tier is a separate API surface from the ambient config tier loaded via [`OCX_CONFIG`](#ocx-config-file).
+
+Equivalent to the `--project` CLI flag, but injectable via environment — the intended use is CI and Docker setups where the env is controlled but the command line is not.
+
+```sh
+export OCX_PROJECT=/workspace/ocx.toml
+```
+
+Precedence: `--project` > `OCX_PROJECT` > CWD walk. [`OCX_NO_PROJECT=1`](#ocx-no-project) prunes both the CWD walk and this env var, but does not block an explicit `--project` flag. Missing files produce a clear error with the path.
+
+**Escape hatch**: setting this to the empty string (`OCX_PROJECT=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
+
+**Symlink policy**: explicit paths (this variable and `--project`) follow symlinks. The CWD walk rejects symlinked `ocx.toml` candidates — use `--project` or `OCX_PROJECT` to opt in.
 
 ### `OCX_REMOTE` {#ocx-remote}
 
-When set to a [truthy value](#truthy-values), tag and catalog lookups query the registry directly,
-bypassing the local tag store. Digest-addressed blob reads still use the local cache with
-write-through to `$OCX_HOME/blobs/`. Only `$OCX_HOME/tags/` is not updated.
+When set to a [truthy value](#truthy-values), routes mutable lookups (tag list, catalog, tag→manifest resolution) to the remote registry instead of the local index. Pure-query commands (`ocx index list`, `ocx index catalog`, `ocx package info`) do **not** persist results to the local index — to refresh the snapshot, run [`ocx index update`][cmd-index-update] explicitly. Digest-addressed reads still consult the local index first (immutable content is safe to cache).
 
-Equivalent to passing the [`--remote`][arg-remote] flag on every invocation.
+Equivalent to passing the [`--remote`][arg-remote] flag on every invocation. See the user guide for the [routing model][indices-routing] and the [pinned-only mode][cmd-pinned-only-mode] (combined with `OCX_OFFLINE`).
 
 ## External {#external}
 
@@ -267,16 +333,24 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [devcontainer-features]: https://containers.dev/implementors/features/
 [xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/
 [apple-dirs-env]: https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html
+[gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
 
 <!-- commands -->
 [cmd-ref]: command-line.md
 [cmd-ci-export]: command-line.md#ci-export
+[cmd-shell-hook]: command-line.md#shell-hook
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-index]: command-line.md#arg-index
+[arg-jobs]: command-line.md#arg-jobs
 [arg-log-level]: command-line.md#arg-log-level
 [arg-offline]: command-line.md#arg-offline
+[arg-project]: command-line.md#arg-project
+[arg-quiet]: command-line.md#arg-quiet
 [arg-remote]: command-line.md#arg-remote
+[cmd-index-update]: command-line.md#index-update
+[cmd-pinned-only-mode]: command-line.md#pinned-only-mode
+[indices-routing]: ../user-guide.md#indices-routing
 
 <!-- in-depth -->
 [exec-modes-ref]: ../in-depth/environments.md#visibility-views

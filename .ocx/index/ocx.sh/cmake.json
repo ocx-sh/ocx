@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "repository": "ocx.sh/cmake",
+  "tags": {
+    "latest": "sha256:26ca84e91bf258eb975490984bbbac2e6dfee69650ff3bdc5a74f06b41b21ff3",
+    "3.31": "sha256:0529655744ddade4b58f86b6e6f6e2c9d6484f677c569120babf917e47976af0"
+  }
+}

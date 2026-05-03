@@ -18,6 +18,15 @@ mod index_impl;
 mod local_index;
 mod remote_index;
 
+/// Re-export the private `IndexImpl` trait for sibling-module tests.
+///
+/// Sibling modules (e.g. `project::resolve` unit tests) that need to
+/// construct an `Index` from a hand-rolled mock must implement
+/// `IndexImpl`. Production code reaches `Index` only via
+/// [`Index::from_chained`] / [`Index::from_remote`].
+#[cfg(test)]
+pub(crate) use index_impl::IndexImpl;
+
 /// Routing policy for a [`ChainedIndex`](chained_index::ChainedIndex).
 ///
 /// Threaded through `Index::from_chained` and on into the chained index so
@@ -27,16 +36,49 @@ mod remote_index;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChainMode {
-    /// Cache-first for all lookups. Write-through on cache-miss source
-    /// fetches. Used for default (no flag) online operation.
+    /// Local-index first for all lookups. Tag-addressed `fetch_manifest`
+    /// with `IndexOperation::Resolve` walks the chain and persists on
+    /// miss; pure `Query` calls return `None` without contacting the
+    /// chain. Default online operation.
     Default,
-    /// Mutable lookups (tags, catalog) bypass cache and go straight to
-    /// source. Digest-addressed (immutable) lookups still use cache +
-    /// write-through. Used for `--remote`.
+    /// Mutable lookups (tag list, catalog, tag-addressed `fetch_manifest`)
+    /// bypass the local index and go straight to the source. Digest-
+    /// addressed (immutable) lookups still consult the local index first.
+    /// Used for `--remote`.
     Remote,
-    /// Cache only. Source list is empty or never consulted; cache misses
-    /// return `None` from `fetch_manifest`. Used for `--offline`.
+    /// Local index only. Source list is empty or never consulted; misses
+    /// return `None`. Used for `--offline`.
     Offline,
+}
+
+/// Caller intent for a manifest lookup on `IndexImpl`.
+///
+/// The trait conflated query and update before this enum existed: pure
+/// queries (e.g. `index list --platforms`) and install/pull resolution
+/// shared the same surface, and a cache miss in `ChainedIndex::fetch_manifest`
+/// would silently walk the source chain and persist the result to the local
+/// index even from query callers. Making intent explicit at every call site
+/// prevents that leak. See `adr_index_routing_semantics.md`.
+///
+/// Naming: `Resolve` (not `Persist`) describes caller intent — "resolve
+/// this identifier for use" — rather than the side effect (`Persist`),
+/// because not every `Resolve` actually persists (digest-only identifiers
+/// skip the tag-pointer commit; Remote-mode hits the source without
+/// touching the local index for tag listings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IndexOperation {
+    /// Pure read. `ChainedIndex` returns the local-index result and never
+    /// walks the source chain on miss. Used by `index list`,
+    /// `index catalog`, `package info`, and any other path that reports
+    /// existing data without producing it.
+    Query,
+    /// Read with write-through on miss. Install/pull paths walk the source
+    /// chain on cache miss and persist the manifest blobs (and, for tag-
+    /// addressed identifiers without a digest, the tag pointer). The only
+    /// callers are `package_manager::tasks::resolve` (install/pull) and
+    /// project lock resolution.
+    Resolve,
 }
 
 /// The result of a platform-aware package selection.
@@ -72,8 +114,13 @@ impl Index {
     /// Used exclusively in unit tests to wrap `TestIndex` fakes without
     /// exposing `IndexImpl` as a public trait.  Not available in production
     /// builds.
+    ///
+    /// Visibility is `pub(crate)` under `#[cfg(test)]` so sibling modules
+    /// (e.g. `project::resolve`) can inject their own mock index
+    /// implementations without going through the heavier `from_chained`
+    /// construction path.
     #[cfg(test)]
-    pub(super) fn from_impl(inner: impl index_impl::IndexImpl + 'static) -> Self {
+    pub(crate) fn from_impl(inner: impl index_impl::IndexImpl + 'static) -> Self {
         Self { inner: Box::new(inner) }
     }
 
@@ -113,24 +160,37 @@ impl Index {
 
     /// Fetch the manifest for the given identifier.
     ///
-    /// Returns `None` when the manifest is not available.
-    pub async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+    /// `op` declares whether the call is a pure query (no chain walk on
+    /// miss, no local-index writes) or a resolve (walk + persist on miss
+    /// for install/pull paths). Returns `None` when the manifest is not
+    /// available under the routing implied by `op` and the impl's mode.
+    pub async fn fetch_manifest(
+        &self,
+        identifier: &oci::Identifier,
+        op: IndexOperation,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         log::trace!("Fetching candidates for identifier '{}'.", identifier);
-        self.inner.fetch_manifest(identifier).await
+        self.inner.fetch_manifest(identifier, op).await
     }
 
     /// Find the manifest digest for the given identifier and tag.
     ///
+    /// `op` carries the same contract as on [`Self::fetch_manifest`].
     /// Returns `None` when the identifier cannot be resolved.
-    pub async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
-        self.inner.fetch_manifest_digest(identifier).await
+    pub async fn fetch_manifest_digest(
+        &self,
+        identifier: &oci::Identifier,
+        op: IndexOperation,
+    ) -> Result<Option<oci::Digest>> {
+        self.inner.fetch_manifest_digest(identifier, op).await
     }
 
     pub async fn fetch_candidates(
         &self,
         identifier: &oci::Identifier,
+        op: IndexOperation,
     ) -> Result<Option<Vec<(oci::Identifier, oci::Platform)>>> {
-        let Some((digest, manifest)) = self.fetch_manifest(identifier).await? else {
+        let Some((digest, manifest)) = self.fetch_manifest(identifier, op).await? else {
             return Ok(None);
         };
         log::trace!(
@@ -164,10 +224,15 @@ impl Index {
         }
     }
 
-    pub async fn select(&self, identifier: &oci::Identifier, platforms: Vec<oci::Platform>) -> Result<SelectResult> {
+    pub async fn select(
+        &self,
+        identifier: &oci::Identifier,
+        platforms: Vec<oci::Platform>,
+        op: IndexOperation,
+    ) -> Result<SelectResult> {
         log::debug!("Selecting package '{}' for platforms {:?}.", identifier, platforms);
 
-        let Some(candidates) = self.fetch_candidates(identifier).await? else {
+        let Some(candidates) = self.fetch_candidates(identifier, op).await? else {
             log::debug!("No candidates found for '{}'.", identifier);
             return Ok(SelectResult::NotFound);
         };

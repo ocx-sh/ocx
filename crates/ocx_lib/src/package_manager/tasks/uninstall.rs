@@ -8,7 +8,6 @@ use tracing::info_span;
 use crate::{
     log, oci,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
-    profile::ProfileSnapshot,
 };
 
 use super::garbage_collection::GarbageCollector;
@@ -44,7 +43,6 @@ impl PackageManager {
         package: &oci::Identifier,
         deselect: bool,
         purge: bool,
-        profile: &ProfileSnapshot,
     ) -> Result<Option<UninstallResult>, PackageErrorKind> {
         let result = uninstall_symlinks(self.file_structure(), package, deselect).await?;
         let Some((candidate, pkg_root)) = result else {
@@ -56,7 +54,7 @@ impl PackageManager {
         // post-flatten layout points at the package root directly (no further
         // `.parent()` needed).
         if purge && let Some(ref obj_dir) = pkg_root {
-            let gc = GarbageCollector::build(self.file_structure(), profile)
+            let gc = GarbageCollector::build(self.file_structure(), &[])
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             let removed = gc
@@ -84,8 +82,6 @@ impl PackageManager {
         deselect: bool,
         purge: bool,
     ) -> Result<Vec<Option<UninstallResult>>, package_manager::error::Error> {
-        let profile = self.profile.snapshot();
-
         // Phase 1: Remove symlinks for all packages, collecting content paths.
         let mut removals: Vec<SymlinkRemoval> = Vec::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
@@ -116,14 +112,12 @@ impl PackageManager {
         };
 
         let purged_set: std::collections::HashSet<PathBuf> = if !purge_seeds.is_empty() {
-            let gc = GarbageCollector::build(self.file_structure(), &profile)
-                .await
-                .map_err(|e| {
-                    package_manager::error::Error::UninstallFailed(vec![PackageError::new(
-                        packages[0].clone(),
-                        PackageErrorKind::Internal(e),
-                    )])
-                })?;
+            let gc = GarbageCollector::build(self.file_structure(), &[]).await.map_err(|e| {
+                package_manager::error::Error::UninstallFailed(vec![PackageError::new(
+                    packages[0].clone(),
+                    PackageErrorKind::Internal(e),
+                )])
+            })?;
             gc.purge(&purge_seeds)
                 .await
                 .map_err(|e| {

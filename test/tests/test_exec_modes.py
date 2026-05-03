@@ -275,10 +275,6 @@ def test_mode_flag_rejected_with_usage_error(
         ("shell", "env"),
         ("ci", "export"),
         ("deps",),
-        # `shell profile load` accepts `--self` but takes no package
-        # positional — the assertion below skips appending `pkg.short` for
-        # this surface.
-        ("shell", "profile", "load"),
     ],
 )
 def test_all_surfaces_carry_self_flag(
@@ -298,9 +294,7 @@ def test_all_surfaces_carry_self_flag(
 
     extra: list[str] = [self_flag] if self_flag else []
 
-    if surface == ("shell", "profile", "load"):
-        args = ["shell", "profile", "load", *extra]
-    elif "--" in surface:
+    if "--" in surface:
         args = ["exec", *extra, pkg.short, "--", "hello"]
     else:
         args = [*surface, *extra, pkg.short]

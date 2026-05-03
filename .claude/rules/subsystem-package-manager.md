@@ -38,8 +38,7 @@ Facade = single coord point for all package ops. Hide store + index + client com
 | `tasks/install.rs` | `install()`, `install_all()` — pull + create symlinks |
 | `tasks/uninstall.rs` | `uninstall()`, `uninstall_all()` — remove symlinks, optional purge |
 | `tasks/deselect.rs` | `deselect()`, `deselect_all()` — remove current symlink |
-| `tasks/clean.rs` | `clean()` — GC unreferenced objects + stale temps |
-| `tasks/profile_resolve.rs` | Profile-related resolution |
+| `tasks/clean.rs` | `clean()` — GC unreferenced objects + stale temps; `collect_project_roots` free function — loads `ProjectRegistry`, resolves each lock's pinned digests into `Vec<ProjectRootDigests>` |
 | `composer.rs` | Two-env composition: `compose(roots, store, self_view: bool) -> Vec<Entry>` (flat iteration over each root's pre-built TC with cross-root dedup, surface-gated via `has_interface()`/`has_private()`); `check_entrypoints(roots, store)` (interface-projection collision gate over 1..N roots, reports all N owners) |
 
 ## Facade Pattern
@@ -50,7 +49,6 @@ pub struct PackageManager {
     index: oci::index::Index,
     client: Option<oci::Client>,  // None when offline
     default_registry: String,
-    profile: ProfileManager,
 }
 ```
 
@@ -117,7 +115,7 @@ TOCTOU `!target.exists()` pre-check intentionally absent — eventual consistenc
 | `install()` / `install_all()` | N/A | `InstallInfo` | Downloads; `candidate` flag creates symlink; `select` flag sets current |
 | `uninstall()` / `uninstall_all()` | N/A | `Option<UninstallResult>` | None = candidate already absent |
 | `deselect()` / `deselect_all()` | N/A | `Option<PathBuf>` | None = current already absent |
-| `clean()` | N/A | `CleanResult` | Removes unreferenced objects + stale temps |
+| `clean(dry_run, force)` | N/A | `CleanResult` | Removes unreferenced objects + stale temps; `force=true` bypasses project registry |
 
 **`_all` methods must preserve input order** — caller zips results with original identifiers.
 

@@ -137,7 +137,7 @@ impl ReferenceManager {
     /// (instead of parsing metadata digests), which handles Image Index →
     /// platform-specific digest resolution correctly. GC determines reachability
     /// by walking `deps/` edges from root objects (those with install symlink refs
-    /// in `refs/` or profile content-mode references).
+    /// in `refs/symlinks/`).
     ///
     /// The filename is derived from `dependency_digest` via
     /// [`cas_path::cas_ref_name`] so the ref is self-describing: a quick look

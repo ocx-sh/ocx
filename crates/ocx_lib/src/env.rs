@@ -24,6 +24,16 @@ pub mod keys {
     pub const OCX_REMOTE: &str = "OCX_REMOTE";
     /// Path to an explicit configuration file. Mirrors `--config`.
     pub const OCX_CONFIG: &str = "OCX_CONFIG";
+    /// Boolean — when truthy, skip the discovered config-tier chain
+    /// (system / user / `$OCX_HOME`). Explicit `--config` / [`OCX_CONFIG`]
+    /// paths still load.
+    pub const OCX_NO_CONFIG: &str = "OCX_NO_CONFIG";
+    /// Path to an explicit project `ocx.toml` (project-tier toolchain config).
+    /// Mirrors `--project`.
+    pub const OCX_PROJECT: &str = "OCX_PROJECT";
+    /// Boolean — when truthy, skip the CWD walk and the [`OCX_PROJECT`]
+    /// env var. Explicit `--project` paths still load.
+    pub const OCX_NO_PROJECT: &str = "OCX_NO_PROJECT";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
 }
@@ -46,6 +56,7 @@ pub struct OcxConfigView {
     pub offline: bool,
     pub remote: bool,
     pub config: Option<PathBuf>,
+    pub project: Option<PathBuf>,
     pub index: Option<PathBuf>,
 }
 
@@ -56,6 +67,7 @@ impl OcxConfigView {
             offline: false,
             remote: false,
             config: None,
+            project: None,
             index: None,
         }
     }
@@ -184,6 +196,10 @@ impl Env {
             Some(path) => self.set(keys::OCX_CONFIG, path.as_os_str()),
             None => self.remove(keys::OCX_CONFIG),
         }
+        match &cfg.project {
+            Some(path) => self.set(keys::OCX_PROJECT, path.as_os_str()),
+            None => self.remove(keys::OCX_PROJECT),
+        }
         match &cfg.index {
             Some(path) => self.set(keys::OCX_INDEX, path.as_os_str()),
             None => self.remove(keys::OCX_INDEX),
@@ -300,6 +316,16 @@ impl IntoIterator for Env {
             .collect::<Vec<_>>()
             .into_iter()
     }
+}
+
+/// Process working directory.
+///
+/// Thin wrapper around [`std::env::current_dir`] so call sites route through
+/// the OCX env layer instead of the std library directly. Keeps the
+/// abstraction boundary consistent (and gives us a single seam for future
+/// test injection without touching every consumer).
+pub fn current_dir() -> std::io::Result<PathBuf> {
+    std::env::current_dir()
 }
 
 pub fn var(key: impl AsRef<str>) -> Option<String> {

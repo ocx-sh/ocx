@@ -4,8 +4,7 @@
 //! Filesystem-based reachability graph for object store garbage collection.
 //!
 //! Built from `refs/` (install back-references) and `deps/` (dependency forward-references).
-//! Objects with live refs or profile content-mode references are roots. BFS through
-//! `deps/` edges determines reachable objects.
+//! Objects with live refs are roots. BFS through `deps/` edges determines reachable objects.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -16,10 +15,10 @@ use tokio::task::JoinSet;
 
 use crate::{
     file_structure::{CasTier, FileStructure},
-    log,
-    profile::ProfileSnapshot,
-    utility,
+    log, utility,
 };
+
+use super::project_roots::ProjectRootDigests;
 
 /// Maximum concurrent I/O tasks for graph building.
 const BUILD_CONCURRENCY: usize = 50;
@@ -33,6 +32,10 @@ pub struct ReachabilityGraph {
     pub roots: HashSet<PathBuf>,
     pub edges: HashMap<PathBuf, Vec<PathBuf>>,
     pub all_entries: HashMap<PathBuf, CasTier>,
+    /// Maps each package-store path that is a project-registry root to the
+    /// `ocx.lock` paths that contributed it. Used by `ocx clean --dry-run`
+    /// to populate the `Held By` column. Empty when `project_roots` is `&[]`.
+    pub roots_attribution: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 impl ReachabilityGraph {
@@ -42,7 +45,11 @@ impl ReachabilityGraph {
     /// `refs/layers/` (layer edges), and `refs/blobs/` (blob edges). Layers and blobs
     /// are passive entries — they have no outgoing edges and are reachable only through
     /// package refs.
-    pub async fn build(file_structure: &FileStructure, profile: &ProfileSnapshot) -> crate::Result<Self> {
+    ///
+    /// `project_roots` supplies additional roots from registered projects' `ocx.lock`
+    /// files (Unit 6). Pass `&[]` when project-registry roots are suppressed (e.g.
+    /// `ocx clean --force`). See [`adr_clean_project_backlinks.md`].
+    pub async fn build(file_structure: &FileStructure, project_roots: &[ProjectRootDigests]) -> crate::Result<Self> {
         // Walk all three stores in parallel.
         let (package_dirs, layer_dirs, blob_dirs) = tokio::try_join!(
             file_structure.packages.list_all(),
@@ -53,17 +60,6 @@ impl ReachabilityGraph {
         let canon_packages_root = canonicalize_or_keep(file_structure.packages.root());
         let canon_layers_root = canonicalize_or_keep(file_structure.layers.root());
         let canon_blobs_root = canonicalize_or_keep(file_structure.blobs.root());
-
-        // Resolve profile content-mode entries to package store paths (forward lookup).
-        let profile_roots: HashSet<PathBuf> = profile
-            .content_digests()
-            .into_iter()
-            .filter_map(|id| {
-                let pinned = crate::oci::PinnedIdentifier::try_from(id.clone()).ok()?;
-                let pkg_path = file_structure.packages.path(&pinned);
-                Some(canonicalize_or_keep(&pkg_path))
-            })
-            .collect();
 
         // Spawn parallel I/O tasks to probe refs/ for each package.
         let sem = Arc::new(Semaphore::new(BUILD_CONCURRENCY));
@@ -99,11 +95,28 @@ impl ReachabilityGraph {
         let mut roots = HashSet::new();
         let mut edges = HashMap::new();
         let mut all_entries = HashMap::new();
+        let mut roots_attribution: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+
+        // Resolve project_roots digests to package-store paths and insert as
+        // additional reachability roots alongside live install symlinks. Also
+        // build roots_attribution for dry-run attribution reporting ("Held By"
+        // column in `ocx clean --dry-run`).
+        for project_root in project_roots {
+            for pinned in &project_root.digests {
+                let pkg_path = file_structure.packages.path(pinned);
+                let canon = canonicalize_or_keep(&pkg_path);
+                roots.insert(canon.clone());
+                roots_attribution
+                    .entry(canon)
+                    .or_default()
+                    .push(project_root.ocx_lock_path.clone());
+            }
+        }
 
         while let Some(result) = tasks.join_next().await {
             let (pkg_dir, is_root, pkg_edges) = result.expect("task panicked");
 
-            if is_root || profile_roots.contains(&pkg_dir) {
+            if is_root {
                 roots.insert(pkg_dir.clone());
             }
 
@@ -121,10 +134,54 @@ impl ReachabilityGraph {
             all_entries.insert(blob_dir, CasTier::Blob);
         }
 
+        // Propagate project-root attribution transitively through the edge
+        // graph so that layers and blobs reachable from a project-root package
+        // carry the same `held_by` entries as the root itself.
+        //
+        // Without this step, `roots_attribution` would only map the top-level
+        // package path → lock paths. Layer and blob paths reachable via
+        // `refs/layers/` and `refs/blobs/` edges would return `None` from
+        // the attribution lookup in `PackageManager::clean`, producing an
+        // empty `held_by` in the dry-run report even though those entries are
+        // retained by the registry.
+        if !roots_attribution.is_empty() {
+            // Snapshot the current roots_attribution entries. Each root may
+            // be reachable from multiple project locks; attribute all of them
+            // to every descendant by collecting the union of lock paths.
+            let attributed_roots: Vec<(PathBuf, Vec<PathBuf>)> = roots_attribution
+                .iter()
+                .map(|(p, ls)| (p.clone(), ls.clone()))
+                .collect();
+
+            for (root_path, lock_paths) in attributed_roots {
+                // BFS from this project root through the edge graph.
+                let mut queue = std::collections::VecDeque::new();
+                let mut visited = HashSet::new();
+                queue.push_back(root_path.clone());
+
+                while let Some(current) = queue.pop_front() {
+                    if !visited.insert(current.clone()) {
+                        continue;
+                    }
+                    // Attribute this node to the same lock paths as the root.
+                    if current != root_path {
+                        roots_attribution
+                            .entry(current.clone())
+                            .or_default()
+                            .extend(lock_paths.iter().cloned());
+                    }
+                    if let Some(neighbors) = edges.get(&current) {
+                        queue.extend(neighbors.iter().cloned());
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             roots,
             edges,
             all_entries,
+            roots_attribution,
         })
     }
 
@@ -270,6 +327,7 @@ pub mod tests {
             roots,
             edges: edges_map,
             all_entries,
+            roots_attribution: HashMap::new(),
         }
     }
 

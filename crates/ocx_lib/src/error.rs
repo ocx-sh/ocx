@@ -32,9 +32,9 @@ pub enum Error {
     /// A platform parsing or validation error.
     #[error(transparent)]
     Platform(#[from] crate::oci::platform::error::PlatformError),
-    /// A profile manifest operation failed.
+    /// A project-tier configuration or lock operation failed.
     #[error(transparent)]
-    Profile(#[from] crate::profile::ProfileError),
+    Project(#[from] crate::project::error::Error),
     /// A package manager operation failed.
     #[error(transparent)]
     PackageManager(#[from] crate::package_manager::error::Error),
@@ -196,7 +196,7 @@ impl ClassifyExitCode for Error {
             // Transparent wrappers delegate to the inner error's classification.
             Self::Auth(e) => e.classify(),
             Self::Platform(e) => e.classify(),
-            Self::Profile(e) => e.classify(),
+            Self::Project(e) => e.classify(),
             Self::PackageManager(e) => e.classify(),
             Self::OciClient(e) => e.classify(),
             Self::Identifier(e) => e.classify(),

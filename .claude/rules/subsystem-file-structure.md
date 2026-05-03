@@ -56,7 +56,14 @@ pub struct FileStructure {
 }
 ```
 
-One instance per session. Sub-stores public fields. `root()` return OCX home path. `profile_manifest()` return `$OCX_HOME/profile.json`.
+One instance per session. Sub-stores public fields. `root()` return OCX home path.
+
+**Root-level state files under `$OCX_HOME`:**
+
+| File | Purpose |
+|------|---------|
+| `projects.json` | Project registry — list of `ocx.lock` paths registered on this machine. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` to retain cross-project packages. |
+| `.projects.lock` | Advisory lock sentinel for `projects.json`. Same-volume sibling pattern as `.ocx-lock`; never contended long — held only during register/rewrite. |
 
 ## Six Stores
 
@@ -170,7 +177,9 @@ Blob forward-ref: created by `pull` directly. Symlink in `refs/blobs/` target `b
 
 ## GC Safety
 
-GC (`garbage_collection/reachability_graph.rs`) build `ReachabilityGraph` covering all three CAS tiers in single BFS pass. Packages with live `refs/symlinks/` entries or profile content-mode refs = roots. BFS follow four edge types from each package: `refs/deps/` (dependent packages), `refs/layers/` (extracted layers), `refs/blobs/` (raw blobs). Layers and blobs no outgoing edges — reachable only via package refs. Unreachable = collected.
+GC (`garbage_collection/reachability_graph.rs`) build `ReachabilityGraph` covering all three CAS tiers in single BFS pass. Packages with live `refs/symlinks/` entries or digests pinned by any registered project's `ocx.lock` (from `projects.json`) = roots. BFS follow four edge types from each package: `refs/deps/` (dependent packages), `refs/layers/` (extracted layers), `refs/blobs/` (raw blobs). Layers and blobs no outgoing edges — reachable only via package refs. Unreachable = collected.
+
+Project-registry roots read via `ProjectRegistry::load_and_prune` at start of `ocx clean`. Entries whose `ocx_lock_path` no longer exists on disk are silently dropped from the registry before the GC walk. Pass `--force` to `ocx clean` to ignore the registry and collect all packages not held by live symlinks.
 
 Blobs first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blob`) included in reachability walk. Previous `tier != CasTier::Blob` skip removed; blobs retained only when live `refs/blobs/` symlink points to them.
 

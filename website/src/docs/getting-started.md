@@ -160,47 +160,6 @@ ocx env nodejs:24 bun:1.3
 
 See the [`ocx env` reference][cmd-env] and [`ocx shell env` reference][cmd-shell-env] for the full flag set, including `--candidate` mode for pinning the resolved path to a specific installed version.
 
-## Shell Profile {#shell-profile}
-
-Adding `eval "$(ocx shell env --current <package>)"` to your shell startup works for one or two tools. By the time you have five — a compiler, a runtime, a build system, a linter, and a formatter — your `.bashrc` has five nearly-identical lines to maintain. Adding a tool means editing the profile; removing one means remembering which line to delete.
-
-[`ocx shell profile`][cmd-shell-profile] replaces those manual lines with a declarative manifest. You tell ocx which packages belong in your shell, and ocx resolves all of them at startup in a single pass.
-
-Add packages after installing them:
-
-```sh
-ocx install --select uv:0.10
-ocx install --select nodejs:24
-ocx shell profile add uv:0.10 nodejs:24
-```
-
-<Terminal src="/casts/profile.cast" title="Managing shell profile packages" collapsed />
-
-[`ocx shell profile list`][cmd-shell-profile-list] shows what is in the profile and whether each entry's symlink is healthy:
-
-```sh
-ocx shell profile list
-```
-
-At shell startup, the ocx env file calls [`ocx shell profile load`][cmd-shell-profile-load] to resolve every profiled package and emit the right exports. Broken entries — packages that were deselected or uninstalled since they were added — are silently skipped so a stale entry never blocks your shell from starting.
-
-To stop loading a package, remove it from the profile. The package itself stays installed:
-
-```sh
-ocx shell profile remove nodejs:24
-```
-
-::: tip Resolution modes
-By default, profiled packages resolve via the `candidates/{tag}` symlink — pinned to the specific tag you installed. To use the floating `current` symlink instead (follows [`ocx select`][cmd-select]), use `--current`:
-
-```sh
-ocx install --select uv:0.10
-ocx shell profile add --current uv:0.10
-```
-
-For the content-addressed object store path instead, use `--content`. This resolves to the digest-based path in `~/.ocx/objects/` — precise and self-verifying, but the path changes whenever the package is reinstalled at a different version.
-:::
-
 ## Next Steps {#next-steps}
 
 The sections above cover the everyday workflow. For deeper topics:
@@ -247,9 +206,6 @@ Environment variables and CLI flags always override config values. For full deta
 [cmd-uninstall]: ./reference/command-line.md#uninstall
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-shell-env]: ./reference/command-line.md#shell-env
-[cmd-shell-profile]: ./reference/command-line.md#shell-profile
-[cmd-shell-profile-list]: ./reference/command-line.md#shell-profile-list
-[cmd-shell-profile-load]: ./reference/command-line.md#shell-profile-load
 [cmd-index-catalog]: ./reference/command-line.md#index-catalog
 [cmd-index-list]: ./reference/command-line.md#index-list
 [cmd-index-update]: ./reference/command-line.md#index-update
