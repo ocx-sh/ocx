@@ -1,18 +1,9 @@
 <script setup lang="ts">
 /**
- * Self-rendering roadmap timeline card.
- *
- * Props control the card header (title, icon, status badge, accent color).
- * Default slot receives <RoadmapDescription> and <RoadmapFeatures> children
- * which render themselves inside the card body.
- *
- * Alternating left/right layout is handled via CSS :nth-child on this element.
- *
- * Scroll-driven focus: card glow, border, shadow, node ring scale, and title
- * accent all intensify as the card approaches the viewport center — same
- * technique as FeatureSection on the index page. `peak` tracks the highest
- * progress reached so the entrance animation never reverses on scroll-up.
- *
+ * Self-rendering roadmap timeline card with alternating left/right layout
+ * (via CSS :nth-child). `progress` (0..1) drives glow, border, shadow, ring
+ * scale, and title accent on a cosine bell curve centered on the viewport.
+ * `isVisible` (one-shot via IntersectionObserver) drives the entry fade.
  * Icon can be an emoji string or a file path (starts with / or contains .).
  */
 import { ref, onMounted, onUnmounted } from 'vue'
@@ -28,8 +19,9 @@ const isImageIcon =
 
 const el = ref<HTMLElement | null>(null)
 const progress = ref(0)
-const peak = ref(0)
+const isVisible = ref(false)
 let raf = 0
+let observer: IntersectionObserver | null = null
 
 function update() {
   if (!el.value) return
@@ -37,14 +29,10 @@ function update() {
   const viewH = window.innerHeight
   const elCenter = rect.top + rect.height / 2
 
-  // Smooth bell curve: full intensity at viewport center, gradual falloff.
-  // dist = 0 at center, 1 at edges. Gaussian-like curve via cosine.
+  // Bell curve via cosine: 1 at viewport center, 0 at edges.
   const dist = Math.abs(elCenter - viewH / 2) / (viewH / 2)
   const clamped = Math.max(0, Math.min(1, dist))
-  const raw = Math.cos(clamped * Math.PI / 2) // 1 at center, 0 at edges, smooth curve
-
-  peak.value = Math.max(peak.value, raw)
-  progress.value = raw
+  progress.value = Math.cos(clamped * Math.PI / 2)
 }
 
 function onScroll() {
@@ -56,12 +44,31 @@ onMounted(() => {
   window.addEventListener('scroll', onScroll, { passive: true })
   window.addEventListener('resize', onScroll, { passive: true })
   update()
+
+  // IntersectionObserver fires asynchronously after layout, so initial
+  // opacity:0 paints before --visible flips and the transition can run.
+  // Plain CSS transition triggered in onMounted skips on hydration because
+  // Vue commits the class change in the same task as the first paint.
+  if (el.value) {
+    observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          isVisible.value = true
+          observer?.disconnect()
+          observer = null
+        }
+      },
+      { rootMargin: '0px 0px -10% 0px' },
+    )
+    observer.observe(el.value)
+  }
 })
 
 onUnmounted(() => {
   window.removeEventListener('scroll', onScroll)
   window.removeEventListener('resize', onScroll)
   cancelAnimationFrame(raf)
+  observer?.disconnect()
 })
 </script>
 
@@ -69,12 +76,11 @@ onUnmounted(() => {
   <div
     ref="el"
     class="timeline-item"
-    :class="{ 'timeline-item--visible': peak > 0.1 }"
+    :class="{ 'timeline-item--visible': isVisible }"
     :style="{
       '--accent-raw': accent ?? 'var(--vp-c-brand-1)',
       '--accent': `color-mix(in srgb, ${accent ?? 'var(--vp-c-brand-1)'} ${Math.round(15 + progress * 85)}%, var(--vp-c-text-3))`,
       '--progress': progress,
-      '--peak': peak,
     }"
   >
     <!-- Node on the center line -->
