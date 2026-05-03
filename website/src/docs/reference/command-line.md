@@ -520,6 +520,10 @@ The second gate is **at consumption time**, invoked whenever `ocx env` or `ocx e
 
 ### `shell` {#shell}
 
+Shell-specific export emission, completion script generation, and persistent shell profile management.
+
+`shell env` and `shell profile load` print export statements meant for `eval`. `shell completion` emits a completion script for sourcing into the running shell. `shell profile add`/`remove`/`list` manage `$OCX_HOME/profile.json` — the manifest read by `shell profile load` at shell startup.
+
 #### `env` {#shell-env}
 
 Generate shell export statements for the environment variables declared by one or more packages.
@@ -565,8 +569,33 @@ ocx shell completion [OPTIONS]
 
 **Options**
 
-- `--shell <SHELL>`: The shell to generate the completions for (e.g., `bash`, `zsh`, `fish`).
-  By default, ocx will attempt to auto-detect the shell and generate the appropriate completions.
+- `--shell <SHELL>`: Shell to generate completions for. One of `bash`, `zsh`, `fish`, `elvish`, `powershell`. Auto-detected from the parent shell when omitted; ocx fails with an error if the detected shell is unsupported (e.g. `nushell`).
+
+**Install examples**
+
+::: code-group
+
+```shell [bash]
+# add to ~/.bashrc
+source <(ocx shell completion --shell bash)
+```
+
+```shell [zsh]
+# write into the first fpath entry, then `compinit`
+ocx shell completion --shell zsh > "${fpath[1]}/_ocx"
+```
+
+```shell [fish]
+# load for the current session, or save under ~/.config/fish/completions/ocx.fish
+ocx shell completion --shell fish | source
+```
+
+```powershell [powershell]
+# add to $PROFILE
+ocx shell completion --shell powershell | Out-String | Invoke-Expression
+```
+
+:::
 
 #### `profile` {#shell-profile}
 
@@ -593,6 +622,7 @@ ocx shell profile add [OPTIONS] <PACKAGE>...
 - `--candidate`: Resolve via the `candidates/{tag}` symlink (default, pinned). Requires a tag in the identifier.
 - `--current`: Resolve via the `current` symlink (floating pointer set by `ocx select`).
 - `--content`: Resolve via the content-addressed object store path. The path changes whenever the package is reinstalled at a different version.
+- `-p`, `--platform <PLATFORM>`: Target platforms to consider when resolving packages. Comma-separated. Auto-detected by default.
 
 Packages that are not yet installed will be auto-installed. For `--current` mode, install with `--select` first to create the `current` symlink (`ocx install --select <pkg>`).
 

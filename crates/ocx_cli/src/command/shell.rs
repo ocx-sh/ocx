@@ -7,7 +7,9 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Shell {
+    /// Print shell export statements for one or more packages.
     Env(super::shell_env::ShellEnv),
+    /// Generate shell completion scripts.
     Completion(super::shell_completion::ShellCompletion),
     /// Manage the shell profile — packages loaded at shell startup.
     #[command(subcommand)]

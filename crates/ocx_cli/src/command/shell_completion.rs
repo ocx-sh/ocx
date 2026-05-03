@@ -24,16 +24,16 @@ impl ShellCompletion {
                 if let Some(shell) = shell::Shell::detect() {
                     match shell.try_into() {
                         Ok(clap_shell) => clap_shell,
-                        Err(err) => anyhow::bail!(
-                            "The detected shell ({shell}) is not supported for completion generation: {err}"
-                        ),
+                        Err(err) => {
+                            anyhow::bail!("detected shell ({shell}) not supported for completion generation: {err}")
+                        }
                     }
                 } else {
-                    anyhow::bail!("Could not detect the current shell. Please specify it using the --shell option.");
+                    anyhow::bail!("could not detect the current shell; specify it using the --shell option");
                 }
             }
         };
-        log::info!("Generating completions for shell: {}", shell);
+        log::debug!("Generating completions for shell: {}", shell);
         clap_complete::generate(shell, &mut cmd, cmd_name, &mut std::io::stdout());
         Ok(ExitCode::SUCCESS)
     }
