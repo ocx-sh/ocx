@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.sh.ocx.package.v1+json",
+    "digest": "sha256:84388e4801140680a79e80cc969785d42061c2dc2b13864f07805234516f6fbf",
+    "size": 107
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+xz",
+      "digest": "sha256:d31d8c2f3057d438f3c47976884416db8e4f1add522945d07ab82e074647613c",
+      "size": 7998536
+    }
+  ],
+  "artifactType": "application/vnd.sh.ocx.package.v1"
+}
