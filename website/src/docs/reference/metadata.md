@@ -471,7 +471,7 @@ If you published packages before the visibility-default flip, their untagged env
 [cmd-env]: ./command-line.md#env
 
 <!-- guide -->
-[authoring-migration]: ../guide/authoring-packages.md#migration
+[authoring-migration]: ../authoring/env-surface.md#migrating
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-packages

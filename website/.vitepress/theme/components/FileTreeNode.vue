@@ -22,6 +22,20 @@ export interface FileNode {
   openIcon?: string
 }
 
+/**
+ * Stable default icons for well-known filenames. Authors get consistent
+ * iconography for free; explicit `icon` on a `<Node>` always wins.
+ */
+const DEFAULT_ICONS: Record<string, { icon: string; openIcon?: string }> = {
+  'metadata.json': { icon: '📋' },
+  'manifest.json': { icon: '📋' },
+  'bin/': { icon: '⚙️' },
+  'lib/': { icon: '📚' },
+  'share/': { icon: '📁' },
+  'content/': { icon: '📂' },
+  'entrypoints/': { icon: '🚀' },
+}
+
 const props = withDefaults(defineProps<{
   node: FileNode
   depth?: number
@@ -29,12 +43,23 @@ const props = withDefaults(defineProps<{
   depth: 0,
 })
 
-const open = ref(props.node.open !== false)
+const collapsible = inject<Ref<boolean>>('ft-collapsible', ref(true))
+
+const open = ref(collapsible.value ? props.node.open !== false : true)
 const isDir = computed(() => Array.isArray(props.node.children))
-const hasIcon = computed(() => props.node.icon != null)
+const defaultIcons = computed(() => {
+  const named = DEFAULT_ICONS[props.node.name]
+  if (named) return named
+  return isDir.value ? { icon: '📁', openIcon: '📂' } : { icon: '📄' }
+})
+const effectiveIcon = computed(() => props.node.icon ?? defaultIcons.value.icon)
+const effectiveOpenIcon = computed(
+  () => props.node.openIcon ?? defaultIcons.value.openIcon ?? effectiveIcon.value,
+)
+const hasIcon = computed(() => effectiveIcon.value != null)
 const displayIcon = computed(() => {
-  if (!isDir.value || !open.value) return props.node.icon
-  return props.node.openIcon ?? props.node.icon
+  if (!isDir.value || !open.value) return effectiveIcon.value
+  return effectiveOpenIcon.value
 })
 
 // Selection state shared via provide/inject from parent FileTree
@@ -44,7 +69,7 @@ const isSelected = computed(() => selectedNode.value === props.node)
 
 function handleClick() {
   selectNode(props.node)
-  if (isDir.value) open.value = !open.value
+  if (isDir.value && collapsible.value) open.value = !open.value
 }
 </script>
 
@@ -53,14 +78,14 @@ function handleClick() {
     <div
       class="ft-row"
       :class="{
-        'ft-row--dir': isDir,
+        'ft-row--dir': isDir && collapsible,
         'ft-row--selected': isSelected,
       }"
       @click="handleClick"
     >
       <!-- expand/collapse arrow only when no custom icon is defined -->
       <span v-if="!hasIcon" class="ft-toggle" aria-hidden="true">
-        {{ isDir ? (open ? '▾' : '▸') : '' }}
+        {{ isDir && collapsible ? (open ? '▾' : '▸') : '' }}
       </span>
       <!-- custom icon replaces the toggle arrow -->
       <span v-if="hasIcon" class="ft-custom-icon" aria-hidden="true">{{ displayIcon }}</span>
@@ -83,6 +108,30 @@ function handleClick() {
   list-style: none;
   padding: 0;
   margin: 0;
+  position: relative;
+}
+
+/* Horizontal connector stub from parent's vertical guide (centered on parent
+   icon column) to the child row. */
+.ft-children > .ft-node::before {
+  content: '';
+  position: absolute;
+  left: -14px;
+  top: 13px;
+  width: 12px;
+  height: 1px;
+  background: var(--vp-c-text-3);
+}
+
+/* Mask the vertical guide below the last child so it ends in an L, not a T. */
+.ft-children > .ft-node:last-child::after {
+  content: '';
+  position: absolute;
+  left: -15px;
+  top: 14px;
+  bottom: 0;
+  width: 2px;
+  background: var(--vp-c-bg-soft);
 }
 
 .ft-row {
@@ -151,8 +200,11 @@ function handleClick() {
   list-style: none;
   padding: 0;
   margin: 0;
-  padding-left: 18px;
-  border-left: 1px solid var(--vp-c-divider);
-  margin-left: 10px;
+  /* Align vertical guide with the center of the parent row's icon column.
+     Row padding-left = 8px, icon column width = 18px (toggle 14px + 4px slack);
+     guide centered on the icon column lands at ~17px from .ft-node origin. */
+  padding-left: 14px;
+  border-left: 1px solid var(--vp-c-text-3);
+  margin-left: 17px;
 }
 </style>

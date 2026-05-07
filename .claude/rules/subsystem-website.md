@@ -59,8 +59,8 @@ All registered globally in `theme/index.mts` — use in `.md` files, no imports.
 | Component | Props | Slots | Purpose |
 |-----------|-------|-------|---------|
 | `<Tooltip>` | `term: string`, `side?: 'top'\|'bottom'\|'left'\|'right'` (default: top), `delayDuration?: number` (default: 400) | default = popup content | Inline term with hover popup |
-| `<Tree>` | *(none — introspects `<Node>` children)* | default = `<Node>` elements | Declarative file tree |
-| `<Node>` | `name: string`, `icon?: string`, `openIcon?: string`, `open?: boolean` | default = child `<Node>`s + `<Description>` | Tree node with icon |
+| `<Tree>` | `collapsible?: boolean` (default `true` — set `false` for static, always-expanded trees) | default = `<Node>` elements | Declarative file tree |
+| `<Node>` | `name: string`, `icon?: string`, `openIcon?: string`, `open?: boolean` | default = child `<Node>`s + `<Description>` | Tree node. Stable default icons by `name` when `icon` omitted: `metadata.json`/`manifest.json` → 📋, `bin/` → ⚙️, `lib/` → 📚, `share/` → 📁, `content/` → 📂, `entrypoints/` → 🚀 |
 | `<Steps>` | *(none — introspects `<Step>` children)* | default = `<Step>` elements | Vertical stepper with detail panels |
 | `<Step>` | `title: string`, `description?: string`, `status?: 'complete'\|'current'\|'upcoming'` | default = detail content + `<Description>` | Step with click-to-reveal panel |
 | `<Description>` | *(none — marker)* | default = description text | Marker for parent VNode introspection |

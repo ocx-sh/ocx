@@ -59,10 +59,18 @@ export default defineConfig({
           link: "/docs/user-guide",
         },
         {
-          text: "Guides",
+          text: "Authoring",
+          link: "/docs/authoring/",
           collapsed: true,
           items: [
-            { text: "Authoring Packages", link: "/docs/guide/authoring-packages" },
+            { text: "Overview",               link: "/docs/authoring/" },
+            { text: "Bundle Anatomy",         link: "/docs/authoring/bundle-anatomy" },
+            { text: "Declaring Dependencies", link: "/docs/authoring/dependencies" },
+            { text: "Env Surface",            link: "/docs/authoring/env-surface" },
+            { text: "Entry Points",           link: "/docs/authoring/entry-points" },
+            { text: "Building & Pushing",     link: "/docs/authoring/building-pushing" },
+            { text: "Multi-Platform",         link: "/docs/authoring/multi-platform" },
+            { text: "Migration",              link: "/docs/authoring/migration" },
           ],
         },
         {

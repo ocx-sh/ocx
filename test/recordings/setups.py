@@ -6,11 +6,14 @@ Shell scripts reference a setup via ``# setup: <name>``.
 """
 from __future__ import annotations
 
+import json
+import stat
 from collections.abc import Callable
 from pathlib import Path
+from uuid import uuid4
 
 from src.helpers import make_package
-from src.runner import OcxRunner, PackageInfo
+from src.runner import OcxRunner, PackageInfo, current_platform
 
 
 def basic(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
@@ -299,6 +302,88 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
     }
 
 
+def publisher(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """Provision a publisher work directory under ``tmp_path``.
+
+    Lays out three source trees plus a sidecar metadata file:
+
+    - ``build/bin/mytool``   — package contents for v1 (and the second push of
+      a multi-platform pair).
+    - ``build-v2/bin/mytool`` — package contents for v1.0.1 in cascade and
+      layer-reuse demos.
+    - ``base/lib/data``      — shared base layer used by the layer-reuse demo.
+    - ``metadata.json``      — single sidecar that all pushes reference.
+
+    No package is published. The publisher recordings demonstrate
+    ``ocx package create`` and ``ocx package push`` end-to-end on screen, so
+    the setup deliberately leaves the registry empty for the script to
+    populate.
+
+    The returned mapping uses display name ``mytool`` so that the UUID-prefixed
+    actual repository name (used when commands run) gets sanitised back to
+    ``mytool`` in the rendered cast.
+    """
+    actual_repo = f"{prefix}mytool"
+
+    # v1 source tree
+    build = tmp_path / "build" / "bin"
+    build.mkdir(parents=True)
+    binary = build / "mytool"
+    binary.write_text("#!/bin/sh\necho mytool 1.0.0\n")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    # v2 source tree (cascade + layer-reuse)
+    build_v2 = tmp_path / "build-v2" / "bin"
+    build_v2.mkdir(parents=True)
+    binary_v2 = build_v2 / "mytool"
+    binary_v2.write_text("#!/bin/sh\necho mytool 1.0.1\n")
+    binary_v2.chmod(binary_v2.stat().st_mode | stat.S_IEXEC)
+
+    # Shared base layer (layer-reuse)
+    base = tmp_path / "base" / "lib"
+    base.mkdir(parents=True)
+    # Deterministic content so the layer digest is stable across runs of the
+    # same recording (small deduplicable file).
+    (base / "data").write_text("shared base library\n")
+
+    # Sidecar metadata
+    metadata = {
+        "type": "bundle",
+        "version": 1,
+        "env": [
+            {
+                "key": "PATH",
+                "type": "path",
+                "required": True,
+                "value": "${installPath}/bin",
+                "visibility": "public",
+            },
+        ],
+    }
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata, indent=2))
+
+    # README + logo for the package describe demo
+    (tmp_path / "README.md").write_text(
+        "# mytool\n\nA small example tool used in the OCX authoring guides.\n"
+    )
+
+    # Stub PackageInfo: triggers display-name → actual-repo rewriting in
+    # test_recordings.py. Tag is irrelevant — only ``repo`` is consulted.
+    return {
+        "mytool": [
+            PackageInfo(
+                repo=actual_repo,
+                tag="display",
+                short=f"{actual_repo}:display",
+                fq=f"{ocx.registry}/{actual_repo}:display",
+                content_dir=tmp_path,
+                marker=f"publisher-{uuid4().hex[:8]}",
+                platform=current_platform(),
+            ),
+        ],
+    }
+
+
 SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]
 
 SETUPS: dict[str, SetupFn] = {
@@ -308,4 +393,5 @@ SETUPS: dict[str, SetupFn] = {
     "variants": variants,
     "dependencies": dependencies,
     "deps-visibility": deps_visibility,
+    "publisher": publisher,
 }

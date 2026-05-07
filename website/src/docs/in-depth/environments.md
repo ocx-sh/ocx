@@ -270,5 +270,5 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 [env-ocx-index]: ../reference/environment.md#ocx-index
 
 <!-- user guide -->
-[ug-conflicts]: ../user-guide.md#dependencies-environment
+[ug-conflicts]: ../user-guide.md#conflict-warnings
 [ug-visibility]: ../user-guide.md#dependencies-visibility

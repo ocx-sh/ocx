@@ -266,6 +266,16 @@ class CastRecorder:
             self._shell.close()
             self._shell = None
 
+    def silent_setup(self, command: str, *, timeout: int = 10) -> None:
+        """Run *command* in the shell without emitting events to the cast.
+
+        Used for pre-flight setup (e.g. ``cd`` into a publisher work directory)
+        that should not appear in the recorded session.
+        """
+        assert self._shell is not None, "call open() before silent_setup()"
+        self._shell.sendline(command)
+        self._shell.expect_exact(self._SENTINEL, timeout=timeout)
+
     def _emit(self, data: str) -> None:
         self._events.append(CastEvent(
             timestamp=self._clock,

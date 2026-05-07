@@ -1,17 +1,25 @@
 <script setup lang="ts">
-import { ref, provide } from 'vue'
+import { ref, provide, toRef } from 'vue'
 import type { FileNode } from './FileTreeNode.vue'
 
-defineProps<{
+const props = withDefaults(defineProps<{
   /** Root-level nodes of the tree. */
   data: FileNode[]
-}>()
+  /**
+   * Allow expand/collapse of directory nodes. Set `false` for static reference
+   * trees that should always render fully expanded.
+   */
+  collapsible?: boolean
+}>(), {
+  collapsible: true,
+})
 
 const selectedNode = ref<FileNode | null>(null)
 provide('ft-selected', selectedNode)
 provide('ft-select', (node: FileNode) => {
   selectedNode.value = selectedNode.value === node ? null : node
 })
+provide('ft-collapsible', toRef(props, 'collapsible'))
 </script>
 
 <template>
