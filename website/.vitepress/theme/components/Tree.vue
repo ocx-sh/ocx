@@ -3,6 +3,16 @@ import { computed, useSlots } from 'vue'
 import type { FileNode } from './FileTreeNode.vue'
 import DescriptionComp from './Description.vue'
 
+withDefaults(defineProps<{
+  /**
+   * Allow expand/collapse of directory nodes. Set `false` for small static
+   * trees that should always render fully expanded.
+   */
+  collapsible?: boolean
+}>(), {
+  collapsible: true,
+})
+
 const slots = useSlots()
 
 /** Extract plain text from a <Description> VNode's default slot. */
@@ -47,5 +57,5 @@ const data = computed(() => vnodesToNodes(slots.default?.() ?? []))
 </script>
 
 <template>
-  <FileTree :data="data" />
+  <FileTree :data="data" :collapsible="collapsible" />
 </template>

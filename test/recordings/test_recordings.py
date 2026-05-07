@@ -15,6 +15,12 @@ from src.runner import OcxRunner, PackageInfo, registry_dir
 
 from recordings.cast_recorder import CastRecorder
 
+# Setups whose scripts run in a publisher work directory (tmp_path) so that
+# `ocx package create` / `package push` can use relative paths like
+# `build/`, `metadata.json`. The recorder silently `cd`s before the first
+# typed command so the cast does not leak the long pytest tmp path.
+_PUBLISHER_SETUPS = {"publisher"}
+
 
 def _rewrite_command(cmd: str, repo_map: dict[str, str]) -> str:
     """Replace display-name package refs with actual repo names in OCX args.
@@ -54,6 +60,7 @@ def test_record(
     cast_dir: Path,
     registry: str,
     ocx_home: Path,
+    tmp_path: Path,
 ) -> None:
     meta = script["meta"]
     commands = script["commands"]
@@ -66,6 +73,14 @@ def test_record(
         registry + "/": "",
         registry_slug + "/": "",
     }
+
+    # Publisher setups: silently cd into the work directory so scripts can
+    # use relative paths, and strip the long pytest tmp_path from output.
+    if meta.get("setup") in _PUBLISHER_SETUPS:
+        recorder.silent_setup(f"cd {shlex.quote(str(tmp_path))}")
+        sanitize_map[str(tmp_path) + "/"] = ""
+        sanitize_map[str(tmp_path)] = ""
+
     # Map actual repo names to display names and build reverse map
     repo_map: dict[str, str] = {}
     for display_name, packages in setup_env.items():
