@@ -1081,7 +1081,9 @@ ocx shell hook [OPTIONS]
 
 #### `direnv` {#shell-direnv}
 
-Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints shell-specific export lines for the resolved environment. Unlike [`shell hook`](#shell-hook), this command does not consult or update `_OCX_APPLIED` — it emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)).
+Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints **bash** export lines for the resolved environment. Unlike [`shell hook`](#shell-hook), this command does not consult or update `_OCX_APPLIED` — it emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)).
+
+Output is always bash. [direnv](https://direnv.net/) sources `.envrc` files in a bash sub-shell regardless of the user's interactive shell, then translates the resulting environment to the interactive shell internally via `direnv export <shell>`. Programs invoked via `eval` from `.envrc` therefore have to emit bash — there is no shell-dialect option on this command.
 
 The command never contacts the network and never installs missing tools. Tools missing from the object store produce a one-line stderr note and are skipped; a stale lock produces a stderr warning but the stale digests are still used. When no project `ocx.toml` is found in scope, the command exits 0 with no output.
 
@@ -1093,7 +1095,6 @@ ocx shell direnv [OPTIONS]
 
 **Options**
 
-- `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
 - `-h`, `--help`: Print help information.
 
 **Exit codes**
