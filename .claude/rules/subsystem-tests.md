@@ -108,9 +108,24 @@ cd test && uv run pytest tests/test_install.py::test_name -v --no-build
 4. Custom packages: use `make_package()` with `unique_repo` and `tmp_path`
 5. Run: `cd test && uv run pytest tests/test_file.py::test_name -v --no-build`
 
+For shell-friendly assertions (exec output, file existence, exit-code branches), prefer `test/scenarios/` — see Platform Split below.
+
 ## Test Files
 
 19 test files cover: install, find, select, uninstall, purge, clean, offline, env, exec, package lifecycle, cascade, package pull, describe, package info, index, color, mirror, CI export, shell profile.
+
+## Platform Split
+
+Two complementary harnesses with different platform reach:
+
+| Harness | Platforms | Use for |
+|---------|-----------|---------|
+| Pytest (`test/tests/test_*.py`) | Linux + macOS + Windows (per `.github/workflows/verify-deep.yml`) | JSON-output assertions, structured fixtures, Windows junction / `.exe` resolution, anything where Python expressivity beats shell |
+| Shell scenarios (`test/scenarios/*.sh`) | Linux + macOS only (Windows skipped via `pytestmark` in `test_scenarios_smoke.py`) | Exec output, marker grep, file/dir existence, exit-code branches — bash is the natural language |
+
+When extending shell scenarios, reuse the harness in `test/src/scenarios/__init__.py` (`Scenario` base class, `# scenario: <Name>` header, registered subclasses for pre-publish state). Do not duplicate setup logic — extend the existing `Scenario` API.
+
+A behaviour assertion belongs in **one** harness, not both. If a pytest case can be expressed verbatim as a shell scenario, prefer the scenario; if it needs structured output parsing or Windows-specific paths, keep it in pytest.
 
 ## Quality Gate
 

@@ -1,0 +1,22 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "PATH",
+      "type": "path",
+      "required": true,
+      "value": "${installPath}/bin",
+      "visibility": "public"
+    },
+    {
+      "key": "LEAF_B_HOME",
+      "type": "constant",
+      "value": "${installPath}",
+      "visibility": "public"
+    }
+  ],
+  "entrypoints": [
+    { "name": "leaf-b", "target": "${installPath}/bin/leaf-b" }
+  ]
+}

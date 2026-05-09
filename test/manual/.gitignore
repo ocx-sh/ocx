@@ -1,0 +1,11 @@
+# Disposable OCX_HOME created by scripts/env.sh.
+.ocx-home/
+
+# Per-package bundle output directory written by bootstrap.sh.
+packages/*/out/
+
+# Rendered metadata.json for every package — bootstrap.sh produces it from
+# `metadata.in.json` (with `@@KEY@@` substitutions for templated packages,
+# or as a plain copy for packages with no variables). The source of truth
+# is `metadata.in.json`, which is committed.
+packages/*/metadata.json
