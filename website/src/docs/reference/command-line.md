@@ -834,12 +834,11 @@ Publishes a package to the registry as zero or more layers. Each layer is upload
 **Usage**
 
 ```shell
-ocx package push [OPTIONS] --platform <PLATFORM> <IDENTIFIER> <LAYERS>...
+ocx package push [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> <LAYERS>...
 ```
 
 **Arguments**
 
-- `<IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000`.
 - `<LAYERS>...`: Zero or more layers, in order (base layer first, top layer last). Each layer is either:
   - a path to a pre-built archive file (`.tar.gz`, `.tgz`, `.tar.xz`, or `.txz`), or
   - a digest reference of the form `sha256:<hex>.<ext>` (e.g. `sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.tar.gz`) pointing at a layer that already exists in the target registry. The `<ext>` suffix is mandatory — OCI blob HEADs do not carry the original media type, so the publisher must declare it. Bare digests are rejected.
@@ -849,6 +848,7 @@ ocx package push [OPTIONS] --platform <PLATFORM> <IDENTIFIER> <LAYERS>...
 
 **Options**
 
+- `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `cmake:3.28.1_20260216120000` (required).
 - `-p`, `--platform <PLATFORM>`: Target platform of the package (required).
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
@@ -860,18 +860,67 @@ Digest-referenced layers are not re-uploaded — ocx only HEADs the registry to 
 
 ```shell
 # Push a fresh base + tool combination
-ocx package push -p linux/amd64 mytool:1.0.0 base.tar.gz tool.tar.gz
+ocx package push -p linux/amd64 -i mytool:1.0.0 base.tar.gz tool.tar.gz
 
 # Reuse the same base by digest in a later release.
 # The digest is the full 64-char sha256 hex written verbatim —
 # the ellipsis is shown here only to keep the example short.
-ocx package push -p linux/amd64 mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.gz
+ocx package push -p linux/amd64 -i mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.gz
 ```
 :::
 
 ::: warning Bring your own archives
 `ocx package push` does not bundle a directory for you. Each file layer must be a pre-built archive. Re-bundling the same content yields a non-deterministic digest (timestamps, compression entropy) and defeats layer reuse — use [`ocx package create`](#package-create) to produce a stable archive once, then push and reference it by digest from later commands.
 :::
+
+#### `test` {#package-test}
+
+Materializes a package locally without a registry round-trip and runs a command in its composed env. Mirrors the argument shape of [`package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`. The trailing `-- CMD [ARGS...]` is required.
+
+**Usage**
+
+```shell
+ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYERS]... -- <CMD> [ARGS]...
+```
+
+**Arguments**
+
+- `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`: a path to a `.tar.gz`/`.tar.xz` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs in `--offline` mode produce exit code 81 (`OfflineBlocked`).
+- `-- <CMD> [ARGS]...`: Command to run inside the composed env. Required.
+
+**Options**
+
+- `-i`, `--identifier <IDENTIFIER>`: Package identifier in tag form (`repo:tag`) — required. An explicit `@digest` suffix is rejected (the digest is computed locally from the supplied layers).
+- `-p`, `--platform <PLATFORM>`: Target platform (required).
+- `-m`, `--metadata <PATH>`: Path to the metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided.
+- `--keep`: Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/`. Mutually exclusive with `--output`.
+- `-o`, `--output <DIR>`: Materialize into `DIR` instead of an auto-managed temp dir. `DIR` must not exist or must be empty. Implies keep — the directory is never deleted by ocx. Must reside on the same filesystem as `$OCX_HOME/layers/`; hardlink assembly does not fall back to copy. Mutually exclusive with `--keep`. On Windows, `--output` must point under `$OCX_HOME/` — cross-volume support is deferred.
+- `--self`: Compose the package's private env surface (default: interface surface). Same semantics as [`ocx exec --self`][cmd-exec-self].
+- `--clean`: Strip ambient parent env before composing — only `OCX_*` config and composed package vars reach the child. Mirrors [`ocx exec --clean`][cmd-exec-clean].
+- `-h`, `--help`: Print help information.
+
+**Examples**
+
+```shell
+# Run the binary in its composed env.
+ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+
+# Keep the temp dir for inspection on failure.
+ocx package test -p linux/amd64 --keep -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+
+# Materialize to a named directory.
+ocx package test -p linux/amd64 --output ./build -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+
+# Explicit metadata path + digest base layer.
+ocx package test -p linux/amd64 -m metadata.json -i mytool:1.0.1 \
+  sha256:<hex>.tar.xz ./newtool.tar.xz -- mytool --version
+```
+
+::: tip Tempdir lifecycle
+Without `--keep` or `--output`, the temp directory is deleted on any exit — success or failure. Use `--keep` to opt in to preservation on failure. Re-run with `--keep` to inspect.
+:::
+
+See the [testing locally guide][authoring-testing] for a full pre-push workflow example.
 
 #### `describe` {#package-describe}
 
@@ -948,3 +997,11 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [fs-index]: ../user-guide.md#indices-local
 [ug-dependencies]: ../user-guide.md#dependencies
 [ug-deps-env]: ../user-guide.md#dependencies-environment
+
+<!-- commands (package-test options) -->
+[cmd-package-push]: #package-push
+[cmd-exec-self]: #exec
+[cmd-exec-clean]: #exec
+
+<!-- authoring -->
+[authoring-testing]: ../authoring/testing.md

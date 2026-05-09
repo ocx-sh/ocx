@@ -290,8 +290,16 @@ impl PackageManager {
         &self.index
     }
 
-    /// Returns the OCI client, or `Err(OfflineMode)` if none is available.
-    pub fn client(&self) -> crate::Result<&oci::Client> {
+    /// Returns the OCI client as an `Option`. `None` indicates offline mode.
+    /// Callers that need to fail loudly when no client is available should use
+    /// [`require_client`][Self::require_client] instead.
+    pub fn client(&self) -> Option<&oci::Client> {
+        self.client.as_ref()
+    }
+
+    /// Returns the OCI client, or `Err(OfflineMode)` when no client is
+    /// configured. Use this at sites that genuinely need network access.
+    pub fn require_client(&self) -> crate::Result<&oci::Client> {
         self.client.as_ref().ok_or(crate::Error::OfflineMode)
     }
 

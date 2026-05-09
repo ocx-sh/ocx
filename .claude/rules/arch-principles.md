@@ -141,6 +141,9 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Lexical path normalize / containment check (no FS I/O) | `utility::fs::path::{lexical_normalize, escapes_root, validate_symlinks_in_dir}` | `utility/fs/path.rs` |
 | Move directory (same-filesystem rename, overwrite-safe) | `utility::fs::move_dir` | `utility/fs.rs` |
 | Probe whether path exists, swallow I/O errors as `false` with debug log | `utility::fs::path_exists_lossy` | `utility/fs.rs` |
+| Refuse a destination path whose ancestor chain contains any symlink (security guard) | `utility::fs::refuse_if_symlink_in_path` | `utility/fs/symlink_walk.rs` |
+| Cross-platform same-filesystem check (Unix dev / Win32 GetVolumePathNameW) | `utility::fs::same_filesystem` | `utility/fs/same_filesystem.rs` |
+| Verify a path is absent or an empty directory | `utility::fs::ensure_empty_or_absent` | `utility/fs/empty_or_absent.rs` |
 | Hardlink file (dedup layer into package) | `hardlink::create` / `update` | `crates/ocx_lib/src/hardlink.rs` |
 | Create / update / probe symlink (cross-platform, junction-aware) | `symlink::create` / `update` / `remove` / `is_link` | `crates/ocx_lib/src/symlink.rs` |
 | Assemble layer's content tree into package (hardlinks + symlinks) | `utility::fs::assemble_from_layer(s)` | `utility/fs/assemble.rs` |

@@ -180,7 +180,17 @@ where
         use std::io::Read;
 
         let mut file = std::fs::File::open(&path)?;
-        let expected_len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+        // CAPACITY: usize::try_from guards against silent truncation on 32-bit targets.
+        // On 64-bit this is safe, but on 32-bit `u64 as usize` would silently wrap.
+        // Capacity is a hint only; Vec grows as needed if the hint is 0 (e.g. special
+        // files). Callers MUST pre-cap input size (e.g. via MAX_FILE_LAYER_BYTES) to
+        // avoid wasteful pre-allocations — hash_file_read_hex allocates the entire
+        // file content in memory.
+        let expected_len = file
+            .metadata()
+            .ok()
+            .and_then(|m| usize::try_from(m.len()).ok())
+            .unwrap_or(0);
         let mut bytes = Vec::with_capacity(expected_len);
         let mut hasher = H::new();
         let mut buf = vec![0u8; 64 * 1024];

@@ -144,7 +144,7 @@ def _push_bundle(
     ]
     if new:
         push_args.append("-n")
-    push_args += [fq, str(bundle_path)]
+    push_args += ["-i", fq, str(bundle_path)]
     ocx.plain(*push_args)
 
 
@@ -241,6 +241,7 @@ def _make_two_packages_sharing_layer(
             current_platform(),
             "-m",
             str(repo_metadata_path),
+            "-i",
             fq,
             str(bundle_path),
         )

@@ -65,7 +65,7 @@ def test_push_pull_three_layers(ocx: OcxRunner, unique_repo: str, tmp_path: Path
     fq = f"{ocx.registry}/{short}"
     plat = current_platform()
     ocx.plain(
-        "package", "push", "-p", plat, "-m", str(meta), "-n", fq,
+        "package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq,
         str(bundle_a), str(bundle_b), str(bundle_c),
     )
     ocx.plain("index", "update", short)

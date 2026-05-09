@@ -83,6 +83,10 @@ pub trait Printable: serde::Serialize {
 
 See `subsystem-cli-api.md` for full contract. `subsystem-cli-commands.md` for quick reference. User-facing per-command docs at `website/src/docs/reference/command-line.md`.
 
+## Cross-Cutting: `--keep` / `--output` Flags
+
+`package test` introduces two destination flags that appear together in clap with `conflicts_with`. `--keep` preserves an auto-managed temp dir; `--output DIR` materializes to a caller-managed directory (never deleted by ocx). Both are mutually exclusive — combined = usage error. `--output` requires the target to be on the same filesystem as `$OCX_HOME/layers/` (hardlink assembly, no copy fallback).
+
 ## Cross-Cutting: `--self` Flag
 
 Six env-consuming commands (`exec`, `env`, `shell env`, `shell profile load`, `ci export`, `deps`) share a single boolean `--self` flag (default off) that selects which env surface `ocx exec` emits:

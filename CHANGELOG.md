@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ocx package test` for local pre-push validation: materializes a package without a registry round-trip and runs a command in its composed env. Temp directory is auto-cleaned on exit; `--keep` opts in to preservation for inspection. *(cli)*
 - Multi-layer package push and pull. `ocx package push` now accepts multiple layer arguments, each either a file path or a `sha256:<hex>.tar.gz` digest reference. *(package)*
 - Layered configuration from `/etc/ocx/config.toml`, `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml` with `--config` / `OCX_CONFIG` overrides and `OCX_NO_CONFIG` kill-switch. *(config)*
 - Typed `ExitCode` taxonomy aligned with BSD sysexits (64/65/69/74/75/77/78/79/80/81). Scripts can now `case $?` reliably. *(cli)*
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Breaking:** `ocx package push` and `ocx package test` now require the identifier as a `-i`/`--identifier` flag instead of a positional argument. Update scripts: `ocx package push <id> <bundle>` → `ocx package push -i <id> <bundle>`. Same change for `package test`. *(cli)*
 - **Breaking:** Package metadata field renamed from `entry_points` to `entrypoints`. Publishers must update `metadata.json` files; bundles using the old field name fail validation at `package create`. *(package)*
 - **Breaking:** Dependency JSON field key renamed from `alias` to `name`. Existing bundles must be re-published with `"name"` in place of `"alias"`. The `${deps.NAME.installPath}` template token is unchanged — `NAME` was always the placeholder keyword, never the literal field name. *(package)*
 - **Breaking:** `ocx-mirror` exit codes changed from `0/2/3/4` to `0/65/79/1/69` to align with the sysexits-based taxonomy. Wrapper scripts matching historic codes must be updated. *(mirror)*

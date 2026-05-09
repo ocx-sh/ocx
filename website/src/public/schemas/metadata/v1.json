@@ -88,15 +88,6 @@
       "pattern": "^[a-z0-9][a-z0-9_-]*$",
       "type": "string"
     },
-    "EntryVisibility": {
-      "description": "Entry-axis visibility on a `Var` entry: `private` (self-only), `public` (consumer + self), `interface` (consumer-only). `sealed` is rejected for entries — entries always belong to at least the package's own runtime. See https://ocx.sh/docs/reference/metadata for the full two-axis visibility model.",
-      "enum": [
-        "private",
-        "public",
-        "interface"
-      ],
-      "type": "string"
-    },
     "Entrypoint": {
       "description": "A single named entrypoint for a package.\n\nDeclares a named launcher that `ocx install` generates at install time.\nThe launcher re-enters via `ocx launcher exec '<package-root>' -- <argv0> [args...]`,\npreserving clean-env execution semantics.",
       "properties": {
@@ -161,7 +152,7 @@
       "type": "string"
     },
     "Var": {
-      "description": "An environment variable declaration.\n\nEach variable has a key (the variable name), a [modifier](Modifier) that\ndetermines how the value is resolved, and a [visibility](EntryVisibility)\nthat controls which exec modes load the entry. The modifier's type and\nfields are flattened into this object in JSON.\n\n`visibility` defaults to [`EntryVisibility::private`] per ADR\n`adr_visibility_two_axis_and_exec_modes.md` Tension 1 (A): publishers must\nopt in explicitly to expose entries on the consumer axis.",
+      "description": "An environment variable declaration.\n\nEach variable has a key (the variable name), a [modifier](Modifier) that\ndetermines how the value is resolved, and a visibility that controls which\nexec surfaces load the entry. The modifier's type and fields are flattened\ninto this object in JSON.\n\n`visibility` defaults to [`Visibility::PRIVATE`] per ADR\n`adr_visibility_two_axis_and_exec_modes.md` Tension 1 (A): publishers must\nopt in explicitly to expose entries on the consumer axis. `\"sealed\"` is\nrejected at parse time — a `Var` invisible on every surface is dead config\n(ADR Tension 4).",
       "oneOf": [
         {
           "$ref": "#/$defs/Path",
@@ -198,9 +189,14 @@
           "type": "string"
         },
         "visibility": {
-          "$ref": "#/$defs/EntryVisibility",
           "default": "private",
-          "description": "Visibility on the entry axis — controls which exec surface (interface vs private)\nsees this entry; see [`crate::package_manager::composer`]. Defaults to\n[`EntryVisibility::private`] — publishers explicitly mark contract entries as\n`public` or `interface` to expose them to consumers."
+          "description": "Visibility on the entry axis — controls which exec surface (interface vs private)\nsees this entry; see [`crate::package_manager::composer`]. Defaults to\n`private` — publishers explicitly mark contract entries as `public` or\n`interface` to expose them to consumers. `\"sealed\"` is rejected at parse\ntime (ADR Tension 4).",
+          "enum": [
+            "private",
+            "public",
+            "interface"
+          ],
+          "type": "string"
         }
       },
       "required": [

@@ -71,6 +71,7 @@ Most packages start as an upstream binary release on [GitHub][gh-releases] or a 
 - **[Env surface][authoring-env-surface]** — which env vars to declare, how to mark each one (`private` / `public` / `interface`), when last-wins matters, how to migrate packages published before the entry-points release. Reach for this when designing the contract between you and consumers — and when retrofitting older `metadata.json` files.
 - **[Entry points][authoring-entry-points]** — when to ship named launchers instead of exposing `bin/` on PATH, how to pick non-colliding names, how `target` templates thread dependency paths. Reach for this when your tool depends on a shared runtime (Python, Node, JVM) and needs its dep graph encapsulated so two installed tools cannot fight over a single ambient interpreter.
 - **[Building and pushing][authoring-building-pushing]** — first push, `--cascade` for rolling tags, BYO archives, cross-package layer reuse by digest. Reach for this when ready to publish.
+- **[Testing locally][authoring-testing]** — verify a package works before pushing: run the same install pipeline in a temp directory, exec a command in the composed env, inspect the layout with `--keep`. No registry round-trip, no new digest.
 - **[Multi-platform packages][authoring-multi-platform]** — pushing per platform under one tag, how OCX assembles the [OCI Image Index][oci-image-index]. Reach for this when supporting more than one OS/arch.
 - **[Migration patterns][authoring-migration]** — `ocx_mirror` specs, repackaging Homebrew and GitHub Releases, attaching description metadata. Reach for this when wrapping an upstream tool you do not own.
 
@@ -84,6 +85,7 @@ Common questions you will hit while authoring, and the page that answers each:
 | Which env vars should consumers see vs. only my launchers? | [Env surface → choosing visibility][authoring-env-visibility] |
 | When do I need named entry points instead of `PATH += bin/`? | [Entry points → when to declare][authoring-entry-points-when] |
 | When do I need a `name` override on a dependency? | [Dependencies → name override][authoring-deps-name] |
+| How do I verify a package works before pushing it to the registry? | [Testing locally][authoring-testing] |
 | How do I make rolling tags (`1.0`, `1`, `latest`) follow new releases? | [Building & pushing → cascade][authoring-cascade] |
 | How do I publish for amd64 + arm64 + darwin under one tag? | [Multi-platform packages][authoring-multi-platform] |
 | How do I avoid re-uploading a base layer that's already in the registry? | [Building & pushing → layer reuse][authoring-layer-reuse] |
@@ -93,7 +95,7 @@ Common questions you will hit while authoring, and the page that answers each:
 ## See Also {#see-also}
 
 - [Metadata reference][reference-metadata] — every field, every constraint
-- [Command-line reference — package commands][reference-cli-package] — `create`, `push`, `pull`, `describe`, `info`
+- [Command-line reference — package commands][reference-cli-package] — `create`, `push`, `pull`, `test`, `describe`, `info`
 - [Storage in depth][in-depth-storage] — the three-tier CAS that makes layer reuse work
 - [Environments in depth][in-depth-environments] — composition order, edge filter, conflicting constants
 - [User guide][user-guide] — the consumer side of every decision documented here
@@ -132,6 +134,7 @@ Common questions you will hit while authoring, and the page that answers each:
 [authoring-building-pushing]: ./building-pushing.md
 [authoring-cascade]: ./building-pushing.md#cascade
 [authoring-layer-reuse]: ./building-pushing.md#layer-reuse
+[authoring-testing]: ./testing.md
 [authoring-multi-platform]: ./multi-platform.md
 [authoring-migration]: ./migration.md
 [authoring-describe]: ./migration.md#describe

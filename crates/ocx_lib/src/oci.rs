@@ -48,6 +48,8 @@ pub mod index;
 pub use index::Index;
 
 pub mod manifest;
+pub mod manifest_builder;
+pub use manifest_builder::{ManifestArtifacts, ManifestBuilder};
 
 pub mod identifier;
 pub use identifier::DEFAULT_REGISTRY;

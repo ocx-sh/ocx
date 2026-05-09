@@ -77,7 +77,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::archive::Error as ArchiveError;
     use crate::auth::error::AuthError;
     use crate::ci::error::Error as CiError;
-    use crate::cli::error::UsageError;
+    use crate::cli::error::{MetadataResolutionError, UsageError};
     use crate::compression::error::Error as CompressionError;
     use crate::config::error::Error as ConfigError;
     use crate::file_structure::error::Error as FileStructureError;
@@ -90,6 +90,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::package::error::Error as PackageError;
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::profile::ProfileError;
+    use crate::utility::fs::{EmptyOrAbsentError, SameFilesystemError, SymlinkWalkError};
 
     macro_rules! try_downcast {
         ($ty:ty) => {
@@ -102,6 +103,10 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     }
 
     try_downcast!(UsageError);
+    try_downcast!(MetadataResolutionError);
+    try_downcast!(SymlinkWalkError);
+    try_downcast!(SameFilesystemError);
+    try_downcast!(EmptyOrAbsentError);
     try_downcast!(crate::Error);
     try_downcast!(ConfigError);
     try_downcast!(ClientError);

@@ -1,19 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::{oci, package::install_info::InstallInfo, package_manager::PackageManager};
+use ocx_lib::{
+    cli::MetadataResolutionError, oci, package::install_info::InstallInfo, package_manager::PackageManager,
+    publisher::LayerRef,
+};
 
 use crate::options;
 
 /// Infers a metadata file path based on the archive file path.
 /// For example, if the content path is `/path/to/package.tar.gz`, this function will return `/path/to/package-metadata.json`.
-pub fn infer_metadata_file(content: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+pub fn infer_metadata_file(content: &std::path::Path) -> Result<std::path::PathBuf, MetadataResolutionError> {
     let content_parent = content
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("content path has no parent directory: {}", content.display()))?;
+        .ok_or_else(|| MetadataResolutionError::InvalidLayerPath {
+            layer: content.to_path_buf(),
+            reason: "no parent directory".into(),
+        })?;
     let mut content_name = content
         .file_stem()
-        .ok_or_else(|| anyhow::anyhow!("content path has no file stem: {}", content.display()))?
+        .ok_or_else(|| MetadataResolutionError::InvalidLayerPath {
+            layer: content.to_path_buf(),
+            reason: "no file stem".into(),
+        })?
         .to_string_lossy()
         .to_string();
     let known_archive_extensions = [".tar", ".tar.gz", ".tgz", ".zip"];
@@ -24,6 +33,36 @@ pub fn infer_metadata_file(content: &std::path::Path) -> anyhow::Result<std::pat
         }
     }
     Ok(content_parent.join(format!("{}-metadata.json", content_name)))
+}
+
+/// Resolves the metadata path used by `ocx package push` and `ocx package
+/// test`.
+///
+/// When `explicit` is `Some`, it wins. Otherwise the helper walks the file
+/// layers, infers a candidate metadata path for each, and dedups: zero file
+/// layers → [`MetadataResolutionError::Required`], multiple distinct
+/// candidates → [`MetadataResolutionError::Ambiguous`].
+pub fn resolve_metadata_path(
+    layers: &[LayerRef],
+    explicit: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, MetadataResolutionError> {
+    if let Some(p) = explicit {
+        return Ok(p.to_path_buf());
+    }
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for layer in layers {
+        if let LayerRef::File(file) = layer {
+            let candidate = infer_metadata_file(file)?;
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    match candidates.len() {
+        0 => Err(MetadataResolutionError::Required),
+        1 => Ok(candidates.into_iter().next().unwrap()),
+        _ => Err(MetadataResolutionError::Ambiguous { candidates }),
+    }
 }
 
 /// List of platforms supported by the current system.

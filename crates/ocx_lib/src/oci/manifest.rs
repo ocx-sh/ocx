@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+//! OCI manifest utilities — platform membership checks.
+//!
+//! For pure manifest *construction* (assembling `ImageManifest` + config blob
+//! bytes from a `package::info::Info` + layer descriptors, with no I/O),
+//! see [`crate::oci::manifest_builder`].
+
 use super::{Manifest, Platform};
 
 /// Returns `true` if the manifest contains an entry for the given platform.

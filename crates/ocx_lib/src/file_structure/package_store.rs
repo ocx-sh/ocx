@@ -25,6 +25,15 @@ pub struct PackageDir {
 }
 
 impl PackageDir {
+    /// Construct a [`PackageDir`] rooted at an arbitrary `path`.
+    ///
+    /// Used by `pull_local` and `package test` to anchor the install pipeline
+    /// at a caller-supplied destination (e.g., a `tempfile::TempDir`) rather
+    /// than the content-addressed object store location.
+    pub fn with_root(path: PathBuf) -> Self {
+        Self { dir: path }
+    }
+
     /// Root directory of the package — parent of `content/`, `entrypoints/`,
     /// `metadata.json`, `refs/`, and the other per-package files.
     ///
@@ -627,6 +636,52 @@ mod tests {
         let store = PackageStore::new(dir.path());
         let packages = store.list_all().await.unwrap();
         assert_eq!(packages.len(), 1);
+    }
+
+    // ── with_root_yields_off_tree_pkg_dir ─────────────────────────────────────
+    //
+    // `PackageDir::with_root(path)` must anchor the package at `path` regardless
+    // of whether `path` is under `$OCX_HOME/packages/`. This is the constructor
+    // that `pull_local` and `package test` use to steer the install pipeline
+    // toward a caller-supplied destination outside the content-addressed store.
+    //
+    // Requirements:
+    //   - `pkg.root()` == `path` (verbatim — no canonicalization applied)
+    //   - All derived accessor paths (`content()`, `metadata()`, …) are children
+    //     of `path`, NOT of any object-store shard path.
+    //
+    // This test is pure logic (no I/O) and always passes even before Phase 4.
+    #[test]
+    fn with_root_yields_off_tree_pkg_dir() {
+        let arbitrary_root = PathBuf::from("/tmp/foo/test-pkg-1234");
+        let pkg = PackageDir::with_root(arbitrary_root.clone());
+
+        // Root is preserved verbatim.
+        assert_eq!(
+            pkg.root(),
+            arbitrary_root.as_path(),
+            "PackageDir::with_root must preserve the supplied path as root"
+        );
+
+        // All child accessors are direct children of the root — not under any
+        // object-store shard prefix.
+        assert_eq!(pkg.content(), arbitrary_root.join("content"));
+        assert_eq!(pkg.metadata(), arbitrary_root.join("metadata.json"));
+        assert_eq!(pkg.manifest(), arbitrary_root.join("manifest.json"));
+        assert_eq!(pkg.resolve(), arbitrary_root.join("resolve.json"));
+        assert_eq!(pkg.install_status(), arbitrary_root.join("install.json"));
+        assert_eq!(pkg.digest_file(), arbitrary_root.join("digest"));
+        assert_eq!(pkg.entrypoints(), arbitrary_root.join("entrypoints"));
+        assert_eq!(pkg.refs_symlinks_dir(), arbitrary_root.join("refs").join("symlinks"));
+
+        // Confirm the root is outside any OCX home path — this is the
+        // "off-tree" guarantee the test name encodes.
+        let root_str = pkg.root().to_str().unwrap_or("");
+        assert!(
+            !root_str.contains(".ocx/packages"),
+            "with_root must not inject an object-store prefix: {}",
+            root_str
+        );
     }
 
     /// Renaming the entrypoints directory invalidates every installed launcher
