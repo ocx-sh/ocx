@@ -34,7 +34,12 @@ tasks:
     deps:
       - install
     cmds:
-      - task: schema:generate
+      # `schema:default` regenerates every published schema (metadata,
+      # config, project, project-lock) so the website ships the canonical
+      # JSON Schema files at `https://ocx.sh/schemas/<kind>/v1.json`. The
+      # `project` and `project-lock` schemas back IDE auto-completion via
+      # the `#:schema` directive emitted by `ocx init`.
+      - task: schema:default
       - task: recordings:parallel
       - task: sbom:generate:page
       - task: catalog:generate

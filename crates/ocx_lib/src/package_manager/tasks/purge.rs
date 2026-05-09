@@ -15,8 +15,7 @@ impl PackageManager {
     /// if the object is still reachable from another root).
     pub async fn purge(&self, identifier: &oci::PinnedIdentifier) -> crate::Result<Vec<PathBuf>> {
         let obj_dir = self.file_structure().packages.path(identifier);
-        let profile = self.profile.snapshot();
-        let gc = GarbageCollector::build(self.file_structure(), &profile).await?;
+        let gc = GarbageCollector::build(self.file_structure(), &[]).await?;
         gc.purge(&[obj_dir]).await
     }
 
@@ -29,8 +28,7 @@ impl PackageManager {
             .iter()
             .map(|id| self.file_structure().packages.path(id))
             .collect();
-        let profile = self.profile.snapshot();
-        let gc = GarbageCollector::build(self.file_structure(), &profile).await?;
+        let gc = GarbageCollector::build(self.file_structure(), &[]).await?;
         gc.purge(&obj_dirs).await
     }
 }

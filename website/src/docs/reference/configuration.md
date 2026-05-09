@@ -138,6 +138,19 @@ Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_
 | `error: invalid TOML at /path/to/file.toml: ...` | TOML syntax error in the config file | Fix the TOML syntax error at the indicated location |
 | `error: failed to read config file /path/to/file.toml: ...` | The file exists but cannot be read — permission denied, the path is a directory, or another I/O failure | Check file permissions; [`--config`][arg-config] and [`OCX_CONFIG`][env-config] must point to a regular, readable file. |
 
+## JSON Schemas {#schemas}
+
+OCX publishes JSON Schemas for every config and project file at stable URLs. IDEs and language servers ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) consume them for autocompletion, hover docs, and validation.
+
+| File | Schema URL |
+|------|------------|
+| `config.toml` (any tier) | [`https://ocx.sh/schemas/config/v1.json`][schema-config] |
+| `ocx.toml` (project) | [`https://ocx.sh/schemas/project/v1.json`][schema-project] |
+| `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v1.json`][schema-project-lock] |
+| `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
+
+`ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
+
 ## Future Config Keys {#future}
 
 ::: details Not yet implemented in v1
@@ -166,18 +179,27 @@ Retention policy configuration will live under `[clean]`. Deferred to the retent
 
 ### Project-level `ocx.toml` {#future-project}
 
-A CWD-walk for a project-level `ocx.toml` is planned. The file name is deliberately different from `config.toml` so the data-directory tier and project tier are never confused. When it lands, it will sit between `$OCX_HOME/config.toml` and `OCX_CONFIG` in the precedence order.
+A project-level `ocx.toml` is now shipped — see the [Project Toolchain section in the user guide](../user-guide.md#project-toolchain) for the schema, locking model, and activation hooks. The file name is deliberately different from `config.toml` so the data-directory tier and project tier are never confused: `ocx.toml` is loaded by a distinct API and never participates in the ambient config chain described above.
 :::
 
 <!-- external -->
 [toml]: https://toml.io/
 [cargo-registries]: https://doc.rust-lang.org/cargo/reference/registries.html
+[taplo]: https://taplo.tamasfe.dev/
+[yaml-ls]: https://github.com/redhat-developer/yaml-language-server
+
+<!-- schemas -->
+[schema-config]: https://ocx.sh/schemas/config/v1.json
+[schema-project]: https://ocx.sh/schemas/project/v1.json
+[schema-project-lock]: https://ocx.sh/schemas/project-lock/v1.json
+[schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 
 <!-- in-depth -->
 [config-indepth]: ../in-depth/configuration.md
 
 <!-- commands -->
 [arg-config]: ./command-line.md#arg-config
+[cmd-lock]: ./command-line.md#lock
 
 <!-- environment -->
 [env-ocx-home]: ./environment.md#ocx-home

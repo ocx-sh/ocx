@@ -65,10 +65,11 @@ The `ocx launcher exec` subcommand â€” used by every generated launcher script â
 
 | Command | Default | Notes |
 |---|---|---|
-| [`ocx exec`][cmd-exec] | off | The primary entry point; launchers embed `--self` |
+| [`ocx exec`][cmd-exec] | off | OCI-tier entry point; launchers embed `--self` |
+| [`ocx run`][cmd-run] | off | Project-tier counterpart to `exec`; binding names from `ocx.toml` |
 | [`ocx env`][cmd-env] | off | Inspect the resolved env for a package |
 | [`ocx shell env`][cmd-shell-env] | off | Generate shell export statements |
-| [`ocx shell profile load`][cmd-profile-load] | off | Load profiled packages into shell |
+| [`ocx shell hook`][cmd-shell-hook] | off | Emit per-profile PATH/env exports for shell eval |
 | [`ocx ci export`][cmd-ci-export] | off | Export env to CI system runtime files |
 | [`ocx deps`][cmd-deps] | off | Show dependency tree with visibility annotations |
 
@@ -249,9 +250,10 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 
 <!-- commands -->
 [cmd-exec]: ../reference/command-line.md#exec
+[cmd-run]: ../reference/command-line.md#run
 [cmd-env]: ../reference/command-line.md#env
 [cmd-shell-env]: ../reference/command-line.md#shell-env
-[cmd-profile-load]: ../reference/command-line.md#shell-profile-load
+[cmd-shell-hook]: ../reference/command-line.md#shell-hook
 [cmd-ci-export]: ../reference/command-line.md#ci-export
 [cmd-deps]: ../reference/command-line.md#deps
 

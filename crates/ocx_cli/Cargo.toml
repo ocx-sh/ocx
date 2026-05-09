@@ -14,7 +14,11 @@ ocx_lib = { workspace = true }
 
 tokio = { workspace = true }
 
-clap = { version = "4", features = ["derive", "color"] }
+# NOTE: clap 4.5.55 (2026-01-27) introduced a regression in the
+# `value_terminator("--") + last(true)` interaction; 4.5.57 (2026-02-03)
+# fixed it. Floor set here to prevent pulling the broken versions when used
+# by `ocx run`'s parser shape. Source: clap CHANGELOG.
+clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
 clap_complete = "4.6.2"
 anyhow = "1.0.101"
 tar = "0.4.45"

@@ -200,7 +200,7 @@ Two symlink entries cover every use case. Both target the **package root** (`pac
 
 **`candidates/{tag}`** — pinned to a specific version. Created by [`ocx install`][cmd-install] and pointed at the exact digest that tag resolved to at install time. cmake 3.28 and 3.30 can coexist; both candidates remain until you explicitly uninstall one. Even if the registry later re-pushes the `3.28` tag with a different binary, your candidate still points to the build you originally installed.
 
-**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you update the tag store. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], [`ocx shell profile load`][cmd-shell-profile] adds `{repo}/current/entrypoints` to `$PATH` so every declared launcher becomes a top-level command. See [Entry Points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
+**`current`** — a floating pointer to whichever candidate you last declared active. Set by [`ocx select`][cmd-select] (or `ocx install --select` in one step). It is never updated automatically — not when you install a newer version, not when you update the tag store. This is intentional: tools referencing `current` should only change behavior when *you* decide they should. When the selected package declares [`entrypoints`][metadata-entry-points], [`ocx shell hook`][cmd-shell-hook] emits a `PATH` export for `{repo}/current/entrypoints` so every declared launcher becomes a top-level command. See [Entry Points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
 
 ::: info Inspired by SDKMAN and Homebrew
 [SDKMAN][sdkman] (the Java SDK manager) uses the same two-level pattern: `~/.sdkman/candidates/{tool}/{version}/` for pinned installs and a `current` symlink updated by `sdk default {version}`. [Homebrew][homebrew] does the same with its `Cellar/{formula}/{version}/` store and a stable `opt/{formula}` symlink pointing at the active version. Linux's `update-alternatives` is the system-level equivalent, managing tools like `java` and `python3` via a layer of stable symlinks in `/etc/alternatives/`.
@@ -230,7 +230,7 @@ Two symlink entries cover every use case. Both target the **package root** (`pac
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-launcher-exec]: ../reference/command-line.md#exec
 [cmd-exec]: ../reference/command-line.md#exec
-[cmd-shell-profile]: ../reference/command-line.md#shell-profile
+[cmd-shell-hook]: ../reference/command-line.md#shell-hook
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home

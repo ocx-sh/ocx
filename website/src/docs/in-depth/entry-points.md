@@ -7,7 +7,7 @@ Most installed packages end up driven through one or two commands — `cmake`, `
 
 Entry points close that gap. A publisher declares named launchers in [`metadata.json`][metadata-ref]; at install time OCX generates a small script per launcher that re-enters the package through the internal `ocx launcher exec` subcommand. Users add one directory to `$PATH` and every declared name becomes a top-level command, with the same clean-env guarantees as a direct `ocx exec` call.
 
-This page explains the inner workings of entry points — how launchers are generated, how they integrate with [env composition][env-composition], how collisions are detected, and how transitive dependencies contribute their launchers via the synth-PATH mechanism. For the field-level schema see the [metadata reference][metadata-entry-points]; for the command-line flags that wrap launchers at runtime see [`ocx exec`][cmd-exec] and [`ocx shell profile load`][cmd-shell-profile].
+This page explains the inner workings of entry points — how launchers are generated, how they integrate with [env composition][env-composition], how collisions are detected, and how transitive dependencies contribute their launchers via the synth-PATH mechanism. For the field-level schema see the [metadata reference][metadata-entry-points]; for the command-line flags that wrap launchers at runtime see [`ocx exec`][cmd-exec] and [`ocx shell hook`][cmd-shell-hook].
 
 ## Declaring Entry Points {#declaring}
 
@@ -122,16 +122,16 @@ Launchers are harmless files until something puts them on `$PATH`. OCX does that
 
 - [`ocx select <package>`][cmd-select] flips `current` to the selected package root. Tools that need launchers reach them via `{registry}/{repo}/current/entrypoints` — there is no separate symlink for entry points; the same anchor exposes content (`current/content`), launchers (`current/entrypoints`), and metadata (`current/metadata.json`).
 - [`ocx deselect <package>`][cmd-deselect] and [`ocx uninstall <package>`][cmd-uninstall] remove `current` as part of their cleanup. Both operations are idempotent — an already-absent symlink is not an error.
-- [`ocx shell profile load`][cmd-shell-profile] emits a shell-specific `PATH` export for every profile entry whose `current` symlink exists *and* whose metadata has a non-empty `entrypoints` array; the exported path is `{registry}/{repo}/current/entrypoints`. Packages that haven't been `ocx select`ed yet (candidate-mode profile entries) are silently skipped, so profile loading never points `$PATH` at a missing directory.
+- [`ocx shell hook`][cmd-shell-hook] emits shell export statements for every selected package whose `current` symlink exists *and* whose metadata has a non-empty `entrypoints` array; the exported `PATH` entry is `{registry}/{repo}/current/entrypoints`. Packages that haven't been `ocx select`ed yet are silently skipped, so the hook never points `$PATH` at a missing directory.
 
 The typical shell wire-up is a single line in a dotfile:
 
 ```sh
 # ~/.bashrc — evaluated on every shell start
-eval "$(ocx --offline shell profile load)"
+eval "$(ocx --offline shell hook bash)"
 ```
 
-The `--offline` flag is essential here: profile load runs on every shell startup and must never touch the network. From the user's perspective, once the shell is open, `cmake --build .` resolves to your launcher, which resolves to your binary, all inside a clean environment.
+The `--offline` flag is essential here: the hook runs on every shell startup and must never touch the network. From the user's perspective, once the shell is open, `cmake --build .` resolves to your launcher, which resolves to your binary, all inside a clean environment.
 
 ::: info Similar to SDKMAN and asdf shims
 [SDKMAN][sdkman] generates shim scripts at `~/.sdkman/candidates/{tool}/current/bin/` and relies on a fixed PATH entry per tool; [asdf][asdf] takes the same approach with a single `~/.asdf/shims/` directory. OCX uses the same idea: one PATH entry per package, anchored on the per-repo `current` symlink, with launchers living under `current/entrypoints`.
@@ -175,7 +175,7 @@ OCX launchers use `SETLOCAL DisableDelayedExpansion`, which closes the registry-
 
 PowerShell invokes `.cmd` files natively — `cmake --version` in a PowerShell prompt resolves to `cmake.cmd` on `$PATH`, runs it under `cmd.exe`, and returns the combined exit code. OCX does **not** generate a `.ps1` variant: a native PowerShell script ran into argument-forwarding quirks around `--` and quoted empty strings during prototyping, and the `.cmd` path avoids every known issue while covering the entire PowerShell user base.
 
-The practical rule is: PowerShell users should install into PowerShell's `$PROFILE` exactly the same `ocx --offline shell profile load` snippet as a `cmd.exe` user. The resulting `$PATH` entries pick up the `.cmd` launchers automatically.
+The practical rule is: PowerShell users should add `ocx --offline shell hook powershell | Invoke-Expression` to their `$PROFILE`. The resulting `$PATH` entries pick up the `.cmd` launchers automatically.
 
 ::: warning PowerShell `%`-style variable references in arguments
 When you call a `.cmd` launcher from a PowerShell prompt, PowerShell expands `%SystemRoot%`-style references inside double-quoted argument strings **before** the argument reaches `cmd.exe`. For example, `cmake "--install=%SystemRoot%\tools"` will have `%SystemRoot%` replaced by PowerShell with the value of `$env:SystemRoot` before the launcher ever runs. Use the PowerShell `--%-` stop-parsing operator to pass arguments verbatim to the cmd.exe layer:
@@ -238,7 +238,7 @@ And on the consumer side:
 
 ```shell
 ocx install --select cmake:3.28
-eval "$(ocx --offline shell profile load)"   # already in ~/.bashrc in practice
+eval "$(ocx --offline shell hook bash)"   # already in ~/.bashrc in practice
 
 # Both are now top-level commands, running under ocx exec's clean environment.
 cmake --version
@@ -252,7 +252,7 @@ ocx install cmake:3.30
 ocx select cmake:3.30     # current flips; next shell command uses 3.30
 ```
 
-No shell profile rewrite, no re-sourcing dotfiles. The stable `current/entrypoints` path was already on `$PATH`; the select just re-points the `current` symlink at the new package root.
+No re-sourcing dotfiles. The `ocx shell hook` output is stable — it emits exports for whichever packages are currently selected. The stable `current/entrypoints` path was already on `$PATH`; the select just re-points the `current` symlink at the new package root, and the next shell open picks up the updated hook output automatically.
 
 <!-- security -->
 [adr-argv]: https://github.com/ocx-sh/ocx/blob/main/.claude/artifacts/adr_windows_cmd_argv_injection.md
@@ -272,7 +272,7 @@ No shell profile rewrite, no re-sourcing dotfiles. The stable `current/entrypoin
 [cmd-select]: ../reference/command-line.md#select
 [cmd-deselect]: ../reference/command-line.md#deselect
 [cmd-uninstall]: ../reference/command-line.md#uninstall
-[cmd-shell-profile]: ../reference/command-line.md#shell-profile-load
+[cmd-shell-hook]: ../reference/command-line.md#shell-hook
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home

@@ -14,6 +14,8 @@ pub use context::Context;
 mod context_options;
 pub use context_options::ContextOptions;
 
+pub mod project_context;
+
 mod update_check;
 
 mod version;

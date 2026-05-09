@@ -26,4 +26,8 @@ ocx_lib = { path = "crates/ocx_lib" }
 tokio = { version = "1", features = ["full"] }
 serde_yaml_ng = "0.10"
 
-[workspace.lints]
+[workspace.lints.clippy]
+# Placeholder for future workspace-wide clippy overrides. Crate-specific
+# overrides belong in each crate's own [lints.clippy] section so the
+# scope is explicit. Kept empty so `[lints] workspace = true` in crate
+# manifests continues to resolve.

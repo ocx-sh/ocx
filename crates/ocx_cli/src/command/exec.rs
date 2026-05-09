@@ -58,7 +58,9 @@ impl Exec {
         let platforms = platforms_or_default(self.platforms.as_slice());
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
-        let infos = manager.find_or_install_all(identifiers, platforms).await?;
+        let infos = manager
+            .find_or_install_all(identifiers, platforms, context.concurrency())
+            .await?;
         let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             infos.into_iter().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&install_infos, self.self_view).await?;

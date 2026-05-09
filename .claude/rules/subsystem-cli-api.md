@@ -79,3 +79,29 @@ pub enum RemovedStatus {
 2. Add `pub mod {name};` to `api/data.rs`
 3. Add `report_{name}()` method to `Api` in `api.rs` (delegates to `self.report()`)
 4. Call from `command/{name}.rs` with data built from task results
+
+## Project-Tier Commands: `Run` Pattern
+
+`command/run.rs` follows the same `struct + execute(&self, context)` pattern as every other command but diverges from the `Printable` / `api/data/` path: it never calls `context.api().report()` because execution diverges via `child_process::exec` (the child replaces the process on Unix, or is waited synchronously on Windows). There is no structured output to emit from the parent.
+
+Consequently, `RunFilterError` (the private error type from `filter_by_names`) stays inside `command/run.rs` and is never placed in `api/data/`. It carries CLI-shaped wording (binding names, group names) and exits 64 before any spawn — no `Printable` payload is involved.
+
+The `Run` struct public surface:
+
+```rust
+// crates/ocx_cli/src/command/run.rs
+#[derive(Parser, Clone)]
+pub struct Run {
+    pub groups: Vec<String>,      // -g / --group, comma-and-repeatable
+    pub clean: bool,              // --clean
+    pub self_view: bool,          // --self
+    pub names: Vec<String>,       // binding-name filter (0.., value_terminator = "--")
+    pub argv: Vec<String>,        // child argv (1.., last = true, allow_hyphen_values)
+}
+
+impl Run {
+    pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode>;
+}
+```
+
+The `app/project_context.rs` module provides `load_project_with_lock` — the shared prologue consumed by both `pull.rs` and `run.rs`. See `subsystem-cli-commands.md` Semantics & Gotchas for the full `run` contract.
