@@ -272,6 +272,35 @@ impl index_impl::IndexImpl for ChainedIndex {
         self.cache.fetch_manifest_digest(identifier).await
     }
 
+    async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        // Cache-first: content-addressed, local hit is authoritative.
+        if let Some(bytes) = self.cache.fetch_blob(blob_ref).await? {
+            return Ok(Some(bytes));
+        }
+        if self.mode == ChainMode::Offline {
+            return Ok(None);
+        }
+        // Walk sources; first `Some` wins, write-through on hit.
+        // Propagate last error if every source erred (trust boundary).
+        let mut last_error: Option<crate::Error> = None;
+        for source in &self.sources {
+            match source.fetch_blob(blob_ref).await {
+                Ok(Some(bytes)) => {
+                    if let Err(e) = self.cache.stage_blob_bytes(blob_ref, &bytes).await {
+                        log::warn!("Write-through stage failed for '{blob_ref}': {e}");
+                    }
+                    return Ok(Some(bytes));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("Source fetch_blob failed for '{blob_ref}': {e}");
+                    last_error = Some(e);
+                }
+            }
+        }
+        last_error.map_or(Ok(None), Err)
+    }
+
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(Self {
             cache: self.cache.clone(),
@@ -380,6 +409,10 @@ mod chain_refs_tests {
             let tag = identifier.tag_or_latest();
             *self.call_count.lock().unwrap() += 1;
             Ok(self.known_tags.get(tag).cloned())
+        }
+        async fn fetch_blob(&self, _blob_ref: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            *self.call_count.lock().unwrap() += 1;
+            Ok(None)
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
             Box::new(self.clone())
@@ -604,6 +637,9 @@ mod chain_refs_tests {
             async fn fetch_manifest_digest(&self, _: &Identifier) -> Result<Option<Digest>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("test error".to_string()).into())
             }
+            async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+                Err(super::super::error::Error::RemoteManifestNotFound("test error".to_string()).into())
+            }
             fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
                 Box::new(self.clone())
             }
@@ -775,6 +811,9 @@ mod chain_refs_tests {
             async fn fetch_manifest_digest(&self, _: &Identifier) -> Result<Option<Digest>> {
                 Ok(None)
             }
+            async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
             fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
                 Box::new(self.clone())
             }
@@ -812,6 +851,9 @@ mod chain_refs_tests {
                 Ok(None)
             }
             async fn fetch_manifest_digest(&self, _: &Identifier) -> Result<Option<Digest>> {
+                Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()).into())
+            }
+            async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()).into())
             }
             fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -891,6 +933,153 @@ mod chain_refs_tests {
             "singleflight must deduplicate {N} concurrent waiters to exactly 1 source call; \
              got {total_calls}"
         );
+    }
+
+    // ── fetch_blob — config-blob routing through ChainedIndex ─────
+
+    /// Source stub that serves a single fixed `(digest → bytes)` mapping
+    /// from `fetch_blob`. Records call count so tests can assert
+    /// cache-first behaviour.
+    #[derive(Clone)]
+    struct BlobOnlySource {
+        digest: Digest,
+        bytes: Vec<u8>,
+        call_count: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for BlobOnlySource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, blob_ref: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            *self.call_count.lock().unwrap() += 1;
+            if blob_ref.digest() == self.digest {
+                Ok(Some(self.bytes.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn pinned_for_test() -> crate::oci::PinnedIdentifier {
+        crate::oci::PinnedIdentifier::try_from(digest_only_id()).unwrap()
+    }
+
+    /// Cache hit: blob already in `blobs/{registry}/.../data` — returns the
+    /// bytes without consulting any source. Proves the offline-rehydration
+    /// path works when the local CAS already holds the blob.
+    #[tokio::test]
+    async fn chained_fetch_blob_cache_hit_no_source_call() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let pinned = pinned_for_test();
+        let blob_digest = digest_b();
+        let bytes = b"cached config blob".to_vec();
+        let blob_ref = pinned.clone_with_digest(blob_digest.clone());
+        cache
+            .stage_blob_bytes(&blob_ref, &bytes)
+            .await
+            .expect("stage_blob_bytes must succeed");
+
+        let spy = BlobOnlySource {
+            digest: blob_digest.clone(),
+            bytes: b"should-not-be-served".to_vec(),
+            call_count: Arc::new(Mutex::new(0)),
+        };
+        let spy_calls = spy.call_count.clone();
+        let src_idx = super::super::Index::from_impl(spy);
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+
+        let got = chained
+            .fetch_blob(&blob_ref)
+            .await
+            .expect("fetch_blob must succeed")
+            .expect("cache hit must return Some(bytes)");
+        assert_eq!(got, bytes, "cache hit must return the on-disk bytes");
+        assert_eq!(*spy_calls.lock().unwrap(), 0, "cache hit must not consult sources");
+    }
+
+    /// Offline mode + local miss → `Ok(None)`. Caller maps `None` to
+    /// `Error::OfflineMode` at the policy boundary (see `pull::setup_owned`).
+    #[tokio::test]
+    async fn chained_fetch_blob_offline_miss_returns_none() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let pinned = pinned_for_test();
+        let blob_digest = digest_b();
+
+        // A source is configured but must never be consulted in Offline mode.
+        let spy = BlobOnlySource {
+            digest: blob_digest.clone(),
+            bytes: b"forbidden in offline mode".to_vec(),
+            call_count: Arc::new(Mutex::new(0)),
+        };
+        let spy_calls = spy.call_count.clone();
+        let src_idx = super::super::Index::from_impl(spy);
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Offline);
+
+        let blob_ref = pinned.clone_with_digest(blob_digest.clone());
+        let got = chained.fetch_blob(&blob_ref).await.expect("fetch_blob must succeed");
+        assert!(got.is_none(), "Offline-mode local miss must return None");
+        assert_eq!(*spy_calls.lock().unwrap(), 0, "Offline mode must not consult sources");
+    }
+
+    /// Default mode + local miss → walks the source chain, returns the
+    /// bytes, AND persists them into the local CAS so a subsequent offline
+    /// read hits without a network round-trip. This is the regression
+    /// guarantee for `ocx clean; rm -rf packages installs; --offline install`.
+    #[tokio::test]
+    async fn chained_fetch_blob_walks_chain_and_persists() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let pinned = pinned_for_test();
+        let blob_digest = digest_b();
+        let bytes = b"freshly fetched config blob".to_vec();
+
+        let spy = BlobOnlySource {
+            digest: blob_digest.clone(),
+            bytes: bytes.clone(),
+            call_count: Arc::new(Mutex::new(0)),
+        };
+        let spy_calls = spy.call_count.clone();
+        let src_idx = super::super::Index::from_impl(spy);
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
+
+        // Pre-condition: not on disk yet.
+        let inspect_store = BlobStore::new(cache_dir.path().join("blobs"));
+        let on_disk = inspect_store.data(REGISTRY, &blob_digest);
+        assert!(!on_disk.exists(), "blob must be absent before the chain walk");
+
+        let blob_ref = pinned.clone_with_digest(blob_digest.clone());
+        let got = chained
+            .fetch_blob(&blob_ref)
+            .await
+            .expect("fetch_blob must succeed")
+            .expect("source hit must return Some(bytes)");
+        assert_eq!(got, bytes);
+        assert_eq!(*spy_calls.lock().unwrap(), 1, "source must be called exactly once");
+
+        // Post-condition: blob persisted into local CAS for offline rehydration.
+        assert!(
+            on_disk.exists(),
+            "write-through must persist the blob at {}",
+            on_disk.display()
+        );
+        let staged = std::fs::read(&on_disk).unwrap();
+        assert_eq!(staged, bytes, "staged bytes must match fetched bytes");
     }
 }
 
@@ -1043,6 +1232,13 @@ mod tests {
             let tag = identifier.tag_or_latest();
             self.calls.lock().unwrap().push(tag.to_string());
             Ok(self.known_tags.get(tag).cloned())
+        }
+
+        async fn fetch_blob(&self, _blob_ref: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            if let Some(msg) = &self.force_error {
+                return Err(super::super::error::Error::RemoteManifestNotFound(msg.clone()).into());
+            }
+            Ok(None)
         }
 
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {

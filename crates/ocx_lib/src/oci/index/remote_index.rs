@@ -71,6 +71,11 @@ impl index_impl::IndexImpl for Index {
         Ok(Some(digest))
     }
 
+    async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        let bytes = self.client.pull_blob(blob_ref).await?;
+        Ok(Some(bytes))
+    }
+
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(Self {
             client: self.client.clone(),

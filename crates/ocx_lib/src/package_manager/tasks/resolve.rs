@@ -17,11 +17,16 @@ use super::super::PackageManager;
 
 /// The full resolution output for a single identifier.
 ///
-/// `chain` lists every pinned identifier the resolver touched — one entry
-/// per manifest blob, in walk order. Every entry is backed by an on-disk
-/// `blobs/{registry}/.../data` file, guaranteed by `ChainedIndex`
-/// write-through persistence. `final_manifest` is the platform-selected
-/// image manifest (never an image index).
+/// `chain` lists every digest the resolved package depends on as a raw
+/// blob in `blobs/`: manifest entries (image-index where present,
+/// image-manifest) followed by the trailing OCX metadata config blob.
+/// Manifest entries land on disk via `ChainedIndex` write-through during
+/// `resolve`; the trailing config-blob entry is **not** guaranteed on
+/// disk by `resolve` alone — `pull::setup_owned` materializes it via
+/// `common::fetch_or_get_blob` before `ReferenceManager::link_blobs`
+/// runs. `link_blobs` tolerates dangling targets (eventual consistency;
+/// GC collects). `final_manifest` is the platform-selected image
+/// manifest (never an image index).
 #[derive(Debug, Clone)]
 pub struct ResolvedChain {
     /// The platform-selected pinned identifier — same value the old
@@ -92,11 +97,18 @@ impl PackageManager {
             // Flat image manifest: the chain is a single entry and the
             // top-level digest IS the pinned identifier. Platform filtering
             // does not apply here — a single-platform package always matches.
-            oci::Manifest::Image(img) => Ok(ResolvedChain {
-                pinned: top_pinned,
-                chain,
-                final_manifest: img,
-            }),
+            oci::Manifest::Image(img) => {
+                let config_digest =
+                    oci::Digest::try_from(img.config.digest.as_str()).map_err(|_| PackageErrorKind::DigestMissing)?;
+                let config_pinned = oci::PinnedIdentifier::try_from(top_id.clone_with_digest(config_digest))
+                    .map_err(|_| PackageErrorKind::DigestMissing)?;
+                chain.push(config_pinned);
+                Ok(ResolvedChain {
+                    pinned: top_pinned,
+                    chain,
+                    final_manifest: img,
+                })
+            }
             // Image index: defer platform selection to `Index::select`, then
             // fetch the selected child to append it to the chain and return
             // its manifest as `final_manifest`.
@@ -142,6 +154,12 @@ impl PackageManager {
                 let child_pinned = oci::PinnedIdentifier::try_from(child_id.clone_with_digest(child_digest))
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
                 chain.push(child_pinned);
+
+                let config_digest = oci::Digest::try_from(final_manifest.config.digest.as_str())
+                    .map_err(|_| PackageErrorKind::DigestMissing)?;
+                let config_pinned = oci::PinnedIdentifier::try_from(top_id.clone_with_digest(config_digest))
+                    .map_err(|_| PackageErrorKind::DigestMissing)?;
+                chain.push(config_pinned);
 
                 Ok(ResolvedChain {
                     pinned,
@@ -303,33 +321,40 @@ mod spec_tests {
     }
 
     /// `resolve` against a flat `ImageManifest` yields a `ResolvedChain`
-    /// with exactly one entry — the top-level manifest digest.
+    /// with two entries — the top-level manifest digest followed by the
+    /// config-blob digest.
     #[tokio::test]
-    async fn resolve_single_image_returns_one_chain_entry() {
+    async fn resolve_single_image_returns_two_chain_entries() {
         let dir = TempDir::new().unwrap();
         seed_flat_manifest(&dir, &digest_a());
         let mgr = make_manager(&dir);
         let result = mgr.resolve(&tagged_id(), vec![linux_amd64()]).await.unwrap();
         assert_eq!(
             result.chain.len(),
-            1,
-            "flat ImageManifest must produce exactly 1 chain entry"
+            2,
+            "flat ImageManifest must produce manifest + config chain entries"
         );
         assert_eq!(result.pinned.digest(), digest_a());
+        assert_eq!(
+            result.chain[1].digest().to_string(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "second entry must be the manifest's config-blob digest"
+        );
     }
 
-    /// `resolve` against an `ImageIndex` yields a `ResolvedChain` with two
-    /// entries — the top-level index plus the platform-selected child.
+    /// `resolve` against an `ImageIndex` yields a `ResolvedChain` with three
+    /// entries — the top-level index, the platform-selected child manifest,
+    /// and the trailing config-blob digest.
     #[tokio::test]
-    async fn resolve_image_index_returns_two_chain_entries() {
+    async fn resolve_image_index_returns_three_chain_entries() {
         let dir = TempDir::new().unwrap();
         seed_image_index(&dir, &digest_a(), &digest_b());
         let mgr = make_manager(&dir);
         let result = mgr.resolve(&tagged_id(), vec![linux_amd64()]).await.unwrap();
         assert_eq!(
             result.chain.len(),
-            2,
-            "ImageIndex must produce 2 chain entries (top + selected platform)"
+            3,
+            "ImageIndex must produce 3 chain entries (top + selected platform + config)"
         );
         assert_eq!(
             result.chain[0].digest(),
@@ -340,6 +365,11 @@ mod spec_tests {
             result.chain[1].digest(),
             digest_b(),
             "second entry must be the platform-selected child digest"
+        );
+        assert_eq!(
+            result.chain[2].digest().to_string(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "third entry must be the child manifest's config-blob digest"
         );
         assert_eq!(result.pinned.digest(), digest_b());
     }
@@ -384,11 +414,16 @@ mod spec_tests {
         let mgr = make_manager(&dir);
         let result = mgr.resolve(&tagged_id(), vec![linux_amd64()]).await.unwrap();
 
-        for pinned in &result.chain {
+        // Manifest entries (all chain entries except the trailing config blob)
+        // must be on disk — ChainedIndex write-through guarantees that.
+        // The trailing config-blob entry is materialised later by
+        // pull::setup_owned via common::fetch_or_get_blob, not by resolve.
+        let manifest_entries = &result.chain[..result.chain.len() - 1];
+        for pinned in manifest_entries {
             let blob_path = blob_store.data(pinned.registry(), &pinned.digest());
             assert!(
                 blob_path.exists(),
-                "property violated: chain entry {pinned} has no on-disk blob at {}",
+                "property violated: manifest chain entry {pinned} has no on-disk blob at {}",
                 blob_path.display()
             );
         }

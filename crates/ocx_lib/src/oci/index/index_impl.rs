@@ -18,5 +18,12 @@ pub trait IndexImpl: Send + Sync {
     async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>>;
     async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>>;
 
+    /// Fetch the raw bytes of a content blob.
+    ///
+    /// `blob_ref` carries `(registry, repo)` for the OCI blob endpoint and
+    /// the blob's own digest for content addressing. `Ok(None)` = unrecoverable
+    /// miss (e.g. local-only mode + absent).
+    async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>>;
+
     fn box_clone(&self) -> Box<dyn IndexImpl>;
 }

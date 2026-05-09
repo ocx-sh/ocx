@@ -3,9 +3,8 @@
 
 use crate::{
     ACCEPTED_MANIFEST_MEDIA_TYPES, MEDIA_TYPE_DESCRIPTION_V1, MEDIA_TYPE_MARKDOWN, MEDIA_TYPE_OCI_EMPTY_CONFIG,
-    MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1,
-    MEDIA_TYPE_PNG, MEDIA_TYPE_SVG, Result, archive, compression, log, media_type_file_ext, media_type_from_path,
-    media_type_select, oci,
+    MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_PACKAGE_V1, MEDIA_TYPE_PNG, MEDIA_TYPE_SVG,
+    Result, archive, compression, log, media_type_file_ext, media_type_from_path, oci,
     package::{self, info::Info, metadata, tag::InternalTag},
     utility,
 };
@@ -282,11 +281,11 @@ impl Client {
     // Composable methods for fetching a package from a registry:
     //
     //   pull_manifest  → ImageManifest   (validate digest, media types, layers)
-    //   pull_metadata  → Metadata        (fetch config blob — deps, env, etc.)
+    //   pull_blob      → Vec<u8>         (raw OCI blob fetch by digest)
     //   pull_layer     → extracted dir   (download one layer blob, extract, codesign)
     //
-    // `pull_metadata` accepts an optional manifest; if `None`, it calls
-    // `pull_manifest` internally.
+    // Higher-level metadata fetch (with local-CAS caching) lives in
+    // `package_manager::tasks::common::fetch_or_get_blob`.
 
     /// Fetches and validates the OCI manifest for a pinned package.
     ///
@@ -316,34 +315,16 @@ impl Client {
         Ok(manifest)
     }
 
-    /// Fetches the package metadata from the config blob (~1KB).
+    /// Fetches a single blob from the registry.
     ///
-    /// If `manifest` is `None`, fetches it via [`pull_manifest`](Self::pull_manifest).
-    pub async fn pull_metadata(
-        &self,
-        identifier: &oci::PinnedIdentifier,
-        manifest: Option<&oci::ImageManifest>,
-    ) -> std::result::Result<metadata::Metadata, ClientError> {
-        let owned;
-        let manifest = match manifest {
-            Some(m) => m,
-            None => {
-                owned = self.pull_manifest(identifier).await?;
-                &owned
-            }
-        };
-
-        media_type_select(&manifest.config.media_type, &[MEDIA_TYPE_PACKAGE_METADATA_V1])
-            .map_err(|e| ClientError::InvalidManifest(e.to_string()))?;
-
-        let image = native::Reference::from(&**identifier);
+    /// `blob_ref` carries `(registry, repo)` for the OCI blob endpoint and
+    /// the blob's own digest for content addressing. Generic OCI blob fetch
+    /// — no media-type validation, no parsing. Caller is responsible for
+    /// content interpretation.
+    pub async fn pull_blob(&self, blob_ref: &oci::PinnedIdentifier) -> std::result::Result<Vec<u8>, ClientError> {
+        let image = native::Reference::from(&**blob_ref);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
-
-        let config_digest = Digest::try_from(manifest.config.digest.as_str()).map_err(|e| {
-            ClientError::InvalidManifest(format!("config digest '{}' is malformed: {e}", manifest.config.digest))
-        })?;
-        let bytes = self.transport.pull_blob(&image, &config_digest).await?;
-        serde_json::from_slice(&bytes).map_err(ClientError::Serialization)
+        self.transport.pull_blob(&image, &blob_ref.digest()).await
     }
 
     /// Downloads and extracts a single OCI layer to the specified directory.
@@ -897,6 +878,7 @@ where
 mod tests {
     use super::test_transport::{StubTransport, StubTransportData};
     use super::*;
+    use crate::MEDIA_TYPE_PACKAGE_METADATA_V1;
     use crate::oci;
 
     use std::sync::Mutex;
@@ -1108,7 +1090,7 @@ mod tests {
         assert!(result.is_ok(), "pull_manifest should not validate media types");
     }
 
-    // ── pull_metadata tests ─────────────────────────────────────
+    // ── pull_blob tests ─────────────────────────────────────────
 
     /// Helper: register a manifest + config blob in the stub, returning the pinned ID.
     fn setup_manifest_and_blob(
@@ -1133,31 +1115,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_metadata_success() {
+    async fn pull_blob_returns_raw_bytes() {
         let metadata_json = br#"{"type":"bundle","version":1}"#;
         let data = StubTransportData::new();
         let manifest = make_image_manifest("sha256:cff", "sha256:1a0e");
-        let id = setup_manifest_and_blob(&data, manifest, metadata_json);
-        let client = stub(&data);
-
-        let result = client.pull_metadata(&id, None).await;
-        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
-    }
-
-    #[tokio::test]
-    async fn pull_metadata_rejects_wrong_config_media_type() {
-        let metadata_json = br#"{"type":"bundle","version":1}"#;
-        let mut manifest = make_image_manifest("sha256:cff", "sha256:1a0e");
-        manifest.config.media_type = "application/vnd.wrong".to_string();
-
-        let data = StubTransportData::new();
         let id = setup_manifest_and_blob(&data, manifest.clone(), metadata_json);
         let client = stub(&data);
 
-        let result = client.pull_metadata(&id, Some(&manifest)).await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("invalid manifest"), "got: {}", err_msg);
+        let config_digest = Digest::try_from(manifest.config.digest.as_str()).unwrap();
+        let blob_ref = id.clone_with_digest(config_digest);
+        let bytes = client
+            .pull_blob(&blob_ref)
+            .await
+            .expect("pull_blob should return registered bytes");
+        assert_eq!(bytes.as_slice(), metadata_json.as_slice());
+
+        // Round-trip parse confirms the bytes are intact.
+        let parsed: metadata::Metadata = serde_json::from_slice(&bytes).expect("returned bytes must parse as Metadata");
+        let _ = parsed;
     }
 
     // ── verify_blob_digest tests ────────────────────────────────
