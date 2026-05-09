@@ -271,8 +271,27 @@ impl index_impl::IndexImpl for LocalIndex {
         Ok(None)
     }
 
+    async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        let Some(guard) = self.blob_store.acquire_read(blob_ref).await? else {
+            return Ok(None);
+        };
+        let bytes = guard.read_bytes().await?;
+        Ok(Some(bytes))
+    }
+
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(self.clone())
+    }
+}
+
+impl LocalIndex {
+    /// Stage raw blob bytes into the local CAS under the blob's own digest.
+    ///
+    /// Content-addressed: re-staging the same digest is idempotent.
+    pub async fn stage_blob_bytes(&self, blob_ref: &oci::PinnedIdentifier, bytes: &[u8]) -> Result<()> {
+        let guard = self.blob_store.acquire_write(blob_ref).await?;
+        guard.write_bytes(bytes).await?;
+        Ok(())
     }
 }
 
@@ -345,6 +364,9 @@ mod spec_tests {
         async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
             Ok(self.known_tags.get(identifier.tag_or_latest()).cloned())
         }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
         fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
             Box::new(self.clone())
         }
@@ -378,6 +400,9 @@ mod spec_tests {
         }
         async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
             Ok(self.known.get(identifier.tag_or_latest()).cloned())
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
         }
         fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
             Box::new(self.clone())
@@ -539,6 +564,9 @@ mod spec_tests {
             async fn fetch_manifest_digest(&self, _: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
                 Ok(Some(self.d.clone()))
             }
+            async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
             fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
                 Box::new(self.clone())
             }
@@ -620,6 +648,9 @@ mod spec_tests {
             }
             async fn fetch_manifest_digest(&self, _: &oci::Identifier) -> crate::Result<Option<oci::Digest>> {
                 Ok(Some(self.parent.clone()))
+            }
+            async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+                Ok(None)
             }
             fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
                 Box::new(self.clone())
@@ -826,6 +857,10 @@ mod concurrency_tests {
 
         async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
             Ok(self.known_tags.get(identifier.tag_or_latest()).cloned())
+        }
+
+        async fn fetch_blob(&self, _blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
         }
 
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {

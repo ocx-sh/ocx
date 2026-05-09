@@ -10,7 +10,8 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, info_span};
 
 use crate::{
-    MEDIA_TYPE_PACKAGE_V1, file_structure, log, media_type_select_some, oci,
+    MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1, file_structure, log, media_type_select,
+    media_type_select_some, oci,
     package::{install_info::InstallInfo, install_status::InstallStatus, metadata, resolved_package::ResolvedPackage},
     package_manager::{
         self, composer,
@@ -337,8 +338,27 @@ pub async fn setup_owned(
     let metadata = if let Some(meta) = provided_metadata {
         meta
     } else {
-        let client = mgr.require_client().map_err(PackageErrorKind::Internal)?;
-        let raw = client.pull_metadata(pinned, Some(&manifest)).await?;
+        // Config blob media-type check before any fetch — refuse to stage
+        // a wrong-media-type blob into the local CAS.
+        media_type_select(&manifest.config.media_type, &[MEDIA_TYPE_PACKAGE_METADATA_V1])
+            .map_err(|e| PackageErrorKind::from(oci::client::error::ClientError::internal(e)))?;
+        let config_digest =
+            oci::Digest::try_from(manifest.config.digest.as_str()).map_err(|e| PackageErrorKind::Internal(e.into()))?;
+        // Route through the index. `ChainedIndex::fetch_blob` is the
+        // single offline-aware blob accessor: local-CAS first, chain-walk
+        // on miss, write-through into the local CAS on hit, and `Ok(None)`
+        // in `ChainMode::Offline` when the local CAS does not have the
+        // blob. GC-protection comes from the config-blob digest carried
+        // in `ResolvedChain.chain` driving `ReferenceManager::link_blobs`
+        // below.
+        let bytes = mgr
+            .index()
+            .fetch_blob(&pinned.clone_with_digest(config_digest))
+            .await
+            .map_err(PackageErrorKind::Internal)?
+            .ok_or(PackageErrorKind::Internal(crate::Error::OfflineMode))?;
+        let raw: metadata::Metadata = serde_json::from_slice(&bytes)
+            .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
         // Reject malformed metadata at the ingress boundary — refuse to write
         // unvalidated metadata to disk so the consumption-side `load_object_data`
         // validation never has to deal with publisher-side bugs after the fact.
@@ -734,7 +754,6 @@ async fn extract_layer_atomic(
     layer_group: LayerGroup,
 ) -> Result<oci::Digest, PackageErrorKind> {
     let fs = mgr.file_structure();
-    let client = mgr.require_client().map_err(PackageErrorKind::Internal)?;
     let registry = pinned.registry().to_string();
 
     // Step 1: singleflight gate.
@@ -745,6 +764,25 @@ async fn extract_layer_atomic(
             return Ok(layer_digest.clone());
         }
         singleflight::Acquisition::Leader(handle) => handle,
+    };
+
+    // Step 2: layer cache fast path — if `layers/{digest}/content/` is present,
+    // no fetch is needed. Acquire the client lazily so an offline manager (no
+    // client) can still re-assemble a package whose layers are all cached.
+    let layer_content = fs.layers.content(pinned.registry(), layer_digest);
+    if utility::fs::path_exists_lossy(&layer_content).await {
+        log::debug!("Layer {} present on disk, skipping fetch.", layer_digest);
+        handle.complete(());
+        return Ok(layer_digest.clone());
+    }
+
+    let client = match mgr.require_client() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = PackageErrorKind::Internal(e);
+            let shared = handle.fail(kind);
+            return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+        }
     };
 
     // We own the handle. Either complete on Ok or fail on Err before return.

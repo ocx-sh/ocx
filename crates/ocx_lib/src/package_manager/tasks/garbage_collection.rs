@@ -220,6 +220,35 @@ mod tests {
         );
     }
 
+    /// Regression: an installed package's metadata config blob, reachable
+    /// via its `refs/blobs/` edge, must survive `unreachable_objects()`.
+    ///
+    /// Before the architectural fix, `ResolvedChain.chain` listed only
+    /// manifest blobs (image-index + image-manifest); `link_blobs` therefore
+    /// never created `refs/blobs/{config_digest}`, GC treated the config
+    /// blob as orphan, and `ocx clean` deleted it while the package was
+    /// installed — breaking `ocx --offline install` rehydration.
+    #[test]
+    fn reachable_config_blob_via_refs_blobs_survives_gc() {
+        // pkg (root) → config_blob (blob via refs/blobs/).
+        // Identical edge shape to test 45, but documents the config-blob
+        // regression intent explicitly so future readers see the bug origin.
+        let collector = gc_with_tiers(
+            &["pkg"],
+            &[("pkg", &["config_blob"])],
+            &[],
+            &[("config_blob", CasTier::Blob)],
+        );
+        assert!(
+            !collector.unreachable_objects().contains(&path("config_blob")),
+            "config blob reachable via refs/blobs/ from an installed package must NOT be collected"
+        );
+        assert!(
+            collector.unreachable_objects().is_empty(),
+            "no unreachable objects when the package roots cover the config blob"
+        );
+    }
+
     /// Test 46 (plan_resolution_chain_refs.md §46): purge cascades through
     /// all intermediate chain blobs — both the top-level index blob and the
     /// platform manifest blob are purged when their parent package is purged.

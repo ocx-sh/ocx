@@ -126,6 +126,17 @@ impl Index {
         self.inner.fetch_manifest_digest(identifier).await
     }
 
+    /// Fetch the raw bytes of a content blob.
+    ///
+    /// `blob_ref` carries `(registry, repo)` for the OCI blob endpoint and
+    /// the blob's own digest for content addressing. `Ok(None)` = unrecoverable
+    /// miss under the active routing policy (e.g. `ChainMode::Offline` + local
+    /// cache miss).
+    pub async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        log::trace!("Fetching blob '{blob_ref}'.");
+        self.inner.fetch_blob(blob_ref).await
+    }
+
     pub async fn fetch_candidates(
         &self,
         identifier: &oci::Identifier,

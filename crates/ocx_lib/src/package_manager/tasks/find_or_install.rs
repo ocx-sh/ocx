@@ -13,7 +13,15 @@ use crate::{
 use super::super::PackageManager;
 
 impl PackageManager {
-    /// Finds a package locally; if absent and the manager is online, installs it.
+    /// Finds a package locally; if absent, falls through to [`pull`].
+    ///
+    /// In offline mode, `pull` no longer requires network when the manifest,
+    /// metadata config blob, and every layer are already in the local CAS —
+    /// see the offline-safe paths in `setup_owned` and `extract_layer_atomic`.
+    /// This lets `--offline exec` re-assemble a package whose `packages/`
+    /// tree was deleted but whose `blobs/` and `layers/` are still present.
+    /// When any cached input is missing, `pull` surfaces the underlying
+    /// `OfflineMode` error and the caller sees a clear failure.
     async fn find_or_install(
         &self,
         package: &oci::Identifier,
@@ -21,13 +29,16 @@ impl PackageManager {
     ) -> Result<InstallInfo, PackageErrorKind> {
         match self.find(package, platforms.clone()).await {
             Ok(info) => Ok(info),
-            Err(PackageErrorKind::NotFound) if !self.is_offline() => {
-                log::info!("Package '{}' not found locally, pulling.", package);
-                self.pull(package, platforms).await
-            }
             Err(PackageErrorKind::NotFound) => {
-                log::error!("Package not found and offline mode is enabled: {}", package);
-                Err(PackageErrorKind::NotFound)
+                if self.is_offline() {
+                    log::info!(
+                        "Package '{}' not found in package store; attempting offline re-assembly from cache.",
+                        package
+                    );
+                } else {
+                    log::info!("Package '{}' not found locally, pulling.", package);
+                }
+                self.pull(package, platforms).await
             }
             Err(e) => Err(e),
         }

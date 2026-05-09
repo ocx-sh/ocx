@@ -42,6 +42,11 @@ impl PinnedIdentifier {
         Self(self.0.without_tag())
     }
 
+    /// Returns a copy with the digest replaced. Tag (if any) is preserved.
+    pub fn clone_with_digest(&self, digest: Digest) -> Self {
+        Self(self.0.clone_with_digest(digest))
+    }
+
     /// Returns a borrow of the inner [`Identifier`].
     ///
     /// Prefer this over the `Deref` impl plus reference gymnastics
@@ -279,6 +284,17 @@ mod tests {
         let pinned: PinnedIdentifier = serde_json::from_str(&json).unwrap();
         assert_eq!(pinned.tag(), Some("3.28"));
         assert_eq!(pinned.repository(), "cmake");
+    }
+
+    #[test]
+    fn clone_with_digest_replaces_digest_preserves_tag() {
+        let pinned = PinnedIdentifier::try_from(make_id_with_tag_and_digest()).unwrap();
+        let new_digest = Digest::Sha256("b".repeat(64));
+        let replaced = pinned.clone_with_digest(new_digest.clone());
+        assert_eq!(replaced.digest(), new_digest);
+        assert_eq!(replaced.registry(), pinned.registry());
+        assert_eq!(replaced.repository(), pinned.repository());
+        assert_eq!(replaced.tag(), pinned.tag());
     }
 
     #[test]

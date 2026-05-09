@@ -682,6 +682,43 @@ mod tests {
         );
     }
 
+    /// Regression: chain ending with a config-blob digest creates a
+    /// `refs/blobs/{config}` symlink alongside the manifest entries.
+    /// Before the architectural fix, `ResolvedChain.chain` listed only
+    /// manifest blobs, so `refs/blobs/` had no edge to the config blob and
+    /// `ocx clean` collected it while the package was installed.
+    #[tokio::test]
+    async fn link_blobs_includes_config_blob_entry() {
+        let (_dir, root, rm) = setup();
+        let content = make_content(&root, 10);
+
+        let reg = "example.com";
+        let manifest_digest = make_digest(0x21);
+        let config_digest = make_digest(0x22);
+        make_blob(&root, reg, &manifest_digest);
+        make_blob(&root, reg, &config_digest);
+
+        let chain = vec![make_pinned(reg, &manifest_digest), make_pinned(reg, &config_digest)];
+        rm.link_blobs(&content, &chain).await.unwrap();
+
+        let refs_blobs = content.parent().unwrap().join("refs").join("blobs");
+        let entries: Vec<_> = std::fs::read_dir(&refs_blobs).unwrap().collect();
+        assert_eq!(
+            entries.len(),
+            2,
+            "manifest + config chain must produce two refs/blobs/ symlinks"
+        );
+
+        let config_link = refs_blobs.join(crate::file_structure::cas_ref_name(&config_digest));
+        let target = std::fs::read_link(&config_link).expect("config symlink must exist");
+        let store = crate::file_structure::BlobStore::new(root.join("blobs"));
+        let expected = store.data(reg, &config_digest);
+        assert_eq!(
+            target, expected,
+            "config-blob symlink must target the config blob's data file"
+        );
+    }
+
     /// Test 40: link_blobs is idempotent — calling twice produces no
     /// duplicate entries and no errors.
     #[tokio::test]
