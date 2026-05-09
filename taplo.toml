@@ -8,3 +8,9 @@ include = [
   "**/ocx/config.toml",
 ]
 url = "https://ocx.sh/schemas/config/v1.json"
+
+[[rule]]
+include = [
+  "**/ocx.toml",
+]
+url = "https://ocx.sh/schemas/project/v1.json"

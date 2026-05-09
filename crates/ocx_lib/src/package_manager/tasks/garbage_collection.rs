@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+mod project_roots;
 mod reachability_graph;
+
+pub use project_roots::ProjectRootDigests;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::{file_structure::FileStructure, log, profile::ProfileSnapshot};
+use crate::{file_structure::FileStructure, log};
 
 use reachability_graph::ReachabilityGraph;
 
@@ -21,9 +24,25 @@ pub struct GarbageCollector {
 }
 
 impl GarbageCollector {
-    pub async fn build(file_structure: &FileStructure, profile: &ProfileSnapshot) -> crate::Result<Self> {
-        let graph = ReachabilityGraph::build(file_structure, profile).await?;
+    /// Builds a [`GarbageCollector`] from the current filesystem state.
+    ///
+    /// `project_roots` supplies additional GC roots derived from registered
+    /// projects' `ocx.lock` files (Unit 6). Pass `&[]` to omit project-registry
+    /// roots (used when `--force` is specified or when the registry is unavailable).
+    ///
+    /// See [`adr_clean_project_backlinks.md`] for the multi-root design.
+    pub async fn build(file_structure: &FileStructure, project_roots: &[ProjectRootDigests]) -> crate::Result<Self> {
+        let graph = ReachabilityGraph::build(file_structure, project_roots).await?;
         Ok(Self { graph })
+    }
+
+    /// Returns the attribution map: package-store path → `Vec<ocx.lock paths>`.
+    ///
+    /// Non-empty only when `project_roots` was non-empty at build time. Used by
+    /// `PackageManager::clean` to populate `CleanedObject::held_by` in dry-run
+    /// output.
+    pub fn roots_attribution(&self) -> &std::collections::HashMap<PathBuf, Vec<PathBuf>> {
+        &self.graph.roots_attribution
     }
 
     /// Returns all entries not reachable from any root.

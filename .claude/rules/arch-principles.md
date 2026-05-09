@@ -82,6 +82,8 @@ CLI command (clap parse)
 | `adr_sbom_strategy.md` | SBOM gen approach |
 | `adr_version_build_separator.md` | Underscore as build separator in version tags |
 | `adr_three_tier_cas_storage.md` | Three-tier content-addressed storage (blobs + layers + packages) |
+| `adr_index_routing_semantics.md` | `IndexOperation::{Query, Resolve}` enum; pinned-id pulls skip tag commit |
+| `adr_cli_high_low_layering.md` | Formalize high-level (project-tier) vs OCI-tier CLI split; add `ocx run`; reserve `all` keyword |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 
@@ -100,12 +102,15 @@ Project-wide conventions enforced by reviewer:
 | Feature type | Location | Notes |
 |--------------|----------|-------|
 | New CLI command | `crates/ocx_cli/src/command/` | One file per command, follow command pattern |
+| Project-tier env-composition command | `crates/ocx_cli/src/command/run.rs` | Project-tier mirror of OCI-tier `exec.rs`; calls `load_project_with_lock` from `app/project_context.rs`, then `compose_tool_set` + `expand_all_keyword`, then `child_process::exec` |
+| Shared project-resolve prologue | `crates/ocx_cli/src/app/project_context.rs` | `load_project_with_lock` helper consumed by `pull.rs` and `run.rs`; returns `ProjectContext` (owned — no borrow on `Context`) |
 | New task method | `crates/ocx_lib/src/package_manager/tasks/` | Add error variant to `error.rs` if needed |
 | New output format | `crates/ocx_cli/src/api/data/` | Impl `Printable` trait |
 | New storage path | `crates/ocx_lib/src/file_structure/` | Add to appropriate store |
 | New index operation | `crates/ocx_lib/src/oci/index/` | Impl on `IndexImpl` trait |
 | New metadata field | `crates/ocx_lib/src/package/metadata/` | Update types + schema + docs |
 | New acceptance test | `test/tests/test_*.py` | Use fixtures, maintain test isolation |
+| Project config mutation | `crates/ocx_lib/src/project/mutate.rs` | `add_binding` / `remove_binding` / `init_project` — atomic read-modify-write under in-place exclusive flock on `ocx.toml` via `acquire_project_lock` |
 
 ## Cross-Cutting Modules
 
@@ -116,7 +121,6 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | `archive/` | Tar/zip extraction + bundling with pluggable backends | Mirror pipeline, package creation |
 | `auth/` | `AuthType` enum with env var + docker cred fallback | OCI Client |
 | `ci/` | CI flavor dispatch (GitHub Actions export) | `ci export` command |
-| `profile/` | `ProfileManager` + `ProfileManifest` for shell profiles | Shell profile commands |
 | `shell/` | `ShellProfileBuilder` — shell-specific export gen | Shell commands |
 | `utility/` | Extension traits + async + fs helpers — see [Utility Catalog](#utility-catalog) below | Everywhere (prelude for extension traits) |
 | `compression/` | Compression level config | Archive, OCI push |

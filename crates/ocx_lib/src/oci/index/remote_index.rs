@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 
-use super::index_impl;
+use super::{IndexOperation, index_impl};
 use crate::{Result, oci, package::tag::Tag};
 
 mod cache;
@@ -57,11 +57,19 @@ impl index_impl::IndexImpl for Index {
         Ok(Some(tags))
     }
 
-    async fn fetch_manifest(&self, identifier: &oci::Identifier) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+    async fn fetch_manifest(
+        &self,
+        identifier: &oci::Identifier,
+        _op: IndexOperation,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
         Ok(Some(self.client.fetch_manifest(identifier).await?))
     }
 
-    async fn fetch_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
+    async fn fetch_manifest_digest(
+        &self,
+        identifier: &oci::Identifier,
+        _op: IndexOperation,
+    ) -> Result<Option<oci::Digest>> {
         if let Some(cached) = self.cache.get_tag_digest(identifier).await {
             return Ok(Some(cached));
         }

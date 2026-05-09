@@ -102,15 +102,17 @@ ocx find --candidate cmake:3.28   # ~/.ocx/symlinks/ocx.sh/cmake/candidates/3.28
 
 Both `--candidate` and `--current` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.
 
-### Shell profile integration
+### Shell hook integration {#stable-paths-shell-hook}
 
-[`ocx shell profile add`][cmd-shell-profile] declares packages whose entry points should always be on `$PATH`:
+For interactive shells, [`ocx shell init`][cmd-shell-init] wires the project toolchain into your shell's prompt cycle. Run it once to install the hook, then every new prompt re-evaluates `ocx.toml` and updates the environment automatically:
 
 ```shell
-ocx shell profile add cmake:3.28 nodejs:24
+ocx shell init bash >> ~/.bashrc
 ```
 
-When a profiled package declares [entry points][in-depth-entry-points] in its metadata, [`ocx shell profile load`][cmd-shell-profile] (run from `~/.bashrc`, `~/.zshrc`, etc.) appends `…/current/entrypoints` to `$PATH` so every launcher becomes a top-level command. Each launcher re-enters via [`ocx launcher exec`][cmd-launcher-exec], so the package always runs under the same [clean-environment guarantee][in-depth-environments-two-surfaces] as `ocx exec`.
+For [direnv][direnv]-driven projects, [`ocx generate direnv`][cmd-generate-direnv] writes an `.envrc` file that calls [`ocx shell direnv`][cmd-shell-direnv] on each `cd`. The stateless export block is re-evaluated by direnv whenever `ocx.toml` or `ocx.lock` changes.
+
+Both approaches route through the [project toolchain][in-depth-project], so the tools on `$PATH` match exactly the digests locked in `ocx.lock`. No ambient installs or manual `export` statements needed.
 
 ::: tip Learn more
 [Storage In Depth → Symlinks][in-depth-storage-symlinks] — candidate vs current design, package-root vs content traversal.
@@ -158,7 +160,7 @@ ocx exec webapp:2.0 -- serve --port 8080
 
 ### Conflict warnings
 
-If two dependencies set the same scalar variable (e.g., both set `JAVA_HOME` to different paths), OCX applies [last-writer-wins][in-depth-environments-last-wins] semantics and emits a warning. Inspect the order with [`ocx deps --flat`][cmd-deps] and decide whether the conflict is real. The same situation arises with the [shell profile][cmd-shell-profile]: if you add a package with dependencies and also have one of those dependencies in the profile as a standalone tool, both contribute env vars — either remove the standalone entry (the dependency provides it) or accept the profile entry's value.
+If two dependencies set the same scalar variable (e.g., both set `JAVA_HOME` to different paths), OCX applies [last-writer-wins][in-depth-environments-last-wins] semantics and emits a warning. Inspect the order with [`ocx deps --flat`][cmd-deps] and decide whether the conflict is real. The same situation arises with project toolchains: if you add a package with dependencies and also declare one of those dependencies as a top-level binding in `ocx.toml`, both contribute env vars — either remove the redundant binding (the transitive dependency provides it) or accept the top-level entry's value winning the conflict.
 
 ::: tip Learn more
 [Dependencies In Depth][in-depth-dependencies] — transitive resolution algorithm, scope philosophy (no version ranges, no auto-update).
@@ -186,6 +188,125 @@ A version bump to the action — proposed automatically by [Dependabot][dependab
 ::: tip Learn more
 [Indices In Depth → Bundled Snapshots][in-depth-indices-bundled] — full bundled-snapshot pattern, [`OCX_INDEX`][env-ocx-index] env var, Dependabot/Renovate flow.
 [Versioning In Depth → Locking][in-depth-versioning-locking] — digest pin rationale, OCI tag mutability.
+:::
+
+## Pin a project's tools {#project}
+
+A repository's contributors and CI runners need the same tool versions — `cmake 3.28`, `shellcheck 0.11`, `goreleaser 2.0` — without arguing over chat or curl-piping installers. The locking mechanisms in the previous section pin a *single* invocation; none of them describe what *the project itself* expects.
+
+A committed `ocx.toml` plus its sibling `ocx.lock` does. The pair makes "the tools this project needs" a piece of source code: reviewable, mergeable, reproducible across machines, resolvable offline once the lock is fetched.
+
+```toml
+# ocx.toml
+[tools]
+cmake      = "ocx.sh/cmake:3.28"
+shellcheck = "ocx.sh/shellcheck:0.11"
+```
+
+Each value is a fully-qualified [OCI identifier][oci-identifier] — `registry/repo[:tag][@digest]`. Bare-tag forms like `cmake = "3.28"` are rejected so the file is unambiguous regardless of any default-registry config. The schema is published at [`https://ocx.sh/schemas/project/v1.json`][schema-project] and wired through [taplo][taplo] for editor autocompletion.
+
+### Lifecycle commands
+
+```shell
+ocx init                              # one-time: scaffold ocx.toml
+ocx add ocx.sh/cmake:3.28             # append to ocx.toml + lock + install
+ocx lock                              # re-resolve every tag to a digest
+ocx pull                              # pre-warm the package store from ocx.lock
+ocx run -- cmake --version            # run with the locked digest (project-tier)
+ocx remove cmake                      # drop the binding + uninstall
+```
+
+[`ocx lock`][cmd-lock] resolves every tag to an immutable digest and writes `ocx.lock`. Subsequent [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] runs read the lock, never the registry, so two machines on the same commit get the same bytes. The lock carries a hash of the canonicalized `ocx.toml`; if you edit `ocx.toml` and forget to re-run `ocx lock`, dependent commands refuse to run with stale digests.
+
+::: tip Edited `ocx.toml` by hand? Run `ocx lock`.
+[`ocx add`][cmd-add] / [`ocx remove`][cmd-remove] regenerate `ocx.lock` for you, but hand-edits to `ocx.toml` do not. The lock carries a hash over the canonicalized `ocx.toml`; commands that read the lock ([`ocx pull`][cmd-pull], [`ocx run`][cmd-run]) detect the drift and exit 65 telling you the lock is stale. Re-run [`ocx lock`][cmd-lock] to sync. The default is intentional: read paths never silently re-resolve, so CI cannot drift behind a stray editor save.
+:::
+
+::: warning Commit your `ocx.lock`
+Without it, every contributor and CI runner re-resolves advisory tags against whatever the registry surfaces today. To keep merge conflicts manageable on busy projects, add a [`.gitattributes`][gitattributes] entry that lets `git` union sibling lock entries:
+
+```text
+ocx.lock merge=union
+```
+:::
+
+### Groups
+
+CI needs `shellcheck` and `shfmt`; a release pipeline needs `goreleaser`; daily development needs neither. Named groups scope subsets so workstations do not download release tooling on first checkout:
+
+```toml
+[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci]
+shellcheck = "ocx.sh/shellcheck:0.11"
+
+[group.release]
+goreleaser = "ocx.sh/goreleaser:2.0"
+```
+
+```shell
+ocx pull -g ci          # CI runner — only what it needs
+ocx lock                # workstation — every group resolved
+```
+
+The same binding name may appear in `[tools]` and any `[group.*]` table — identity is `(group, name)`. This lets a project pin one `shfmt` for daily use and a different one in `ci` without conflict.
+
+### Shell activation
+
+Project tools should land on `PATH` whenever you `cd` into the project — without `eval`-ing on every shell startup. Three entry points, each suited to a different workflow:
+
+- [`ocx shell init <shell>`][cmd-shell-init] — appends a prompt-hook snippet to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. A fingerprint over the installed tool set lives in `_OCX_APPLIED`, so unchanged prompts emit nothing.
+- [`ocx shell direnv`][cmd-shell-direnv] — stateless [direnv][direnv] backend; [`ocx generate direnv`][cmd-generate-direnv] drops a ready `.envrc`.
+- [`ocx exec`][cmd-exec] — no hook at all, for CI and scripts.
+
+The hooks export only — they never install missing tools or contact the registry. Run [`ocx pull`][cmd-pull] first.
+
+::: tip Learn more
+[Project Toolchain In Depth][in-depth-project] — schema details, declaration-hash canonicalization (RFC 8785 JCS), in-place flock concurrency, home-tier fallback, per-group binding semantics, multi-project GC retention, SLSA roadmap.
+:::
+
+## Run tools from your project {#run}
+
+You have an `ocx.toml`, the lock is current, and you want to invoke a tool from it — without translating binding names into OCI identifiers first. That is what [`ocx run`][cmd-run] is for.
+
+The simplest form runs a command in the default group (`[tools]`) environment:
+
+```shell
+ocx run -- task build
+```
+
+`--` is mandatory. Every token after `--` is forwarded unchanged to the child. Pass `-g` to scope to a named group:
+
+```shell
+ocx run -g ci -- shellcheck path/to/file.sh
+```
+
+To compose the environment from every group at once, use the `all` keyword:
+
+```shell
+ocx run -g all -- env
+```
+
+`-g all` expands to `[tools]` + every declared `[group.*]` before env composition. The expansion order determines PATH precedence — groups listed earlier win over later ones (see [Project Toolchain In Depth → Running tools][in-depth-project-running]).
+
+When you only need a specific binding from the composed set, name it:
+
+```shell
+ocx run cmake -- cmake --version
+```
+
+The name must resolve unambiguously in the selected scope; `ocx run` exits 64 if a name is unknown or matches entries in more than one selected group with conflicting identifiers.
+
+:::tip `ocx run` vs `ocx exec`
+`ocx run` is the project-tier command — it reads `ocx.toml` + `ocx.lock` and maps binding names to installed packages. `ocx exec` is the OCI-tier command — it accepts an OCI identifier directly, with no project file involved.
+
+**Rule:** if you have an `ocx.toml`, use `ocx run`; otherwise use [`ocx exec`][cmd-exec].
+:::
+
+::: tip Learn more
+[Project Toolchain In Depth → Running tools][in-depth-project-running] — composition order, PATH precedence, exit code table, `all` keyword semantics.
+[Environments In Depth][in-depth-environments] — what the composed environment actually contains.
 :::
 
 ## Use OCX in CI {#ci}
@@ -325,21 +446,77 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 
 [`ocx clean`][cmd-clean] sweeps the entire store — packages with no live install symlink and no [forward-ref][in-depth-storage-gc] from a dependent package are removed in a single pass, along with any layers and blobs that become unreachable.
 
+When multiple [registered projects][in-depth-project-multi-project-retention] share the same `OCX_HOME`, `ocx clean` retains every package referenced by *any* project's `ocx.lock` — not just the active one. Pass `--force` to bypass the project registry; live install symlinks are always honoured.
+
 ::: tip Learn more
 [Storage In Depth → Garbage Collection][in-depth-storage-gc] — full reachability walk across `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`.
 [Dependencies In Depth → Garbage Collection][in-depth-dependencies-gc] — why dependencies are protected by dependents, not by back-references.
+[Project Toolchain In Depth → Multi-project retention][in-depth-project-multi-project-retention] — `projects.json` registry semantics.
 :::
+
+### Lock-first by default: where are `--locked` and `--frozen`? {#locked-frozen-equivalents}
+
+Users coming from [uv][uv], [Cargo][cargo], or [pnpm][pnpm] often look for `--locked` / `--frozen` flags on read-path commands. OCX folds those guarantees into the defaults instead — read paths refuse stale locks unconditionally, and the only commands that touch `ocx.lock` are explicit mutators.
+
+| You used to write… | OCX equivalent |
+|---|---|
+| [`uv lock --check`][uv-lock] | [`ocx lock --check`][cmd-lock] |
+| [`uv sync --locked`][uv-sync] | [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] (default; exit 65 on drift) |
+| [`uv sync --frozen`][uv-sync] | `ocx pull --offline` / `ocx run --offline` |
+| [`cargo build --locked`][cargo-build] | [`ocx run`][cmd-run] / [`ocx pull`][cmd-pull] (default) |
+| [`cargo build --frozen`][cargo-build] | `--offline` |
+| [`pnpm install --frozen-lockfile`][pnpm-install] | [`ocx pull`][cmd-pull] (default) |
+
+Why this asymmetry? OCX is [backend-first][product-context]: read paths refuse stale locks unconditionally so CI scripts cannot silently drift. The mutating commands ([`ocx add`][cmd-add], [`ocx remove`][cmd-remove], [`ocx lock`][cmd-lock], [`ocx update`][cmd-update]) are the only commands that touch `ocx.lock`; if you do not run them, the lock cannot change.
+
+For the `update --locked` flow — "verify a subset would not change without writing" — use [`ocx update --check`][cmd-update]. It mirrors [`ocx lock --check`][cmd-lock] but evaluates the partial-resolve candidate against the predecessor.
+
+## Migration {#project-toolchain-migration}
+
+This section covers the changes introduced in the `feat/project-toolchain` release that affect existing workflows.
+
+### Shell profile subcommands removed {#migration-shell-profile}
+
+`ocx shell profile add`, `shell profile remove`, `shell profile list`, and `shell profile load` are deprecated and will be removed in v2. The replacement is the project-tier toolchain:
+
+1. Create `ocx.toml` in your repository (or home directory): `ocx init`
+2. Add each tool: `ocx add cmake:3.28 nodejs:24`
+3. Wire the hook into your shell once: `ocx shell init bash >> ~/.bashrc`
+
+After that, every new shell picks up the locked tools automatically. No `shell profile load` line needed in `~/.bashrc`. For [direnv][direnv]-driven repos, use `ocx generate direnv` instead of the hook.
+
+### Project mutators are atomic {#migration-atomic-mutators}
+
+`ocx add`, `ocx remove`, and `ocx lock` now acquire an in-place exclusive flock on `ocx.toml` before reading or writing either file. Concurrent invocations from different terminals or parallel CI jobs are serialised. The old `.ocx-lock` sentinel file is gone — remove it from `.gitignore` and run `git rm .ocx-lock` if previously committed.
+
+### `--project` accepts custom filenames {#migration-project-flag}
+
+The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable now accept any path, not just files named `ocx.toml`. The CWD walk still only looks for files named exactly `ocx.toml`.
 
 <!-- external -->
 [toml]: https://toml.io/
+[uv]: https://docs.astral.sh/uv/
+[uv-lock]: https://docs.astral.sh/uv/reference/cli/#uv-lock
+[uv-sync]: https://docs.astral.sh/uv/reference/cli/#uv-sync
+[cargo]: https://doc.rust-lang.org/cargo/
+[cargo-build]: https://doc.rust-lang.org/cargo/commands/cargo-build.html
+[pnpm]: https://pnpm.io/
+[pnpm-install]: https://pnpm.io/cli/install
+[product-context]: ./getting-started.md
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 [dependabot]: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/keeping-your-actions-up-to-date-with-dependabot
 [renovate]: https://docs.renovatebot.com/
 [toolchains-llvm]: https://github.com/bazel-contrib/toolchains_llvm/blob/master/toolchain/internal/llvm_distributions.bzl
+[oci-identifier]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
+[taplo]: https://taplo.tamasfe.dev/
+[direnv]: https://direnv.net/
+[gitattributes]: https://git-scm.com/docs/gitattributes
+[schema-project]: https://ocx.sh/schemas/project/v1.json
 
 <!-- commands -->
+[cmd-run]: ./reference/command-line.md#run
 [arg-config]: ./reference/command-line.md#arg-config
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-deselect]: ./reference/command-line.md#deselect
@@ -355,7 +532,14 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 [cmd-deps]: ./reference/command-line.md#deps
 [cmd-env]: ./reference/command-line.md#env
 [cmd-shell-env]: ./reference/command-line.md#shell-env
-[cmd-shell-profile]: ./reference/command-line.md#shell-profile
+[cmd-add]: ./reference/command-line.md#add
+[cmd-remove]: ./reference/command-line.md#remove
+[cmd-lock]: ./reference/command-line.md#lock
+[cmd-update]: ./reference/command-line.md#update
+[cmd-pull]: ./reference/command-line.md#pull
+[cmd-shell-init]: ./reference/command-line.md#shell-init
+[cmd-shell-direnv]: ./reference/command-line.md#shell-direnv
+[cmd-generate-direnv]: ./reference/command-line.md#generate-direnv
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-offline]: ./reference/command-line.md#arg-offline
 [arg-index]: ./reference/command-line.md#arg-index
@@ -365,6 +549,7 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 [env-ocx-index]: ./reference/environment.md#ocx-index
 [env-config]: ./reference/environment.md#ocx-config
 [env-no-config]: ./reference/environment.md#ocx-no-config
+[env-project]: ./reference/environment.md#ocx-project
 [env-auth-type]: ./reference/environment.md#ocx-auth-registry-type
 [env-auth-user]: ./reference/environment.md#ocx-auth-registry-user
 [env-auth-token]: ./reference/environment.md#ocx-auth-registry-token
@@ -400,3 +585,6 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 [in-depth-environments-last-wins]: ./in-depth/environments.md#last-wins
 [in-depth-entry-points]: ./in-depth/entry-points.md
 [in-depth-configuration]: ./in-depth/configuration.md
+[in-depth-project]: ./in-depth/project.md
+[in-depth-project-multi-project-retention]: ./in-depth/project.md#multi-project-retention
+[in-depth-project-running]: ./in-depth/project.md#running

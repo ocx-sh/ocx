@@ -7,6 +7,12 @@ paths:
 
 Thin CLI shell. Use clap at `crates/ocx_cli/src/`. One file per subcommand. Output format via `Printable` trait.
 
+## High-Level vs OCI-Tier Layering
+
+The CLI surface divides cleanly into two tiers. **High-level (project-tier)** commands operate on binding names declared in `ocx.toml` + `ocx.lock` — the unit of work is a lock-resolved name, not a registry identifier. **OCI-tier (low-level)** commands operate on OCI identifiers directly and never consult `ocx.toml`. The boundary is firm: a missing `ocx.toml` is a usage error (exit 64) for project-tier commands; `ocx.toml` presence is irrelevant and never consulted by OCI-tier commands.
+
+`ocx run` is the project-tier env-composition command; `ocx exec` is its OCI-tier counterpart. Use `ocx run` when you have an `ocx.toml`; use `ocx exec` when you do not. For the full command classification table and semantics, see `subsystem-cli-commands.md`.
+
 ## Design Rationale
 
 CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse (mirror tool, future SDK). Single `Context` struct with lazy init. No build unused client/index. `Printable` trait give each report type own formatting (plain + JSON). Enforce single-table rule without central formatter. See `arch-principles.md` for full pattern catalog.
@@ -22,7 +28,8 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 | `app/context_options.rs` | `ContextOptions`: global flags (offline, remote, format, color, log-level) |
 | `app/update_check.rs` | GitHub release update notification |
 | `app/version.rs` | Version string accessor |
-| `command/*.rs` | One file per subcommand (30 files) |
+| `command/*.rs` | One file per subcommand (31 files) |
+| `command/run.rs` | Project-tier env-composition command (`ocx run`) |
 | `api.rs` | `Api` facade: dispatches JSON vs plain text |
 | `api/data/*.rs` | Report data types implementing `Printable` |
 | `options/*.rs` | Shared arg parsing helpers (Identifier, ContentPath, Platform, PackageRef + `validate_package_root`) |
@@ -54,6 +61,10 @@ Every command same flow:
 2. **Call manager task** — `context.manager().task_all(identifiers, ...)`
 3. **Build report data** — from task return values (never from CLI args alone)
 4. **Report** — `context.api().report(&data_type)?`
+
+## Routing intent
+
+Commands that hit `Index::fetch_manifest{,_digest}` / `Index::select` / `Index::fetch_candidates` must declare caller intent via `IndexOperation::{Query, Resolve}`. Pure-read commands (`index list`, `index catalog`, `package info`) pass `Op::Query` so a cache miss returns `None` instead of triggering a chain walk + write-through. Install/pull paths in `package_manager::tasks::resolve` pass `Op::Resolve`. Misuse silently leaks writes through query paths — the structural test `chain_refs_tests::op_query_never_walks_source_in_any_mode` catches the most common regression mode. Full contract → [`subsystem-oci.md`](./subsystem-oci.md) and [`adr_index_routing_semantics.md`](../artifacts/adr_index_routing_semantics.md).
 
 ## API Reporting Layer
 
@@ -89,7 +100,7 @@ See `subsystem-cli-api.md` for full contract. `subsystem-cli-commands.md` for qu
 
 ## Cross-Cutting: `--self` Flag
 
-Six env-consuming commands (`exec`, `env`, `shell env`, `shell profile load`, `ci export`, `deps`) share a single boolean `--self` flag (default off) that selects which env surface `ocx exec` emits:
+Seven env-consuming commands (`exec`, `run`, `env`, `shell env`, `shell profile load`, `ci export`, `deps`) share a single boolean `--self` flag (default off) that selects which env surface `ocx exec` emits:
 
 - **Off (default)** — interface surface: emits the consumer-visible env (vars where `has_interface()` is true). What a human or CI script sees when using a package.
 - **On (`--self`)** — private surface: emits the package's own runtime env (vars where `has_private()` is true). The `ocx launcher exec` subcommand forces `self_view=true` internally so generated launchers do not need to bake any flag.

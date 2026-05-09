@@ -1,0 +1,5 @@
+[tools]
+cmake = "ocx.sh/cmake:3.31"
+
+[group.ci]
+shfmt = "ocx.sh/shfmt:3.13"

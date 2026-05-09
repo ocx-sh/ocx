@@ -25,6 +25,28 @@ The grammar is fully unambiguous: `.` separates components, `-` introduces a pre
 
 See [Versioning][ug-versioning] in the user guide for the full tag hierarchy and cascade behavior.
 
+## Project Toolchain {#project}
+
+### When should I use `ocx exec` vs `ocx run`? {#exec-vs-run}
+
+**Short rule:** if you have an `ocx.toml`, use [`ocx run`][cmd-run]; if you do not, use [`ocx exec`][cmd-exec].
+
+[`ocx exec`][cmd-exec] is the OCI-tier command — its first argument is an OCI identifier (`node:20`, `ocx.sh/cmake:3.28@sha256:…`). It never reads `ocx.toml` or `ocx.lock`, so it behaves identically regardless of the current directory and regardless of any project file nearby. This makes it the right primitive for embedding in [GitHub Actions][github-actions-docs], [Bazel rules][bazel-rules], and CI scripts that manage their own tool pins.
+
+[`ocx run`][cmd-run] is the project-tier command — its symbols are binding names declared in `ocx.toml` (e.g. `cmake`, `shellcheck`). It resolves those names through `ocx.lock`, auto-installs missing packages, composes the declared environment, and spawns the child. A missing `ocx.toml` is a usage error (exit 64), not a fallback to OCI-tier behavior.
+
+Both commands:
+
+- Auto-install missing packages from the registry
+- Compose and forward the [package-declared environment][in-depth-environments]
+- Accept `--clean` to strip inherited shell state
+- Accept `--self` to expose private-visibility env entries
+- Forward the child's exit code byte-for-byte
+
+Neither command is deprecated. They cover complementary use cases — running a tool by its project-assigned name (`run`) vs running it by its registry identity (`exec`).
+
+See [Project Toolchain In Depth → Running tools][in-depth-project-running] for the full contract, composition order, and exit code table.
+
 ## Dependencies {#dependencies}
 
 ### No Version Ranges {#dependencies-no-version-ranges}
@@ -142,6 +164,16 @@ In environments with a minimal set of environment variables (containers, CI runn
 
 <!-- commands -->
 [cmd-deps]: ./reference/command-line.md#deps
+[cmd-exec]: ./reference/command-line.md#exec
+[cmd-run]: ./reference/command-line.md#run
+
+<!-- in-depth -->
+[in-depth-environments]: ./in-depth/environments.md
+[in-depth-project-running]: ./in-depth/project.md#running
+
+<!-- external -->
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[bazel-rules]: https://bazel.build/extending/rules
 
 <!-- internal -->
 [fs-objects]: ./user-guide.md#file-structure-objects

@@ -4,6 +4,11 @@
 mod config;
 mod media_type;
 
+/// Re-exported config-loader error type so crates that depend on `ocx_lib`
+/// can reference `ocx_lib::ConfigError` without traversing the private
+/// `config` module path. Used by `ocx_cli`'s `ProjectContextError::Config`
+/// variant.
+pub use config::error::Error as ConfigError;
 pub use config::loader::{ConfigInputs, ConfigLoader};
 pub use config::{Config, RegistryConfig, RegistryDefaults};
 
@@ -28,7 +33,7 @@ pub mod log;
 pub mod oci;
 pub mod package;
 pub mod package_manager;
-pub mod profile;
+pub mod project;
 pub mod publisher;
 pub mod reference_manager;
 pub mod shell;

@@ -53,7 +53,7 @@ For a typical bare-binary package ([`cmake`][cmake], [`node`][nodejs], [`uv`][uv
 
 ## Last-Wins for Constants {#last-wins}
 
-When two packages on the same composition both declare the same constant variable (for example, two [Java][java] distributions each declaring `JAVA_HOME`), exactly one wins in `ocx exec` / `ocx env`: the last one in topological dependency order. The first declaration is replaced silently in the main composition path. The full rule, including how transitive resolution preserves order, lives in [environments in depth][in-depth-environments-last-wins]. (The `ocx shell profile load` and `ocx ci export` commands run an extra `ConstantTracker` pass that does emit a warning when truly unrelated TC entries collide.)
+When two packages on the same composition both declare the same constant variable (for example, two [Java][java] distributions each declaring `JAVA_HOME`), exactly one wins in `ocx exec` / `ocx env`: the last one in topological dependency order. The first declaration is replaced silently in the main composition path. The full rule, including how transitive resolution preserves order, lives in [environments in depth][in-depth-environments-last-wins]. (The `ocx ci export` command runs an extra `ConstantTracker` pass that does emit a warning when truly unrelated TC entries collide.)
 
 Treat conflicting constants as a publisher signal. If your package declares `JAVA_HOME` and a sibling package already does too, the deployment is asking two tools to share one slot — the consumer needs to pick one to depend on and seal the other's env, not both publishers fighting over the same key.
 
