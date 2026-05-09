@@ -1,0 +1,28 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "PATH",
+      "type": "path",
+      "required": true,
+      "value": "${installPath}/bin",
+      "visibility": "public"
+    },
+    {
+      "key": "MID_HOME",
+      "type": "constant",
+      "value": "${installPath}",
+      "visibility": "public"
+    }
+  ],
+  "dependencies": [
+    {
+      "identifier": "@@LEAF_A_FQ_DIGEST@@",
+      "visibility": "interface"
+    }
+  ],
+  "entrypoints": [
+    { "name": "mid", "target": "${installPath}/bin/mid" }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "PATH",
+      "type": "path",
+      "required": true,
+      "value": "${installPath}/bin",
+      "visibility": "public"
+    },
+    {
+      "key": "APP_HOME",
+      "type": "constant",
+      "value": "${installPath}",
+      "visibility": "public"
+    }
+  ],
+  "dependencies": [
+    {
+      "identifier": "@@MID_FQ_DIGEST@@",
+      "visibility": "interface"
+    },
+    {
+      "identifier": "@@LEAF_B_FQ_DIGEST@@",
+      "visibility": "private"
+    }
+  ],
+  "entrypoints": [
+    { "name": "app", "target": "${installPath}/bin/app" }
+  ]
+}

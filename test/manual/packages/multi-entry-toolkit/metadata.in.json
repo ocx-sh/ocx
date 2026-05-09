@@ -1,0 +1,19 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "PATH",
+      "type": "path",
+      "required": true,
+      "value": "${installPath}/bin",
+      "visibility": "public"
+    }
+  ],
+  "entrypoints": [
+    { "name": "tool-a", "target": "${installPath}/bin/tool-a" },
+    { "name": "tool-b", "target": "${installPath}/bin/tool-b" },
+    { "name": "tool-c", "target": "${installPath}/bin/tool-c" },
+    { "name": "tool-d", "target": "${installPath}/bin/tool-d" }
+  ]
+}
