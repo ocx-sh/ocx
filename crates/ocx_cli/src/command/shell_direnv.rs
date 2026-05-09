@@ -18,10 +18,16 @@ use crate::conventions::supported_platforms;
 ///
 /// Reads the nearest project `ocx.toml` (project tier only — no home-tier
 /// fallback in this phase), loads the matching `ocx.lock`, looks up each
-/// default-group tool in the local object store, and prints shell-specific
-/// export lines for the resolved environment. The command is stateless: it
-/// does not consult or update `_OCX_APPLIED`, making it suitable for use
-/// from `direnv`'s `.envrc` via `eval "$(ocx shell direnv)"`.
+/// default-group tool in the local object store, and prints bash export
+/// lines for the resolved environment. The command is stateless: it does
+/// not consult or update `_OCX_APPLIED`, making it suitable for use from
+/// `direnv`'s `.envrc` via `eval "$(ocx shell direnv)"`.
+///
+/// Output is always bash. `direnv` evaluates `.envrc` files in a bash
+/// sub-shell regardless of the user's interactive shell; translation to
+/// the interactive shell happens later, inside direnv, via `direnv export
+/// <shell>`. Programs invoked via `eval` from `.envrc` therefore must emit
+/// bash. There is no `--shell` flag on this command for the same reason.
 ///
 /// The command never contacts the network and never installs or mutates
 /// filesystem state. Tools missing from the object store produce a one-line
@@ -29,23 +35,11 @@ use crate::conventions::supported_platforms;
 /// the stale digests are still used. When no project `ocx.toml` is found,
 /// the command exits 0 with no output.
 #[derive(Parser)]
-pub struct ShellDirenv {
-    /// The shell to generate the environment configuration for. If not specified, it will be auto-detected.
-    #[clap(short = 's', long = "shell")]
-    shell: Option<shell::Shell>,
-}
+pub struct ShellDirenv {}
 
 impl ShellDirenv {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let shell = match self.shell {
-            Some(s) => s,
-            None => match shell::Shell::detect() {
-                Some(s) => s,
-                None => {
-                    anyhow::bail!("could not detect the current shell; specify it using the --shell option");
-                }
-            },
-        };
+        let shell = shell::Shell::Bash;
 
         // Project tier ONLY in Phase 7 — Phase 9 will add home-tier
         // fallback. The OCX_NO_PROJECT=1 kill switch is honored by

@@ -159,7 +159,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
     assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "shell", "direnv", "--shell", "bash")
+    result = _run(ocx, project, "shell", "direnv")
 
     assert result.returncode == EXIT_SUCCESS, (
         f"shell direnv must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
@@ -205,7 +205,7 @@ beta = "{ocx.registry}/{repo_missing}:{tag_missing}"
         == EXIT_SUCCESS
     )
 
-    result = _run(ocx, project, "shell", "direnv", "--shell", "bash")
+    result = _run(ocx, project, "shell", "direnv")
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
     # The missing tool's stderr note format from plan §7 line 768.
@@ -253,7 +253,7 @@ beta = "{ocx.registry}/{repo_b}:{tag_b}"
 """,
     )
 
-    result = _run(ocx, project, "shell", "direnv", "--shell", "bash")
+    result = _run(ocx, project, "shell", "direnv")
 
     assert result.returncode == EXIT_SUCCESS, (
         f"shell direnv with stale lock must NOT fail (unlike ocx exec); "
@@ -285,7 +285,7 @@ def test_shell_direnv_no_project_emits_nothing(ocx: OcxRunner, tmp_path: Path) -
     empty.mkdir()
 
     result = _run(
-        ocx, empty, "shell", "direnv", "--shell", "bash",
+        ocx, empty, "shell", "direnv",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
 
@@ -613,7 +613,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
     assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
 
     result = _run(
-        ocx, project, "--remote", "shell", "direnv", "--shell", "bash",
+        ocx, project, "--remote", "shell", "direnv",
         extra_env={"OCX_OFFLINE": "1"},
     )
 
@@ -727,7 +727,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
     )
     # Deliberately skip `ocx lock` and `ocx pull`.
 
-    result = _run(ocx, project, "shell", "direnv", "--shell", "bash")
+    result = _run(ocx, project, "shell", "direnv")
 
     assert result.returncode == EXIT_SUCCESS, (
         f"missing lock must NOT fail shell direnv; rc={result.returncode}\n"
