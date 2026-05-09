@@ -259,6 +259,24 @@ impl Client {
         Ok((index_digest, index))
     }
 
+    // ── Blob introspection ────────────────────────────────────────────
+
+    /// HEAD a blob to verify its existence and retrieve its content length.
+    ///
+    /// Returns `Ok(size_bytes)` when the blob exists in the registry.
+    /// Returns `Err(ClientError::BlobNotFound)` when the blob is absent.
+    ///
+    /// Used by `pull_local` to capture the real byte count for a
+    /// `LayerRef::Digest` layer before pulling it, so the synthesized
+    /// OCI descriptor has the same size as the manifest produced by
+    /// `package push`.
+    pub async fn head_blob(&self, identifier: &Identifier, digest: &Digest) -> Result<u64> {
+        let image = native::Reference::from(identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        let size = self.transport.head_blob(&image, digest).await?;
+        Ok(size)
+    }
+
     // ── Package pull ─────────────────────────────────────────────────
     //
     // Composable methods for fetching a package from a registry:
@@ -623,44 +641,35 @@ impl Client {
             .try_collect()
             .await?;
 
-        // Config blob — tiny, no progress needed.
-        let config_data = serde_json::to_vec(&package_info.metadata).map_err(ClientError::Serialization)?;
-        let config_data_len = config_data.len();
-        let config_digest = Algorithm::Sha256.hash(&config_data);
-        log::trace!("Config digest: {}", config_digest);
+        // Assemble the manifest from the resolved descriptors (pure, no I/O).
+        // Shared with `pull_local` so the two paths produce byte-identical manifests.
+        let parts = super::manifest_builder::build_package_manifest(&package_info.metadata, layer_descriptors)?;
+        log::trace!("Config digest: {}", parts.config_digest);
+
+        // Push config blob — tiny, no progress needed.
         self.transport
-            .push_blob(&image, config_data, &config_digest, transport::no_progress())
+            .push_blob(
+                &image,
+                parts.config_bytes,
+                &parts.config_digest,
+                transport::no_progress(),
+            )
             .await?;
 
-        let config_size = i64::try_from(config_data_len).map_err(|_| {
-            ClientError::InvalidManifest(format!("config blob size {config_data_len} exceeds i64::MAX"))
-        })?;
-        let manifest = oci::ImageManifest {
-            media_type: Some(MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string()),
-            artifact_type: Some(MEDIA_TYPE_PACKAGE_V1.to_string()),
-            config: oci::Descriptor {
-                media_type: MEDIA_TYPE_PACKAGE_METADATA_V1.to_string(),
-                digest: config_digest.to_string(),
-                size: config_size,
-                urls: None,
-                annotations: None,
-            },
-            layers: layer_descriptors,
-            annotations: None,
-            ..Default::default()
-        };
-
-        let manifest_data = serde_json::to_vec(&manifest).map_err(ClientError::Serialization)?;
-        let manifest_sha256 = Algorithm::Sha256.hash(&manifest_data).to_string();
+        let manifest_sha256 = parts.manifest_digest.to_string();
         let canonical_image = image.clone_with_digest(manifest_sha256.clone());
 
         let pushed_digest = self
             .transport
-            .push_manifest_raw(&canonical_image, manifest_data.clone(), MEDIA_TYPE_OCI_IMAGE_MANIFEST)
+            .push_manifest_raw(
+                &canonical_image,
+                parts.manifest_bytes.clone(),
+                MEDIA_TYPE_OCI_IMAGE_MANIFEST,
+            )
             .await?;
         log::debug!("Pushed manifest with digest '{}'", pushed_digest);
 
-        Ok((manifest, manifest_data, manifest_sha256))
+        Ok((parts.manifest, parts.manifest_bytes, manifest_sha256))
     }
 
     // ── Description operations ────────────────────────────────────────
@@ -725,28 +734,18 @@ impl Client {
             });
         }
 
-        let manifest_annotations = if description.annotations.is_empty() {
-            None
-        } else {
-            Some(description.annotations.clone())
-        };
-
-        let manifest = oci::ImageManifest {
-            media_type: Some(MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string()),
-            artifact_type: Some(MEDIA_TYPE_DESCRIPTION_V1.to_string()),
-            config: oci::Descriptor {
-                media_type: MEDIA_TYPE_OCI_EMPTY_CONFIG.to_string(),
-                digest: config_digest.to_string(),
-                size: 2,
-                urls: None,
-                annotations: None,
-            },
-            layers,
-            annotations: manifest_annotations,
-            ..Default::default()
-        };
-
-        let manifest_data = serde_json::to_vec(&manifest).map_err(ClientError::Serialization)?;
+        let mut builder = super::manifest_builder::ManifestBuilder::new()
+            .artifact_type(MEDIA_TYPE_DESCRIPTION_V1)
+            .config_bytes(MEDIA_TYPE_OCI_EMPTY_CONFIG, b"{}".to_vec())
+            .layers(layers);
+        if !description.annotations.is_empty() {
+            builder = builder.annotations(description.annotations.clone());
+        }
+        let parts = builder.build()?;
+        // Sanity: the empty-config blob digest computed by the builder must
+        // match the one we already pushed above.
+        debug_assert_eq!(parts.config_digest.to_string(), config_digest.to_string());
+        let manifest_data = parts.manifest_bytes;
 
         // Push to the tag reference directly (not by digest) so the tag is created.
         self.transport

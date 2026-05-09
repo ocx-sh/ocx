@@ -10,7 +10,7 @@ use ocx_lib::{
     publisher::{LayerRef, Publisher},
 };
 
-use crate::options;
+use crate::{conventions, options};
 
 #[derive(Parser)]
 pub struct PackagePush {
@@ -33,6 +33,8 @@ pub struct PackagePush {
     #[clap(short, long, required = true)]
     platform: oci::Platform,
 
+    /// Identifier under which the package is published (e.g. `repo:2.0.0`).
+    #[clap(short = 'i', long = "identifier", required = true)]
     identifier: options::Identifier,
 
     /// Layers to push, in order (base layer first, top layer last).
@@ -61,19 +63,7 @@ impl PackagePush {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
-        // Infer metadata from the first file layer, or require --metadata for digest-only pushes.
-        let metadata_path = match &self.metadata {
-            Some(path) => path.clone(),
-            None => {
-                let first_file = self.layers.iter().find_map(|l| match l {
-                    LayerRef::File(p) => Some(p.as_path()),
-                    LayerRef::Digest { .. } => None,
-                });
-                let file_path = first_file
-                    .ok_or_else(|| anyhow::anyhow!("--metadata is required when no file layers are provided"))?;
-                crate::conventions::infer_metadata_file(file_path)?
-            }
-        };
+        let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
 
         log::info!(
             "deploying package with {} layer(s) and metadata {}",

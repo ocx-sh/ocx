@@ -20,7 +20,7 @@ mod printer;
 mod styles;
 
 pub use classify::{ClassifyExitCode, classify_error};
-pub use error::UsageError;
+pub use error::{MetadataResolutionError, UsageError};
 pub use exit_code::ExitCode;
 pub use log_level::LogLevel;
 pub use log_settings::LogSettings;

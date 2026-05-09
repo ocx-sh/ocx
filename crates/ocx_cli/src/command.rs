@@ -26,6 +26,7 @@ pub mod package_describe;
 pub mod package_info;
 pub mod package_pull;
 pub mod package_push;
+pub mod package_test;
 pub mod select;
 pub mod shell;
 pub mod shell_completion;

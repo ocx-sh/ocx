@@ -313,7 +313,7 @@ pub async fn acquire_selection_locks(
 /// On any rollback failure we log and continue: the caller already has a real
 /// error to surface, and burying it under a rollback secondary failure would
 /// obscure the root cause.
-pub(super) fn rollback_symlink(rm: &ReferenceManager, forward_path: &Path, prior_target: Option<&Path>) {
+pub fn rollback_symlink(rm: &ReferenceManager, forward_path: &Path, prior_target: Option<&Path>) {
     match prior_target {
         Some(target) => {
             if let Err(rollback_err) = rm.link(forward_path, target) {

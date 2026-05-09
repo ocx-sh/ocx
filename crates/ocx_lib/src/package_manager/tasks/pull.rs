@@ -47,6 +47,11 @@ const PACKAGE_SETUP_TIMEOUT: Duration = Duration::from_mins(10);
 /// hung leader.
 const LAYER_SETUP_TIMEOUT: Duration = Duration::from_mins(30);
 
+/// Conservative lock timeout used when there is no OCI client to derive a
+/// configured timeout from (e.g., in `pull_local` with offline mode or a
+/// caller-supplied local metadata).
+pub const PULL_LOCAL_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Singleflight group keyed by [`PinnedIdentifier`](oci::PinnedIdentifier)
 /// (advisory tag stripped) for in-process dedup of concurrent dependency setups.
 type SetupGroup = singleflight::Group<oci::PinnedIdentifier, InstallInfo>;
@@ -59,14 +64,17 @@ type LayerGroup = singleflight::Group<(String, oci::Digest), ()>;
 
 /// Bundle of singleflight groups threaded through the pull pipeline so
 /// package-level and layer-level dedup share a session lifetime.
+///
+/// Exposed to sibling task modules (`pull_local`) so they can call
+/// `setup_owned` with a fresh group and bypass the `setup_impl` dedup gate.
 #[derive(Clone)]
-struct SetupGroups {
+pub struct SetupGroups {
     packages: SetupGroup,
     layers: LayerGroup,
 }
 
 impl SetupGroups {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             packages: SetupGroup::new(MAX_NODES, PACKAGE_SETUP_TIMEOUT),
             layers: LayerGroup::new(MAX_NODES, LAYER_SETUP_TIMEOUT),
@@ -172,16 +180,23 @@ fn setup_with_tracker<'a>(
     groups: SetupGroups,
 ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + 'a>> {
     let package = package.clone();
-    Box::pin(async move { setup_impl(mgr, &package, platforms, groups).await })
+    Box::pin(async move { setup_impl(mgr, &package, platforms, groups, None).await })
 }
 
 /// Inner implementation of [`PackageManager::pull`] — see that method for
 /// concurrency safety documentation.
+///
+/// `dest_override` — when `Some(path)`, forwarded to [`setup_owned`] and
+/// ultimately to [`move_temp_to_object_store`] so the package lands at `path`
+/// instead of the content-addressed object store location. All existing callers
+/// pass `None`; only `pull_local` supplies a value here (via `setup_owned`
+/// directly, bypassing this function's singleflight gate).
 async fn setup_impl(
     mgr: &PackageManager,
     package: &oci::Identifier,
     platforms: Vec<oci::Platform>,
     groups: SetupGroups,
+    dest_override: Option<&std::path::Path>,
 ) -> Result<InstallInfo, PackageErrorKind> {
     log::debug!("Pulling package: {}", package);
 
@@ -225,7 +240,7 @@ async fn setup_impl(
     // to waiters. On error, broadcast the error message so waiters get a
     // meaningful diagnostic instead of a generic "abandoned".
     // If we panic, Drop sends Abandoned as a fallback.
-    match setup_owned(mgr, &pinned, resolved, platforms, groups).await {
+    match setup_owned(mgr, &pinned, resolved, platforms, groups, dest_override, None).await {
         Ok(info) => {
             handle.complete(info.clone());
             Ok(info)
@@ -239,15 +254,33 @@ async fn setup_impl(
 
 /// Performs the actual download, dependency resolution, and store placement.
 /// Called only by the task that owns the singleflight handle.
-async fn setup_owned(
+///
+/// `dest_override` — when `Some(path)`, the package is written to `path` instead
+/// of the content-addressed object store location. Passed through to
+/// [`move_temp_to_object_store`] and the launcher bake-in step. All existing
+/// callers pass `None`.
+///
+/// `provided_metadata` — when `Some`, the metadata validation + `pull_metadata`
+/// registry call is skipped and the supplied value is used directly. Used by
+/// `pull_local` which has already validated the metadata before calling this
+/// function. When `None` (normal pull path), metadata is fetched from the
+/// registry via `client.pull_metadata`.
+pub async fn setup_owned(
     mgr: &PackageManager,
     pinned: &oci::PinnedIdentifier,
     resolved: super::resolve::ResolvedChain,
     platforms: Vec<oci::Platform>,
     groups: SetupGroups,
+    dest_override: Option<&std::path::Path>,
+    provided_metadata: Option<metadata::Metadata>,
 ) -> Result<InstallInfo, PackageErrorKind> {
     // Defense layer 2 — skip if already fully installed (cross-process).
-    if let Some(info) = mgr.find_plain(pinned).await? {
+    // When dest_override is set the caller wants to materialize to a specific
+    // path, not the object-store CAS path — bypass the fast-path so the
+    // materialization always proceeds to the override destination.
+    if dest_override.is_none()
+        && let Some(info) = mgr.find_plain(pinned).await?
+    {
         let install_path = mgr.file_structure().packages.install_status(pinned);
         if utility::fs::path_exists_lossy(&install_path).await {
             log::debug!("Package '{}' already fully installed, skipping.", pinned);
@@ -268,16 +301,20 @@ async fn setup_owned(
     }
 
     // Defense layer 3: Acquire exclusive temp directory (file lock).
-    let temp = acquire_temp_dir(
-        mgr.file_structure(),
-        mgr.client().map_err(PackageErrorKind::Internal)?,
-        pinned,
-    )
-    .await?;
+    // When `provided_metadata` is set (pull_local path), there may be no OCI
+    // client (offline mode). In that case fall back to a conservative timeout.
+    let lock_timeout = mgr
+        .client()
+        .map(|c| c.lock_timeout())
+        .unwrap_or(PULL_LOCAL_LOCK_TIMEOUT);
+    let temp = acquire_temp_dir(mgr.file_structure(), pinned, lock_timeout).await?;
 
     // Post-lock recheck — if we waited for another process to release the
-    // lock, it may have already installed the package.
-    if let Some(info) = mgr.find_plain(pinned).await? {
+    // lock, it may have already installed the package. Same dest_override
+    // gate as above: skip when a specific destination is requested.
+    if dest_override.is_none()
+        && let Some(info) = mgr.find_plain(pinned).await?
+    {
         let install_path = mgr.file_structure().packages.install_status(pinned);
         if utility::fs::path_exists_lossy(&install_path).await {
             log::debug!(
@@ -294,15 +331,21 @@ async fn setup_owned(
 
     // Manifest comes from the resolver — ChainedIndex already persisted it to
     // `blobs/` via write-through during resolve, so no extra fetch is needed.
-    let client = mgr.client().map_err(PackageErrorKind::Internal)?;
+    // When `provided_metadata` is `Some` (pull_local path), the metadata has
+    // already been validated by the caller; skip the registry round-trip.
     let manifest = resolved.final_manifest.clone();
-    let metadata = client.pull_metadata(pinned, Some(&manifest)).await?;
-    // Reject malformed metadata at the ingress boundary — refuse to write
-    // unvalidated metadata to disk so the consumption-side `load_object_data`
-    // validation never has to deal with publisher-side bugs after the fact.
-    let metadata: metadata::Metadata = metadata::ValidMetadata::try_from(metadata)
-        .map_err(PackageErrorKind::Internal)?
-        .into();
+    let metadata = if let Some(meta) = provided_metadata {
+        meta
+    } else {
+        let client = mgr.require_client().map_err(PackageErrorKind::Internal)?;
+        let raw = client.pull_metadata(pinned, Some(&manifest)).await?;
+        // Reject malformed metadata at the ingress boundary — refuse to write
+        // unvalidated metadata to disk so the consumption-side `load_object_data`
+        // validation never has to deal with publisher-side bugs after the fact.
+        metadata::ValidMetadata::try_from(raw)
+            .map_err(PackageErrorKind::Internal)?
+            .into()
+    };
 
     // Validate manifest before any extraction work. Zero layers is valid —
     // the package is a config-only artifact whose `content/` is the empty
@@ -312,9 +355,7 @@ async fn setup_owned(
 
     // Wrap the temp directory in a PackageDir so all sibling-file accesses
     // use the canonical accessors instead of hardcoded strings.
-    let pkg = file_structure::PackageDir {
-        dir: temp.dir.dir.clone(),
-    };
+    let pkg = file_structure::PackageDir::with_root(temp.dir.dir.clone());
 
     // Store manifest in temp dir for audit trail — gets moved with the package.
     manifest
@@ -389,7 +430,9 @@ async fn setup_owned(
         let dest = pkg.entrypoints();
         // Bake the post-move package-root path into the launcher so it remains
         // valid after the temp→final atomic rename.
-        let final_pkg_root = fs.packages.path(pinned);
+        let final_pkg_root = dest_override
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| fs.packages.path(pinned));
         crate::package_manager::launcher::generate(&final_pkg_root, entrypoints, &dep_contexts, &dest)
             .await
             .map_err(PackageErrorKind::Internal)?;
@@ -446,18 +489,31 @@ async fn setup_owned(
         .map_err(PackageErrorKind::Internal)?;
 
     // Atomic move temp → object store.
-    let install_info =
-        move_temp_to_object_store(mgr.file_structure(), pinned, &metadata, resolved_package, temp).await?;
+    let install_info = move_temp_to_object_store(
+        mgr.file_structure(),
+        pinned,
+        &metadata,
+        resolved_package,
+        temp,
+        dest_override,
+    )
+    .await?;
 
     log::debug!("Pull succeeded for '{}'.", pinned);
     Ok(install_info)
 }
 
 /// Acquires an exclusive temp directory for the given identifier.
-async fn acquire_temp_dir(
+///
+/// `lock_timeout` is used when the temp directory is locked by another
+/// process — this is how long to wait before giving up. Pass
+/// `client.lock_timeout()` on the normal pull path; pass
+/// [`PULL_LOCAL_LOCK_TIMEOUT`] when there is no client available (e.g.,
+/// the `pull_local` offline path).
+pub async fn acquire_temp_dir(
     fs: &file_structure::FileStructure,
-    client: &oci::Client,
     identifier: &oci::PinnedIdentifier,
+    lock_timeout: Duration,
 ) -> Result<crate::file_structure::TempAcquireResult, PackageErrorKind> {
     let temp_path = fs.temp.path(identifier).map_err(PackageErrorKind::Internal)?;
 
@@ -466,7 +522,7 @@ async fn acquire_temp_dir(
         None => {
             log::debug!("Temp dir locked by another process, waiting: {}", temp_path.display());
             fs.temp
-                .acquire_with_timeout(&temp_path, client.lock_timeout())
+                .acquire_with_timeout(&temp_path, lock_timeout)
                 .await
                 .map_err(PackageErrorKind::Internal)?
         }
@@ -568,16 +624,26 @@ async fn post_download_actions(
 }
 
 /// Atomically moves the enriched temp directory to the object store.
+///
+/// When `dest_override` is `Some(path)`, the package is moved to `path` instead
+/// of the content-addressed location under `$OCX_HOME/packages/`. The returned
+/// [`InstallInfo`] is constructed with a [`PackageDir`](file_structure::PackageDir)
+/// rooted at whichever destination was chosen, so all downstream consumers
+/// (including `install_info_from_package_root`) see the correct paths. All
+/// existing callers pass `None`.
 async fn move_temp_to_object_store(
     fs: &file_structure::FileStructure,
     identifier: &oci::PinnedIdentifier,
     metadata: &metadata::Metadata,
     resolved: ResolvedPackage,
     temp: crate::file_structure::TempAcquireResult,
+    dest_override: Option<&std::path::Path>,
 ) -> Result<InstallInfo, PackageErrorKind> {
-    let output_path = fs.packages.path(identifier);
+    let output_path = dest_override
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| fs.packages.path(identifier));
     let temp_path = temp.dir.dir.clone();
-    let pkg = fs.packages.package_dir(identifier);
+    let pkg = file_structure::PackageDir::with_root(output_path.clone());
 
     crate::utility::fs::move_dir(&temp_path, &output_path)
         .await
@@ -668,7 +734,7 @@ async fn extract_layer_atomic(
     layer_group: LayerGroup,
 ) -> Result<oci::Digest, PackageErrorKind> {
     let fs = mgr.file_structure();
-    let client = mgr.client().map_err(PackageErrorKind::Internal)?;
+    let client = mgr.require_client().map_err(PackageErrorKind::Internal)?;
     let registry = pinned.registry().to_string();
 
     // Step 1: singleflight gate.
@@ -744,30 +810,7 @@ async fn extract_layer_inner(
         .map_err(PackageErrorKind::Internal)?;
 
     // Step 7: atomic rename temp → layers/{digest}/.
-    let layer_path = fs.layers.path(pinned.registry(), layer_digest);
-    if let Some(parent) = layer_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(parent.to_path_buf(), e)))?;
-    }
-    let temp_path_for_rename = temp.dir.dir.clone();
-    match tokio::fs::rename(&temp_path_for_rename, &layer_path).await {
-        Ok(()) => {
-            log::debug!("Extracted layer {} to {}", layer_digest, layer_path.display());
-        }
-        Err(_) if utility::fs::path_exists_lossy(&layer_content).await => {
-            // Another process extracted the same layer — discard our copy.
-            log::debug!("Layer {} already exists (race), cleaning up temp.", layer_digest);
-            // Best-effort cleanup — stale temps are reclaimed by TempStore::try_acquire.
-            let _ = tokio::fs::remove_dir_all(&temp_path_for_rename).await;
-        }
-        Err(e) => {
-            return Err(PackageErrorKind::Internal(crate::Error::InternalFile(
-                temp_path_for_rename,
-                e,
-            )));
-        }
-    }
+    super::layer_staging::finalize_layer_dir(fs, pinned.registry(), layer_digest, &temp.dir.dir).await?;
 
     drop(temp);
     Ok(())

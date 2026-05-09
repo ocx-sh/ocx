@@ -204,7 +204,7 @@ def make_package(
         push_args.append("-n")
     if cascade:
         push_args.append("--cascade")
-    push_args += [fq, str(bundle)]
+    push_args += ["-i", fq, str(bundle)]
     ocx.plain(*push_args)
 
     # Update local index so install/find can discover the package.
@@ -295,7 +295,7 @@ def make_package_with_entrypoints(
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:{tag}"
     ocx.plain(
-        "package", "push", "-p", plat, "-m", str(metadata_path), "-n", "--cascade", fq, str(bundle),
+        "package", "push", "-p", plat, "-m", str(metadata_path), "-n", "--cascade", "-i", fq, str(bundle),
     )
     short = f"{unique_repo}:{tag}"
     ocx.plain("index", "update", unique_repo)

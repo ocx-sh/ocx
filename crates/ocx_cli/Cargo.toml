@@ -18,6 +18,7 @@ clap = { version = "4", features = ["derive", "color"] }
 clap_complete = "4.6.2"
 anyhow = "1.0.101"
 tar = "0.4.45"
+tempfile = "3"
 lzma-rust2 = "0.16.0"
 flate2 = "1.1.9"
 futures = "0.3.31"
@@ -33,9 +34,6 @@ tracing-log = "0.2.0"
 serde = "1.0.228"
 console = "0.16.2"
 thiserror = "2"
-
-[dev-dependencies]
-tempfile = "3"
 
 [lints]
 workspace = true

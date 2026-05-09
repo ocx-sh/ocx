@@ -197,7 +197,7 @@ def test_metadata_with_empty_entrypoints_array_installs(
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     push_result = ocx.run(
-        "package", "push", "-p", plat, "-m", str(metadata_path), "-n", fq, str(bundle),
+        "package", "push", "-p", plat, "-m", str(metadata_path), "-n", "-i", fq, str(bundle),
         check=False,
     )
     # Empty entrypoints is valid — push must succeed.

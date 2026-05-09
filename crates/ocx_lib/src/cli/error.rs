@@ -83,6 +83,57 @@ impl ClassifyExitCode for UsageError {
     }
 }
 
+/// Failure modes of metadata-path resolution for `ocx package push` and
+/// `ocx package test`.
+///
+/// All variants classify to [`ExitCode::UsageError`] (`64`): they signal
+/// CLI-input problems the user must correct before any I/O can succeed.
+#[derive(Debug)]
+pub enum MetadataResolutionError {
+    /// No explicit `--metadata` and no file layers to infer a sibling from.
+    Required,
+    /// File layers point at distinct candidate metadata paths; the caller
+    /// must disambiguate via explicit `--metadata`.
+    Ambiguous { candidates: Vec<std::path::PathBuf> },
+    /// A file layer's path could not yield a metadata candidate (no parent,
+    /// no file stem, etc.).
+    InvalidLayerPath { layer: std::path::PathBuf, reason: String },
+}
+
+impl std::fmt::Display for MetadataResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Required => f.write_str("--metadata is required when no file layers are provided"),
+            Self::Ambiguous { candidates } => {
+                let list = candidates
+                    .iter()
+                    .map(|p| format!("'{}'", p.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "file layers point at distinct metadata candidates ({list}); pass --metadata explicitly",
+                )
+            }
+            Self::InvalidLayerPath { layer, reason } => {
+                write!(
+                    f,
+                    "cannot infer metadata path from layer '{}': {reason}",
+                    layer.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for MetadataResolutionError {}
+
+impl ClassifyExitCode for MetadataResolutionError {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(ExitCode::UsageError)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;

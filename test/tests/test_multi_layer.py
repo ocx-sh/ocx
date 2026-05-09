@@ -90,7 +90,7 @@ def _push_multi_layer(
         args.append("-n")
     if cascade:
         args.append("--cascade")
-    args.append(fq)
+    args.extend(["-i", fq])
     args.extend(layers)
     ocx.plain(*args)
     return fq
@@ -138,7 +138,7 @@ def test_push_zero_layers_succeeds_with_metadata(
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     ocx.plain(
-        "package", "push", "-p", plat, "-m", str(meta), "-n", fq,
+        "package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq,
     )
 
     # Walk the index → per-platform manifest and confirm `layers: []`.
@@ -159,7 +159,7 @@ def test_push_zero_layers_without_metadata_fails(
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     result = ocx.run(
-        "package", "push", "-p", plat, "-n", fq,
+        "package", "push", "-p", plat, "-n", "-i", fq,
         check=False, format=None,
     )
     assert result.returncode != 0
@@ -186,7 +186,7 @@ def test_round_trip_zero_layers(
     plat = current_platform()
     short = f"{unique_repo}:1.0.0"
     fq = f"{ocx.registry}/{short}"
-    ocx.plain("package", "push", "-p", plat, "-m", str(meta), "-n", fq)
+    ocx.plain("package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq)
     ocx.plain("index", "update", short)
 
     result = ocx.json("install", short)
@@ -373,7 +373,7 @@ def test_push_bare_digest_is_rejected(
         "package", "push", "-p", current_platform(),
         "-m", str(tmp_path / "meta.json"),
         "-n",
-        f"{ocx.registry}/{unique_repo}:1.0.0",
+        "-i", f"{ocx.registry}/{unique_repo}:1.0.0",
         bare_digest,
         str(bundle_b),
         check=False, format=None,
@@ -401,7 +401,7 @@ def test_push_digest_layer_not_found(
         "package", "push", "-p", current_platform(),
         "-m", str(tmp_path / "meta.json"),
         "-n",
-        f"{ocx.registry}/{unique_repo}:1.0.0",
+        "-i", f"{ocx.registry}/{unique_repo}:1.0.0",
         f"{fake_digest}.tar.gz",
         str(bundle_b),
         check=False, format=None,
@@ -428,7 +428,7 @@ def test_push_digest_only_without_metadata_fails(
     result = ocx.run(
         "package", "push", "-p", current_platform(),
         "-n",
-        f"{ocx.registry}/{unique_repo}:2.0.0",
+        "-i", f"{ocx.registry}/{unique_repo}:2.0.0",
         f"{layer_a_digest}.tar.gz",
         check=False, format=None,
     )
@@ -460,3 +460,44 @@ def test_cascade_multi_layer(
     assert "1.2.3" in tags
     assert "1.2" in tags
     assert "1" in tags
+
+
+def test_push_ambiguous_metadata_rejected(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """Two file layers with sibling metadata pointing at distinct paths
+    must be rejected — the caller has to disambiguate via -m. Plan §5
+    Phase 5 acceptance gate for `resolve_metadata_path`.
+    """
+    # Place two file layers in *separate* parent directories so each
+    # infers a distinct sibling metadata path.
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    layer_a_dir = _make_layer_content(dir_a, "a", {"lib/a.so": "a"})
+    layer_b_dir = _make_layer_content(dir_b, "b", {"bin/tool": "#!/bin/sh\necho ok\n"})
+    bundle_a = _bundle_layer(ocx, layer_a_dir, dir_a)
+    bundle_b = _bundle_layer(ocx, layer_b_dir, dir_b)
+    # Write distinct sibling metadata to confirm the inference targets
+    # would collide.
+    (dir_a / f"{bundle_a.stem}-metadata.json").write_text(
+        json.dumps({"type": "bundle", "version": 1})
+    )
+    (dir_b / f"{bundle_b.stem}-metadata.json").write_text(
+        json.dumps({"type": "bundle", "version": 1})
+    )
+
+    plat = current_platform()
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+    result = ocx.run(
+        "package", "push", "-p", plat, "-n", "-i", fq,
+        str(bundle_a), str(bundle_b),
+        check=False, format=None,
+    )
+    assert result.returncode == 64, (
+        f"expected exit 64 (UsageError) for ambiguous metadata candidates, "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+    combined = (result.stderr + result.stdout).lower()
+    assert "metadata" in combined and ("ambig" in combined or "distinct" in combined or "--metadata" in combined), (
+        f"expected an ambiguity / pass-explicit-metadata message; got:\n{result.stderr}\n{result.stdout}"
+    )

@@ -46,8 +46,9 @@ Concise index of all `ocx` CLI commands. User-facing per-command docs live in [`
 | `index update PKGS...` | Sync local index from remote | No | — |
 | `package pull PKGS...` | Download to object store only | N/A (is pull) | `-p` |
 | `package create PATH` | Bundle directory into archive | No | `-o`, `-m`, `-l`, `-j`, `--force` |
-| `package push ID CONTENT` | Publish archive to registry | No | `-c/--cascade`, `-n`, `-m`, `-p` |
+| `package push -i ID LAYERS...` | Publish archive to registry | No | `-i/--identifier` (required), `-c/--cascade`, `-n`, `-m`, `-p` |
 | `package describe ID` | Push description metadata | No | `--readme`, `--logo`, `--title` |
+| `package test -i ID LAYERS... -- CMD` | Materialize + exec locally (no registry) | **Yes** (deps only) | `-i/--identifier` (required), `-p`, `-m`, `--keep`, `-o/--output`, `--self`, `--clean` |
 | `package info ID` | Display description metadata | No | `--save-readme`, `--save-logo` |
 | `ci export PKGS...` | Export env to CI system | No | `-p`, `--flavor`, `--candidate/--current`, `--mode` |
 | `version` | Print version | No | — |
@@ -94,6 +95,10 @@ Design intent not visible from flag table — read before changing CLI behavior 
 - **`shell profile load`**: silently skips broken entries (no error output). Designed for shell init file as `eval "$(ocx --offline shell profile load)"` — `--offline` essential because env file runs every shell startup, must not touch network.
 - **`env` vs `shell env`**: `env` auto-installs missing packages (`find_or_install_all`); `shell env` does not (`find_all`). Split exists because `shell env` wired into shell init paths where surprise downloads hostile.
 - **`--self` flag** (shared by `exec`, `env`, `shell env`, `shell profile load`, `ci export`, `deps`): selects the private surface — emits vars where `has_private()` is true (`private` and `public`). Default (off) selects the interface surface — emits vars where `has_interface()` is true (`public` and `interface`). See `subsystem-cli.md` Cross-Cutting section.
+- **`package test` tempdir lifecycle**: without `--keep` or `--output`, the temp directory is deleted on **any** exit — success and failure. `--keep` is the explicit opt-in for post-failure inspection; re-run with `--keep` to preserve. The deletion is explicit (pre-exec `drop(td_guard)`) because `child_process::exec` diverges on Unix (execvp replaces the process image) so RAII `Drop` never fires on the success path.
+- **`package test --output` same-filesystem requirement**: `--output DIR` must be on the same filesystem as `$OCX_HOME/layers/` — hardlink assembly has no cross-device copy fallback. Validated via `dev()` device number comparison (Unix). Cross-fs → `IoError` (exit 74) with a message naming both paths.
+- **`package test` identifier rejects `@digest`**: the digest is computed locally from the supplied layers; supplying one would conflict. `UsageError` (exit 64).
+- **`--keep` + `--output` are mutually exclusive**: enforced by clap `conflicts_with`. Use one or the other; combining is a usage error.
 - **`exec` identifier form**: `ocx exec` accepts only bare OCI identifiers (e.g. `node:20`); identifiers resolve through the index and auto-install when missing. The former `file://` URI form was removed (generated launchers re-enter via `ocx launcher exec` instead). The `oci://` scheme is not parsed by `oci::Identifier::from_str`.
 - **`launcher exec` internal subcommand**: hidden from `--help` (`#[command(hide = true)]`). Wire ABI is `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Forces `self_view=true` internally. Validates `pkg-root`: must be absolute, canonical inside `$OCX_HOME/packages/`, and contain `metadata.json`. Exits 64 (UsageError) on any validation failure.
 - **Entrypoint collision behavior**: Within a single package, duplicate entrypoint names are rejected at deserialization (`EntrypointError::DuplicateName`). Cross-package collisions (two currently-selected packages with the same entrypoint name on the interface surface) are detected by `composer.rs` at compose time and surface as `PackageErrorKind::EntrypointCollision { name, owners }` (exit code `DataError` = 65). Entries that do not enter the active surface (e.g., `private` entries when composing the interface surface) are excluded from collision detection — they cannot collide at runtime under that surface.

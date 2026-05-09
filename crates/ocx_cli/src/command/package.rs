@@ -16,6 +16,8 @@ pub enum Package {
     /// Downloads packages into the local object store without creating install symlinks.
     Pull(super::package_pull::PackagePull),
     Push(super::package_push::PackagePush),
+    /// Materialize a package locally (no registry round-trip) and run a command in its env.
+    Test(super::package_test::PackageTest),
 }
 
 impl Package {
@@ -26,6 +28,7 @@ impl Package {
             Package::Info(info) => info.execute(context).await,
             Package::Pull(pull) => pull.execute(context).await,
             Package::Push(deploy) => deploy.execute(context).await,
+            Package::Test(test) => test.execute(context).await,
         }
     }
 }

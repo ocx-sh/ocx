@@ -69,6 +69,7 @@ export default defineConfig({
             { text: "Env Surface",            link: "/docs/authoring/env-surface" },
             { text: "Entry Points",           link: "/docs/authoring/entry-points" },
             { text: "Building & Pushing",     link: "/docs/authoring/building-pushing" },
+            { text: "Testing locally",        link: "/docs/authoring/testing" },
             { text: "Multi-Platform",         link: "/docs/authoring/multi-platform" },
             { text: "Migration",              link: "/docs/authoring/migration" },
           ],

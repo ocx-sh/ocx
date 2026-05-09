@@ -54,7 +54,7 @@ pub struct PackageManager {
 }
 ```
 
-All fields cheap to clone. `is_offline()` returns `client.is_none()`. `client()` returns `Err(OfflineMode)` if no client.
+All fields cheap to clone. `is_offline()` returns `client.is_none()`. `client()` returns `Option<&oci::Client>` (use when missing client should fall back). `require_client()` returns `Err(OfflineMode)` if no client (use at sites that need network).
 
 ## Three-Layer Error Model
 
@@ -111,6 +111,7 @@ TOCTOU `!target.exists()` pre-check intentionally absent — eventual consistenc
 
 | Method | Auto-Install | Returns | Notes |
 |--------|-------------|---------|-------|
+| `pull_local(info, layers, dest_override)` | **Yes** (deps) | `InstallInfo` | Materialize from local metadata + layers; `dest_override: Option<&Path>` is a sanctioned hook through `setup_owned` / `move_temp_to_object_store`; bypasses `setup_impl` singleflight gate so concurrent calls with different `dest_override` paths each get their own materialization |
 | `find()` / `find_all()` | No | `InstallInfo` | Resolves locally only; calls `link_blobs` |
 | `find_symlink()` / `find_symlink_all()` | No | `InstallInfo` | Via candidate/current symlink; calls `link_blobs` |
 | `find_or_install()` / `find_or_install_all()` | **Yes** (if online) | `InstallInfo` | Falls through to install on NotFound |

@@ -69,7 +69,7 @@ def test_cross_repo_dedup_preserves_query_repository(
 
     def push(repo: str) -> None:
         fq = f"{ocx.registry}/{repo}:{tag}"
-        ocx.plain("package", "push", "-n", "-p", plat, "-m", str(metadata), fq, str(bundle))
+        ocx.plain("package", "push", "-n", "-p", plat, "-m", str(metadata), "-i", fq, str(bundle))
         ocx.plain("index", "update", f"{repo}:{tag}")
 
     push(tools_repo)

@@ -11,12 +11,16 @@ Every package starts the same way: a tar archive on disk, a `metadata.json` next
 
 ```sh
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz
-ocx package push -p linux/amd64 -m metadata.json mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package push -p linux/amd64 -m metadata.json -i mytool:1.0.0 mytool-1.0.0.tar.xz
 ```
 
 `--new` (`-n`) is a `--cascade` modifier: it tells the cascade resolver to skip the existing-tag lookup on the first publish of a repository. Outside `--cascade` the flag is a no-op. Reach for it once you adopt rolling tags.
 
 <Terminal src="/casts/package-push.cast" title="Publishing a package for the first time" collapsed />
+
+::: tip Test before you push
+Before pushing, verify the package works locally with [`ocx package test`][authoring-testing]. It runs the same install pipeline — dep resolution, extraction, env composition — in a temp directory with no registry round-trip. Exit code is forwarded from the command you run, so CI can gate on it. See [Testing locally][authoring-testing] for the full workflow.
+:::
 
 ## Bring Your Own Archives {#byo-archives}
 
@@ -84,3 +88,4 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 [authoring-bundle-anatomy]: ./bundle-anatomy.md
 [authoring-bundle-anatomy-stable]: ./bundle-anatomy.md#stable
 [authoring-multi-platform]: ./multi-platform.md
+[authoring-testing]: ./testing.md
