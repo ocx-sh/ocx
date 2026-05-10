@@ -383,25 +383,29 @@ fn emit_root_vars(
     Ok(())
 }
 
-/// Emit the synth-entrypoints PATH entry for a dep followed by the dep's
-/// interface-tagged env vars.
+/// Emit the dep's interface-tagged env vars followed by the dep's
+/// synth-entrypoints PATH entry.
 ///
 /// # Ordering invariant
 ///
 /// PATH is searched left-to-right (first match wins). OCX consumers apply
 /// entries by **prepending**, so the **last** entry pushed into `entries`
-/// ends up **first** in the resolved PATH. This means:
+/// ends up **first** in the resolved PATH. The required global emit order
+/// is `Deps > Env > Entrypoints`, where entrypoints land last so that
+/// `entrypoints/` shadows the declared `bin/` PATH entry. This means:
 ///
-/// 1. Push `entrypoints/` synth-PATH *first*.
-/// 2. Call `emit_interface_vars` *second* — its `bin/` PATH entry is pushed
-///    after, so it is prepended on top and wins lookup priority at runtime.
+/// 1. Call `emit_interface_vars` *first* — its `bin/` PATH entry is pushed
+///    before the synth-PATH.
+/// 2. Push `entrypoints/` synth-PATH *second* — pushed after, so it is
+///    prepended on top and wins lookup priority at runtime.
 ///
-/// Reversing the push order makes a synthetic launcher re-find itself on
-/// PATH and re-invoke `ocx exec` → infinite recursion. The ordering is
-/// therefore **load-bearing**, not stylistic.
+/// Entrypoint launchers are the canonical way to invoke a package's tools:
+/// each launcher re-enters via `ocx launcher exec` and execs the resolved
+/// target by absolute path, so PATH lookup inside the child does not feed
+/// back into the launcher for normal binaries.
 ///
 /// Regression test:
-/// `test/tests/test_entrypoints.py::test_synthetic_entrypoints_path_emitted_before_declared_bin`
+/// `test/tests/test_entrypoints.py::test_synthetic_entrypoints_path_emitted_after_declared_bin`
 fn emit_dep_path_block(
     dep_metadata: &metadata::Metadata,
     dep_pkg: &PackageDir,
@@ -409,35 +413,38 @@ fn emit_dep_path_block(
     dep_dep_contexts: &HashMap<DependencyName, DependencyContext>,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
-    // Step 1: synth-PATH first (so bin/ from step 2 lands ahead of it on PATH).
+    // Step 1: interface-tagged env vars (includes declared bin/ PATH entry).
+    // Only the interface side of a dep crosses edges into the consumer's
+    // surface (ADR Algorithm v3 step 5).
+    emit_interface_vars(dep_metadata, dep_content, dep_dep_contexts, entries)?;
+
+    // Step 2: synth-PATH last so entrypoints/ ends up at the front of PATH
+    // and shadows bin/ from step 1.
     if let Some(eps) = dep_metadata.entrypoints()
         && !eps.is_empty()
     {
         entries.push(synth_entrypoints_path_for(dep_pkg));
     }
 
-    // Step 2: interface-tagged env vars (includes declared bin/ PATH entry).
-    // Only the interface side of a dep crosses edges into the consumer's
-    // surface (ADR Algorithm v3 step 5).
-    emit_interface_vars(dep_metadata, dep_content, dep_dep_contexts, entries)
+    Ok(())
 }
 
-/// Emit the synth-entrypoints PATH entry for the root followed by the root's
-/// own env vars, partitioned by `self_view`.
+/// Emit the root's own env vars followed by the root's synth-entrypoints
+/// PATH entry, partitioned by `self_view`.
 ///
 /// # Ordering invariant
 ///
-/// Same as [`emit_dep_path_block`]: synth-PATH must be pushed **before**
-/// the declared env vars so that the declared `bin/` PATH entry (pushed
-/// second) ends up earlier in the resolved PATH and wins lookup priority.
+/// Same as [`emit_dep_path_block`]: synth-PATH must be pushed **after**
+/// the declared env vars so that the synthetic `entrypoints/` entry (pushed
+/// last) ends up earlier in the resolved PATH and shadows declared `bin/`.
 ///
 /// The synth-PATH push is additionally gated by `!self_view` because under
 /// `--self` the root must not see its own launchers (ADR Algorithm v3
-/// §"Root's own contributions"). Emitting root's `entrypoints/` on the
-/// private surface would allow the launcher to find itself and recurse.
+/// §"Root's own contributions") — the package's private runtime view bypasses
+/// the launcher and uses `bin/` directly.
 ///
 /// Regression test:
-/// `test/tests/test_entrypoints.py::test_synthetic_entrypoints_path_emitted_before_declared_bin`
+/// `test/tests/test_entrypoints.py::test_synthetic_entrypoints_path_emitted_after_declared_bin`
 fn emit_root_path_block(
     root_metadata: &metadata::Metadata,
     root_dir: &PackageDir,
@@ -446,7 +453,10 @@ fn emit_root_path_block(
     self_view: bool,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
-    // Step 1: synth-PATH first (guarded by !self_view — no launchers on --self surface).
+    // Step 1: env vars (includes declared bin/ PATH entry when present).
+    emit_root_vars(root_metadata, root_content, root_dep_contexts, self_view, entries)?;
+
+    // Step 2: synth-PATH last (guarded by !self_view — no launchers on --self surface).
     if !self_view
         && let Some(eps) = root_metadata.entrypoints()
         && !eps.is_empty()
@@ -454,8 +464,7 @@ fn emit_root_path_block(
         entries.push(synth_entrypoints_path_for(root_dir));
     }
 
-    // Step 2: env vars (includes declared bin/ PATH entry when present).
-    emit_root_vars(root_metadata, root_content, root_dep_contexts, self_view, entries)
+    Ok(())
 }
 
 /// Emits `tracing::warn!` for every `registry/repo` that appears with two or
@@ -557,9 +566,9 @@ fn record_repo_digest(
 
 /// Construct the synthetic `PATH ⊳ <pkg_root>/entrypoints` entry for `pkg`.
 ///
-/// The entry kind is `Path` so consumers prepend it to PATH — which is why
-/// root contributions emit AFTER TC entries: root's `bin/` PATH entries
-/// prepend on top of dep entrypoint synth-PATHs and win lookup.
+/// The entry kind is `Path` so consumers prepend it to PATH. Pushed *after*
+/// a package's declared `bin/` PATH entry so the synthetic `entrypoints/`
+/// directory ends up at the front of PATH and the launchers shadow `bin/`.
 fn synth_entrypoints_path_for(pkg: &PackageDir) -> Entry {
     Entry {
         key: "PATH".to_string(),
@@ -2193,15 +2202,15 @@ mod tests {
     }
 
     /// Within each root, root's synth-PATH (entrypoints) entry is emitted
-    /// BEFORE root's declared envvars on the consumer surface.
+    /// AFTER root's declared envvars on the consumer surface.
     ///
-    /// PATH semantics are last-prepended-wins, so emitting synth-PATH before
-    /// the declared `bin/` PATH entry makes `bin/` win lookup priority at
-    /// runtime. This prevents `ocx exec file://<pkg>` from re-resolving its
-    /// own launcher and recursing — see acceptance test
-    /// `test_synthetic_entrypoints_path_emitted_before_declared_bin`.
+    /// PATH semantics are last-prepended-wins, so emitting synth-PATH after
+    /// the declared `bin/` PATH entry makes `entrypoints/` win lookup priority
+    /// at runtime — entrypoint launchers shadow declared `bin/`. See
+    /// acceptance test
+    /// `test_synthetic_entrypoints_path_emitted_after_declared_bin`.
     #[tokio::test]
-    async fn compose_root_synth_path_emitted_before_root_own_vars() {
+    async fn compose_root_synth_path_emitted_after_root_own_vars() {
         let dir = tempfile::tempdir().unwrap();
 
         // Root declares one Public var AND one entrypoint — no deps needed.
@@ -2250,8 +2259,8 @@ mod tests {
             .position(|e| e.key == "PATH")
             .expect("synth-PATH entry present");
         assert!(
-            path_pos < var_pos,
-            "synth-PATH (pos {path_pos}) must come before ROOT_VAR (pos {var_pos})"
+            var_pos < path_pos,
+            "ROOT_VAR (pos {var_pos}) must come before synth-PATH (pos {path_pos})"
         );
     }
 
@@ -2496,23 +2505,23 @@ mod tests {
     // These unit tests verify the load-bearing ordering enforced by the helpers
     // extracted in the refactor for finding #7.
     //
-    // Invariant: synth-entrypoints PATH entry MUST appear at a lower index
-    // than the declared `bin/` PATH entry in `entries` so that, when a consumer
-    // prepends each entry in order, `bin/` ends up at the front of PATH and wins
-    // lookup priority. Reversing the order makes a launcher re-resolve itself →
-    // infinite recursion.
+    // Invariant: declared `bin/` PATH entry MUST appear at a lower index than
+    // the synth-entrypoints PATH entry in `entries` so that, when a consumer
+    // prepends each entry in order, `entrypoints/` ends up at the front of
+    // PATH and wins lookup priority — entrypoint launchers shadow declared
+    // `bin/`.
     //
     // The second test in each pair demonstrates that swapping the two pushes
     // inside the helper would produce a DIFFERENT ordering, proving the order is
     // load-bearing and that a reversal is detectable.
 
-    /// `emit_dep_path_block` emits synth-PATH before the declared `bin/` PATH entry.
+    /// `emit_dep_path_block` emits the declared `bin/` PATH entry before the synth-PATH.
     ///
     /// Construct a dep with both an entrypoint (so synth-PATH is emitted) and a
-    /// declared PATH env var (simulating `bin/`). Assert that synth-PATH appears
-    /// at a lower index in `entries` than the declared PATH entry.
+    /// declared PATH env var (simulating `bin/`). Assert that the declared PATH
+    /// entry appears at a lower index in `entries` than the synth-PATH entry.
     #[test]
-    fn emit_dep_path_block_synth_path_precedes_declared_bin() {
+    fn emit_dep_path_block_declared_bin_precedes_synth_path() {
         let dir = tempfile::tempdir().unwrap();
 
         // Build dep metadata: one entrypoint + one public PATH var (the bin/).
@@ -2574,9 +2583,9 @@ mod tests {
             .expect("declared bin/ PATH entry must be present");
 
         assert!(
-            synth_idx < bin_idx,
-            "synth-PATH (index {synth_idx}) must precede declared bin/ PATH (index {bin_idx}); \
-             reversing would cause launcher self-recursion. entries: {:?}",
+            bin_idx < synth_idx,
+            "declared bin/ PATH (index {bin_idx}) must precede synth-PATH (index {synth_idx}); \
+             reversing would let bin/ win lookup priority over launchers. entries: {:?}",
             entries.iter().map(|e| (&e.key, &e.value)).collect::<Vec<_>>()
         );
     }
@@ -2640,8 +2649,8 @@ mod tests {
 
         entries.swap(synth_idx, bin_idx);
 
-        // After the swap, synth-PATH must now be at the *higher* index.
-        // (bin_idx < synth_idx after swap.) This proves that swapping breaks the invariant.
+        // After the swap, synth-PATH must now be at the *lower* index.
+        // (synth_idx < bin_idx after swap.) This proves that swapping breaks the invariant.
         let new_synth_idx = entries
             .iter()
             .position(|e| e.key == "PATH" && e.value.contains("entrypoints"))
@@ -2651,18 +2660,18 @@ mod tests {
             .position(|e| e.key == "PATH" && e.value.contains("bin") && !e.value.contains("entrypoints"))
             .unwrap();
 
-        // The swapped vector has synth AFTER bin — the invariant is violated.
+        // The swapped vector has synth BEFORE bin — the invariant is violated.
         assert!(
-            new_bin_idx < new_synth_idx,
-            "after swap, bin/ (index {new_bin_idx}) must precede synth-PATH (index {new_synth_idx}); \
+            new_synth_idx < new_bin_idx,
+            "after swap, synth-PATH (index {new_synth_idx}) must precede bin/ (index {new_bin_idx}); \
              this confirms the swap reverses the invariant"
         );
     }
 
-    /// `emit_root_path_block` emits synth-PATH before the declared `bin/` PATH entry
+    /// `emit_root_path_block` emits the declared `bin/` PATH entry before the synth-PATH
     /// on the consumer (default exec, self_view=false) surface.
     #[test]
-    fn emit_root_path_block_synth_path_precedes_declared_bin_consumer_surface() {
+    fn emit_root_path_block_declared_bin_precedes_synth_path_consumer_surface() {
         let dir = tempfile::tempdir().unwrap();
 
         let ep = Entrypoint {
@@ -2725,9 +2734,9 @@ mod tests {
             .expect("declared bin/ PATH must be present in consumer surface output");
 
         assert!(
-            synth_idx < bin_idx,
-            "synth-PATH (index {synth_idx}) must precede declared bin/ (index {bin_idx}) \
-             in emit_root_path_block output; reversal causes launcher self-recursion"
+            bin_idx < synth_idx,
+            "declared bin/ (index {bin_idx}) must precede synth-PATH (index {synth_idx}) \
+             in emit_root_path_block output; entrypoint launchers must shadow declared bin/"
         );
     }
 
