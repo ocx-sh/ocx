@@ -300,18 +300,19 @@ def test_root_package_entrypoints_appear_in_self_env(
     )
 
 
-def test_synthetic_entrypoints_path_emitted_before_declared_bin(
+def test_synthetic_entrypoints_path_emitted_after_declared_bin(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """The synthetic `entrypoints/` PATH entry must be emitted BEFORE the
+    """The synthetic `entrypoints/` PATH entry must be emitted AFTER the
     declared `${installPath}/bin` PATH entry in `ocx env` output.
 
     `ocx env` lists PATH-typed entries in apply order. Consumers process them
     by prepending, so the LAST entry in the list ends up FIRST in the resolved
-    PATH. Putting the synthetic `entrypoints/` entry before the declared `bin/`
-    entry in the output therefore makes `bin/` win lookup priority — which is
-    the invariant that prevents a generated launcher (`ocx launcher exec`) from
-    re-resolving its own launcher and recursing.
+    PATH. Putting the synthetic `entrypoints/` entry after the declared `bin/`
+    entry in the output therefore makes `entrypoints/` win lookup priority —
+    entrypoint launchers shadow declared `bin/` so the canonical `ocx launcher
+    exec` re-entry is the one PATH lookup finds first. Required global emit
+    order: ``Deps > Env > Entrypoints``.
 
     The fixture's declared ``bin/`` PATH entry is marked ``visibility: public``
     so it surfaces under the default ``--mode=consumer`` alongside the
@@ -319,7 +320,7 @@ def test_synthetic_entrypoints_path_emitted_before_declared_bin(
     consumer-visible). Both appear and their ordering can be verified.
 
     Acceptance-level mirror of the unit test in
-    `crates/ocx_lib/src/package_manager/visible.rs::apply_visible_packages_synthetic_path_before_declared_env`.
+    `crates/ocx_lib/src/package_manager/composer.rs::emit_root_path_block_declared_bin_precedes_synth_path_consumer_surface`.
     """
     pkg = make_package_with_entrypoints(
         ocx,
@@ -344,7 +345,13 @@ def test_synthetic_entrypoints_path_emitted_before_declared_bin(
     assert path_entries, f"expected PATH entries in env output: {env_result}"
 
     # On Windows the bin segment uses backslashes; match either separator.
-    syn_idx = next((i for i, v in path_entries if "entrypoints" in v), None)
+    # Anchor on the path tail — the pytest tmp_path dir name contains
+    # "entrypoints" because the test name does, so a loose substring check
+    # would also match the bin/ entry.
+    syn_idx = next(
+        (i for i, v in path_entries if v.endswith("/entrypoints") or v.endswith("\\entrypoints")),
+        None,
+    )
     bin_idx = next(
         (i for i, v in path_entries if v.endswith("/bin") or v.endswith("\\bin")),
         None,
@@ -356,9 +363,9 @@ def test_synthetic_entrypoints_path_emitted_before_declared_bin(
     assert bin_idx is not None, (
         f"declared bin/ PATH entry missing; PATH values: {[v for _, v in path_entries]}"
     )
-    assert syn_idx < bin_idx, (
-        f"synthetic entrypoints entry (index {syn_idx}) must precede declared bin/ entry "
-        f"(index {bin_idx}) in env output; values: {[v for _, v in path_entries]}"
+    assert bin_idx < syn_idx, (
+        f"declared bin/ entry (index {bin_idx}) must precede synthetic entrypoints entry "
+        f"(index {syn_idx}) in env output; values: {[v for _, v in path_entries]}"
     )
 
 
@@ -369,10 +376,11 @@ def test_exec_dep_launcher_via_path(
     """exec A -- cmake executes B's cmake binary when A declares B as a public dep.
 
     B's cmake entrypoint must be reachable through the synthetic PATH entry that
-    the visible-package pipeline emits for B's entrypoints/ directory.  The bin/
-    PATH entry has higher priority (it is added AFTER the synthetic entry, ending
-    up first in the prepend chain), so exec finds `bin/cmake` rather than the
-    launcher — which means the real binary runs and the marker appears in stdout.
+    the visible-package pipeline emits for B's entrypoints/ directory. The
+    synth-PATH entry is added LAST in the env list (and so ends up FIRST in the
+    resolved PATH), so exec finds B's launcher first; the launcher re-enters via
+    `ocx launcher exec` and execs B's `bin/cmake` by absolute path — the real
+    binary runs and the marker appears in stdout.
     """
     b_repo = f"{unique_repo}_b"
     a_repo = f"{unique_repo}_a"
