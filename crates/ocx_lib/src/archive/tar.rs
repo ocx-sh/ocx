@@ -22,6 +22,10 @@ impl TarBackend {
     pub fn new(writer: Box<dyn Write + Send>) -> Self {
         let mut builder = tar::Builder::new(writer);
         builder.follow_symlinks(false);
+        // Deterministic headers: zero uid/gid/mtime/uname/gname. Without this, every
+        // archive embeds the build user's uid and the current mtime, breaking byte-for-byte
+        // reproducibility and producing files owned by a stale uid after extraction.
+        builder.mode(tar::HeaderMode::Deterministic);
         Self {
             inner: Arc::new(Mutex::new(builder)),
         }
@@ -182,4 +186,129 @@ pub(super) fn extract(reader: impl std::io::Read, output: &std::path::Path, stri
     tracing::debug!("Extracted {count} entries total");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::archive::Archive;
+
+    /// Regression: tar archives must not embed the build host's ownership or per-file
+    /// mtimes. Without `HeaderMode::Deterministic` every entry carries the build user's
+    /// uid/gid and the source file's mtime, breaking byte-reproducibility and producing
+    /// files owned by a stale uid after extraction on a different machine. The tar crate
+    /// uses a fixed non-zero constant for mtime to work around tools that mishandle a
+    /// zero timestamp (see rust-lang/cargo#9512), so we assert mtime is uniform across
+    /// entries — not derived from the source filesystem.
+    #[tokio::test]
+    async fn test_headers_have_zero_ownership_and_constant_mtime() {
+        let src = tempfile::tempdir().unwrap();
+        let nested = src.path().join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(src.path().join("top.txt"), b"top").unwrap();
+        std::fs::write(nested.join("inner.txt"), b"inner").unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.tar");
+
+        let mut archive = Archive::create(&archive_path).await.unwrap();
+        archive.add_dir_all("", src.path()).await.unwrap();
+        archive.finish().await.unwrap();
+
+        let file = std::fs::File::open(&archive_path).unwrap();
+        let mut tar = ::tar::Archive::new(file);
+        let mut entry_count = 0;
+        let mut first_mtime: Option<u64> = None;
+        for entry in tar.entries().unwrap() {
+            let entry = entry.unwrap();
+            let header = entry.header();
+            let path = entry.path().unwrap().to_path_buf();
+            assert_eq!(header.uid().unwrap(), 0, "uid not zeroed on {path:?}");
+            assert_eq!(header.gid().unwrap(), 0, "gid not zeroed on {path:?}");
+            assert_eq!(
+                header.username().unwrap().unwrap_or(""),
+                "",
+                "uname not cleared on {path:?}"
+            );
+            assert_eq!(
+                header.groupname().unwrap().unwrap_or(""),
+                "",
+                "gname not cleared on {path:?}"
+            );
+            let mtime = header.mtime().unwrap();
+            match first_mtime {
+                None => first_mtime = Some(mtime),
+                Some(expected) => assert_eq!(
+                    mtime, expected,
+                    "mtime varies across entries (source mtime leaked) on {path:?}"
+                ),
+            }
+            entry_count += 1;
+        }
+        assert!(entry_count >= 2, "expected at least 2 entries, got {entry_count}");
+    }
+
+    /// Regression: `HeaderMode::Deterministic` normalizes mode bits but must still
+    /// propagate the user-execute bit so distributed binaries remain runnable after
+    /// extraction. Regular files land at 0o644, executables at 0o755.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_executable_bit_preserved_through_round_trip() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().unwrap();
+        let bin = src.path().join("tool");
+        let data = src.path().join("data.txt");
+        std::fs::write(&bin, b"#!/bin/sh\necho hi").unwrap();
+        std::fs::write(&data, b"plain").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.tar");
+
+        let mut archive = Archive::create(&archive_path).await.unwrap();
+        archive.add_dir_all("", src.path()).await.unwrap();
+        archive.finish().await.unwrap();
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&archive_path, extract_dir.path()).await.unwrap();
+
+        let bin_mode = extract_dir.path().join("tool").metadata().unwrap().permissions().mode() & 0o777;
+        let data_mode = extract_dir
+            .path()
+            .join("data.txt")
+            .metadata()
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(bin_mode, 0o755, "executable bit lost through round-trip");
+        assert_eq!(data_mode, 0o644, "regular file mode not normalized to 0o644");
+    }
+
+    /// Regression: identical source trees produce byte-identical tar archives across
+    /// invocations. Confirms determinism end-to-end.
+    #[tokio::test]
+    async fn test_archive_bytes_are_reproducible() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src.path().join("b.txt"), b"beta").unwrap();
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let first = out_dir.path().join("first.tar");
+        let second = out_dir.path().join("second.tar");
+
+        for path in [&first, &second] {
+            let mut archive = Archive::create(path).await.unwrap();
+            archive.add_dir_all("", src.path()).await.unwrap();
+            archive.finish().await.unwrap();
+        }
+
+        let bytes_first = std::fs::read(&first).unwrap();
+        let bytes_second = std::fs::read(&second).unwrap();
+        assert_eq!(
+            bytes_first, bytes_second,
+            "two runs over the same source tree produced different archive bytes"
+        );
+    }
 }
