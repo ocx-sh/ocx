@@ -769,8 +769,9 @@ def test_different_package_versions_produce_disjoint_refs(
     tmp_path: Path,
 ) -> None:
     """AC2 corollary: two different package versions installed side-by-side
-    produce disjoint refs/blobs/ entries (no cross-contamination from the
-    shared BlobStore).
+    produce divergent chains in refs/blobs/ — each side carries at least one
+    ref the other does not — without cross-contamination from the shared
+    BlobStore.
 
     Note: the "count grows" variant of AC2 (same content dir, second find
     walks a different image-index and appends new refs) is not reachable
@@ -780,10 +781,14 @@ def test_different_package_versions_produce_disjoint_refs(
     constructing two image-index manifests that share a child platform
     manifest, which is beyond what make_package exposes.
 
-    What we CAN test is that two different versions installed to two
-    different content dirs have different refs/blobs/ entries (since
-    their chain digests differ), and that each entry is a valid symlink
-    into the shared blob store.
+    Strict disjointness is the wrong invariant: the package config blob is
+    `serde_json::to_vec(metadata)` (see `manifest_builder::build_package_manifest`),
+    and two versions built by make_package share the default metadata shape,
+    so their config bytes — and therefore one entry in refs/blobs/ — are
+    legitimately content-equal. What the test enforces is that each version's
+    chain still contains at least one blob the other does not (the platform
+    manifest, which descriptor-references the version-unique layer), and that
+    every entry is a valid symlink into the shared blob store.
     """
     v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path / "v1", new=True, cascade=False)
     v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", new=False, cascade=False)
@@ -799,9 +804,13 @@ def test_different_package_versions_produce_disjoint_refs(
 
     assert v1_ref_names, "AC2: v1 must have at least one chain ref"
     assert v2_ref_names, "AC2: v2 must have at least one chain ref"
-    assert v1_ref_names.isdisjoint(v2_ref_names), (
-        f"AC2: v1 and v2 have different digests, so their refs/blobs/ "
-        f"entries must be disjoint; v1={v1_ref_names}, v2={v2_ref_names}"
+    assert v1_ref_names - v2_ref_names, (
+        f"AC2: v1 chain must carry at least one ref absent from v2; "
+        f"v1={v1_ref_names}, v2={v2_ref_names}"
+    )
+    assert v2_ref_names - v1_ref_names, (
+        f"AC2: v2 chain must carry at least one ref absent from v1; "
+        f"v1={v1_ref_names}, v2={v2_ref_names}"
     )
 
     # Each ref is a valid symlink into blobs/.
