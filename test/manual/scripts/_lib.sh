@@ -11,10 +11,10 @@
 
 # ANSI colors when stdout is a tty.
 if [[ -t 1 ]]; then
-    OCX_C_STEP=$'\033[1;36m'   # bold cyan — section headers
-    OCX_C_CMD=$'\033[0;90m'    # bright-black — echoed commands
-    OCX_C_WARN=$'\033[1;33m'   # bold yellow
-    OCX_C_DONE=$'\033[1;32m'   # bold green
+    OCX_C_STEP=$'\033[1;36m' # bold cyan — section headers
+    OCX_C_CMD=$'\033[0;90m'  # bright-black — echoed commands
+    OCX_C_WARN=$'\033[1;33m' # bold yellow
+    OCX_C_DONE=$'\033[1;32m' # bold green
     OCX_C_RESET=$'\033[0m'
 else
     OCX_C_STEP=""

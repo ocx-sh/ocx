@@ -10,8 +10,14 @@ set -euo pipefail
 ocx install --select "$PKG_HELLO"
 
 # Sanity: package and blobs both present after install.
-[[ -d "$OCX_HOME/packages" ]] || { echo "expected packages dir after install" >&2; exit 1; }
-[[ -d "$OCX_HOME/blobs"    ]] || { echo "expected blobs dir after install"   >&2; exit 1; }
+[[ -d "$OCX_HOME/packages" ]] || {
+    echo "expected packages dir after install" >&2
+    exit 1
+}
+[[ -d "$OCX_HOME/blobs" ]] || {
+    echo "expected blobs dir after install" >&2
+    exit 1
+}
 
 rm -rf "$OCX_HOME/packages"
 

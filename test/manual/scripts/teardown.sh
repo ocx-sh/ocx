@@ -11,7 +11,7 @@ fi
 
 read -r -p "delete $home and everything beneath it? [y/N] " ans
 case "${ans:-N}" in
-    y|Y|yes|YES)
+    y | Y | yes | YES)
         rm -rf -- "$home"
         echo "removed $home"
         ;;

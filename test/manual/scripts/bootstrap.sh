@@ -41,6 +41,7 @@ PKG_ROOT="packages"
 # shellcheck disable=SC2034  # consumed by ocx() in _lib.sh
 OCX_BIN="${REPO_ROOT}/test/bin/ocx"
 # shellcheck source=./_lib.sh
+# shellcheck disable=SC1091  # _lib.sh resolved at runtime via SCRIPT_DIR
 source "${SCRIPT_DIR}/_lib.sh"
 
 # Short, registry-relative identifier for CLI use (`push -i`, `index update`,
@@ -130,10 +131,10 @@ render_meta() {
 }
 
 # ── 1. Leaf packages with no deps ─────────────────────────────────────────
-push_simple single-layer-hello   build
-push_simple multi-entry-toolkit  build
-push_simple deps-leaf-a          build
-push_simple deps-leaf-b          build
+push_simple single-layer-hello build
+push_simple multi-entry-toolkit build
+push_simple deps-leaf-a build
+push_simple deps-leaf-b build
 
 # ── 2. Multi-layer (no deps) ──────────────────────────────────────────────
 push_multi_layer multi-layer-app layer-base layer-libs layer-app
