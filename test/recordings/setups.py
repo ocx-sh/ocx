@@ -19,7 +19,8 @@ from src.runner import OcxRunner, PackageInfo, current_platform
 def basic(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Single package, one version."""
     uv_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
     ]
     return {
         "uv": [
@@ -34,8 +35,10 @@ def basic(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[Pa
 def multi_version(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """One package with multiple versions."""
     corretto_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "JAVA_HOME", "type": "constant", "value": "${installPath}"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+        {"key": "JAVA_HOME", "type": "constant", "value": "${installPath}",
+         "visibility": "public"},
     ]
     return {
         "corretto": [
@@ -64,24 +67,32 @@ def multi_version(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str,
 def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Multiple packages for index/catalog demos."""
     uv_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
     ]
     cmake_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "MANPATH", "type": "path", "value": "${installPath}/share/man"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+        {"key": "MANPATH", "type": "path", "value": "${installPath}/share/man",
+         "visibility": "public"},
     ]
     corretto_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "JAVA_HOME", "type": "constant", "value": "${installPath}"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+        {"key": "JAVA_HOME", "type": "constant", "value": "${installPath}",
+         "visibility": "public"},
     ]
     node_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
     ]
     bun_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
     ]
     ocx_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
     ]
     return {
         "uv": [
@@ -144,8 +155,10 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
 def variants(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Python with multiple variant builds for variant discovery demos."""
     python_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "PYTHON_HOME", "type": "constant", "value": "${installPath}"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+        {"key": "PYTHON_HOME", "type": "constant", "value": "${installPath}",
+         "visibility": "public"},
     ]
     return {
         "python": [
@@ -176,16 +189,22 @@ def dependencies(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
     from src.registry import fetch_manifest_digest
 
     node_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "NODE_HOME", "type": "constant", "value": "${installPath}"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+        {"key": "NODE_HOME", "type": "constant", "value": "${installPath}",
+         "visibility": "public"},
     ]
     bun_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "BUN_HOME", "type": "constant", "value": "${installPath}"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+        {"key": "BUN_HOME", "type": "constant", "value": "${installPath}",
+         "visibility": "public"},
     ]
     webapp_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
-        {"key": "APP_HOME", "type": "constant", "value": "${installPath}"},
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+        {"key": "APP_HOME", "type": "constant", "value": "${installPath}",
+         "visibility": "public"},
     ]
 
     nodejs = make_package(
@@ -239,9 +258,18 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
     """
     from src.registry import fetch_manifest_digest
 
-    path_env = [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}]
-    node_env = path_env + [{"key": "NODE_HOME", "type": "constant", "value": "${installPath}"}]
-    bun_env = path_env + [{"key": "BUN_HOME", "type": "constant", "value": "${installPath}"}]
+    path_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+    ]
+    node_env = path_env + [
+        {"key": "NODE_HOME", "type": "constant", "value": "${installPath}",
+         "visibility": "public"},
+    ]
+    bun_env = path_env + [
+        {"key": "BUN_HOME", "type": "constant", "value": "${installPath}",
+         "visibility": "public"},
+    ]
 
     # Leaf packages (no deps of their own)
     nodejs = make_package(
@@ -279,7 +307,8 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
     # Root: webapp depends on server (public), bun (public), renderer (private)
     webapp = make_package(
         ocx, f"{prefix}webapp", "2.0.0", tmp_path, bins=["serve"],
-        env=path_env + [{"key": "APP_HOME", "type": "constant", "value": "${installPath}"}],
+        env=path_env + [{"key": "APP_HOME", "type": "constant", "value": "${installPath}",
+                          "visibility": "public"}],
         dependencies=[
             {"identifier": f"{server.fq}@{server_digest}", "visibility": "public"},
             {"identifier": f"{bun.fq}@{bun_digest}", "visibility": "public"},
