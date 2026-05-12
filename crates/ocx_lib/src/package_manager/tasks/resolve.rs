@@ -260,7 +260,7 @@ mod spec_tests {
     }
 
     fn linux_amd64() -> oci::Platform {
-        oci::Platform::current().unwrap()
+        "linux/amd64".parse().unwrap()
     }
 
     /// Build a `PackageManager` whose local index already has the tag +

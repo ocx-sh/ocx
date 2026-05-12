@@ -97,23 +97,32 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Canonicalize the tempdir path: on macOS `TempDir::new()` lands under
+    /// `/var/folders/...`, but `/var` is a symlink to `/private/var`, which
+    /// would trip [`refuse_if_symlink_in_path`] on every ancestor walk.
+    fn temp_root() -> (TempDir, PathBuf) {
+        let td = TempDir::new().unwrap();
+        let canonical = td.path().canonicalize().unwrap();
+        (td, canonical)
+    }
+
     #[tokio::test]
     async fn absent_path_passes() {
-        let td = TempDir::new().unwrap();
-        let target = td.path().join("does/not/exist");
+        let (_td, root) = temp_root();
+        let target = root.join("does/not/exist");
         refuse_if_symlink_in_path(&target).await.unwrap();
     }
 
     #[tokio::test]
     async fn regular_dir_passes() {
-        let td = TempDir::new().unwrap();
-        refuse_if_symlink_in_path(td.path()).await.unwrap();
+        let (_td, root) = temp_root();
+        refuse_if_symlink_in_path(&root).await.unwrap();
     }
 
     #[tokio::test]
     async fn regular_file_passes() {
-        let td = TempDir::new().unwrap();
-        let f = td.path().join("file");
+        let (_td, root) = temp_root();
+        let f = root.join("file");
         tokio::fs::write(&f, b"x").await.unwrap();
         refuse_if_symlink_in_path(&f).await.unwrap();
     }
