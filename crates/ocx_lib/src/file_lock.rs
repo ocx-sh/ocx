@@ -4,6 +4,8 @@
 // Option A: `Ok(None)` = contended, `Ok(Some(guard))` = acquired, `Err` = real I/O error.
 // This models the three states correctly without introducing a new error type.
 
+use fs4::{FileExt, TryLockError};
+
 #[derive(Debug)]
 pub struct FileLock {
     _lock_file: std::fs::File,
@@ -15,10 +17,10 @@ impl FileLock {
     /// Returns `Ok(Some(guard))` if the lock was acquired, `Ok(None)` if another
     /// process already holds it (contention), or `Err` on a real I/O error.
     pub fn try_exclusive(file: std::fs::File) -> std::io::Result<Option<Self>> {
-        match <std::fs::File as fs4::fs_std::FileExt>::try_lock_exclusive(&file) {
-            Ok(true) => Ok(Some(FileLock { _lock_file: file })),
-            Ok(false) => Ok(None),
-            Err(e) => Err(e),
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(Some(FileLock { _lock_file: file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(e),
         }
     }
 
@@ -27,16 +29,16 @@ impl FileLock {
     /// Returns `Ok(Some(guard))` if the lock was acquired, `Ok(None)` if another
     /// process already holds an exclusive lock (contention), or `Err` on a real I/O error.
     pub fn try_shared(file: std::fs::File) -> std::io::Result<Option<Self>> {
-        match <std::fs::File as fs4::fs_std::FileExt>::try_lock_shared(&file) {
-            Ok(true) => Ok(Some(FileLock { _lock_file: file })),
-            Ok(false) => Ok(None),
-            Err(e) => Err(e),
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => Ok(Some(FileLock { _lock_file: file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(e),
         }
     }
 
     pub async fn lock_exclusive(file: std::fs::File) -> std::io::Result<Self> {
         let handle = tokio::task::spawn_blocking(move || {
-            <std::fs::File as fs4::fs_std::FileExt>::lock_exclusive(&file)?;
+            FileExt::lock(&file)?;
             Ok::<_, std::io::Error>(file)
         });
         let file = handle.await.map_err(std::io::Error::other)??;
@@ -48,7 +50,7 @@ impl FileLock {
         duration: std::time::Duration,
     ) -> std::io::Result<FileLock> {
         let blocking = tokio::task::spawn_blocking(move || {
-            <std::fs::File as fs4::fs_std::FileExt>::lock_exclusive(&file)?;
+            FileExt::lock(&file)?;
             Ok::<_, std::io::Error>(file)
         });
 
@@ -63,7 +65,7 @@ impl FileLock {
 
     pub async fn lock_shared(file: std::fs::File) -> std::io::Result<Self> {
         let handle = tokio::task::spawn_blocking(move || {
-            <std::fs::File as fs4::fs_std::FileExt>::lock_shared(&file)?;
+            FileExt::lock_shared(&file)?;
             Ok::<_, std::io::Error>(file)
         });
         let file = handle.await.map_err(std::io::Error::other)??;
@@ -75,7 +77,7 @@ impl FileLock {
         duration: std::time::Duration,
     ) -> std::io::Result<FileLock> {
         let blocking = tokio::task::spawn_blocking(move || {
-            <std::fs::File as fs4::fs_std::FileExt>::lock_shared(&file)?;
+            FileExt::lock_shared(&file)?;
             Ok::<_, std::io::Error>(file)
         });
 
