@@ -10,7 +10,10 @@ use ocx_lib::{
     publisher::{LayerRef, Publisher},
 };
 
-use crate::{conventions, options};
+use crate::{
+    api::data::package_push::{PushReport, PushStatus},
+    conventions, options,
+};
 
 #[derive(Parser)]
 pub struct PackagePush {
@@ -98,9 +101,14 @@ impl PackagePush {
             };
 
             let existing_versions = Publisher::parse_versions(&existing_tags);
-            publisher.push_cascade(info, &self.layers, existing_versions).await?;
+            let (manifest_digest, cascade_tags_written) =
+                publisher.push_cascade(info, &self.layers, existing_versions).await?;
+            let report = PushReport::new(manifest_digest, cascade_tags_written, PushStatus::Pushed);
+            context.api().report_package_push(&report)?;
         } else {
-            publisher.push(info, &self.layers).await?;
+            let manifest_digest = publisher.push(info, &self.layers).await?;
+            let report = PushReport::new(manifest_digest, vec![], PushStatus::Pushed);
+            context.api().report_package_push(&report)?;
         }
 
         Ok(ExitCode::SUCCESS)

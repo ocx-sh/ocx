@@ -10,6 +10,7 @@ pub mod info;
 pub mod install;
 pub mod lock;
 pub mod package_description;
+pub mod package_push;
 pub mod paths;
 pub mod pull_dry_run;
 pub mod removed;

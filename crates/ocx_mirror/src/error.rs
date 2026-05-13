@@ -4,6 +4,7 @@
 use ocx_lib::cli::ExitCode;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum MirrorError {
     /// Spec file has validation errors (YAML parse, schema, regex, etc.)
     SpecInvalid(Vec<String>),
@@ -13,6 +14,25 @@ pub enum MirrorError {
     ExecutionFailed(Vec<String>),
     /// Error fetching upstream version information from source (GitHub, URL index).
     SourceError(String),
+
+    // ── Pipeline variants (added in test-pipeline phase) ────────────────────
+    /// Content-policy violation in `mirror.yml`: hardcoded webhook URL, empty
+    /// `tests:` list, bad runner label, or ambiguous shell on non-standard image.
+    /// Distinct from `SpecInvalid` (which is structural/schema) — this covers
+    /// mirror-author configuration choices the renderer rejects by policy.
+    SpecUsageError(String),
+    /// `--check` mode detected drift between `mirror.yml` and generated files.
+    RendererDrift(Vec<String>),
+    /// A JUNIT XML file could not be parsed or is missing required attributes.
+    JunitParseError(String),
+    /// `run-summary.json` is missing, malformed, or has an unrecognised schema version.
+    RunSummaryError(String),
+    /// Template render failure or write failure for a generated file.
+    TemplateError(String),
+    /// Discord webhook returned 5xx or the request timed out.
+    WebhookUnavailable(String),
+    /// Discord webhook returned 401/403 — secret rotated or misconfigured.
+    WebhookPermissionDenied(String),
 }
 
 impl MirrorError {
@@ -29,6 +49,14 @@ impl MirrorError {
             Self::SpecNotFound(_) => ExitCode::NotFound,
             Self::ExecutionFailed(_) => ExitCode::Failure,
             Self::SourceError(_) => ExitCode::Unavailable,
+            // Pipeline variants
+            Self::SpecUsageError(_) => ExitCode::UsageError,
+            Self::RendererDrift(_) => ExitCode::DataError,
+            Self::JunitParseError(_) => ExitCode::DataError,
+            Self::RunSummaryError(_) => ExitCode::DataError,
+            Self::TemplateError(_) => ExitCode::IoError,
+            Self::WebhookUnavailable(_) => ExitCode::Unavailable,
+            Self::WebhookPermissionDenied(_) => ExitCode::PermissionDenied,
         }
     }
 }
@@ -52,6 +80,20 @@ impl std::fmt::Display for MirrorError {
                 Ok(())
             }
             Self::SourceError(msg) => write!(f, "source error: {msg}"),
+            // Pipeline variants — lowercase, no trailing punctuation (quality-rust-errors.md)
+            Self::SpecUsageError(msg) => write!(f, "mirror spec usage error: {msg}"),
+            Self::RendererDrift(paths) => {
+                writeln!(f, "renderer drift detected:")?;
+                for path in paths {
+                    writeln!(f, "  - {path}")?;
+                }
+                Ok(())
+            }
+            Self::JunitParseError(msg) => write!(f, "JUNIT parse error: {msg}"),
+            Self::RunSummaryError(msg) => write!(f, "run-summary error: {msg}"),
+            Self::TemplateError(msg) => write!(f, "template error: {msg}"),
+            Self::WebhookUnavailable(msg) => write!(f, "webhook unavailable: {msg}"),
+            Self::WebhookPermissionDenied(msg) => write!(f, "webhook permission denied: {msg}"),
         }
     }
 }
