@@ -24,23 +24,32 @@
 //! | [`pipeline`] | 15-step push state machine; implements [`Signer`] |
 //! | [`error`] | [`SignErrorKind`] variant inventory |
 
-// Public modules: consumed by CLI layer or re-exported as stable API surface.
+// `error` is `pub` — `SignError`/`SignErrorKind` are bound by the CLI layer.
 pub mod error;
-pub mod oidc;
-pub mod oidc_ambient;
-pub mod oidc_ambient_inline;
-pub mod oidc_browser;
-pub mod pipeline;
+// `endpoint` is `pub` — `validate_sigstore_url` is bound by the CLI layer
+// (and any future library consumer that constructs a `SignContext`).
+pub mod endpoint;
 
-// Private modules: stub-only, no current callers outside this module.
-// Phase 5c will promote these to `pub` when real call sites are wired.
+// Phase 5c-blocked modules. Bodies are `unimplemented!()` until sigstore-rs
+// integration lands; promoting their types to the public API today would
+// advertise an unstable shape. Modules stay crate-internal; Phase 5c re-promotes
+// the specific items the CLI binds against.
+#[allow(dead_code)]
 mod bundle;
+// `fulcio` and `rekor` already carry `#![allow(dead_code)]` at the file head.
 mod fulcio;
+#[allow(dead_code)] // Phase 5c will wire callers.
+pub(crate) mod oidc;
+#[allow(dead_code)]
+pub(crate) mod oidc_ambient;
+#[allow(dead_code)]
+pub(crate) mod oidc_ambient_inline;
+#[allow(dead_code)]
+pub(crate) mod oidc_browser;
+#[allow(dead_code)]
+pub(crate) mod pipeline;
 mod rekor;
+#[allow(dead_code)]
 mod signer;
 
-pub use bundle::SignedBundle;
 pub use error::{SignError, SignErrorKind};
-pub use oidc::{AmbientProvider, DispatchingTokenProvider, OidcToken, TokenProvider};
-pub use pipeline::{SignContext, SignPipeline, SignResult};
-pub use signer::{KeylessSigner, Signer};

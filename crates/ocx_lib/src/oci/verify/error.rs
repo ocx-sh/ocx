@@ -8,6 +8,7 @@
 
 use crate::cli::{ClassifyErrorKind, ClassifyExitCode, ExitCode};
 use crate::oci::Identifier;
+use crate::oci::sign::endpoint::UrlRejection;
 
 /// Top-level verify error carrying the identifier being verified + the kind.
 #[derive(Debug, thiserror::Error)]
@@ -117,11 +118,78 @@ pub enum VerifyErrorKind {
     #[error("trust root unavailable")]
     TrustRootUnavailable,
 
-    /// Trust root PEM failed to parse (malformed PEM, no certificate blocks, bad UTF-8).
+    /// Trust root PEM failed to load (malformed PEM, no certificate blocks,
+    /// TUF fetch failed, etc.).
     ///
-    /// Exit 78 (`ConfigError`).
-    #[error("trust root load failed: {reason}")]
-    TrustRootLoad { reason: String },
+    /// Exit 78 (`ConfigError`). The reason is encoded as a typed discriminant
+    /// (`TrustRootLoadReason`) so callers can distinguish actionable failure
+    /// modes without parsing stderr.
+    #[error("trust root load failed: {0}")]
+    TrustRootLoad(TrustRootLoadReason),
+
+    /// User-supplied Sigstore endpoint URL failed SSRF/scheme validation.
+    ///
+    /// Surfaces at the boundary where `--rekor-url` is parsed by `ocx package
+    /// verify`. Exit 64 (`UsageError`) — a malformed flag value is a CLI
+    /// misuse, not a runtime fault. The `endpoint` field carries the flag
+    /// name (e.g. `--rekor-url`) so the envelope `error.detail` is
+    /// programmatically dispatchable.
+    #[error("invalid {endpoint} URL: {reason}")]
+    InvalidEndpointUrl {
+        /// Flag name the URL was supplied via (e.g. `--rekor-url`).
+        endpoint: String,
+        /// Structured rejection reason from [`crate::oci::sign::endpoint::validate_sigstore_url`].
+        #[source]
+        reason: UrlRejection,
+    },
+}
+
+/// Typed discriminant for [`VerifyErrorKind::TrustRootLoad`].
+///
+/// Each variant maps to a distinct user-facing remediation; replacing the
+/// previous free-form `String reason` with this enum lets callers (and
+/// integration tests) pattern-match on the failure mode without string
+/// matching, and prevents accidental introduction of paths or other
+/// sensitive content into the reason text.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TrustRootLoadReason {
+    /// `TrustRoot::load_embedded` invoked but the compile-time TUF asset is
+    /// not present (Slice 1: not yet shipped).
+    #[error("embedded trust-root asset is not bundled in this build")]
+    EmbeddedAssetMissing,
+
+    /// I/O error reading a trust-root asset (filesystem or embedded source).
+    #[error("trust-root asset read failed")]
+    AssetReadFailed {
+        /// Underlying I/O / source error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// TUF fetch returned a non-2xx HTTP status.
+    #[error("TUF fetch failed: HTTP {status}")]
+    TufFetchFailed {
+        /// HTTP status code returned by the TUF endpoint.
+        status: u16,
+    },
+
+    /// TUF fetch did not complete within the configured deadline.
+    #[error("TUF fetch timed out")]
+    TufFetchTimeout,
+
+    /// PEM bytes parsed but did not yield a valid certificate body.
+    #[error("PEM parse failed: {detail}")]
+    PemParseFailed {
+        /// Short detail (e.g., `"unexpected block label"`). Never embed file
+        /// paths or other sensitive content here.
+        detail: String,
+    },
+
+    /// PEM input contained zero `CERTIFICATE` blocks — input was structurally
+    /// valid PEM but carried no certificate body.
+    #[error("no certificate blocks in trust-root PEM")]
+    NoCertificateBlocks,
 }
 
 impl ClassifyErrorKind for VerifyErrorKind {
@@ -137,7 +205,29 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::RekorSetInvalid => ExitCode::DataError,
             Self::RekorSetAbsentTsaPresent | Self::RekorUnavailable => ExitCode::RekorUnavailable,
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
-            Self::TrustRootUnavailable | Self::TrustRootLoad { .. } => ExitCode::ConfigError,
+            Self::TrustRootUnavailable | Self::TrustRootLoad(_) => ExitCode::ConfigError,
+            Self::InvalidEndpointUrl { .. } => ExitCode::UsageError,
+        }
+    }
+
+    fn kind_detail(&self) -> &'static str {
+        // Frozen contract C-S1-1: snake_case parallel of the variant name.
+        // Exhaustive match — no wildcard, so adding a variant forces a new arm.
+        match self {
+            Self::NoSignaturesFound => "no_signatures_found",
+            Self::NoUsableBundle => "no_usable_bundle",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::IssuerMismatch => "issuer_mismatch",
+            Self::CertChainInvalid => "cert_chain_invalid",
+            Self::SignatureInvalid => "signature_invalid",
+            Self::RekorSetInvalid => "rekor_set_invalid",
+            Self::RekorSetAbsentTsaPresent => "rekor_set_absent_tsa_present",
+            Self::ReferrersUnsupported => "referrers_unsupported",
+            Self::RekorUnavailable => "rekor_unavailable",
+            Self::BundleParseFailed => "bundle_parse_failed",
+            Self::TrustRootUnavailable => "trust_root_unavailable",
+            Self::TrustRootLoad(_) => "trust_root_load",
+            Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
         }
     }
 }
@@ -269,5 +359,90 @@ mod tests {
         let err = VerifyError::new(id(), VerifyErrorKind::BundleParseFailed);
         let source = err.source().expect("VerifyError has source");
         assert_eq!(format!("{source}"), "bundle parse failed");
+    }
+
+    #[test]
+    fn invalid_endpoint_url_maps_to_usage_error() {
+        use crate::oci::sign::endpoint::UrlRejection;
+        // Verify side borrows its own InvalidEndpointUrl variant so the exit-code
+        // classification is independent of the sign side.
+        let kind = VerifyErrorKind::InvalidEndpointUrl {
+            endpoint: "--rekor-url".into(),
+            reason: UrlRejection {
+                reason: "URL must use HTTPS".into(),
+            },
+        };
+        assert_eq!(kind.exit_code(), ExitCode::UsageError);
+    }
+
+    #[test]
+    fn trust_root_load_maps_to_config_error() {
+        // Every TrustRootLoadReason variant produces ConfigError.
+        // ADR §C-S1-2: trust root failures are configuration-layer, not runtime faults.
+        // Asset-read failures carry a boxed source — construct one via a synthetic
+        // io::Error so the source-carrying branch is also covered.
+        let asset_read_source: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "synthetic"));
+        let reasons: Vec<TrustRootLoadReason> = vec![
+            TrustRootLoadReason::EmbeddedAssetMissing,
+            TrustRootLoadReason::AssetReadFailed {
+                source: asset_read_source,
+            },
+            TrustRootLoadReason::TufFetchFailed { status: 503 },
+            TrustRootLoadReason::TufFetchTimeout,
+            TrustRootLoadReason::PemParseFailed {
+                detail: "unexpected block label".into(),
+            },
+            TrustRootLoadReason::NoCertificateBlocks,
+        ];
+        for reason in reasons {
+            let kind = VerifyErrorKind::TrustRootLoad(reason);
+            assert_eq!(kind.exit_code(), ExitCode::ConfigError, "variant: {kind:?}");
+        }
+    }
+
+    #[test]
+    fn kind_detail_values_are_stable() {
+        // C-S1-1 frozen contract: these strings ship in JSON envelopes and consumer
+        // scripts dispatch on them. A rename or typo here is a user-visible breaking
+        // change. The exhaustive match in `kind_detail()` ensures a new variant forces
+        // a new arm there; this table ensures the *string value* for each arm is pinned.
+        use crate::oci::sign::endpoint::UrlRejection;
+        use VerifyErrorKind::*;
+
+        // Construct one representative instance per variant.
+        // `TrustRootLoad` carries a `TrustRootLoadReason`; use the simplest variant.
+        // `InvalidEndpointUrl` carries a `UrlRejection` borrowed from the sign module.
+        let pairs: &[(&'static str, VerifyErrorKind)] = &[
+            ("no_signatures_found", NoSignaturesFound),
+            ("no_usable_bundle", NoUsableBundle),
+            ("identity_mismatch", IdentityMismatch),
+            ("issuer_mismatch", IssuerMismatch),
+            ("cert_chain_invalid", CertChainInvalid),
+            ("signature_invalid", SignatureInvalid),
+            ("rekor_set_invalid", RekorSetInvalid),
+            ("rekor_set_absent_tsa_present", RekorSetAbsentTsaPresent),
+            ("referrers_unsupported", ReferrersUnsupported),
+            ("rekor_unavailable", RekorUnavailable),
+            ("bundle_parse_failed", BundleParseFailed),
+            ("trust_root_unavailable", TrustRootUnavailable),
+            (
+                "trust_root_load",
+                TrustRootLoad(TrustRootLoadReason::EmbeddedAssetMissing),
+            ),
+            (
+                "invalid_endpoint_url",
+                InvalidEndpointUrl {
+                    endpoint: "--rekor-url".into(),
+                    reason: UrlRejection {
+                        reason: "URL must use HTTPS".into(),
+                    },
+                },
+            ),
+        ];
+
+        for (expected, kind) in pairs {
+            assert_eq!(kind.kind_detail(), *expected, "kind_detail() drift for {kind:?}",);
+        }
     }
 }

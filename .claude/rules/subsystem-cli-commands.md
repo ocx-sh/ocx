@@ -50,6 +50,8 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `init` | Create minimal `ocx.toml` in current directory | No | — |
 | `remove IDENTIFIER` | Drop binding from `ocx.toml`, rewrite lock, uninstall | No | — |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with project-tier composed env (binding names from `ocx.lock`) | **Yes** | `-g/--group`, `--clean`, `--self` |
+| `pull [-g GROUP]... [NAME...]` | Resolve binding names from `ocx.toml` + `ocx.lock` and warm the local cache (no symlinks) | **Yes** | `-g/--group` |
+| `update [-g GROUP]... [NAME...]` | Re-resolve project bindings to latest tags, refresh `ocx.lock` | No | `-g/--group` |
 | `install PKGS...` | Download and install packages | N/A (is install) | `-s/--select`, `-p/--platform` |
 | `find PKGS...` | Resolve installed packages to paths | No | `--candidate`, `--current`, `-p` |
 | `select PKGS...` | Set `current` symlink | No | `-p` |
@@ -63,6 +65,8 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `shell completion` | Generate completions | No | `--shell` |
 | `shell hook` | Stateful prompt-hook export generator (reads/updates `_OCX_APPLIED`) | No | `-s/--shell` |
 | `shell direnv` | Stateless export generator for direnv `.envrc` | No | `-s/--shell` |
+| `shell init` | Emit shell-init snippet (sets PATH and registers `ocx shell hook`) | No | `-s/--shell` |
+| `generate direnv` | Materialize an `.envrc` from the active `ocx.toml` for direnv integration | No | — |
 | `index catalog` | List known repositories | No | `--tags` |
 | `index list PKGS...` | List tags for packages | No | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote | No | — |
@@ -70,6 +74,8 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `package pull PKGS...` | Download to object store only | N/A (is pull) | `-p` |
 | `package create PATH` | Bundle directory into archive | No | `-o`, `-m`, `-l`, `-j`, `--force` |
 | `package push -i ID LAYERS...` | Publish archive to registry | No | `-i/--identifier` (required), `-c/--cascade`, `-n`, `-m`, `-p`, `--build-timestamp [datetime\|date\|none]` |
+| `package sign IDENTIFIER` | Keyless Sigstore sign via OCI Referrers | No | `-p/--platform` (required), `--fulcio-url`, `--rekor-url`, `--identity-token-file`, `--identity-token-stdin`, `--no-tty`, `--no-cache` |
+| `package verify IDENTIFIER` | Keyless Sigstore verify via OCI Referrers | No | `-p/--platform` (required), `--certificate-identity` (required), `--certificate-oidc-issuer` (required), `--rekor-url`, `--no-cache` |
 | `package describe ID` | Push description metadata | No | `--readme`, `--logo`, `--title` |
 | `package test -i ID LAYERS... -- CMD` | Materialize + exec locally (no registry) | **Yes** (deps only) | `-i/--identifier` (required), `-p`, `-m`, `--keep`, `-o/--output`, `--self`, `--clean` |
 | `package info ID` | Display description metadata | No | `--save-readme`, `--save-logo` |

@@ -18,6 +18,8 @@ Old `objects/` tree mix three concerns: raw OCI blobs, extracted layer files, as
 
 Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`) → GC do single BFS pass over all three tiers. Only packages can be roots or have outgoing edges; layers and blobs reachable only via package `refs/layers/` and `refs/blobs/` links.
 
+Fourth tier `state/` for **ephemeral, non-content-addressed runtime state** (TTL-bound, per-subsystem/per-registry, not GC-walked). Distinct from the three CAS tiers because it carries no digest, has no `refs/` linkage, and may be deleted at any time without integrity loss. See `adr_oci_referrers_signing_v1.md` Amendment 3 for the definitional contract and the originating decision.
+
 ## Module Map
 
 | File | Purpose | Key Types |
@@ -30,6 +32,7 @@ Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`
 | `tag_store.rs` | Local tag→digest index | `TagStore` |
 | `symlink_store.rs` | Install symlinks (candidate/current) | `SymlinkStore`, `SymlinkKind` |
 | `temp_store.rs` | Temp dirs for in-progress downloads | `TempStore`, `TempDir`, `TempAcquireResult`, `StaleEntry`, `TempEntry` |
+| `state_store.rs` (planned, Slice 1) | Ephemeral runtime state per subsystem (e.g. OCI Referrers capability cache) | `StateStore`, `StateKey` |
 | `cas_path.rs` | Digest sharding; `CasTier` enum | `cas_shard_path()`, `is_valid_cas_path()`, `write_digest_file()` |
 | `reference_manager.rs` | Forward symlinks + back-references for GC | `ReferenceManager` |
 
@@ -53,6 +56,7 @@ pub struct FileStructure {
     pub tags: TagStore,
     pub symlinks: SymlinkStore,
     pub temp: TempStore,
+    pub state: StateStore,   // Slice 1 — ephemeral runtime state; see adr_oci_referrers_signing_v1.md Amendment 3
 }
 ```
 
@@ -124,6 +128,21 @@ Key methods: `candidate(identifier)`, `current(identifier)`, `candidates(identif
 Layout: `{root}/temp/{32-hex-hash}/` — deterministic SHA-256 hash of full identifier string.
 
 Lock file sits as sibling: `{32-hex-hash}.lock`. `try_acquire()` non-blocking; stale artifacts cleaned on acquire. Temp dir atomically renamed into `packages/` on completion.
+
+### StateStore — Ephemeral subsystem state
+
+Layout: `{root}/state/{subsystem}/{key}.json`. Slice 1 introduces this tier for the OCI Referrers API capability cache at `state/referrers/<registry-slug>.json`. See `adr_oci_referrers_signing_v1.md` Amendment 3 for the originating decision.
+
+**Definitional contract:**
+
+- **Purpose:** ephemeral, non-content-addressed, registry-scoped or subsystem-scoped runtime state. NOT for content (use `blobs/`), extracted files (`layers/`), assembled packages (`packages/`), persistent metadata mirror (`tags/`), or install pointers (`symlinks/`).
+- **Lifetime:** TTL-bound. Slice 1 capability cache uses flat 6h TTL (see ADR Amendment 6). Stale entries are safe to delete at any time without integrity loss.
+- **GC:** **not walked** by `ocx clean`. The garbage collector traverses `refs/{symlinks,deps,layers,blobs}/` for reachability; `state/` has no refs, no digest, no GC role. v2 may add `ocx clean --state` to truncate.
+- **Atomicity:** writes via `tempfile::NamedTempFile` + `std::fs::rename` (Windows-safe across existing targets). The `tempfile::persist` shortcut does **not** replace-existing on Windows.
+- **Concurrency:** advisory file lock optional per subsystem. Capability cache reads tolerate fail-open ("file missing → unknown, reprobe").
+- **Schema:** each subsystem owns its JSON schema. No registry-wide invariants beyond filename layout.
+
+Key methods (planned): `state.subsystem_path(subsystem) → PathBuf`, `state.read_json(subsystem, key) → Result<Option<T>>`, `state.write_json(subsystem, key, &T) → Result<()>`.
 
 ## Path Construction
 

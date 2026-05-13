@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx verify` — keyless Sigstore verification of a target manifest's
+//! `ocx package verify` — keyless Sigstore verification of a target manifest's
 //! signature via OCI Referrers.
 //!
 //! Fetches the Sigstore bundle v0.3 referrer for the target, verifies the
@@ -26,9 +26,9 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use ocx_lib::oci;
+use ocx_lib::oci::sign::endpoint::validate_sigstore_url;
 use ocx_lib::oci::verify::{VerifyError, VerifyErrorKind};
 
-use crate::command::sigstore_url::validate_sigstore_url;
 use crate::options;
 
 /// Default public Rekor transparency-log endpoint (overridable via `--rekor-url`).
@@ -69,8 +69,19 @@ impl Verify {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
         // SSRF hardening (CWE-918): validate user-supplied endpoint URL at the
-        // boundary before it becomes an HTTP client target.
-        let _rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url")?;
+        // boundary before it becomes an HTTP client target. Wrap the
+        // UrlRejection into `VerifyErrorKind::InvalidEndpointUrl` so the
+        // exit-code classifier maps it to `UsageError` (64) via the verify
+        // error path — no cross-subsystem dependency on SignError.
+        let _rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url").map_err(|reason| {
+            VerifyError::new(
+                identifier.clone(),
+                VerifyErrorKind::InvalidEndpointUrl {
+                    endpoint: "--rekor-url".into(),
+                    reason,
+                },
+            )
+        })?;
 
         // Online-only: verify needs the registry to fetch referrers (and Rekor
         // to verify the SET). Offline mode → exit 81 via `OfflineMode` classifier.
@@ -82,7 +93,10 @@ impl Verify {
         // the `sigstore-trust-root` crate). Until both land we surface
         // `VerifyErrorKind::TrustRootUnavailable` so the exit-code classifier
         // produces `ConfigError` (78) — a readable "the verify path isn't
-        // wired yet" signal rather than a panic.
+        // wired yet" signal rather than a panic. (Verify reuses the existing
+        // `TrustRootUnavailable` variant because the trust root is genuinely
+        // missing in Slice 1 — there is no value in introducing a separate
+        // verify-side `NotImplemented` until the embedded TUF root ships.)
         Err(anyhow::Error::from(VerifyError::new(
             identifier,
             VerifyErrorKind::TrustRootUnavailable,

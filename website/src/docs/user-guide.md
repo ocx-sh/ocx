@@ -444,82 +444,39 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 
 Knowing that a binary was downloaded from the right registry is not the same as knowing it was built by the right person at the right time. Anyone with push access to a registry — or the ability to intercept traffic to it — could substitute a different binary under the same tag. Signatures provide tamper evidence: they bind a specific binary digest to a specific signer identity via a publicly verifiable log entry.
 
-OCX integrates [Sigstore][sigstore] keyless signing. You do not manage signing keys. Instead, an ephemeral key is generated at signing time, and [Fulcio][fulcio] issues a short-lived certificate that binds the key to your OIDC identity (your GitHub Actions workflow, your Google account, your email). The key never leaves memory. After signing, [Rekor][rekor] records the entry in a public, append-only transparency log. The Sigstore bundle — certificate, signature, and Rekor log entry — is attached to the package manifest as an [OCI Referrers][oci-referrers-spec] artifact.
+OCX integrates [Sigstore][sigstore] keyless signing. You do not manage signing keys. [Fulcio][fulcio] issues a short-lived certificate binding an ephemeral key to your OIDC identity, and [Rekor][rekor] records the entry in a public, append-only transparency log.
 
 :::info How keyless signing compares to GPG
-Traditional GPG signing requires generating, distributing, and revoking a long-lived key pair — a human process that organizations frequently skip. [Sigstore][sigstore] keyless signing replaces the key management ceremony with short-lived OIDC credentials your CI system already provisions. The Rekor transparency log plays the role of a public key server, but with an immutable audit log rather than a mutable key ring.
+Traditional GPG signing requires generating, distributing, and revoking a long-lived key pair — a human process that organizations frequently skip. [Sigstore][sigstore] keyless signing replaces the key management ceremony with short-lived OIDC credentials your CI system already provisions. The [Rekor][rekor] transparency log plays the role of a public key server, but with an immutable audit log rather than a mutable key ring.
 :::
 
-### Signing {#supply-chain-signing}
+### Sign a release {#supply-chain-signing}
 
-[`ocx package sign`][cmd-package-sign] publishes a [Sigstore bundle v0.3][sigstore-bundle] as a referrer of the target manifest. In a GitHub Actions workflow with `id-token: write` permission, ambient OIDC detection works with no extra configuration:
+[`ocx package sign`][cmd-package-sign] publishes a [Sigstore bundle][sigstore-bundle] as a referrer of the target manifest. In a GitHub Actions workflow with `id-token: write` permission, ambient OIDC detection works with no extra configuration:
 
 ```shell
 ocx package sign -p linux/amd64 registry.example/pkg:1.0
 ```
 
-ocx detects the `ACTIONS_ID_TOKEN_REQUEST_TOKEN` environment variable, requests a token from the GitHub OIDC endpoint, and proceeds through the full sign pipeline automatically.
+### Verify what you install {#supply-chain-verification}
 
-When ambient detection is not available — for example in a CI system that writes the token to a file — use an explicit override:
-
-```shell
-ocx package sign \
-  -p linux/amd64 \
-  --identity-token-file /run/secrets/oidc-token \
-  registry.example/pkg:1.0
-```
-
-The identity token file must be readable only by the owner (`chmod 600`); world- or group-readable files are rejected with exit 77.
-
-Token source precedence (highest to lowest): `--identity-token-file` → `--identity-token-stdin` → [`OCX_IDENTITY_TOKEN`][env-identity-token] env var → ambient CI detection → interactive browser OAuth.
-
-### Verification {#supply-chain-verification}
-
-[`ocx verify`][cmd-verify] checks a previously published signature. You must supply the expected certificate identity and OIDC issuer — there are no defaults, because verification is meaningless without specifying whose signature you trust:
+[`ocx package verify`][cmd-package-verify] checks a previously published signature. You must supply the expected certificate identity and OIDC issuer — there are no defaults, because verification is meaningless without specifying whose signature you trust:
 
 ```shell
-ocx verify \
+ocx package verify \
   -p linux/amd64 \
   --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.example/pkg:1.0
 ```
 
-Verification is exact-match in Slice 1: the certificate SAN must equal `--certificate-identity` and the OIDC issuer URL must equal `--certificate-oidc-issuer`. All five checks must pass for exit 0: certificate chain against the TUF trust root, Rekor SET, signature over the subject digest, identity match, and issuer match.
-
-### Trust Model {#supply-chain-trust}
-
-Registries must implement the [OCI Referrers API][oci-referrers-spec] (OCI Distribution Specification 1.1) to store and retrieve signature bundles. Registries that lack support produce exit 83 (`ReferrersUnsupported`) — sign and verify fail hard rather than silently returning empty results. There is no push-side fallback to cosign's `sha256-<digest>.sig` tag convention.
-
 :::warning Auto-verify during install is not yet enabled
-`ocx verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx verify` explicitly in CI before deploying a package to a production environment.
+`ocx package verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx package verify` explicitly in CI before deploying a package to a production environment.
 :::
 
-See the [command reference][cmd-package-sign] for flags, exit codes, and CI examples.
-
-## CI Integration {#ci}
-
-CI environments need tool binaries to be available and their environment variables exported — but
-they don't need version switching, candidate symlinks, or any of the install-store machinery that
-supports interactive use. OCX provides two commands tailored for this:
-
-[`package pull`][cmd-package-pull] downloads packages into the content-addressed
-[package store][fs-packages] without creating any symlinks. [`ci export`][cmd-ci-export] then writes
-the package-declared environment variables directly into the CI system's runtime files.
-
-```shell
-ocx package pull cmake:3.28
-ocx ci export cmake:3.28
-```
-
-On [GitHub Actions][github-actions-docs], `ci export` auto-detects the environment and appends
-`PATH` entries to `$GITHUB_PATH` and other variables to `$GITHUB_ENV`, making them available in
-all subsequent steps.
-
-:::tip
-`package pull` only touches the package store — no symlinks, no symlink-store mutations. This makes
-it safe to run concurrently in matrix builds that share a cached [`OCX_HOME`][env-ocx-home], since
-content-addressed writes are inherently idempotent.
+::: tip Learn more
+[Signing In Depth][in-depth-signing] — trust root mechanics, OCI 1.1 referrers hard-fail policy, Sigstore bundle storage, slice boundaries, and offline semantics.
+[`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify] — flags, exit codes, and CI examples.
 :::
 
 ## Remove and clean up {#cleanup}
@@ -615,7 +572,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [arg-config]: ./reference/command-line.md#arg-config
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-package-sign]: ./reference/command-line.md#package-sign
-[cmd-verify]: ./reference/command-line.md#verify
+[cmd-package-verify]: ./reference/command-line.md#package-verify
 [cmd-package-create]: ./reference/command-line.md#package-create
 [cmd-deselect]: ./reference/command-line.md#deselect
 [cmd-find]: ./reference/command-line.md#find
@@ -687,3 +644,4 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [in-depth-project]: ./in-depth/project.md
 [in-depth-project-multi-project-retention]: ./in-depth/project.md#multi-project-retention
 [in-depth-project-running]: ./in-depth/project.md#running
+[in-depth-signing]: ./in-depth/signing.md

@@ -82,7 +82,7 @@ def test_sign_then_verify_happy_path(
         [
             str(ocx.binary),
             "--format", "json",
-            "verify",
+            "package", "verify",
             "--certificate-identity", "test-signer@example.com",
             "--certificate-oidc-issuer", "https://fake-oidc.test",
             "--rekor-url", fake_rekor.url,
@@ -96,7 +96,7 @@ def test_sign_then_verify_happy_path(
     assert verify_result.returncode == 0, verify_result.stderr
     verify_envelope = json.loads(verify_result.stdout)
     assert verify_envelope["schema_version"] == 1
-    assert verify_envelope["command"] == "verify"
+    assert verify_envelope["command"] == "package verify"
     assert verify_envelope["data"]["subject_digest"] == data["subject_digest"]
 
 
@@ -294,7 +294,7 @@ def test_sign_offline_refused(
 
 
 @pytest.mark.xfail(
-    strict=False,
+    strict=True,
     reason="Phase 5c pipeline not yet implemented",
 )
 def test_sign_token_file_only(
@@ -342,7 +342,7 @@ def test_sign_token_file_only(
 
 
 @pytest.mark.xfail(
-    strict=False,
+    strict=True,
     reason="Phase 5c pipeline not yet implemented",
 )
 def test_sign_token_stdin_overrides_env(
@@ -395,7 +395,7 @@ def test_sign_token_stdin_overrides_env(
 
 
 @pytest.mark.xfail(
-    strict=False,
+    strict=True,
     reason="Phase 5c pipeline not yet implemented",
 )
 def test_sign_token_file_overrides_stdin_and_env(
@@ -538,5 +538,204 @@ def test_sign_referrers_unsupported_exits_83(
     )
     assert result.returncode == 83, (
         f"expected exit 83 (ReferrersUnsupported), got {result.returncode}\n"
+        f"stderr: {result.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Credential exemption — OCX_IDENTITY_TOKEN must not leak to child processes
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: sign pipeline must complete and spawn a child to observe forwarded env",
+)
+def test_sign_does_not_forward_identity_token_to_children(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_oidc_token: str,
+    tmp_path,
+) -> None:
+    """``OCX_IDENTITY_TOKEN`` must not be forwarded into spawned children.
+
+    Credential exemption (see ``subsystem-cli.md``): the token is a bearer
+    credential read directly via ``std::env::var`` for the sign call only;
+    ``Env::apply_ocx_config`` actively scrubs it from any subprocess env
+    composed via ``OcxConfigView``. The Rust unit test
+    ``apply_ocx_config_never_forwards_credential_tokens`` covers the lib
+    boundary; this test pins the end-to-end behaviour through the sign
+    command.
+
+    Phase 5c will spawn a child during the sign path (e.g. the post-publish
+    referrer-update hook); until then the test xfails strictly.
+    """
+    pkg = published_package
+    probe = "PROBE-DO-NOT-LOG-" + fake_oidc_token[:16]
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": probe}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    # The probe token must not appear in stdout or stderr — any child the sign
+    # path spawns must run with OCX_IDENTITY_TOKEN absent from its env.
+    assert probe not in result.stdout, "probe token leaked into stdout"
+    assert probe not in result.stderr, "probe token leaked into stderr"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SSRF guard — non-loopback HTTP and non-{http,https} schemes → exit 64
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_sign_rejects_http_non_loopback_fulcio_url(ocx: OcxRunner) -> None:
+    """`--fulcio-url http://example.com/...` must exit 64 (UsageError).
+
+    The SSRF guard (`validate_sigstore_url`) permits `http://` only for
+    loopback hosts so the fake-sigstore stack works in CI; any other
+    `http://` target is a CWE-918 risk and the typed
+    ``SignErrorKind::InvalidEndpointUrl`` routes it through `UsageError`.
+    """
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--fulcio-url", "http://example.com/fulcio",
+            "--platform", "linux/amd64",
+            "pkg:1.0",
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 64, (
+        f"expected exit 64 (UsageError / InvalidEndpointUrl on --fulcio-url), got {result.returncode}\n"
+        f"stderr: {result.stderr.strip()}"
+    )
+
+
+def test_sign_rejects_ftp_scheme_url(ocx: OcxRunner) -> None:
+    """`--rekor-url ftp://...` must exit 64 (UsageError).
+
+    Any scheme other than `http` (loopback only) and `https` is rejected at
+    the SSRF guard so neither sign nor verify ever issues a non-HTTP request
+    to a user-supplied endpoint.
+    """
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--rekor-url", "ftp://example.com/bundle",
+            "--platform", "linux/amd64",
+            "pkg:1.0",
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 64, (
+        f"expected exit 64 (UsageError / InvalidEndpointUrl on ftp scheme), got {result.returncode}\n"
+        f"stderr: {result.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Re-sign idempotency — ADR S1-I
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: SignPipeline::run unimplemented — re-sign idempotency (ADR S1-I)",
+)
+def test_sign_then_sign_again_is_idempotent(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_oidc_token: str,
+) -> None:
+    """Two sign invocations for the same subject must not double-publish.
+
+    Per ADR §"Re-sign idempotency" (S1-I): a second `package sign` of an
+    already-signed subject either no-ops (publisher convention) or refreshes
+    the existing referrer pointer; in either case the referrers list for
+    that subject must contain exactly one bundle from this signer afterwards.
+    Phase 5c wires the idempotency check.
+    """
+    pkg = published_package
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
+    for _ in range(2):
+        result = subprocess.run(
+            [
+                str(ocx.binary),
+                "package", "sign",
+                "--fulcio-url", fake_fulcio.url,
+                "--rekor-url", fake_rekor.url,
+                "--platform", "linux/amd64",
+                pkg.short,
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# --no-tty + missing override + no ambient → exit 77 (B3 observable contract)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: DispatchingTokenProvider browser path not wired",
+)
+def test_sign_no_tty_skips_browser_fallback_exits_77(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+) -> None:
+    """`--no-tty` with no override token + no ambient detection → exit 77.
+
+    B3 observable contract: when the dispatcher cannot find a token through
+    any of override/ambient and `--no-tty` is set, it MUST NOT attempt the
+    interactive browser OAuth (which would hang in CI). It surfaces
+    `OidcPreCheckFailed` → exit 77 instead. Phase 5c implements the full
+    dispatch state machine.
+    """
+    pkg = published_package
+    # Deliberately do NOT set OCX_IDENTITY_TOKEN — and pass --no-tty so the
+    # only legal path (browser) is suppressed.
+    env_no_token = {k: v for k, v in ocx.env.items() if k != "OCX_IDENTITY_TOKEN"}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--no-tty",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env_no_token,
+    )
+    assert result.returncode == 77, (
+        f"expected exit 77 (PermissionDenied / OidcPreCheckFailed), got {result.returncode}\n"
         f"stderr: {result.stderr.strip()}"
     )

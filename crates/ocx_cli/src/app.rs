@@ -149,7 +149,6 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         Command::Lock(_) => "lock",
         Command::Uninstall(_) => "uninstall",
         Command::Update(_) => "update",
-        Command::Verify(_) => "verify",
         Command::Exec(_) => "exec",
         Command::Env(_) => "env",
         Command::Package(sub) => match sub {
@@ -160,6 +159,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
             PackageCmd::Push(_) => "package push",
             PackageCmd::Sign(_) => "package sign",
             PackageCmd::Test(_) => "package test",
+            PackageCmd::Verify(_) => "package verify",
         },
         Command::Pull(_) => "pull",
         Command::Remove(_) => "remove",

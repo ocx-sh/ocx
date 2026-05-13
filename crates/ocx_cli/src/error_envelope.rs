@@ -33,9 +33,11 @@
 
 // Stubs are consumed by `main.rs` once error-routing dispatch branches on
 // `--format json`. Silence `dead_code` until every consumer is wired.
+// TODO(Phase 5c): remove this allow once main.rs branches on --format json
+//                 and consumes the envelope stubs.
 #![allow(dead_code)]
 
-use ocx_lib::cli::{ExitCode, classify_error};
+use ocx_lib::cli::{ClassifyErrorKind, ExitCode, classify_error};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -190,13 +192,14 @@ pub fn render_error_envelope(command: &str, err: &anyhow::Error) -> anyhow::Resu
     let kind = ErrorCategory::from_exit_code(exit_code);
     let message = format!("{err:#}");
     let context = collect_context(err_ref);
+    let detail = collect_detail(err_ref);
     let envelope = ErrorEnvelope {
         schema_version: ENVELOPE_SCHEMA_VERSION,
         command,
         exit_code: exit_code as u8,
         error: EnvelopeError {
             kind,
-            detail: None,
+            detail,
             message,
             remediation: None,
             context,
@@ -231,6 +234,30 @@ fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static
         }
     }
     context
+}
+
+/// Walk the error chain and pull the fine-grained `detail` discriminant from
+/// the first leaf "kind" enum encountered.
+///
+/// Per C-S1-1, `envelope.error.detail` carries the snake_case variant name
+/// (e.g. `"offline_sign_refused"`) so consumers can dispatch programmatically
+/// without parsing stderr. The lookup walks `source()` to find the inner
+/// [`SignErrorKind`] / [`VerifyErrorKind`] carried by the typed three-layer
+/// errors. Returning `None` (no match) leaves `detail` absent in the JSON
+/// envelope via `skip_serializing_if`.
+fn collect_detail(err: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    use ocx_lib::oci::sign::SignErrorKind;
+    use ocx_lib::oci::verify::VerifyErrorKind;
+
+    for cause in std::iter::successors(Some(err), |e| e.source()) {
+        if let Some(kind) = cause.downcast_ref::<SignErrorKind>() {
+            return Some(kind.kind_detail());
+        }
+        if let Some(kind) = cause.downcast_ref::<VerifyErrorKind>() {
+            return Some(kind.kind_detail());
+        }
+    }
+    None
 }
 
 /// Render the success-path JSON envelope, serializing `data` under the
@@ -458,6 +485,36 @@ mod tests {
         assert_eq!(parsed["exit_code"], 80);
         assert_eq!(parsed["error"]["kind"], "auth_error");
         assert_eq!(parsed["error"]["context"]["identifier"], "registry.example/pkg:1.0");
+    }
+
+    #[test]
+    fn envelope_detail_populated_for_offline_sign_refused() {
+        // C-S1-1 frozen contract: `envelope.error.detail` carries the snake_case
+        // discriminant of the inner `SignErrorKind`. Previously hard-coded to
+        // `None`, which left scripts unable to distinguish e.g. an offline-refusal
+        // from any other PermissionDenied without parsing stderr.
+        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let inner = ocx_lib::oci::sign::SignError::new(id, ocx_lib::oci::sign::SignErrorKind::OfflineSignRefused);
+        let err = anyhow::Error::from(inner);
+        let json = render_error_envelope("package sign", &err).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["exit_code"], 77);
+        assert_eq!(parsed["error"]["kind"], "permission_denied");
+        assert_eq!(parsed["error"]["detail"], "offline_sign_refused");
+    }
+
+    #[test]
+    fn envelope_detail_populated_for_verify_identity_mismatch() {
+        // Mirror coverage on the verify side: a reachable VerifyErrorKind variant
+        // must surface its snake_case discriminant via `envelope.error.detail`.
+        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let inner = ocx_lib::oci::verify::VerifyError::new(id, ocx_lib::oci::verify::VerifyErrorKind::IdentityMismatch);
+        let err = anyhow::Error::from(inner);
+        let json = render_error_envelope("verify", &err).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["exit_code"], 77);
+        assert_eq!(parsed["error"]["kind"], "permission_denied");
+        assert_eq!(parsed["error"]["detail"], "identity_mismatch");
     }
 
     #[test]

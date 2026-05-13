@@ -66,6 +66,7 @@ CLI command (clap parse)
 | **Identifier** | Parsed OCI reference: `registry/repo:tag@digest` with default registry fallback |
 | **Manifest** | OCI image manifest or image index (multi-platform) |
 | **Refs** | Reference sub-dirs inside `packages/.../refs/`: `symlinks/` (GC roots from install symlinks), `deps/` (forward-refs to other packages), `layers/` (forward-refs to layers), `blobs/` (forward-refs to blobs) |
+| **State** | Ephemeral, registry-scoped or subsystem-scoped runtime state at `state/{subsystem}/{key}.json`; TTL-bound; not GC-walked. Example: `state/referrers/<registry>.json` for OCI Referrers API capability cache. See `adr_oci_referrers_signing_v1.md` Amendment 3. |
 
 ## ADR Index
 

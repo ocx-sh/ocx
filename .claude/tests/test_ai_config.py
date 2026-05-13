@@ -1842,3 +1842,109 @@ class TestPlanStatusBlock:
                 assert field in block, (
                     f"{tmpl.relative_to(ROOT)} Status block missing field {field}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# CLI command table coverage in subsystem-cli-commands.md
+# ---------------------------------------------------------------------------
+
+
+class TestSubsystemCliCommandsTableCoverage:
+    """Every clap command file must appear in the Command Summary table.
+
+    Regression guard against the B2 finding on PR #87 — the `package sign`
+    and `package verify` commands shipped without rows in the Command Summary
+    table of `subsystem-cli-commands.md`. When a new CLI command is added,
+    this test fails until the doc table catches up.
+    """
+
+    _CLI_COMMANDS_RULE = CLAUDE_DIR / "rules" / "subsystem-cli-commands.md"
+    _COMMAND_DIR = ROOT / "crates" / "ocx_cli" / "src" / "command"
+
+    # Filename stems whose first row in the table maps to a multi-token command
+    # ("package_sign.rs" → "package sign"). The table cell uses the spaced
+    # form, so we normalize the stem to match.
+    _STEM_REWRITES = {
+        "package_sign": "package sign",
+        "package_pull": "package pull",
+        "package_push": "package push",
+        "package_describe": "package describe",
+        "package_info": "package info",
+        "package_test": "package test",
+        "package_create": "package create",
+        "index_catalog": "index catalog",
+        "index_list": "index list",
+        "index_update": "index update",
+        "shell_completion": "shell completion",
+        "shell_direnv": "shell direnv",
+        "shell_env": "shell env",
+        "shell_hook": "shell hook",
+        "shell_init": "shell init",
+        "ci_export": "ci export",
+        "launcher_exec": "launcher exec",
+        "generate_direnv": "generate direnv",
+    }
+
+    # Commands intentionally absent from the public table (internal /
+    # umbrella subcommands; `verify` is documented as `package verify`).
+    _EXEMPT = {
+        # `verify.rs` ships as `package verify` — the docs cite "package verify"
+        # in the row label rather than "verify".
+        "verify",
+        # `launcher` is the parent group; only `launcher exec` is documented.
+        "launcher",
+        # Parent groups whose subcommands are documented individually:
+        "package",
+        "shell",
+        "index",
+        "ci",
+        "generate",
+        # `app.rs` / `command.rs` rooted dispatchers (not commands themselves).
+    }
+
+    def _table_cells(self) -> set[str]:
+        """Extract the leading-cell tokens from the Command Summary table."""
+        text = self._CLI_COMMANDS_RULE.read_text()
+        # Find the "Command Summary" section and walk its `|`-delimited rows.
+        section_start = text.find("## Command Summary")
+        assert section_start != -1, "Command Summary section missing"
+        section = text[section_start:]
+        next_section = section.find("\n## ", 1)
+        if next_section != -1:
+            section = section[:next_section]
+        cells: set[str] = set()
+        for line in section.splitlines():
+            if not line.startswith("| `"):
+                continue
+            # Row shape: `| \`name [ARGS]\` | ... | ... |`
+            first_cell = line.split("|", 2)[1].strip()
+            if first_cell.startswith("`"):
+                first_cell = first_cell.strip("`")
+            # Strip leading "ocx " if present, then take first word(s) up to ARGS.
+            head = first_cell.split(" ")
+            # Multi-token command (e.g. "package sign IDENTIFIER") — keep first
+            # two tokens if first is a group; else single token.
+            group_heads = {"package", "shell", "index", "ci", "launcher", "generate"}
+            if head and head[0] in group_heads and len(head) >= 2:
+                cells.add(f"{head[0]} {head[1]}")
+            elif head:
+                cells.add(head[0])
+        return cells
+
+    def test_subsystem_cli_commands_table_covers_all_commands(self) -> None:
+        if not self._COMMAND_DIR.is_dir():
+            pytest.skip("CLI command directory missing — pre-Rust checkout")
+        documented = self._table_cells()
+        missing: list[str] = []
+        for cmd_file in sorted(self._COMMAND_DIR.glob("*.rs")):
+            stem = cmd_file.stem
+            if stem in self._EXEMPT:
+                continue
+            expected = self._STEM_REWRITES.get(stem, stem)
+            if expected not in documented:
+                missing.append(f"{cmd_file.relative_to(ROOT)} → expected `{expected}`")
+        assert not missing, (
+            f"CLI command files without a row in `subsystem-cli-commands.md` "
+            f"Command Summary: {missing}. Add a row (one per command) so new "
+            f"commands are discoverable from the AI-config catalog."
+        )

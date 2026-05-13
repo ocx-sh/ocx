@@ -51,6 +51,8 @@ indicatif = { version = "0.18.3", features = ["tokio"] }
 thiserror = "2"
 tracing-indicatif = { version = "0.3.14" }
 pem = "3.0.6"
+url = { workspace = true }
+zeroize = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

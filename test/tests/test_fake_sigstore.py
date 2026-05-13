@@ -23,9 +23,9 @@ from tests.fixtures.fake_sigstore import (
     FakeFulcio,
     FakeRekor,
     FakeSigstoreStack,
-    _FAKE_AUDIENCE,
-    _FAKE_ISSUER_URL,
-    _FAKE_SUBJECT,
+    FAKE_AUDIENCE,
+    FAKE_ISSUER_URL,
+    FAKE_SUBJECT,
 )
 
 
@@ -88,7 +88,7 @@ def test_oidc_discovery_endpoint(tmp_path: Path) -> None:
     with FakeSigstoreStack(tmp_path) as stack:
         resp = urllib.request.urlopen(f"{stack.oidc_url}/.well-known/openid-configuration")
         doc = json.loads(resp.read())
-    assert doc["issuer"] == _FAKE_ISSUER_URL
+    assert doc["issuer"] == FAKE_ISSUER_URL
     assert "jwks_uri" in doc
     assert "ES256" in doc["id_token_signing_alg_values_supported"]
 
@@ -121,10 +121,10 @@ def test_oidc_token_contains_expected_claims(tmp_path: Path) -> None:
         # Decode without verification to inspect claims
         claims = pyjwt.decode(token, options={"verify_signature": False})
 
-    assert claims["iss"] == _FAKE_ISSUER_URL
-    assert claims["sub"] == _FAKE_SUBJECT
-    assert claims["aud"] == _FAKE_AUDIENCE
-    assert claims["email"] == _FAKE_SUBJECT
+    assert claims["iss"] == FAKE_ISSUER_URL
+    assert claims["sub"] == FAKE_SUBJECT
+    assert claims["aud"] == FAKE_AUDIENCE
+    assert claims["email"] == FAKE_SUBJECT
     assert claims["exp"] > claims["iat"]
 
 
@@ -138,9 +138,9 @@ def test_oidc_token_verifies_against_jwks(tmp_path: Path) -> None:
         resp = urllib.request.urlopen(f"{stack.oidc_url}/.well-known/jwks.json")
         jwks = json.loads(resp.read())
         key = pyjwt.algorithms.ECAlgorithm.from_jwk(json.dumps(jwks["keys"][0]))
-        claims = pyjwt.decode(token, key, algorithms=["ES256"], audience=_FAKE_AUDIENCE)
+        claims = pyjwt.decode(token, key, algorithms=["ES256"], audience=FAKE_AUDIENCE)
 
-    assert claims["sub"] == _FAKE_SUBJECT
+    assert claims["sub"] == FAKE_SUBJECT
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +191,7 @@ def test_fulcio_issues_cert_for_valid_token(tmp_path: Path) -> None:
     leaf = x509.load_pem_x509_certificate(certs[0].encode())
     sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName)
     emails = sans.value.get_values_for_type(x509.RFC822Name)
-    assert _FAKE_SUBJECT in emails
+    assert FAKE_SUBJECT in emails
 
 
 def test_fulcio_rejects_invalid_token(tmp_path: Path) -> None:

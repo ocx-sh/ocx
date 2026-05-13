@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for ``ocx verify`` (Slice 1 — referrers verify).
+"""Acceptance tests for ``ocx package verify`` (Slice 1 — referrers verify).
 
 Contract source: ``.claude/artifacts/adr_oci_referrers_signing_v1.md``
 (specifically C-S1-1 frozen envelope + C-S1-2 VerifyErrorKind variant set) and
@@ -74,7 +74,7 @@ def test_verify_unknown_signer_fails_identity_mismatch(
     verify = subprocess.run(
         [
             str(ocx.binary),
-            "verify",
+            "package", "verify",
             "--certificate-identity", "someone-else@example.com",
             "--certificate-oidc-issuer", "https://fake-oidc.test",
             "--rekor-url", fake_rekor.url,
@@ -126,7 +126,7 @@ def test_verify_issuer_mismatch_exits_77(
     verify = subprocess.run(
         [
             str(ocx.binary),
-            "verify",
+            "package", "verify",
             "--certificate-identity", "test-signer@example.com",
             "--certificate-oidc-issuer", "https://wrong-issuer.example",
             "--rekor-url", fake_rekor.url,
@@ -166,7 +166,7 @@ def test_verify_no_signatures_exits_79(
     result = subprocess.run(
         [
             str(ocx.binary),
-            "verify",
+            "package", "verify",
             "--certificate-identity", "anyone@example.com",
             "--certificate-oidc-issuer", "https://anywhere.example",
             "--platform", "linux/amd64",
@@ -205,7 +205,7 @@ def test_verify_referrers_unsupported_exits_83(
     result = subprocess.run(
         [
             str(ocx.binary),
-            "verify",
+            "package", "verify",
             "--certificate-identity", "anyone@example.com",
             "--certificate-oidc-issuer", "https://anywhere.example",
             "--platform", "linux/amd64",
@@ -248,7 +248,7 @@ def test_verify_error_envelope_golden_shape(
         [
             str(ocx.binary),
             "--format", "json",
-            "verify",
+            "package", "verify",
             "--certificate-identity", "anyone@example.com",
             "--certificate-oidc-issuer", "https://anywhere.example",
             "--platform", "linux/amd64",
@@ -261,7 +261,7 @@ def test_verify_error_envelope_golden_shape(
     assert result.returncode != 0, "unsigned package must fail verify"
     envelope = json.loads(result.stdout or result.stderr)
     assert envelope["schema_version"] == 1
-    assert envelope["command"] == "verify"
+    assert envelope["command"] == "package verify"
     assert envelope["exit_code"] == 79
     assert "data" not in envelope, "error branch must not carry data"
     error = envelope["error"]
@@ -312,7 +312,7 @@ def test_verify_success_envelope_golden_shape(
         [
             str(ocx.binary),
             "--format", "json",
-            "verify",
+            "package", "verify",
             "--certificate-identity", "test-signer@example.com",
             "--certificate-oidc-issuer", "https://fake-oidc.test",
             "--rekor-url", fake_rekor.url,
@@ -326,7 +326,7 @@ def test_verify_success_envelope_golden_shape(
     assert verify.returncode == 0, verify.stderr
     envelope = json.loads(verify.stdout)
     assert envelope["schema_version"] == 1
-    assert envelope["command"] == "verify"
+    assert envelope["command"] == "package verify"
     assert envelope["exit_code"] == 0
     assert "error" not in envelope, "success branch must not carry error"
     data = envelope["data"]
@@ -334,3 +334,253 @@ def test_verify_success_envelope_golden_shape(
     assert data["referrer_digest"].startswith("sha256:")
     assert data["certificate_identity"] == "test-signer@example.com"
     assert data["certificate_oidc_issuer"] == "https://fake-oidc.test"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tampered Rekor SET — exit 65 (DataError)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: VerifyPipeline SET canonicalization not yet wired",
+)
+def test_verify_detects_tampered_rekor_set(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_oidc_token: str,
+) -> None:
+    """A tampered Rekor SET → exit 65 (DataError), not exit 82.
+
+    Locks the TODO at ``fake_sigstore.py:551-562``. RekorSetInvalid is a
+    data-integrity failure (the bundle has been altered) — retry will not
+    help, so it must map to ``DataError`` not ``RekorUnavailable``. Phase 5c
+    must canonicalize the SET payload in a way that catches single-bit
+    tampering during ``VerifyPipeline::run``.
+    """
+    pkg = published_package
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
+    sign = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert sign.returncode == 0, sign.stderr
+
+    # Toggle the fake Rekor into tampered-SET mode (Phase 5c adds the toggle).
+    fake_rekor.set_tampered_set(True)  # type: ignore[attr-defined]
+
+    verify = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "verify",
+            "--certificate-identity", "test-signer@example.com",
+            "--certificate-oidc-issuer", "https://fake-oidc.test",
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert verify.returncode == 65, (
+        f"expected exit 65 (DataError / RekorSetInvalid), got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tampered bundle signature — exit 65 (DataError / SignatureInvalid)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: VerifyPipeline::run unimplemented",
+)
+def test_verify_detects_tampered_bundle_signature_exits_65(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_oidc_token: str,
+    tmp_path,
+) -> None:
+    """Flip a byte in the published bundle blob → exit 65 (SignatureInvalid).
+
+    The bundle is content-addressed, so altering the OCI blob will fail the
+    subject-digest signature check. Phase 5c implements the full verify
+    pipeline; pre-5c the test xfails strictly.
+    """
+    pkg = published_package
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
+    sign = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert sign.returncode == 0, sign.stderr
+
+    # Phase 5c wires the bundle-tamper path. The probe — flipping a single
+    # byte in the bundle blob and re-pushing — runs at Phase 5c time.
+
+    verify = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "verify",
+            "--certificate-identity", "test-signer@example.com",
+            "--certificate-oidc-issuer", "https://fake-oidc.test",
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert verify.returncode == 65, (
+        f"expected exit 65 (DataError / SignatureInvalid), got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Invalid cert chain — exit 65 (DataError / CertChainInvalid)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: VerifyPipeline::run unimplemented",
+)
+def test_verify_invalid_cert_chain_exits_65(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_oidc_token: str,
+) -> None:
+    """Fulcio returns a cert chain that fails validation → exit 65.
+
+    Toggles ``fake_fulcio.set_invalid_chain(True)`` before signing so the
+    bundle carries a chain that the verify pipeline rejects via
+    ``CertChainInvalid``. Phase 5c implements the trust-root chain check;
+    pre-5c xfail strictly.
+    """
+    pkg = published_package
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
+    fake_fulcio.set_invalid_chain(True)
+    sign = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert sign.returncode == 0, sign.stderr
+
+    verify = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "verify",
+            "--certificate-identity", "test-signer@example.com",
+            "--certificate-oidc-issuer", "https://fake-oidc.test",
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert verify.returncode == 65, (
+        f"expected exit 65 (DataError / CertChainInvalid), got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rekor unavailable during verify — exit 82
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 5c: VerifyPipeline::run unimplemented",
+)
+def test_verify_rekor_unavailable_exits_82(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    fake_fulcio: FakeFulcio,
+    fake_rekor: FakeRekor,
+    fake_oidc_token: str,
+) -> None:
+    """Fake Rekor returns 503 during the verify SET lookup → exit 82.
+
+    Distinguished from ``RekorSetInvalid`` (exit 65) because retry MAY help
+    here — the service is transiently down, not a crypto failure. Phase 5c
+    implements the SET fetch + classification.
+    """
+    pkg = published_package
+    env = {**ocx.env, "OCX_IDENTITY_TOKEN": fake_oidc_token}
+    sign = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "sign",
+            "--fulcio-url", fake_fulcio.url,
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert sign.returncode == 0, sign.stderr
+
+    from tests.fixtures.fake_sigstore import HttpStatus
+    fake_rekor.set_failure_mode(HttpStatus(503))
+
+    verify = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "verify",
+            "--certificate-identity", "test-signer@example.com",
+            "--certificate-oidc-issuer", "https://fake-oidc.test",
+            "--rekor-url", fake_rekor.url,
+            "--platform", "linux/amd64",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert verify.returncode == 82, (
+        f"expected exit 82 (RekorUnavailable), got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )

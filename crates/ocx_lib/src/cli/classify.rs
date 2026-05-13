@@ -64,6 +64,17 @@ pub trait ClassifyExitCode {
 pub trait ClassifyErrorKind {
     /// Return the exit code this kind maps to.
     fn exit_code(&self) -> ExitCode;
+
+    /// Stable snake_case discriminant for `envelope.error.detail`.
+    ///
+    /// Frozen contract C-S1-1 — values must NOT change between releases.
+    /// Consumers pattern-match on this string to dispatch programmatically
+    /// without parsing stderr. The snake_case parallel to `exit_code()`:
+    /// coarse category goes on `exit_code`, fine-grained variant name goes here.
+    ///
+    /// Implementations must be exhaustive (no wildcard `_` arm) so that adding
+    /// a new variant produces a compile error and forces an explicit mapping.
+    fn kind_detail(&self) -> &'static str;
 }
 
 /// Classify a [`std::error::Error`] chain into an [`ExitCode`].

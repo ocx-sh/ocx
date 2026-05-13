@@ -23,22 +23,27 @@
 //! [`oidc_ambient_inline::InlineAmbientProvider`]: super::oidc_ambient_inline::InlineAmbientProvider
 
 use async_trait::async_trait;
+use zeroize::Zeroizing;
 
 use super::error::SignErrorKind;
 
 /// An acquired OIDC identity token.
 ///
-/// The token is held as a plain `String` in-memory; callers must never log
-/// it at any level (see `tracing` negative-log tests in Phase 3). The field
-/// is not `Debug`-printed to avoid accidental leak in error traces.
+/// The token is held as a `Zeroizing<String>` so the memory is wiped on drop,
+/// reducing the window for accidental exposure via memory dumps or swap.
+/// Callers must never log the token at any level (see `tracing` negative-log
+/// tests in Phase 3). The field is not `Debug`-printed to avoid accidental
+/// leak in error traces.
 pub struct OidcToken {
-    raw: String,
+    raw: Zeroizing<String>,
 }
 
 impl OidcToken {
     /// Wrap a raw token string.
     pub fn new(raw: String) -> Self {
-        Self { raw }
+        Self {
+            raw: Zeroizing::new(raw),
+        }
     }
 
     /// Return the raw JWT string.
@@ -86,23 +91,26 @@ pub trait AmbientProvider: Send + Sync {
 /// Constructed once per `ocx package sign` invocation by the CLI layer after
 /// resolving the override token per C-S1-4 precedence.
 ///
-/// Phase 1 stub. Phase 5c will re-add `override_token` and `no_tty` fields
-/// alongside the real dispatch state machine.
-pub struct DispatchingTokenProvider;
-
-impl DispatchingTokenProvider {
-    /// Construct a dispatcher.
-    ///
-    /// Phase 5c will re-introduce `override_token: Option<String>` and
-    /// `no_tty: bool` parameters alongside the real ADR S1-C implementation.
-    pub fn new() -> Self {
-        Self
-    }
+/// `override_token` (if `Some`) short-circuits ambient + browser detection —
+/// the value is returned directly from `acquire`. The token is held under
+/// `Zeroizing` so the underlying bytes are wiped on drop, reducing the
+/// exposure window against memory dumps or swap (CWE-316).
+///
+/// `no_tty=true` disables the interactive browser-OAuth fallback so headless
+/// CI runs surface a typed error instead of hanging waiting for user input.
+pub struct DispatchingTokenProvider {
+    /// Precedence-resolved override token (file → stdin → env), or `None`
+    /// when the CLI did not supply any of those sources.
+    pub override_token: Option<Zeroizing<String>>,
+    /// When `true`, suppress the browser OAuth fallback — required for CI.
+    pub no_tty: bool,
 }
 
-impl Default for DispatchingTokenProvider {
-    fn default() -> Self {
-        Self::new()
+impl DispatchingTokenProvider {
+    /// Construct a dispatcher with the precedence-resolved override token
+    /// (or `None`) and the `--no-tty` policy bit.
+    pub fn new(override_token: Option<Zeroizing<String>>, no_tty: bool) -> Self {
+        Self { override_token, no_tty }
     }
 }
 
@@ -110,5 +118,85 @@ impl Default for DispatchingTokenProvider {
 impl TokenProvider for DispatchingTokenProvider {
     async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
         unimplemented!("DispatchingTokenProvider::acquire — Phase 5 implements ADR S1-C state machine")
+    }
+}
+
+/// `--identity-token-file` source — reads the OIDC token from a file with
+/// owner-only permission gating (`mode & 0o077 == 0` on Unix).
+///
+/// Phase 1 stub — Phase 5c wires the file read + `IdentityTokenFilePermissive`
+/// gate into [`TokenProvider::acquire`] so the dispatcher composes uniformly
+/// over file / stdin / env / ambient / browser sources.
+pub struct FileTokenProvider {
+    /// Path to the token file (validated lazily on `acquire`).
+    pub path: std::path::PathBuf,
+}
+
+impl FileTokenProvider {
+    /// Construct a file-backed token provider. Path is validated when
+    /// [`TokenProvider::acquire`] is called, not at construction time.
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+#[async_trait]
+impl TokenProvider for FileTokenProvider {
+    async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
+        unimplemented!("FileTokenProvider::acquire — Phase 5c reads + validates the token file")
+    }
+}
+
+/// `--identity-token-stdin` source — reads a newline-terminated OIDC token
+/// from the process's standard input. Phase 1 stub.
+pub struct StdinTokenProvider;
+
+impl StdinTokenProvider {
+    /// Construct a stdin-backed token provider.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for StdinTokenProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl TokenProvider for StdinTokenProvider {
+    async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
+        unimplemented!("StdinTokenProvider::acquire — Phase 5c reads + trims the stdin token")
+    }
+}
+
+/// Environment-variable source — reads `OCX_IDENTITY_TOKEN` directly via
+/// `std::env::var` (the value is intentionally not propagated through
+/// `OcxConfigView`; see the credential exemption in `subsystem-cli.md`).
+///
+/// Phase 1 stub.
+pub struct EnvTokenProvider {
+    /// Env-var key the token is read from (defaults to `OCX_IDENTITY_TOKEN`).
+    pub key: &'static str,
+}
+
+impl EnvTokenProvider {
+    /// Construct an env-backed token provider.
+    pub fn new(key: &'static str) -> Self {
+        Self { key }
+    }
+}
+
+impl Default for EnvTokenProvider {
+    fn default() -> Self {
+        Self::new("OCX_IDENTITY_TOKEN")
+    }
+}
+
+#[async_trait]
+impl TokenProvider for EnvTokenProvider {
+    async fn acquire(&self, _audience: &str) -> Result<OidcToken, SignErrorKind> {
+        unimplemented!("EnvTokenProvider::acquire — Phase 5c reads + validates the env-supplied token")
     }
 }

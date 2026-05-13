@@ -105,7 +105,11 @@ impl ReferrersApiCapability {
     /// `{ocx_home}/state/referrers/{registry_slug}.json`.
     ///
     /// Uses a temporary file + rename for atomicity so a concurrent reader
-    /// never sees a partially-written file.
+    /// never sees a partially-written file. The rename step uses
+    /// `std::fs::rename`, which is replace-existing on both POSIX
+    /// (`rename(2)`) and Windows (`MoveFileExW` with
+    /// `MOVEFILE_REPLACE_EXISTING`), so repeated writes for the same
+    /// registry overwrite the previous cache atomically on every platform.
     pub async fn write_cache(&self, cache_root: &Path) -> io::Result<()> {
         let target = cache_path(cache_root, &self.registry);
         let dir = target
@@ -117,10 +121,15 @@ impl ReferrersApiCapability {
         let bytes = serde_json::to_vec(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Write to a temp file in the same directory so rename is atomic
-        // on POSIX filesystems (same mount point guaranteed).
-        // `NamedTempFile::persist` holds a blocking file handle; run the
-        // whole tempfile+rename sequence on a blocking thread to avoid
-        // blocking the async executor.
+        // (same mount point guaranteed on POSIX, same volume on Windows).
+        // `NamedTempFile` and the final rename both touch blocking file
+        // handles; run the whole sequence on a blocking thread.
+        //
+        // We disarm `NamedTempFile`'s drop-delete by promoting it to a
+        // `TempPath` via `into_temp_path()`, then `keep()` to release
+        // cleanup, then `std::fs::rename` for the atomic replace-existing
+        // step. `NamedTempFile::persist` is not used because it does NOT
+        // replace an existing target on Windows.
         tokio::task::spawn_blocking(move || -> io::Result<()> {
             #[cfg(unix)]
             let tmp = {
@@ -132,7 +141,10 @@ impl ReferrersApiCapability {
             #[cfg(not(unix))]
             let tmp = tempfile::Builder::new().tempfile_in(&dir)?;
             std::fs::write(tmp.path(), &bytes)?;
-            tmp.persist(&target).map_err(|e| e.error)?;
+            // Release the tempfile's drop-delete guard before renaming so
+            // a successful rename does not race with cleanup.
+            let tmp_path = tmp.into_temp_path().keep().map_err(io::Error::other)?;
+            std::fs::rename(&tmp_path, &target)?;
             Ok(())
         })
         .await
@@ -174,15 +186,18 @@ impl ReferrersApiCapability {
 
     /// Returns `true` if the cached probe is still within TTL.
     ///
-    /// Compares `probed_at + ttl_seconds` against the current wall clock;
-    /// clock going backwards counts as "not fresh" so a rewound clock forces
-    /// a reprobe rather than extending cache lifetime arbitrarily.
+    /// Compares `now - probed_at` against `ttl_seconds`. If the wall clock has
+    /// been rewound since the probe (so `probed_at` is in the future), the
+    /// subtraction errors and the entry is treated as stale — forcing a
+    /// reprobe rather than extending cache lifetime arbitrarily.
     pub fn is_fresh(&self) -> bool {
-        let expiry = self.probed_at + Duration::from_secs(self.ttl_seconds);
-        // duration_since returns Err when `expiry` is in the future — i.e. the
-        // cache entry is still valid. A rewound wall clock produces the same
-        // branch, which forces a reprobe rather than extending TTL arbitrarily.
-        SystemTime::now().duration_since(expiry).is_err()
+        // `duration_since` errors when `probed_at` is in the future (rewound
+        // wall clock or corrupted cache). Treat that as stale so the caller
+        // reprobes rather than trusting a bogus timestamp.
+        match SystemTime::now().duration_since(self.probed_at) {
+            Ok(elapsed) => elapsed < Duration::from_secs(self.ttl_seconds),
+            Err(_) => false,
+        }
     }
 }
 
@@ -450,6 +465,43 @@ mod tests {
         let _: serde_json::Value = serde_json::from_slice(&bytes).expect("written file must be valid JSON");
     }
 
+    /// Repeated `write_cache` calls for the same registry must succeed —
+    /// the second write replaces the first atomically. On Windows this
+    /// fails with `NamedTempFile::persist`; the implementation must use
+    /// `std::fs::rename` (replace-existing on every platform). On POSIX
+    /// this regression-tests the same contract.
+    #[tokio::test]
+    async fn write_cache_replaces_existing_atomic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = "ghcr.io";
+
+        let first = ReferrersApiCapability {
+            registry: registry.to_string(),
+            supported: ReferrersSupport::Supported,
+            probed_at: SystemTime::now(),
+            ttl_seconds: TTL_SECS,
+        };
+        first.write_cache(tmp.path()).await.expect("first write must succeed");
+
+        let second = ReferrersApiCapability {
+            registry: registry.to_string(),
+            supported: ReferrersSupport::Unsupported,
+            probed_at: SystemTime::now(),
+            ttl_seconds: TTL_SECS,
+        };
+        second
+            .write_cache(tmp.path())
+            .await
+            .expect("second write must succeed (replace-existing)");
+
+        // Reload and confirm the second value won — proves replace happened.
+        let loaded = ReferrersApiCapability::from_cache(registry, tmp.path())
+            .await
+            .expect("from_cache must not error")
+            .expect("from_cache must return Some for the replaced entry");
+        assert_eq!(loaded.supported, ReferrersSupport::Unsupported);
+    }
+
     // ── existing from_cache tests (preserved) ───────────────────────────────
 
     #[test]
@@ -504,17 +556,17 @@ mod tests {
     }
 
     #[test]
-    fn is_fresh_handles_probed_at_in_future() {
-        // If wall clock jumped backwards after probing, `probed_at` is in the
-        // future. We deliberately treat the cache as still fresh (conservative:
-        // avoids invalidating cache on every clock skew).
+    fn is_fresh_future_probed_at_treated_as_stale() {
+        // If the wall clock jumped backwards after probing, `probed_at` is in
+        // the future. Treat the cache as stale so the caller reprobes rather
+        // than trusting a timestamp that cannot be reconciled with `now`.
         let cap = ReferrersApiCapability {
             registry: "ghcr.io".into(),
             supported: ReferrersSupport::Supported,
             probed_at: SystemTime::now() + Duration::from_secs(3600),
             ttl_seconds: 3600,
         };
-        assert!(cap.is_fresh(), "future-dated probe counts as fresh");
+        assert!(!cap.is_fresh(), "future-dated probe must be stale (forces reprobe)");
     }
 
     #[tokio::test]

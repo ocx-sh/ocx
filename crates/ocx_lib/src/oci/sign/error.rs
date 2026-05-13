@@ -13,6 +13,7 @@
 
 use crate::cli::{ClassifyErrorKind, ClassifyExitCode, ExitCode};
 use crate::oci::Identifier;
+use crate::oci::sign::endpoint::UrlRejection;
 
 /// Top-level sign error carrying the identifier being signed + the kind.
 ///
@@ -102,12 +103,38 @@ pub enum SignErrorKind {
     /// `mode & 0o077` were non-zero). Secrets must be owner-readable only.
     ///
     /// Exit 77 (`PermissionDenied`). Remediation: `chmod 600 <path>`.
-    #[error("identity token file {path} has permissive permissions (mode {mode:#o}); expected 0600 or tighter")]
+    ///
+    /// The `Display` impl deliberately surfaces only the file's basename — the
+    /// full path can leak through CLI stderr, the JSON error envelope, or any
+    /// log sink, and a token-file path is a sensitive credential location that
+    /// should not be echoed back to whatever pipes the command output
+    /// (CWE-209). The full `PathBuf` is preserved on the variant for callers
+    /// that legitimately need it.
+    #[error(
+        "identity token file `{}` has permissive permissions (mode {mode:#o}); expected 0600 or tighter",
+        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "<redacted>".into())
+    )]
     IdentityTokenFilePermissive {
         /// Path to the token file that failed the permission check.
         path: std::path::PathBuf,
         /// Raw Unix mode bits (lower 12 bits: setuid/setgid/sticky + rwxrwxrwx).
         mode: u32,
+    },
+
+    /// User-supplied Sigstore endpoint URL failed SSRF/scheme validation.
+    ///
+    /// Surfaces at the boundary where `--fulcio-url` / `--rekor-url` are
+    /// parsed. Exit 64 (`UsageError`) — a malformed flag value is a CLI
+    /// misuse, not a runtime fault. The `endpoint` field carries the flag
+    /// name (e.g. `--fulcio-url`) so the envelope `error.detail` is
+    /// programmatically dispatchable.
+    #[error("invalid {endpoint} URL: {reason}")]
+    InvalidEndpointUrl {
+        /// Flag name the URL was supplied via (e.g. `--fulcio-url`).
+        endpoint: String,
+        /// Structured rejection reason from [`crate::oci::sign::endpoint::validate_sigstore_url`].
+        #[source]
+        reason: UrlRejection,
     },
 
     /// Catch-all for Fulcio/Rekor HTTP errors outside the codes above.
@@ -117,6 +144,24 @@ pub enum SignErrorKind {
     /// cause — never erase it with `.to_string()`.
     #[error("internal signing error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Sign pipeline plumbed but not wired to sigstore-rs / Fulcio / Rekor yet.
+    ///
+    /// Slice 1 / Phase 5a ships the CLI surface (`ocx package sign`) — flag
+    /// parsing, SSRF hardening, offline policy, and the OIDC token override
+    /// resolution — but `SignPipeline::run` is gated behind sigstore-rs
+    /// integration *and* a public `Client::transport()` accessor (see
+    /// `adr_oci_referrers_signing_v1.md`). Surfacing this variant lets the
+    /// CLI exit with a structured error and a readable exit code instead of
+    /// `unimplemented!()` panicking out of an `async fn`.
+    ///
+    /// Exit 78 (`ConfigError`). Mirrors the verify-side stub at
+    /// `VerifyErrorKind::TrustRootUnavailable`: both signal "the feature is
+    /// plumbed but not yet wired" and route to the same exit code. When
+    /// Phase 5c lands, this variant becomes unreachable — but is kept so
+    /// callers matching on it keep compiling during the transition.
+    #[error("sign pipeline not yet wired (Phase 5c pending)")]
+    PipelinePending,
 }
 
 impl ClassifyErrorKind for SignErrorKind {
@@ -130,7 +175,27 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::OidcPreCheckFailed { .. } | Self::OfflineSignRefused | Self::IdentityTokenFilePermissive { .. } => {
                 ExitCode::PermissionDenied
             }
+            Self::InvalidEndpointUrl { .. } => ExitCode::UsageError,
             Self::Internal(_) => ExitCode::Failure,
+            Self::PipelinePending => ExitCode::ConfigError,
+        }
+    }
+
+    fn kind_detail(&self) -> &'static str {
+        // Frozen contract C-S1-1: snake_case parallel of the variant name.
+        // Exhaustive match — no wildcard, so adding a variant forces a new arm.
+        match self {
+            Self::FulcioBadRequest => "fulcio_bad_request",
+            Self::OidcTokenRejected => "oidc_token_rejected",
+            Self::RekorUnavailable => "rekor_unavailable",
+            Self::RekorSetMalformed => "rekor_set_malformed",
+            Self::ReferrersUnsupported => "referrers_unsupported",
+            Self::OidcPreCheckFailed { .. } => "oidc_pre_check_failed",
+            Self::OfflineSignRefused => "offline_sign_refused",
+            Self::IdentityTokenFilePermissive { .. } => "identity_token_file_permissive",
+            Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
+            Self::Internal(_) => "internal",
+            Self::PipelinePending => "pipeline_pending",
         }
     }
 }
@@ -213,6 +278,13 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_pending_maps_to_config_error() {
+        // "Feature plumbed but not yet wired" surfaces as 78 (ConfigError),
+        // mirroring `VerifyErrorKind::TrustRootUnavailable` on the verify side.
+        assert_eq!(SignErrorKind::PipelinePending.exit_code(), ExitCode::ConfigError);
+    }
+
+    #[test]
     fn sign_error_display_prefixes_identifier() {
         // Outer Display format: "{identifier}: {kind}".
         let err = SignError::new(id(), SignErrorKind::OidcTokenRejected);
@@ -249,6 +321,7 @@ mod tests {
                 path: std::path::PathBuf::from("/tmp/tok"),
                 mode: 0o644,
             },
+            SignErrorKind::PipelinePending,
         ] {
             let msg = format!("{kind}");
             assert!(!msg.ends_with('.'), "trailing period on: {msg}");
@@ -273,5 +346,50 @@ mod tests {
         let source_kind = err.source().expect("SignError has source");
         let source_inner = source_kind.source().expect("SignErrorKind has inner source");
         assert_eq!(format!("{source_inner}"), "inner boom");
+    }
+
+    #[test]
+    fn kind_detail_values_are_stable() {
+        // C-S1-1 frozen contract: these strings ship in JSON envelopes and consumer
+        // scripts dispatch on them. A rename or typo here is a user-visible breaking
+        // change. The exhaustive match in `kind_detail()` ensures a new variant forces
+        // a new arm there; this table ensures the *string value* for each arm is pinned.
+        use crate::oci::sign::endpoint::UrlRejection;
+        use SignErrorKind::*;
+
+        // Construct one representative instance per variant.
+        // Unit/fieldless variants are listed first; struct/tuple variants follow.
+        // `Internal` is last because it needs a boxed error allocation.
+        let pairs: &[(&'static str, SignErrorKind)] = &[
+            ("fulcio_bad_request", FulcioBadRequest),
+            ("oidc_token_rejected", OidcTokenRejected),
+            ("rekor_unavailable", RekorUnavailable),
+            ("rekor_set_malformed", RekorSetMalformed),
+            ("referrers_unsupported", ReferrersUnsupported),
+            ("oidc_pre_check_failed", OidcPreCheckFailed { reason: String::new() }),
+            ("offline_sign_refused", OfflineSignRefused),
+            (
+                "identity_token_file_permissive",
+                IdentityTokenFilePermissive {
+                    path: std::path::PathBuf::from("/tmp/tok"),
+                    mode: 0o644,
+                },
+            ),
+            (
+                "invalid_endpoint_url",
+                InvalidEndpointUrl {
+                    endpoint: "--fulcio-url".into(),
+                    reason: UrlRejection {
+                        reason: "URL must use HTTPS".into(),
+                    },
+                },
+            ),
+            ("internal", Internal(Box::new(std::io::Error::other("test")))),
+            ("pipeline_pending", PipelinePending),
+        ];
+
+        for (expected, kind) in pairs {
+            assert_eq!(kind.kind_detail(), *expected, "kind_detail() drift for {kind:?}",);
+        }
     }
 }

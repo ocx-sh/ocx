@@ -20,6 +20,8 @@ pub enum Package {
     Sign(super::package_sign::PackageSign),
     /// Materialize a package locally (no registry round-trip) and run a command in its env.
     Test(super::package_test::PackageTest),
+    /// Verify a published package's Sigstore signature (keyless, via OCI Referrers).
+    Verify(super::verify::Verify),
 }
 
 impl Package {
@@ -32,6 +34,7 @@ impl Package {
             Package::Push(deploy) => deploy.execute(context).await,
             Package::Sign(sign) => sign.execute(context).await,
             Package::Test(test) => test.execute(context).await,
+            Package::Verify(verify) => verify.execute(context).await,
         }
     }
 }

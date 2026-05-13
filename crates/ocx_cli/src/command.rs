@@ -43,7 +43,6 @@ pub mod shell_direnv;
 pub mod shell_env;
 pub mod shell_hook;
 pub mod shell_init;
-pub mod sigstore_url;
 pub mod uninstall;
 pub mod update;
 pub mod verify;
@@ -82,8 +81,6 @@ pub enum Command {
     Uninstall(uninstall::Uninstall),
     /// Re-resolve advisory tags and rewrite ocx.lock for one or more tools.
     Update(update::Update),
-    /// Verify a published package's Sigstore signature (keyless, via OCI Referrers).
-    Verify(verify::Verify),
     /// Runs installed packages.
     Exec(exec::Exec),
     /// Print resolved environment variables for one or more packages.
@@ -125,7 +122,6 @@ impl Command {
             Command::Lock(lock) => lock.execute(context).await,
             Command::Uninstall(uninstall) => uninstall.execute(context).await,
             Command::Update(update) => update.execute(context).await,
-            Command::Verify(verify) => verify.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,
             Command::Env(env) => env.execute(context).await,
             Command::Launcher(launcher) => launcher.execute(context).await,

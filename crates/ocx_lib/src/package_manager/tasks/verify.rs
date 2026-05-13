@@ -15,7 +15,7 @@
 //!
 //! Phase 1 stub — body uses `unimplemented!()`.
 
-use crate::oci::{self, verify::VerifyResult};
+use crate::oci::{self, verify::pipeline::VerifyResult};
 use crate::package_manager::error::{PackageError, PackageErrorKind};
 
 use super::super::PackageManager;

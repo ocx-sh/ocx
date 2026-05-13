@@ -88,19 +88,32 @@ class OcxRunner:
         format: str | None = "json",
         check: bool = True,
         log_level: str | None = None,
+        env_overlay: dict[str, str] | None = None,
+        stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run ocx with the given arguments."""
+        """Run ocx with the given arguments.
+
+        ``env_overlay`` adds or overrides entries on top of the runner's
+        isolated environment for a single invocation — use this for
+        per-test secrets like ``OCX_IDENTITY_TOKEN`` so each call site
+        does not have to spell out the full ``{**ocx.env, ...}`` merge.
+        ``stdin`` is forwarded to the subprocess as ``input=`` so callers
+        can drive flows that read from standard input (e.g. the
+        ``--identity-token-stdin`` sign path).
+        """
         cmd: list[str] = [str(self.binary)]
         if format:
             cmd += ["--format", format]
         if log_level:
             cmd += ["--log-level", log_level]
         cmd += list(args)
+        env = self.env if env_overlay is None else {**self.env, **env_overlay}
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            env=self.env,
+            env=env,
+            input=stdin,
         )
         if check and result.returncode != 0:
             raise AssertionError(

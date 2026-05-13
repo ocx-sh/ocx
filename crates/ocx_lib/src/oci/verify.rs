@@ -12,16 +12,18 @@
 //! [`adr_oci_referrers_signing_v1.md`](../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
 //! for the full verify state machine.
 
-// Public modules: consumed by CLI layer or re-exported as stable API surface.
+// `error` is `pub` — `VerifyError`/`VerifyErrorKind` are bound by the CLI layer.
 pub mod error;
-pub mod pipeline;
-pub mod trust_root;
 
-// Private module: stub-only, no current callers outside this module.
-// Phase 5c will promote this to `pub` when the verification pipeline is wired.
+// Phase 5c-blocked modules. Bodies are `unimplemented!()` until sigstore-rs +
+// trust-root integration land; promoting their types to the public API today
+// would advertise an unstable shape. Modules stay crate-internal; Phase 5c
+// re-promotes the specific items the CLI binds against.
+#[allow(dead_code)]
 mod identity;
+#[allow(dead_code)] // Phase 5c will wire callers.
+pub(crate) mod pipeline;
+#[allow(dead_code)]
+pub(crate) mod trust_root;
 
 pub use error::{VerifyError, VerifyErrorKind};
-pub use identity::{IdentityMatcher, IssuerMatcher};
-pub use pipeline::{VerifyContext, VerifyPipeline, VerifyResult};
-pub use trust_root::TrustRoot;

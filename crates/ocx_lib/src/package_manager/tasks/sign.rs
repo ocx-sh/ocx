@@ -13,9 +13,9 @@
 //! and Spec A10 — tasks live in `package_manager/tasks/`; the aggregator is
 //! `package_manager/tasks.rs` (not `tasks/mod.rs`).
 //!
-//! Phase 1 stub — body uses `unimplemented!()`.
+//! Phase 5c stub — body uses `unimplemented!()`.
 
-use crate::oci::{self, sign::SignResult};
+use crate::oci::{self, sign::pipeline::SignResult};
 use crate::package_manager::error::{PackageError, PackageErrorKind};
 
 use super::super::PackageManager;
@@ -59,14 +59,16 @@ impl PackageManager {
     /// The pipeline is:
     /// resolve subject digest → pre-check OIDC → Fulcio keyless cert issue
     /// → sign subject digest → Rekor upload → bundle build → push bundle
-    /// blob → push referrer manifest (with fallback-tag refresh on pre-1.1
-    /// registries). Emits a [`SignReport`] on success.
+    /// blob → push referrer manifest via the OCI Referrers API only. Registries
+    /// without Referrers API hard-fail with `SignErrorKind::ReferrersUnsupported`
+    /// (exit 83) per ADR S1-F — OCX never writes `sha256-<hex>.sig` fallback
+    /// tags on the push side. Emits a [`SignReport`] on success.
     ///
     /// Returns [`PackageError`] tagged with `package` on any failure —
     /// exit-code classification routes via
     /// [`crate::oci::sign::SignErrorKind`].
     ///
-    /// Phase 1 stub — Phase 5 implements the pipeline.
+    /// Phase 5c stub — Phase 5c implements the pipeline.
     pub async fn sign_one(
         &self,
         _package: &oci::Identifier,

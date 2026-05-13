@@ -85,9 +85,9 @@ log = logging.getLogger(__name__)
 _FULCIO_ISSUER_OID = x509.ObjectIdentifier("1.3.6.1.4.1.57264.1.1")
 
 # Subject / issuer used by every fake token & cert in this module.
-_FAKE_SUBJECT = "test-signer@example.com"
-_FAKE_ISSUER_URL = "https://fake-oidc.test"
-_FAKE_AUDIENCE = "sigstore"
+FAKE_SUBJECT = "test-signer@example.com"
+FAKE_ISSUER_URL = "https://fake-oidc.test"
+FAKE_AUDIENCE = "sigstore"
 
 
 # ---------------------------------------------------------------------------
@@ -103,10 +103,26 @@ class FakeFulcio:
     pipelines via ``--fulcio-url``. ``root_pem`` is the self-signed CA PEM
     that must be loaded into the verify pipeline's ``TrustRoot`` so the
     leaf cert is trusted.
+
+    The injection toggles (``set_invalid_chain``) flip server-side behaviour
+    so verify-side acceptance tests can exercise specific failure modes
+    (``CertChainInvalid`` → exit 65). They are wired in Phase 5c when the
+    verify pipeline starts consuming Fulcio leaf certificates.
     """
 
     url: str
     root_pem: Path
+    invalid_chain: bool = False
+
+    def set_invalid_chain(self, value: bool) -> None:
+        """Toggle the fake Fulcio into "issue a malformed cert chain" mode.
+
+        Phase 5c wires the handler to honour this flag and emit a chain that
+        fails cert-chain validation; pre-5c the flag is recorded but the
+        handler still issues a valid chain. Tests that depend on this
+        toggle are gated behind ``xfail(strict=True)``.
+        """
+        self.invalid_chain = value
 
 
 @dataclasses.dataclass
@@ -116,10 +132,47 @@ class FakeRekor:
     ``url`` is the ``http://127.0.0.1:<port>`` base URL injected via
     ``--rekor-url``. ``public_key_pem`` is the Ed25519 signing key's public
     PEM, used for SET verification.
+
+    Injection toggles (``set_tampered_set``, ``set_failure_mode``) flip
+    server-side behaviour so verify-side acceptance tests can exercise
+    specific failure modes (``RekorSetInvalid`` → exit 65,
+    ``RekorUnavailable`` → exit 82). They are wired in Phase 5c.
     """
 
     url: str
     public_key_pem: Path
+    tampered_set: bool = False
+    failure_mode: object | None = None
+
+    def set_tampered_set(self, value: bool) -> None:
+        """Toggle the fake Rekor into "return a tampered SET" mode.
+
+        Phase 5c wires the handler to flip one bit in the SET payload before
+        signing, so the verify pipeline's SET check fails. Pre-5c the flag
+        is recorded only; tests gated behind ``xfail(strict=True)``.
+        """
+        self.tampered_set = value
+
+    def set_failure_mode(self, mode: object | None) -> None:
+        """Configure the fake Rekor's failure mode (e.g. ``HttpStatus(503)``).
+
+        ``None`` clears the failure mode. Phase 5c wires the handler to honour
+        the mode; pre-5c only the value is stored. Tests gated behind
+        ``xfail(strict=True)``.
+        """
+        self.failure_mode = mode
+
+
+class HttpStatus:
+    """Failure-mode sentinel naming an explicit HTTP status to return."""
+
+    __slots__ = ("status",)
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return f"HttpStatus({self.status})"
 
 
 @dataclasses.dataclass
@@ -147,9 +200,9 @@ class _OidcKeyMaterial:
 
     def sign_token(
         self,
-        subject: str = _FAKE_SUBJECT,
-        issuer: str = _FAKE_ISSUER_URL,
-        audience: str = _FAKE_AUDIENCE,
+        subject: str = FAKE_SUBJECT,
+        issuer: str = FAKE_ISSUER_URL,
+        audience: str = FAKE_AUDIENCE,
     ) -> str:
         """Mint an ES256 JWT with 10-minute expiry."""
         now = int(time.time())
@@ -199,7 +252,7 @@ class _OidcKeyMaterial:
             ]
         }
 
-    def verify_token(self, token: str, audience: str = _FAKE_AUDIENCE) -> dict[str, Any]:
+    def verify_token(self, token: str, audience: str = FAKE_AUDIENCE) -> dict[str, Any]:
         """Verify and decode a JWT minted by this issuer.
 
         Raises ``pyjwt.exceptions.PyJWTError`` on invalid token.
@@ -390,7 +443,7 @@ def _make_oidc_handler(key_material: _OidcKeyMaterial, server_url: str) -> type:
             if self.path == "/.well-known/openid-configuration":
                 body = json.dumps(
                     {
-                        "issuer": _FAKE_ISSUER_URL,
+                        "issuer": FAKE_ISSUER_URL,
                         "jwks_uri": f"{server_url}/.well-known/jwks.json",
                         "id_token_signing_alg_values_supported": ["ES256"],
                         "subject_types_supported": ["public"],
@@ -445,7 +498,7 @@ def _make_fulcio_handler(
                 return
 
             try:
-                claims = oidc_key.verify_token(oidc_token, audience=_FAKE_AUDIENCE)
+                claims = oidc_key.verify_token(oidc_token, audience=FAKE_AUDIENCE)
             except Exception as exc:
                 log.debug("fake Fulcio: token rejected: %s", exc)
                 self._respond(403, b"token rejected")
@@ -472,7 +525,7 @@ def _make_fulcio_handler(
                 self._respond(400, b"bad public key")
                 return
 
-            oidc_issuer = claims.get("iss", _FAKE_ISSUER_URL)
+            oidc_issuer = claims.get("iss", FAKE_ISSUER_URL)
             leaf_pem = ca.mint_leaf_cert(subject_email, subject_pub_key, oidc_issuer)
             root_pem = ca.root_pem()
 
@@ -677,9 +730,9 @@ class FakeSigstoreStack:
 
     def oidc_token(
         self,
-        subject: str = _FAKE_SUBJECT,
-        issuer: str = _FAKE_ISSUER_URL,
-        audience: str = _FAKE_AUDIENCE,
+        subject: str = FAKE_SUBJECT,
+        issuer: str = FAKE_ISSUER_URL,
+        audience: str = FAKE_AUDIENCE,
     ) -> str:
         """Mint a fresh ES256 JWT valid for 10 minutes."""
         return self._oidc_key.sign_token(subject=subject, issuer=issuer, audience=audience)
