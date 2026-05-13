@@ -39,5 +39,8 @@ serde = "1.0.228"
 console = "0.16.2"
 thiserror = "2"
 
+[dev-dependencies]
+serde_json = "1"
+
 [lints]
 workspace = true

@@ -1,0 +1,41 @@
+# §3.8 S8: Skeleton mirror.yml for pipeline integration tests.
+# This is a synthetic minimal mirror spec for shfmt used by test_mirror_pipeline.py.
+# It uses a url_index source so tests can control versions without GitHub API access.
+#
+# Platform declared: linux/amd64 (single platform, one container, one test).
+# test infrastructure overrides the asset URL via the asset_server fixture.
+name: shfmt
+target:
+  registry: localhost:5000
+  repository: test-shfmt-pipeline
+source:
+  type: url_index
+  versions:
+    "3.7.0":
+      assets:
+        "shfmt_v3.7.0_linux_amd64": "http://127.0.0.1:__ASSET_PORT__/shfmt_v3.7.0_linux_amd64"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+asset_type:
+  kind: binary
+cascade: true
+versions:
+  min: "3.7.0"
+platforms:
+  linux/amd64:
+    runner: ubuntu-22.04
+    containers:
+      - image: ubuntu:24.04
+    tests:
+      - name: version
+        command: "shfmt --version"
+tests:
+  - name: version
+    command: "shfmt --version"
+ocx_mirror:
+  release_tag: v0.1.0
+  rev: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+notify:
+  discord:
+    webhook_secret: DISCORD_WEBHOOK_URL

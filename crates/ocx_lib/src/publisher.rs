@@ -53,22 +53,31 @@ impl Publisher {
     /// Each `LayerRef::File` is uploaded as a new blob. Each `LayerRef::Digest`
     /// is verified to exist via HEAD. The manifest contains one descriptor per
     /// layer in the order provided.
-    pub async fn push(&self, info: Info, layers: &[LayerRef]) -> Result<()> {
+    ///
+    /// Returns the OCI manifest digest of the pushed image index
+    /// (e.g. `sha256:abc…`) so callers can include it in push reports.
+    pub async fn push(&self, info: Info, layers: &[LayerRef]) -> Result<String> {
         log::debug!("Pushing package with identifier {}", info.identifier);
-        self.client.push_package(info, layers).await?;
-        Ok(())
+        let (digest, _manifest) = self.client.push_package(info, layers).await?;
+        Ok(digest.to_string())
     }
 
     /// Push a package with cascade tag management.
     ///
     /// `existing_versions` is the set of versions already in the registry,
     /// used to compute which rolling tags this push should update.
+    ///
+    /// Returns `(manifest_digest, cascade_tags_written)` where
+    /// `cascade_tags_written` includes every rolling tag updated beyond the
+    /// primary version tag. The CLI layer wraps these into [`PushReport`].
+    ///
+    /// [`PushReport`]: crate (defined in ocx_cli::api::data::package_push)
     pub async fn push_cascade(
         &self,
         info: Info,
         layers: &[LayerRef],
         existing_versions: BTreeSet<Version>,
-    ) -> Result<()> {
+    ) -> Result<(String, Vec<String>)> {
         let version = Version::parse(info.identifier.tag_or_latest())
             .ok_or_else(|| crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string()))?;
 

@@ -8,11 +8,14 @@ use ocx_lib::cli::{self, ColorMode, LogLevel, LogSettings, Printer, indicatif::P
 
 mod annotations;
 mod command;
+mod discord;
 mod error;
 mod filter;
+mod junit;
 mod normalizer;
 mod pipeline;
 mod resolver;
+mod run_summary;
 mod source;
 mod spec;
 mod version_platform_map;

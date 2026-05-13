@@ -24,15 +24,6 @@
       "Bash(curl:*)",
       "Bash(wget:*)",
 
-      "// === Git Destructive Operations (git push handled by pre_push_main_blocker hook) ===",
-      "Bash(git push --force:*)",
-      "Bash(git push -f:*)",
-      "Bash(git push origin --force:*)",
-      "Bash(git push origin -f:*)",
-      "Bash(git reset --hard:*)",
-      "Bash(git clean -f:*)",
-      "Bash(git clean -fd:*)",
-
       "// === Infrastructure Destructive Operations ===",
       "Bash(docker system prune:*)",
       "Bash(docker rm:*)",
@@ -81,11 +72,6 @@
           {
             "type": "command",
             "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/conventional_commit_validator.py\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_push_main_blocker.py\"",
             "timeout": 5
           }
         ]

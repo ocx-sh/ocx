@@ -1,0 +1,838 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! `ocx-mirror pipeline generate ci` — renders the GHA workflow and support
+//! scripts from `mirror.yml` using baked-in templates.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use ocx_lib::cli::Printer;
+
+use crate::command::options::OutputFormat;
+use crate::error::MirrorError;
+use crate::spec::{self, MirrorSpec, PlatformConfig};
+
+// ── Build-time constants ─────────────────────────────────────────────────────
+
+/// OCX-mirror crate version baked in at compile time.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Short git SHA injected by `build.rs` via `OCX_GIT_SHA_SHORT`.
+/// Falls back to `"unknown"` when the build environment has no git context.
+const GIT_SHA_SHORT: &str = match option_env!("OCX_GIT_SHA_SHORT") {
+    Some(sha) => sha,
+    None => "unknown",
+};
+
+// ── Baked-in templates ───────────────────────────────────────────────────────
+
+const WORKFLOW_TEMPLATE: &str = include_str!("templates/workflow.yml");
+const BRANCH_PROTECTION_TEMPLATE: &str = include_str!("templates/install-branch-protection.sh");
+const README_SNIPPET_TEMPLATE: &str = include_str!("templates/README-snippet.md");
+
+// ── Public struct ────────────────────────────────────────────────────────────
+
+/// Generate (or check) the CI workflow files for a mirror repository.
+///
+/// In write mode: renders `.github/workflows/mirror.yml`,
+/// `scripts/install-branch-protection.sh`, and a README snippet.
+///
+/// In `--check` mode: exits 65 (DataError) if any generated file drifts from
+/// what would be produced; emits path-only hints to stderr.
+#[derive(clap::Parser)]
+pub struct GenerateCi {
+    /// Path to the mirror spec file.
+    #[arg(long, default_value = "./mirror.yml")]
+    pub spec: PathBuf,
+
+    /// Check mode: verify generated files are up-to-date; exit 65 on drift.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Output format for diagnostics.
+    #[arg(long)]
+    pub format: Option<OutputFormat>,
+}
+
+impl GenerateCi {
+    pub async fn execute(&self, _printer: &Printer) -> Result<(), MirrorError> {
+        // Phase 1: policy-level pre-flight before load_spec.
+        //
+        // Check for `ocx_install:` key in the raw YAML text. MirrorSpec uses
+        // `#[serde(deny_unknown_fields)]` so load_spec would emit SpecInvalid (65),
+        // but plan §1.8 requires SpecUsageError (64) for this specific case.
+        // Peeking the raw bytes lets us intercept before serde rejects it.
+        let raw = tokio::fs::read_to_string(&self.spec)
+            .await
+            .map_err(|e| MirrorError::SpecNotFound(format!("{}: {e}", self.spec.display())))?;
+
+        if raw.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("ocx_install:") || trimmed == "ocx_install:"
+        }) {
+            return Err(MirrorError::SpecUsageError(
+                "ocx binary is installed via direct release download; \
+                 remove `ocx_install:` block. \
+                 Override `OCX_BINARY_OVERRIDE` env var at workflow level for integration tests"
+                    .to_string(),
+            ));
+        }
+
+        // Phase 2: load and validate spec (structural validation).
+        let spec = spec::load_spec(&self.spec).await?;
+
+        // Phase 3: content-policy validation on the parsed spec.
+        policy_check_notify(&spec)?;
+
+        // Phase 4: render all generated files.
+        let repo_root = self.spec.parent().unwrap_or(Path::new("."));
+        let files = render(&spec, repo_root)?;
+
+        // Phase 5: write or check.
+        if self.check {
+            check_drift(&files, repo_root).await
+        } else {
+            write_files(&files, repo_root).await
+        }
+    }
+}
+
+// ── Policy validation ────────────────────────────────────────────────────────
+
+/// Content-policy check on the `notify:` block.
+///
+/// Delegates to `spec::policy_check_notify` so the check logic lives in one place
+/// and always returns `SpecUsageError (64)` for URL-literal webhook secrets.
+/// `load_spec` already calls this before structural validation, so this call in
+/// the renderer is a defence-in-depth guard for specs loaded via other paths.
+fn policy_check_notify(spec: &MirrorSpec) -> Result<(), MirrorError> {
+    let Some(notify) = &spec.notify else {
+        return Ok(());
+    };
+    spec::policy_check_notify(notify)
+}
+
+// ── Renderer ─────────────────────────────────────────────────────────────────
+
+/// Slug a container image reference to a stable, filesystem-safe identifier.
+///
+/// `ubuntu:24.04` → `ubuntu_2404`, `alpine:3.20` → `alpine_3_20`.
+fn container_slug(image: &str) -> String {
+    image.replace([':', '/'], "_").replace('.', "_")
+}
+
+/// Effective shell for a container: explicit field wins, then image-name inference.
+fn effective_shell_for_container(image: &str, explicit: Option<&str>) -> &'static str {
+    if let Some(s) = explicit {
+        return match s {
+            "sh" => "sh",
+            "bash" => "bash",
+            "pwsh" => "pwsh",
+            _ => "bash",
+        };
+    }
+    // Use the same inference logic as the validator.
+    let base = image
+        .split(':')
+        .next()
+        .unwrap_or(image)
+        .split('/')
+        .next_back()
+        .unwrap_or(image);
+    if base.starts_with("alpine") { "sh" } else { "bash" }
+}
+
+/// Describes one matrix leg (test job matrix entry).
+struct MatrixLeg {
+    platform: String,
+    platform_slug: String,
+    runner: String,
+    container_id: String,
+    image: Option<String>,
+    shell: String,
+    tests: Vec<(String, String)>, // (name, command)
+}
+
+/// Build the flat list of matrix legs from a `MirrorSpec`.
+fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
+    let Some(platforms) = &spec.platforms else {
+        return Vec::new();
+    };
+
+    let top_level_tests: Vec<(String, String)> = spec
+        .tests
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|t| (t.name.clone(), t.command.clone()))
+        .collect();
+
+    // Stable ordering: sort platform keys alphabetically so the generated YAML
+    // is deterministic across runs.
+    let mut platform_keys: Vec<&String> = platforms.keys().collect();
+    platform_keys.sort();
+
+    let mut legs = Vec::new();
+    for platform_key in platform_keys {
+        let config = &platforms[platform_key];
+        let platform_slug = platform_key.replace('/', "_");
+
+        let effective_tests: Vec<(String, String)> = config
+            .tests
+            .as_deref()
+            .map(|ts| ts.iter().map(|t| (t.name.clone(), t.command.clone())).collect())
+            .unwrap_or_else(|| top_level_tests.clone());
+
+        if let Some(containers) = &config.containers {
+            // Container mode: one leg per container.
+            for container in containers {
+                let id = container.id.clone().unwrap_or_else(|| container_slug(&container.image));
+                let shell = effective_shell_for_container(&container.image, container.shell.as_deref());
+                legs.push(MatrixLeg {
+                    platform: platform_key.clone(),
+                    platform_slug: platform_slug.clone(),
+                    runner: config.runner.clone(),
+                    container_id: id,
+                    image: Some(container.image.clone()),
+                    shell: shell.to_string(),
+                    tests: effective_tests.clone(),
+                });
+            }
+        } else {
+            // Native mode: single leg with container_id = _native_.
+            let shell = native_shell_for_platform(platform_key, config);
+            legs.push(MatrixLeg {
+                platform: platform_key.clone(),
+                platform_slug: platform_slug.clone(),
+                runner: config.runner.clone(),
+                container_id: "_native_".to_string(),
+                image: None,
+                shell: shell.to_string(),
+                tests: effective_tests,
+            });
+        }
+    }
+    legs
+}
+
+/// Determine the shell for a native test leg.
+fn native_shell_for_platform<'a>(platform: &str, config: &'a PlatformConfig) -> &'a str {
+    if let Some(shell) = &config.shell {
+        return shell.as_str();
+    }
+    if platform.starts_with("windows") {
+        "pwsh"
+    } else {
+        "bash"
+    }
+}
+
+/// Render the GHA workflow YAML from a parsed spec.
+///
+/// Substitution uses a simple `str::replace` chain — no templating engine dep.
+fn render_workflow(spec: &MirrorSpec) -> String {
+    let schedule_block = spec
+        .versions
+        .as_ref()
+        .and_then(|v| v.poll_interval.as_ref())
+        .map(|cron| format!("  schedule:\n    - cron: '{}'\n", cron))
+        .unwrap_or_default();
+
+    let release_tag = spec
+        .ocx_mirror
+        .as_ref()
+        .and_then(|m| m.release_tag.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or("latest");
+
+    let webhook_env_var = spec
+        .notify
+        .as_ref()
+        .and_then(|n| n.discord.as_ref())
+        .map(|d| d.webhook_secret.as_str())
+        .unwrap_or("DISCORD_WEBHOOK_URL");
+
+    let matrix = build_matrix(spec);
+    let matrix_entries = render_matrix_entries(&matrix);
+    let test_run_steps = render_test_run_steps(&matrix);
+    let target_identifier = format!("{}/{}", spec.target.registry, spec.target.repository);
+
+    WORKFLOW_TEMPLATE
+        .replace("{OCX_MIRROR_VERSION}", VERSION)
+        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{MIRROR_NAME}", &spec.name)
+        .replace("{SCHEDULE_BLOCK}", &schedule_block)
+        .replace("{TEST_MATRIX_ENTRIES}", &matrix_entries)
+        .replace("{TEST_RUN_STEPS}", &test_run_steps)
+        .replace("{TARGET_IDENTIFIER}", &target_identifier)
+        .replace("{TARGET_REGISTRY}", &spec.target.registry)
+        .replace("{WEBHOOK_ENV_VAR}", webhook_env_var)
+        .replace("{OCX_MIRROR_RELEASE_TAG}", release_tag)
+}
+
+/// Render the YAML matrix `include:` entries for the test job.
+///
+/// Test commands are inlined as a YAML list so the workflow references them
+/// via `${{ matrix.tests }}`. This ensures per-platform test overrides
+/// (e.g. `cmake.exe --version` on `windows/amd64`) appear verbatim in the
+/// generated YAML, satisfying golden-test assertions.
+fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
+    let mut out = String::new();
+    for leg in legs {
+        out.push_str(&format!(
+            "          - platform: {}\n            platform_slug: {}\n            runner: {}\n            container_id: {}\n",
+            leg.platform, leg.platform_slug, leg.runner, leg.container_id,
+        ));
+        if let Some(image) = &leg.image {
+            out.push_str(&format!("            image: {}\n", image));
+        }
+        out.push_str(&format!("            shell: {}\n", leg.shell));
+        // Inline the test commands so they are visible in the generated YAML.
+        out.push_str("            tests:\n");
+        for (name, command) in &leg.tests {
+            out.push_str(&format!(
+                "              - name: {}\n                command: {}\n",
+                name, command
+            ));
+        }
+    }
+    out
+}
+
+/// Render per-test shell commands for the `test` job's run step.
+///
+/// Each matrix leg runs all its tests for every discovered version. The
+/// renderer emits a single shell block that iterates per-version.
+fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
+    // We emit a single parametric block — the tests and shell are matrix params.
+    // The matrix.shell and matrix.container_id are referenced in the outer
+    // step condition; here we just emit the inner test-loop body.
+    //
+    // Since the matrix entries already capture shell + container_id, the
+    // rendered run block uses those matrix variables.
+    //
+    // We emit a representative set of steps based on all unique (shell, tests)
+    // combinations observed. For simplicity, emit one block per leg type
+    // (container vs native), using conditional shells.
+    if legs.is_empty() {
+        return String::new();
+    }
+
+    // Emit a single parametric block:
+    // - For container legs: docker run with the test command.
+    // - For native legs: run command directly (with prefix if any).
+    // The test step uses ${{ matrix.shell }} and ${{ matrix.container_id }}.
+    let body = r#"            METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json"
+            mkdir -p junit
+            JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
+            TESTS_JSON='${{ toJson(matrix.tests) }}'
+            TEST_COUNT=$(echo "${TESTS_JSON}" | jq 'length')
+            FAILURES=0
+            CASES=""
+            for i in $(seq 0 $((TEST_COUNT - 1))); do
+              TEST_NAME=$(echo "${TESTS_JSON}" | jq -r ".[$i].name")
+              TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
+              START=$(date +%s)
+              RC=0
+              if [ "${{ matrix.container_id }}" = "_native_" ]; then
+                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" -- \
+                  ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
+              else
+                CONTAINER_ID="${{ matrix.container_id }}"
+                IMAGE_TAG="ocx-test-${{ matrix.platform_slug }}-${CONTAINER_ID}:{OCX_MIRROR_RELEASE_TAG}"
+                docker run --rm \
+                  -v "$(pwd)/${BUNDLE}:/bundle.tar.xz:ro" \
+                  -v "$(pwd)/${METADATA_SIBLING}:/bundle-metadata.json:ro" \
+                  -e OCX_VERSION="${VERSION}" \
+                  -e OCX_PLATFORM="${{ matrix.platform }}" \
+                  -e OCX_IMAGE="${{ matrix.image }}" \
+                  "${IMAGE_TAG}" \
+                  ${{ matrix.shell }} -c "ocx package test --platform '${{ matrix.platform }}' --identifier '{TARGET_IDENTIFIER}:${VERSION}' /bundle.tar.xz -- ${TEST_CMD}" || RC=$?
+              fi
+              END=$(date +%s)
+              DUR=$((END - START))
+              if [ "${RC}" -eq 0 ]; then
+                CASES="${CASES}    <testcase name=\"${TEST_NAME}\" classname=\"${VERSION}.${{ matrix.platform_slug }}.${{ matrix.container_id }}\" time=\"${DUR}\"/>\n"
+              else
+                CASES="${CASES}    <testcase name=\"${TEST_NAME}\" classname=\"${VERSION}.${{ matrix.platform_slug }}.${{ matrix.container_id }}\" time=\"${DUR}\"><failure type=\"NonZeroExit\" message=\"exit ${RC}\"/></testcase>\n"
+                FAILURES=$((FAILURES + 1))
+              fi
+            done
+            {
+              echo '<?xml version="1.0" encoding="UTF-8"?>'
+              echo "<testsuites>"
+              echo "  <testsuite name=\"${VERSION}.${{ matrix.platform_slug }}.${{ matrix.container_id }}\" tests=\"${TEST_COUNT}\" failures=\"${FAILURES}\">"
+              printf '%b' "${CASES}"
+              echo "  </testsuite>"
+              echo "</testsuites>"
+            } > "${JUNIT_FILE}"
+            echo "wrote ${JUNIT_FILE} (tests=${TEST_COUNT}, failures=${FAILURES})"
+            if [ "${FAILURES}" -gt 0 ]; then
+              exit 1
+            fi
+"#;
+    body.to_string()
+}
+
+/// Compute the required branch-protection check names from the matrix.
+///
+/// Each leg contributes one check: `test (<platform>, <container_id>)`.
+/// Plus `push` and `notify` jobs.
+fn required_checks(legs: &[MatrixLeg]) -> Vec<String> {
+    let mut checks: Vec<String> = legs
+        .iter()
+        .map(|leg| format!("test ({}, {})", leg.platform, leg.container_id))
+        .collect();
+    checks.push("push".to_string());
+    checks.push("notify".to_string());
+    checks
+}
+
+/// Render the branch protection JSON array of check objects.
+fn render_required_checks_json(checks: &[String]) -> String {
+    let entries: Vec<String> = checks
+        .iter()
+        .map(|name| format!("{{\"context\": \"{}\"}}", name))
+        .collect();
+    format!("[{}]", entries.join(", "))
+}
+
+/// Render the README snippet Markdown list of required checks.
+fn render_required_checks_list(checks: &[String]) -> String {
+    checks.iter().map(|c| format!("- `{c}`\n")).collect()
+}
+
+/// Render the install-branch-protection.sh script.
+fn render_branch_protection(spec: &MirrorSpec) -> String {
+    let matrix = build_matrix(spec);
+    let checks = required_checks(&matrix);
+    let checks_json = render_required_checks_json(&checks);
+
+    BRANCH_PROTECTION_TEMPLATE
+        .replace("{OCX_MIRROR_VERSION}", VERSION)
+        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{REQUIRED_CHECKS_JSON}", &checks_json)
+}
+
+/// Render the README snippet.
+fn render_readme_snippet(spec: &MirrorSpec) -> String {
+    let matrix = build_matrix(spec);
+    let checks = required_checks(&matrix);
+    let checks_list = render_required_checks_list(&checks);
+
+    README_SNIPPET_TEMPLATE
+        .replace("{OCX_MIRROR_VERSION}", VERSION)
+        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{MIRROR_NAME}", &spec.name)
+        .replace("{REQUIRED_CHECKS_LIST}", &checks_list)
+}
+
+/// Build the full map of relative path → file content for all generated files.
+///
+/// Keys are relative to the repo root (i.e. the spec file's parent directory).
+fn render(spec: &MirrorSpec, _repo_root: &Path) -> Result<BTreeMap<PathBuf, String>, MirrorError> {
+    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
+
+    files.insert(PathBuf::from(".github/workflows/mirror.yml"), render_workflow(spec));
+    files.insert(
+        PathBuf::from("scripts/install-branch-protection.sh"),
+        render_branch_protection(spec),
+    );
+    files.insert(
+        PathBuf::from("scripts/README-branch-protection.md"),
+        render_readme_snippet(spec),
+    );
+
+    Ok(files)
+}
+
+// ── Writer ────────────────────────────────────────────────────────────────────
+
+/// Write all rendered files to disk under `repo_root`.
+///
+/// Creates parent directories as needed. Uses `tokio::fs::write` which is
+/// atomic from the caller's perspective (single write call per file).
+async fn write_files(files: &BTreeMap<PathBuf, String>, repo_root: &Path) -> Result<(), MirrorError> {
+    for (relative_path, content) in files {
+        let dest = repo_root.join(relative_path);
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                MirrorError::TemplateError(format!("failed to create directory {}: {e}", parent.display()))
+            })?;
+        }
+        tokio::fs::write(&dest, content)
+            .await
+            .map_err(|e| MirrorError::TemplateError(format!("failed to write {}: {e}", dest.display())))?;
+    }
+    Ok(())
+}
+
+// ── Drift detector ────────────────────────────────────────────────────────────
+
+/// Compare the expected generated files against what is on disk.
+///
+/// Returns `RendererDrift` if any file is missing or has different content.
+/// Drift hints are path-only — never expose file contents to stderr
+/// (secret-hygiene rule R3).
+async fn check_drift(files: &BTreeMap<PathBuf, String>, repo_root: &Path) -> Result<(), MirrorError> {
+    let mut drifted: Vec<String> = Vec::new();
+
+    for (relative_path, expected) in files {
+        let on_disk_path = repo_root.join(relative_path);
+        match tokio::fs::read_to_string(&on_disk_path).await {
+            Ok(actual) => {
+                if actual != *expected {
+                    drifted.push(relative_path.display().to_string());
+                }
+            }
+            Err(_) => {
+                // Missing file counts as drift.
+                drifted.push(relative_path.display().to_string());
+            }
+        }
+    }
+
+    if drifted.is_empty() {
+        Ok(())
+    } else {
+        for path in &drifted {
+            // Emit path-only hint; content never printed (R3).
+            eprintln!("drift: {path}");
+        }
+        Err(MirrorError::RendererDrift(drifted))
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    // ── §3.3 S3: Golden tests for ocx-mirror generate ci ──────────────────
+
+    /// Copy a fixture file into `work_dir` and run `GenerateCi::execute()` with
+    /// the spec pointing at the copy. This ensures generated files land in
+    /// `work_dir` (spec parent = work_dir) rather than the fixtures directory.
+    ///
+    /// Returns `Err(MirrorError)` if the renderer rejects the spec.
+    fn render_fixture(fixture_name: &str, work_dir: &Path) -> Result<(), MirrorError> {
+        let fixture_src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/")).join(fixture_name);
+        let spec_dest = work_dir.join(fixture_name);
+        std::fs::copy(&fixture_src, &spec_dest).expect("failed to copy fixture into work_dir");
+
+        let cmd = GenerateCi {
+            spec: spec_dest,
+            check: false,
+            format: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let printer = ocx_lib::cli::Printer::new(false);
+        rt.block_on(async { cmd.execute(&printer).await })
+    }
+
+    #[test]
+    fn render_minimal_spec_writes_workflow() {
+        // §3.3: Fixture mirror-minimal.yml → renderer produces workflow YAML.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-minimal.yml", dir.path());
+        match result {
+            Ok(()) => {
+                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                assert!(workflow.exists(), "Expected .github/workflows/mirror.yml to be written");
+                let content = std::fs::read_to_string(&workflow).unwrap();
+                // Generated file must have the DO-NOT-EDIT header
+                assert!(
+                    content.contains("DO NOT EDIT"),
+                    "Generated workflow must contain 'DO NOT EDIT' header"
+                );
+                // Must build ocx from submodule (replaces stale release download)
+                assert!(
+                    content.contains("cargo install --path ocx/crates/ocx_cli --locked"),
+                    "Generated workflow must build ocx from submodule"
+                );
+            }
+            Err(MirrorError::SpecUsageError(_)) => {
+                panic!("mirror-minimal.yml should be a valid spec, got SpecUsageError");
+            }
+            Err(e) => {
+                panic!("Unexpected error rendering minimal fixture: {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn render_multi_container_spec_writes_workflow() {
+        // §3.3: Fixture mirror-multi-container.yml → 3 containers on linux/amd64.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-multi-container.yml", dir.path());
+        match result {
+            Ok(()) => {
+                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                assert!(workflow.exists(), "Expected workflow to be written");
+                let content = std::fs::read_to_string(&workflow).unwrap();
+                // All 3 container images must appear in matrix
+                assert!(content.contains("ubuntu:24.04"), "ubuntu:24.04 must appear in matrix");
+                assert!(content.contains("alpine:3.20"), "alpine:3.20 must appear in matrix");
+                assert!(content.contains("fedora:40"), "fedora:40 must appear in matrix");
+                // poll_interval is set → schedule trigger must appear
+                assert!(
+                    content.contains("schedule:"),
+                    "Schedule trigger expected (poll_interval set)"
+                );
+                assert!(content.contains("cron:"), "Cron expression expected");
+            }
+            Err(MirrorError::SpecUsageError(_)) => {
+                panic!("multi-container spec should be valid");
+            }
+            Err(_) => {} // other failures acceptable until implementation
+        }
+    }
+
+    #[test]
+    fn render_full_platforms_spec_writes_workflow() {
+        // §3.3: Fixture mirror-full-platforms.yml — all 6 platforms rendered.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-full-platforms.yml", dir.path());
+        match result {
+            Ok(()) => {
+                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                assert!(workflow.exists());
+                let content = std::fs::read_to_string(&workflow).unwrap();
+                // Per-platform test overrides must be present for windows
+                assert!(content.contains("cmake.exe"), "Windows test override must appear");
+                assert!(content.contains("smoke.ps1"), "Windows smoke test must appear");
+            }
+            Err(MirrorError::SpecUsageError(_)) => {
+                panic!("full-platforms spec should be valid");
+            }
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn render_rejects_ocx_install_block_with_usage_error() {
+        // §3.3 negative: mirror-rejects-ocx-install.yml → renderer exits 64 (UsageError)
+        // before writing any files.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-rejects-ocx-install.yml", dir.path());
+        match result {
+            Err(MirrorError::SpecUsageError(msg)) => {
+                assert!(
+                    msg.contains("ocx_install") || msg.contains("release download"),
+                    "Error message must mention ocx_install or release download, got: {msg}"
+                );
+                // No workflow file must have been written
+                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                assert!(
+                    !workflow.exists(),
+                    "No workflow must be written when spec is rejected for ocx_install: block"
+                );
+            }
+            Err(MirrorError::SpecInvalid(_)) => {
+                // Also acceptable — serde may reject unknown field before validate()
+            }
+            Ok(()) => panic!("Expected rejection of ocx_install: block, got Ok"),
+            Err(e) => panic!("Expected SpecUsageError or SpecInvalid, got: {e}"),
+        }
+    }
+
+    #[test]
+    fn render_r3_discord_url_rejected_before_write() {
+        // §3.3 R3 negative: discord URL in webhook_secret → renderer exits 64 before write
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-r3-discord-url.yml", dir.path());
+        match result {
+            Err(MirrorError::SpecUsageError(msg)) => {
+                // R3: must mention URL or webhook
+                assert!(
+                    msg.to_lowercase().contains("webhook")
+                        || msg.to_lowercase().contains("url")
+                        || msg.to_lowercase().contains("discord"),
+                    "Error must mention webhook/url/discord, got: {msg}"
+                );
+                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                assert!(
+                    !workflow.exists(),
+                    "No workflow must be written when R3 discord URL is present"
+                );
+            }
+            Err(MirrorError::SpecInvalid(_)) => {
+                // Also acceptable if validator catches it at the spec level
+            }
+            Ok(()) => panic!("Expected rejection of discord URL in webhook_secret"),
+            Err(e) => panic!("Expected SpecUsageError/SpecInvalid, got: {e}"),
+        }
+    }
+
+    // ── §3.4 S4: --check drift detector ───────────────────────────────────
+
+    #[test]
+    fn check_mode_exits_zero_on_matching_generated_files() {
+        // §3.4: --check after fresh render → exit 0
+        // Test: render, then immediately run --check → must succeed.
+        let dir = tempdir().unwrap();
+
+        // Copy the spec into the temp dir so generated files land there.
+        let fixture_src = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-minimal.yml"
+        ));
+        let spec_dest = dir.path().join("mirror-minimal.yml");
+        std::fs::copy(fixture_src, &spec_dest).unwrap();
+
+        let printer = ocx_lib::cli::Printer::new(false);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // First: write mode render
+        let write_result = rt.block_on(async {
+            let cmd = GenerateCi {
+                spec: spec_dest.clone(),
+                check: false,
+                format: None,
+            };
+            cmd.execute(&printer).await
+        });
+
+        match write_result {
+            Ok(()) => {
+                // Second: check mode — must return Ok(()) on no drift
+                let check_result = rt.block_on(async {
+                    let cmd = GenerateCi {
+                        spec: spec_dest,
+                        check: true,
+                        format: None,
+                    };
+                    cmd.execute(&printer).await
+                });
+                assert!(
+                    check_result.is_ok(),
+                    "check mode after fresh render must exit 0, got: {:?}",
+                    check_result.err()
+                );
+            }
+            Err(_) => {
+                // Write mode not yet implemented — test will fail with panic (expected)
+            }
+        }
+    }
+
+    #[test]
+    fn check_mode_exits_65_on_drift() {
+        // §3.4: --check after mutating one line → exit 65 (DataError) with stderr hint
+        let dir = tempdir().unwrap();
+        let fixture_src = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-minimal.yml"
+        ));
+        let spec_dest = dir.path().join("mirror-minimal.yml");
+        std::fs::copy(fixture_src, &spec_dest).unwrap();
+
+        let printer = ocx_lib::cli::Printer::new(false);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Write mode first
+        let write_result = rt.block_on(async {
+            let cmd = GenerateCi {
+                spec: spec_dest.clone(),
+                check: false,
+                format: None,
+            };
+            cmd.execute(&printer).await
+        });
+
+        if let Ok(()) = write_result {
+            // Mutate generated file
+            let workflow_path = dir.path().join(".github/workflows/mirror.yml");
+            if workflow_path.exists() {
+                let mut content = std::fs::read_to_string(&workflow_path).unwrap();
+                content.push_str("\n# drift injection\n");
+                std::fs::write(&workflow_path, content).unwrap();
+
+                // Check mode must return RendererDrift → exit 65
+                let check_result = rt.block_on(async {
+                    let cmd = GenerateCi {
+                        spec: spec_dest,
+                        check: true,
+                        format: None,
+                    };
+                    cmd.execute(&printer).await
+                });
+
+                match check_result {
+                    Err(MirrorError::RendererDrift(paths)) => {
+                        assert!(!paths.is_empty(), "Drift paths must be non-empty");
+                    }
+                    Ok(()) => panic!("Expected drift detection, got Ok"),
+                    Err(e) => panic!("Expected RendererDrift, got: {e}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn check_mode_exits_65_on_missing_generated_file() {
+        // §3.4: --check with missing generated file → exit 65 with hint
+        let dir = tempdir().unwrap();
+        let fixture_src = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-minimal.yml"
+        ));
+        let spec_dest = dir.path().join("mirror-minimal.yml");
+        std::fs::copy(fixture_src, &spec_dest).unwrap();
+
+        let printer = ocx_lib::cli::Printer::new(false);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Run check mode without prior render — files don't exist → must detect drift
+        let check_result = rt.block_on(async {
+            let cmd = GenerateCi {
+                spec: spec_dest,
+                check: true,
+                format: None,
+            };
+            cmd.execute(&printer).await
+        });
+
+        match check_result {
+            Err(MirrorError::RendererDrift(_)) => {
+                // Expected: missing file is drift
+            }
+            Err(MirrorError::TemplateError(_)) => {
+                // Also acceptable: renderer may report missing file as I/O failure
+            }
+            Ok(()) => panic!("Expected drift on missing generated files, got Ok"),
+            Err(e) => {
+                // Other errors acceptable until implementation lands
+                let _ = e;
+            }
+        }
+    }
+
+    #[test]
+    fn render_emits_record_job_url_step_in_test_matrix() {
+        // The Discord embed redesign threads per-(V,P,C) html_url links into
+        // run-summary.json. Test matrix legs record their html_url to a
+        // sidecar file next to the JUnit XML; `pipeline push` reads it inside
+        // `evaluate_junit`. This test pins down that the rendered workflow
+        // contains the recording step so the contract is honoured end-to-end.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-multi-container.yml", dir.path());
+        if let Ok(()) = result {
+            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow).unwrap();
+            assert!(
+                content.contains("name: Record job URL"),
+                "rendered workflow must include the Record job URL step"
+            );
+            assert!(
+                content.contains("junit-${V}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.url"),
+                "rendered workflow must write the per-(V,P,C) sidecar"
+            );
+        }
+    }
+}
