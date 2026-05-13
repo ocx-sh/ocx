@@ -3,6 +3,7 @@
 
 mod check;
 mod options;
+mod pipeline;
 #[cfg(feature = "jsonschema")]
 mod schema;
 mod sync;
@@ -23,6 +24,10 @@ pub enum Command {
     /// Validate a mirror spec file
     Validate(validate::Validate),
 
+    /// Pre-publish multi-runner test pipeline subcommands
+    #[command(subcommand)]
+    Pipeline(pipeline::PipelineCommand),
+
     /// Generate JSON Schema for mirror types
     #[cfg(feature = "jsonschema")]
     Schema(schema::Schema),
@@ -34,6 +39,7 @@ impl Command {
             Self::Sync(cmd) => cmd.execute(printer).await,
             Self::Check(cmd) => cmd.execute(printer).await,
             Self::Validate(cmd) => cmd.execute().await,
+            Self::Pipeline(cmd) => cmd.execute(printer).await,
             #[cfg(feature = "jsonschema")]
             Self::Schema(cmd) => cmd.execute().await,
         }

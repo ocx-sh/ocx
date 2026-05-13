@@ -190,14 +190,20 @@ pub async fn resolve_cascade_tags(
 /// Pushes a package to its primary tag, then merges the platform entry
 /// into each cascade tag sequentially (most-specific → least-specific
 /// for partial-failure safety).
+///
+/// Returns `(manifest_digest, cascade_tags_written)` where
+/// `manifest_digest` is the OCI digest of the pushed manifest and
+/// `cascade_tags_written` lists every rolling tag updated beyond the primary
+/// version tag. The caller (CLI or mirror pipeline) wraps these values into
+/// their output report type.
 pub async fn push_with_cascade(
     client: &oci::Client,
     package_info: package::info::Info,
     layers: &[crate::publisher::LayerRef],
     other_versions: BTreeSet<Version>,
     version: &Version,
-) -> Result<()> {
-    let (cascade_tags, _) = resolve_cascade_tags(
+) -> Result<(String, Vec<String>)> {
+    let (cascade_tag_strings, _is_latest) = resolve_cascade_tags(
         client,
         &package_info.identifier,
         version,
@@ -206,11 +212,15 @@ pub async fn push_with_cascade(
     )
     .await?;
 
-    client
-        .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags)
+    let (index_digest, _index) = client
+        .push_manifest_and_merge_tags(&package_info, layers, &cascade_tag_strings)
         .await?;
 
-    Ok(())
+    let manifest_digest = index_digest.to_string();
+
+    log::debug!("pushed package with cascade: digest={manifest_digest}, tags={cascade_tag_strings:?}");
+
+    Ok((manifest_digest, cascade_tag_strings))
 }
 
 /// Checks blockers sequentially, returning `true` on first platform match.

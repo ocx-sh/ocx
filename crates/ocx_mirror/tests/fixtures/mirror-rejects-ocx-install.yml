@@ -1,0 +1,38 @@
+# Mirror spec: contains ocx_install: {} block — NEGATIVE fixture.
+# Renderer must exit 64 (UsageError) before writing any files.
+# Tests the early-adopter mistake catcher from §3.1.
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+
+ocx_mirror:
+  release_tag: v0.7.2
+
+# This block should cause rejection:
+ocx_install: {}

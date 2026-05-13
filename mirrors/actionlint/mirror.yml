@@ -1,0 +1,52 @@
+name: actionlint
+target:
+  registry: dev.ocx.sh
+  repository: actionlint
+
+source:
+  type: github_release
+  owner: rhysd
+  repo: actionlint
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+# actionlint tarballs/zips contain a single `actionlint` binary at the
+# archive root — no wrapper dir.
+assets:
+  linux/amd64:
+    - "actionlint_.*_linux_amd64\\.tar\\.gz$"
+  linux/arm64:
+    - "actionlint_.*_linux_arm64\\.tar\\.gz$"
+  darwin/amd64:
+    - "actionlint_.*_darwin_amd64\\.tar\\.gz$"
+  darwin/arm64:
+    - "actionlint_.*_darwin_arm64\\.tar\\.gz$"
+  windows/amd64:
+    - "actionlint_.*_windows_amd64\\.zip$"
+  windows/arm64:
+    - "actionlint_.*_windows_arm64\\.zip$"
+
+asset_type:
+  type: archive
+  strip_components: 0
+
+metadata:
+  default: metadata.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "1.7.0"
+  new_per_run: 10
+
+verify:
+  github_asset_digest: true
+
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0

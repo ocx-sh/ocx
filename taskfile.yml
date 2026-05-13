@@ -30,6 +30,27 @@ includes:
       PACKAGE: 'ocx.sh/shfmt:3'
       TOOL: shfmt
       GLOB: '*.sh'
+  bats:
+    taskfile: ./taskfiles/ocx.taskfile.yml
+    internal: true
+    vars:
+      PACKAGE: 'dev.ocx.sh/bats:1.11'
+      TOOL: bats
+      GLOB: '*.bats'
+  hawkeye:
+    taskfile: ./taskfiles/ocx.taskfile.yml
+    internal: true
+    vars:
+      PACKAGE: 'dev.ocx.sh/hawkeye:6'
+      TOOL: hawkeye
+      GLOB: '*'
+  actionlint:
+    taskfile: ./taskfiles/ocx.taskfile.yml
+    internal: true
+    vars:
+      PACKAGE: 'dev.ocx.sh/actionlint:1.7'
+      TOOL: actionlint
+      GLOB: '.github/workflows/*.yml'
   mirror-sdk:
     taskfile: ./mirror-sdk-py/taskfile.yml
     dir: ./mirror-sdk-py

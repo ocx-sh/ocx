@@ -1,0 +1,50 @@
+name: hawkeye
+target:
+  registry: dev.ocx.sh
+  repository: hawkeye
+
+source:
+  type: github_release
+  owner: korandoru
+  repo: hawkeye
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+# hawkeye ships per-arch archives. Linux has both gnu and musl builds; we
+# prefer gnu (matches the other gnu-libc tools in this fleet).
+assets:
+  linux/amd64:
+    - "hawkeye-x86_64-unknown-linux-gnu\\.tar\\.xz$"
+  linux/arm64:
+    - "hawkeye-aarch64-unknown-linux-gnu\\.tar\\.xz$"
+  darwin/amd64:
+    - "hawkeye-x86_64-apple-darwin\\.tar\\.xz$"
+  darwin/arm64:
+    - "hawkeye-aarch64-apple-darwin\\.tar\\.xz$"
+  windows/amd64:
+    - "hawkeye-x86_64-pc-windows-msvc\\.zip$"
+
+asset_type:
+  type: archive
+  strip_components: 1
+
+metadata:
+  default: metadata.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "6.0.0"
+  new_per_run: 10
+
+verify:
+  github_asset_digest: true
+
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0

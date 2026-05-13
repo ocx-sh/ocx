@@ -1,0 +1,47 @@
+name: bats
+target:
+  registry: dev.ocx.sh
+  repository: bats
+
+# bats-core releases ship no uploaded binary assets — it's pure shell. We pull
+# the GitHub-generated source archive (one tarball per tag) via a url_index
+# generator and publish the same archive under all platforms.
+source:
+  type: url_index
+  generator:
+    command: ["uv", "run", "generate.py"]
+
+assets:
+  linux/amd64:
+    - "bats-core-.*-linux-amd64\\.tar\\.gz$"
+  linux/arm64:
+    - "bats-core-.*-linux-arm64\\.tar\\.gz$"
+  darwin/amd64:
+    - "bats-core-.*-darwin-amd64\\.tar\\.gz$"
+  darwin/arm64:
+    - "bats-core-.*-darwin-arm64\\.tar\\.gz$"
+  windows/amd64:
+    - "bats-core-.*-windows-amd64\\.tar\\.gz$"
+
+asset_type:
+  type: archive
+  strip_components: 1
+
+metadata:
+  default: metadata.json
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+versions:
+  min: "1.11.0"
+  new_per_run: 10
+
+concurrency:
+  max_downloads: 4
+  max_bundles: 2
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0

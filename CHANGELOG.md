@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ocx-mirror pipeline generate ci|plan|prepare|push|notify` subcommands for per-mirror GitHub Actions pipelines that smoke-test every `(version, platform)` pair before publishing. `generate ci` renders a workflow from `mirror.yml`; `plan` discovers new work; `prepare` downloads and bundles; `push` aggregates JUnit results and calls `ocx package push --cascade` only for green pairs; `notify` posts a Discord webhook summary. *(mirror)*
+- `ocx package push --format json` structured output: emits `manifest_digest` (sha256 of the pushed OCI manifest), `cascade_tags_written` (array of tags written by cascade), and `status` (`pushed` or `skipped_existing`). Consumed by `ocx-mirror pipeline push` to build `run-summary.json`. *(cli)*
+- `mirror.yml` schema extensions: `tests` (smoke-test command list), `platforms` (GHA runner and container matrix), `ocx_mirror` (version pin for generated workflows), and `notify` (Discord webhook settings) top-level keys. *(mirror)*
 - `ocx package test` for local pre-push validation: materializes a package without a registry round-trip and runs a command in its composed env. Temp directory is auto-cleaned on exit; `--keep` opts in to preservation for inspection. *(cli)*
 - `ocx clean --force` bypasses the project registry and collects packages held only by other projects' `ocx.lock` files. Live install symlinks and profile content-mode roots are still honoured. *(cli)*
 - Multi-project GC retention: `ocx clean` now retains packages pinned by any registered project's `ocx.lock` on the machine, not just the active project. Projects register automatically in `$OCX_HOME/projects.json` when `ocx lock` runs. *(project)*
