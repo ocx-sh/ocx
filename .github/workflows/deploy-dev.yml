@@ -44,7 +44,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install git-cliff
-        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: git-cliff
       - name: Compute next version and timestamp
@@ -88,7 +88,7 @@ jobs:
       - name: Install zig (for cargo-zigbuild cross-compile)
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - name: Install build tooling (cargo-zigbuild, cargo-auditable, dist)
-        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           # dist version matches `cargo-dist-version` in dist-workspace.toml so
           # dev archives are produced by the same dist that drives prod releases.
@@ -99,7 +99,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: dist build --artifacts=local --target="$TARGET"
       - name: Upload cargo-dist archives
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: artifacts-build-local-${{ matrix.target }}
           path: target/distrib/
