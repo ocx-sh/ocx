@@ -35,14 +35,6 @@ pub enum Error {
         #[source]
         source: super::metadata::template::TemplateError,
     },
-
-    /// An entrypoint target template failed validation at publish time.
-    #[error("entrypoint '{name}' target {source}")]
-    EntrypointTargetInvalid {
-        name: String,
-        #[source]
-        source: super::metadata::template::TemplateError,
-    },
 }
 
 impl ClassifyExitCode for Error {
@@ -51,7 +43,6 @@ impl ClassifyExitCode for Error {
             Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) | Self::BuildMeta(_) => Some(ExitCode::DataError),
             Self::RequiredPathMissing(_) => Some(ExitCode::NotFound),
             Self::EnvVarInterpolation { source, .. } => source.classify(),
-            Self::EntrypointTargetInvalid { source, .. } => source.classify(),
         }
     }
 }

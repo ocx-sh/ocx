@@ -1,10 +1,13 @@
 {
-  "type": "bundle", "version": 1, "env": [
+  "type": "bundle",
+  "version": 1,
+  "env": [
     {
       "key": "PATH",
       "type": "path",
       "required": true,
-      "value": "${installPath}/bin"
+      "value": "${installPath}/bin",
+      "visibility": "public"
     },
     {
       "key": "MANPATH",
@@ -16,20 +19,16 @@
   ],
   "entrypoints": [
     {
-      "name": "cmake",
-      "target": "${installPath}/bin/cmake"
+      "name": "cmake"
     },
     {
-      "name": "cmake-gui",
-      "target": "${installPath}/bin/cmake-gui"
+      "name": "cmake-gui"
     },
     {
-      "name": "cpack",
-      "target": "${installPath}/bin/cpack"
+      "name": "cpack"
     },
     {
-      "name": "ctest",
-      "target": "${installPath}/bin/ctest"
+      "name": "ctest"
     }
   ]
 }

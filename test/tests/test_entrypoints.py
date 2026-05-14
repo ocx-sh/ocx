@@ -62,7 +62,7 @@ def test_entrypoint_launcher_files_created_after_select(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -85,7 +85,7 @@ def test_entrypoint_unix_launcher_is_executable(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -104,7 +104,7 @@ def test_deselect_removes_current_symlink(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -153,7 +153,7 @@ def test_invalid_entrypoint_name_rejected_at_validation(
 
     metadata_path = tmp_path / "metadata-invalid-ep.json"
     metadata_obj = {
-        "type": "bundle", "version": 1, "entrypoints": [{"name": "INVALID_UPPER", "target": "${installPath}/bin/hello"}],
+        "type": "bundle", "version": 1, "entrypoints": [{"name": "INVALID_UPPER"}],
     }
     metadata_path.write_text(json.dumps(metadata_obj))
 
@@ -180,13 +180,13 @@ def test_install_without_select_does_not_trigger_collision_check(
 
     pkg_a = make_package_with_entrypoints(
         ocx, repo_a, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
     pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
@@ -210,7 +210,7 @@ def test_reselect_to_package_without_entrypoints_drops_entrypoints_dir(
     """
     pkg_with = make_package_with_entrypoints(
         ocx, unique_repo, tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
         tag="1.0.0",
     )
@@ -236,7 +236,7 @@ def test_launcher_invocation_runs_target_and_forwards_args(
     """Invoking the generated launcher with extra args runs the resolved target and forwards args."""
     pkg = make_package_with_entrypoints(
         ocx, unique_repo, tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
         tag="1.0.0",
     )
@@ -286,7 +286,7 @@ def test_root_package_entrypoints_appear_in_self_env(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -326,7 +326,7 @@ def test_synthetic_entrypoints_path_emitted_after_declared_bin(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
         env=[
             {
@@ -389,7 +389,7 @@ def test_exec_dep_launcher_via_path(
         ocx,
         b_repo,
         tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
         file_prefix="b",
@@ -441,7 +441,7 @@ def test_exec_auto_injects_cmd_into_pathext_on_windows(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -484,7 +484,7 @@ def test_install_warns_when_pathext_missing_cmd_on_windows(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=[{"name": "hello"}],
         bins=["hello"],
     )
 
@@ -533,13 +533,13 @@ def test_env_two_roots_with_same_entrypoint_name_errors(
 
     pkg_a = make_package_with_entrypoints(
         ocx, repo_a, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
     pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
@@ -574,13 +574,13 @@ def test_exec_two_roots_with_same_entrypoint_name_errors(
 
     pkg_a = make_package_with_entrypoints(
         ocx, repo_a, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
     pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
     )
@@ -618,7 +618,7 @@ def test_install_intra_closure_collision_aborts_before_candidate_symlink(
 
     pkg_a = make_package_with_entrypoints(
         ocx, repo_a, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
         file_prefix="a",
@@ -631,7 +631,7 @@ def test_install_intra_closure_collision_aborts_before_candidate_symlink(
 
     pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
         file_prefix="b",
@@ -685,7 +685,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
     # C — leaf with `cmake` entrypoint.
     pkg_c = make_package_with_entrypoints(
         ocx, repo_c, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
         file_prefix="c",
@@ -695,7 +695,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
     # D — leaf with conflicting `cmake` entrypoint.
     pkg_d = make_package_with_entrypoints(
         ocx, repo_d, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
         file_prefix="d",
@@ -811,7 +811,7 @@ def test_suite_a_entrypoint_collision_gated_on_interface_projection(
     # B: leaf package with entrypoint ``tool``.
     pkg_b = make_package_with_entrypoints(
         ocx, repo_b, tmp_path,
-        entrypoints=[{"name": "tool", "target": "${installPath}/bin/tool"}],
+        entrypoints=[{"name": "tool"}],
         bins=["tool"],
         tag="1.0.0",
         file_prefix="b",
@@ -821,7 +821,7 @@ def test_suite_a_entrypoint_collision_gated_on_interface_projection(
     dep_b = _dep_entry_ep(ocx, pkg_b, visibility=edge_visibility)
     pkg_r = make_package_with_entrypoints(
         ocx, unique_repo, tmp_path,
-        entrypoints=[{"name": "tool", "target": "${installPath}/bin/tool"}],
+        entrypoints=[{"name": "tool"}],
         bins=["tool"],
         tag="1.0.0",
         file_prefix="r",
@@ -897,7 +897,7 @@ def test_suite_e_mixed_edge_private_seals_c_from_interface_no_collision(
     # C — leaf with ``cmake`` entrypoint.
     pkg_c = make_package_with_entrypoints(
         ocx, repo_c, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
         file_prefix="ec",
@@ -907,7 +907,7 @@ def test_suite_e_mixed_edge_private_seals_c_from_interface_no_collision(
     # D — leaf with conflicting ``cmake`` entrypoint.
     pkg_d = make_package_with_entrypoints(
         ocx, repo_d, tmp_path,
-        entrypoints=[{"name": "cmake", "target": "${installPath}/bin/cmake"}],
+        entrypoints=[{"name": "cmake"}],
         bins=["cmake"],
         tag="1.0.0",
         file_prefix="ed",

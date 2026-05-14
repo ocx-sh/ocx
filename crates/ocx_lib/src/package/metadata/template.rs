@@ -22,13 +22,9 @@ use crate::package::metadata::dependency::DependencyName;
 /// template string. Callers that iterate over many variables (e.g. `Exporter`) benefit from
 /// building the resolver once and reusing it.
 ///
-/// Two resolution modes are exposed:
-/// - [`TemplateResolver::resolve`] — runtime mode. Substitutes real install paths and
-///   verifies each dep's `install_path.exists()` on disk. Used by `env::resolver::EnvResolver`
-///   at install/exec time.
-/// - [`TemplateResolver::resolve_for_validate`] — publish-time mode. Pure syntax +
-///   reference-existence check, no filesystem access. Used by `validate_entrypoints`
-///   so publish-time validation is platform-portable (no `Path::new("/")` sentinel).
+/// Runtime mode only: [`TemplateResolver::resolve`] substitutes real install paths and
+/// verifies each dep's `install_path.exists()` on disk. Used by `env::resolver::EnvResolver`
+/// at install/exec time.
 pub struct TemplateResolver<'a> {
     install_path: &'a Path,
     dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
@@ -56,24 +52,6 @@ impl<'a> TemplateResolver<'a> {
     /// an unsupported field, or a dependency that is not installed on disk.
     pub fn resolve(&self, template: &str) -> Result<String, TemplateError> {
         self.resolve_inner(template, /* check_exists = */ true)
-    }
-
-    /// Publish-time validation mode: substitutes tokens and checks references but does
-    /// **not** consult the filesystem. Used by `validate_entrypoints` so validation
-    /// is platform-portable — Windows publishers no longer rely on a `Path::new("/")`
-    /// sentinel that may not exist on their host.
-    ///
-    /// `install_path` and the dep contexts' `install_path` fields are still substituted
-    /// into the output (callers downstream of this method may inspect the resolved
-    /// string for path-prefix containment), but no `exists()` probe is performed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TemplateError::UnknownDependencyRef`] / `UnknownDependencyField` when
-    /// a `${deps.*}` token references something not declared. Never returns
-    /// [`TemplateError::DependencyNotInstalled`].
-    pub fn resolve_for_validate(&self, template: &str) -> Result<String, TemplateError> {
-        self.resolve_inner(template, /* check_exists = */ false)
     }
 
     fn resolve_inner(&self, template: &str, check_exists: bool) -> Result<String, TemplateError> {
@@ -225,17 +203,9 @@ pub enum TemplateError {
 
     /// A `${...}` placeholder remained after substitution — neither `${installPath}`
     /// nor `${deps.NAME.FIELD}` syntax. Rejected at publish time so unrecognized
-    /// tokens are not baked into launcher targets as literals.
+    /// tokens are not baked into env values as literals.
     #[error("contains unknown placeholder '{placeholder}'")]
     UnknownPlaceholder { placeholder: String },
-
-    /// An entry point target resolves to a path that escapes its install root —
-    /// either an absolute path outside `${installPath}` / `${deps.*.installPath}`,
-    /// or a `..` segment that traverses outside the contained tree.
-    #[error(
-        "target '{target}' escapes the install root (must resolve under ${{installPath}} or ${{deps.NAME.installPath}}, no '..' traversal)"
-    )]
-    TargetEscapesInstallRoot { target: String },
 }
 
 impl ClassifyExitCode for TemplateError {
@@ -244,8 +214,7 @@ impl ClassifyExitCode for TemplateError {
             Self::UnknownDependencyRef { .. }
             | Self::UnknownDependencyField { .. }
             | Self::AmbiguousDependencyRef { .. }
-            | Self::UnknownPlaceholder { .. }
-            | Self::TargetEscapesInstallRoot { .. } => ExitCode::DataError,
+            | Self::UnknownPlaceholder { .. } => ExitCode::DataError,
             Self::DependencyNotInstalled { .. } => ExitCode::NotFound,
         })
     }
@@ -431,43 +400,6 @@ mod tests {
                 if ref_name.as_str() == "dep1"),
             "unexpected error: {err}"
         );
-    }
-
-    // 8a. resolve_for_validate substitutes tokens but does NOT consult the filesystem,
-    //     so a dep whose install_path doesn't exist still resolves cleanly. This is
-    //     the publish-time mode used by `validate_entrypoints` — Windows publishers
-    //     can't rely on a `Path::new("/")` sentinel existing on their host.
-    #[test]
-    fn resolve_for_validate_does_not_check_exists() {
-        let dir = TempDir::new().unwrap();
-        let nonexistent = dir.path().join("definitely-not-there");
-        let mut contexts = HashMap::new();
-        contexts.insert(
-            dep_name("dep1"),
-            DependencyContext::path_only(pinned("dep1"), nonexistent),
-        );
-        let resolver = TemplateResolver::new(dir.path(), &contexts);
-
-        // Runtime mode: errors because install_path doesn't exist.
-        assert!(matches!(
-            resolver.resolve("${deps.dep1.installPath}").unwrap_err(),
-            TemplateError::DependencyNotInstalled { .. }
-        ));
-        // Validate mode: succeeds because the filesystem is not consulted.
-        assert!(resolver.resolve_for_validate("${deps.dep1.installPath}").is_ok());
-    }
-
-    // 8b. resolve_for_validate still rejects unknown deps and unsupported fields —
-    //     it's the syntactic + referential check at publish time, not a no-op.
-    #[test]
-    fn resolve_for_validate_rejects_unknown_dep() {
-        let dir = TempDir::new().unwrap();
-        let contexts: HashMap<DependencyName, DependencyContext> = HashMap::new();
-        let resolver = TemplateResolver::new(dir.path(), &contexts);
-        let err = resolver
-            .resolve_for_validate("${deps.missing.installPath}")
-            .unwrap_err();
-        assert!(matches!(err, TemplateError::UnknownDependencyRef { .. }));
     }
 
     // 9. Defense-in-depth: if the install_path itself contains a `${` sequence,

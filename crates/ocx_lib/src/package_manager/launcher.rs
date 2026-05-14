@@ -11,4 +11,3 @@ mod safety;
 
 pub use generate::generate;
 pub use pathext::{LAUNCHER_EXT, emplace_pathext, includes_launcher};
-pub(crate) use safety::LauncherSafeString;
