@@ -31,6 +31,7 @@ pub mod package_describe;
 pub mod package_info;
 pub mod package_pull;
 pub mod package_push;
+pub mod package_sign;
 pub mod package_test;
 pub mod pull;
 pub mod remove;
@@ -44,6 +45,7 @@ pub mod shell_hook;
 pub mod shell_init;
 pub mod uninstall;
 pub mod update;
+pub mod verify;
 pub mod version;
 
 #[derive(Subcommand)]

@@ -77,6 +77,19 @@ pub enum ExitCode {
     /// Offline mode blocked a network operation.
     /// Distinct from `Unavailable`: the failure is deliberate policy, not a fault.
     OfflineBlocked = 81,
+    /// Rekor transparency log service unavailable. Used by the sign path
+    /// (Rekor upload failure) AND the verify path (Rekor-required verification
+    /// cannot complete: SET absent + TSA absent, or Rekor lookup returns 5xx/timeout).
+    /// Tool-specific; distinct from `Unavailable` to let operators distinguish
+    /// "registry down" (retry likely helps) from "Rekor down" (sign cannot complete,
+    /// verify fails if Rekor is needed for SET presence but the log itself is
+    /// unreachable). Invalid Rekor SET content maps to `DataError = 65`, not here —
+    /// that is a data-integrity failure, not a service availability failure.
+    RekorUnavailable = 82,
+    /// Registry does not implement the OCI Referrers API and has no fallback-tag
+    /// referrers index. The operation cannot proceed — discovery fails hard rather
+    /// than silently returning empty results. Tool-specific.
+    ReferrersUnsupported = 83,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -188,6 +201,8 @@ case $? in
     79) echo "not found; pin a different version" ;;
     80) echo "auth failed; refresh credentials" ;;
     81) echo "offline mode; run online" ;;
+    82) echo "rekor unavailable; retry or skip signing" ;;
+    83) echo "registry lacks referrers support; use a registry with OCI 1.1 referrers" ;;
     *)  echo "unknown failure ($?)"; exit 1 ;;
 esac
 ```

@@ -261,6 +261,24 @@ impl OciTransport for StubTransport {
         self.next_push_result()
     }
 
+    async fn push_referrer_manifest(
+        &self,
+        _image: &oci::native::Reference,
+        _subject_digest: &oci::Digest,
+        _manifest_bytes: &[u8],
+        _media_type: &str,
+    ) -> Result<oci::Descriptor> {
+        unimplemented!("push_referrer_manifest — Phase 5 adds builder-mode capture to StubTransport")
+    }
+
+    async fn list_referrers(
+        &self,
+        _image: &oci::native::Reference,
+        _subject_digest: &oci::Digest,
+    ) -> Result<Vec<oci::Descriptor>> {
+        unimplemented!("list_referrers — Phase 5 adds builder-mode referrer injection")
+    }
+
     fn box_clone(&self) -> Box<dyn OciTransport> {
         Box::new(self.clone())
     }

@@ -122,6 +122,18 @@ New resolution-affecting `ContextOptions` fields (offline / remote / config / in
 
 The `--interactive` flag on `ocx exec` was removed: stdin always inherits, matching shell exec semantics. Do not reintroduce a stdin-gating flag.
 
+### Credential exemption
+
+Env vars carrying bearer credentials are read directly via `std::env::var` and intentionally NOT forwarded via `OcxConfigView` or `apply_ocx_config`. Rationale: tokens are short-lived bearer credentials; forwarding them propagates the credential into every subprocess child env, broadening the attack surface unnecessarily.
+
+Exempted vars (direct `std::env::var` read is compliant, not a forwarding-rule violation):
+
+| Var | Read site | Rationale |
+|-----|-----------|-----------|
+| `OCX_IDENTITY_TOKEN` | `command/package_sign.rs` | Short-lived OIDC bearer token for Sigstore signing |
+
+Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR.
+
 ## Quality Gate
 
 During review-fix loop, run `task rust:verify` — not full `task verify`.

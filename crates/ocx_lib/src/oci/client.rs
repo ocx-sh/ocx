@@ -104,6 +104,15 @@ impl Client {
         self.lock_timeout
     }
 
+    /// Returns a reference to the inner transport.
+    ///
+    /// Exposed for pipeline consumers (sign/verify) that need to issue
+    /// transport-level calls (e.g., capability probes) without going through
+    /// the higher-level `Client` methods.
+    pub fn transport(&self) -> &dyn OciTransport {
+        &*self.transport
+    }
+
     #[cfg(test)]
     pub(crate) fn with_transport(transport: Box<dyn OciTransport>) -> Self {
         Client {

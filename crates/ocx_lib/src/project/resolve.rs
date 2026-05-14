@@ -487,10 +487,15 @@ fn classify_client_error(err: &crate::Error) -> ClientFailure {
 
 fn classify(client: &ClientError) -> ClientFailure {
     match client {
-        // Transient: registry-side failures and file I/O are both retryable.
-        ClientError::Registry(_) | ClientError::Io { .. } => ClientFailure::Transient,
-        // Terminal auth failure — no retry.
-        ClientError::Authentication(_) => ClientFailure::Auth,
+        // Transient: registry-side failures, file I/O, rate limits, and 5xx are retryable.
+        ClientError::Registry(_)
+        | ClientError::Io { .. }
+        | ClientError::RateLimited { .. }
+        | ClientError::ServiceUnavailable { .. } => ClientFailure::Transient,
+        // Terminal auth/permission failures — no retry.
+        ClientError::Authentication(_) | ClientError::Unauthorized { .. } | ClientError::Forbidden { .. } => {
+            ClientFailure::Auth
+        }
         // 404-equivalent — no retry.
         ClientError::ManifestNotFound(_) | ClientError::BlobNotFound(_) => ClientFailure::NotFound,
         // Data errors and other structural failures — not retryable.
@@ -499,6 +504,7 @@ fn classify(client: &ClientError) -> ClientFailure {
         | ClientError::UnexpectedManifestType
         | ClientError::Serialization(_)
         | ClientError::InvalidEncoding(_)
+        | ClientError::ReferrersUnsupported { .. }
         | ClientError::Internal(_) => ClientFailure::Other,
     }
 }

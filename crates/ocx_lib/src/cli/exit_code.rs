@@ -52,6 +52,20 @@ pub enum ExitCode {
     /// Offline mode blocked a network operation.
     /// Distinct from `Unavailable`: the failure is deliberate policy, not a fault.
     OfflineBlocked = 81,
+    /// Rekor transparency log service unavailable.
+    ///
+    /// Used by the sign path (Rekor upload failure) AND the verify path
+    /// (Rekor-required verification cannot complete: SET absent + TSA absent,
+    /// Rekor SET verification fails against known Rekor public key, or Rekor
+    /// lookup returns 5xx/timeout). OCX-specific; distinct from `Unavailable`
+    /// to let operators distinguish "registry down" (retry likely helps) from
+    /// "Rekor down" (sign cannot complete, verify of existing v0.3 bundles
+    /// fails if Rekor is needed for SET verification).
+    RekorUnavailable = 82,
+    /// Registry does not implement the OCI Referrers API and has no fallback-tag
+    /// referrers index. The operation cannot proceed — discovery fails hard rather
+    /// than silently returning empty results. OCX-specific.
+    ReferrersUnsupported = 83,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -137,6 +151,19 @@ mod tests {
     fn exit_code_offline_blocked_is_81() {
         // OCX-specific; distinct from Unavailable (deliberate policy, not a fault)
         assert_eq!(ExitCode::OfflineBlocked as u8, 81);
+    }
+
+    #[test]
+    fn exit_code_rekor_unavailable_is_82() {
+        // Tool-specific; distinct from Unavailable — Rekor is a separate,
+        // non-retryable supply-chain dependency (vs registry transient faults).
+        assert_eq!(ExitCode::RekorUnavailable as u8, 82);
+    }
+
+    #[test]
+    fn exit_code_referrers_unsupported_is_83() {
+        // Tool-specific; registry lacks OCI 1.1 referrers — no fallback.
+        assert_eq!(ExitCode::ReferrersUnsupported as u8, 83);
     }
 
     #[test]

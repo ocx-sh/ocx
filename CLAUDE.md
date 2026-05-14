@@ -99,9 +99,9 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 | `OCX_PROJECT` | Path to an explicit `ocx.toml` (overrides CWD walk) | (unset) |
 | `OCX_NO_PROJECT` | Skip CWD walk + `OCX_PROJECT`; explicit `--project` paths still load | false |
 | `OCX_INDEX` | Override local index directory path | (unset → `$OCX_HOME/index/`) |
-| `OCX_BINARY_PIN` | Absolute path to the running `ocx`; set on every subprocess spawn so a child ocx (e.g. via a generated launcher) pins to the same binary | (unset → PATH lookup) |
-| `OCX_NO_UPDATE_CHECK` | Disable update check notification | false |
-| `OCX_NO_MODIFY_PATH` | Disable shell profile modification during install | false |
+| `OCX_BINARY_PIN` | Absolute path to running `ocx`; set on every subprocess spawn so child ocx pins to same binary | (unset → PATH lookup) |
+| `OCX_NO_UPDATE_CHECK` / `OCX_NO_MODIFY_PATH` | Disable update check notification / shell profile modification on install | false |
+| `OCX_IDENTITY_TOKEN` | OIDC bearer token for `ocx package sign`; NOT forwarded to subprocess children | (unset) |
 
 ## Acceptance Test Structure
 

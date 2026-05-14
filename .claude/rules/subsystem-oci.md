@@ -36,6 +36,26 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `oci/client/test_transport.rs` | Mock transport for unit tests |
 | `oci/manifest.rs` | `has_platform()` utility |
 | `oci/annotations.rs` | OCI annotation keys + OCX-specific `KEYWORDS` |
+| `oci/referrer.rs` | Root module; re-exports `ReferrersApiCapability`, `ReferrersSupport`, `ReferrerManifest` |
+| `oci/referrer/capability.rs` | `ReferrersApiCapability` probe + per-registry capability cache (`$OCX_HOME/state/referrers/<registry>.json`) |
+| `oci/referrer/manifest.rs` | `ReferrerManifest` — OCI referrer manifest builder and descriptor helpers |
+| `oci/referrer/media_types.rs` | Media-type constants for Sigstore bundle and other referrer artifact types |
+| `oci/sign.rs` | Root module; re-exports signing public types |
+| `oci/sign/bundle.rs` | Sigstore bundle v0.3 (`application/vnd.dev.sigstore.bundle.v0.3+json`) serialisation |
+| `oci/sign/error.rs` | `SignError` + `SignErrorKind` — three-layer error with exit-code classification |
+| `oci/sign/fulcio.rs` | Fulcio CA client — CSR construction + certificate issuance |
+| `oci/sign/oidc.rs` | OIDC token provider trait + dispatch logic |
+| `oci/sign/oidc_ambient.rs` | Ambient CI token detection (dispatches to inline fallback) |
+| `oci/sign/oidc_ambient_inline.rs` | Per-platform inline ambient OIDC fetchers (GHA, GCP, etc.) |
+| `oci/sign/oidc_browser.rs` | Interactive browser OAuth PKCE flow (suppressed with `--no-tty`) |
+| `oci/sign/pipeline.rs` | `SignPipeline` orchestrator (Phase 5c stub — pending sigstore-rs integration) |
+| `oci/sign/rekor.rs` | Rekor transparency-log client — log entry POST + SET extraction |
+| `oci/sign/signer.rs` | `KeylessSigner` — ephemeral ECDSA P-256 keypair generation |
+| `oci/verify.rs` | Root module; re-exports verification public types |
+| `oci/verify/error.rs` | `VerifyError` + `VerifyErrorKind` — three-layer error with exit-code classification |
+| `oci/verify/identity.rs` | Certificate identity + OIDC issuer exact-match policy |
+| `oci/verify/pipeline.rs` | `VerifyPipeline` orchestrator (Phase 5c stub — pending sigstore-rs integration) |
+| `oci/verify/trust_root.rs` | TUF trust root loading (embedded asset + network refresh) |
 
 ## Key Types
 

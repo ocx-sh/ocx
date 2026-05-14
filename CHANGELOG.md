@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ocx clean --force` bypasses the project registry and collects packages held only by other projects' `ocx.lock` files. Live install symlinks and profile content-mode roots are still honoured. *(cli)*
 - Multi-project GC retention: `ocx clean` now retains packages pinned by any registered project's `ocx.lock` on the machine, not just the active project. Projects register automatically in `$OCX_HOME/projects.json` when `ocx lock` runs. *(project)*
 - `ocx clean --dry-run` output gains a `Held By` column listing the `ocx.lock` paths that pin each retained package; also surfaced in JSON output as `held_by` array on each `CleanEntry`. *(cli)*
+- `ocx package sign` — keyless [Sigstore](https://www.sigstore.dev/) signing of a published package manifest via OCI Referrers. Publishes a Sigstore bundle v0.3 as a referrer of the target manifest, interoperable with `cosign verify`. *(sign)*
+- `ocx package verify` — keyless Sigstore verification of a target manifest against a user-specified identity and OIDC issuer. Verifies the Fulcio certificate chain, Rekor SET, and signature over the subject digest. *(verify)*
+- `OCX_IDENTITY_TOKEN` environment variable — lowest-precedence OIDC token source for `ocx package sign` (after `--identity-token-file` and `--identity-token-stdin`). *(sign)*
+- Exit codes `82 RekorUnavailable` and `83 ReferrersUnsupported` added to the typed `ExitCode` taxonomy. Scripts can now distinguish Rekor service failures from registries that lack OCI 1.1 Referrers API support. *(cli)*
 - Multi-layer package push and pull. `ocx package push` now accepts multiple layer arguments, each either a file path or a `sha256:<hex>.tar.gz` digest reference. *(package)*
 - Layered configuration from `/etc/ocx/config.toml`, `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml` with `--config` / `OCX_CONFIG` overrides and `OCX_NO_CONFIG` kill-switch. *(config)*
 - Typed `ExitCode` taxonomy aligned with BSD sysexits (64/65/69/74/75/77/78/79/80/81). Scripts can now `case $?` reliably. *(cli)*

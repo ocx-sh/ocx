@@ -25,6 +25,8 @@ lto = "thin"
 ocx_lib = { path = "crates/ocx_lib" }
 tokio = { version = "1", features = ["full"] }
 serde_yaml_ng = "0.10"
+url = "2"
+zeroize = { version = "1.8", features = ["derive"] }
 
 [workspace.lints.clippy]
 # Placeholder for future workspace-wide clippy overrides. Crate-specific

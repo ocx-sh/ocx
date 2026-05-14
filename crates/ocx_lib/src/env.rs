@@ -36,6 +36,13 @@ pub mod keys {
     pub const OCX_NO_PROJECT: &str = "OCX_NO_PROJECT";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
+
+    /// Bearer-credential env vars that `apply_ocx_config` must actively scrub
+    /// from a child env. Forwarding these to every subprocess would broaden
+    /// the attack surface — the CLI command that needs the token reads it
+    /// once via `std::env::var` and never propagates it. See the credential
+    /// exemption table in `subsystem-cli.md`.
+    pub const CREDENTIAL_KEYS: &[&str] = &["OCX_IDENTITY_TOKEN"];
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -181,6 +188,11 @@ impl Env {
     /// `--color`) — those are user-facing surface and must not leak into a
     /// launcher's child stream. Idempotent.
     pub fn apply_ocx_config(&mut self, cfg: &OcxConfigView) {
+        // Bearer credentials are intentionally NOT forwarded — strip any
+        // inherited value before writing the resolution-affecting keys.
+        for credential in keys::CREDENTIAL_KEYS {
+            self.remove(credential);
+        }
         self.set(keys::OCX_BINARY_PIN, cfg.self_exe.as_os_str());
         if cfg.offline {
             self.set(keys::OCX_OFFLINE, "1");
@@ -609,6 +621,30 @@ mod tests {
         assert!(env.get(keys::OCX_REMOTE).is_none(), "stale OCX_REMOTE must be cleared");
         assert!(env.get(keys::OCX_CONFIG).is_none(), "stale OCX_CONFIG must be cleared");
         assert!(env.get(keys::OCX_INDEX).is_none(), "stale OCX_INDEX must be cleared");
+    }
+
+    #[test]
+    fn apply_ocx_config_never_forwards_credential_tokens() {
+        // Credential exemption (see subsystem-cli.md): bearer-credential env
+        // vars must NEVER be forwarded to a child env via apply_ocx_config.
+        // Forwarding a short-lived OIDC token to every subprocess broadens the
+        // attack surface unnecessarily — the value should be read once by the
+        // CLI command that needs it, never propagated through OcxConfigView.
+        //
+        // This test guards the boundary: even when the parent env already has
+        // OCX_IDENTITY_TOKEN set (e.g. inherited via Env::new()), the call to
+        // apply_ocx_config must leave the child-env entry absent.
+        let mut env = Env::clean();
+        for credential in keys::CREDENTIAL_KEYS {
+            env.set(*credential, "tok-secret");
+        }
+        env.apply_ocx_config(&view("/abs/ocx"));
+        for credential in keys::CREDENTIAL_KEYS {
+            assert!(
+                env.get(credential).is_none(),
+                "credential token `{credential}` must never be forwarded by apply_ocx_config",
+            );
+        }
     }
 
     #[test]
