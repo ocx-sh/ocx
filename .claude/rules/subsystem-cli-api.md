@@ -26,6 +26,51 @@ Every file in `api/data/` follow this structure:
 
 Reference impls: `api/data/paths.rs`, `api/data/env.rs`.
 
+## Output architecture — three structs, two streams (Block-tier)
+
+OCX is a **backend tool** (`product-context.md`: automation-first, "not user-facing PM"). Output is split across three `ocx_lib::cli` structs. Pick by *what the bytes are*, never by convenience.
+
+| Struct | Stream | Role | Knows |
+|--------|--------|------|-------|
+| **`Printer`** | — | Bare write primitive: `out`/`out_line`/`err`/`err_line`. Nothing else. | nothing |
+| **`DataInterface`** | stdout | Machine data only: `print_json` / `print_table` / `print_tree` / `print_hint` / `print_steps`. Owns stdout color. Builds the (maybe styled) string, hands bytes to `Printer`. | `--format`, stdout color |
+| **`UserInterface`** | stderr | Human diagnostics + interactive input. Owns stderr color, `interactive` (TTY), `quiet`. | quiet, TTY, stderr color |
+
+`Context` exposes `data()` (→ `Api::report` for `Printable`) and `ui()`. `Api` wraps `DataInterface` for the report path; it is not a styling layer.
+
+### Channel rules
+
+- **Data → stdout, `DataInterface` only.** `--format json` = one JSON document; `--format plain` = TSV/aligned table, or **nothing** for action commands with no payload (`login`, `select`, `add`). Never interleave human text on stdout — `ocx … | jq` must not break. `Printable::print_plain` being a no-op for an action result is correct (see `api/data/login.rs`).
+- **Diagnostics → `UserInterface` (`status` / `status_break` / `warn` / `success`).** Environment-adaptive routing, decided once inside `UserInterface`, never at the call site:
+
+  | Environment | Behavior |
+  |---|---|
+  | `--quiet` OR non-TTY (CI/pipe) | route to `log::info!` / `log::warn!` (level-gated by `-l/--log-level`, default `info`) |
+  | interactive TTY & not quiet | styled line on stderr (color per stderr setting) |
+
+  So CI/non-interactive runs funnel diagnostics into the single `log` channel with its existing level control; decorated UI only when a human is watching.
+- **Errors → typed error, never `eprintln!`.** Return a typed error; `main.rs` is the **single** boundary — `log::error!("{err:#}")` then `app::classify_error` derives the exit code from `ClassifyExitCode`. Hand-mapping (`eprintln!(msg); return Ok(ExitCode::X.into())`) is forbidden in `command/*.rs`: it skips the log layer and creates a second exit-code source that drifts.
+
+  ```rust
+  // WRONG                                  // RIGHT
+  eprintln!("no ocx.toml; run `ocx init`"); return Err(UsageError::new(
+  return Ok(cli::ExitCode::UsageError.into());   "no ocx.toml found … run `ocx init`").into());
+  ```
+- **Interactive input → `UserInterface::prompt_line` / `prompt_secret`.** Both return `Err(Unsupported)` when non-interactive; the command maps that to the usual `UsageError` (e.g. login → "requires --password-stdin"). No ad-hoc `is_terminal()` checks scattered in commands.
+
+**Known exception:** `shell hook` / `shell direnv` / `shell env` emit `# ocx: …` shell-comment lines into the shell-eval stream by design (consumer = the shell, not a human). Keep the `# ocx:` prefix so they are inert when sourced.
+
+## Semantic intent, not display attributes (Block-tier)
+
+Callers declare **what a line means**, never **how it looks**. `status` / `warn` / `success` are intents; `green().bold()` is an attribute. `console::style(...)`, `Style::new()…apply_to`, raw ANSI, or manual `if color {…}` **must not** appear in `command/*.rs` or `Printable` impls. `DataInterface` / `UserInterface` are the sole owners of the color/stream/route decision.
+
+- Right: `context.ui().success("Login succeeded")` — intent; `UserInterface` decides style/stream/route.
+- Wrong: `println!("{}", console::style("Login succeeded").green().bold())` — caller hard-codes presentation and stream.
+
+New visual concept → add a named intent method + `STYLE_*` const inside `data_interface.rs` or `user_interface.rs` (whichever stream owns it). The vocabulary is small and semantic on purpose. Sole place a raw `console::Style` legitimately crosses a call site: per-tree-node `Annotation::with_style(...)`, which `DataInterface`'s tree renderer applies/strips (see `api/data/deps.rs`).
+
+**Known exception:** `command/info.rs::print_logo` renders bespoke logo+sidebar art with manual term layout — inline styling tolerated there, not copied elsewhere; do not generalize a struct API for it (YAGNI).
+
 ## Single-Table Rule
 
 Each `Printable::print_plain()` impl produce exactly one table. Multiple dimensions (e.g., type + path, status + content) → encode as columns, not separate tables with dynamic headers.

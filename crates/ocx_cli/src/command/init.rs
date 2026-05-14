@@ -20,7 +20,7 @@ pub struct Init {
 }
 
 impl Init {
-    pub async fn execute(&self, _context: crate::app::Context) -> anyhow::Result<ExitCode> {
+    pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // `ocx init` bootstraps the project, so it must NOT use the context's
         // project-discovery path (which errors when ocx.toml is absent). Use
         // the raw process cwd instead. The directory variant of the lib API
@@ -29,7 +29,7 @@ impl Init {
         let cwd = ocx_lib::env::current_dir()?;
 
         let toml_path = ocx_lib::project::init_project_at_default(&cwd)?;
-        eprintln!("created {}", toml_path.display());
+        context.ui().success(format!("created {}", toml_path.display()));
 
         Ok(ExitCode::SUCCESS)
     }

@@ -39,7 +39,7 @@ impl Installs {
 }
 
 impl Printable for Installs {
-    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
+    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (package, entry) in &self.packages {
             rows[0].push(package.clone());

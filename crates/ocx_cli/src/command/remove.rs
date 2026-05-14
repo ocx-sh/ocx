@@ -7,11 +7,10 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::cli;
 use ocx_lib::project::{ResolveLockOptions, remove_binding_in_memory, resolve_lock};
 
 use crate::api::data::lock::{LockEntry, LockReport};
-use crate::app::project_context::{ProjectContextError, load_project_for_mutate};
+use crate::app::project_context::load_project_for_mutate;
 
 /// Remove a tool binding from `ocx.toml`.
 ///
@@ -56,18 +55,9 @@ impl Remove {
             }
         }
 
-        // Acquire flock + load snapshot + predecessor.
-        let guard = match load_project_for_mutate(&context).await {
-            Ok(g) => g,
-            Err(ProjectContextError::NoProject { cwd }) => {
-                eprintln!(
-                    "no ocx.toml found in {} or any parent; run `ocx init` to create one",
-                    cwd.display()
-                );
-                return Ok(cli::ExitCode::UsageError.into());
-            }
-            Err(other) => return Err(other.into()),
-        };
+        // Acquire flock + load snapshot + predecessor. Errors propagate to
+        // the `main.rs` boundary (logged + classified there).
+        let guard = load_project_for_mutate(&context).await?;
 
         // Derive the binding key + look up the live identifier from the
         // pre-mutation snapshot so we can uninstall it after the commit.

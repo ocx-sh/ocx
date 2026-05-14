@@ -21,6 +21,69 @@ mod update_check;
 mod version;
 pub use version::version;
 
+/// A CLI-local command failure carrying its own exit code.
+///
+/// Mirrors `ocx_lib::cli::UsageError` (message + fixed classification) but
+/// lets the caller pick the code, for command-boundary validations that map
+/// to exits other than 64 (e.g. `NotFound`, `ConfigError`, `DataError`) and
+/// whose originating type is not a library error. Commands return this
+/// instead of `eprintln!` + `Ok(ExitCode::…)` so the message flows through
+/// the single `main.rs` `log::error!` + classify boundary.
+#[derive(Debug)]
+pub struct CommandError {
+    message: String,
+    code: cli::ExitCode,
+}
+
+impl CommandError {
+    pub fn new(message: impl Into<String>, code: cli::ExitCode) -> Self {
+        Self {
+            message: message.into(),
+            code,
+        }
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CommandError {}
+
+impl ocx_lib::cli::ClassifyExitCode for CommandError {
+    fn classify(&self) -> Option<cli::ExitCode> {
+        Some(self.code)
+    }
+}
+
+/// Classify an error chain into an [`ExitCode`], extending the library
+/// classifier with CLI-local error types.
+///
+/// `ocx_lib::cli::classify_error` only knows library error types — it cannot
+/// downcast `ocx_cli`-local types like [`project_context::ProjectContextError`]
+/// (the dependency only points one way). This wrapper walks the chain for the
+/// CLI-local types first, then delegates the remainder to the library
+/// classifier. It is the single exit-code authority for `main.rs`; commands
+/// must return typed errors rather than hand-mapping exit codes.
+pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> cli::ExitCode {
+    use ocx_lib::cli::ClassifyExitCode as _;
+    for cause in std::iter::successors(Some(err), |e| e.source()) {
+        if let Some(pce) = cause.downcast_ref::<project_context::ProjectContextError>()
+            && let Some(code) = pce.classify()
+        {
+            return code;
+        }
+        if let Some(ce) = cause.downcast_ref::<CommandError>()
+            && let Some(code) = ce.classify()
+        {
+            return code;
+        }
+    }
+    cli::classify_error(err)
+}
+
 #[derive(Parser)]
 #[command(name = "ocx", about, long_about = None)]
 #[command(about = "A simple package manager for pre-built binaries.", long_about = None)]

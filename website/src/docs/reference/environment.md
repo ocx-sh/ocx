@@ -295,6 +295,8 @@ for multiline values).
 
 The location of the Docker configuration directory. Read by the Docker credential helper that ocx delegates to when resolving registry credentials from `~/.docker/config.json`.
 
+`OCX_AUTH_*` environment variables (see above) take priority over any credential stored in the Docker configuration directory at read time. The resolution order for a given registry is: `OCX_AUTH_TOKEN` / `OCX_AUTH_USER` + `OCX_AUTH_PASSWORD` (highest) → `credHelpers[registry]` → `credsStore` → `auths[registry]` (lowest).
+
 ### `XDG_CONFIG_HOME` {#external-xdg-config-home}
 
 User-level configuration base directory, defined by the [XDG Base Directory Specification][xdg-basedir]. On Linux, OCX uses it to locate the user-tier [configuration file][config-ref]: the user tier is `$XDG_CONFIG_HOME/ocx/config.toml`, falling back to `~/.config/ocx/config.toml` when the variable is unset.

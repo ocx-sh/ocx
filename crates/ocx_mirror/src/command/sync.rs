@@ -35,7 +35,7 @@ pub struct Sync {
 }
 
 impl Sync {
-    pub async fn execute(&self, printer: &ocx_lib::cli::Printer) -> Result<(), MirrorError> {
+    pub async fn execute(&self, printer: &ocx_lib::cli::DataInterface) -> Result<(), MirrorError> {
         let spec_path = &self.spec;
         let spec = spec::load_spec(spec_path).await?;
         let spec_dir = spec_path.parent().unwrap_or(std::path::Path::new("."));

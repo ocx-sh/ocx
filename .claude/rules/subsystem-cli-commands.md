@@ -19,7 +19,7 @@ The CLI surface splits into six rows. The split is firm — a command does not c
 | **Project mutators** | `add`, `remove`, `lock`, `update` | OCI identifier in → binding name written | `ocx.toml` + `ocx.lock` | Writes `ocx.toml` and/or `ocx.lock` |
 | **Shell activation** | `shell hook`, `shell direnv`, `shell init` | Binding names (resolved to installed paths) | Nearest `ocx.toml` + install store | Shell export lines |
 | **Bootstrap / mixed** | `init`, `info`, `version`, `shell completion` | Varies | Varies | No tier contract |
-| **Low-level — registry** | `install`, `uninstall`, `package pull/push/describe/info/create`, `index update/list/catalog` | OCI identifiers | Registry + local index | Install store / index |
+| **Low-level — registry** | `install`, `login`, `logout`, `uninstall`, `package pull/push/describe/info/create`, `index update/list/catalog` | OCI identifiers | Registry + local index | Install store / index |
 | **Low-level — local store** | `find`, `select`, `deselect`, `deps`, `env`, `exec`, `shell env`, `clean`, `launcher exec`, `ci export` | OCI identifiers | Install + symlink store | Reports / child spawn |
 
 **Layer-purity rule:** `ocx run` is project-tier (binding-name semantics); `ocx exec` is OCI-tier (identifier semantics). If you have `ocx.toml`, prefer `ocx run`; if you do not, use `ocx exec`. No command silently switches contract based on CWD or filesystem state.
@@ -51,6 +51,8 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `remove IDENTIFIER` | Drop binding from `ocx.toml`, rewrite lock, uninstall | No | — |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with project-tier composed env (binding names from `ocx.lock`) | **Yes** | `-g/--group`, `--clean`, `--self` |
 | `install PKGS...` | Download and install packages | N/A (is install) | `-s/--select`, `-p/--platform` |
+| `login [REGISTRY]` | Authenticate to a registry; persists via docker credential store | No | `-u/--username`, `--password-stdin`, `--insecure`, `--allow-insecure-store` |
+| `logout [REGISTRY]` | Remove stored credentials for a registry | No | — |
 | `find PKGS...` | Resolve installed packages to paths | No | `--candidate`, `--current`, `-p` |
 | `select PKGS...` | Set `current` symlink | No | `-p` |
 | `deselect PKGS...` | Remove `current` symlink | No | — |
@@ -111,6 +113,10 @@ Use `--candidate` or `--current` when embedding paths in configs, IDE settings, 
 
 Design intent not visible from flag table — read before changing CLI behavior here.
 
+- **`login` / `logout` registry argument**: optional — falls back to `OCX_DEFAULT_REGISTRY` (default `ocx.sh`) when omitted. Matches `pull`/`install` default-registry semantics.
+- **`login` credential storage tiers** (resolution order in put): `credHelpers[registry]` → `credsStore` → detected platform helper → plaintext base64 in `auths[registry].auth` (gated by `--allow-insecure-store`; default refused). Mirrors `oras-go` `DynamicStore`.
+- **`logout` is always exit 0**: matches `docker`/`oras`/`helm`/`crane`; CI cleanup must not fail when previous step already cleaned.
+- **`--password VALUE` does not exist**: argv-visible secrets leak via `ps`/shell history (CWE-214). Use `--password-stdin` for non-interactive flows.
 - **`index list <pkg>@<digest>`**: rejected with usage error. `index list` enumerates tags; a digest narrows nothing. Use `ocx package info <pkg>@<digest>` for a single artifact. Tag-only identifiers (`<pkg>:<tag>`) still work as a tag filter on the returned list.
 - **`index update <pkg>`**: tagged identifier (`cmake:3.28`) fetches only that tag's digest + manifest, merges into existing `tags/{repo}.json`. Bare identifier (`cmake`) fetches all tags. Two modes intentional — tagged mode keep offline indexes minimal + reproducible. **Sole writer** of tag pointers outside install/pull (which writes via `LocalIndex::commit_tag`, gated to skip pinned-id pulls because `ocx.lock` is canonical).
 - **`deps`**: tree view marks repeated subtrees with `(*)`, no re-expand. Flat view (`--flat`) emits topological evaluation order — same order `exec` and `env` use to layer env vars. Why view (`--why`) traces all paths from roots to target by registry/repository (tag ignored when matching).

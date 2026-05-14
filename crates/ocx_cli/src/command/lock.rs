@@ -9,7 +9,7 @@ use ocx_lib::cli;
 use ocx_lib::project::{DEFAULT_GROUP, ResolveLockOptions, resolve_lock};
 
 use crate::api::data::lock::{LockEntry, LockReport};
-use crate::app::project_context::{ProjectContextError, load_project_for_mutate, load_project_with_lock};
+use crate::app::project_context::{load_project_for_mutate, load_project_with_lock};
 
 /// Resolve tool tags to digests and write `ocx.lock`.
 ///
@@ -45,8 +45,9 @@ impl Lock {
         // Pre-validate empty comma segments before any I/O.
         for raw in &self.groups {
             if raw.is_empty() {
-                eprintln!("empty group segment in --group value; check for stray commas");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(
+                    cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
+                );
             }
         }
 
@@ -65,17 +66,8 @@ impl Lock {
         // Acquire flock + load snapshot. `ocx lock` mutates the lock file
         // only; the staging closure is identity, and `lock_only()`
         // suppresses the manifest rewrite at commit time.
-        let guard = match load_project_for_mutate(&context).await {
-            Ok(g) => g,
-            Err(ProjectContextError::NoProject { cwd }) => {
-                eprintln!(
-                    "no ocx.toml found in {} or any parent; run `ocx lock` from a project directory",
-                    cwd.display()
-                );
-                return Ok(cli::ExitCode::UsageError.into());
-            }
-            Err(other) => return Err(other.into()),
-        };
+        // Errors propagate to the `main.rs` boundary (logged + classified).
+        let guard = load_project_for_mutate(&context).await?;
 
         // Validate group filter against the loaded snapshot.
         for raw in &self.groups {
@@ -83,8 +75,7 @@ impl Lock {
                 continue;
             }
             if !guard.config().groups.contains_key(raw) {
-                eprintln!("unknown group '{raw}' in --group filter");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
             }
         }
 
@@ -109,7 +100,9 @@ impl Lock {
         // `ocx.lock merge=union`.
         let project_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
         if !gitattributes_has_merge_union(project_dir).await {
-            eprintln!("note: add `ocx.lock merge=union` to .gitattributes to avoid merge conflicts");
+            context
+                .ui()
+                .warn("add `ocx.lock merge=union` to .gitattributes to avoid merge conflicts");
         }
 
         let entries: Vec<LockEntry> = new_lock
@@ -136,28 +129,11 @@ impl Lock {
 /// lock gate (`LockMissing` → exit 78) are byte-identical to what
 /// `ocx run` and `ocx pull` already enforce. Success returns exit 0.
 async fn run_check(context: &crate::app::Context) -> anyhow::Result<ExitCode> {
-    match load_project_with_lock(context).await {
-        Ok(_) => Ok(ExitCode::SUCCESS),
-        Err(ProjectContextError::NoProject { cwd }) => {
-            eprintln!(
-                "no ocx.toml found in {} or any parent; run `ocx lock --check` from a project directory",
-                cwd.display()
-            );
-            Ok(cli::ExitCode::UsageError.into())
-        }
-        Err(ProjectContextError::LockMissing { path }) => {
-            eprintln!("ocx.lock not found at {}; run `ocx lock` to create it", path.display());
-            Ok(cli::ExitCode::ConfigError.into())
-        }
-        Err(ProjectContextError::StaleLock { lock_path }) => {
-            eprintln!(
-                "ocx.lock at {} is stale (declaration_hash drift from ocx.toml); run `ocx lock`",
-                lock_path.display()
-            );
-            Ok(cli::ExitCode::DataError.into())
-        }
-        Err(other) => Err(other.into()),
-    }
+    // All `ProjectContextError` variants classify at the `main.rs` boundary
+    // (NoProject→64, LockMissing→78, StaleLock→65); propagate and let the
+    // boundary log + map the exit code.
+    load_project_with_lock(context).await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Probe whether `{project_dir}/.gitattributes` contains the

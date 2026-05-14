@@ -60,15 +60,15 @@ impl Info {
 
         let info = crate::api::data::info::Info::new(version, registry, platforms, current_shell, home);
 
-        let printer = context.api().printer();
+        let data = context.api().data();
         if context.api().is_json() {
             context.api().report(&info)?;
         // Show the logo in terminals (even with --color never, just unstyled),
         // and also when color is forced (--color always) even if piped.
-        } else if Term::stdout().is_term() || printer.color() {
-            self.print_logo(&info, printer.color())?;
+        } else if Term::stdout().is_term() || data.color() {
+            self.print_logo(&info, data.color())?;
         } else {
-            info.print_plain(printer);
+            info.print_plain(data);
         }
 
         Ok(ExitCode::SUCCESS)

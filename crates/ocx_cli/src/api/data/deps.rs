@@ -4,23 +4,24 @@
 use serde::Serialize;
 
 use ocx_lib::{
-    cli::{Annotation, TreeItem},
+    cli::{Annotation, Style, TreeItem},
     oci,
     package::metadata::visibility::Visibility,
 };
 
 use crate::api::Printable;
 
-const STYLE_DIGEST: console::Style = console::Style::new().color256(117); // light sky blue
-const STYLE_REPEATED: console::Style = console::Style::new().italic().dim();
+const STYLE_DIGEST: Style = Style::new().style(console::Style::new().color256(117)); // light sky blue
+const STYLE_REPEATED: Style = Style::new().style(console::Style::new().italic().dim());
 
-const fn visibility_style(vis: Visibility) -> console::Style {
-    match (vis.private, vis.interface) {
+const fn visibility_style(vis: Visibility) -> Style {
+    let inner = match (vis.private, vis.interface) {
         (true, true) => console::Style::new().color256(114), // public — soft green
         (true, false) => console::Style::new().italic().color256(179), // private — warm amber
         (false, true) => console::Style::new().italic().color256(141), // interface — lavender
         (false, false) => console::Style::new().italic().dim().color256(245), // sealed — muted gray
-    }
+    };
+    Style::new().style(inner)
 }
 
 /// A node in the dependency tree (for tree view output).
@@ -82,7 +83,7 @@ impl TreeItem for Dependency {
 
 impl Printable for Dependencies {
     // Tree output is inherently non-tabular, so we use printer.print_tree()
-    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
+    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
         for root in &self.roots {
             printer.print_tree(root);
         }
@@ -108,7 +109,7 @@ impl FlatDependencies {
 }
 
 impl Printable for FlatDependencies {
-    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
+    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
             // Display identifier without digest — the digest has its own column.
@@ -139,7 +140,7 @@ impl DependenciesTrace {
 }
 
 impl Printable for DependenciesTrace {
-    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
+    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
         if self.paths.is_empty() {
             if let Some(ref msg) = self.message {
                 printer.print_hint(msg);

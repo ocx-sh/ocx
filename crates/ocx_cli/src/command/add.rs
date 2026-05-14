@@ -8,12 +8,11 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::cli;
 use ocx_lib::project::error::ProjectErrorKind;
 use ocx_lib::project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, resolve_lock_partial};
 
 use crate::api::data::lock::{LockEntry, LockReport};
-use crate::app::project_context::{ProjectContextError, load_project_for_mutate};
+use crate::app::project_context::load_project_for_mutate;
 use crate::conventions::platforms_or_default;
 
 /// Add a tool binding to `ocx.toml`.
@@ -53,17 +52,10 @@ impl Add {
         };
 
         // Resolve project, acquire flock, load snapshot + predecessor lock.
-        let guard = match load_project_for_mutate(&context).await {
-            Ok(g) => g,
-            Err(ProjectContextError::NoProject { cwd }) => {
-                eprintln!(
-                    "no ocx.toml found in {} or any parent; run `ocx init` to create one",
-                    cwd.display()
-                );
-                return Ok(cli::ExitCode::UsageError.into());
-            }
-            Err(other) => return Err(other.into()),
-        };
+        // Errors propagate to the `main.rs` boundary: `log::error!` logs the
+        // message once and `app::classify_error` derives the exit code from
+        // `ProjectContextError`'s `ClassifyExitCode` impl.
+        let guard = load_project_for_mutate(&context).await?;
 
         // Stage: in-memory add against a clone of the snapshot.
         let config_path = guard.config_path().to_path_buf();
