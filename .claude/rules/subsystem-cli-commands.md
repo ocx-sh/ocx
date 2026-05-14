@@ -69,7 +69,7 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `lock` | Resolve project tool tags to digests and write `ocx.lock` | No | `-g/--group` |
 | `package pull PKGS...` | Download to object store only | N/A (is pull) | `-p` |
 | `package create PATH` | Bundle directory into archive | No | `-o`, `-m`, `-l`, `-j`, `--force` |
-| `package push -i ID LAYERS...` | Publish archive to registry | No | `-i/--identifier` (required), `-c/--cascade`, `-n`, `-m`, `-p` |
+| `package push -i ID LAYERS...` | Publish archive to registry | No | `-i/--identifier` (required), `-c/--cascade`, `-n`, `-m`, `-p`, `--build-timestamp [datetime\|date\|none]` |
 | `package describe ID` | Push description metadata | No | `--readme`, `--logo`, `--title` |
 | `package test -i ID LAYERS... -- CMD` | Materialize + exec locally (no registry) | **Yes** (deps only) | `-i/--identifier` (required), `-p`, `-m`, `--keep`, `-o/--output`, `--self`, `--clean` |
 | `package info ID` | Display description metadata | No | `--save-readme`, `--save-logo` |

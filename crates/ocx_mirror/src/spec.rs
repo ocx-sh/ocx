@@ -79,13 +79,7 @@ pub struct MirrorSpec {
     pub concurrency: ConcurrencyConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BuildTimestampFormat {
-    Datetime,
-    Date,
-    None,
-}
+pub use ocx_lib::package::version::BuildTimestampFormat;
 
 fn default_build_timestamp() -> BuildTimestampFormat {
     BuildTimestampFormat::Datetime

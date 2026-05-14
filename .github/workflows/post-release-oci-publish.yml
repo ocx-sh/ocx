@@ -1,9 +1,14 @@
 name: Publish to Registry
 
+# cargo-dist post-announce job. Delegates the platform-loop + push logic to
+# `oci-publish.yml`; this workflow only contributes the prod-specific inputs
+# (registry, version derivation from tag, cargo-dist archive layout).
+
 on:
   workflow_call:
     inputs:
       plan:
+        # Forwarded by cargo-dist; not consumed here, but the contract requires it.
         required: true
         type: string
 
@@ -11,106 +16,32 @@ permissions:
   contents: read
 
 jobs:
-  publish:
-    # Skip registry publish for pre-release tags (e.g. v0.6.0-canary.1)
+  compute-tag:
+    # Skip registry publish for pre-release tags (e.g. v0.6.0-canary.1).
     if: ${{ !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-22.04
-    environment: ocx.sh
+    runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ steps.tag.outputs.version_tag }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
+      - id: tag
+        shell: bash
+        run: echo "version_tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: artifacts-build-*
-          path: target/distrib/
-          merge-multiple: true
-
-      - name: Install OCX from build artifacts
-        run: |
-          # Extract the linux-musl x86_64 build to get a working ocx binary
-          tar -xf target/distrib/ocx-x86_64-unknown-linux-musl.tar.xz -C /tmp
-          chmod +x /tmp/ocx-x86_64-unknown-linux-musl/ocx
-          sudo mv /tmp/ocx-x86_64-unknown-linux-musl/ocx /usr/local/bin/ocx
-          ocx version
-
-      - name: Repackage and publish to registry
-        env:
-          OCX_AUTH_ocx_sh_USER: ${{ secrets.REGISTRY_USER }}
-          OCX_AUTH_ocx_sh_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-
-          # Target triple → OCI platform mapping
-          # Use musl targets for linux (statically linked, works on any distro)
-          declare -A PLATFORM_MAP=(
-            ["x86_64-unknown-linux-musl"]="linux/amd64"
-            ["aarch64-unknown-linux-musl"]="linux/arm64"
-            ["x86_64-apple-darwin"]="darwin/amd64"
-            ["aarch64-apple-darwin"]="darwin/arm64"
-            ["x86_64-pc-windows-msvc"]="windows/amd64"
-            ["aarch64-pc-windows-msvc"]="windows/arm64"
-          )
-
-          METADATA="packaging/ocx/metadata.json"
-
-          for TARGET in "${!PLATFORM_MAP[@]}"; do
-            PLATFORM="${PLATFORM_MAP[$TARGET]}"
-
-            # Determine archive extension and binary name
-            if [[ "$TARGET" == *windows* ]]; then
-              ARCHIVE="target/distrib/ocx-${TARGET}.zip"
-              BIN_NAME="ocx.exe"
-            else
-              ARCHIVE="target/distrib/ocx-${TARGET}.tar.xz"
-              BIN_NAME="ocx"
-            fi
-
-            if [ ! -f "$ARCHIVE" ]; then
-              echo "WARNING: Archive not found: $ARCHIVE, skipping"
-              continue
-            fi
-
-            echo "==> Repackaging $ARCHIVE for $PLATFORM"
-            WORK_DIR=$(mktemp -d)
-
-            # Extract original archive
-            if [[ "$ARCHIVE" == *.zip ]]; then
-              unzip -q "$ARCHIVE" -d "$WORK_DIR/extracted"
-            else
-              mkdir -p "$WORK_DIR/extracted"
-              tar -xf "$ARCHIVE" -C "$WORK_DIR/extracted"
-            fi
-
-            # Find the binary (cargo-dist puts it at root or in a subdirectory)
-            BINARY=$(find "$WORK_DIR/extracted" -name "$BIN_NAME" -type f | head -1)
-            if [ -z "$BINARY" ]; then
-              echo "ERROR: Binary $BIN_NAME not found in $ARCHIVE, skipping"
-              rm -rf "$WORK_DIR"
-              continue
-            fi
-
-            # Repackage with bin/ directory layout
-            REPACKAGE_DIR="$WORK_DIR/repackage"
-            mkdir -p "$REPACKAGE_DIR/bin"
-            cp "$BINARY" "$REPACKAGE_DIR/bin/$BIN_NAME"
-            chmod +x "$REPACKAGE_DIR/bin/$BIN_NAME"
-
-            # Create OCX package archive
-            REPACKAGED="$WORK_DIR/ocx-${TARGET}.tar.xz"
-            ocx package create "$REPACKAGE_DIR" \
-              -m "$METADATA" \
-              -o "$REPACKAGED" \
-              -p "$PLATFORM"
-
-            echo "==> Publishing ocx.sh/ocx:${VERSION} ($PLATFORM)"
-            ocx package push "ocx.sh/ocx:${VERSION}" "$REPACKAGED" \
-              --platform "$PLATFORM" --cascade --new \
-              -m "$METADATA"
-
-            rm -rf "$WORK_DIR"
-          done
-
-          echo "==> All platforms published successfully"
+  publish:
+    if: ${{ !contains(github.ref_name, '-') }}
+    needs: [compute-tag]
+    uses: ./.github/workflows/oci-publish.yml
+    with:
+      registry: ocx.sh
+      repo: ocx
+      version_tag: ${{ needs.compute-tag.outputs.version_tag }}
+      # Prod registry today carries the default ocx variant only. Adding
+      # `mirror` here would publish ocx-mirror to ocx.sh — gate that on a
+      # separate decision when the time comes.
+      variants: '[""]'
+      targets: '["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-apple-darwin","aarch64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]'
+      environment: ocx.sh
+      artifact_source: cargo-dist
+    secrets:
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

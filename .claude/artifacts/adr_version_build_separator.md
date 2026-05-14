@@ -2,8 +2,9 @@
 
 ## Metadata
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-03-12
+**Date Accepted:** 2026-05-14
 **Deciders:** mherwig
 **Beads Issue:** N/A
 **Related PRD:** N/A

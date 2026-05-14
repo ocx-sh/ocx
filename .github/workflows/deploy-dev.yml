@@ -1,0 +1,123 @@
+name: Deploy Dev
+
+# Rolling continuous-deploy pipeline. Runs after `Basic Verification` succeeds
+# on `main` (smoke + acceptance tests must pass first). Builds linux x86_64 and
+# aarch64 musl for both `ocx` and `ocx-mirror` via `dist build` (cargo-dist),
+# then publishes them to `dev.ocx.sh/ocx:<core>-dev_<timestamp>` (and
+# `mirror-<core>-dev_<timestamp>`).
+#
+# Target set + tooling match `dist-workspace.toml` so dev artifacts are produced
+# by the same dist that drives prod releases. Published archives are
+# intentionally tagged as pre-release (`-dev_<TS>`) so they cannot collide with
+# the stable release graph.
+
+on:
+  workflow_run:
+    workflows: [Basic Verification]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize runs so the timestamp suffix stays monotonic; never cancel a
+# publish in flight.
+concurrency:
+  group: deploy-dev-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compute-version:
+    name: Compute version
+    # workflow_run fires on every completion; gate on success. workflow_dispatch
+    # bypasses the gate (manual trigger always proceeds).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.cliff.outputs.version }}
+      version_tag: ${{ steps.cliff.outputs.version_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install git-cliff
+        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        with:
+          tool: git-cliff
+      - name: Compute next version and timestamp
+        id: cliff
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$(git-cliff --bumped-version)"
+          version="${raw#v}"
+          if [[ -z "$version" ]]; then
+            echo "::error::git-cliff --bumped-version returned empty output; no commits since last tag — refusing to publish a dev build"
+            exit 1
+          fi
+          ts="$(date -u +%Y%m%d%H%M%S)"
+          echo "version=${version}"                         | tee -a "$GITHUB_OUTPUT"
+          echo "version_tag=${version}-dev_${ts}"           | tee -a "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Build (${{ matrix.target }})
+    needs: [compute-version]
+    # ubuntu-22.04 matches the runner cargo-dist plans for our linux targets
+    # in `dist-workspace.toml` — older glibc baseline for portability.
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Install Rust target on toml channel
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
+      - name: Install zig (for cargo-zigbuild cross-compile)
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - name: Install build tooling (cargo-zigbuild, cargo-auditable, dist)
+        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        with:
+          # dist version matches `cargo-dist-version` in dist-workspace.toml so
+          # dev archives are produced by the same dist that drives prod releases.
+          tool: cargo-zigbuild,cargo-auditable,cargo-dist@0.31.0
+      - name: Build via dist
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: dist build --artifacts=local --target="$TARGET"
+      - name: Upload cargo-dist archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: target/distrib/
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish to dev.ocx.sh
+    needs: [compute-version, build-linux]
+    uses: ./.github/workflows/oci-publish.yml
+    with:
+      registry: dev.ocx.sh
+      repo: ocx
+      version_tag: ${{ needs.compute-version.outputs.version_tag }}
+      variants: '["","mirror"]'
+      targets: '["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl"]'
+      environment: dev.ocx.sh
+      artifact_source: cargo-dist
+    secrets:
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

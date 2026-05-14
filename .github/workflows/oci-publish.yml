@@ -1,0 +1,232 @@
+name: OCI Publish
+
+# Reusable workflow that publishes bare-binary build artifacts to an OCI
+# registry as OCX packages. Called by `deploy-dev.yml` (rolling main publishes)
+# and `post-release-oci-publish.yml` (tag-driven release publishes).
+#
+# Inputs assume that for every (target, variant) pair an artifact named
+# `${variant}${variant_sep}${target}` was uploaded by the caller — a single
+# file whose name is `${variant}${variant_sep}${target}` (no extension on
+# unix targets, `.exe` on windows). The default variant uses the empty prefix,
+# so the artifact name is `ocx-${target}`. Non-default variants prefix the
+# binary name, e.g. `ocx-mirror-${target}`.
+
+on:
+  workflow_call:
+    inputs:
+      registry:
+        description: Registry hostname (e.g. `dev.ocx.sh`, `ocx.sh`).
+        required: true
+        type: string
+      repo:
+        description: Repository name within the registry (typically `ocx`).
+        required: true
+        type: string
+      version_tag:
+        description: Version core including any pre-release segment (e.g. `0.3.0-dev`).
+        required: true
+        type: string
+      variants:
+        description: JSON array of variant prefixes; `""` for the default ocx variant.
+        required: true
+        type: string
+      targets:
+        description: JSON array of Rust target triples to publish.
+        required: true
+        type: string
+      environment:
+        description: GitHub Environment whose secrets gate the publish.
+        required: true
+        type: string
+      artifact_source:
+        description: How to stage binaries — `bare` (artifacts named `ocx-${target}` from build-rust) or `cargo-dist` (`artifacts-build-*` archives in `target/distrib/`).
+        required: false
+        type: string
+        default: bare
+    secrets:
+      REGISTRY_USER:
+        required: true
+      REGISTRY_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download bare-binary artifacts
+        if: ${{ inputs.artifact_source == 'bare' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Download cargo-dist archives
+        if: ${{ inputs.artifact_source == 'cargo-dist' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-build-*
+          path: distrib/
+          merge-multiple: true
+
+      - name: Extract cargo-dist archives into bare-binary layout
+        if: ${{ inputs.artifact_source == 'cargo-dist' }}
+        shell: bash
+        env:
+          TARGETS_JSON: ${{ inputs.targets }}
+          VARIANTS_JSON: ${{ inputs.variants }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          mapfile -t TARGETS  < <(echo "${TARGETS_JSON}"  | jq -r '.[]')
+          mapfile -t VARIANTS < <(echo "${VARIANTS_JSON}" | jq -r '.[]')
+          for target in "${TARGETS[@]}"; do
+            ext=""
+            archive_ext="tar.xz"
+            if [[ "$target" == *windows* ]]; then
+              ext=".exe"
+              archive_ext="zip"
+            fi
+            archive="distrib/ocx-${target}.${archive_ext}"
+            if [[ ! -f "$archive" ]]; then
+              echo "::error::missing $archive"
+              exit 1
+            fi
+            stage="$(mktemp -d)"
+            if [[ "$archive" == *.zip ]]; then
+              unzip -q "$archive" -d "$stage"
+            else
+              tar -xf "$archive" -C "$stage"
+            fi
+            for variant in "${VARIANTS[@]}"; do
+              if [[ -z "$variant" ]]; then
+                bin_stem="ocx"
+              else
+                bin_stem="ocx-${variant}"
+              fi
+              found="$(find "$stage" -name "${bin_stem}${ext}" -type f | head -1)"
+              if [[ -z "$found" ]]; then
+                echo "::error::no ${bin_stem}${ext} in $archive"
+                exit 1
+              fi
+              cp "$found" "dist/${bin_stem}-${target}${ext}"
+            done
+            rm -rf "$stage"
+          done
+
+      - name: Install OCX from staged binary
+        run: |
+          set -euo pipefail
+          SRC="dist/ocx-x86_64-unknown-linux-musl"
+          if [[ ! -f "$SRC" ]]; then
+            echo "::error::missing linux-musl-x86_64 ocx binary; cannot publish without an ocx to drive the push"
+            exit 1
+          fi
+          install -m 0755 "$SRC" /usr/local/bin/ocx
+          ocx version
+
+      - name: Publish to registry
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          REPO: ${{ inputs.repo }}
+          VERSION_TAG: ${{ inputs.version_tag }}
+          VARIANTS_JSON: ${{ inputs.variants }}
+          TARGETS_JSON: ${{ inputs.targets }}
+          OCX_AUTH_REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          OCX_AUTH_REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # B3: validate registry against allowlist before using it in dynamic export.
+          # Prevents command substitution injection if registry ever contains shell metacharacters.
+          if ! [[ "${REGISTRY}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "::error::registry '${REGISTRY}' contains invalid characters (must match ^[a-zA-Z0-9._-]+\$)"
+            exit 1
+          fi
+
+          # W9: allowlist defense-in-depth — only permit known registries.
+          case "$REGISTRY" in
+            dev.ocx.sh|ocx.sh) ;;
+            *) echo "::error::registry '$REGISTRY' not in allowlist"; exit 1 ;;
+          esac
+
+          # Map secrets to the registry-specific env names ocx reads.
+          # Hostname dots become underscores in OCX_AUTH_<host>_USER/TOKEN.
+          auth_key="$(echo "${REGISTRY}" | tr '.' '_')"
+          export "OCX_AUTH_${auth_key}_USER=${OCX_AUTH_REGISTRY_USER}"
+          export "OCX_AUTH_${auth_key}_TOKEN=${OCX_AUTH_REGISTRY_TOKEN}"
+
+          declare -A PLATFORM_MAP=(
+            ["x86_64-unknown-linux-gnu"]="linux/amd64"
+            ["x86_64-unknown-linux-musl"]="linux/amd64"
+            ["aarch64-unknown-linux-gnu"]="linux/arm64"
+            ["aarch64-unknown-linux-musl"]="linux/arm64"
+            ["x86_64-apple-darwin"]="darwin/amd64"
+            ["aarch64-apple-darwin"]="darwin/arm64"
+            ["x86_64-pc-windows-msvc"]="windows/amd64"
+            ["aarch64-pc-windows-msvc"]="windows/arm64"
+          )
+
+          METADATA="packaging/ocx/metadata.json"
+
+          # variants is a JSON array of strings; iterate.
+          mapfile -t VARIANTS < <(echo "${VARIANTS_JSON}" | jq -r '.[]')
+          mapfile -t TARGETS  < <(echo "${TARGETS_JSON}"  | jq -r '.[]')
+
+          for variant in "${VARIANTS[@]}"; do
+            # Empty string variant = default (binary "ocx", no tag prefix).
+            # Non-empty variant = e.g. "mirror" -> binary "ocx-mirror", tag "mirror-<version>".
+            if [[ -z "$variant" ]]; then
+              bin_stem="ocx"
+              tag_prefix=""
+            else
+              bin_stem="ocx-${variant}"
+              tag_prefix="${variant}-"
+            fi
+
+            for target in "${TARGETS[@]}"; do
+              platform="${PLATFORM_MAP[$target]:-}"
+              if [[ -z "$platform" ]]; then
+                echo "::error::unknown target $target; add it to PLATFORM_MAP"
+                exit 1
+              fi
+
+              ext=""
+              [[ "$target" == *windows* ]] && ext=".exe"
+              SRC="dist/${bin_stem}-${target}${ext}"
+              if [[ ! -f "$SRC" ]]; then
+                echo "::error::missing artifact $SRC"
+                exit 1
+              fi
+
+              WORK="$(mktemp -d)"
+              mkdir -p "$WORK/repackage/bin"
+              install -m 0755 "$SRC" "$WORK/repackage/bin/${bin_stem}${ext}"
+
+              ARCHIVE="$WORK/${bin_stem}-${target}.tar.xz"
+              ocx package create "$WORK/repackage" \
+                -m "$METADATA" \
+                -o "$ARCHIVE" \
+                -p "$platform"
+
+              identifier="${REGISTRY}/${REPO}:${tag_prefix}${VERSION_TAG}"
+              echo "==> Publishing ${identifier} (${platform})"
+              ocx package push \
+                --identifier "${identifier}" \
+                --platform "${platform}" \
+                --cascade \
+                --new \
+                --metadata "${METADATA}" \
+                "$ARCHIVE"
+
+              rm -rf "$WORK"
+            done
+          done
