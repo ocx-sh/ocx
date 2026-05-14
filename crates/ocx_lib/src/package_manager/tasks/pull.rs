@@ -442,28 +442,13 @@ pub async fn setup_owned(
     if let Some(entrypoints) = metadata.entrypoints()
         && !entrypoints.is_empty()
     {
-        use crate::package::metadata::dependency::DependencyName;
-        use crate::package::metadata::env::dep_context::DependencyContext;
-        let dep_contexts: std::collections::HashMap<DependencyName, DependencyContext> = metadata
-            .dependencies()
-            .iter()
-            .zip(dependencies.iter())
-            .map(|(decl, info)| {
-                let name = decl.name();
-                // `info` is already an `Arc<InstallInfo>` from
-                // `setup_dependencies`; clone the Arc instead of re-allocating
-                // a fresh `Arc::new(info.clone())` (the previous shape).
-                let ctx = DependencyContext::full(Arc::clone(info));
-                (name, ctx)
-            })
-            .collect();
         let dest = pkg.entrypoints();
         // Bake the post-move package-root path into the launcher so it remains
         // valid after the temp→final atomic rename.
         let final_pkg_root = dest_override
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| fs.packages.path(pinned));
-        crate::package_manager::launcher::generate(&final_pkg_root, entrypoints, &dep_contexts, &dest)
+        crate::package_manager::launcher::generate(&final_pkg_root, entrypoints, &dest)
             .await
             .map_err(PackageErrorKind::Internal)?;
     }

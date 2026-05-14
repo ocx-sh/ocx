@@ -17,11 +17,11 @@ use super::safety::LauncherSafeString;
 
 /// Produces the body of a Unix `.sh` launcher.
 ///
-/// Per ADR `adr_package_entry_points.md` §6, the launcher does NOT bake the
-/// resolved `target` — `target` is a publish-time existence assertion only.
-/// The launcher calls `ocx launcher exec '<pkg_root>' -- "$(basename "$0")" "$@"`,
-/// which reads `metadata.json` from that root and resolves the target via env
-/// interpolation at invocation time.
+/// The launcher bakes only `<pkg_root>` and calls
+/// `ocx launcher exec '<pkg_root>' -- "$(basename "$0")" "$@"`, which reads
+/// `metadata.json` from that root, composes the runtime env, and resolves the
+/// entrypoint name against the composed `PATH` at invocation time. No binary
+/// path is baked into the launcher body itself.
 ///
 /// `${OCX_BINARY_PIN:-ocx}` pins the inner ocx to the binary that installed
 /// the package (set by the outer ocx via `Env::apply_ocx_config`),
@@ -37,10 +37,9 @@ use super::safety::LauncherSafeString;
 pub(super) fn unix_launcher_body(pkg_root: &LauncherSafeString) -> String {
     let pkg_root = pkg_root.as_str();
     // `$(basename "$0")` injects the launcher's own filename as argv0 after
-    // `--`. ADR §6 invariant ("target field is not the launcher file") is
-    // preserved: nothing from `target` is baked. `ocx launcher exec` receives
-    // the entrypoint name via argv0 and resolves the binary through the
-    // package's PATH env (set up from metadata).
+    // `--`. `ocx launcher exec` receives the entrypoint name via argv0 and
+    // resolves the binary against the composed `PATH` from the package's `env`
+    // block — no binary path is baked into the launcher.
     //
     // `${OCX_BINARY_PIN:-ocx}` pins the inner ocx to the binary that installed
     // the package (set by the outer ocx via `Env::apply_ocx_config`),
@@ -59,11 +58,11 @@ pub(super) fn unix_launcher_body(pkg_root: &LauncherSafeString) -> String {
 
 /// Produces the body of a Windows `.cmd` launcher.
 ///
-/// Per ADR `adr_package_entry_points.md` §6, the launcher does NOT bake the
-/// resolved `target` — `target` is a publish-time existence assertion only.
-/// The launcher calls `ocx launcher exec "<pkg_root>" -- "%~n0" %*`,
-/// which reads `metadata.json` from that root and resolves the target via env
-/// interpolation at invocation time.
+/// The launcher bakes only `<pkg_root>` and calls
+/// `ocx launcher exec "<pkg_root>" -- "%~n0" %*`, which reads `metadata.json`
+/// from that root, composes the runtime env, and resolves the entrypoint name
+/// against the composed `PATH` (with `PATHEXT` probing) at invocation time. No
+/// binary path is baked into the launcher body itself.
 ///
 /// `SETLOCAL DisableDelayedExpansion` closes the registry-level `!VAR!`
 /// expansion vector (BatBadBut interim mitigation, ADR
@@ -82,8 +81,9 @@ pub(super) fn unix_launcher_body(pkg_root: &LauncherSafeString) -> String {
 pub(super) fn windows_launcher_body(pkg_root: &LauncherSafeString) -> String {
     let pkg_root = pkg_root.as_str();
     // `%~n0` expands to the script's filename without path or extension —
-    // identical role to Unix `$(basename "$0")`. ADR §6 invariant preserved:
-    // nothing from `target` is baked.
+    // identical role to Unix `$(basename "$0")`. The launcher forwards the
+    // entrypoint name to `ocx launcher exec`, which resolves the binary
+    // against the composed `PATH` (`PATHEXT`-aware) at invocation time.
     // `DisableDelayedExpansion`: closes the `!VAR!` expansion vector that is
     // active when the Windows registry key
     // `HKCU\Software\Microsoft\Command Processor\DelayedExpansion` is set to

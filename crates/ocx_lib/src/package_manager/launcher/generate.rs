@@ -7,19 +7,16 @@
 //! Each launcher calls `ocx launcher exec '<baked-package-root>' -- "$@"`,
 //! preserving OCX's clean-env execution guarantee. The baked path carries the
 //! absolute package-root; `ocx launcher exec` reads `metadata.json` from that
-//! root and resolves the binary target via env interpolation at invocation
-//! time. Presentation flags and self-view selection are hidden inside the
-//! `launcher exec` subcommand — they are no longer baked into the launcher.
+//! root and resolves `argv0` against the composed `PATH` from the package's
+//! `env` block at invocation time. Presentation flags and self-view selection
+//! are hidden inside the `launcher exec` subcommand — they are no longer baked
+//! into the launcher.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use tokio::task::JoinSet;
 
-use crate::package::metadata::dependency::DependencyName;
 use crate::package::metadata::entrypoint::Entrypoints;
-use crate::package::metadata::env::dep_context::DependencyContext;
-use crate::package::metadata::template::TemplateResolver;
 
 use super::body::{unix_launcher_body, windows_launcher_body};
 use super::safety::LauncherSafeString;
@@ -32,13 +29,9 @@ use super::safety::LauncherSafeString;
 ///
 /// `pkg_root` is the absolute package-root directory
 /// (`packages/<registry>/<algo>/<2hex>/<30hex>/`). The launcher bakes
-/// `<pkg_root>` and forwards the user's args to `ocx launcher exec`, which reads
-/// `metadata.json` from that root and resolves each entry's `target` via env
-/// interpolation at invocation time. Each entry's `target` is still resolved
-/// here through [`TemplateResolver`] (against `<pkg_root>/content`) as a
-/// defense-in-depth check that the templates parse — an unresolvable target
-/// means the package is malformed and install should fail before any launcher
-/// is written.
+/// `<pkg_root>` and forwards `argv0` plus the user's args to
+/// `ocx launcher exec`, which reads `metadata.json` from that root and
+/// resolves `argv0` against the composed `PATH` at invocation time.
 ///
 /// # Errors
 ///
@@ -47,21 +40,12 @@ use super::safety::LauncherSafeString;
 /// - Writing any launcher file fails.
 /// - The `pkg_root` contains a character unsafe for either launcher
 ///   template (see [`LauncherSafeString`]).
-/// - An entry's `target` references an unknown dependency or field.
-pub async fn generate(
-    pkg_root: &Path,
-    entries: &Entrypoints,
-    dep_contexts: &HashMap<DependencyName, DependencyContext>,
-    dest: &Path,
-) -> Result<(), crate::Error> {
+pub async fn generate(pkg_root: &Path, entries: &Entrypoints, dest: &Path) -> Result<(), crate::Error> {
     if entries.is_empty() {
         return Ok(());
     }
 
     let pkg_root_str = LauncherSafeString::new(pkg_root.to_string_lossy().into_owned())?;
-    // `${installPath}` resolves to the content tree, not the package root.
-    let content_path = pkg_root.join("content");
-    let resolver = TemplateResolver::new(&content_path, dep_contexts);
 
     tokio::fs::create_dir_all(dest)
         .await
@@ -75,16 +59,6 @@ pub async fn generate(
 
     for entry in entries.iter() {
         let name = entry.name.as_str();
-        // Resolve the target template eagerly to fail fast on malformed
-        // packages (unknown dep, bad field). Per ADR §6 the resolved value is
-        // NOT baked into the launcher — `ocx exec` re-resolves it from
-        // `metadata.json` at invocation time — so the result is discarded.
-        resolver
-            .resolve(&entry.target)
-            .map_err(|e| crate::Error::EntrypointInstallFailed {
-                name: name.to_string(),
-                source: Box::new(e),
-            })?;
 
         // Unix launcher: write body, then set the executable bit.
         let unix_body = unix_launcher_body(&pkg_root_str);
@@ -138,15 +112,13 @@ async fn write_unix_launcher(path: PathBuf, body: String) -> Result<(), crate::E
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use tempfile::tempdir;
 
     use crate::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
 
-    fn make_entrypoint(name: &str, target: &str) -> Entrypoint {
+    fn make_entrypoint(name: &str) -> Entrypoint {
         Entrypoint {
             name: EntrypointName::try_from(name).unwrap(),
-            target: target.to_string(),
         }
     }
 
@@ -162,11 +134,8 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         let dest = pkg_root.join("entrypoints");
         let entrypoints = make_entrypoints(vec![]);
-        let dep_contexts = HashMap::new();
 
-        super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest)
-            .await
-            .unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
         assert!(
             !dest.exists(),
             "entrypoints/ dir must not be created for empty entrypoints"
@@ -181,12 +150,9 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake", "${installPath}/bin/cmake")]);
-        let dep_contexts = HashMap::new();
+        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake")]);
 
-        super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest)
-            .await
-            .unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
         assert!(dest.join("cmake").exists(), "unix launcher must be created");
         assert!(dest.join("cmake.cmd").exists(), "windows launcher must be created");
     }
@@ -201,12 +167,9 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake", "${installPath}/bin/cmake")]);
-        let dep_contexts = HashMap::new();
+        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake")]);
 
-        super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest)
-            .await
-            .unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
         let mode = std::fs::metadata(dest.join("cmake")).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755, "unix launcher must be mode 0755");
     }
@@ -230,13 +193,12 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake", "${installPath}/bin/cmake")]);
-        let dep_contexts = HashMap::new();
+        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake")]);
 
         // First call
-        let _ = super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest).await;
+        let _ = super::generate(&pkg_root, &entrypoints, &dest).await;
         // Second call — must not error due to already-existing files
-        let _ = super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest).await;
+        let _ = super::generate(&pkg_root, &entrypoints, &dest).await;
         // Both calls should return Ok(()).
     }
 
@@ -257,10 +219,9 @@ mod tests {
         let pkg_root = tmp.path().join("pkg'with'quote");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake", "${installPath}/bin/cmake")]);
-        let dep_contexts = HashMap::new();
+        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake")]);
 
-        let err = super::generate(&pkg_root, &entrypoints, &dep_contexts, &dest)
+        let err = super::generate(&pkg_root, &entrypoints, &dest)
             .await
             .expect_err("pkg_root with unsafe character must be rejected");
         match err {

@@ -1744,11 +1744,36 @@ class TestPlanStatusBlock:
         plans_dir = CLAUDE_DIR / "state" / "plans"
         if not plans_dir.exists():
             return []
-        return [
+        candidates = [
             p
             for p in sorted(plans_dir.glob("plan_*.md"))
             if not p.name.startswith("meta-plan_")
         ]
+        # `.claude/state/` is gitignored — plans are per-worktree scratch. Only
+        # enforce the Status-block invariant on plans tracked by git; local
+        # untracked plans are the developer's own scratch (legacy plans from
+        # before the protocol existed, in-progress drafts, etc.) and should not
+        # block commits on this worktree.
+        #
+        # Use plain `git ls-files <paths>` (NOT `--error-unmatch`) so a mixed
+        # set of tracked + untracked candidates is handled correctly:
+        # `--error-unmatch` aborts on the first untracked path with exit 128 +
+        # empty stdout, which would silently exempt every tracked plan in the
+        # same call.
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "--", *[str(p) for p in candidates]],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, FileNotFoundError):
+            # No git available — fall back to enforcing on everything.
+            return candidates
+        tracked = {(ROOT / line).resolve() for line in result.stdout.splitlines() if line}
+        return [p for p in candidates if p.resolve() in tracked]
 
     def _extract_status_block(self, text: str) -> str | None:
         """Return content between `## Status` and the next `## ` heading, or None."""

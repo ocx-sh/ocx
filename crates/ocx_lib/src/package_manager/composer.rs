@@ -692,7 +692,6 @@ mod tests {
         let id = pinned(repo, hex_char);
         let ep = Entrypoint {
             name: EntrypointName::try_from(ep_name).unwrap(),
-            target: format!("${{installPath}}/bin/{ep_name}"),
         };
         let entrypoints = Entrypoints::new(vec![ep]).unwrap();
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
@@ -1102,10 +1101,7 @@ mod tests {
         let meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{
-                "name": "cmake",
-                "target": "${installPath}/bin/cmake",
-            }],
+            "entrypoints": [{ "name": "cmake" }],
         });
         std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
         let resolved_json = serde_json::to_string(&dep_resolved).unwrap();
@@ -1864,7 +1860,7 @@ mod tests {
         let b_meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "e", "target": "${installPath}/bin/e" }],
+            "entrypoints": [{ "name": "e" }],
         });
         std::fs::write(b_path.join("metadata.json"), b_meta.to_string()).unwrap();
         std::fs::write(b_path.join("resolve.json"), serde_json::to_string(&b_resolved).unwrap()).unwrap();
@@ -1898,7 +1894,7 @@ mod tests {
         let b_meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "e", "target": "${installPath}/bin/e" }],
+            "entrypoints": [{ "name": "e" }],
         });
         std::fs::write(b_path.join("metadata.json"), b_meta.to_string()).unwrap();
         std::fs::write(b_path.join("resolve.json"), serde_json::to_string(&b_resolved).unwrap()).unwrap();
@@ -1933,7 +1929,7 @@ mod tests {
         let b_meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "e", "target": "${installPath}/bin/e" }],
+            "entrypoints": [{ "name": "e" }],
         });
         std::fs::write(b_path.join("metadata.json"), b_meta.to_string()).unwrap();
         std::fs::write(b_path.join("resolve.json"), serde_json::to_string(&b_resolved).unwrap()).unwrap();
@@ -1970,7 +1966,7 @@ mod tests {
         let b_meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "e", "target": "${installPath}/bin/e" }],
+            "entrypoints": [{ "name": "e" }],
         });
         std::fs::write(b_path.join("metadata.json"), b_meta.to_string()).unwrap();
         std::fs::write(b_path.join("resolve.json"), serde_json::to_string(&b_resolved).unwrap()).unwrap();
@@ -2228,7 +2224,6 @@ mod tests {
 
         let ep = Entrypoint {
             name: EntrypointName::try_from("mytool").unwrap(),
-            target: "${installPath}/bin/mytool".to_string(),
         };
         let entrypoints = Entrypoints::new(vec![ep]).unwrap();
 
@@ -2527,7 +2522,6 @@ mod tests {
         // Build dep metadata: one entrypoint + one public PATH var (the bin/).
         let ep = Entrypoint {
             name: EntrypointName::try_from("tool").unwrap(),
-            target: "${installPath}/bin/tool".to_string(),
         };
         let entrypoints = Entrypoints::new(vec![ep]).unwrap();
 
@@ -2603,7 +2597,6 @@ mod tests {
 
         let ep = Entrypoint {
             name: EntrypointName::try_from("tool").unwrap(),
-            target: "${installPath}/bin/tool".to_string(),
         };
         let entrypoints = Entrypoints::new(vec![ep]).unwrap();
 
@@ -2676,7 +2669,6 @@ mod tests {
 
         let ep = Entrypoint {
             name: EntrypointName::try_from("rootool").unwrap(),
-            target: "${installPath}/bin/rootool".to_string(),
         };
         let entrypoints = Entrypoints::new(vec![ep]).unwrap();
 
@@ -2750,7 +2742,6 @@ mod tests {
 
         let ep = Entrypoint {
             name: EntrypointName::try_from("rootool").unwrap(),
-            target: "${installPath}/bin/rootool".to_string(),
         };
         let entrypoints = Entrypoints::new(vec![ep]).unwrap();
 

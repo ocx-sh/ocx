@@ -5,7 +5,7 @@ outline: deep
 
 `entrypoints` are named launchers OCX generates at install time. Each entry becomes a tiny script in the package's `entrypoints/` directory; when the package is selected via `ocx select`, those scripts land on the consumer's PATH as bare commands. The headline reason to declare them is **dependency encapsulation**: the launcher carries the package's own dep graph and runs in a clean environment, so two tools that share a runtime — Python, Node, the JVM — stop fighting over a single ambient version.
 
-This page covers the publisher decisions: when to declare entrypoints at all, how to pick names that don't collide with the rest of the ecosystem, and how the `target` template threads dependency paths through.
+This page covers the publisher decisions: when to declare entrypoints at all, how to pick names that don't collide with the rest of the ecosystem, and how the composed `PATH` from the package's `env` block tells the launcher where each entry point's binary lives.
 
 ## Why Encapsulate Through a Launcher {#why}
 
@@ -16,9 +16,9 @@ That conflict is structural, not a configuration mistake. Bare-binary exposure l
 Entry points cut the exposure surface to the binary alone. The launcher script that lands on PATH carries:
 
 - a baked path to this package's root,
-- a re-entry through [`ocx launcher exec`][cmd-exec], which reads `metadata.json` and composes the package's [private surface env][in-depth-environments] (its own env entries plus the env contributed by its declared dependencies) on top of the inherited shell environment, then resolves `target` against that PATH.
+- a re-entry through [`ocx launcher exec`][cmd-exec], which reads `metadata.json` and composes the package's [private surface env][in-depth-environments] (its own env entries plus the env contributed by its declared dependencies) on top of the inherited shell environment, then resolves the entry-point name against that composed PATH.
 
-So when a JS tool's launcher runs, the dep's pinned [Node.js][nodejs] takes priority on PATH for the process it launches — the digest declared in `dependencies[]`. A second JS tool with a different Node pin runs the same way, with its own pinned interpreter winning the resolver race. Neither launcher exposes its pinned Node as a bare PATH entry on the consumer's shell, so the two tools never fight over a single ambient interpreter.
+So when a JS tool's launcher runs, the dep's pinned [Node.js][nodejs] takes priority on the composed PATH for the process it launches — the digest declared in `dependencies[]`. A second JS tool with a different Node pin runs the same way, with its own pinned interpreter winning the resolver race. Neither launcher exposes its pinned Node as a bare PATH entry on the consumer's shell, so the two tools never fight over a single ambient interpreter.
 
 ::: tip Mental model
 Without entrypoints, packages publish *their environment* and consumers compose. With entrypoints, packages publish *executables*; the environment stays inside. That is the encapsulation dividend — and it is the only way two tools that share a runtime can coexist on one machine without a version manager arbitrating between them.
@@ -29,7 +29,7 @@ Without entrypoints, packages publish *their environment* and consumers compose.
 Reach for `entrypoints` when one of these is true:
 
 - **Your tool depends on a runtime another tool also depends on.** [Python][python] scripts, [Node.js][nodejs] CLIs, [JVM][jvm] tools, [Ruby][ruby] gems — anything where the executable is meaningless without a specific interpreter version on PATH. The launcher pins the interpreter inside the package; consumers never see the conflict.
-- **Your tool needs to find a dependency at runtime.** A wrapper that calls into a sibling package's binary uses `${deps.NAME.installPath}` to point at it. OCX validates every `${deps.*}` reference at publish time; at exec time `ocx launcher exec` re-resolves the template against the dep's actual install path and runs the resulting binary.
+- **Your tool needs to find a dependency at runtime.** Declare the dep in `dependencies[]` with `visibility: private` (or `public` if the consumer should also see it) and use `${deps.NAME.installPath}` in `env` values to put the dep's binaries on the composed PATH; the launcher then resolves the entry point's name against that PATH.
 - **You want the package to run with the env it declared.** The launcher re-enters via [`ocx launcher exec`][cmd-exec], which composes the package's declared env (its own entries plus the env contributed by its declared dependencies) on top of the inherited shell. PATH-based exposure cannot do this — the launched binary just inherits whatever the consumer's shell carried in.
 - **Bare-binary exposure would leak too much.** A toolchain that ships fifty binaries but only wants three on PATH declares the three as entrypoints and leaves `bin/` private — consumers see exactly the public surface.
 
@@ -49,40 +49,41 @@ Collisions are the failure mode publishers underestimate. OCX checks for them at
 
 The full collision-detection mechanic, error format, and the cross-platform launcher caveats live in [entry points in depth][in-depth-entry-points] (see also `select`'s [collision section][select-collision] for how detection relates to the candidate symlink).
 
-## Target Templates {#target}
+## Name = Dispatch Key {#dispatch}
 
-The `target` field is the path OCX resolves at install time. It supports the same two placeholders as `env` values:
+`entrypoints` carries only one field per entry — `name`. There is no `target` template. At install time OCX writes one launcher per name; at exec time the launcher re-enters `ocx launcher exec`, which composes the package's env, and the entry-point name is resolved against the composed `PATH` using the standard PATH search (`PATHEXT` on Windows). Declare the binary's location once via `env`, and every entry-point name picks it up from there.
 
-- `${installPath}` — this package's content directory.
-- `${deps.NAME.installPath}` — a declared dependency's content directory, where `NAME` is the dependency's repository basename or its explicit `name` field.
-
-A simple wrapper around a single bundled binary:
+A simple wrapper around a single bundled binary — declare `bin/` on the PATH, declare the entry points:
 
 ```json
 {
+  "env": [
+    { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "private" }
+  ],
   "entrypoints": [
-    { "name": "cmake", "target": "${installPath}/bin/cmake" }
+    { "name": "cmake" }
   ]
 }
 ```
 
-A meta-package that exposes a tool from a dependency without re-bundling it:
+A meta-package that exposes a tool from a dependency without re-bundling it — put the dep's `bin/` on the composed PATH and declare the name:
 
 ```json
 {
   "dependencies": [
     { "identifier": "ocx.sh/cmake:3.28@sha256:abc...", "name": "cmake", "visibility": "public" }
   ],
+  "env": [
+    { "key": "PATH", "type": "path", "value": "${deps.cmake.installPath}/bin", "visibility": "private" }
+  ],
   "entrypoints": [
-    { "name": "cmake", "target": "${deps.cmake.installPath}/bin/cmake" }
+    { "name": "cmake" }
   ]
 }
 ```
 
-`target` resolves to a filesystem path, not an interpreter import like [Python's entry-points convention][python-entry-points]. OCX validates the template at publish time (every `${deps.*}` reference must resolve to a declared dependency) and verifies dep roots exist at install time. Resolution of the *target binary* itself happens at exec time when `ocx launcher exec` reads `metadata.json` and the consumer types the launcher name.
-
-::: warning Target binary not stat'd at install
-A typo in the path under `${installPath}` (e.g. `bin/cmke`) will install cleanly and only fail when the launcher is invoked. Test the launcher with `ocx exec <pkg> -- <name>` after install to catch missing-target bugs early.
+::: warning Binary not stat'd at install
+A typo in an entry-point name (e.g. `cmke` instead of `cmake`) will install cleanly and only fail when the launcher is invoked and the PATH search comes up empty. Test every launcher with `ocx exec <pkg> -- <name>` after install to catch missing-binary bugs early.
 :::
 
 ### Worked Example: Python Script with a Pinned Interpreter {#target-python-example}
@@ -114,7 +115,7 @@ Entrypoints encapsulate by pinning Python *inside the launcher's environment*. D
     { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "private" }
   ],
   "entrypoints": [
-    { "name": "mytool", "target": "${installPath}/bin/mytool" }
+    { "name": "mytool" }
   ]
 }
 ```
@@ -145,7 +146,6 @@ A single `entrypoints` declaration covers every platform of the package. OCX gen
 - [`select` reference][select-collision] — collision detection at select time
 
 <!-- external -->
-[python-entry-points]: https://packaging.python.org/en/latest/specifications/entry-points/
 [python]: https://www.python.org/
 [nodejs]: https://nodejs.org/
 [jvm]: https://openjdk.org/

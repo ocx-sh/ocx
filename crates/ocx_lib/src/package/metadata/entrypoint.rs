@@ -97,17 +97,12 @@ impl schemars::JsonSchema for EntrypointName {
 ///
 /// Declares a named launcher that `ocx install` generates at install time.
 /// The launcher re-enters via `ocx launcher exec '<package-root>' -- <argv0> [args...]`,
-/// preserving clean-env execution semantics.
+/// preserving clean-env execution semantics. The launcher resolves `<argv0>`
+/// against the composed `PATH` from the package's `env` block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Entrypoint {
     /// The name users will invoke (e.g. `"cmake"`). Must match `^[a-z0-9][a-z0-9_-]*$`.
     pub name: EntrypointName,
-
-    /// Template string for the binary target within the package content.
-    ///
-    /// Validated at publish time to resolve under `${installPath}` or
-    /// `${deps.NAME.installPath}`. Example: `"${installPath}/bin/cmake"`.
-    pub target: String,
 }
 
 /// Ordered, uniqueness-validated list of entrypoints for a package.
@@ -307,11 +302,9 @@ mod tests {
         let entries = vec![
             Entrypoint {
                 name: EntrypointName::try_from("cmake").unwrap(),
-                target: "${installPath}/bin/cmake".to_string(),
             },
             Entrypoint {
                 name: EntrypointName::try_from("ctest").unwrap(),
-                target: "${installPath}/bin/ctest".to_string(),
             },
         ];
         assert!(Entrypoints::new(entries).is_ok());
@@ -322,11 +315,9 @@ mod tests {
         let entries = vec![
             Entrypoint {
                 name: EntrypointName::try_from("cmake").unwrap(),
-                target: "${installPath}/bin/cmake".to_string(),
             },
             Entrypoint {
                 name: EntrypointName::try_from("cmake").unwrap(),
-                target: "${installPath}/bin/cmake2".to_string(),
             },
         ];
         let err = Entrypoints::new(entries).unwrap_err();
@@ -343,17 +334,16 @@ mod tests {
 
     #[test]
     fn entrypoint_round_trip_via_serde() {
-        let json = r#"{"name":"cmake","target":"${installPath}/bin/cmake"}"#;
+        let json = r#"{"name":"cmake"}"#;
         let ep: Entrypoint = serde_json::from_str(json).unwrap();
         assert_eq!(ep.name.as_str(), "cmake");
-        assert_eq!(ep.target, "${installPath}/bin/cmake");
         let back = serde_json::to_string(&ep).unwrap();
         assert_eq!(back, json);
     }
 
     #[test]
     fn entrypoint_name_deserialization_rejects_invalid() {
-        let json = r#"{"name":"","target":"${installPath}/bin/cmake"}"#;
+        let json = r#"{"name":""}"#;
         assert!(serde_json::from_str::<Entrypoint>(json).is_err());
     }
 
@@ -392,7 +382,6 @@ mod tests {
     fn entrypoints_is_not_empty_when_populated() {
         let entries = vec![Entrypoint {
             name: EntrypointName::try_from("cmake").unwrap(),
-            target: "${installPath}/bin/cmake".to_string(),
         }];
         let ep = Entrypoints::new(entries).unwrap();
         assert!(!ep.is_empty());
@@ -426,7 +415,7 @@ mod tests {
 
     #[test]
     fn bundle_with_populated_entrypoints_round_trips() {
-        let json = r#"{"version":1,"entrypoints":[{"name":"cmake","target":"${installPath}/bin/cmake"}]}"#;
+        let json = r#"{"version":1,"entrypoints":[{"name":"cmake"}]}"#;
         let bundle: crate::package::metadata::bundle::Bundle = serde_json::from_str(json).unwrap();
         assert!(!bundle.entrypoints.is_empty());
         assert_eq!(bundle.entrypoints.iter().next().unwrap().name.as_str(), "cmake");
@@ -443,7 +432,7 @@ mod tests {
     fn entrypoints_deserialization_error_surfaces_for_duplicate_names() {
         // Two entries with the same name — custom Deserialize calls Entrypoints::new()
         // which enforces uniqueness, so duplicate names are rejected at serde time.
-        let json = r#"[{"name":"cmake","target":"bin/cmake"},{"name":"cmake","target":"bin/cmake2"}]"#;
+        let json = r#"[{"name":"cmake"},{"name":"cmake"}]"#;
         let result: Result<Entrypoints, _> = serde_json::from_str(json);
         assert!(
             result.is_err(),

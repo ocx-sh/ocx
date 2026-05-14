@@ -111,8 +111,13 @@ def test_schema_entrypoints_is_array_type() -> None:
     )
 
 
-def test_schema_entrypoints_items_have_name_and_target() -> None:
-    """entrypoints array items must have 'name' and 'target' properties."""
+def test_schema_entrypoints_items_have_name() -> None:
+    """entrypoints array items must have a 'name' property.
+
+    The `target` field was removed in 0.3.0 — entry-point dispatch resolves
+    `name` against the composed `PATH` from the package's `env` block at
+    launcher exec time.
+    """
     schema = load_schema()
     bundle = find_bundle_definition(schema)
     ep_schema = bundle["properties"]["entrypoints"]
@@ -133,8 +138,9 @@ def test_schema_entrypoints_items_have_name_and_target() -> None:
     assert "name" in item_props, (
         f"Entrypoint items must have 'name' property. Got: {list(item_props.keys())}"
     )
-    assert "target" in item_props, (
-        f"Entrypoint items must have 'target' property. Got: {list(item_props.keys())}"
+    assert "target" not in item_props, (
+        f"Entrypoint items must NOT carry a 'target' property — that field was "
+        f"removed in 0.3.0. Got: {list(item_props.keys())}"
     )
 
 

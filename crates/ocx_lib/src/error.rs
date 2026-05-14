@@ -79,19 +79,6 @@ pub enum Error {
     #[error(transparent)]
     PinnedIdentifier(#[from] crate::oci::pinned_identifier::PinnedIdentifierError),
 
-    /// An entrypoint's `target` template could not be resolved at install time.
-    ///
-    /// Distinct from [`crate::package::error::Error::EntrypointTargetInvalid`],
-    /// which fires during publish-time validation. This variant signals a
-    /// failure that surfaced only when the launcher generator tried to bake
-    /// the resolved target on the consumer's host.
-    #[error("entrypoint '{name}' has invalid target: {source}")]
-    EntrypointInstallFailed {
-        name: String,
-        #[source]
-        source: Box<crate::package::metadata::template::TemplateError>,
-    },
-
     /// A string baked into an install-time launcher contains a character that
     /// cannot be safely embedded in either the Unix `.sh` or Windows `.cmd`
     /// template (single-quote, percent, double-quote, NUL, CR, LF). The unsafe
@@ -212,7 +199,6 @@ impl ClassifyExitCode for Error {
             Self::Digest(e) => e.classify(),
             Self::Dependency(e) => e.classify(),
             Self::PinnedIdentifier(e) => e.classify(),
-            Self::EntrypointInstallFailed { source, .. } => source.classify(),
             Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
         }
     }

@@ -21,13 +21,13 @@ Entry points live as a sibling array on the bundle metadata:
     { "key": "CMAKE_ROOT", "type": "constant", "value": "${installPath}/share/cmake" }
   ],
   "entrypoints": [
-    { "name": "cmake", "target": "${installPath}/bin/cmake" },
-    { "name": "ctest", "target": "${installPath}/bin/ctest" }
+    { "name": "cmake" },
+    { "name": "ctest" }
   ]
 }
 ```
 
-Every entry has exactly two fields — `name` (the launcher filename and the command users type) and `target` (a template string pointing at the executable to run). The complete field reference, including optional schema additions, lives at [Entry Points in the metadata reference][metadata-entry-points].
+Every entry has exactly one field — `name` — which is both the launcher filename and the command users type. At runtime the launcher resolves `name` against the composed `PATH` from the package's [`env`][metadata-env] block, so the publisher declares the binary's location once via `env` and the launcher exec resolver picks it up from there. The complete field reference, including optional schema additions, lives at [Entry Points in the metadata reference][metadata-entry-points].
 
 At install time OCX writes one script per entry into a sibling [`entrypoints/` directory][fs-packages] inside the content-addressed package directory — a POSIX `.sh` launcher (mode `0755`) and a Windows `.cmd` launcher for every declared name, regardless of which platform is currently installing. Generating both shapes on every platform keeps publishers from having to fork metadata per host OS.
 
@@ -59,17 +59,6 @@ A name that appears as an entrypoint in a `private`-edge dep is **not an install
 Short, common names (`ls`, `gcc`, `tar`) create more cross-package collisions than they are worth. Where possible, mirror the upstream binary name exactly — most registries will have one canonical publisher per tool, and entry-point collisions at select time are a clear signal that two packages are competing for the same slot.
 :::
 
-## Template Substitution {#template}
-
-The `target` field understands the same placeholders as [environment variable values][metadata-env]:
-
-- `${installPath}` — the absolute path to *this* package's content directory at install time. Baked once into the generated launcher; future selects do not rewrite it.
-- `${deps.NAME.installPath}` — the content directory of a declared dependency, where `NAME` is the repository basename (or the dependency's `name` field when one is declared). Expands against the exact digest resolved at install time, so launchers keep pointing at the build the package was originally installed against even after the dependency's tag advances.
-
-Tokens that don't match the `${installPath}` or `${deps.NAME.FIELD}` shapes — anything missing the leading `$`, missing braces, or that is plainly not a placeholder (`{whatever}`, `$installPath`, `${{nested}}`) — pass through as literals on disk. Anything that *does* parse as `${...}` but isn't recognized is rejected at publish time: a `${deps.NAME.FIELD}` token referencing a dependency the package does not declare is rejected, an unsupported field on a declared dependency is rejected, and any other well-formed `${...}` token in an entry-point `target` is rejected as unrecognized. Validation runs at publish, again at install, and a final time when launcher scripts are generated, so invalid metadata never reaches the launcher.
-
-Template expansion happens once at install time. The resolved path is baked into the launcher body, so running the script is a single `exec` call with no template engine in the hot path.
-
 ## How Launchers Work at Runtime {#runtime}
 
 A generated launcher is deliberately small. On Unix it is exactly:
@@ -94,7 +83,7 @@ IF DEFINED OCX_BINARY_PIN (
 
 Only the absolute package-root path is baked. The `ocx launcher exec` subcommand (hidden from `ocx --help`) forces the [self view][visibility-views] internally — private + public + interface entries all visible to the launched binary — so internal helpers (compilers, runtimes, shared libraries) are available without any flag baked into the script.
 
-The launcher injects its own filename — `$(basename "$0")` on Unix, `%~n0` on Windows — as the first positional after `--`, so `launcher exec` learns which entry point was invoked from the script's filename rather than from a hard-coded `target`. That keeps `target` a publish-time existence assertion, not a runtime dispatch key.
+The launcher injects its own filename — `$(basename "$0")` on Unix, `%~n0` on Windows — as the first positional after `--`. `launcher exec` reads that argv0, composes the runtime env (including `PATH`), and uses the standard PATH search — `Env::resolve_command` — to locate the executable. There is no separate `target` field to dispatch on; the entry-point name *is* the dispatch key, and the composed `PATH` from the package's [`env`][metadata-env] block is the authoritative source of where each entry point's binary lives.
 
 Both flavors use `OCX_BINARY_PIN` when the variable is set, falling back to plain `ocx` on `$PATH` otherwise. The variable is propagated from the parent `ocx` process to all child processes via `env::Env::apply_ocx_config`, so a user-level OCX upgrade that sets `OCX_BINARY_PIN` takes effect for every launcher without touching the launcher bodies on disk.
 
@@ -105,7 +94,7 @@ A launcher whose body expanded `current` on every invocation would drift the mom
 :::
 
 ::: warning Characters that fail launcher generation
-The same character set is rejected for every launcher OCX writes, regardless of which platform is doing the install — both `.sh` and `.cmd` shapes are generated on every host. The forbidden characters in the package-root path or in any resolved `target` are: single quote (`'`), double quote (`"`), percent (`%`), newline (`\n`), carriage return (`\r`), and NUL (`\0`). The double quote is rejected even on Unix because Windows `cmd.exe` shares the rule. Validation runs at publish, again at install, and a final time when launcher scripts are generated, so packages whose paths contain any of these never produce a corrupt launcher — they fail loudly first.
+The same character set is rejected for every launcher OCX writes, regardless of which platform is doing the install — both `.sh` and `.cmd` shapes are generated on every host. The forbidden characters in the package-root path are: single quote (`'`), double quote (`"`), percent (`%`), newline (`\n`), carriage return (`\r`), and NUL (`\0`). The double quote is rejected even on Unix because Windows `cmd.exe` shares the rule. The check fires at launcher generation time so packages installed into a path containing any of these never produce a corrupt launcher — install fails loudly first.
 :::
 
 ## Synth-PATH Mechanism {#synth-path}
@@ -228,8 +217,8 @@ Publishing a CMake package with two launchers looks like this on the publisher s
     { "key": "PATH", "type": "path", "required": true, "value": "${installPath}/bin" }
   ],
   "entrypoints": [
-    { "name": "cmake", "target": "${installPath}/bin/cmake" },
-    { "name": "ctest", "target": "${installPath}/bin/ctest" }
+    { "name": "cmake" },
+    { "name": "ctest" }
   ]
 }
 ```

@@ -93,8 +93,7 @@ A language runtime with multiple environment variables, archive stripping, a dep
   ],
   "entrypoints": [
     {
-      "name": "cmake",
-      "target": "${installPath}/bin/cmake"
+      "name": "cmake"
     }
   ]
 }
@@ -317,25 +316,16 @@ is flipped to the package root and consumers traverse `current/entrypoints` from
 add the launchers to `PATH`.
 
 Each launcher re-enters via [`ocx launcher exec`][cmd-launcher-exec] with the package root baked at
-install time, preserving clean-environment execution semantics on every invocation.
+install time, preserving clean-environment execution semantics on every invocation. The launcher
+resolves the entry point's `name` against the composed `PATH` from the package's [`env`](#env)
+block — there is no separate `target` field; the publisher declares the binary's location once via
+`env`, and the launcher exec resolver picks it up from there.
 
 ### Entry Point Fields {#entry-points-fields}
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | Yes | The launcher name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Used as the script filename and the command users invoke. |
-| `target` | string | Yes | Template string for the binary to execute. Supports the same placeholders as [`env`](#env) values. |
-
-::: tip `target` must point to an executable file
-OCX resolves `target` to a filesystem path. The Python [entry-points][python-entry-points] convention of `module:callable` strings is incompatible — `target` must be a path to an executable binary or script, not a Python import expression.
-:::
-
-### Template Substitution {#entry-points-template}
-
-The `target` field supports the same placeholders as [environment variable values](#env):
-
-- **`${installPath}`** — replaced with the absolute path to this package's content directory.
-- **`${deps.NAME.installPath}`** — replaced with a declared dependency's content directory, where `NAME` is the repository basename or explicit `name` field.
+| `name` | string | Yes | The launcher name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Used as the script filename, the command users invoke, and the key the launcher resolves against the composed `PATH`. |
 
 ### Disk Layout {#entry-points-disk-layout}
 
@@ -356,8 +346,8 @@ select time.
 ```json
 {
   "entrypoints": [
-    { "name": "cmake", "target": "${installPath}/bin/cmake" },
-    { "name": "ctest", "target": "${installPath}/bin/ctest" }
+    { "name": "cmake" },
+    { "name": "ctest" }
   ]
 }
 ```
@@ -455,7 +445,6 @@ If you published packages before the visibility-default flip, their untagged env
 [nix-propagated]: https://ryantm.github.io/nixpkgs/stdenv/stdenv/
 [guix]: https://guix.gnu.org/
 [guix-propagated]: https://guix.gnu.org/manual/en/html_node/package-Reference.html
-[python-entry-points]: https://packaging.python.org/en/latest/specifications/entry-points/
 
 <!-- schema -->
 [schema-url]: /schemas/metadata/v1.json

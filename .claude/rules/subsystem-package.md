@@ -19,7 +19,7 @@ Tagged enum metadata (`Metadata::Bundle`) supports future format versions, no br
 | `metadata.rs` | Root `Metadata` enum (tagged: currently `Bundle` only); re-exports `Entrypoint`, `EntrypointName`, `Entrypoints`, `ValidMetadata` |
 | `metadata/bundle.rs` | `Version` enum (single variant `V1`; `serde_repr` rejects unknown on deser); `Bundle` struct (version + strip_components + env + dependencies + entrypoints) |
 | `metadata/dependency.rs` | `Dependency` struct; `DependencyName` newtype; `Dependencies` validated collection; `DependencyError` variants |
-| `metadata/entrypoint.rs` | `Entrypoint` struct (name + target); `EntrypointName` slug newtype; `Entrypoints` validated collection (rejects duplicate names at construction/deser); `EntrypointError` variants |
+| `metadata/entrypoint.rs` | `Entrypoint` struct (name only — dispatch resolves the name against the composed `PATH` at launcher exec time); `EntrypointName` slug newtype; `Entrypoints` validated collection (rejects duplicate names at construction/deser); `EntrypointError` variants |
 | `metadata/env.rs` | `Env` struct (array of Var); `resolve_into_env()`, `EnvBuilder` |
 | `metadata/env/var.rs` | `Var` with flattened modifier (key + Path or Constant) |
 | `metadata/env/path.rs` | Path modifier: prepended to existing values, `${installPath}` template |
@@ -29,7 +29,7 @@ Tagged enum metadata (`Metadata::Bundle`) supports future format versions, no br
 | `metadata/env/dep_context.rs` | `DependencyContext` enum (`Full(Arc<InstallInfo>)` / `PathOnly`) for `${deps.NAME.*}` interpolation |
 | `metadata/env/resolver.rs` | `EnvResolver`: per-var resolver — `resolve(var) → Option<Entry>`; surface gating (`has_interface()` / `has_private()`) happens upstream at `composer.rs`, not inside `EnvResolver` |
 | `metadata/slug.rs` | `SLUG_PATTERN` regex + `SLUG_MAX_LEN` constant shared by `DependencyName` and `EntrypointName` validation |
-| `metadata/template.rs` | `Template` — parse + resolve `${installPath}` and `${deps.NAME.installPath}` placeholders in env values and entrypoint `target` fields; `TemplateError` variants |
+| `metadata/template.rs` | `Template` — parse + resolve `${installPath}` and `${deps.NAME.installPath}` placeholders in env values; `TemplateError` variants |
 | `metadata/validation.rs` | `ValidMetadata` newtype wrapping `Metadata` after cross-field checks (dep name uniqueness, `${deps.*}` references resolve to declared deps); `ValidationError` variants |
 | `metadata/visibility.rs` | `Visibility` two-axis struct (`private` + `interface` booleans); four constants `SEALED`/`PRIVATE`/`INTERFACE`/`PUBLIC`; `through_edge`, `merge` algebra; `has_interface()` / `has_private()` accessors; `deserialize_entry_visibility` + `entry_visibility_schema` for `Var.visibility` field restriction |
 | `bundle.rs` | `BundleBuilder`: tar archive creation with configurable compression |

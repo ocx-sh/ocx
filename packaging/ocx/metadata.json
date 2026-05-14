@@ -6,7 +6,8 @@
       "key": "PATH",
       "value": "${installPath}/bin",
       "type": "path",
-      "required": true
+      "required": true,
+      "visibility": "public"
     }
   ]
 }
