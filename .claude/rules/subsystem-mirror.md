@@ -20,7 +20,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `command/check.rs` | Dry-run sync |
 | `command/validate.rs` | Spec validation only |
 | `command/options.rs` | Shared `SyncOptions` (--exact-version, --latest, --fail-fast) |
-| `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution |
+| `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution; `build_timestamp` field uses `BuildTimestampFormat` re-exported from `ocx_lib::package::version` |
 | `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex) |
 | `spec/target.rs` | `Target` (registry + repository) |
 | `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping) |
@@ -40,7 +40,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `pipeline/mirror_result.rs` | `MirrorResult`: Pushed/Skipped/Failed |
 | `resolver.rs` | `resolve_assets()`: apply regex patterns to asset names |
 | `filter.rs` | `filter_versions()`: apply bounds, prerelease skip, backfill cap |
-| `normalizer.rs` | `normalize_version()`: add build timestamp |
+| `normalizer.rs` | `normalize_version()`: attach build timestamp to a version string; re-exports `build_timestamp` from `ocx_lib::package::version` (defined in `version/build_meta.rs`) |
 | `error.rs` | `MirrorError`: SpecInvalid, SpecNotFound, ExecutionFailed, SourceError |
 
 ## Pipeline Architecture

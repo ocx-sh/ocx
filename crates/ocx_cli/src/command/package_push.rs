@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::{
     log, oci, package,
+    package::version::{BuildTimestampFormat, build_timestamp},
     prelude::*,
     publisher::{LayerRef, Publisher},
 };
@@ -22,6 +23,28 @@ pub struct PackagePush {
     /// This will skip some checks that requires an existing index.
     #[clap(long = "new", short = 'n')]
     new: bool,
+
+    /// Append a UTC build-metadata segment to the published tag.
+    ///
+    /// `datetime` appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`,
+    /// `none` is a no-op. Passing the flag without a value defaults to
+    /// `datetime`. Must use `=` when supplying an explicit value
+    /// (`--build-timestamp=date`); bare `--build-timestamp` with no `=`
+    /// uses the `datetime` default. The version core in `--identifier`
+    /// must already be `X.Y.Z` (optionally with variant prefix or
+    /// pre-release); pushing against a tag that already carries build
+    /// metadata is rejected.
+    ///
+    /// Use this in continuous-deploy pipelines to publish rolling versions
+    /// like `dev.ocx.sh/ocx:0.3.0-dev_20260514120000`.
+    #[clap(
+        long = "build-timestamp",
+        value_enum,
+        num_args = 0..=1,
+        default_missing_value = "datetime",
+        require_equals = true,
+    )]
+    build_timestamp: Option<BuildTimestampFormat>,
 
     /// Path to the package metadata JSON file. Defaults to a sibling of the
     /// first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required
@@ -81,6 +104,8 @@ impl PackagePush {
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&identifier).await?;
 
+        let build_meta: Option<String> = self.build_timestamp.as_ref().and_then(build_timestamp);
+
         if self.cascade {
             let existing_tags = match publisher.list_tags(identifier.clone()).await {
                 Ok(tags) => tags,
@@ -98,9 +123,11 @@ impl PackagePush {
             };
 
             let existing_versions = Publisher::parse_versions(&existing_tags);
-            publisher.push_cascade(info, &self.layers, existing_versions).await?;
+            publisher
+                .push_cascade(info, &self.layers, existing_versions, build_meta.as_deref())
+                .await?;
         } else {
-            publisher.push(info, &self.layers).await?;
+            publisher.push(info, &self.layers, build_meta.as_deref()).await?;
         }
 
         Ok(ExitCode::SUCCESS)

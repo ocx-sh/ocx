@@ -16,6 +16,10 @@ pub enum Error {
     #[error("invalid package version: {0}")]
     VersionInvalid(String),
 
+    /// Build metadata could not be attached to a parsed [`crate::package::version::Version`].
+    #[error(transparent)]
+    BuildMeta(#[from] super::version::build_meta::BuildMetaError),
+
     /// A logo file has an unsupported image format.
     #[error("unsupported logo format: {0}")]
     UnsupportedLogoFormat(String),
@@ -44,7 +48,7 @@ pub enum Error {
 impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) => Some(ExitCode::DataError),
+            Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) | Self::BuildMeta(_) => Some(ExitCode::DataError),
             Self::RequiredPathMissing(_) => Some(ExitCode::NotFound),
             Self::EnvVarInterpolation { source, .. } => source.classify(),
             Self::EntrypointTargetInvalid { source, .. } => source.classify(),
