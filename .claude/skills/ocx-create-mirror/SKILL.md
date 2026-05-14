@@ -1,12 +1,12 @@
 ---
 name: ocx-create-mirror
-description: Use when creating new ocx-mirror config for GitHub-released tool. Inspects Release assets, detects platforms, examines archive contents, produces mirror YAML, metadata JSON, README, logo. Triggers: "create a mirror", "/ocx-create-mirror", "add mirror for <tool>".
+description: Use when creating new ocx-mirror config for GitHub-released tool. Inspects Release assets, detects platforms, examines archive contents, produces mirror YAML, metadata JSON, CATALOG, logo. Triggers: "create a mirror", "/ocx-create-mirror", "add mirror for <tool>".
 disable-model-invocation: true
 ---
 
 # Create Mirror Configuration
 
-Interactive skill. Generates complete `mirrors/{name}/` dir with `mirror.yml`, `metadata.json`, `README.md` (frontmatter), `logo.svg` for new package by analyzing GitHub Releases.
+Interactive skill. Generates complete `mirrors/{name}/` dir with `mirror.yml`, `metadata.json`, `CATALOG.md` (frontmatter), `logo.svg` for new package by analyzing GitHub Releases.
 
 ## Workflow
 
@@ -95,15 +95,15 @@ gh api "repos/{owner}/{repo}/releases/tags/{tag}" --jq '.assets[] | {name, size,
     curl -fsSL -o mirrors/{name}/logo.svg "{download_url}"
     ```
 
-16. **Write the README with frontmatter.** Use README template in [`references/yaml-templates.md`](./references/yaml-templates.md). Frontmatter `title` / `description` / `keywords` become OCI annotations via `ocx package describe`.
+16. **Write the CATALOG.md with frontmatter.** Use CATALOG template in [`references/yaml-templates.md`](./references/yaml-templates.md). Frontmatter `title` / `description` / `keywords` become OCI annotations via `ocx package describe`. `pipeline describe` defaults to this filename.
 
 17. **Present a summary** to user showing:
-    - Generated files (mirror YAML, metadata JSON, README, logo)
+    - Generated files (mirror YAML, metadata JSON, CATALOG, logo)
     - Detected platforms
     - Asset patterns
     - Whether `strip_components` set (and why)
     - Metadata layout (shared vs platform-specific)
-    - README frontmatter values
+    - CATALOG frontmatter values
     - Taskfile registration (`task mirror:{name}:sync`, `task mirror:{name}:describe`)
     - Warnings (missing platforms, ambiguous patterns, missing logo, etc.)
 
@@ -128,12 +128,12 @@ gh api "repos/{owner}/{repo}/releases/tags/{tag}" --jq '.assets[] | {name, size,
 - **Do NOT use `verify.checksums_file`** for GitHub releases — expects full URL, not asset filename. `github_asset_digest: true` already verifies integrity via GitHub API per-asset digest, sufficient. `checksums_file` only for `url_index` sources with direct URL to checksums file.
 - **Default to `build_timestamp: none`** — most mirrors no need timestamp-differentiated builds.
 - **Default to `skip_prereleases: true`** — user can change.
-- **Always generate a README with frontmatter** — `title`, `description`, `keywords` in YAML frontmatter extracted as OCI annotations by `ocx package describe`, stripped from pushed README body. Primary way to set catalog metadata.
+- **Always generate a CATALOG.md with frontmatter** — `title`, `description`, `keywords` in YAML frontmatter extracted as OCI annotations by `ocx package describe`, stripped from pushed body. Primary way to set catalog metadata. `pipeline describe` reads `CATALOG.md` by default.
 - **Prefer SVG logos** over PNG — scale to any resolution, smaller.
 
 ## References
 
 - [`references/platform-detection.md`](./references/platform-detection.md) — platform mapping table, musl vs glibc
 - [`references/archive-inspection.md`](./references/archive-inspection.md) — directory-layout analysis, macOS gotchas, per-platform forms
-- [`references/yaml-templates.md`](./references/yaml-templates.md) — metadata.json, mirror.yml, README, Taskfile templates
+- [`references/yaml-templates.md`](./references/yaml-templates.md) — metadata.json, mirror.yml, CATALOG, Taskfile templates
 - [`references/env-vars.md`](./references/env-vars.md) — common env var sets by tool type

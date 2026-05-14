@@ -520,7 +520,7 @@ To generate the workflow for a mirror, run:
 ocx-mirror pipeline generate ci --spec ./mirrors/cmake/mirror.yml
 ```
 
-This writes `.github/workflows/mirror.yml` and a branch-protection setup script. Re-run after every `mirror.yml` change to keep the workflow in sync. Use `--check` to verify the generated files are current without overwriting them (exit 65 on drift).
+This writes `.github/workflows/mirror.yml` (sync pipeline) and `.github/workflows/describe.yml` (catalog publisher). Re-run after every `mirror.yml` change to keep both workflows in sync. Use `--check` to verify the generated files are current without overwriting them (exit 65 on drift).
 
 ::: tip Learn more
 [mirror.yml reference][ref-mirror-yml] — all schema keys including `tests`, `platforms`, `ocx_mirror`, and `notify`.

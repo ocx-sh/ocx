@@ -285,17 +285,28 @@ impl Push {
             summary.any_new_green,
         );
 
-        // Fail the push job when every version in the run produced no green
-        // publish AND at least one platform failed. Partial-success runs still
-        // exit 0 — they publish what they can and the notify step renders the
-        // partial result. The notify step runs regardless of this exit code
-        // because the workflow gates `notify` on the push job's outputs
-        // (`any_red` / `any_new_green`), not its `success()` status.
-        if summary.any_red && !summary.any_new_green {
-            return Err(MirrorError::ExecutionFailed(vec![format!(
-                "all platforms failed across {} version(s); no package published — see run-summary.json",
-                summary.versions.len(),
-            )]));
+        // Fail the push job whenever any (V, P) pair was red — even when
+        // other platforms published successfully. Per-platform publication
+        // happens inline in the loop above, so greens are already in the
+        // registry; this exit code surfaces the partial failure to the
+        // pipeline and to the maintainer. The notify step still runs because
+        // the workflow gates `notify` on the push job's outputs
+        // (`any_red` / `any_new_green`), not its `success()` status, and the
+        // `summarise` step uses `if: always()` to write outputs even when this
+        // call returns Err.
+        if summary.any_red {
+            let detail = if summary.any_new_green {
+                format!(
+                    "partial run across {} version(s): some platforms failed — see run-summary.json",
+                    summary.versions.len(),
+                )
+            } else {
+                format!(
+                    "all platforms failed across {} version(s); no package published — see run-summary.json",
+                    summary.versions.len(),
+                )
+            };
+            return Err(MirrorError::ExecutionFailed(vec![detail]));
         }
 
         Ok(())
@@ -728,7 +739,7 @@ async fn invoke_push(
 /// 1. `OCX_BINARY_PIN` env var (per CLAUDE.md env table — set by ocx itself).
 /// 2. Current executable path (`std::env::current_exe()`).
 /// 3. `"ocx"` on `PATH` as final fallback.
-fn resolve_ocx_binary() -> Result<PathBuf, String> {
+pub(crate) fn resolve_ocx_binary() -> Result<PathBuf, String> {
     if let Ok(pin) = std::env::var("OCX_BINARY_PIN")
         && !pin.is_empty()
     {
@@ -752,7 +763,7 @@ fn resolve_ocx_binary() -> Result<PathBuf, String> {
 /// Forward all `OCX_*` environment variables from the current process into a
 /// child command. This ensures offline mode, remote mode, registry config, and
 /// index paths are inherited by the subprocess.
-fn forward_ocx_env(cmd: &mut tokio::process::Command) {
+pub(crate) fn forward_ocx_env(cmd: &mut tokio::process::Command) {
     const OCX_VARS: &[&str] = &[
         "OCX_HOME",
         "OCX_DEFAULT_REGISTRY",
@@ -1173,12 +1184,20 @@ mod tests {
     // the registry, masking total-failure runs from the workflow's overall
     // conclusion.
     //
-    // Contract: a run with `any_red == true && any_new_green == false`
-    // (nothing was published AND something failed) exits non-zero via
-    // `MirrorError::ExecutionFailed`. Partial runs (some publish, some fail)
-    // still exit 0; the notify step renders the partial state.
+    // Contract: any run with `any_red == true` exits non-zero via
+    // `MirrorError::ExecutionFailed` — partial-success runs (some greens
+    // published, some platforms failed) still surface as a pipeline failure
+    // so the maintainer is forced to look at the run-summary. Greens are
+    // published in-loop before this exit code is decided, so partial publish
+    // still lands at the registry. The notify step runs regardless of this
+    // exit code because the workflow gates `notify` on the push job's outputs
+    // (`any_red` / `any_new_green`), not its `success()` status, and the
+    // `summarise` step uses `if: always()` to write outputs.
     #[test]
-    fn push_returns_err_when_all_platforms_failed_and_no_green() {
+    fn push_returns_err_whenever_any_red_even_with_partial_publish() {
+        // Test exercises the all-red sub-case (no bundles → no greens) but
+        // the exit policy applies to partial-publish runs as well: any_red
+        // → ExecutionFailed, regardless of whether some platforms published.
         let junit_dir = tempdir().unwrap();
         let bundles_dir = tempdir().unwrap();
         let summary_path = tempdir().unwrap().path().join("run-summary.json");
@@ -1207,7 +1226,7 @@ mod tests {
 
         assert!(
             matches!(result, Err(MirrorError::ExecutionFailed(_))),
-            "all-red + !any_new_green must propagate as ExecutionFailed, got {result:?}",
+            "any_red must propagate as ExecutionFailed, got {result:?}",
         );
 
         // Run-summary is still written so the notify step can read it via

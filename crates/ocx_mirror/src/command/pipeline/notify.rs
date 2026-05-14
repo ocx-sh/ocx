@@ -72,10 +72,7 @@ impl Notify {
 /// Build the [`DiscordWebhookPayload`] from a [`RunSummary`] per the D10 taxonomy.
 fn build_payload(summary: &RunSummary) -> DiscordWebhookPayload {
     let embed = build_embed(summary);
-    DiscordWebhookPayload {
-        username: None,
-        embeds: vec![embed],
-    }
+    DiscordWebhookPayload { embeds: vec![embed] }
 }
 
 /// Maximum length of a single Discord embed field value.
@@ -280,7 +277,11 @@ fn clip_to_field_limit(s: &str) -> String {
     }
     const SUFFIX: &str = "\n… (truncated)";
     let budget = DISCORD_FIELD_VALUE_LIMIT - SUFFIX.len();
-    let mut clipped = s[..budget].to_string();
+    // Round budget down to a UTF-8 char boundary so we never slice mid-codepoint.
+    // Status cells contain multi-byte emoji (🟢/🔴/🚫), which can straddle the
+    // byte index of `budget` and would otherwise panic in `s[..budget]`.
+    let boundary = (0..=budget).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0);
+    let mut clipped = s[..boundary].to_string();
     if let Some(pos) = clipped.rfind('\n') {
         clipped.truncate(pos);
     }
@@ -513,10 +514,10 @@ mod tests {
         // Title is `{target}: published` — no icon, no version, no mirror name.
         let summary = make_all_green_summary();
         let payload = build_payload(&summary);
-        assert_eq!(
-            payload.username, None,
-            "webhook owns the bot name; payload must not override"
-        );
+        // Payload never carries a `username` override — Discord uses the
+        // webhook's configured bot name (e.g. "Captain Mirror").
+        let json: serde_json::Value = serde_json::to_value(&payload).unwrap();
+        assert!(json.get("username").is_none(), "username must be absent");
         assert_eq!(payload.embeds.len(), 1);
         let embed = &payload.embeds[0];
         assert_eq!(embed.color, colors::GREEN, "green outcome must use GREEN color");
@@ -1041,5 +1042,25 @@ mod tests {
         let embed = &payload.embeds[0];
         let thumb = embed.thumbnail.as_ref().expect("logo_url must produce thumbnail");
         assert_eq!(thumb.url, url);
+    }
+
+    // Regression: notify panicked at `s[..budget]` when the byte at `budget`
+    // landed inside a multi-byte emoji codepoint (🟢 = 4 bytes). Status cells
+    // join with newlines and easily overshoot the 1024-byte Discord limit, so
+    // any run with ~25+ green platforms tripped this.
+    #[test]
+    fn clip_to_field_limit_handles_emoji_at_byte_boundary() {
+        let cell = "[`🟢`](https://example.com/job/1)";
+        let mut s = String::new();
+        while s.len() <= DISCORD_FIELD_VALUE_LIMIT {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(cell);
+        }
+        let clipped = clip_to_field_limit(&s);
+        assert!(clipped.len() <= DISCORD_FIELD_VALUE_LIMIT);
+        assert!(clipped.ends_with("… (truncated)"));
+        assert!(clipped.is_char_boundary(clipped.len()));
     }
 }

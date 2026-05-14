@@ -3,6 +3,7 @@
 
 mod asset_type;
 mod assets;
+mod catalog_config;
 mod concurrency_config;
 mod metadata_config;
 mod notify_config;
@@ -18,6 +19,7 @@ mod versions_config;
 
 pub use asset_type::{AssetType, AssetTypeConfig};
 pub use assets::AssetPatterns;
+pub use catalog_config::CatalogConfig;
 pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 pub use metadata_config::MetadataConfig;
 #[allow(unused_imports)]
@@ -109,6 +111,11 @@ pub struct MirrorSpec {
     /// Notification settings (currently only Discord webhooks).
     #[serde(default)]
     pub notify: Option<NotifyConfig>,
+
+    /// Catalog publishing settings (README + logo → `__ocx.desc`).
+    /// When omitted, defaults apply: `readme: CATALOG.md`, logo probed.
+    #[serde(default)]
+    pub catalog: Option<CatalogConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

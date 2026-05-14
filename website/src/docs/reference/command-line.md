@@ -1533,7 +1533,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 
 #### `pipeline generate ci` {#ocx-mirror-pipeline-generate-ci}
 
-Reads `mirror.yml` and writes a [GitHub Actions][github-actions-docs] workflow, a branch-protection setup script, and a README snippet.
+Reads `mirror.yml` and writes the [GitHub Actions][github-actions-docs] workflow files for the mirror repo: the sync pipeline and the catalog publisher.
 
 **Usage**
 
@@ -1550,8 +1550,8 @@ ocx-mirror pipeline generate ci [--check] [--spec <PATH>]
 
 **Outputs (write mode):**
 
-- `.github/workflows/mirror.yml` — the generated workflow (overwritten)
-- `scripts/install-branch-protection.sh` — idempotent branch-protection script (overwritten)
+- `.github/workflows/mirror.yml` — sync pipeline (overwritten)
+- `.github/workflows/describe.yml` — catalog publisher triggered on `CATALOG.md` / `logo.*` / `mirror.yml` edits (overwritten)
 
 **Generated file header:**
 

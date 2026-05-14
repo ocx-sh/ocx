@@ -28,15 +28,14 @@ const GIT_SHA_SHORT: &str = match option_env!("OCX_GIT_SHA_SHORT") {
 // ── Baked-in templates ───────────────────────────────────────────────────────
 
 const WORKFLOW_TEMPLATE: &str = include_str!("templates/workflow.yml");
-const BRANCH_PROTECTION_TEMPLATE: &str = include_str!("templates/install-branch-protection.sh");
-const README_SNIPPET_TEMPLATE: &str = include_str!("templates/README-snippet.md");
+const DESCRIBE_TEMPLATE: &str = include_str!("templates/describe.yml");
 
 // ── Public struct ────────────────────────────────────────────────────────────
 
 /// Generate (or check) the CI workflow files for a mirror repository.
 ///
-/// In write mode: renders `.github/workflows/mirror.yml`,
-/// `scripts/install-branch-protection.sh`, and a README snippet.
+/// In write mode: renders `.github/workflows/mirror.yml` and
+/// `.github/workflows/describe.yml`.
 ///
 /// In `--check` mode: exits 65 (DataError) if any generated file drifts from
 /// what would be produced; emits path-only hints to stderr.
@@ -383,57 +382,26 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
     body.to_string()
 }
 
-/// Compute the required branch-protection check names from the matrix.
+/// Render the describe.yml catalog-publish workflow.
 ///
-/// Each leg contributes one check: `test (<platform>, <container_id>)`.
-/// Plus `push` and `notify` jobs.
-fn required_checks(legs: &[MatrixLeg]) -> Vec<String> {
-    let mut checks: Vec<String> = legs
-        .iter()
-        .map(|leg| format!("test ({}, {})", leg.platform, leg.container_id))
-        .collect();
-    checks.push("push".to_string());
-    checks.push("notify".to_string());
-    checks
-}
+/// Lighter than `mirror.yml`: only the release-tag + target-registry
+/// placeholders need substitution. The workflow itself triggers on changes to
+/// `CATALOG.md`, `logo.*`, or `mirror.yml` and invokes
+/// `ocx-mirror pipeline describe` to publish the README + logo to the
+/// `__ocx.desc` referrer tag on the target repository.
+fn render_describe(spec: &MirrorSpec) -> String {
+    let release_tag = spec
+        .ocx_mirror
+        .as_ref()
+        .and_then(|m| m.release_tag.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or("latest");
 
-/// Render the branch protection JSON array of check objects.
-fn render_required_checks_json(checks: &[String]) -> String {
-    let entries: Vec<String> = checks
-        .iter()
-        .map(|name| format!("{{\"context\": \"{}\"}}", name))
-        .collect();
-    format!("[{}]", entries.join(", "))
-}
-
-/// Render the README snippet Markdown list of required checks.
-fn render_required_checks_list(checks: &[String]) -> String {
-    checks.iter().map(|c| format!("- `{c}`\n")).collect()
-}
-
-/// Render the install-branch-protection.sh script.
-fn render_branch_protection(spec: &MirrorSpec) -> String {
-    let matrix = build_matrix(spec);
-    let checks = required_checks(&matrix);
-    let checks_json = render_required_checks_json(&checks);
-
-    BRANCH_PROTECTION_TEMPLATE
+    DESCRIBE_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
-        .replace("{REQUIRED_CHECKS_JSON}", &checks_json)
-}
-
-/// Render the README snippet.
-fn render_readme_snippet(spec: &MirrorSpec) -> String {
-    let matrix = build_matrix(spec);
-    let checks = required_checks(&matrix);
-    let checks_list = render_required_checks_list(&checks);
-
-    README_SNIPPET_TEMPLATE
-        .replace("{OCX_MIRROR_VERSION}", VERSION)
-        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
-        .replace("{MIRROR_NAME}", &spec.name)
-        .replace("{REQUIRED_CHECKS_LIST}", &checks_list)
+        .replace("{OCX_MIRROR_RELEASE_TAG}", release_tag)
+        .replace("{TARGET_REGISTRY}", &spec.target.registry)
 }
 
 /// Build the full map of relative path → file content for all generated files.
@@ -443,14 +411,7 @@ fn render(spec: &MirrorSpec, _repo_root: &Path) -> Result<BTreeMap<PathBuf, Stri
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
     files.insert(PathBuf::from(".github/workflows/mirror.yml"), render_workflow(spec));
-    files.insert(
-        PathBuf::from("scripts/install-branch-protection.sh"),
-        render_branch_protection(spec),
-    );
-    files.insert(
-        PathBuf::from("scripts/README-branch-protection.md"),
-        render_readme_snippet(spec),
-    );
+    files.insert(PathBuf::from(".github/workflows/describe.yml"), render_describe(spec));
 
     Ok(files)
 }
@@ -848,5 +809,119 @@ mod tests {
                 "old standalone 'Record job URL' step must not be emitted any more"
             );
         }
+    }
+
+    // ── describe.yml renderer ──────────────────────────────────────────────
+
+    #[test]
+    fn render_minimal_spec_writes_describe_workflow() {
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-minimal.yml", dir.path());
+        if let Ok(()) = result {
+            let describe = dir.path().join(".github/workflows/describe.yml");
+            assert!(describe.exists(), "describe.yml must be emitted alongside mirror.yml");
+            let content = std::fs::read_to_string(&describe).unwrap();
+            assert!(
+                content.contains("name: describe"),
+                "describe.yml must declare workflow name"
+            );
+            assert!(
+                content.contains("ocx-mirror pipeline describe"),
+                "describe.yml must invoke `ocx-mirror pipeline describe`"
+            );
+            assert!(content.contains("CATALOG.md"), "path filter must include CATALOG.md");
+            assert!(
+                content.contains("logo.*"),
+                "path filter must include logo.* (svg/png probe target)"
+            );
+        }
+    }
+
+    #[test]
+    fn render_describe_substitutes_release_tag() {
+        // Fixture pins `ocx_mirror.release_tag: v0.7.2`; placeholder must be
+        // replaced with the pinned value.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-minimal.yml", dir.path());
+        if let Ok(()) = result {
+            let describe_path = dir.path().join(".github/workflows/describe.yml");
+            let content = std::fs::read_to_string(&describe_path).unwrap();
+            assert!(
+                content.contains("OCX_MIRROR_RELEASE_TAG: v0.7.2"),
+                "release_tag must substitute fixture's pinned value"
+            );
+            assert!(
+                !content.contains("{OCX_MIRROR_RELEASE_TAG}"),
+                "release_tag placeholder must be substituted"
+            );
+        }
+    }
+
+    #[test]
+    fn check_mode_detects_describe_yml_drift() {
+        let dir = tempdir().unwrap();
+        let fixture_src = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-minimal.yml"
+        ));
+        let spec_dest = dir.path().join("mirror-minimal.yml");
+        std::fs::copy(fixture_src, &spec_dest).unwrap();
+
+        let printer = ocx_lib::cli::Printer::new(false);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let write_result = rt.block_on(async {
+            let cmd = GenerateCi {
+                spec: spec_dest.clone(),
+                check: false,
+                format: None,
+            };
+            cmd.execute(&printer).await
+        });
+
+        if write_result.is_ok() {
+            let describe_path = dir.path().join(".github/workflows/describe.yml");
+            assert!(describe_path.exists(), "describe.yml must have been written");
+            let mut content = std::fs::read_to_string(&describe_path).unwrap();
+            content.push_str("\n# drift injection\n");
+            std::fs::write(&describe_path, content).unwrap();
+
+            let check_result = rt.block_on(async {
+                let cmd = GenerateCi {
+                    spec: spec_dest,
+                    check: true,
+                    format: None,
+                };
+                cmd.execute(&printer).await
+            });
+
+            match check_result {
+                Err(MirrorError::RendererDrift(paths)) => {
+                    assert!(
+                        paths.iter().any(|p| p.contains("describe.yml")),
+                        "drift must call out describe.yml: {paths:?}"
+                    );
+                }
+                Ok(()) => panic!("expected drift detection for describe.yml mutation"),
+                Err(e) => panic!("expected RendererDrift, got: {e}"),
+            }
+        }
+    }
+
+    // Regression: native jq.exe on Windows runners emits CRLF, so without
+    // `tr -d '\r'` after each jq pipeline in the test job the captured
+    // `${VERSION}` carried a trailing CR and corrupted bundle paths
+    // (e.g. `bundles/bundle-3.10.0\r-windows_amd64.tar.xz`).
+    #[test]
+    fn workflow_template_strips_cr_after_jq_for_windows_runners() {
+        let template = super::WORKFLOW_TEMPLATE;
+        assert!(
+            template.contains("jq -r '.[].version' | tr -d '\\r'"),
+            "test job must strip CR from jq output to survive Git Bash + native jq.exe on Windows"
+        );
+        assert!(
+            template.contains("head -n1 | tr -d '\\r' || true"),
+            "CI_JOB_URL capture must strip CR before exporting the URL"
+        );
     }
 }

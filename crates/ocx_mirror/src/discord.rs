@@ -9,10 +9,12 @@
 //!
 //! ```json
 //! {
-//!   "username": "ocx-mirror",
 //!   "embeds": [{ "title": "...", "color": 3066993, "fields": [...], "url": "..." }]
 //! }
 //! ```
+//!
+//! No `username` field is sent: Discord uses the webhook's configured bot
+//! name (e.g. "Captain Mirror") so server admins control the bot identity.
 //!
 //! # Color codes
 //!
@@ -87,12 +89,10 @@ pub struct DiscordEmbed {
 }
 
 /// Full Discord webhook payload.
+///
+/// No `username` override: Discord uses the webhook's configured bot name.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscordWebhookPayload {
-    /// Bot display name override. `None` keeps the webhook's configured name
-    /// (e.g. "Captain Mirror") so server admins control the bot identity.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
     /// Up to 10 embeds (Discord limit).
     pub embeds: Vec<DiscordEmbed>,
 }
@@ -258,28 +258,12 @@ mod tests {
     }
 
     #[test]
-    fn discord_payload_omits_username_when_none() {
+    fn discord_payload_serializes_without_username_field() {
         // Webhook bot name (e.g. "Captain Mirror") is owned by server admins;
-        // payload must not override it. Serialized JSON drops the field via
-        // `skip_serializing_if = "Option::is_none"`.
-        let payload = DiscordWebhookPayload {
-            username: None,
-            embeds: vec![],
-        };
+        // payload never carries a `username` override.
+        let payload = DiscordWebhookPayload { embeds: vec![] };
         let value: serde_json::Value = serde_json::to_value(&payload).unwrap();
         assert!(value.get("username").is_none(), "username must be absent: {value}");
-    }
-
-    #[test]
-    fn discord_payload_includes_username_when_set() {
-        // When a future caller explicitly overrides the bot identity (e.g. a
-        // dry-run preview), the value must round-trip.
-        let payload = DiscordWebhookPayload {
-            username: Some("custom-bot".to_string()),
-            embeds: vec![],
-        };
-        let value: serde_json::Value = serde_json::to_value(&payload).unwrap();
-        assert_eq!(value["username"].as_str().unwrap(), "custom-bot");
     }
 
     #[test]
@@ -337,10 +321,7 @@ mod tests {
         // §3.9: 2xx response from Discord → Ok(())
         ensure_crypto_provider();
         let url = one_shot_http_server(204).await;
-        let payload = DiscordWebhookPayload {
-            username: None,
-            embeds: vec![],
-        };
+        let payload = DiscordWebhookPayload { embeds: vec![] };
         let result = post(&url, &payload).await;
         assert!(matches!(result, Ok(())), "2xx must return Ok(()): {result:?}");
     }
@@ -350,10 +331,7 @@ mod tests {
         // §3.9: 5xx → WebhookUnavailable (exit 69)
         ensure_crypto_provider();
         let url = one_shot_http_server(503).await;
-        let payload = DiscordWebhookPayload {
-            username: None,
-            embeds: vec![],
-        };
+        let payload = DiscordWebhookPayload { embeds: vec![] };
         let result = post(&url, &payload).await;
         assert!(
             matches!(result, Err(MirrorError::WebhookUnavailable(_))),
@@ -366,10 +344,7 @@ mod tests {
         // §3.9: 401 → WebhookPermissionDenied (exit 77)
         ensure_crypto_provider();
         let url = one_shot_http_server(401).await;
-        let payload = DiscordWebhookPayload {
-            username: None,
-            embeds: vec![],
-        };
+        let payload = DiscordWebhookPayload { embeds: vec![] };
         let result = post(&url, &payload).await;
         assert!(
             matches!(result, Err(MirrorError::WebhookPermissionDenied(_))),
@@ -382,10 +357,7 @@ mod tests {
         // §3.9: 403 → WebhookPermissionDenied (exit 77)
         ensure_crypto_provider();
         let url = one_shot_http_server(403).await;
-        let payload = DiscordWebhookPayload {
-            username: None,
-            embeds: vec![],
-        };
+        let payload = DiscordWebhookPayload { embeds: vec![] };
         let result = post(&url, &payload).await;
         assert!(
             matches!(result, Err(MirrorError::WebhookPermissionDenied(_))),

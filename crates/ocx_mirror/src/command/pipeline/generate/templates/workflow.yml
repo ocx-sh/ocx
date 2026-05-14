@@ -169,13 +169,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # `tr -d '\r'` strips CR injected by native jq.exe on Windows runners.
+          # Git Bash word-splits `$()` on LF only, so without this the captured
+          # value carries a trailing CR and corrupts downstream paths/URLs.
           CI_JOB_URL=$(gh api \
             "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
             --jq ".jobs[] | select(.name | contains(\"${{ matrix.platform_slug }}\") and contains(\"${{ matrix.container_id }}\")) | .html_url" \
-            | head -n1 || true)
+            | head -n1 | tr -d '\r' || true)
           export CI_JOB_URL
           VERSIONS='${{ needs.discover.outputs.versions }}'
-          for VERSION in $(echo "${VERSIONS}" | jq -r '.[].version'); do
+          for VERSION in $(echo "${VERSIONS}" | jq -r '.[].version' | tr -d '\r'); do
             BUNDLE="bundles/bundle-${VERSION}-${{ matrix.platform_slug }}.tar.xz"
 {TEST_RUN_STEPS}
           done
@@ -188,7 +191,12 @@ jobs:
 
   push:
     needs: [discover, prepare, test]
-    if: needs.discover.outputs.has_new == 'true'
+    # `if: always()` keeps push running even when the `test` job is marked
+    # failed (any matrix leg red). The push step gates per-(V, P) on JUnit
+    # results: greens publish, reds are skipped. Without `always()` a single
+    # failed test leg short-circuits the whole job and prevents partial
+    # publication + notification.
+    if: always() && needs.discover.outputs.has_new == 'true'
     runs-on: ubuntu-latest
     outputs:
       any_new_green: ${{ steps.summarise.outputs.any_new_green }}

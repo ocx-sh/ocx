@@ -69,9 +69,9 @@ concurrency:
   compression_threads: 0
 ```
 
-## README with frontmatter
+## CATALOG with frontmatter
 
-Generate `mirrors/{name}/README.md`:
+Generate `mirrors/{name}/CATALOG.md` (default filename for `pipeline describe`):
 
 ```markdown
 ---

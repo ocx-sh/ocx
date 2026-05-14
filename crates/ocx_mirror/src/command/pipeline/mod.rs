@@ -12,7 +12,9 @@
 //! | `prepare` | `prepare` | Download, verify, bundle one version |
 //! | `push` | `push` | Aggregate JUNIT results, publish passing (V, P) pairs |
 //! | `notify` | `notify` | Post Discord webhook summary |
+//! | `describe` | `describe` | Publish catalog metadata (README + logo) to the registry |
 
+pub mod describe;
 pub mod generate;
 pub mod notify;
 pub mod plan;
@@ -41,6 +43,9 @@ pub enum PipelineCommand {
 
     /// Post a Discord webhook notification from `run-summary.json`.
     Notify(notify::Notify),
+
+    /// Publish catalog metadata (README + logo) to the registry.
+    Describe(describe::Describe),
 }
 
 impl PipelineCommand {
@@ -53,6 +58,7 @@ impl PipelineCommand {
             Self::Prepare(cmd) => cmd.execute(printer).await,
             Self::Push(cmd) => cmd.execute(printer).await,
             Self::Notify(cmd) => cmd.execute(printer).await,
+            Self::Describe(cmd) => cmd.execute(printer).await,
         }
     }
 }
