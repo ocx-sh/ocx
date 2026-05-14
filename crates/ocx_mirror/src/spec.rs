@@ -3,34 +3,47 @@
 
 mod asset_type;
 mod assets;
+mod catalog_config;
 mod concurrency_config;
 mod metadata_config;
+mod notify_config;
+mod ocx_mirror_config;
+mod platforms_config;
 mod source;
 mod strip_components_config;
 mod target;
+mod tests_config;
 mod variant;
 mod verify_config;
 mod versions_config;
 
 pub use asset_type::{AssetType, AssetTypeConfig};
 pub use assets::AssetPatterns;
+pub use catalog_config::CatalogConfig;
 pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 pub use metadata_config::MetadataConfig;
+#[allow(unused_imports)]
+pub use notify_config::{DiscordConfig, NotifyConfig};
+pub use ocx_mirror_config::OcxMirrorConfig;
+#[allow(unused_imports)]
+pub use platforms_config::{ContainerConfig, PlatformConfig};
 pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
+pub use tests_config::TestEntry;
 pub use variant::{EffectiveVariant, VariantSpec};
 pub use verify_config::VerifyConfig;
 pub(crate) use versions_config::BackfillOrder;
 pub use versions_config::VersionsConfig;
 
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::MirrorError;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MirrorSpec {
     pub name: String,
     pub target: Target,
@@ -77,9 +90,41 @@ pub struct MirrorSpec {
 
     #[serde(default)]
     pub concurrency: ConcurrencyConfig,
+
+    // ── Pipeline test configuration (added in test-pipeline phase) ──
+    /// Test commands to run against each installed package before publishing.
+    /// Required by `ocx-mirror push`; optional for backwards-compat parsing.
+    #[serde(default)]
+    pub tests: Option<Vec<TestEntry>>,
+
+    /// Per-platform runner + container matrix for the generated GHA workflow.
+    /// Keys must match the OCI platform format (`^[a-z0-9_-]+/[a-z0-9_-]+$`).
+    #[serde(default)]
+    pub platforms: Option<HashMap<String, PlatformConfig>>,
+
+    /// Pins the `ocx-mirror` release tag (and optionally a git SHA) used
+    /// when installing `ocx-mirror` and downloading the `ocx` binary inside
+    /// the generated workflow.
+    #[serde(default)]
+    pub ocx_mirror: Option<OcxMirrorConfig>,
+
+    /// Notification settings (currently only Discord webhooks).
+    #[serde(default)]
+    pub notify: Option<NotifyConfig>,
+
+    /// Catalog publishing settings (README + logo → `__ocx.desc`).
+    /// When omitted, defaults apply: `readme: CATALOG.md`, logo probed.
+    #[serde(default)]
+    pub catalog: Option<CatalogConfig>,
 }
 
-pub use ocx_lib::package::version::BuildTimestampFormat;
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildTimestampFormat {
+    Datetime,
+    Date,
+    None,
+}
 
 fn default_build_timestamp() -> BuildTimestampFormat {
     BuildTimestampFormat::Datetime
@@ -93,6 +138,30 @@ fn default_true() -> bool {
 /// letters, digits, or dots.
 static VARIANT_NAME_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z][a-z0-9.]*$").unwrap());
+
+/// Regex for valid test entry names: starts with letter, then letters/digits/hyphens/underscores.
+static TEST_NAME_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9_-]*$").unwrap());
+
+/// Regex for valid OCI platform keys: `os/arch` format with lowercase alphanumerics, hyphens, underscores.
+static PLATFORM_KEY_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9_-]+/[a-z0-9_-]+$").unwrap());
+
+/// Regex for valid `release_tag` — semantic version with optional pre-release.
+static RELEASE_TAG_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$").unwrap());
+
+/// Regex for a 40-character lowercase hexadecimal git SHA.
+static GIT_REV_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[0-9a-f]{40}$").unwrap());
+
+/// Regex for valid GitHub Actions secret names: `^[A-Z][A-Z0-9_]+$`.
+///
+/// Requires at least one uppercase letter, then one or more uppercase letters, digits, or
+/// underscores. Names starting with `_` or containing only a single character are rejected
+/// (GHA enforces both constraints in practice).
+static GHA_SECRET_NAME_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[A-Z][A-Z0-9_]+$").unwrap());
 
 impl MirrorSpec {
     pub fn validate(&self, spec_path: &Path) -> Vec<String> {
@@ -123,6 +192,33 @@ impl MirrorSpec {
 
         if let Some(versions) = &self.versions {
             versions.validate(&mut errors);
+        }
+
+        if let Some(tests) = &self.tests {
+            validate_tests(tests, &mut errors);
+        }
+        if let Some(platforms) = &self.platforms {
+            validate_platforms(platforms, &mut errors);
+        }
+        if let Some(ocx_mirror) = &self.ocx_mirror {
+            validate_ocx_mirror_config(ocx_mirror, &mut errors);
+        }
+        if let Some(notify) = &self.notify {
+            validate_notify_config(notify, &mut errors);
+        }
+
+        // Cross-field: release_tag required when any platform declares containers.
+        // This catches the case where ocx_mirror block is absent or release_tag is omitted.
+        let any_platform_has_containers = self.platforms.as_ref().is_some_and(|plats| {
+            plats
+                .values()
+                .any(|p| p.containers.as_ref().is_some_and(|c| !c.is_empty()))
+        });
+        if any_platform_has_containers {
+            let has_release_tag = self.ocx_mirror.as_ref().and_then(|m| m.release_tag.as_ref()).is_some();
+            if !has_release_tag {
+                errors.push("ocx_mirror.release_tag is required when any platform declares containers".to_string());
+            }
         }
 
         errors
@@ -212,6 +308,165 @@ impl MirrorSpec {
     }
 }
 
+// ── Pipeline field validators ────────────────────────────────────────────────
+
+/// Validate `tests:` entries: non-empty, unique names, valid name regex.
+fn validate_tests(tests: &[TestEntry], errors: &mut Vec<String>) {
+    if tests.is_empty() {
+        errors.push("tests: must contain at least one entry".to_string());
+        return;
+    }
+
+    let mut seen = HashSet::new();
+    for entry in tests {
+        if !TEST_NAME_RE.is_match(&entry.name) {
+            errors.push(format!(
+                "tests: invalid name '{}' (must match ^[a-zA-Z][a-zA-Z0-9_-]*$)",
+                entry.name
+            ));
+        }
+        if !seen.insert(&entry.name) {
+            errors.push(format!("tests: duplicate name '{}'", entry.name));
+        }
+    }
+}
+
+/// Infer the default shell for a container image based on its image-name prefix.
+///
+/// Returns `Some(shell)` when a well-known distro prefix matches, `None` when
+/// the image is non-standard and an explicit `shell` is required.
+fn infer_shell_from_image(image: &str) -> Option<&'static str> {
+    // Strip optional tag (everything after `:`) and optional registry prefix
+    // (everything before the last `/` component that looks like `host/repo`).
+    // We only look at the repository basename for prefix matching.
+    let image_name = image.split(':').next().unwrap_or(image);
+    // Take the last path component for matching (`ubuntu:24.04` → `ubuntu`,
+    // `docker.io/library/alpine:3.20` → `alpine`).
+    let base = image_name.split('/').next_back().unwrap_or(image_name);
+
+    // Well-known distros that default to bash.
+    const BASH_PREFIXES: &[&str] = &["ubuntu", "debian", "fedora", "rocky", "opensuse"];
+    // Alpine defaults to sh (no bash by default).
+    const SH_PREFIXES: &[&str] = &["alpine"];
+
+    for prefix in BASH_PREFIXES {
+        if base.starts_with(prefix) {
+            return Some("bash");
+        }
+    }
+    for prefix in SH_PREFIXES {
+        if base.starts_with(prefix) {
+            return Some("sh");
+        }
+    }
+
+    None
+}
+
+/// Validate `platforms:` map: valid platform keys, runner present, container
+/// image format, shell defaults for known distros, explicit shell required for unknown.
+fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &mut Vec<String>) {
+    for (key, config) in platforms {
+        if !PLATFORM_KEY_RE.is_match(key) {
+            errors.push(format!(
+                "platforms: invalid key '{key}' (must be os/arch format, e.g. linux/amd64)"
+            ));
+        }
+
+        if config.runner.trim().is_empty() {
+            errors.push(format!("platforms: '{key}': runner must not be empty"));
+        }
+
+        if let Some(containers) = &config.containers {
+            if containers.is_empty() {
+                errors.push(format!(
+                    "platforms: '{key}': containers must contain at least one entry when declared"
+                ));
+            } else {
+                for container in containers {
+                    // If no explicit shell, the image must have a known default.
+                    if container.shell.is_none() && infer_shell_from_image(&container.image).is_none() {
+                        errors.push(format!(
+                            "platforms: '{key}': container image '{}' has ambiguous shell; \
+                             set an explicit shell (e.g. shell: bash)",
+                            container.image
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Validate `ocx_mirror:` block: release_tag format, rev format.
+fn validate_ocx_mirror_config(config: &OcxMirrorConfig, errors: &mut Vec<String>) {
+    if let Some(tag) = &config.release_tag
+        && !RELEASE_TAG_RE.is_match(tag)
+    {
+        errors.push(format!(
+            "ocx_mirror: release_tag '{tag}' must match ^v\\d+\\.\\d+\\.\\d+(-[a-z0-9.]+)?$"
+        ));
+    }
+
+    if let Some(rev) = &config.rev
+        && !GIT_REV_RE.is_match(rev)
+    {
+        errors.push(format!(
+            "ocx_mirror: rev '{rev}' must be a 40-character lowercase hex SHA"
+        ));
+    }
+}
+
+/// Content-policy check on the `notify:` block.
+///
+/// Rejects any `webhook_secret` value that looks like a hardcoded URL. This is a
+/// *policy* violation (exit 64 / `SpecUsageError`), distinct from the structural
+/// format check in `validate_notify_config` (exit 65 / `SpecInvalid`).
+///
+/// Call this from `load_spec` **before** `spec.validate()` so the correct exit code
+/// is returned even when a structurally-valid spec contains a bad policy choice.
+pub(crate) fn policy_check_notify(notify: &NotifyConfig) -> Result<(), MirrorError> {
+    let Some(discord) = &notify.discord else {
+        return Ok(());
+    };
+    let secret = &discord.webhook_secret;
+
+    // R3 mitigation: reject any hardcoded URL — catches accidental paste of the raw webhook URL.
+    if secret.starts_with("https://") || secret.starts_with("http://") {
+        return Err(MirrorError::SpecUsageError(format!(
+            "webhook_secret: hardcoded URL not allowed; use a GitHub Actions secret name instead (got '{secret}')"
+        )));
+    }
+    if secret.contains("discord.com") || secret.contains("discordapp.com") {
+        return Err(MirrorError::SpecUsageError(format!(
+            "webhook_secret: value must not contain a Discord URL; use a GitHub Actions secret name instead (got '{secret}')"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate `notify:` block: webhook_secret must be a valid GHA secret name format.
+///
+/// URL-literal checks are handled separately by [`policy_check_notify`] with a
+/// `SpecUsageError` (exit 64). This function only checks the structural format,
+/// contributing to `SpecInvalid` (exit 65) errors.
+fn validate_notify_config(config: &NotifyConfig, errors: &mut Vec<String>) {
+    let Some(discord) = &config.discord else {
+        return;
+    };
+
+    let secret = &discord.webhook_secret;
+
+    // Must match GHA secret name format.
+    if !GHA_SECRET_NAME_RE.is_match(secret) {
+        errors.push(format!(
+            "webhook_secret: '{secret}' is not a valid GitHub Actions secret name \
+             (must match ^[A-Z][A-Z0-9_]+$)"
+        ));
+    }
+}
+
 /// Load and validate a mirror spec from a YAML file, resolving `extends` chains.
 ///
 /// If the spec contains an `extends` key, the referenced base file is loaded first
@@ -256,6 +511,13 @@ pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
 
     let spec: MirrorSpec = serde_yaml_ng::from_value(merged)
         .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
+
+    // Policy check (exit 64 / SpecUsageError) must run before structural validate
+    // (exit 65 / SpecInvalid) so the correct exit code is returned for URL-literal
+    // webhook secrets.
+    if let Some(notify) = &spec.notify {
+        policy_check_notify(notify)?;
+    }
 
     let errors = spec.validate(spec_path);
     if !errors.is_empty() {
@@ -1560,5 +1822,692 @@ metadata:
         // debug inherits top-level metadata
         let debug = &variants[1];
         assert!(debug.metadata.is_some());
+    }
+
+    // ── §3.1 S1: Pipeline schema round-trip and validation tests ────────────
+
+    /// Helper: base YAML suitable for all §3.1 round-trip tests. Adds the
+    /// minimum required fields so pipeline-specific blocks can be appended.
+    const MINIMAL_BASE_YAML: &str = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+  linux/arm64:
+    - "shfmt_v.*_linux_arm64$"
+  darwin/arm64:
+    - "shfmt_v.*_darwin_arm64$"
+asset_type:
+  type: binary
+  name: shfmt
+"#;
+
+    #[test]
+    fn round_trip_full_pipeline_spec() {
+        // §3.1: Round-trip: valid mirror.yml with full tests:, platforms:,
+        // ocx_mirror:, notify: blocks parses correctly.
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+  - name: smoke
+    command: bash ./tests/smoke.sh
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+      - image: alpine:3.20
+        shell: sh
+  darwin/arm64:
+    runner: macos-latest
+    shell: bash
+  windows/amd64:
+    runner: windows-latest
+    shell: pwsh
+    tests:
+      - name: version
+        command: shfmt.exe --version
+
+ocx_mirror:
+  release_tag: v0.7.2
+  rev: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+notify:
+  discord:
+    webhook_secret: DISCORD_WEBHOOK_URL
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+
+        // tests block
+        let tests = spec.tests.as_ref().unwrap();
+        assert_eq!(tests.len(), 2);
+        assert_eq!(tests[0].name, "version");
+        assert_eq!(tests[0].command, "shfmt --version");
+        assert_eq!(tests[1].name, "smoke");
+
+        // platforms block
+        let platforms = spec.platforms.as_ref().unwrap();
+        assert!(platforms.contains_key("linux/amd64"));
+        assert!(platforms.contains_key("darwin/arm64"));
+        assert!(platforms.contains_key("windows/amd64"));
+
+        let linux = &platforms["linux/amd64"];
+        assert_eq!(linux.runner, "ubuntu-latest");
+        let containers = linux.containers.as_ref().unwrap();
+        assert_eq!(containers.len(), 2);
+        assert_eq!(containers[0].image, "ubuntu:24.04");
+        assert_eq!(containers[0].shell.as_deref(), Some("bash"));
+        assert_eq!(containers[1].image, "alpine:3.20");
+
+        // per-platform test override
+        let windows = &platforms["windows/amd64"];
+        let win_tests = windows.tests.as_ref().unwrap();
+        assert_eq!(win_tests.len(), 1);
+        assert_eq!(win_tests[0].name, "version");
+        assert_eq!(win_tests[0].command, "shfmt.exe --version");
+
+        // ocx_mirror block
+        let ocx_mirror = spec.ocx_mirror.as_ref().unwrap();
+        assert_eq!(ocx_mirror.release_tag.as_deref(), Some("v0.7.2"));
+        assert_eq!(
+            ocx_mirror.rev.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+
+        // notify block
+        let notify = spec.notify.as_ref().unwrap();
+        let discord = notify.discord.as_ref().unwrap();
+        assert_eq!(discord.webhook_secret, "DISCORD_WEBHOOK_URL");
+    }
+
+    #[test]
+    fn backward_compat_existing_mirrors_parse() {
+        // §3.1: Backward-compat regression: parse every mirrors/*/mirror.yml
+        // unchanged — none should fail to deserialize. Uses glob to ensure
+        // we catch new mirrors added to the repo.
+        //
+        // NOTE: validate() is NOT called here because existing mirrors don't
+        // have the new required pipeline fields. This only verifies serde
+        // deserialization does not break.
+        let pattern = concat!(env!("CARGO_MANIFEST_DIR"), "/../../mirrors/*/mirror.yml");
+        let paths: Vec<_> = glob::glob(pattern)
+            .expect("glob pattern should be valid")
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert!(
+            !paths.is_empty(),
+            "No mirrors/*/mirror.yml found — check path relative to crate"
+        );
+
+        for path in &paths {
+            let content =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+            let result: Result<MirrorSpec, _> = serde_yaml_ng::from_str(&content);
+            assert!(result.is_ok(), "Failed to parse {}: {:?}", path.display(), result.err());
+        }
+    }
+
+    #[test]
+    fn validate_empty_tests_array() {
+        // §3.1: Rejection — empty tests: array
+        let yaml = format!(
+            r#"{base}
+tests: []
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("tests") && (e.contains("empty") || e.contains("least"))),
+            "Expected error about empty tests:, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_duplicate_test_names() {
+        // §3.1: Rejection — duplicate tests[].name
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+  - name: version
+    command: shfmt --version --again
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("duplicate") || e.contains("unique")),
+            "Expected duplicate test name error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_invalid_test_name_starts_with_digit() {
+        // §3.1: Rejection — invalid tests[].name (starts with digit)
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: 1version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("name") || e.contains("invalid")),
+            "Expected invalid test name error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_invalid_platform_key_no_arch() {
+        // §3.1: Rejection — invalid platform key (linux without arch)
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux:
+    runner: ubuntu-latest
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("platform") || e.contains("linux")),
+            "Expected invalid platform key error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_platform_missing_runner() {
+        // §3.1: Rejection — missing runner on declared platform
+        // PlatformConfig.runner is required (non-optional) so this fails at
+        // parse time with serde error.
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        // Missing required `runner` field → serde parse error
+        let result: Result<MirrorSpec, _> = serde_yaml_ng::from_str(&yaml);
+        assert!(result.is_err(), "Expected parse error for missing runner, but got Ok");
+    }
+
+    #[test]
+    fn validate_empty_containers_array() {
+        // §3.1: Rejection — empty containers: array (must be absent OR ≥1)
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers: []
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("container") && (e.contains("empty") || e.contains("least"))),
+            "Expected error about empty containers:, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_ambiguous_shell_on_nonstandard_image() {
+        // §3.1: Rejection — ambiguous shell on non-standard image (no default)
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: mycorp/custom-runner:1.0
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("shell") || e.contains("ambiguous")),
+            "Expected ambiguous shell error for non-standard image, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_release_tag_required_when_linux_has_containers() {
+        // §3.1: Rejection — ocx_mirror.release_tag absent when any linux platform has containers
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("release_tag") || e.contains("ocx_mirror")),
+            "Expected error about missing release_tag when containers declared, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_release_tag_format() {
+        // §3.1: Rejection — release_tag not matching ^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+ocx_mirror:
+  release_tag: "not-a-semver"
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("release_tag") || e.contains("semver") || e.contains("format")),
+            "Expected invalid release_tag format error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rev_not_40_hex() {
+        // §3.1: Rejection — rev not 40-hex
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+ocx_mirror:
+  release_tag: v0.7.2
+  rev: "short"
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("rev") || e.contains("hex") || e.contains("40")),
+            "Expected invalid rev format error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_ocx_install_block() {
+        // §3.1: Rejection — ocx_install: block present at all → SpecUsageError
+        // Catches early adopters who copied an earlier draft spec.
+        // Since ocx_install is not in the schema, serde rejects unknown fields
+        // OR it silently ignores them (depends on #[serde(deny_unknown_fields)]).
+        // We test via validate() returning an error for this field.
+        //
+        // Implementation note: the validator should check for `ocx_install` key
+        // via a raw YAML pass or a dedicated sentinel field, and emit:
+        //   "ocx binary is installed via direct release download; remove `ocx_install:` block"
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+ocx_mirror:
+  release_tag: v0.7.2
+ocx_install: {{}}
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        // If serde rejects unknown fields, this is a parse error.
+        // If serde ignores unknown fields, it's a validate() error.
+        // Either satisfies the rejection requirement.
+        let result: Result<MirrorSpec, _> = serde_yaml_ng::from_str(&yaml);
+        match result {
+            Err(_) => {
+                // serde rejected the unknown field — test passes
+            }
+            Ok(spec) => {
+                let errors = spec.validate(Path::new("test.yml"));
+                assert!(
+                    errors
+                        .iter()
+                        .any(|e| e.contains("ocx_install") || e.contains("release download")),
+                    "Expected rejection of ocx_install: block, got: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_r3_discord_com_in_webhook_secret() {
+        // §3.1 R3 mitigation: webhook_secret containing "discord.com" → rejected
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+notify:
+  discord:
+    webhook_secret: "https://discord.com/api/webhooks/1234/token"
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("webhook_secret") || e.contains("discord") || e.contains("URL")),
+            "Expected R3 rejection for discord.com URL in webhook_secret, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_r3_discordapp_com_in_webhook_secret() {
+        // §3.1 R3 mitigation: webhook_secret containing "discordapp.com" → rejected
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+notify:
+  discord:
+    webhook_secret: "https://discordapp.com/api/webhooks/1234/token"
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("webhook_secret") || e.contains("discordapp") || e.contains("URL")),
+            "Expected R3 rejection for discordapp.com URL in webhook_secret, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_r3_http_url_in_webhook_secret() {
+        // §3.1 R3 mitigation: webhook_secret matching ^https?:// → rejected
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+notify:
+  discord:
+    webhook_secret: "https://example.com/webhook/abc123"
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("webhook_secret") || e.contains("https") || e.contains("URL")),
+            "Expected R3 rejection for http:// URL in webhook_secret, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_r3_valid_secret_name_accepted() {
+        // §3.1 R3 positive: valid GHA secret name accepted without error
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+ocx_mirror:
+  release_tag: v0.7.2
+notify:
+  discord:
+    webhook_secret: DISCORD_WEBHOOK_URL
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        // No webhook_secret errors expected
+        let webhook_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| e.contains("webhook_secret") || e.contains("discord"))
+            .collect();
+        assert!(
+            webhook_errors.is_empty(),
+            "Unexpected webhook_secret errors for valid GHA secret name: {webhook_errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_per_platform_tests_override_replaces_top_level() {
+        // §3.1: Per-platform tests: override replaces top-level entirely (no merge)
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+  - name: smoke
+    command: bash ./tests/smoke.sh
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+  windows/amd64:
+    runner: windows-latest
+    shell: pwsh
+    tests:
+      - name: version
+        command: shfmt.exe --version
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let platforms = spec.platforms.as_ref().unwrap();
+
+        // Top-level tests: 2 entries
+        let top_tests = spec.tests.as_ref().unwrap();
+        assert_eq!(top_tests.len(), 2);
+
+        // windows/amd64 override: 1 entry only (replacement, not merge)
+        let windows = &platforms["windows/amd64"];
+        let win_tests = windows.tests.as_ref().unwrap();
+        assert_eq!(
+            win_tests.len(),
+            1,
+            "Per-platform override must replace, not merge top-level tests"
+        );
+        assert_eq!(win_tests[0].name, "version");
+
+        // linux/amd64 has no override — platforms[].tests is None
+        let linux = &platforms["linux/amd64"];
+        assert!(
+            linux.tests.is_none(),
+            "linux/amd64 must inherit top-level tests (no override)"
+        );
+    }
+
+    #[test]
+    fn validate_default_shell_alpine_infers_sh() {
+        // §3.1: Default-from-image shell inference: alpine:3.20 → sh
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: alpine:3.20
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        // alpine:3.20 has a known default (sh) — no ambiguous shell error expected
+        let shell_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| e.contains("shell") || e.contains("ambiguous"))
+            .collect();
+        assert!(
+            shell_errors.is_empty(),
+            "alpine:3.20 should have inferred shell 'sh'; got errors: {shell_errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_default_shell_ubuntu_infers_bash() {
+        // §3.1: Default-from-image shell inference: ubuntu:24.04 → bash
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        let shell_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| e.contains("shell") || e.contains("ambiguous"))
+            .collect();
+        assert!(
+            shell_errors.is_empty(),
+            "ubuntu:24.04 should have inferred shell 'bash'; got errors: {shell_errors:?}"
+        );
     }
 }

@@ -11,6 +11,7 @@ pub mod install;
 pub mod lock;
 pub mod login;
 pub mod package_description;
+pub mod package_push;
 pub mod paths;
 pub mod pull_dry_run;
 pub mod removed;

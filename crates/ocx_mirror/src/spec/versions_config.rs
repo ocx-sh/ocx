@@ -37,6 +37,10 @@ pub struct VersionsConfig {
     pub new_per_run: Option<usize>,
     #[serde(default)]
     pub backfill: BackfillOrder,
+    /// Cron schedule expression (e.g. `"0 */6 * * *"`) used to generate a
+    /// `schedule:` trigger in the rendered GHA workflow. Omitting this field
+    /// produces a workflow with only `workflow_dispatch` + `push:` triggers.
+    pub poll_interval: Option<String>,
 }
 
 impl VersionsConfig {

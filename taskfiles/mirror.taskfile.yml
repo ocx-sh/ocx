@@ -98,13 +98,31 @@ includes:
     vars:
       PACKAGE: uv
       REPO: ocx.sh/uv
+  bats:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: bats
+      REPO: dev.ocx.sh/bats
+  hawkeye:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: hawkeye
+      REPO: dev.ocx.sh/hawkeye
+  actionlint:
+    taskfile: ../mirrors/mirror.taskfile.yml
+    vars:
+      PACKAGE: actionlint
+      REPO: dev.ocx.sh/actionlint
 
 tasks:
   describe-all:
     desc: Push README and logo for all mirrored packages
     cmds:
+      - task: actionlint:describe
+      - task: bats:describe
       - task: bun:describe
       - task: corretto-8:describe
+      - task: hawkeye:describe
       - task: cmake:describe
       - task: cpython-3.12:describe
       - task: git-cliff:describe
