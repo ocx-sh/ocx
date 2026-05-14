@@ -46,7 +46,7 @@ impl Serialize for Paths {
 }
 
 impl Printable for Paths {
-    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
+    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.package.clone());

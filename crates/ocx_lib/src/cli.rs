@@ -11,6 +11,7 @@
 
 pub mod clap;
 pub mod classify;
+mod data_interface;
 pub mod error;
 pub mod exit_code;
 mod log_level;
@@ -18,15 +19,18 @@ mod log_settings;
 pub mod options;
 mod printer;
 mod styles;
+mod user_interface;
 
 pub use classify::{ClassifyExitCode, classify_error};
+pub use data_interface::{Annotation, DataInterface, TreeItem};
 pub use error::{MetadataResolutionError, UsageError};
 pub use exit_code::ExitCode;
 pub use log_level::LogLevel;
 pub use log_settings::LogSettings;
 pub use options::{ColorMode, ColorModeConfig, ProgressMode};
-pub use printer::{Annotation, Printer, TreeItem};
+pub use printer::{Alignment, Printer, Style};
 pub use styles::clap_styles;
+pub use user_interface::UserInterface;
 
 pub mod progress;
 pub use indicatif;

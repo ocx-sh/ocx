@@ -32,7 +32,7 @@ impl Info {
 }
 
 impl Printable for Info {
-    fn print_plain(&self, _printer: &ocx_lib::cli::Printer) {
+    fn print_plain(&self, _printer: &ocx_lib::cli::DataInterface) {
         // Plain format is handled directly by the command (logo rendering).
         // This is only called as a fallback.
         println!("Version:   {}", self.version);

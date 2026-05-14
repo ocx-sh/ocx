@@ -6,7 +6,7 @@ use super::LogLevel;
 /// Tracing subscriber configuration shared across OCX binaries.
 ///
 /// Supports the following environment variable cascade for log filtering:
-/// `OCX_LOG_CONSOLE` → `OCX_LOG` → `RUST_LOG` → default level (WARN).
+/// `OCX_LOG_CONSOLE` → `OCX_LOG` → `RUST_LOG` → default level (INFO).
 ///
 /// # Usage
 ///
@@ -170,7 +170,7 @@ impl LogSettings {
                 let log_level = self.console_level.map(tracing_subscriber::filter::LevelFilter::from);
                 builder.with_default_directive(
                     log_level
-                        .unwrap_or(tracing_subscriber::filter::LevelFilter::WARN)
+                        .unwrap_or(tracing_subscriber::filter::LevelFilter::INFO)
                         .into(),
                 )
             } else {

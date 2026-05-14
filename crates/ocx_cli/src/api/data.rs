@@ -9,6 +9,7 @@ pub mod env;
 pub mod info;
 pub mod install;
 pub mod lock;
+pub mod login;
 pub mod package_description;
 pub mod paths;
 pub mod pull_dry_run;

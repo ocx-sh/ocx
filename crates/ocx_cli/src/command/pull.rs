@@ -9,7 +9,7 @@ use ocx_lib::oci;
 use ocx_lib::project::DEFAULT_GROUP;
 
 use crate::api;
-use crate::app::project_context::{ProjectContextError, load_project_with_lock};
+use crate::app::project_context::load_project_with_lock;
 use crate::conventions::platforms_or_default;
 
 /// Pre-warm the object store from the project `ocx.lock` without creating symlinks.
@@ -52,32 +52,17 @@ impl Pull {
         // into `["ci", "", "lint"]`; an empty string is a user-typing error.
         for raw in &self.groups {
             if raw.is_empty() {
-                eprintln!("empty group segment in --group value; check for stray commas");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(
+                    cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
+                );
             }
         }
 
         // ── Phase 2–3: project resolution, lock load, staleness gate ─────
-
-        let ctx = match load_project_with_lock(&context).await {
-            Ok(ctx) => ctx,
-            Err(ProjectContextError::NoProject { cwd }) => {
-                eprintln!(
-                    "no ocx.toml found in {} or any parent; create one, or run from a directory that contains it",
-                    cwd.display()
-                );
-                return Ok(cli::ExitCode::UsageError.into());
-            }
-            Err(ProjectContextError::LockMissing { path }) => {
-                eprintln!("ocx.lock not found at {}; run `ocx lock` to create it", path.display());
-                return Ok(cli::ExitCode::ConfigError.into());
-            }
-            Err(ProjectContextError::StaleLock { .. }) => {
-                eprintln!("ocx.lock is stale (ocx.toml changed since last `ocx lock`); run `ocx lock`");
-                return Ok(cli::ExitCode::DataError.into());
-            }
-            Err(other) => return Err(other.into()),
-        };
+        // Errors propagate to the `main.rs` boundary: logged once via
+        // `log::error!` and classified by `app::classify_error` from
+        // `ProjectContextError`'s `ClassifyExitCode` impl.
+        let ctx = load_project_with_lock(&context).await?;
 
         // Validate requested groups against the loaded config. Unknown
         // groups produce exit 64. `default` is always valid since it
@@ -87,8 +72,7 @@ impl Pull {
                 continue;
             }
             if !ctx.config.groups.contains_key(raw) {
-                eprintln!("unknown group '{raw}' in --group filter");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
             }
         }
 

@@ -67,7 +67,7 @@ impl Serialize for Removed {
 }
 
 impl Printable for Removed {
-    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
+    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.package.clone());

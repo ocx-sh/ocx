@@ -26,7 +26,11 @@ pub mod native {
     pub use docker_credential;
     pub use docker_credential::CredentialRetrievalError as DockerCredentialRetrievalError;
     pub use docker_credential::DockerCredential;
+    pub use docker_credential::detect_default_helper as detect_default_docker_helper;
+    pub use docker_credential::erase_credential as erase_docker_credential;
     pub use docker_credential::get_credential as get_docker_credential;
+    pub use docker_credential::list_credentials as list_docker_credentials;
+    pub use docker_credential::store_credential as store_docker_credential;
 }
 
 pub use oci_client::{

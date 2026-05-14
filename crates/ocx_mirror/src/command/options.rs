@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::Printer;
+use ocx_lib::cli::DataInterface;
 
 use crate::pipeline::mirror_result::MirrorResult;
 
@@ -45,7 +45,7 @@ pub struct SyncOptions {
 }
 
 /// Print structured results and return whether any failures occurred.
-pub fn report_results(results: &[MirrorResult], format: OutputFormat, printer: &Printer) -> bool {
+pub fn report_results(results: &[MirrorResult], format: OutputFormat, printer: &DataInterface) -> bool {
     let pushed = results
         .iter()
         .filter(|r| matches!(r, MirrorResult::Pushed { .. }))

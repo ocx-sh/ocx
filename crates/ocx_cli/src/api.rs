@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::Printer;
+use ocx_lib::cli::DataInterface;
 
 use crate::options;
 
@@ -14,33 +14,33 @@ pub mod data;
 /// delegating it to a giant match block in the API layer.
 ///
 /// `print_json` has a default implementation that serializes `self` via
-/// [`Printer::print_json`] (with optional syntax highlighting). Override it
+/// [`DataInterface::print_json`] (with optional syntax highlighting). Override it
 /// only when the JSON representation needs special handling beyond `Serialize`.
 pub trait Printable: serde::Serialize {
-    fn print_plain(&self, printer: &Printer);
+    fn print_plain(&self, data: &DataInterface);
 
-    fn print_json(&self, printer: &Printer) -> anyhow::Result<()>
+    fn print_json(&self, data: &DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,
     {
-        Ok(printer.print_json(self)?)
+        Ok(data.print_json(self)?)
     }
 }
 
 #[derive(Clone)]
 pub struct Api {
     format: options::Format,
-    printer: Printer,
+    data: DataInterface,
     quiet: bool,
 }
 
 impl Api {
-    pub fn new(format: options::Format, printer: Printer, quiet: bool) -> Self {
-        Self { format, printer, quiet }
+    pub fn new(format: options::Format, data: DataInterface, quiet: bool) -> Self {
+        Self { format, data, quiet }
     }
 
-    pub fn printer(&self) -> &Printer {
-        &self.printer
+    pub fn data(&self) -> &DataInterface {
+        &self.data
     }
 
     /// Renders `item` to stdout in the configured format, unless quiet mode is
@@ -51,8 +51,8 @@ impl Api {
             return Ok(());
         }
         match self.format {
-            options::Format::Json => item.print_json(&self.printer)?,
-            options::Format::Plain => item.print_plain(&self.printer),
+            options::Format::Json => item.print_json(&self.data)?,
+            options::Format::Plain => item.print_plain(&self.data),
         }
         Ok(())
     }
@@ -65,6 +65,8 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+
+    use ocx_lib::cli::Printer;
 
     use super::*;
 
@@ -91,11 +93,11 @@ mod tests {
     }
 
     impl Printable for CallCounter {
-        fn print_plain(&self, _printer: &Printer) {
+        fn print_plain(&self, _data: &DataInterface) {
             self.plain.set(self.plain.get() + 1);
         }
 
-        fn print_json(&self, _printer: &Printer) -> anyhow::Result<()> {
+        fn print_json(&self, _data: &DataInterface) -> anyhow::Result<()> {
             self.json.set(self.json.get() + 1);
             Ok(())
         }
@@ -103,7 +105,11 @@ mod tests {
 
     #[test]
     fn report_skips_render_when_quiet() {
-        let api = Api::new(options::Format::Plain, Printer::new(false), true);
+        let api = Api::new(
+            options::Format::Plain,
+            DataInterface::new(Printer::new(false, false)),
+            true,
+        );
         let counter = CallCounter::new();
         api.report(&counter).unwrap();
         assert_eq!(counter.plain.get(), 0);
@@ -112,7 +118,11 @@ mod tests {
 
     #[test]
     fn report_renders_plain_when_not_quiet() {
-        let api = Api::new(options::Format::Plain, Printer::new(false), false);
+        let api = Api::new(
+            options::Format::Plain,
+            DataInterface::new(Printer::new(false, false)),
+            false,
+        );
         let counter = CallCounter::new();
         api.report(&counter).unwrap();
         assert_eq!(counter.plain.get(), 1);
@@ -121,7 +131,11 @@ mod tests {
 
     #[test]
     fn report_skips_json_when_quiet() {
-        let api = Api::new(options::Format::Json, Printer::new(false), true);
+        let api = Api::new(
+            options::Format::Json,
+            DataInterface::new(Printer::new(false, false)),
+            true,
+        );
         let counter = CallCounter::new();
         api.report(&counter).unwrap();
         assert_eq!(counter.plain.get(), 0);

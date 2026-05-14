@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::{
     ConfigInputs, ConfigLoader,
-    cli::{ColorModeConfig, Printer},
+    cli::{ColorModeConfig, DataInterface, Printer, UserInterface},
     env,
     file_structure::{self, BlobStore, TagStore},
     log,
@@ -26,6 +26,7 @@ pub struct Context {
     local_index: oci::index::LocalIndex,
     file_structure: file_structure::FileStructure,
     api: api::Api,
+    ui: UserInterface,
     default_index: oci::index::Index,
     manager: package_manager::PackageManager,
     default_registry: String,
@@ -72,7 +73,10 @@ impl Context {
         })
         .await?;
 
-        let api = api::Api::new(options.format, Printer::new(color_config.stdout), options.quiet);
+        let printer = Printer::new(color_config.stdout, color_config.stderr);
+        let data = DataInterface::new(printer);
+        let ui = UserInterface::new(printer, console::Term::stderr().is_term(), options.quiet);
+        let api = api::Api::new(options.format, data, options.quiet);
 
         let (remote_client, remote_index) = if options.offline {
             (None, None)
@@ -150,6 +154,7 @@ impl Context {
             project_path,
             file_structure,
             api,
+            ui,
             local_index,
             default_index: selected_index,
             manager,
@@ -197,6 +202,10 @@ impl Context {
 
     pub fn api(&self) -> &api::Api {
         &self.api
+    }
+
+    pub fn ui(&self) -> &UserInterface {
+        &self.ui
     }
 
     pub fn manager(&self) -> &package_manager::PackageManager {

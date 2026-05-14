@@ -75,19 +75,19 @@ pub struct ProjectContext {
 pub enum ProjectContextError {
     /// No `ocx.toml` was found in `cwd` or any parent directory (nor via the
     /// `OCX_PROJECT` env override or `--project` flag).
-    #[error("no ocx.toml found in {cwd} or any parent")]
+    #[error("no ocx.toml found in {cwd} or any parent; run `ocx init` to create one")]
     NoProject { cwd: PathBuf },
 
     /// `ocx.toml` was found but the sibling `ocx.lock` is absent. The user
     /// must run `ocx lock` to create it before project-tier commands that
     /// require a lock can proceed.
-    #[error("ocx.lock not found at {path}")]
+    #[error("ocx.lock not found at {path}; run `ocx lock` to create it")]
     LockMissing { path: PathBuf },
 
     /// `ocx.lock` exists but its stored `declaration_hash` no longer matches
     /// the hash of the current `ocx.toml`. The lock is stale and must be
     /// regenerated with `ocx lock`.
-    #[error("ocx.lock is stale (ocx.toml changed since last `ocx lock`)")]
+    #[error("ocx.lock is stale (ocx.toml changed since last `ocx lock`); run `ocx lock`")]
     StaleLock { lock_path: PathBuf },
 
     /// A project-tier library error (parse failure, identifier error, etc.)
@@ -105,6 +105,25 @@ pub enum ProjectContextError {
     /// `#[error("{0}")]` rationale as `Project`.
     #[error("{0}")]
     Config(#[from] ocx_lib::ConfigError),
+}
+
+impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
+    fn classify(&self) -> Option<ocx_lib::cli::ExitCode> {
+        use ocx_lib::cli::ExitCode;
+        match self {
+            // Misuse: the user pointed a project-tier command at a tree with
+            // no `ocx.toml`.
+            Self::NoProject { .. } => Some(ExitCode::UsageError),
+            // Project exists but is not locked — a configuration gap.
+            Self::LockMissing { .. } => Some(ExitCode::ConfigError),
+            // Lock exists but disagrees with `ocx.toml` — stale on-disk data.
+            Self::StaleLock { .. } => Some(ExitCode::DataError),
+            // Defer to the wrapped library error's own classification via the
+            // `source()` chain (both variants carry `#[source]` through
+            // `#[from]`).
+            Self::Project(_) | Self::Config(_) => None,
+        }
+    }
 }
 
 /// Load `ocx.toml`, its sibling `ocx.lock`, validate the staleness gate,

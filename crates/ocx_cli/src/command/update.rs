@@ -11,7 +11,8 @@ use ocx_lib::project::{
 };
 
 use crate::api::data::lock::{LockEntry, LockReport};
-use crate::app::project_context::{ProjectContextError, load_project_for_mutate};
+use crate::app::CommandError;
+use crate::app::project_context::load_project_for_mutate;
 
 /// Re-resolve advisory tags for one or more tools and rewrite `ocx.lock`.
 ///
@@ -56,22 +57,14 @@ impl Update {
         // Pre-validate empty `--group` segments before any I/O.
         for raw in &self.groups {
             if raw.is_empty() {
-                eprintln!("empty group segment in --group value; check for stray commas");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(
+                    cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
+                );
             }
         }
 
-        let guard = match load_project_for_mutate(&context).await {
-            Ok(g) => g,
-            Err(ProjectContextError::NoProject { cwd }) => {
-                eprintln!(
-                    "no ocx.toml found in {} or any parent; run `ocx update` from a project directory",
-                    cwd.display()
-                );
-                return Ok(cli::ExitCode::UsageError.into());
-            }
-            Err(other) => return Err(other.into()),
-        };
+        // Errors propagate to the `main.rs` boundary (logged + classified).
+        let guard = load_project_for_mutate(&context).await?;
 
         // Validate group filter against the loaded snapshot.
         for raw in &self.groups {
@@ -79,8 +72,7 @@ impl Update {
                 continue;
             }
             if !guard.config().groups.contains_key(raw) {
-                eprintln!("unknown group '{raw}' in --group filter");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
             }
         }
 
@@ -89,8 +81,11 @@ impl Update {
             let in_default = guard.config().tools.contains_key(name);
             let in_groups = guard.config().groups.values().any(|tools| tools.contains_key(name));
             if !in_default && !in_groups {
-                eprintln!("tool '{name}' not declared in ocx.toml");
-                return Ok(cli::ExitCode::NotFound.into());
+                return Err(CommandError::new(
+                    format!("tool '{name}' not declared in ocx.toml"),
+                    cli::ExitCode::NotFound,
+                )
+                .into());
             }
         }
 
@@ -106,11 +101,14 @@ impl Update {
             let prev = match guard.previous_lock() {
                 Some(p) => p.clone(),
                 None => {
-                    eprintln!(
-                        "ocx.lock not found at {}; run `ocx lock` to create it before updating a subset",
-                        guard.lock_path().display()
-                    );
-                    return Ok(cli::ExitCode::ConfigError.into());
+                    return Err(CommandError::new(
+                        format!(
+                            "ocx.lock not found at {}; run `ocx lock` to create it before updating a subset",
+                            guard.lock_path().display()
+                        ),
+                        cli::ExitCode::ConfigError,
+                    )
+                    .into());
                 }
             };
             // Try the partial resolve first. When the predecessor's
@@ -150,18 +148,22 @@ impl Update {
         // no predecessor lock to compare against.
         if self.check {
             let Some(prev) = guard.previous_lock() else {
-                eprintln!(
-                    "ocx.lock not found at {}; run `ocx lock` to create it",
-                    guard.lock_path().display()
-                );
-                return Ok(cli::ExitCode::ConfigError.into());
+                return Err(CommandError::new(
+                    format!(
+                        "ocx.lock not found at {}; run `ocx lock` to create it",
+                        guard.lock_path().display()
+                    ),
+                    cli::ExitCode::ConfigError,
+                )
+                .into());
             };
             if !lock_content_matches(&new_lock, prev) {
-                eprintln!(
+                return Err(CommandError::new(
                     "ocx.lock candidate would change pinned content; \
-                     re-run `ocx update` (without --check) to refresh the lock."
-                );
-                return Ok(cli::ExitCode::DataError.into());
+                     re-run `ocx update` (without --check) to refresh the lock.",
+                    cli::ExitCode::DataError,
+                )
+                .into());
             }
             return Ok(ExitCode::SUCCESS);
         }

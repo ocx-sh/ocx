@@ -739,6 +739,139 @@ ocx install [OPTIONS] <PACKAGE>...
 On Windows, `install` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. Generated entrypoint launchers are `.cmd` files and require `PATHEXT` to advertise that extension before bare-name lookup (e.g. `cmake`) can find them. Add `.CMD` to `PATHEXT` (typically via your shell profile) or invoke launchers with their full filename.
 :::
 
+### `login` {#login}
+
+Authenticate to a registry and persist the credentials for use by subsequent
+`ocx install`, `ocx pull`, and other registry-accessing commands.
+
+Credentials are stored in the same `~/.docker/config.json` that [`docker login`][docker-login]
+and [`oras login`][oras-login] write. The three tools interoperate: a credential written by any
+one of them is readable by the others.
+
+**Usage**
+
+```shell
+ocx login [OPTIONS] [REGISTRY]
+```
+
+**Arguments**
+
+- `[REGISTRY]`: Registry hostname (e.g. `ghcr.io`, `registry.example.com`). Optional — falls back
+  to `OCX_DEFAULT_REGISTRY` (default `ocx.sh`) when omitted.
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--username <USER>` | `-u` | Username for the registry. Prompted interactively when omitted on a TTY. | *(prompt)* |
+| `--password-stdin` | — | Read the password or token from stdin. Required in non-interactive contexts. No `-p/--password VALUE` flag — argv-visible secrets leak via `ps` and shell history (CWE-214). | off |
+| `--allow-insecure-store` | — | Permit storing credentials as base64 in `auths[registry]` when no native credential helper is configured. Default: refuse, exit 78. | off |
+| `-h`, `--help` | | Print help information. | — |
+
+:::details Reserved flags
+
+`--auth-type <TYPE>` is reserved for a future v2 OIDC / browser-OAuth flow. Passing it today emits a usage error (exit 64). Plain HTTP registries are enabled via `OCX_INSECURE_REGISTRIES` environment variable rather than a login flag.
+
+:::
+
+**Credential storage tiers** (highest priority first):
+
+1. `credHelpers[REGISTRY]` in `~/.docker/config.json` — per-registry helper
+2. `credsStore` — global default helper
+3. Plaintext `auths[REGISTRY].auth` — base64 fallback (requires `--allow-insecure-store`)
+
+**Examples**
+
+Interactive login on a developer workstation with a configured credential helper:
+
+```shell
+ocx login ghcr.io
+# Username: myuser
+# Password: ****
+# Login succeeded
+```
+
+Non-interactive CI login piping a token on stdin:
+
+```shell
+echo "$GHCR_TOKEN" | ocx login -u "$GHCR_USER" --password-stdin ghcr.io
+```
+
+Headless environment without a native keychain daemon:
+
+```shell
+echo "$TOKEN" | ocx login -u ci --password-stdin --allow-insecure-store internal.registry.example.com
+```
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Credentials persisted successfully. |
+| 64 | Usage error — missing required flag, empty password, or `--password VALUE` attempted. |
+| 74 | I/O error writing `~/.docker/config.json`. |
+| 75 | Credential helper timed out (transient — retry). |
+| 78 | No credential store available (no helper configured and `--allow-insecure-store` not passed), or helper not on PATH. |
+| 80 | Credential helper failed (non-sentinel exit), helper output too large, or credentials rejected. |
+
+**Docker interop**
+
+`ocx login` writes to the same `~/.docker/config.json` as `docker login` and `oras login`.
+Override the location with [`DOCKER_CONFIG`][env-docker-config].
+
+**JSON output**
+
+```shell
+ocx --format json login ghcr.io
+# {"registry":"ghcr.io","username":"ocx-bot"}
+```
+
+---
+
+### `logout` {#logout}
+
+Remove stored credentials for a registry.
+
+Always exits 0 — including when the registry was never logged in. This matches the convention of
+[`docker logout`][docker-logout], [`oras logout`][oras-logout], and [`helm registry logout`][helm-logout].
+CI cleanup scripts must not fail when a previous step already removed the credentials.
+
+**Usage**
+
+```shell
+ocx logout [REGISTRY]
+```
+
+**Arguments**
+
+- `[REGISTRY]`: Registry hostname. Optional — falls back to `OCX_DEFAULT_REGISTRY` when omitted.
+
+**Examples**
+
+```shell
+ocx logout ghcr.io
+# Logged out of ghcr.io
+
+# CI cleanup — safe even if no login occurred
+ocx logout internal.registry.example.com || true  # redundant: already exits 0
+```
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Credentials removed, or registry was not logged in (noop). |
+| 74 | I/O error writing `~/.docker/config.json`. |
+
+**JSON output**
+
+```shell
+ocx --format json logout ghcr.io
+# {"registry":"ghcr.io"}
+```
+
+---
+
 ### `lock` {#lock}
 
 Resolves every tool tag in the nearest `ocx.toml` to a pinned OCI manifest digest and writes the result to `ocx.lock` next to it. The command is fully transactional — either every tool resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
@@ -1522,9 +1655,17 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [env-no-project]: ./environment.md#ocx-no-project
 [env-ocx-quiet]: ./environment.md#ocx-quiet
 [env-ocx-jobs]: ./environment.md#ocx-jobs
+[env-docker-config]: ./environment.md#external-docker-config
 
 <!-- reference -->
 [config-ref]: ./configuration.md
+
+<!-- external: login/logout interop -->
+[docker-login]: https://docs.docker.com/reference/cli/docker/login/
+[docker-logout]: https://docs.docker.com/reference/cli/docker/logout/
+[oras-login]: https://oras.land/docs/commands/oras_login/
+[oras-logout]: https://oras.land/docs/commands/oras_logout/
+[helm-logout]: https://helm.sh/docs/helm/helm_registry_logout/
 
 <!-- internal -->
 [entry-points]: ./metadata.md#entry-points

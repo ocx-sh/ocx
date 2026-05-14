@@ -24,7 +24,7 @@ use ocx_lib::package_manager::launcher;
 use ocx_lib::project::{ALL_GROUP, DEFAULT_GROUP, Origin, ResolvedTool, compose_tool_set, expand_all_keyword};
 use ocx_lib::utility::child_process;
 
-use crate::app::project_context::{ProjectContextError, load_project_with_lock};
+use crate::app::project_context::load_project_with_lock;
 use crate::conventions::platforms_or_default;
 
 /// Run a command with the composed environment from the project toolchain.
@@ -122,32 +122,15 @@ impl Run {
         // into `["ci", "", "lint"]`; an empty string is a user-typing error.
         for raw in &self.groups {
             if raw.is_empty() {
-                eprintln!("empty group segment in --group value");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(cli::UsageError::new("empty group segment in --group value").into());
             }
         }
 
         // ── Phase B: project context ──────────────────────────────────────
-
-        let ctx = match load_project_with_lock(&context).await {
-            Ok(ctx) => ctx,
-            Err(ProjectContextError::NoProject { cwd }) => {
-                eprintln!(
-                    "no ocx.toml found in {} or any parent; create one, or run from a directory that contains it",
-                    cwd.display()
-                );
-                return Ok(cli::ExitCode::UsageError.into());
-            }
-            Err(ProjectContextError::LockMissing { path }) => {
-                eprintln!("ocx.lock not found at {}; run `ocx lock` to create it", path.display());
-                return Ok(cli::ExitCode::ConfigError.into());
-            }
-            Err(ProjectContextError::StaleLock { .. }) => {
-                eprintln!("ocx.lock is stale (ocx.toml changed since last `ocx lock`); run `ocx lock`");
-                return Ok(cli::ExitCode::DataError.into());
-            }
-            Err(other) => return Err(other.into()),
-        };
+        // Errors propagate to the `main.rs` boundary: logged once and
+        // classified by `app::classify_error` from `ProjectContextError`'s
+        // `ClassifyExitCode` impl (NoProject→64, LockMissing→78, StaleLock→65).
+        let ctx = load_project_with_lock(&context).await?;
 
         // Phase B.3: validate `-g` groups against the loaded config.
         // `default` and `all` are always valid (all is expanded later).
@@ -157,8 +140,7 @@ impl Run {
                 continue;
             }
             if !ctx.config.groups.contains_key(raw) {
-                eprintln!("unknown group '{raw}' in --group filter");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
             }
         }
 
@@ -180,15 +162,14 @@ impl Run {
         let filtered = match filter_by_names(composed, &self.names) {
             Ok(v) => v,
             Err(RunFilterError::Unknown { name }) => {
-                eprintln!("binding '{name}' not found in selected groups");
-                return Ok(cli::ExitCode::UsageError.into());
+                return Err(cli::UsageError::new(format!("binding '{name}' not found in selected groups")).into());
             }
             Err(RunFilterError::Ambiguous { name, groups }) => {
                 let groups_str = groups.join(", ");
-                eprintln!(
+                return Err(cli::UsageError::new(format!(
                     "binding '{name}' exists in multiple selected groups: [{groups_str}]; pass `-g <group>` to narrow scope"
-                );
-                return Ok(cli::ExitCode::UsageError.into());
+                ))
+                .into());
             }
         };
 

@@ -25,6 +25,8 @@ pub mod init;
 pub mod install;
 pub mod launcher;
 pub mod lock;
+pub mod login;
+pub mod logout;
 pub mod package;
 pub mod package_create;
 pub mod package_describe;
@@ -75,6 +77,10 @@ pub enum Command {
     Install(install::Install),
     /// Resolve tool tags to digests and write ocx.lock.
     Lock(lock::Lock),
+    /// Authenticate to a registry and persist credentials.
+    Login(login::Login),
+    /// Remove credentials for a registry.
+    Logout(logout::Logout),
     /// Remove an installed candidate for one or more packages.
     Uninstall(uninstall::Uninstall),
     /// Re-resolve advisory tags and rewrite ocx.lock for one or more tools.
@@ -118,6 +124,8 @@ impl Command {
             Command::Init(init) => init.execute(context).await,
             Command::Install(install) => install.execute(context).await,
             Command::Lock(lock) => lock.execute(context).await,
+            Command::Login(login) => login.execute(context).await,
+            Command::Logout(logout) => logout.execute(context).await,
             Command::Uninstall(uninstall) => uninstall.execute(context).await,
             Command::Update(update) => update.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,

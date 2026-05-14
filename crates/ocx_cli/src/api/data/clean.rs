@@ -109,7 +109,7 @@ impl Printable for Clean {
     ///   `Type | Path`
     ///
     /// See [`adr_clean_project_backlinks.md`] "Dry-run preview shape (plain)".
-    fn print_plain(&self, printer: &ocx_lib::cli::Printer) {
+    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
         let has_attribution = self.entries.iter().any(|e| !e.held_by.is_empty());
 
         if has_attribution {

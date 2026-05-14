@@ -5,9 +5,14 @@ use crate::{env, log, oci, prelude::*};
 
 mod auth_type;
 pub mod error;
+pub mod login;
+pub mod registry_url;
+pub mod store;
 
 pub use auth_type::AuthType;
 pub use error::AuthError;
+pub use registry_url::canonicalize_registry;
+pub use store::{Credential, CredentialStore, DockerCredentialStore, StoreOptions};
 
 #[derive(Clone)]
 pub struct Auth {
@@ -49,7 +54,7 @@ impl Auth {
             Ok(auth) => auth,
             Err(error) => {
                 log::warn!(
-                    "Failed to retrieve authentication for registry '{}', falling back to anonymous: {}",
+                    "failed to retrieve authentication for registry '{}', falling back to anonymous: {}",
                     registry,
                     error
                 );
@@ -78,11 +83,15 @@ impl Default for Auth {
 }
 
 /// Retrieves Docker credentials for the specified registry using the native Docker credential helper.
+///
+/// Canonicalizes the registry argument through `auth::registry_url::canonicalize_registry`
+/// so the same key form is used for read (here) and write (`auth::store::DockerCredentialStore`).
 fn get_docker_auth(registry: impl AsRef<str>) -> Result<Option<oci::native::Auth>> {
     use docker_credential::CredentialRetrievalError as DockerError;
     use docker_credential::DockerCredential;
 
-    let registry = registry.as_ref();
+    let registry = canonicalize_registry(registry.as_ref());
+    let registry = registry.as_str();
     let auth = match oci::native::get_docker_credential(registry) {
         Ok(DockerCredential::IdentityToken(token)) => Some(oci::native::Auth::Bearer(token)),
         Ok(DockerCredential::UsernamePassword(username, password)) => {
@@ -91,6 +100,7 @@ fn get_docker_auth(registry: impl AsRef<str>) -> Result<Option<oci::native::Auth
         Err(DockerError::NoCredentialConfigured)
         | Err(DockerError::ConfigNotFound)
         | Err(DockerError::ConfigReadError)
+        | Err(DockerError::NotFound)
         | Err(DockerError::HelperFailure {
             helper: _,
             stdout: _,
@@ -100,7 +110,7 @@ fn get_docker_auth(registry: impl AsRef<str>) -> Result<Option<oci::native::Auth
             None
         }
         Err(error) => {
-            log::warn!("Failed to retrieve Docker credentials for registry '{}'", registry);
+            log::warn!("failed to retrieve Docker credentials for registry '{}'", registry);
             return Err(AuthError::DockerCredentialRetrieval(error).into());
         }
     };

@@ -1,242 +1,312 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::borrow::Cow;
-use std::fmt::Write;
+use std::io::Write as _;
+use std::ops::Deref;
 
-use serde::Serialize;
-
-use crate::Result;
-
-// ── Semantic styles ──────────────────────────────────────────────
-
-const STYLE_TABLE_HEADER: console::Style = console::Style::new().underlined();
-const STYLE_TABLE_ROW_EVEN: console::Style = console::Style::new();
-const STYLE_TABLE_ROW_ODD: console::Style = console::Style::new().reverse();
-const STYLE_PRINT_HINT: console::Style = console::Style::new().dim().italic().underlined();
-const STYLE_TREE_LABEL: console::Style = console::Style::new().bold();
-const STYLE_TREE_CHROME: console::Style = console::Style::new().dim();
-const STYLE_TREE_ANNOTATION: console::Style = console::Style::new().yellow();
-
-/// A single annotation on a tree node.
+/// The single write point for the CLI. Owns the per-stream color decision.
 ///
-/// Each annotation carries text, an optional title, and an optional
-/// [`console::Style`].  When no style is provided, the printer falls
-/// back to its default annotation style.
-pub struct Annotation {
-    pub text: Cow<'static, str>,
-    pub style: Option<console::Style>,
-}
-
-impl Annotation {
-    /// Creates an annotation with the printer's default style.
-    pub fn new(text: impl Into<Cow<'static, str>>) -> Self {
-        Self {
-            text: text.into(),
-            style: None,
-        }
-    }
-
-    /// Sets a custom style for this annotation.
-    pub fn with_style(mut self, style: console::Style) -> Self {
-        self.style = Some(style);
-        self
-    }
-}
-
-/// Trait for types that can be rendered as a tree.
-pub trait TreeItem {
-    /// The primary display text for this node (shown bold when color is enabled).
-    fn label(&self) -> String;
-    /// Child nodes.
-    fn children(&self) -> &[Self]
-    where
-        Self: Sized;
-    /// Annotations appended after the label, separated by `·`.
-    ///
-    /// Each annotation carries its own style hint. The printer applies the
-    /// annotation's style when present, falling back to a default otherwise.
-    fn annotations(&self) -> Vec<Annotation> {
-        Vec::new()
-    }
-}
-
-/// Stdout output helper that carries the resolved color setting.
+/// Callers never call `console::Style::apply_to` themselves and never branch
+/// on color. They build a line through the fluent [`Line`] builder returned
+/// by [`Printer::cout`] / [`Printer::cerr`], declaring each segment's text
+/// and intended [`Style`]; the builder applies color only when the target
+/// stream's color is enabled — but layout (alignment / margin) is *always*
+/// applied so columns line up identically with and without color.
 ///
-/// Used by [`Printable`] implementations to format plain-text tables.
-/// When color is enabled, headers are underlined and data rows alternate
-/// between normal and reversed styles.
+/// ```ignore
+/// printer.cerr()
+///     .render("warning:", &STYLE_WARN)   // colored iff stderr color on
+///     .plain(" disk almost full")          // never colored
+///     .end_line();                          // emit with trailing '\n'
+/// ```
+///
+/// `push_style` / `pop_style` layer an extra color (e.g. a background) over
+/// every following segment until popped. Because `console::Style` values do
+/// not merge, layering is done by nesting (`pushed.apply_to(seg.apply_to(t))`):
+/// fine for a backdrop, but two conflicting attributes resolve to the inner.
+/// Layout on a pushed style is ignored — only [`Line::render`]'s own `style`
+/// argument drives alignment.
 #[derive(Clone, Copy, Debug)]
 pub struct Printer {
-    color: bool,
+    stdout_color: bool,
+    stderr_color: bool,
 }
 
-const GAP: &str = "  ";
-
 impl Printer {
-    pub fn new(color: bool) -> Self {
-        Self { color }
-    }
-
-    /// Whether stdout color is enabled.
-    pub fn color(&self) -> bool {
-        self.color
-    }
-
-    /// Serializes `value` as pretty-printed JSON, with syntax highlighting when color is enabled.
-    pub fn print_json(&self, value: &impl Serialize) -> Result<()> {
-        if self.color {
-            let json_value = serde_json::to_value(value)?;
-            println!(
-                "{}",
-                colored_json::to_colored_json(&json_value, colored_json::ColorMode::On)?
-            );
-        } else {
-            println!("{}", serde_json::to_string_pretty(value)?);
+    pub fn new(stdout_color: bool, stderr_color: bool) -> Self {
+        Self {
+            stdout_color,
+            stderr_color,
         }
-        Ok(())
     }
 
-    /// Prints a table of strings to stdout, with columns aligned based on the longest cell in each column.
-    pub fn print_table(&self, headers: &[&str], rows: &[Vec<String>]) {
-        let widths = Self::column_widths(headers, rows);
-        let max_rows = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    /// Whether stdout color is enabled. Exposed only for the rare caller that
+    /// must compute display width before writing (e.g. `info` logo layout),
+    /// where ANSI in the measured string would break alignment.
+    pub fn stdout_color(&self) -> bool {
+        self.stdout_color
+    }
 
-        let header_style = STYLE_TABLE_HEADER;
-        let even_style = STYLE_TABLE_ROW_EVEN;
-        let odd_style = STYLE_TABLE_ROW_ODD;
-        let mut buf = String::new();
+    /// Begin a line targeting **stdout**.
+    pub fn cout(&self) -> Line {
+        Line::new(Target::Stdout, self.stdout_color)
+    }
 
-        // Header row
-        for (i, header) in headers.iter().enumerate() {
-            if i > 0 {
-                buf.push_str(GAP);
+    /// Begin a line targeting **stderr**.
+    pub fn cerr(&self) -> Line {
+        Line::new(Target::Stderr, self.stderr_color)
+    }
+}
+
+/// Horizontal alignment used by [`Style::apply`] when a [`Style::margin`] is
+/// set and the text is narrower than the margin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Alignment {
+    #[default]
+    Left,
+    Right,
+    Center,
+}
+
+/// A CLI cell style: a `console::Style` plus layout (alignment + margin).
+///
+/// `Style` [`Deref`]s to the inner [`console::Style`], so it is a drop-in
+/// where a `console::Style` was used for coloring (`style.apply_to(x)`,
+/// `style.force_styling(..)`, …). The added [`Style::apply`] pads the text to
+/// [`Style::margin`] columns per [`Style::alignment`] — letting tables and
+/// trees align by margin instead of `format!("{:width$}")` plus a separate
+/// coloring pass, which double-counts ANSI bytes and breaks alignment under
+/// color.
+///
+/// Layout is color-independent: [`Line::render`] always calls [`Style::apply`]
+/// and only conditionally applies color, so a column is the same width with
+/// `--color never` and `--color always`.
+///
+/// Built with `const fn` builders so `STYLE_*` items stay `const`:
+///
+/// ```ignore
+/// const HDR: Style = Style::new()
+///     .margin_left(12)
+///     .style(console::Style::new().underlined());
+/// ```
+#[derive(Clone, Debug)]
+pub struct Style {
+    alignment: Alignment,
+    margin: usize,
+    style: console::Style,
+}
+
+impl Style {
+    /// An unstyled, zero-margin, left-aligned style. `const` so call sites
+    /// can declare `const STYLE_X: Style = Style::new()...;`.
+    pub const fn new() -> Self {
+        Self {
+            alignment: Alignment::Left,
+            margin: 0,
+            style: console::Style::new(),
+        }
+    }
+
+    /// Replace the color/attribute layer with `style`.
+    pub const fn style(mut self, style: console::Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// Set the alignment used when padding to [`Self::margin`].
+    pub const fn alignment(mut self, alignment: Alignment) -> Self {
+        self.alignment = alignment;
+        self
+    }
+
+    /// Minimum column width. [`Self::apply`] pads narrower text to this many
+    /// display columns; `0` (default) disables padding entirely.
+    pub const fn margin(mut self, margin: usize) -> Self {
+        self.margin = margin;
+        self
+    }
+
+    /// `margin(margin)` + left alignment (pad on the right).
+    pub const fn margin_left(mut self, margin: usize) -> Self {
+        self.margin = margin;
+        self.alignment = Alignment::Left;
+        self
+    }
+
+    /// `margin(margin)` + right alignment (pad on the left).
+    pub const fn margin_right(mut self, margin: usize) -> Self {
+        self.margin = margin;
+        self.alignment = Alignment::Right;
+        self
+    }
+
+    /// `margin(margin)` + center alignment (pad both sides, extra space on
+    /// the right when the padding is odd).
+    pub const fn margin_center(mut self, margin: usize) -> Self {
+        self.margin = margin;
+        self.alignment = Alignment::Center;
+        self
+    }
+
+    /// Pad `text` with spaces to [`Self::margin`] display columns per
+    /// [`Self::alignment`]. Returns `text` unchanged when it is already at
+    /// least `margin` wide (never truncates) or when `margin == 0`.
+    ///
+    /// This is the layout half of a style; the color half is the inner
+    /// `console::Style` reached through [`Deref`]. Width is measured with
+    /// `console::measure_text_width`, so already-styled input still aligns.
+    pub fn apply(&self, text: &str) -> String {
+        let width = console::measure_text_width(text);
+        if width >= self.margin {
+            return text.to_string();
+        }
+        let pad = self.margin - width;
+        match self.alignment {
+            Alignment::Left => format!("{text}{}", " ".repeat(pad)),
+            Alignment::Right => format!("{}{text}", " ".repeat(pad)),
+            Alignment::Center => {
+                let left = pad / 2;
+                format!("{}{text}{}", " ".repeat(left), " ".repeat(pad - left))
             }
-            write!(buf, "{:width$}", header, width = widths[i]).unwrap();
         }
-        self.print_styled(&buf, &header_style);
-        buf.clear();
+    }
+}
 
-        // Data rows
-        for i in 0..max_rows {
-            for (j, row) in rows.iter().enumerate() {
-                if j > 0 {
-                    buf.push_str(GAP);
+impl Default for Style {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Deref for Style {
+    type Target = console::Style;
+
+    fn deref(&self) -> &console::Style {
+        &self.style
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Target {
+    Stdout,
+    Stderr,
+}
+
+/// Fluent single-line builder. Every chainable method returns `self`; the
+/// line is written only by [`Line::end`] (no newline) or [`Line::end_line`].
+/// Color is decided once (the originating stream's setting): when off, every
+/// `render` / `push_style` is a no-op color-wise — but [`Style`] layout
+/// (alignment / margin) is still applied so output stays aligned.
+pub struct Line {
+    target: Target,
+    color: bool,
+    buf: String,
+    style_stack: Vec<console::Style>,
+}
+
+impl Line {
+    fn new(target: Target, color: bool) -> Self {
+        Self {
+            target,
+            color,
+            buf: String::new(),
+            style_stack: Vec::new(),
+        }
+    }
+
+    /// Apply the active pushed-style stack (outermost first) over `s`. Color
+    /// only — pushed styles never re-align.
+    fn layer(&self, s: String) -> String {
+        if !self.color {
+            return s;
+        }
+        let mut acc = s;
+        for style in self.style_stack.iter().rev() {
+            acc = style.apply_to(acc).to_string();
+        }
+        acc
+    }
+
+    /// Append `text`: always laid out per `style` ([`Style::apply`]), then
+    /// colored with `style` **iff** the target stream's color is enabled,
+    /// then any pushed styles layered on top.
+    pub fn render(mut self, text: impl std::fmt::Display, style: &Style) -> Self {
+        let aligned = style.apply(&text.to_string());
+        let painted = if self.color {
+            style.apply_to(&aligned).to_string()
+        } else {
+            aligned
+        };
+        self.buf.push_str(&self.layer(painted));
+        self
+    }
+
+    /// Append `text` verbatim — never colored, never padded (still subject to
+    /// pushed styles).
+    pub fn plain(mut self, text: impl std::fmt::Display) -> Self {
+        let s = self.layer(text.to_string());
+        self.buf.push_str(&s);
+        self
+    }
+
+    /// Append a single space, colored by pushed styles but not by `render` styles.
+    pub fn space(mut self) -> Self {
+        let s = self.layer(" ".to_string());
+        self.buf.push_str(&s);
+        self
+    }
+
+    /// Append `n` spaces, colored by pushed styles but not by `render` styles.
+    pub fn spaces(mut self, n: usize) -> Self {
+        let s = self.layer(" ".repeat(n));
+        self.buf.push_str(&s);
+        self
+    }
+
+    /// Push an extra color applied to every following segment until
+    /// [`Line::pop_style`]. Only the color layer is used; any margin /
+    /// alignment on `style` is ignored. No-op when color is disabled.
+    pub fn push_style(mut self, style: Style) -> Self {
+        self.style_stack.push(style.style);
+        self
+    }
+
+    /// Remove the most recently pushed style.
+    pub fn pop_style(mut self) -> Self {
+        self.style_stack.pop();
+        self
+    }
+
+    fn write(&self, newline: bool) {
+        match self.target {
+            Target::Stdout => {
+                let mut out = std::io::stdout();
+                if newline {
+                    let _ = writeln!(out, "{}", self.buf);
+                } else {
+                    let _ = write!(out, "{}", self.buf);
+                    let _ = out.flush();
                 }
-                let cell = row.get(i).map_or("", |c| c.as_str());
-                write!(buf, "{:width$}", cell, width = widths[j]).unwrap();
             }
-            let style = if i % 2 == 0 { &even_style } else { &odd_style };
-            self.print_styled(&buf, style);
-            buf.clear();
-        }
-    }
-
-    /// Prints a hint or informational message (dim, italic, and underlined when color is enabled).
-    pub fn print_hint(&self, text: &str) {
-        if self.color {
-            println!("{}", STYLE_PRINT_HINT.apply_to(text));
-        } else {
-            println!("{text}");
-        }
-    }
-
-    /// Prints a chain of steps connected by `→`, with bold steps and dim connectors.
-    pub fn print_steps(&self, steps: &[impl std::fmt::Display]) {
-        if self.color {
-            let parts: Vec<_> = steps
-                .iter()
-                .map(|s| format!("{}", STYLE_TREE_LABEL.apply_to(s)))
-                .collect();
-            println!("{}", parts.join(&format!(" {} ", STYLE_TREE_CHROME.apply_to("→"))));
-        } else {
-            let parts: Vec<_> = steps.iter().map(|s| s.to_string()).collect();
-            println!("{}", parts.join(" → "));
-        }
-    }
-
-    /// Prints a tree rooted at `root` using standard POSIX tree connectors.
-    pub fn print_tree<T: TreeItem>(&self, root: &T) {
-        self.print_tree_node(root, "", true, true);
-    }
-
-    fn print_tree_node<T: TreeItem>(&self, node: &T, prefix: &str, is_last: bool, is_root: bool) {
-        let connector = if is_root {
-            ""
-        } else if is_last {
-            "└── "
-        } else {
-            "├── "
-        };
-
-        let annotations = node.annotations();
-
-        if self.color {
-            let mut suffix = String::new();
-            for ann in &annotations {
-                let style = ann.style.as_ref().unwrap_or(&STYLE_TREE_ANNOTATION);
-                write!(
-                    suffix,
-                    " {} {}",
-                    STYLE_TREE_CHROME.apply_to("·"),
-                    style.apply_to(&ann.text)
-                )
-                .unwrap();
+            Target::Stderr => {
+                let mut err = std::io::stderr();
+                if newline {
+                    let _ = writeln!(err, "{}", self.buf);
+                } else {
+                    let _ = write!(err, "{}", self.buf);
+                }
             }
-
-            println!(
-                "{}{}{}{suffix}",
-                STYLE_TREE_CHROME.apply_to(prefix),
-                STYLE_TREE_CHROME.apply_to(connector),
-                STYLE_TREE_LABEL.apply_to(node.label()),
-            );
-        } else {
-            let mut suffix = String::new();
-            for ann in &annotations {
-                write!(suffix, " · {}", ann.text).unwrap();
-            }
-            println!("{prefix}{connector}{}{suffix}", node.label());
-        }
-
-        let children = node.children();
-        let child_prefix = if is_root {
-            String::new()
-        } else if is_last {
-            format!("{prefix}    ")
-        } else {
-            format!("{prefix}│   ")
-        };
-
-        for (i, child) in children.iter().enumerate() {
-            let child_is_last = i == children.len() - 1;
-            self.print_tree_node(child, &child_prefix, child_is_last, false);
         }
     }
 
-    fn print_styled(&self, text: &str, style: &console::Style) {
-        if self.color {
-            println!("{}", style.apply_to(text));
-        } else {
-            println!("{}", text);
-        }
+    /// Emit the accumulated line with no trailing newline (flushes stdout).
+    pub fn end(self) {
+        self.write(false);
     }
 
-    fn column_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
-        let num_cols = headers.len().max(rows.len());
-        let mut widths = Vec::with_capacity(num_cols);
-
-        for (i, header) in headers.iter().enumerate() {
-            let data_max = rows
-                .get(i)
-                .map_or(0, |col| col.iter().map(|c| c.len()).max().unwrap_or(0));
-            widths.push(header.len().max(data_max));
-        }
-        // Extra columns beyond headers (shouldn't happen, but be safe)
-        for col in rows.iter().skip(headers.len()) {
-            widths.push(col.iter().map(|c| c.len()).max().unwrap_or(0));
-        }
-
-        widths
+    /// Emit the accumulated line followed by `\n`.
+    pub fn end_line(self) {
+        self.write(true);
     }
 }
 
@@ -244,45 +314,80 @@ impl Printer {
 mod tests {
     use super::*;
 
+    /// `const` construction must compile — `STYLE_*` items rely on it.
+    const STYLE_CONST: Style = Style::new().margin_right(6).style(console::Style::new().bold());
+
     #[test]
-    fn column_widths_matches_header_lengths() {
-        let headers = &["Name", "Digest"];
-        let rows: &[Vec<String>] = &[];
-        let widths = Printer::column_widths(headers, rows);
-        assert_eq!(widths, vec![4, 6]);
+    fn const_style_carries_layout_and_color() {
+        assert_eq!(STYLE_CONST.margin, 6);
+        assert_eq!(STYLE_CONST.alignment, Alignment::Right);
+        // Inner console::Style reachable through Deref (clone — force_styling
+        // consumes self and we cannot move out of a Deref target).
+        let inner = STYLE_CONST.clone().style.force_styling(true);
+        assert!(inner.apply_to("x").to_string().contains("x"));
     }
 
     #[test]
-    fn column_widths_data_wider_than_header() {
-        let headers = &["A"];
-        let rows = vec![vec!["Long cell".to_string()]];
-        let widths = Printer::column_widths(headers, &rows);
-        assert_eq!(widths, vec![9]);
+    fn apply_left_pads_on_the_right() {
+        let s = Style::new().margin_left(5);
+        assert_eq!(s.apply("ab"), "ab   ");
     }
 
     #[test]
-    fn column_widths_header_wider_than_data() {
-        let headers = &["Header"];
-        let rows = vec![vec!["Hi".to_string()]];
-        let widths = Printer::column_widths(headers, &rows);
-        assert_eq!(widths, vec![6]);
+    fn apply_right_pads_on_the_left() {
+        let s = Style::new().margin_right(5);
+        assert_eq!(s.apply("ab"), "   ab");
     }
 
     #[test]
-    fn column_widths_extra_columns_beyond_headers() {
-        let headers = &["A"];
-        let rows = vec![vec!["x".to_string()], vec!["extra".to_string(), "more".to_string()]];
-        let widths = Printer::column_widths(headers, &rows);
-        assert_eq!(widths.len(), 2);
-        assert_eq!(widths[0], 1);
-        assert_eq!(widths[1], 5);
+    fn apply_center_splits_padding_extra_on_the_right() {
+        let s = Style::new().margin_center(5);
+        // pad = 3 → 1 left, 2 right
+        assert_eq!(s.apply("ab"), " ab  ");
     }
 
     #[test]
-    fn column_widths_empty_inputs() {
-        let headers: &[&str] = &[];
-        let rows: &[Vec<String>] = &[];
-        let widths = Printer::column_widths(headers, rows);
-        assert!(widths.is_empty());
+    fn apply_is_noop_when_text_at_least_margin_wide() {
+        let s = Style::new().margin_left(2);
+        assert_eq!(s.apply("abcd"), "abcd");
+    }
+
+    #[test]
+    fn apply_is_noop_when_margin_zero() {
+        let s = Style::new().style(console::Style::new().bold());
+        assert_eq!(s.apply("abc"), "abc");
+    }
+
+    #[test]
+    fn apply_measures_display_width_ignoring_ansi() {
+        // A pre-colored 2-column string still pads to width 5, not counting
+        // the ANSI escape bytes.
+        let colored = console::Style::new()
+            .force_styling(true)
+            .red()
+            .apply_to("ab")
+            .to_string();
+        let s = Style::new().margin_left(5);
+        let out = s.apply(&colored);
+        assert_eq!(console::measure_text_width(&out), 5);
+    }
+
+    #[test]
+    fn line_layout_applied_even_without_color() {
+        // color = false: no ANSI, but margin padding still present so a
+        // NO_COLOR table aligns identically to a colored one.
+        let line = Line::new(Target::Stdout, false).render("ab", &Style::new().margin_left(4));
+        assert_eq!(line.buf, "ab  ");
+    }
+
+    #[test]
+    fn line_color_applied_when_enabled() {
+        let style = Style::new()
+            .margin_left(4)
+            .style(console::Style::new().force_styling(true).red());
+        let line = Line::new(Target::Stdout, true).render("ab", &style);
+        // Padded to 4 display columns and wrapped in ANSI.
+        assert_eq!(console::measure_text_width(&line.buf), 4);
+        assert!(line.buf.len() > 4, "expected ANSI escapes in {:?}", line.buf);
     }
 }

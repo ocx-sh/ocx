@@ -3,8 +3,9 @@
 
 use std::process::ExitCode;
 
-use ocx_lib::cli::classify_error;
 use ocx_lib::log;
+
+use crate::app::classify_error;
 
 mod api;
 mod app;

@@ -8,7 +8,7 @@ mod schema;
 mod sync;
 mod validate;
 
-use ocx_lib::cli::Printer;
+use ocx_lib::cli::DataInterface;
 
 use crate::error::MirrorError;
 
@@ -29,7 +29,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub async fn execute(&self, printer: &Printer) -> Result<(), MirrorError> {
+    pub async fn execute(&self, printer: &DataInterface) -> Result<(), MirrorError> {
         match self {
             Self::Sync(cmd) => cmd.execute(printer).await,
             Self::Check(cmd) => cmd.execute(printer).await,

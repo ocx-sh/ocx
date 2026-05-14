@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ocx_lib::cli::{self, ColorMode, LogLevel, LogSettings, Printer, indicatif::ProgressStyle};
+use ocx_lib::cli::{self, ColorMode, DataInterface, LogLevel, LogSettings, Printer, indicatif::ProgressStyle};
 
 mod annotations;
 mod command;
@@ -64,7 +64,7 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let printer = Printer::new(color_config.stdout);
+    let printer = DataInterface::new(Printer::new(color_config.stdout, color_config.stderr));
     match cli.command.execute(&printer).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

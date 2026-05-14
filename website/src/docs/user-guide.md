@@ -386,6 +386,36 @@ Override the location with [`DOCKER_CONFIG`][env-docker-config].
 [Configuration In Depth][in-depth-configuration] — pair auth env vars with per-tier config defaults.
 :::
 
+### Storing credentials {#authentication-storing}
+
+`ocx login REGISTRY` writes credentials to the same `~/.docker/config.json` that `docker login`
+and `oras login` use. The three tools interoperate: a credential written by any of them is readable
+by the others.
+
+Storage tier (highest priority first):
+
+1. `credHelpers[REGISTRY]` in `~/.docker/config.json` (per-registry helper)
+2. `credsStore` (global default helper)
+3. Plaintext `auths[REGISTRY].auth` (gated by `--allow-insecure-store`)
+
+For headless CI without a native keychain daemon, pipe the token via `--password-stdin` and pass
+`--allow-insecure-store` to opt into the plaintext tier. `OCX_AUTH_*` environment variables still
+take precedence over any docker-config-stored credential at read time.
+
+```sh
+# Developer workstation (interactive)
+ocx login ghcr.io
+
+# Non-interactive CI
+echo "$GHCR_TOKEN" | ocx login -u "$GHCR_USER" --password-stdin ghcr.io
+
+# Headless CI — no native keychain
+echo "$TOKEN" | ocx login -u ci --password-stdin --allow-insecure-store internal.registry.example.com
+```
+
+Remove credentials with [`ocx logout`][cmd-logout]. Logout always exits 0, even when the registry
+was never logged in — CI cleanup scripts are safe to run unconditionally.
+
 ## Work offline {#offline}
 
 Once the [local snapshot][in-depth-indices-local] is populated and the [package store][in-depth-storage-packages] holds the binaries you need, OCX runs without network access. Two flags control how strictly the network is avoided:
@@ -516,6 +546,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [schema-project]: https://ocx.sh/schemas/project/v1.json
 
 <!-- commands -->
+[cmd-logout]: ./reference/command-line.md#logout
+[cmd-login]: ./reference/command-line.md#login
 [cmd-run]: ./reference/command-line.md#run
 [arg-config]: ./reference/command-line.md#arg-config
 [cmd-clean]: ./reference/command-line.md#clean
