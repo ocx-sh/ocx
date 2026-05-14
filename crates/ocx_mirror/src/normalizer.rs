@@ -2,20 +2,9 @@
 // Copyright 2026 The OCX Authors
 
 use anyhow::{Result, bail};
-use chrono::Utc;
 use ocx_lib::package::version::Version;
 
-use crate::spec::BuildTimestampFormat;
-
-/// Generate a UTC build timestamp string for the current run.
-pub fn build_timestamp(format: &BuildTimestampFormat) -> Option<String> {
-    let now = Utc::now();
-    match format {
-        BuildTimestampFormat::Datetime => Some(now.format("%Y%m%d%H%M%S").to_string()),
-        BuildTimestampFormat::Date => Some(now.format("%Y%m%d").to_string()),
-        BuildTimestampFormat::None => None,
-    }
-}
+pub use ocx_lib::package::version::build_timestamp;
 
 /// Normalize a version string, optionally appending a build timestamp.
 ///
@@ -115,22 +104,6 @@ mod tests {
         assert!(normalize_version("3.28", &None).is_err());
     }
 
-    #[test]
-    fn date_format_timestamp() {
-        let ts = build_timestamp(&BuildTimestampFormat::Date).unwrap();
-        assert_eq!(ts.len(), 8); // YYYYMMDD
-        assert!(ts.chars().all(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn datetime_format_timestamp() {
-        let ts = build_timestamp(&BuildTimestampFormat::Datetime).unwrap();
-        assert_eq!(ts.len(), 14); // YYYYMMDDHHmmss
-        assert!(ts.chars().all(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn none_format_timestamp() {
-        assert!(build_timestamp(&BuildTimestampFormat::None).is_none());
-    }
+    // `build_timestamp` and `BuildTimestampFormat` itself are tested where
+    // they live, in `ocx_lib::package::version::build_meta`.
 }

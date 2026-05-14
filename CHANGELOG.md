@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ocx package push --build-timestamp [datetime|date|none]` appends a UTC build-metadata segment to the published tag. `datetime` (default when the flag is passed bare) yields `_YYYYMMDDhhmmss`; `date` yields `_YYYYMMDD`; `none` is a no-op. Designed for continuous-deploy pipelines that publish rolling pre-release builds, e.g. `0.3.0-dev_20260514120000`. The identifier tag must be in `X.Y.Z` form (with optional variant or pre-release) and must not already carry build metadata. *(cli)*
+- `Error::BuildMeta` variant on the package error chain, wrapping `BuildMetaError::{NoPatch, AlreadyPresent}` from `crates/ocx_lib/src/package/version/build_meta.rs`. Classified as `ExitCode::DataError` (65). *(package)*
 - `ocx package test` for local pre-push validation: materializes a package without a registry round-trip and runs a command in its composed env. Temp directory is auto-cleaned on exit; `--keep` opts in to preservation for inspection. *(cli)*
 - `ocx clean --force` bypasses the project registry and collects packages held only by other projects' `ocx.lock` files. Live install symlinks and profile content-mode roots are still honoured. *(cli)*
 - Multi-project GC retention: `ocx clean` now retains packages pinned by any registered project's `ocx.lock` on the machine, not just the active project. Projects register automatically in `$OCX_HOME/projects.json` when `ocx lock` runs. *(project)*
