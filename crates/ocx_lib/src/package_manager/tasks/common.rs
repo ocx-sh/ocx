@@ -23,9 +23,10 @@ use std::path::Path;
 use tokio::task::JoinSet;
 
 use crate::{
+    MEDIA_TYPE_PACKAGE_METADATA_V1,
     file_lock::FileLock,
     file_structure::{self, PackageStore},
-    log, oci,
+    log, media_type_select, oci,
     package::{install_info::InstallInfo, metadata, resolved_package::ResolvedPackage},
     package_manager::error::{self, PackageError, PackageErrorKind},
     prelude::SerdeExt,
@@ -122,6 +123,39 @@ pub async fn load_object_data(
     );
     let metadata = metadata::ValidMetadata::try_from(metadata_result?)?.into();
     Ok((metadata, resolved_result?))
+}
+
+/// Fetches the OCX metadata config blob referenced by `manifest`, validates
+/// its media type, deserializes it, and runs publish-time validation.
+///
+/// Shared by the pull pipeline (`setup_owned`) and `inspect` so both apply
+/// identical media-type + [`ValidMetadata`](metadata::ValidMetadata) gating
+/// to the config blob. The blob is fetched through the index
+/// ([`Index::fetch_blob`](oci::index::Index::fetch_blob)), the single
+/// offline-aware blob accessor: local-CAS first, chain-walk on miss,
+/// write-through on hit, `Ok(None)` when offline and absent locally.
+pub async fn load_config_metadata(
+    index: &oci::index::Index,
+    pinned: &oci::PinnedIdentifier,
+    manifest: &oci::ImageManifest,
+) -> Result<metadata::ValidMetadata, PackageErrorKind> {
+    // Config blob media-type check before any fetch — refuse to stage a
+    // wrong-media-type blob into the local CAS.
+    media_type_select(&manifest.config.media_type, &[MEDIA_TYPE_PACKAGE_METADATA_V1])
+        .map_err(|e| PackageErrorKind::from(oci::client::error::ClientError::internal(e)))?;
+    let config_digest =
+        oci::Digest::try_from(manifest.config.digest.as_str()).map_err(|e| PackageErrorKind::Internal(e.into()))?;
+    let bytes = index
+        .fetch_blob(&pinned.clone_with_digest(config_digest))
+        .await
+        .map_err(PackageErrorKind::Internal)?
+        .ok_or(PackageErrorKind::Internal(crate::Error::OfflineMode))?;
+    let raw: metadata::Metadata = serde_json::from_slice(&bytes)
+        .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
+    // Reject malformed metadata at the ingress boundary — refuse to write
+    // unvalidated metadata to disk so the consumption-side validation never
+    // has to deal with publisher-side bugs after the fact.
+    metadata::ValidMetadata::try_from(raw).map_err(PackageErrorKind::Internal)
 }
 
 /// Drains a [`JoinSet`] of package tasks and collects results preserving
