@@ -86,7 +86,7 @@ push_simple() {
         ocx_cd "${PKG_ROOT}/${repo}"
         mkdir -p out
         ocx package create --force -m metadata.json -o "$bundle" "$src"
-        ocx package push -n -p "$PLATFORM" -m metadata.json -i "$(id "$repo")" "$bundle"
+        ocx package push -n -c -p "$PLATFORM" -m metadata.json -i "$(id "$repo")" "$bundle"
     )
 }
 
@@ -109,7 +109,7 @@ push_multi_layer() {
             bundles+=("$b")
             idx=$((idx + 1))
         done
-        ocx package push -n -p "$PLATFORM" -m metadata.json -i "$(id "$repo")" "${bundles[@]}"
+        ocx package push -n -c -p "$PLATFORM" -m metadata.json -i "$(id "$repo")" "${bundles[@]}"
     )
 }
 
@@ -129,6 +129,11 @@ render_meta() {
         sed -i "s|@@${k}@@|${v}|g" "$out"
     done
 }
+
+# Materialize the (gitignored) per-package source trees before any
+# `ocx package create`. Only metadata.in.json + multi-layer-app .so stubs
+# are committed; the bin/ payloads are generated artifacts.
+scaffold_payloads "$PKG_ROOT"
 
 # ── 1. Leaf packages with no deps ─────────────────────────────────────────
 push_simple single-layer-hello build
