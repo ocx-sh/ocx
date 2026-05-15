@@ -208,22 +208,29 @@ impl Context {
     /// here instead of via a duplicated `conflicts_with` on every command
     /// (extend-don't-duplicate; one enforcement seam).
     ///
-    /// When the **per-command** `--global` is set and an **explicit**
-    /// project selection is in effect — the `--project` flag or the
-    /// `OCX_PROJECT` env var (NOT a project merely discovered via the CWD
-    /// walk; `--global` while standing inside a project directory is
-    /// legal and global wins by precedence per
+    /// When the **effective** `--global` selector is set — either the
+    /// per-command `--global` flag *or* the already-folded
+    /// `OCX_GLOBAL`/top-level surface (`config_view.global`) — and an
+    /// **explicit** project selection is in effect (the `--project` flag
+    /// or the `OCX_PROJECT` env var, NOT a project merely discovered via
+    /// the CWD walk; `--global` while standing inside a project directory
+    /// is legal and global wins by precedence per
     /// adr_global_toolchain_tier.md §Decision 2) — this returns a
     /// [`UsageError`] that classifies to [`ExitCode::UsageError`] (`64`),
     /// mirroring what clap's top-level `conflicts_with` already does for
-    /// the top-level pair.
+    /// the top-level `--global`/`--project` flag pair. The flag pair stays
+    /// clap's responsibility; checking the *effective* selector here also
+    /// closes the `OCX_GLOBAL=1` + `--project`/`OCX_PROJECT` bypass clap
+    /// cannot see (the env-sourced global selector would otherwise evade
+    /// the seam and the explicit project be silently ignored).
     ///
     /// # Errors
     ///
-    /// Returns [`UsageError`] (exit `64`) when `command_global` is set
-    /// alongside an explicit `--project` / `OCX_PROJECT` selection.
+    /// Returns [`UsageError`] (exit `64`) when the effective `--global`
+    /// selector (`config_view.global || command_global`) is set alongside
+    /// an explicit `--project` / `OCX_PROJECT` selection.
     pub fn with_command_global(self, command_global: bool) -> Result<Self, ocx_lib::cli::UsageError> {
-        if command_global && self.has_explicit_project_selection() {
+        if (self.config_view.global || command_global) && self.has_explicit_project_selection() {
             return Err(ocx_lib::cli::UsageError::new(
                 "--global cannot be combined with an explicit --project / OCX_PROJECT selection",
             ));

@@ -47,6 +47,8 @@ therefore pinned at the acceptance level instead.
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -541,4 +543,333 @@ def test_clean_io_failure_is_non_fatal(
         f"broken ledger state must be non-fatal (no exit 78); "
         f"got rc={result.returncode}\nstderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. A2/A1 fail-closed: a transiently-unreachable holder project's package
+#    must SURVIVE clean (no fail-open to an empty root set)
+# ---------------------------------------------------------------------------
+
+
+def test_transiently_unreachable_holder_survives_clean(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Plan §"Living Design — Review-Fix Amendments" A1 + A2 (fail-closed).
+
+    Project B pins a package and is registered in the symlink ledger. Its
+    ledger entry is then made *transiently* unreachable by ``chmod 000`` on an
+    intermediate directory component of B's path (the project dir is NOT
+    deleted — distinct from ``test_lazy_prune_after_lockfile_deletion``, which
+    deletes ``ocx.lock``, and from ``test_clean_io_failure_is_non_fatal``,
+    which drops a garbage regular file).
+
+    Probing B's ledger link now fails with ``EACCES`` (a non-``NotFound``
+    transient error) → ``ProbeResult::Unknown``. Per A1, B must remain a GC
+    root for this run (fail-closed); per A2 a registry enumeration failure
+    must NOT degrade to an empty root set. Either way, B's pinned package
+    MUST survive ``ocx clean`` run from project A.
+
+    Pre-A1/A2 behaviour (the bug this pins): the Unknown entry is dropped
+    from the live-root set this run (and/or the enumeration error fails open
+    to ``Vec::new()``), so B's package appears collectable — the assertion
+    below fails, exposing the silent-data-loss regression.
+
+    Skips gracefully when running as root (root ignores DAC mode bits, so the
+    unreachable condition cannot be constructed).
+    """
+    proj_a = tmp_path / "proj-a"
+    proj_a.mkdir(parents=True, exist_ok=True)
+
+    # Project B lives behind an intermediate `gate/` directory so we can make
+    # *its path* (not the ledger store) untraversable without touching A.
+    gate = tmp_path / "gate"
+    proj_b = gate / "proj-b"
+    proj_b.mkdir(parents=True, exist_ok=True)
+
+    # B pins a package (lock → register in the symlink ledger, pull → blobs).
+    repo, tag = _setup_project_a(ocx, tmp_path, proj_b)
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    count_before = _packages_present_count(ocx_home, ocx.registry)
+    assert count_before >= 1, (
+        f"expected B's package present after pull; got {count_before}"
+    )
+
+    # Make the intermediate `gate/` component untraversable. The ledger
+    # symlink ($OCX_HOME/projects/<hash> -> .../gate/proj-b) still exists
+    # (lstat unaffected), but canonicalising it now fails with EACCES — a
+    # transient (NOT NotFound) error → ProbeResult::Unknown.
+    original_mode = stat.S_IMODE(gate.stat().st_mode)
+    os.chmod(gate, 0o000)
+    try:
+        # Root ignores DAC bits — the precondition cannot be built. Detect by
+        # probing and skip without failing.
+        try:
+            os.listdir(proj_b)
+            running_as_root = True
+        except PermissionError:
+            running_as_root = False
+        if running_as_root:
+            import pytest
+
+            pytest.skip("running as root: cannot construct unreachable path")
+
+        result = _run(ocx, proj_a, "--format", "json", "clean", "--dry-run")
+    finally:
+        os.chmod(gate, original_mode)
+
+    # Clean must not crash the way an unhandled panic / fatal error would.
+    assert result.returncode == EXIT_SUCCESS, (
+        f"clean with a transiently-unreachable holder must remain non-fatal "
+        f"for the run itself; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+
+    entries: list[dict] = json.loads(result.stdout)
+    object_entries = [e for e in entries if e.get("kind") == "object"]
+    free_entries = [e for e in object_entries if not e.get("held_by")]
+
+    # The core fail-closed assertion: B's pinned package must NOT be in the
+    # collectable (free) set. A transient EACCES on a *live* holder project
+    # must never let GC collect its pinned packages.
+    assert len(free_entries) == 0, (
+        "fail-closed (A1/A2): a transiently-unreachable holder project's "
+        "pinned package must survive clean — it must NOT appear as a "
+        f"collectable (free) object. Got free entries: {free_entries}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. A3 fail-closed: a Live-probed holder whose ocx.lock is itself
+#    independently unreadable ⇒ LockLoad::Indeterminate ⇒ RetainAll, exit 0
+# ---------------------------------------------------------------------------
+
+
+def test_live_holder_with_unreadable_lock_survives_clean(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Plan §"Living Design — Review-Fix Amendments" A3 (record):
+    ``LockLoad::Indeterminate ⇒ CollectedRoots::RetainAll`` exit 0.
+
+    This isolates the ``LockLoad::Indeterminate``-via-**readable-ledger** path
+    from the A1-``ProbeResult::Unknown`` path exercised by
+    ``test_transiently_unreachable_holder_survives_clean``.
+
+    Project B is registered and its ledger entry probes cleanly to
+    ``ProbeResult::Live`` (the ``$OCX_HOME/projects/<hash>`` symlink resolves
+    and ``<dir>/ocx.lock`` exists). The root set is therefore *known*. We then
+    make ``<B>/ocx.lock`` **itself** unreadable via ``chmod 0o000`` on the
+    **lock file** — NOT an intermediate directory (distinct from
+    ``test_transiently_unreachable_holder_survives_clean``) and NOT a garbage
+    regular file dropped into the store (distinct from
+    ``test_clean_io_failure_is_non_fatal``).
+
+    ``ProjectLock::from_path`` then fails with a transient non-``NotFound``
+    I/O error (``EACCES``) ⇒ ``Ok(None)`` is NOT produced ⇒
+    ``LockLoad::Indeterminate``. Per A3 the GC fails closed
+    proportionally: ``CollectedRoots::RetainAll`` ⇒ ``ocx clean`` collects
+    NOTHING this run (sweeps only stale temps), exits 0 (WARN logged; next
+    clean re-probes). B's pinned package therefore MUST survive — it must not
+    appear as a collectable (free) object.
+
+    Pre-A3 behaviour (the bug this pins): an unreadable lock on a known-Live
+    root degrades the root's pinned digests to "drop the root", so B's package
+    appears collectable — the assertion below fails, exposing the
+    silent-data-loss regression at the lock-load layer (distinct from the
+    enumeration/probe layer A1/A2 covers).
+
+    Skips gracefully when running as root (root ignores DAC mode bits, so the
+    unreadable-lock condition cannot be constructed).
+    """
+    proj_a = tmp_path / "proj-a"
+    proj_a.mkdir(parents=True, exist_ok=True)
+    proj_b = tmp_path / "proj-b"
+    proj_b.mkdir(parents=True, exist_ok=True)
+
+    # B pins a package (lock → register in the symlink ledger, pull → blobs).
+    # B's ledger entry + dir + ocx.lock are all fine here, so the per-entry
+    # liveness probe is ProbeResult::Live (root set is KNOWN — the A1/A2
+    # enumeration/probe layer is NOT what this test exercises).
+    _setup_project_a(ocx, tmp_path, proj_b)
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    count_before = _packages_present_count(ocx_home, ocx.registry)
+    assert count_before >= 1, (
+        f"expected B's package present after pull; got {count_before}"
+    )
+
+    lock_b = proj_b / "ocx.lock"
+    assert lock_b.is_file(), "precondition: B's ocx.lock must exist and be a file"
+    original_mode = stat.S_IMODE(lock_b.stat().st_mode)
+
+    # Make the LOCK FILE itself unreadable (not an intermediate dir). The
+    # ledger symlink still resolves and <dir>/ocx.lock still *exists*
+    # (try_exists → true) so probe_live_target returns Live; only
+    # ProjectLock::from_path's read of the file content fails with EACCES.
+    os.chmod(lock_b, 0o000)
+    try:
+        # Root ignores DAC bits — the precondition cannot be built. Detect by
+        # probing a read and skip without failing.
+        try:
+            lock_b.read_bytes()
+            running_as_root = True
+        except PermissionError:
+            running_as_root = False
+        if running_as_root:
+            import pytest
+
+            pytest.skip("running as root: cannot make ocx.lock unreadable")
+
+        result = _run(ocx, proj_a, "--format", "json", "clean", "--dry-run")
+    finally:
+        os.chmod(lock_b, original_mode)
+
+    # A3: proportional fail-closed is exit 0 (RetainAll), NOT an abort.
+    assert result.returncode == EXIT_SUCCESS, (
+        f"A3: an unreadable ocx.lock on a Live-probed holder must yield "
+        f"RetainAll + exit 0 (proportional fail-closed), not an abort; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout}"
+    )
+
+    entries: list[dict] = json.loads(result.stdout)
+    object_entries = [e for e in entries if e.get("kind") == "object"]
+    free_entries = [e for e in object_entries if not e.get("held_by")]
+
+    # The core A3 fail-closed assertion: RetainAll means NOTHING is
+    # collectable this run, so B's pinned package must NOT be free.
+    assert len(free_entries) == 0, (
+        "fail-closed (A3): a Live-probed holder whose ocx.lock is itself "
+        "transiently unreadable must trigger RetainAll — B's pinned package "
+        "must survive clean and must NOT appear as a collectable (free) "
+        f"object. Got free entries: {free_entries}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. Bug-R3: an Absent (deleted-ocx.lock) project ordered before a survivor
+#    must NOT panic ``ocx clean`` (buckets[index] out-of-bounds regression)
+# ---------------------------------------------------------------------------
+
+
+def test_clean_survives_departed_project_before_survivor(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Plan §"Living Design — Review-Fix Amendments" Bug-R3 regression.
+
+    ``collect_project_roots`` loads every registered project's ``ocx.lock`` in
+    parallel, then sizes a ``buckets`` vector to ``loaded.len()`` (survivors
+    only). The pre-fix code keyed ``buckets[index]`` by the *original*
+    ``entries`` enumerate index, which spans every registered project
+    **including** the ones that became ``LockLoad::Absent`` (a deleted /
+    raced-away ``ocx.lock``). When an ``Absent`` entry precedes a survivor,
+    the survivor's original index is ``>= loaded.len()`` ⇒ ``buckets[index]``
+    panics out of bounds, crashing ``ocx clean``. The fix re-keys ``buckets``
+    on each survivor's *dense* position in ``loaded`` (assigned via
+    ``loaded.iter().enumerate()``), so the OOB is structurally impossible
+    regardless of how/when an ``Absent`` entry arises.
+
+    This test pins the **user-visible invariant** the fix guarantees: a
+    multi-project ``$OCX_HOME`` where one project's ``ocx.lock`` was deleted
+    (the common departed-project case) and another survives — ``ocx clean``
+    (no ``--force``) run from an unrelated third directory must exit 0 (never
+    panic / abort) and retain the survivor's pinned package.
+
+    Black-box determinism note: the flat-symlink ledger's ``live_projects``
+    probe self-prunes a project whose ``<dir>/ocx.lock`` is absent *before*
+    the load step (``probe_live_target`` → ``Dead`` → the ledger link is
+    removed and the project is excluded from ``project_dirs``), so a
+    plainly-deleted lock is filtered by the registry layer and the residual
+    ``LockLoad::Absent`` arm is only reachable via the narrow
+    probe-vs-``ProjectLock::from_path`` TOCTOU race — not deterministically
+    forceable from a black-box acceptance test. The unit-level OOB precondition
+    is therefore pinned by the dense-keying contract documented on
+    ``LoadedLock`` in ``crates/ocx_lib/src/package_manager/tasks/clean.rs``;
+    this test pins the externally-observable correctness contract (no crash,
+    survivor retained) the regression would otherwise break for every
+    multi-project user.
+    """
+    proj_a = tmp_path / "proj-a"
+    proj_a.mkdir(parents=True, exist_ok=True)
+    proj_b = tmp_path / "proj-b"
+    proj_b.mkdir(parents=True, exist_ok=True)
+    proj_c = tmp_path / "proj-c"
+    proj_c.mkdir(parents=True, exist_ok=True)
+
+    # One published package pinned by both A and B. Each gets its own
+    # ``ocx.toml`` + ``ocx lock`` (→ ledger ``register``) + ``ocx pull`` (→
+    # blobs in the object store). They pin the *same* package digest, so
+    # whichever project survives is the sole holder of that one package.
+    repo, tag = _published_tool(ocx, tmp_path, "shared")
+    tool_ref = f"{ocx.registry}/{repo}:{tag}"
+    for proj in (proj_a, proj_b):
+        _write_ocx_toml(proj, f'[tools]\nthe_tool = "{tool_ref}"\n')
+        lock_res = _run(ocx, proj, "lock")
+        assert lock_res.returncode == EXIT_SUCCESS, (
+            f"ocx lock failed for {proj}: rc={lock_res.returncode}\n"
+            f"stderr:\n{lock_res.stderr}"
+        )
+        pull_res = _run(ocx, proj, "pull")
+        assert pull_res.returncode == EXIT_SUCCESS, (
+            f"ocx pull failed for {proj}: rc={pull_res.returncode}\n"
+            f"stderr:\n{pull_res.stderr}"
+        )
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    projects_dir = ocx_home / "projects"
+
+    # Map each ledger symlink to the project dir it resolves to, then pick the
+    # project whose link sorts FIRST (collect_project_roots enumerates sorted
+    # by link name). Deleting its lock makes the Absent entry deterministically
+    # occupy enumerate index 0, so a survivor's original index always exceeds
+    # `loaded.len()` ⇒ the pre-fix `buckets[index]` panics out of bounds
+    # regardless of the hash values.
+    proj_a_resolved = proj_a.resolve()
+    proj_b_resolved = proj_b.resolve()
+    ledger: list[tuple[str, Path]] = []
+    for link in sorted(projects_dir.iterdir(), key=lambda p: p.name):
+        if link.name.startswith(".tmp-"):
+            continue
+        ledger.append((link.name, link.resolve()))
+    assert {t for _, t in ledger} == {proj_a_resolved, proj_b_resolved}, (
+        f"both projects must be registered in the ledger; got {ledger}"
+    )
+
+    first_target = ledger[0][1]
+    absent_proj = proj_a if first_target == proj_a_resolved else proj_b
+    survivor_proj = proj_b if absent_proj is proj_a else proj_a
+
+    # Delete the first-sorting project's ocx.lock → it becomes
+    # LockLoad::Absent at enumerate index 0 (ProjectLock::from_path maps
+    # NotFound → Ok(None) → the project is dropped from `loaded` but its
+    # index slot is the one the pre-fix `buckets[index]` keyed on).
+    absent_lock = absent_proj / "ocx.lock"
+    absent_lock.unlink()
+    assert not absent_lock.exists(), "absent project's ocx.lock must be deleted"
+    assert (survivor_proj / "ocx.lock").exists(), "survivor's ocx.lock must remain"
+
+    # Confirm the shared package is still in the object store before the GC.
+    count_before = _packages_present_count(ocx_home, ocx.registry)
+    assert count_before >= 1, (
+        f"expected shared package present after pull; got {count_before}"
+    )
+
+    # ``ocx clean --dry-run`` (NO --force) from a third directory. The pre-fix
+    # code panics here with ``index out of bounds`` because the Absent entry
+    # is deterministically at enumerate index 0 while the survivor's original
+    # index exceeds `loaded.len()`; _run_clean_json asserts rc=0 so a panic
+    # surfaces as a clear failure with the captured stderr.
+    entries = _run_clean_json(ocx, proj_c)
+
+    # The survivor is a live GC root (its ledger symlink resolves and its
+    # ocx.lock exists), so the shared package must be retained — no free
+    # object entries.
+    object_entries = [e for e in entries if e.get("kind") == "object"]
+    free_entries = [e for e in object_entries if not e.get("held_by")]
+    assert len(free_entries) == 0, (
+        "Bug-R3: with the first-sorting project's ocx.lock deleted (Absent at "
+        "enumerate index 0) and the other surviving, ocx clean must not panic "
+        "and the survivor's pinned package must remain held — got free "
+        f"entries: {free_entries}"
     )

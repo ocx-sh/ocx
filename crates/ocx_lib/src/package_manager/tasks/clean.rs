@@ -175,10 +175,7 @@ async fn resolve_to_package_digests(
 /// There is no JSON parse surface: stale/broken links are silently pruned.
 /// A corrupt-registry exit-78 branch is deliberately absent — eliminated with
 /// the JSON ledger (ADR §Risks "Corrupt-state failure mode removed, not relocated").
-pub async fn collect_project_roots(
-    ocx_home: &Path,
-    file_structure: &FileStructure,
-) -> crate::Result<Vec<ProjectRootDigests>> {
+pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructure) -> crate::Result<CollectedRoots> {
     let registry = ProjectRegistry::new(ocx_home);
 
     // Opportunistic legacy cleanup: the superseded JSON ledger
@@ -205,15 +202,16 @@ pub async fn collect_project_roots(
     // surface (no JSON document), so the old corrupt-registry →
     // `crate::Error::InternalFile` (exit 78) branch is deliberately ELIMINATED
     // — a bad/dangling link is simply pruned (ADR §Risks "Corrupt-state
-    // failure mode removed, not relocated"). A filesystem I/O error remains
-    // non-fatal: log and proceed with whatever roots were collected.
-    let project_dirs = match registry.live_projects().await {
-        Ok(dirs) => dirs,
-        Err(e) => {
-            log::warn!("Project registry unavailable, running GC without project roots: {e}");
-            Vec::new()
-        }
-    };
+    // failure mode removed, not relocated").
+    //
+    // A `live_projects()` error fails CLOSED (plan A2): it propagates so
+    // `ocx clean` aborts (classifies to `IoError`) rather than running
+    // destructive GC against a live multi-project store with zero project
+    // roots — degrading to `Vec::new()` here was the fail-open
+    // silent-data-loss bug. `--force` already bypasses the registry entirely
+    // upstream (explicit operator override), so the sanctioned escape hatch
+    // is unaffected by this propagation.
+    let project_dirs = registry.live_projects().await?;
     // The ledger targets the project *directory*; the lock is its canonical
     // sibling `<dir>/ocx.lock` (invariant
     // `lock_path_for(config) == <dir>/ocx.lock`, ARCH-4d). Derive the lock
@@ -231,34 +229,45 @@ pub async fn collect_project_roots(
     // garbage-collector reachability graph keys on these paths.
     //
     // Step 1 — load locks in parallel.
-    struct LoadedLock {
-        index: usize,
-        lock_path: PathBuf,
-        tools: Vec<crate::project::lock::LockedTool>,
-    }
-
-    let mut load_set: JoinSet<Option<LoadedLock>> = JoinSet::new();
-    for (index, lock_path) in entries.into_iter().enumerate() {
+    let mut load_set: JoinSet<LockLoad> = JoinSet::new();
+    for lock_path in entries {
         load_set.spawn(async move {
             match ProjectLock::from_path(&lock_path).await {
-                Ok(Some(lock)) => Some(LoadedLock {
-                    index,
+                Ok(Some(lock)) => LockLoad::Loaded(LoadedLock {
                     lock_path,
                     tools: lock.tools,
                 }),
                 Ok(None) => {
+                    // `from_path` maps a genuinely-absent lock (`NotFound`)
+                    // to `Ok(None)`. This is the benign departed-project
+                    // case (`test_lazy_prune_after_lockfile_deletion`):
+                    // debug + drop the root.
                     log::debug!(
                         "Skipping project root '{}': lock file no longer present.",
                         lock_path.display()
                     );
-                    None
+                    LockLoad::Absent
                 }
                 Err(e) => {
+                    // A registered live root whose lock cannot be read due
+                    // to a transient (non-`NotFound`) I/O error —
+                    // EACCES/ESTALE on a *live* holder (e.g. the
+                    // `ProbeResult::Unknown` root `read_link`-recovered in
+                    // `live_projects`, whose lock now sits behind a
+                    // momentarily-unreachable path component). Its pinned
+                    // digests are indeterminate. Fail CLOSED (plan A1/A2):
+                    // signal the whole GC to retain everything this run
+                    // rather than silently dropping the root (which would
+                    // GC the live project's pinned packages — the
+                    // silent-data-loss class A1 closes one layer up). The
+                    // run still succeeds (non-fatal); `--force` remains the
+                    // sanctioned override to GC anyway.
                     log::warn!(
-                        "Skipping project root '{}': failed to read lock file: {e}",
+                        "Project root '{}': lock unreadable (transient I/O); retaining all objects \
+                         this run (fail-closed): {e}",
                         lock_path.display()
                     );
-                    None
+                    LockLoad::Indeterminate
                 }
             }
         });
@@ -266,21 +275,33 @@ pub async fn collect_project_roots(
 
     let mut loaded: Vec<LoadedLock> = Vec::new();
     while let Some(join) = load_set.join_next().await {
-        if let Some(l) = join.expect("collect_project_roots load task panicked") {
-            loaded.push(l);
+        match join.expect("collect_project_roots load task panicked") {
+            LockLoad::Loaded(l) => loaded.push(l),
+            LockLoad::Absent => {}
+            LockLoad::Indeterminate => {
+                // Drain the remaining joins so no spawned task is detached,
+                // then return the fail-closed retain-all marker.
+                load_set.abort_all();
+                while load_set.join_next().await.is_some() {}
+                return Ok(CollectedRoots::RetainAll);
+            }
         }
     }
 
     // Step 2 — resolve every (lock, tool) pair under a bounded semaphore.
     let sem = Arc::new(Semaphore::new(COLLECT_ROOTS_CONCURRENCY));
     let mut resolve_set: JoinSet<(usize, String, String, Vec<oci::PinnedIdentifier>)> = JoinSet::new();
-    for loaded_lock in &loaded {
+    for (index, loaded_lock) in loaded.iter().enumerate() {
         for tool in &loaded_lock.tools {
             let sem = Arc::clone(&sem);
             let pinned = tool.pinned.clone();
             let group = tool.group.clone();
             let name = tool.name.clone();
-            let index = loaded_lock.index;
+            // Dense post-filter position in `loaded` (Bug-R3): the resolve
+            // buckets are sized `loaded.len()`, so the key MUST be the
+            // survivor's dense index here, never the original `entries`
+            // enumerate index (which spans `LockLoad::Absent` entries too and
+            // would index `buckets` out of bounds).
             // `resolve_to_package_digests` borrows `&FileStructure`. Cloning is
             // cheap (the struct holds `Arc`-shared sub-stores).
             let fs = file_structure.clone();
@@ -292,9 +313,11 @@ pub async fn collect_project_roots(
         }
     }
 
-    // Materialise into a per-entry buffer keyed by the load index so we can
-    // sort tool-level results by (group, name) inside each entry without
-    // depending on JoinSet completion order.
+    // Materialise into a per-entry buffer keyed by the survivor's dense
+    // position in `loaded` (Bug-R3: never the original enumerate index) so we
+    // can sort tool-level results by (group, name) inside each entry without
+    // depending on JoinSet completion order. `index` is in `0..loaded.len()`
+    // by construction, so `buckets[index]` cannot panic.
     let mut buckets: Vec<Vec<(String, String, Vec<oci::PinnedIdentifier>)>> =
         (0..loaded.len()).map(|_| Vec::new()).collect();
     while let Some(join) = resolve_set.join_next().await {
@@ -323,7 +346,52 @@ pub async fn collect_project_roots(
     // Inter-entry order: sort by lock_path so callers see a stable list across
     // runs even when the registry's on-disk order changes.
     roots.sort_by(|a, b| a.ocx_lock_path.cmp(&b.ocx_lock_path));
-    Ok(roots)
+    Ok(CollectedRoots::Roots(roots))
+}
+
+/// A registered project's `ocx.lock` parsed into resolvable GC-root inputs.
+///
+/// Carries **no** load index: the resolve buckets are keyed by the survivor's
+/// *dense* position in `loaded` (assigned via `loaded.iter().enumerate()`),
+/// never the original `entries` enumerate index. Bug-R3 regression — the
+/// original index spans every registered project including the ones that
+/// became [`LockLoad::Absent`] (deleted `ocx.lock`, the common
+/// departed-project case), so it can exceed `loaded.len()` and panic
+/// `buckets[index]` out of bounds.
+struct LoadedLock {
+    lock_path: PathBuf,
+    tools: Vec<crate::project::lock::LockedTool>,
+}
+
+/// Outcome of loading a single registered project's `ocx.lock`.
+enum LockLoad {
+    /// The lock parsed; its tools become resolvable GC roots.
+    Loaded(LoadedLock),
+    /// The lock is genuinely absent (`from_path` mapped `NotFound` →
+    /// `Ok(None)`) — the benign departed-project case; the root is dropped.
+    Absent,
+    /// The lock could not be read due to a transient (non-`NotFound`) I/O
+    /// error on a *registered live* root. The pinned digests are
+    /// indeterminate; per plan A1/A2 the GC fails closed by retaining every
+    /// object this run rather than dropping the root.
+    Indeterminate,
+}
+
+/// Result of [`collect_project_roots`].
+///
+/// `Roots` carries the resolved per-project GC roots. `RetainAll` is the
+/// fail-closed marker emitted when a registered *live* root's lock is
+/// transiently unreadable (plan A1/A2): the lock's pinned digests cannot be
+/// enumerated, so [`PackageManager::clean`] must retain every object this run
+/// rather than collect against a partial root set (which would silently GC the
+/// live project's pinned packages). The run still succeeds; `--force` remains
+/// the sanctioned override.
+pub enum CollectedRoots {
+    /// Resolved project-registry GC roots, deterministically ordered.
+    Roots(Vec<ProjectRootDigests>),
+    /// Fail-closed: a live root's lock was transiently unreadable — retain
+    /// all objects this run.
+    RetainAll,
 }
 
 impl PackageManager {
@@ -337,11 +405,25 @@ impl PackageManager {
     pub async fn clean(&self, dry_run: bool, force: bool) -> crate::Result<CleanResult> {
         let ocx_home = self.file_structure().root().to_path_buf();
 
-        // Collect project-registry roots unless --force suppresses the registry.
+        // Collect project-registry roots unless --force suppresses the
+        // registry. A transiently-unreachable *live* root makes the root set
+        // indeterminate (plan A1/A2): fail closed by retaining every object
+        // this run — skip object collection entirely and only sweep stale
+        // temps. The run stays non-fatal (exit 0); `--force` is the
+        // sanctioned override to GC against live install symlinks alone.
         let project_roots: Vec<ProjectRootDigests> = if force {
             Vec::new()
         } else {
-            collect_project_roots(&ocx_home, self.file_structure()).await?
+            match collect_project_roots(&ocx_home, self.file_structure()).await? {
+                CollectedRoots::Roots(roots) => roots,
+                CollectedRoots::RetainAll => {
+                    let temp = clean_temp(self.file_structure(), dry_run).await?;
+                    return Ok(CleanResult {
+                        objects: Vec::new(),
+                        temp,
+                    });
+                }
+            }
         };
 
         let garbage_collector = GarbageCollector::build(self.file_structure(), &project_roots).await?;
