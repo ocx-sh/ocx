@@ -31,6 +31,9 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CLI_REF = PROJECT_ROOT / "website" / "src" / "docs" / "reference" / "command-line.md"
+ENV_COMPOSITION = (
+    PROJECT_ROOT / "website" / "src" / "docs" / "reference" / "env-composition.md"
+)
 
 
 # Each entry: (anchor, human-readable command name used in error messages)
@@ -195,4 +198,103 @@ def test_shell_hook_section_references_applied_fingerprint(
     assert "_OCX_APPLIED" in section, (
         "`shell hook` section must mention the applied-fingerprint env "
         "var `_OCX_APPLIED`"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C (doc accuracy) — plan §"Living Design — Review-Fix Amendments" C
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def env_composition_text() -> str:
+    """Read env-composition.md once per module."""
+    assert ENV_COMPOSITION.exists(), (
+        f"env-composition.md missing at {ENV_COMPOSITION}"
+    )
+    return ENV_COMPOSITION.read_text(encoding="utf-8")
+
+
+def test_env_composition_does_not_claim_ambient_path_not_forwarded(
+    env_composition_text: str,
+) -> None:
+    """Plan C: the env-composition page's ``ocx run`` section currently
+    states "Ambient PATH entries from the parent shell are not forwarded",
+    which is FALSE for the default (non-``--clean``) ``ocx run`` — the
+    default inherits the parent environment and merely *prepends* the
+    composed tool ``bin/`` dirs to PATH; only ``--clean`` is hermetic.
+
+    The false claim must be removed. This is a substring-absence assertion:
+    it fails NOW (the false sentence is present) and passes once the page is
+    corrected to describe the inherit-and-prepend default.
+    """
+    lowered = env_composition_text.lower()
+    assert "ambient path entries from the parent shell are not forwarded" not in lowered, (
+        "env-composition.md must NOT claim ambient PATH is not forwarded for "
+        "the default `ocx run` — the default inherits the parent environment "
+        "and prepends composed tool bin/ dirs; only `--clean` is hermetic "
+        "(plan amendment C)."
+    )
+
+
+def test_env_composition_states_default_run_inherits_and_prepends(
+    env_composition_text: str,
+) -> None:
+    """Plan C positive form: the corrected page must state that the default
+    ``ocx run`` inherits the parent environment and prepends the composed
+    tool bin dirs, and that only ``--clean`` is hermetic (matching
+    ``exec --clean``). Substring presence — phrasing is the writer's call,
+    but the load-bearing tokens must be there."""
+    lowered = env_composition_text.lower()
+    assert "--clean" in lowered, (
+        "env-composition.md `ocx run` section must reference `--clean` as the "
+        "hermetic opt-in (plan amendment C)"
+    )
+    assert ("inherit" in lowered and "prepend" in lowered), (
+        "env-composition.md must state the default `ocx run` *inherits* the "
+        "parent environment and *prepends* composed tool bin/ dirs (plan "
+        "amendment C — the default is not hermetic)."
+    )
+
+
+@pytest.mark.parametrize("anchor,name", [
+    ("{#pull}", "pull"),
+    ("{#run}", "run"),
+    ("{#upgrade}", "upgrade"),
+])
+def test_exit64_row_mentions_global_project_conflict(
+    cli_ref_text: str, anchor: str, name: str
+) -> None:
+    """Plan C: ``command-line.md``'s exit-64 row for ``pull``/``run``/
+    ``upgrade`` must mention the ``--global`` + ``--project`` conflict, for
+    parity with ``add``/``lock``/``remove`` (which already say "`--global`
+    combined with `--project`").
+
+    Currently these three sections' exit-64 rows do NOT name ``--global`` at
+    all, so this fails now and pins the doc gap. Bound to the command's own
+    section so an `add`-section match cannot satisfy it.
+    """
+    section = _slice_section_by_anchor(cli_ref_text, anchor)
+    # Find the exit-code-64 table row within this command's section.
+    row_match = re.search(r"^\|\s*64\s*\|[^\n]*$", section, re.MULTILINE)
+    assert row_match is not None, (
+        f"`{name}` ({anchor}) section must have an exit-64 table row"
+    )
+    row = row_match.group(0)
+    assert "--global" in row and "--project" in row, (
+        f"`{name}` ({anchor}) exit-64 row must mention the `--global` + "
+        f"`--project` conflict for parity with `add`/`lock`/`remove` "
+        f"(plan amendment C); got row: {row!r}"
+    )
+
+
+def test_global_flag_section_links_strict_isolation(cli_ref_text: str) -> None:
+    """Plan C: the ``--global`` flag section must carry the
+    ``[env-composition-strict-isolation]`` reference link so readers reach
+    the strict-isolation spec. Fails now (the link is absent)."""
+    section = _slice_section_by_anchor(cli_ref_text, "{#global-flag}")
+    assert "env-composition-strict-isolation" in section, (
+        "the `--global` flag section ({#global-flag}) must reference "
+        "`[env-composition-strict-isolation]` so users reach the "
+        "strict-isolation spec (plan amendment C)"
     )

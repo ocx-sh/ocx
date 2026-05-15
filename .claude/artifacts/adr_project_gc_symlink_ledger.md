@@ -260,9 +260,17 @@ project directory.**
   here: a bad/dangling symlink is simply pruned. This is a deliberate
   *elimination* of a failure mode (no JSON ⇒ nothing to corrupt), explicitly
   called out so the behavioural delta is not mistaken for a regression. A
-  filesystem I/O error while reading `projects/` is still non-fatal (debug,
-  proceed with the symlink/`current` roots), matching the superseded ADR's
-  "registry unreadable ⇒ non-fatal" stance.
+  non-`NotFound` `read_dir` failure enumerating `projects/` is **fail-closed:
+  propagate ⇒ `ocx clean` aborts (`IoError` 74), `--force` overrides** — it is
+  indistinguishable downstream from "no projects registered", so swallowing it
+  would let GC run with zero roots against a live multi-project store and
+  collect every live project's pinned packages (silent-data-loss class). Only
+  `NotFound` (`projects/` absent) stays non-fatal (no projects registered is
+  valid). This reverses the superseded ADR's "registry unreadable ⇒ non-fatal"
+  stance for enumeration failure. Proportionally, a *known* root whose
+  `ocx.lock` is transiently unreadable yields retain-all/exit-0 rather than an
+  abort (recoverability differs by layer — see §Changelog Review-fix
+  A2/A2′/A3).
 
 ### How Would We Reverse This?
 
@@ -335,8 +343,11 @@ impl ProjectRegistry {
     /// the same observed target (TOCTOU guard: a concurrent `register`
     /// re-pointing the same hash must not be deleted — if it now resolves,
     /// treat as live), DEBUG log; else yield the resolved project dir.
-    /// Deterministic order (sort by link name). Filesystem I/O error →
-    /// DEBUG, return what was collected (non-fatal, matches superseded ADR).
+    /// Deterministic order (sort by link name). Non-`NotFound` `read_dir`
+    /// failure → **fail-closed: propagate `Err` ⇒ `ocx clean` aborts
+    /// (`IoError` 74), `--force` overrides** (reversed from the superseded
+    /// ADR's non-fatal stance — see §Changelog). `NotFound` (`projects/`
+    /// absent) → `[]`, non-fatal.
     pub async fn live_projects(&self) -> Result<Vec<PathBuf>, Error>;
 }
 ```
@@ -411,3 +422,4 @@ to delete."
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-05-15 | Architect (Opus) | Initial — supersede JSON `projects.json` ledger with a flat symlink store; silent debug prune; no-self-link; multi-project contract preserved. |
+| 2026-05-16 | Review-fix (Opus) | Review-fix A2/A2′/A3: registry enumeration failure reversed from non-fatal to fail-closed-abort (silent-data-loss class); transiently-unreadable known root ⇒ retain-all/exit-0 (proportional fail-closed). Supersedes the prior "registry unreadable ⇒ non-fatal" stance inherited from the superseded ADR. |

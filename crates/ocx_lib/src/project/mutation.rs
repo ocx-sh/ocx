@@ -49,7 +49,6 @@ use super::Error;
 use super::config::ProjectConfig;
 use super::error::{ProjectError, ProjectErrorKind};
 use super::lock::ProjectLock;
-use super::registry::ProjectRegistry;
 
 /// RAII handle to an in-flight project-tier mutation transaction.
 ///
@@ -328,60 +327,11 @@ impl MutationGuard {
         }
 
         // Best-effort GC-ledger registration so `ocx clean` retains packages
-        // pinned by this lock. The ledger keys on the project *directory*,
-        // not the lock+config path pair. Dropping the separate config-path
-        // capture is safe ONLY because of the invariant
-        // `lock_path_for(config) == config.parent()/ocx.lock` for every
-        // `--project` basename — pinned by test
-        // `lock_path_for_always_produces_ocx_lock_in_config_dir` (ARCH-4d).
-        // If that test is ever weakened the custom-`--project` multi-project
-        // GC contract breaks.
-        //
-        // Canonicalize the *config file* first, then take its parent, so a
-        // bare relative `--project` basename (e.g. `workspace.toml`, whose
-        // `Path::parent()` is `Some("")` — NOT `None`) resolves against the
-        // CWD instead of canonicalizing the empty path and silently skipping
-        // registration. The config file exists on disk here (the commit just
-        // wrote next to it). Canonicalizing the file also collapses aliased
-        // lookups (relative segments, symlinks) to one ledger entry.
-        // Canonicalize failure of THIS project's own path is the
-        // silent-data-loss class: log at WARN (NOT debug — C1.1
-        // self-register-failure rule) and skip registration without aborting
-        // the commit.
-        let canonical_project_dir = match tokio::fs::canonicalize(&self.config_path).await {
-            Ok(canonical_config) => match canonical_config.parent() {
-                Some(dir) => dir.to_path_buf(),
-                None => {
-                    log::warn!(
-                        "Project registry: config path '{}' has no parent directory \
-                         (non-fatal, registration skipped)",
-                        canonical_config.display()
-                    );
-                    return Ok(MutationCommit {
-                        config_path: self.config_path,
-                        lock_path: self.lock_path,
-                    });
-                }
-            },
-            Err(e) => {
-                log::warn!(
-                    "Project registry: canonicalize of config path '{}' failed \
-                     (non-fatal, registration skipped): {e}",
-                    self.config_path.display()
-                );
-                return Ok(MutationCommit {
-                    config_path: self.config_path,
-                    lock_path: self.lock_path,
-                });
-            }
-        };
-        let registry = ProjectRegistry::new(&self.home);
-        if let Err(e) = registry.register(&canonical_project_dir).await {
-            log::warn!(
-                "Project registry: registration of '{}' failed (non-fatal): {e}",
-                canonical_project_dir.display()
-            );
-        }
+        // pinned by this lock. The shared infallible helper owns the
+        // canonicalize→parent→register derivation and the WARN-on-failure
+        // silent-data-loss policy; a registration failure never aborts the
+        // commit (next `ocx lock` re-registers).
+        super::registry::register_project_dir_best_effort(&self.config_path, &self.home).await;
 
         Ok(MutationCommit {
             config_path: self.config_path,

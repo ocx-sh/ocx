@@ -35,6 +35,9 @@ pub enum Error {
     /// A project-tier configuration or lock operation failed.
     #[error(transparent)]
     Project(#[from] crate::project::error::Error),
+    /// A project GC-ledger (flat symlink store) operation failed.
+    #[error(transparent)]
+    ProjectRegistry(#[from] crate::project::registry::error::Error),
     /// A package manager operation failed.
     #[error(transparent)]
     PackageManager(#[from] crate::package_manager::error::Error),
@@ -184,6 +187,7 @@ impl ClassifyExitCode for Error {
             Self::Auth(e) => e.classify(),
             Self::Platform(e) => e.classify(),
             Self::Project(e) => e.classify(),
+            Self::ProjectRegistry(e) => e.classify(),
             Self::PackageManager(e) => e.classify(),
             Self::OciClient(e) => e.classify(),
             Self::Identifier(e) => e.classify(),

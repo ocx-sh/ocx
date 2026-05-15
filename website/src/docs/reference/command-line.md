@@ -178,7 +178,7 @@ Selects `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) as the project file for
 
 Accepted on: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, and `install`.
 
-`--global` is mutually exclusive with `--project`. Passing both exits with code 64 (`UsageError`).
+`--global` is mutually exclusive with `--project`. Passing both — whether as flags or via the `OCX_GLOBAL` / `OCX_PROJECT` environment variables — exits with code 64 (`UsageError`). The global toolchain never composes into project resolution; see [strict isolation][env-composition-strict-isolation] for the full hermetic contract.
 
 ::: warning No implicit home discovery
 There is no implicit fallback to `$OCX_HOME/ocx.toml` when no project is found in the CWD walk. You must pass `--global` explicitly to target the global file. The prior automatic home-tier discovery has been removed.
@@ -996,7 +996,7 @@ ocx upgrade [OPTIONS] [BINDING...]
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written, or `--check` confirmed the candidate matches. |
-| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `ocx.lock` absent when a partial upgrade was requested. |
+| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, `ocx.lock` absent when a partial upgrade was requested, or `--global` combined with `--project`. |
 | 65 | `--check` reported the candidate would change pinned content (advisory tag moved upstream for a selected or preserved entry). |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
@@ -1054,7 +1054,7 @@ ocx pull [OPTIONS]
 | Code | Meaning |
 |------|---------|
 | 0 | Success (or empty group filter — nothing to pull). |
-| 64 | Missing `ocx.toml`, unknown `--group` name, or empty comma segment. |
+| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `--global` combined with `--project`. |
 | 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
 | 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. |
 
@@ -1120,7 +1120,7 @@ The composer prepends env entries in iteration order, so the **last group listed
 |------|---------|
 | *(child)* | Child ran; its exit code is forwarded byte-for-byte. |
 | 1 | Child spawn failed (binary not found, exec errno). |
-| 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers. (OCX remaps clap's default exit 2 to 64.) |
+| 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; or `--global` combined with `--project`. (OCX remaps clap's default exit 2 to 64.) |
 | 65 | `ocx.lock` is stale — run `ocx lock`. |
 | 69 | Registry unreachable during auto-install of a missing package. |
 | 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error (e.g. `[group.all]` declared). |
@@ -1763,6 +1763,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [exec-modes]: ../in-depth/environments.md#visibility-views
 [env-composition-forwarding]: ../in-depth/environments.md#ocx-forwarding
 [in-depth-project-running]: ../in-depth/project.md#running
+[env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global

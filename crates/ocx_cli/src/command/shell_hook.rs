@@ -174,16 +174,19 @@ async fn emit_locked_set(
     // intersection `collect_applied` already computes via `find_plain`.
     let applied = collect_applied(&manager, lock, &platforms).await?;
 
+    // Computed once and reused below: `compute_fingerprint` is a SHA-256 over
+    // the applied entries and this is the per-prompt hot path.
+    let new_fingerprint = compute_fingerprint(&applied.entries);
+
     for name in &applied.missing {
         // Missing-tool notes ride alongside the diff path. The shared
         // emitter below short-circuits before printing these on the
         // unchanged fast path, so they cannot spam every prompt.
-        if !is_applied_unchanged(&compute_fingerprint(&applied.entries)) {
+        if !is_applied_unchanged(&new_fingerprint) {
             eprintln!("# ocx: {name} not installed; run `ocx pull` to fetch");
         }
     }
 
-    let new_fingerprint = compute_fingerprint(&applied.entries);
     let entries = manager.resolve_env(&applied.infos, false).await?;
     emit_env_with_sentinel(shell, &entries, &new_fingerprint, strip_global, context);
     Ok(())

@@ -15,8 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use super::error::{ProjectError, ProjectErrorKind};
-use super::registry::ProjectRegistry;
-use crate::log;
 use crate::oci::PinnedIdentifier;
 
 /// Derive the canonical `ocx.lock` data-file path for a given config file path.
@@ -372,56 +370,11 @@ impl ProjectLock {
 
         // Register this project's directory in the per-user GC ledger so
         // `ocx clean` can retain packages held by this project's lock file.
-        //
-        // The ledger keys on the project *directory* (the dir containing
-        // `ocx.lock`), not the lock+config path pair. Dropping the separate
-        // `config_path` capture (which the old JSON model needed to record a
-        // custom `--project=<custom>.toml` basename) is safe ONLY because of
-        // the invariant `lock_path_for(config) == config.parent()/ocx.lock`
-        // for every `--project` basename — pinned by test
-        // `lock_path_for_always_produces_ocx_lock_in_config_dir` (ARCH-4d).
-        // If that test is ever weakened the custom-`--project` multi-project
-        // GC contract breaks.
-        //
-        // Canonicalize the *config file* first, then take its parent, so a
-        // bare relative `--project` basename (e.g. `workspace.toml`, whose
-        // `Path::parent()` is `Some("")` — NOT `None`) resolves against the
-        // CWD instead of canonicalizing the empty path and silently skipping
-        // registration. The config file exists on disk here (the lock was
-        // just renamed next to it). Canonicalizing the file also collapses
-        // aliased lookups (relative segments, symlinks) to a single ledger
-        // entry. Failure to canonicalize THIS project's own path is the
-        // silent-data-loss class: log at WARN (NOT debug — C1.1
-        // self-register-failure rule) and skip registration without aborting
-        // the save (next `ocx lock` re-registers).
-        let canonical_project_dir = match tokio::fs::canonicalize(config_path).await {
-            Ok(canonical_config) => match canonical_config.parent() {
-                Some(dir) => dir.to_path_buf(),
-                None => {
-                    log::warn!(
-                        "Project registry: config path '{}' has no parent directory \
-                         (non-fatal, registration skipped)",
-                        canonical_config.display()
-                    );
-                    return Ok(());
-                }
-            },
-            Err(e) => {
-                log::warn!(
-                    "Project registry: canonicalize of config path '{}' failed \
-                     (non-fatal, registration skipped): {e}",
-                    config_path.display()
-                );
-                return Ok(());
-            }
-        };
-        let registry = ProjectRegistry::new(ocx_home);
-        if let Err(e) = registry.register(&canonical_project_dir).await {
-            log::warn!(
-                "Project registry: registration of '{}' failed (non-fatal): {e}",
-                canonical_project_dir.display()
-            );
-        }
+        // The shared infallible helper owns the canonicalize→parent→register
+        // derivation and the WARN-on-failure silent-data-loss policy; a
+        // registration failure never aborts the save (next `ocx lock`
+        // re-registers).
+        super::registry::register_project_dir_best_effort(config_path, ocx_home).await;
 
         Ok(())
     }
