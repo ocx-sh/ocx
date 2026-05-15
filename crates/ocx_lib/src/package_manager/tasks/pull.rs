@@ -10,8 +10,7 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, info_span};
 
 use crate::{
-    MEDIA_TYPE_PACKAGE_METADATA_V1, MEDIA_TYPE_PACKAGE_V1, file_structure, log, media_type_select,
-    media_type_select_some, oci,
+    MEDIA_TYPE_PACKAGE_V1, file_structure, log, media_type_select_some, oci,
     package::{install_info::InstallInfo, install_status::InstallStatus, metadata, resolved_package::ResolvedPackage},
     package_manager::{self, composer, concurrency::Concurrency, error::PackageErrorKind},
     prelude::SerdeExt,
@@ -348,32 +347,11 @@ pub async fn setup_owned(
     let metadata = if let Some(meta) = provided_metadata {
         meta
     } else {
-        // Config blob media-type check before any fetch — refuse to stage
-        // a wrong-media-type blob into the local CAS.
-        media_type_select(&manifest.config.media_type, &[MEDIA_TYPE_PACKAGE_METADATA_V1])
-            .map_err(|e| PackageErrorKind::from(oci::client::error::ClientError::internal(e)))?;
-        let config_digest =
-            oci::Digest::try_from(manifest.config.digest.as_str()).map_err(|e| PackageErrorKind::Internal(e.into()))?;
-        // Route through the index. `ChainedIndex::fetch_blob` is the
-        // single offline-aware blob accessor: local-CAS first, chain-walk
-        // on miss, write-through into the local CAS on hit, and `Ok(None)`
-        // in `ChainMode::Offline` when the local CAS does not have the
-        // blob. GC-protection comes from the config-blob digest carried
-        // in `ResolvedChain.chain` driving `ReferenceManager::link_blobs`
-        // below.
-        let bytes = mgr
-            .index()
-            .fetch_blob(&pinned.clone_with_digest(config_digest))
-            .await
-            .map_err(PackageErrorKind::Internal)?
-            .ok_or(PackageErrorKind::Internal(crate::Error::OfflineMode))?;
-        let raw: metadata::Metadata = serde_json::from_slice(&bytes)
-            .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
-        // Reject malformed metadata at the ingress boundary — refuse to write
-        // unvalidated metadata to disk so the consumption-side `load_object_data`
-        // validation never has to deal with publisher-side bugs after the fact.
-        metadata::ValidMetadata::try_from(raw)
-            .map_err(PackageErrorKind::Internal)?
+        // Fetch + media-type-check + validate the config blob. GC-protection
+        // comes from the config-blob digest carried in `ResolvedChain.chain`
+        // driving `ReferenceManager::link_blobs` below.
+        super::common::load_config_metadata(mgr.index(), pinned, &manifest)
+            .await?
             .into()
     };
 
