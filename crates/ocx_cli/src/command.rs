@@ -31,6 +31,7 @@ pub mod package;
 pub mod package_create;
 pub mod package_describe;
 pub mod package_info;
+pub mod package_inspect;
 pub mod package_pull;
 pub mod package_push;
 pub mod package_test;

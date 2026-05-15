@@ -245,6 +245,8 @@ pub use error::DependencyError;
 pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
+pub use tasks::inspect::InspectResult;
+pub use tasks::resolve::ResolvedChain;
 
 use crate::{file_structure, oci};
 
