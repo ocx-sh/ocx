@@ -6,6 +6,7 @@ mod dir_walker;
 mod drop_file;
 mod empty_or_absent;
 pub mod path;
+mod same_dir;
 mod same_filesystem;
 mod symlink_walk;
 
@@ -13,6 +14,7 @@ pub use assemble::{AssemblyError, AssemblyStats, assemble_from_layer, assemble_f
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 pub use empty_or_absent::{EmptyOrAbsentError, ensure_empty_or_absent};
+pub use same_dir::same_dir;
 pub use same_filesystem::{SameFilesystemError, same_filesystem};
 pub use symlink_walk::{SymlinkWalkError, refuse_if_symlink_in_path};
 

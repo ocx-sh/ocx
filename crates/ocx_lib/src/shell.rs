@@ -214,6 +214,54 @@ impl Shell {
         })
     }
 
+    /// Emit a shell line that rebuilds `PATH` dropping every element whose
+    /// path contains `needle` as a substring.
+    ///
+    /// Used by the prompt hook on project entry to strip the global
+    /// toolchain's `current` bin segments (rooted at
+    /// `$OCX_HOME/symlinks/…`) so a global-only tool is *removed* — not
+    /// merely shadowed — inside a project (strict isolation at the shell
+    /// layer, adr_global_toolchain_tier.md §Decision 6 / CODEX-BLOCK-4).
+    ///
+    /// Returns `None` for shells without a portable single-line PATH
+    /// filter (`Batch`); the caller surfaces a `# ocx:` note rather than
+    /// aborting. POSIX-family branches stay dash/sh-compatible (no bash
+    /// arrays, no `<<<`) so the static `init.bash` entrypoint sourced by
+    /// `bash --norc -c` / `dash` works unchanged (SOTA-2b).
+    ///
+    /// `needle` must not contain the shell's field separator or quoting
+    /// metacharacters; in practice it is an `$OCX_HOME`-rooted absolute
+    /// path, escaped here defensively.
+    pub fn filter_path_excluding(self, needle: impl AsRef<str>) -> Option<String> {
+        let needle = self.escape_value(needle.as_ref());
+        Some(match self {
+            // POSIX: split PATH on ':' with IFS, rebuild excluding any
+            // element containing $needle. `case` substring match is
+            // POSIX-portable (no bashisms) — works in dash/sh/ash/ksh too.
+            Self::Ash | Self::Ksh | Self::Dash | Self::Bash | Self::Zsh => format!(
+                "export PATH=\"$(_o=\"\"; _IFS=\"$IFS\"; IFS=':'; for _p in $PATH; do \
+                 case \"$_p\" in *\"{needle}\"*) ;; *) _o=\"${{_o:+$_o:}}$_p\";; esac; done; \
+                 IFS=\"$_IFS\"; printf '%s' \"$_o\")\""
+            ),
+            Self::Fish => format!("set -x PATH (string match -v -- \"*{needle}*\" $PATH)"),
+            Self::PowerShell => {
+                format!("$env:PATH = (($env:PATH -split ';') | Where-Object {{ $_ -notlike '*{needle}*' }}) -join ';'")
+            }
+            Self::Elvish => format!(
+                "set E:PATH = (str:join \":\" [(each [p]{{ if (not (str:contains $p \"{needle}\")) {{ put $p }} }} [(str:split \":\" $E:PATH)])])"
+            ),
+            Self::Nushell => format!(
+                "$env.PATH = ($env.PATH | split row (char esep) | where $it !~ \"{needle}\" | str join (char esep))"
+            ),
+            // No portable single-line PATH filter on cmd.exe; caller
+            // degrades to a `# ocx:` note (global tools may leak — Windows
+            // interactive prompt-hook isolation is a documented gap, not a
+            // correctness regression for the CI/non-interactive path the
+            // acceptance suite asserts).
+            Self::Batch => return None,
+        })
+    }
+
     /// Escape `value` for safe interpolation into the double-quoted form of
     /// `self`'s shell.
     ///

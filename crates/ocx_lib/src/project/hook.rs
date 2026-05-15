@@ -65,8 +65,10 @@ pub enum MissingState {
 ///
 /// `cwd` is the working directory the CLI saw at invocation time;
 /// `project_path_override` is the explicit `--project` / `OCX_PROJECT_FILE`
-/// path if one was supplied. Home-tier fallback is *not* consulted in this
-/// helper — the prompt-hook trio is project-tier only until Phase 9.
+/// path if one was supplied. There is no implicit home-tier fallback; the
+/// prompt-hook trio is project-tier only. Global-toolchain shell exposure
+/// is handled at the `NoProject` arm of `shell hook` (C2.7,
+/// adr_global_toolchain_tier.md §Decision 6), not by this resolver.
 ///
 /// Returns:
 ///
@@ -81,7 +83,10 @@ pub async fn load_project_state(
     cwd: &Path,
     project_path_override: Option<&Path>,
 ) -> crate::Result<Result<ProjectState, MissingState>> {
-    let resolved = ProjectConfig::resolve(Some(cwd), project_path_override, None).await?;
+    // `global: false` — the prompt-hook trio resolves the project tier
+    // only. Global-toolchain shell exposure is handled separately at the
+    // `NoProject` arm (C2.7), not via this resolver (strict isolation).
+    let resolved = ProjectConfig::resolve(Some(cwd), project_path_override, None, false).await?;
     let Some((config_path, lock_path)) = resolved else {
         return Ok(Err(MissingState::NoProject));
     };

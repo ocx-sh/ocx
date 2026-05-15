@@ -2,7 +2,8 @@
 
 ## Metadata
 
-**Status:** Accepted
+**Status:** Superseded
+**Superseded By:** [`adr_project_gc_symlink_ledger.md`](./adr_project_gc_symlink_ledger.md) (2026-05-15) — flat symlink store replaces the JSON ledger; multi-project GC contract preserved unchanged.
 **Date:** 2026-04-29
 **Deciders:** mherwig
 **Beads Issue:** N/A
@@ -505,3 +506,4 @@ Plan-document scope; this ADR records architecture only. The Unit 6 plan-artifac
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-04-29 | worker-architect (Opus) | Initial draft — Option 1 (`projects.json` + sibling lock) chosen. |
+| 2026-05-15 | Architect (Opus) | **Superseded** by `adr_project_gc_symlink_ledger.md`. The JSON-vs-symlink choice is reversed: the Option-2 rejection here argued against a per-project *directory tree*; the successor adopts a flat *one-symlink-per-project store* (pnpm/Nix shape) consistent with OCX's existing `refs/symlinks/` liveness model. Multi-project acceptance contract carried forward unchanged. |

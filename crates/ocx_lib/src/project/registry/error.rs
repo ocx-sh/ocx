@@ -8,7 +8,9 @@
 //! [`ProjectRegistryErrorKind`] discriminant. All registry failures flow through
 //! this single chain so callers can match on kind without downcasting.
 //!
-//! See [`adr_clean_project_backlinks.md`] for failure-mode rationale.
+//! See `adr_project_gc_symlink_ledger.md` for failure-mode rationale. The flat
+//! symlink store has no JSON document, no schema version, and no advisory-lock
+//! sentinel, so the only failure class is filesystem I/O (`Io` variant).
 
 use std::path::PathBuf;
 
@@ -29,11 +31,12 @@ pub enum Error {
 
 /// Context-bearing registry error: which path the failure occurred on.
 ///
-/// The `path` field carries the registry file path (`projects.json`) or the
-/// sentinel path (`.projects.lock`) depending on which operation failed.
+/// The `path` field carries the `projects/` store directory, a `projects/`
+/// entry, or a staging temp link, depending on which operation failed.
 #[derive(Debug)]
 pub struct ProjectRegistryError {
-    /// Path associated with the failure (registry file or sentinel).
+    /// Path associated with the failure (the `projects/` store directory, an
+    /// entry link, or a staging temp link — depending on which operation failed).
     pub path: PathBuf,
     /// Discriminant identifying the failure category.
     pub kind: ProjectRegistryErrorKind,
@@ -67,36 +70,18 @@ impl std::error::Error for ProjectRegistryError {
 
 /// Inner error discriminant for registry failures.
 ///
-/// Four variants cover all failure modes described in the ADR "Failure Modes"
-/// table: I/O (filesystem), Corrupt (parse failure refusing blind overwrite),
-/// UnknownVersion (unrecognised schema_version field), and Locked (advisory
-/// lock contention past retry timeout).
+/// The flat symlink store (ADR `adr_project_gc_symlink_ledger.md`) has no JSON
+/// document, no schema version, and no advisory-lock sentinel — there is
+/// nothing to parse or to contend on. The only failure class is filesystem
+/// I/O, so this enum carries a single `Io` variant. `#[non_exhaustive]` is
+/// retained so a future variant is not a semver break.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProjectRegistryErrorKind {
-    /// Filesystem I/O failure (directory creation, sentinel open, rename, read).
+    /// Filesystem I/O failure (store-directory creation, symlink create/
+    /// rename, readdir, stat).
     #[error("I/O error: {0}")]
     Io(#[source] std::io::Error),
-
-    /// Registry file exists but failed to parse as valid JSON.
-    ///
-    /// Per the ADR, a corrupt registry must surface as an error rather than
-    /// being silently overwritten, to avoid masking data loss and to force
-    /// the user to inspect and repair the file.
-    #[error("registry file is corrupt")]
-    Corrupt(#[source] serde_json::Error),
-
-    /// Registry file has a `schema_version` value that this version of OCX
-    /// does not recognise. Treated as a hard error to avoid silently
-    /// overwriting data written by a newer version of OCX.
-    #[error("unrecognised schema version {found}; expected {expected}")]
-    UnknownVersion { found: u8, expected: u8 },
-
-    /// Advisory lock on the sentinel file could not be acquired within the
-    /// retry timeout. The registration window is lost; the next successful
-    /// invocation re-registers.
-    #[error("registry advisory lock is held by another process")]
-    Locked,
 }
 
 impl ClassifyExitCode for Error {
@@ -104,9 +89,6 @@ impl ClassifyExitCode for Error {
         Some(match self {
             Self::Registry(e) => match &e.kind {
                 ProjectRegistryErrorKind::Io(_) => ExitCode::IoError,
-                ProjectRegistryErrorKind::Corrupt(_) => ExitCode::ConfigError,
-                ProjectRegistryErrorKind::UnknownVersion { .. } => ExitCode::ConfigError,
-                ProjectRegistryErrorKind::Locked => ExitCode::TempFail,
             },
         })
     }

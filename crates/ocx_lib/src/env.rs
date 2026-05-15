@@ -34,6 +34,10 @@ pub mod keys {
     /// Boolean — when truthy, skip the CWD walk and the [`OCX_PROJECT`]
     /// env var. Explicit `--project` paths still load.
     pub const OCX_NO_PROJECT: &str = "OCX_NO_PROJECT";
+    /// Boolean — when truthy, select the global toolchain
+    /// (`$OCX_HOME/ocx.toml`) as the in-effect project file instead of
+    /// discovering one via the CWD walk. Mirrors `--global`.
+    pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
 }
@@ -57,6 +61,26 @@ pub struct OcxConfigView {
     pub remote: bool,
     pub config: Option<PathBuf>,
     pub project: Option<PathBuf>,
+    /// When true, the global toolchain (`$OCX_HOME/ocx.toml`) is the
+    /// in-effect project file. Resolution-affecting → forwarded as
+    /// [`keys::OCX_GLOBAL`] so a child ocx selects the same tier.
+    ///
+    /// **Forwarding-coverage rationale (W2-P3, F6).** `OCX_GLOBAL` is
+    /// forwarded by [`Env::apply_ocx_config`] like every other
+    /// resolution-affecting flag, and that contract is pinned by the unit
+    /// test `apply_ocx_config_sets_ocx_global_when_set` (the sole
+    /// `OCX_*`-landing path). No *acceptance-level* end-to-end
+    /// "child ocx inherits `OCX_GLOBAL`" test is exercised on purpose: under
+    /// strict isolation (adr_global_toolchain_tier.md §Decision 4) the only
+    /// path that re-enters `ocx` from a `run`/`exec` spawn is a generated
+    /// entrypoint launcher (`ocx launcher exec`), an OCI-tier primitive that
+    /// reads `metadata.json` and never consults `ocx.toml`/global project
+    /// resolution. There is therefore no observable child-side resolution
+    /// difference to assert; fabricating a recursive `ocx run --global`
+    /// child to create one would test a contrived path strict isolation
+    /// forbids by design. The block-tier "resolution flag forwarded"
+    /// contract is fully pinned at the unit layer.
+    pub global: bool,
     pub index: Option<PathBuf>,
 }
 
@@ -68,6 +92,7 @@ impl OcxConfigView {
             remote: false,
             config: None,
             project: None,
+            global: false,
             index: None,
         }
     }
@@ -171,8 +196,9 @@ impl Env {
     /// child ocx process sees the same policy the parent saw.
     ///
     /// Always sets [`keys::OCX_BINARY_PIN`]. Sets [`keys::OCX_OFFLINE`] /
-    /// [`keys::OCX_REMOTE`] only when the corresponding flag is true so the
-    /// child env stays minimal. Sets [`keys::OCX_CONFIG`] /
+    /// [`keys::OCX_REMOTE`] / [`keys::OCX_GLOBAL`] only when the
+    /// corresponding flag is true so the child env stays minimal. Sets
+    /// [`keys::OCX_CONFIG`] /
     /// [`keys::OCX_INDEX`] only when the parent had an explicit value;
     /// otherwise removes any inherited setting so a stale parent-shell export
     /// cannot beat the outer ocx's parsed state.
@@ -191,6 +217,11 @@ impl Env {
             self.set(keys::OCX_REMOTE, "1");
         } else {
             self.remove(keys::OCX_REMOTE);
+        }
+        if cfg.global {
+            self.set(keys::OCX_GLOBAL, "1");
+        } else {
+            self.remove(keys::OCX_GLOBAL);
         }
         match &cfg.config {
             Some(path) => self.set(keys::OCX_CONFIG, path.as_os_str()),
@@ -598,6 +629,44 @@ mod tests {
         assert_eq!(env.get(keys::OCX_REMOTE).unwrap(), "1");
         assert_eq!(env.get(keys::OCX_CONFIG).unwrap(), "/cfg.toml");
         assert_eq!(env.get(keys::OCX_INDEX).unwrap(), "/idx");
+    }
+
+    #[test]
+    fn apply_ocx_config_sets_ocx_global_when_set() {
+        // W2-P3 (adr_global_toolchain_tier.md §Decision 2, C2.2): `--global`
+        // is resolution-affecting, so `apply_ocx_config` MUST forward it to a
+        // child ocx as `OCX_GLOBAL=1` when set, and remove any inherited
+        // value when unset (so a stale parent-shell export cannot beat the
+        // outer ocx's parsed state). This plumbing is REAL (not a stub) — the
+        // guard PASSES now, pinning the contract against future regression.
+        let mut cfg = view("/abs/ocx");
+        cfg.global = true;
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+        assert_eq!(
+            env.get(keys::OCX_GLOBAL).unwrap(),
+            "1",
+            "cfg.global=true must forward OCX_GLOBAL=1 to the child env"
+        );
+        // OCX_GLOBAL travels with the resolution-affecting set, never the
+        // presentation set (which is never forwarded — it would leak into
+        // entrypoint child streams).
+        for presentation in ["OCX_LOG", "OCX_LOG_CONSOLE", "OCX_FORMAT", "OCX_COLOR"] {
+            assert!(
+                env.get(presentation).is_none(),
+                "presentation key `{presentation}` must never ride along with OCX_GLOBAL"
+            );
+        }
+
+        // Unset: a stale inherited OCX_GLOBAL must be cleared so the outer
+        // ocx's parsed state (global=false) wins.
+        let mut env = Env::clean();
+        env.set(keys::OCX_GLOBAL, "1");
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_GLOBAL).is_none(),
+            "cfg.global=false must clear any inherited OCX_GLOBAL"
+        );
     }
 
     #[test]

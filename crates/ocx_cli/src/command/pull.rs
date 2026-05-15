@@ -41,10 +41,19 @@ pub struct Pull {
     /// is pulled.
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
     pub groups: Vec<String>,
+
+    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of
+    /// a discovered project. Read-only: an absent global file yields the
+    /// existing `NoProject` semantics. Mutually exclusive with
+    /// `--project`.
+    #[arg(long)]
+    pub global: bool,
 }
 
 impl Pull {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        let context = context.with_command_global(self.global)?;
+
         // ── Phase 1: parse-time validation ───────────────────────────────
 
         // Reject empty comma segments (`-g ci,,lint`) BEFORE any filesystem

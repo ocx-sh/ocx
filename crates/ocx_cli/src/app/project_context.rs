@@ -132,7 +132,8 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
 /// Encapsulates the prologue currently inlined in `command/pull.rs` Phase 2–3:
 ///
 /// 1. Resolve `ocx.toml` + sibling `ocx.lock` paths via the full precedence
-///    chain (explicit flag > env > CWD walk > home fallback).
+///    chain (`--global`/`OCX_GLOBAL` selector ▸ `--project` ▸ `OCX_PROJECT`
+///    ▸ CWD walk ▸ None).
 /// 2. Load [`ProjectConfig`] from disk.
 /// 3. Load [`ProjectLock`] from disk.
 /// 4. Verify the lock's stored `declaration_hash` matches the current config
@@ -151,12 +152,91 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
 /// the lock's declaration hash does not match the current config. Returns
 /// `Err(ProjectContextError::Project)` or `Err(ProjectContextError::Config)`
 /// for lower-level parse or I/O errors.
+/// Auto-create `$OCX_HOME/ocx.toml` when a `--global` mutator
+/// (`ocx add --global`, the `ocx install --global` add-step) runs against
+/// an absent global file (F7, adr_global_toolchain_tier.md §Decision 3).
+///
+/// Mirrors what project `add` would do on a fresh project, except project
+/// `add` deliberately refuses to scaffold (exit 64) — the global tier is
+/// the one place auto-init is sanctioned, because there is no
+/// `ocx init`-equivalent for `$OCX_HOME` and the user explicitly opted
+/// into the global file with `--global`. Reuses
+/// [`ocx_lib::project::init_project`] rather than re-implementing the
+/// scaffold (feedback_extend_dont_duplicate).
+///
+/// No-op when `context.global()` is false (a CWD-discovered project must
+/// never be auto-scaffolded) or the global file already exists. Idempotent
+/// under two distinct race shapes, both benign:
+///
+/// - **Sequential re-entry** (the caller probed before another mutator's
+///   write landed, then `init_project` ran second): `init_project`'s own
+///   `symlink_metadata` check sees the file and returns
+///   `ProjectErrorKind::ConfigAlreadyExists`, which is swallowed — the file
+///   the caller wanted now exists.
+/// - **Genuinely concurrent**: both processes pass the `symlink_metadata`
+///   check and both `rename(2)`-write the *identical* fixed empty scaffold.
+///   Neither yields `ConfigAlreadyExists`; the double-write is an
+///   idempotent overwrite with the same bytes. This is accepted because
+///   real binding writes are flock-protected in `MutationGuard::commit` —
+///   only the fixed empty scaffold is written here, never user data. Making
+///   this init atomic is a deferred decision, not a correctness gap.
+///
+/// # Errors
+///
+/// Propagates `ProjectContextError::Project` for an I/O failure writing the
+/// scaffold (other than the benign already-exists race).
+pub async fn ensure_global_project_initialized(context: &crate::app::Context) -> Result<(), ProjectContextError> {
+    use ocx_lib::project::error::ProjectErrorKind;
+
+    if !context.global() {
+        return Ok(());
+    }
+
+    let home = context.file_structure().root().to_path_buf();
+    let config_path = home.join("ocx.toml");
+
+    // `symlink_metadata` (via `init_project`) is the authoritative
+    // existence check; this fast-path probe only avoids the spawn_blocking
+    // hop on the common already-initialised case.
+    if tokio::fs::symlink_metadata(&config_path).await.is_ok() {
+        return Ok(());
+    }
+
+    let init_path = config_path.clone();
+    let result = tokio::task::spawn_blocking(move || ocx_lib::project::init_project(&init_path))
+        .await
+        .map_err(|e| {
+            ProjectContextError::Project(ocx_lib::project::Error::Project(
+                ocx_lib::project::error::ProjectError::new(
+                    config_path.clone(),
+                    ProjectErrorKind::Io(std::io::Error::other(e)),
+                ),
+            ))
+        })?;
+
+    match result {
+        Ok(_) => Ok(()),
+        // Sequential re-entry: another global mutator's write landed
+        // between our fast-path probe and `init_project`'s own
+        // `symlink_metadata` check. The file the caller wanted now exists,
+        // so swallow. (The genuinely-concurrent path never reaches here —
+        // it double-writes the identical fixed scaffold; see fn doc.)
+        Err(ocx_lib::project::Error::Project(pe))
+            if matches!(pe.kind, ProjectErrorKind::ConfigAlreadyExists { .. }) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(ProjectContextError::Project(e)),
+    }
+}
+
 pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<ProjectContext, ProjectContextError> {
     use ocx_lib::env;
     use ocx_lib::project::error::{ProjectError, ProjectErrorKind};
 
     // Resolve `ocx.toml` + sibling `ocx.lock` paths with the full precedence
-    // chain: explicit flag > env > CWD walk > home fallback.
+    // chain: `--global`/`OCX_GLOBAL` selector ▸ `--project` ▸ `OCX_PROJECT`
+    // ▸ CWD walk ▸ None.
     let cwd = env::current_dir().map_err(|e| {
         ProjectContextError::Project(ocx_lib::project::Error::Project(ProjectError::new(
             std::path::PathBuf::new(),
@@ -164,7 +244,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
         )))
     })?;
     let home = context.file_structure().root().to_path_buf();
-    let resolved = ProjectConfig::resolve(Some(&cwd), context.project_path(), Some(&home)).await?;
+    let resolved = ProjectConfig::resolve(Some(&cwd), context.project_path(), Some(&home), context.global()).await?;
 
     let (config_path, lock_path) = match resolved {
         Some(pair) => pair,
@@ -248,7 +328,8 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
     use ocx_lib::project::error::{ProjectError, ProjectErrorKind};
 
     // Resolve `ocx.toml` + sibling `ocx.lock` paths via the same precedence
-    // chain consumed by `load_project_with_lock`.
+    // chain consumed by `load_project_with_lock`: `--global`/`OCX_GLOBAL`
+    // selector ▸ `--project` ▸ `OCX_PROJECT` ▸ CWD walk ▸ None.
     let cwd = env::current_dir().map_err(|e| {
         ProjectContextError::Project(ocx_lib::project::Error::Project(ProjectError::new(
             std::path::PathBuf::new(),
@@ -256,7 +337,7 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         )))
     })?;
     let home = context.file_structure().root().to_path_buf();
-    let resolved = ProjectConfig::resolve(Some(&cwd), context.project_path(), Some(&home)).await?;
+    let resolved = ProjectConfig::resolve(Some(&cwd), context.project_path(), Some(&home), context.global()).await?;
     let (config_path, lock_path) = match resolved {
         Some(pair) => pair,
         None => return Err(ProjectContextError::NoProject { cwd }),

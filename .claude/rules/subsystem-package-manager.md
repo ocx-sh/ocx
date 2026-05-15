@@ -38,7 +38,7 @@ Facade = single coord point for all package ops. Hide store + index + client com
 | `tasks/install.rs` | `install()`, `install_all()` — pull + create symlinks |
 | `tasks/uninstall.rs` | `uninstall()`, `uninstall_all()` — remove symlinks, optional purge |
 | `tasks/deselect.rs` | `deselect()`, `deselect_all()` — remove current symlink |
-| `tasks/clean.rs` | `clean()` — GC unreferenced objects + stale temps; `collect_project_roots` free function — loads `ProjectRegistry`, resolves each lock's pinned digests into `Vec<ProjectRootDigests>` |
+| `tasks/clean.rs` | `clean()` — GC unreferenced objects + stale temps; `collect_project_roots` free function — calls `ProjectRegistry::live_projects()` (flat symlink ledger, no JSON parse), resolves each live project dir's `ocx.lock` pinned digests into `Vec<ProjectRootDigests>`; opportunistically removes legacy `projects.json`/`.projects.lock` if found; no corrupt-registry exit-78 branch (eliminated with the JSON parse surface) |
 | `composer.rs` | Two-env composition: `compose(roots, store, self_view: bool) -> Vec<Entry>` (flat iteration over each root's pre-built TC with cross-root dedup, surface-gated via `has_interface()`/`has_private()`); `check_entrypoints(roots, store)` (interface-projection collision gate over 1..N roots, reports all N owners) |
 
 ## Facade Pattern

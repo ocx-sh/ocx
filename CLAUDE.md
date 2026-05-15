@@ -100,6 +100,7 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 | `OCX_NO_PROJECT` | Skip CWD walk + `OCX_PROJECT`; explicit `--project` paths still load | false |
 | `OCX_INDEX` | Override local index directory path | (unset → `$OCX_HOME/index/`) |
 | `OCX_BINARY_PIN` | Absolute path to the running `ocx`; set on every subprocess spawn so a child ocx (e.g. via a generated launcher) pins to the same binary | (unset → PATH lookup) |
+| `OCX_GLOBAL` | Select global toolchain tier (`$OCX_HOME/ocx.toml`); equivalent to `--global`; resolution-affecting, forwarded to child ocx. Implicit home discovery removed — use `--global` explicitly. | (unset) |
 | `OCX_NO_UPDATE_CHECK` | Disable update check notification | false |
 | `OCX_NO_MODIFY_PATH` | Disable shell profile modification during install | false |
 
@@ -112,7 +113,6 @@ Tests live in `test/` using pytest + Docker Compose (registry:2 on localhost:500
 - `.claude/rules/product-context.md` — Product vision, positioning, competitive analysis, use cases (auto-loads on website/agents/skill paths)
 - `.claude/rules/arch-principles.md` — Design principles, glossary, ADR index (auto-loads on Rust files)
 - `website/src/docs/user-guide.md` — Primary conceptual doc: three-store architecture, versioning, locking, auth
-
 
 ## Core Principles
 

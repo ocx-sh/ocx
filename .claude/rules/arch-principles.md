@@ -58,6 +58,8 @@ CLI command (clap parse)
 | **Index** | Local JSON snapshot of registry metadata (tags, manifests) for offline/reproducibility |
 | **Candidate** | Symlink at `symlinks/{registry}/{repo}/candidates/{tag}` — pinned at install time |
 | **Current** | Floating symlink at `symlinks/{registry}/{repo}/current` — set by `ocx select` |
+| **Project ledger** | Flat symlink store at `$OCX_HOME/projects/` — one symlink per registered project, name = 16-hex SHA-256 of canonical project dir, target = project dir. GC roots for multi-project clean. Self-link for the global toolchain is prohibited (global file's project dir is `$OCX_HOME`). ADR: `adr_project_gc_symlink_ledger.md`. |
+| **Global toolchain** | `$OCX_HOME/ocx.toml` + `$OCX_HOME/ocx.lock`, reachable only via explicit `--global`/`OCX_GLOBAL`. Strict isolation: never composes into project resolution; `run`/`exec` are always hermetic. Shell-exposed via `ocx shell init` static entrypoint + per-prompt hook. ADR: `adr_global_toolchain_tier.md`. |
 | **Digest** | SHA-256 content hash — immutable identity of package version |
 | **Tag** | Mutable alias to digest (e.g., `3.28`, `latest`) |
 | **Cascade** | Publisher convention: push `3.28.1` and auto-update `3.28`, `3`, `latest` tags |
@@ -85,6 +87,8 @@ CLI command (clap parse)
 | `adr_index_routing_semantics.md` | `IndexOperation::{Query, Resolve}` enum; pinned-id pulls skip tag commit |
 | `adr_cli_high_low_layering.md` | Formalize high-level (project-tier) vs OCI-tier CLI split; add `ocx run`; reserve `all` keyword |
 | `adr_windows_exe_shim.md` | Native Windows `.exe` shim + `.shim` sidecar replaces the `.cmd` launcher (no `.cmd` emitted; PATHEXT inject/warn machinery removed); fully eliminates BatBadBut `%*`; committed-blob embed (A1 + B1 + C2 + D1) |
+| `adr_project_gc_symlink_ledger.md` | Flat symlink store `$OCX_HOME/projects/` as project GC ledger (supersedes `adr_clean_project_backlinks.md`) |
+| `adr_global_toolchain_tier.md` | Explicit `--global` toolchain tier, strict isolation, no implicit home fallback (supersedes Amendment C of `adr_project_toolchain_config.md`) |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 

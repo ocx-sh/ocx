@@ -10,9 +10,10 @@
 //! previews) with the set of [`crate::oci::PinnedIdentifier`]s that lock
 //! pins.
 //!
-//! See [`adr_clean_project_backlinks.md`] for the full design rationale and
-//! the "Reachability Graph Contract Change" section for how these digests
-//! are inserted as roots alongside live install symlinks.
+//! See `adr_project_gc_symlink_ledger.md` for the full design rationale.
+//! The digests are inserted as reachability roots alongside live install
+//! symlinks; the source is [`crate::project::registry::ProjectRegistry::live_projects`]
+//! (flat symlink ledger — not the superseded `load_and_prune` JSON reader).
 
 use std::path::PathBuf;
 
@@ -21,7 +22,7 @@ use crate::oci::PinnedIdentifier;
 /// Resolved GC roots derived from a single registered project's `ocx.lock`.
 ///
 /// Produced by `collect_project_roots` in `tasks/clean.rs` after reading each
-/// entry from [`crate::project::registry::ProjectRegistry::load_and_prune`]
+/// live project directory from [`crate::project::registry::ProjectRegistry::live_projects`]
 /// and parsing its lock file. Consumed by
 /// [`super::reachability_graph::ReachabilityGraph::build`] to add project-held
 /// packages as reachability roots alongside live install symlinks.

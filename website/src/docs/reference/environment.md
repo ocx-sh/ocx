@@ -108,6 +108,24 @@ The default registry to use when no registry is specified in a package reference
 Overrides the `[registry] default` key in the [configuration file][config-ref].
 If neither is set, OCX uses `ocx.sh`.
 
+### `OCX_GLOBAL` {#ocx-global}
+
+Selects the global toolchain tier — equivalent to the [`--global`][arg-global] CLI flag, but injectable via environment for CI and container setups where the command line is not controlled.
+
+When set to a [truthy value](#truthy-values), project-tier commands (`add`, `remove`, `lock`, `upgrade`, `pull`, `run`) and `install` target `$OCX_HOME/ocx.toml` instead of a discovered project file.
+
+```sh
+export OCX_GLOBAL=1
+```
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same tier selection.
+
+**No implicit fallback**: the earlier implicit `$OCX_HOME/ocx.toml` discovery (home-tier fallback) has been removed. The global toolchain is only active when `--global` is explicitly passed or `OCX_GLOBAL` is set. Absent both, `ocx` does not discover any home-tier project file.
+
+`OCX_GLOBAL` and [`OCX_PROJECT`](#ocx-project) are mutually exclusive — setting both is a usage error (exit 64).
+
+**Strict isolation**: the global toolchain never composes into project-tier resolution. Inside a project directory, `ocx run` and `ocx exec` are hermetic and never see global tools — the shell hook removes global tools from `PATH` entirely when a project is in scope. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
+
 ::: warning
 This variable is mostly intended for testing.
 It is recommended to specify the registry explicitly in the package reference.
@@ -353,6 +371,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-shell-hook]: command-line.md#shell-hook
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
+[arg-global]: command-line.md#global-flag
 [arg-index]: command-line.md#arg-index
 [arg-jobs]: command-line.md#arg-jobs
 [arg-log-level]: command-line.md#arg-log-level
@@ -375,6 +394,9 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote
+
+<!-- reference -->
+[env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 
 <!-- internal -->
 [fs-objects]: ../user-guide.md#file-structure-objects

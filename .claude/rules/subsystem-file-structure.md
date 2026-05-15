@@ -60,10 +60,11 @@ One instance per session. Sub-stores public fields. `root()` return OCX home pat
 
 **Root-level state files under `$OCX_HOME`:**
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `projects.json` | Project registry — list of `ocx.lock` paths registered on this machine. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` to retain cross-project packages. |
-| `.projects.lock` | Advisory lock sentinel for `projects.json`. Same-volume sibling file; never contended long — held only during register/rewrite. |
+| `projects/` | Project GC ledger — flat directory of one symlink per registered project. Name = first 16 hex chars of `SHA-256(canonical_abs_project_dir)`; target = the project directory. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` via `ProjectRegistry::live_projects()` to retain cross-project packages. ADR: `adr_project_gc_symlink_ledger.md`. |
+
+`$OCX_HOME/projects.json` and `$OCX_HOME/.projects.lock` from the prior JSON ledger are obsolete — safe to delete. `ocx clean` removes them opportunistically with a single debug log if encountered.
 
 ## Six Stores
 
@@ -177,9 +178,9 @@ Blob forward-ref: created by `pull` directly. Symlink in `refs/blobs/` target `b
 
 ## GC Safety
 
-GC (`garbage_collection/reachability_graph.rs`) build `ReachabilityGraph` covering all three CAS tiers in single BFS pass. Packages with live `refs/symlinks/` entries or digests pinned by any registered project's `ocx.lock` (from `projects.json`) = roots. BFS follow four edge types from each package: `refs/deps/` (dependent packages), `refs/layers/` (extracted layers), `refs/blobs/` (raw blobs). Layers and blobs no outgoing edges — reachable only via package refs. Unreachable = collected.
+GC (`garbage_collection/reachability_graph.rs`) build `ReachabilityGraph` covering all three CAS tiers in single BFS pass. Packages with live `refs/symlinks/` entries or digests pinned by any registered project's `ocx.lock` = roots. BFS follow four edge types from each package: `refs/deps/` (dependent packages), `refs/layers/` (extracted layers), `refs/blobs/` (raw blobs). Layers and blobs no outgoing edges — reachable only via package refs. Unreachable = collected.
 
-Project-registry roots read via `ProjectRegistry::load_and_prune` at start of `ocx clean`. Entries whose `ocx_lock_path` no longer exists on disk are silently dropped from the registry before the GC walk. Pass `--force` to `ocx clean` to ignore the registry and collect all packages not held by live symlinks.
+Project-registry roots read via `ProjectRegistry::live_projects()` at the start of `ocx clean`. The ledger is the flat symlink store at `$OCX_HOME/projects/` (ADR: `adr_project_gc_symlink_ledger.md`). Each symlink's liveness is a three-state probe (`Live`/`Dead`/`Unknown`): a broken or lock-absent link is pruned silently at debug; a transiently unreachable link (`Unknown` — NFS/automount) is retained with one WARN and excluded as a root this run. There is no parse surface to corrupt — the prior `projects.json` JSON ledger and its corrupt-registry exit-78 branch are eliminated. Pass `--force` to `ocx clean` to ignore the registry and collect all packages not held by live symlinks.
 
 Blobs first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blob`) included in reachability walk. Previous `tier != CasTier::Blob` skip removed; blobs retained only when live `refs/blobs/` symlink points to them.
 
@@ -194,6 +195,12 @@ Low-level primitives. Use only for non-package symlinks or inside `ReferenceMana
 - `is_link(path)` — use instead of `is_symlink()` — handle Windows NTFS junctions
 
 Windows: use NTFS junction points (no privilege escalation needed).
+
+**ARCH-4b — sanctioned exception for `$OCX_HOME/projects/`:** `ProjectRegistry` uses `symlink::create`/`update` (via `symlink::replace_atomic`) directly, bypassing `ReferenceManager`. This is intentional and must not be "fixed":
+
+- `projects/` links target an absolute path **outside** `$OCX_HOME` (the project directory). `ReferenceManager::link()` validates containment inside `refs/` — that check is correct for install back-refs and must reject external targets.
+- `projects/` links are categorically not install back-refs. They are GC-root registrations with a flat-symlink liveness model (ADR: `adr_project_gc_symlink_ledger.md`).
+- Any future reviewer who sees raw `symlink::` calls in `project/registry.rs` should recognise this carve-out, not re-flag it as a violation of the "always use `ReferenceManager`" rule.
 
 ## hardlink Module
 

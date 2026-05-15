@@ -275,14 +275,13 @@ impl ProjectLock {
     /// Save the lock file and register its path in the per-user project registry.
     ///
     /// `ocx_home` is the OCX data-home directory (e.g., `~/.ocx`) used to
-    /// locate `$OCX_HOME/projects.json`. `config_path` is the originating
-    /// project config file (typically `<dir>/ocx.toml`, but may carry a
-    /// custom name when `--project=<custom>.toml` was used) — recorded
-    /// alongside the lock path so the registry's lazy-prune walker
-    /// (`entry_is_valid_async`) honours custom-named projects (Codex
-    /// High-4 fix). Registration runs **after** the atomic rename
-    /// succeeds; a registration failure is logged at WARN and never
-    /// aborts the save.
+    /// locate the project ledger at `$OCX_HOME/projects/` (flat symlink store,
+    /// ADR: `adr_project_gc_symlink_ledger.md`). `config_path` is the
+    /// originating project config file (typically `<dir>/ocx.toml`, but may
+    /// carry a custom name when `--project=<custom>.toml` was used) — its
+    /// parent directory is canonicalized and registered as the project dir.
+    /// Registration runs **after** the atomic rename succeeds; a registration
+    /// failure is logged at WARN and never aborts the save.
     pub async fn save(
         &self,
         path: &Path,
@@ -313,9 +312,6 @@ impl ProjectLock {
         // a blocking thread so the sync filesystem calls do not block the
         // async runtime.
         let path = path.to_path_buf();
-        // Keep a clone for the post-save registry call below (the original
-        // is moved into the spawn_blocking closure).
-        let saved_path = path.clone();
         tokio::task::spawn_blocking(move || -> Result<(), super::Error> {
             let parent = path.parent().unwrap_or_else(|| Path::new("."));
             if !parent.as_os_str().is_empty() {
@@ -374,48 +370,56 @@ impl ProjectLock {
         .await
         .expect("spawn_blocking panicked in ProjectLock::save")?;
 
-        // Register the saved lock path in the per-user project registry so
+        // Register this project's directory in the per-user GC ledger so
         // `ocx clean` can retain packages held by this project's lock file.
-        // Canonicalize first so two writers reaching the same physical file
-        // through different aliased paths (e.g. one via `./ocx.lock`, one
-        // via an absolute path) collapse to a single registry entry. The
-        // lock file exists at this point — the atomic rename above is
-        // already complete — so canonicalize() will not fail with NotFound.
-        // Registration is non-fatal: a failure here (e.g., read-only
-        // OCX_HOME, lock contention) logs at WARN and does not abort the
-        // save. The next successful `ocx lock` re-registers.
-        let canonical_path = match tokio::fs::canonicalize(&saved_path).await {
-            Ok(p) => p,
+        //
+        // The ledger keys on the project *directory* (the dir containing
+        // `ocx.lock`), not the lock+config path pair. Dropping the separate
+        // `config_path` capture (which the old JSON model needed to record a
+        // custom `--project=<custom>.toml` basename) is safe ONLY because of
+        // the invariant `lock_path_for(config) == config.parent()/ocx.lock`
+        // for every `--project` basename — pinned by test
+        // `lock_path_for_always_produces_ocx_lock_in_config_dir` (ARCH-4d).
+        // If that test is ever weakened the custom-`--project` multi-project
+        // GC contract breaks.
+        //
+        // Canonicalize the *config file* first, then take its parent, so a
+        // bare relative `--project` basename (e.g. `workspace.toml`, whose
+        // `Path::parent()` is `Some("")` — NOT `None`) resolves against the
+        // CWD instead of canonicalizing the empty path and silently skipping
+        // registration. The config file exists on disk here (the lock was
+        // just renamed next to it). Canonicalizing the file also collapses
+        // aliased lookups (relative segments, symlinks) to a single ledger
+        // entry. Failure to canonicalize THIS project's own path is the
+        // silent-data-loss class: log at WARN (NOT debug — C1.1
+        // self-register-failure rule) and skip registration without aborting
+        // the save (next `ocx lock` re-registers).
+        let canonical_project_dir = match tokio::fs::canonicalize(config_path).await {
+            Ok(canonical_config) => match canonical_config.parent() {
+                Some(dir) => dir.to_path_buf(),
+                None => {
+                    log::warn!(
+                        "Project registry: config path '{}' has no parent directory \
+                         (non-fatal, registration skipped)",
+                        canonical_config.display()
+                    );
+                    return Ok(());
+                }
+            },
             Err(e) => {
                 log::warn!(
-                    "Project registry: canonicalize of '{}' failed (non-fatal, registration skipped): {e}",
-                    saved_path.display()
-                );
-                return Ok(());
-            }
-        };
-        // Canonicalize the config path too so two writers reaching the
-        // same physical file via different aliased paths collapse to one
-        // registry entry (mirrors the `ocx_lock_path` canonicalization
-        // contract on `ProjectRegistry::register`). On rare canonicalize
-        // failure (e.g. config file deleted between save and register)
-        // skip registration with a WARN — same non-fatal policy as the
-        // lock-path canonicalize above.
-        let canonical_config = match tokio::fs::canonicalize(config_path).await {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!(
-                    "Project registry: canonicalize of config '{}' failed (non-fatal, registration skipped): {e}",
+                    "Project registry: canonicalize of config path '{}' failed \
+                     (non-fatal, registration skipped): {e}",
                     config_path.display()
                 );
                 return Ok(());
             }
         };
         let registry = ProjectRegistry::new(ocx_home);
-        if let Err(e) = registry.register(&canonical_path, &canonical_config).await {
+        if let Err(e) = registry.register(&canonical_project_dir).await {
             log::warn!(
                 "Project registry: registration of '{}' failed (non-fatal): {e}",
-                canonical_path.display()
+                canonical_project_dir.display()
             );
         }
 

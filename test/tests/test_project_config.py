@@ -25,7 +25,6 @@ which does NOT yet call ``ConfigLoader::project_path`` — only wires
 """
 from __future__ import annotations
 
-import json
 import subprocess
 import uuid
 from pathlib import Path
@@ -284,17 +283,24 @@ def test_project_flag_resolves_custom_filename(
 def test_project_flag_canonicalized_for_registry(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Aliased project paths collapse to one entry in ``projects.json``.
+    """Aliased ``--project`` paths collapse to one symlink in ``$OCX_HOME/projects/``.
 
-    Plan_review_fixes_project_toolchain.md Phase 3 (Cluster B), Security
-    Warn: pre-fix, ``ProjectRegistry::register`` accepted any absolute
-    path verbatim, so two writers reaching the same physical lock file
-    through different aliased paths (e.g. one canonical, one with a ``./``
-    segment) registered twice. After the fix, lock-write sites
-    canonicalize before registering — both paths land on a single entry.
+    Living Design — storage swapped by ``adr_project_gc_symlink_ledger.md``
+    (W1 C1.3): the per-user JSON ledger ``$OCX_HOME/projects.json`` is
+    REPLACED by a flat symlink store ``$OCX_HOME/projects/<16hex> →
+    <project dir>``. Registration now canonicalizes the *config file* then
+    takes its parent (not a ``projects.json`` entry). This test previously
+    asserted ``len(doc["entries"]) == 1`` in ``projects.json``; rewritten
+    to the symlink-ledger reality — exactly one non-staging symlink under
+    ``$OCX_HOME/projects/`` resolving to the canonical project directory.
 
-    Two ``ocx lock`` invocations targeting the same project file via
-    distinct path forms must produce one entry in ``$OCX_HOME/projects.json``.
+    Coverage strengthened to genuinely exercise the W1-P5 bare-relative
+    fix: the second invocation passes a **bare relative** ``--project``
+    basename (``ocx.toml``) with ``cwd=project_dir``. Pre-W1-P5 a bare
+    relative basename made ``Path::parent()`` return ``Some("")`` and
+    registration silently skipped; the fix canonicalizes the config file
+    first so the relative form resolves against the CWD and collapses onto
+    the same ledger symlink as the absolute form (one entry, not two).
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -303,16 +309,11 @@ def test_project_flag_canonicalized_for_registry(
     project_dir.mkdir()
     (project_dir / "ocx.toml").write_text("[tools]\n")
 
-    # Path A: absolute, canonical.
-    path_a = project_dir / "ocx.toml"
-    # Path B: absolute path with a `./` segment that resolves to the same
-    # file. Per POSIX, `<project_dir>/./ocx.toml` is the same file as
-    # `<project_dir>/ocx.toml`; canonicalize collapses them.
-    path_b = Path(str(project_dir) + "/./ocx.toml")
-
     env = {**ocx.env, "OCX_HOME": str(home)}
 
-    # First lock via canonical path.
+    # Path A: absolute path with a `./` segment that canonicalizes to the
+    # same file (alias form).
+    path_a = Path(str(project_dir) + "/./ocx.toml")
     r1 = subprocess.run(
         [str(ocx.binary), "--project", str(path_a), "lock"],
         capture_output=True,
@@ -323,27 +324,45 @@ def test_project_flag_canonicalized_for_registry(
         f"first ocx lock must succeed; rc={r1.returncode}, stderr={r1.stderr!r}"
     )
 
-    # Second lock via aliased path.
+    # Path B: BARE RELATIVE basename run from inside the project dir. This
+    # is the W1-P5 regression surface — `Path::parent()` of "ocx.toml" is
+    # `Some("")`, so registration must canonicalize the config file before
+    # taking its parent or it silently skips (and would create a *second*
+    # divergent ledger entry / none).
     r2 = subprocess.run(
-        [str(ocx.binary), "--project", str(path_b), "lock"],
+        [str(ocx.binary), "--project", "ocx.toml", "lock"],
+        cwd=project_dir,
         capture_output=True,
         text=True,
         env=env,
     )
     assert r2.returncode == 0, (
-        f"second ocx lock must succeed; rc={r2.returncode}, stderr={r2.stderr!r}"
+        f"second ocx lock (bare relative --project) must succeed; "
+        f"rc={r2.returncode}, stderr={r2.stderr!r}"
     )
 
-    registry_file = home / "projects.json"
-    assert registry_file.is_file(), (
-        f"projects.json must exist after two `ocx lock` invocations; "
+    projects_dir = home / "projects"
+    assert projects_dir.is_dir(), (
+        f"$OCX_HOME/projects/ symlink store must exist after `ocx lock`; "
         f"home contents: {sorted(p.name for p in home.iterdir())}"
     )
-    doc = json.loads(registry_file.read_text())
-    entries = doc.get("entries", [])
-    assert len(entries) == 1, (
-        f"aliased lock paths must collapse to a single registry entry; "
-        f"got {len(entries)} entries: {entries}"
+    links = [
+        p for p in projects_dir.iterdir() if not p.name.startswith(".tmp-")
+    ]
+    assert len(links) == 1, (
+        f"aliased + bare-relative --project forms must collapse to a "
+        f"single ledger symlink; got {len(links)}: "
+        f"{[p.name for p in links]}"
+    )
+    link = links[0]
+    assert link.is_symlink(), (
+        f"ledger entry must be a symlink (flat symlink store, "
+        f"adr_project_gc_symlink_ledger.md); {link} is not a symlink"
+    )
+    assert link.resolve() == project_dir.resolve(), (
+        f"ledger symlink must resolve to the canonical project DIR (not "
+        f"the lock/config file); {link} -> {link.resolve()}, "
+        f"expected {project_dir.resolve()}"
     )
 
 
@@ -534,32 +553,63 @@ def _run_lock_in(
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env)
 
 
-def test_home_tier_ocx_toml_loads_when_no_project(
+def test_home_ocx_toml_not_discovered_without_global(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``$OCX_HOME/ocx.toml`` is consumed when CWD has no project file.
+    """``$OCX_HOME/ocx.toml`` is NOT discovered implicitly; only via ``--global``.
 
-    ``ocx lock`` exits 0 when the home tier provides a valid (empty)
-    ``[tools]`` table; without the fallback it would exit 64 ("no
-    ocx.toml found").  This pins down the project-tier observability of
-    the home-tier branch.
+    Living Design — behaviour deliberately changed by
+    ``adr_global_toolchain_tier.md`` §Decision 1: the implicit Tier-4
+    ``$OCX_HOME/ocx.toml`` home fallback (``home_project_path()``) is
+    DELETED. This test previously pinned the now-removed fallback
+    (asserted ``ocx lock`` succeeds from a sibling cwd off the home
+    file). Rewritten to assert the NEW contract — the acceptance mirror
+    of the unit test
+    ``project::config::project_path_returns_none_without_global_or_project``:
+
+    1. With no project file in the CWD walk and no ``--global``, ``ocx
+       lock`` exits non-zero (``NoProject``) even though
+       ``$OCX_HOME/ocx.toml`` exists — there is no implicit home
+       discovery and no ``$OCX_HOME/ocx.lock`` is written.
+    2. The same ``$OCX_HOME/ocx.toml`` IS reachable via the explicit
+       ``--global`` selector: ``ocx --global lock`` exits 0 and writes
+       ``$OCX_HOME/ocx.lock`` next to the global file.
     """
     cwd = tmp_path / "sibling"
     cwd.mkdir()
     home = tmp_path / "home"
     home.mkdir()
     (home / "ocx.toml").write_text("[tools]\n")
+    env = {"OCX_HOME": str(home)}
 
-    result = _run_lock_in(ocx, cwd, extra_env={"OCX_HOME": str(home)})
-
-    assert result.returncode == 0, (
-        f"home-tier ocx.toml should drive `ocx lock` to success; "
-        f"rc={result.returncode}, stderr={result.stderr!r}"
+    # (1) No implicit discovery: a walk-miss with no --global is NoProject.
+    implicit = _run_lock_in(ocx, cwd, extra_env=env)
+    assert implicit.returncode != 0, (
+        f"$OCX_HOME/ocx.toml must NOT be discovered implicitly "
+        f"(adr_global_toolchain_tier.md §Decision 1 — home fallback "
+        f"deleted); expected non-zero, got rc={implicit.returncode}, "
+        f"stderr={implicit.stderr!r}"
     )
-    # The lock writes next to the home file, not the cwd.
-    assert (home / "ocx.lock").is_file(), (
-        f"ocx.lock should be written to $OCX_HOME, not cwd; "
+    assert not (home / "ocx.lock").exists(), (
+        f"no implicit home discovery ⇒ no $OCX_HOME/ocx.lock written; "
         f"home contents: {sorted(p.name for p in home.iterdir())}"
+    )
+
+    # (2) The global file is reachable ONLY via the explicit --global flag.
+    explicit = subprocess.run(
+        [str(ocx.binary), "--global", "lock"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env={**ocx.env, **env},
+    )
+    assert explicit.returncode == 0, (
+        f"`ocx --global lock` must select $OCX_HOME/ocx.toml; "
+        f"rc={explicit.returncode}, stderr={explicit.stderr!r}"
+    )
+    assert (home / "ocx.lock").is_file(), (
+        f"--global lock must write $OCX_HOME/ocx.lock next to the global "
+        f"file; home contents: {sorted(p.name for p in home.iterdir())}"
     )
 
 

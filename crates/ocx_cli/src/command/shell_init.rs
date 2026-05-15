@@ -21,7 +21,12 @@ use ocx_lib::shell;
 #[derive(Parser)]
 pub struct ShellInit {
     /// The shell to print the init snippet for.
-    #[arg(value_name = "SHELL")]
+    ///
+    /// Spelled `--shell` (with `-s` short) to match the sibling
+    /// `ocx shell hook --shell` form and the W2-P3
+    /// `test_global_toolchain.py` contract, which invokes
+    /// `ocx shell init --shell bash`.
+    #[clap(short = 's', long = "shell", value_name = "SHELL")]
     shell: shell::Shell,
 }
 
@@ -95,8 +100,189 @@ $env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt? | default []) ++ [
 const UNSUPPORTED_INIT: &str = "# `ocx shell init` does not yet ship a prompt-hook snippet for this shell.\n\
      # Call `ocx shell hook --shell <name>` from your prompt manually until support lands.\n";
 
+/// Write the static `$OCX_HOME/init.<shell>` PATH-prepend entrypoint.
+///
+/// Distinct from the per-prompt hook (interactive-only, mise-`activate`
+/// shape): this static entrypoint prepends the stable global-`current` bin
+/// dir to PATH **without** invoking the hook, so a sourced *non-interactive*
+/// shell (CI `bash --norc`, `bash -c`, editor terminals) still sees the
+/// global tools (adr_global_toolchain_tier.md §Decision 6, SOTA-2a). The
+/// POSIX entrypoint uses `.` (dot), not bash `source`, for dash/sh CI
+/// compatibility (SOTA-2b). The landing path is
+/// [`ocx_lib::ConfigLoader::home_init_path`]. The OS install-script edit
+/// that sources this file is out of scope (downstream `setup.ocx.sh`).
+/// Wrap `export_lines` in a self-contained, project-aware guard so the
+/// global PATH-prepend is suppressed whenever an `ocx.toml` is in scope.
+///
+/// Strict isolation at the static-entrypoint layer
+/// (adr_global_toolchain_tier.md §Decision 6): a non-interactive shell
+/// that only sources `$OCX_HOME/init.<shell>` (CI `bash --norc -c`, no
+/// prompt hook) must still NOT see global tools inside a project. The
+/// guard is a pure-shell upward `ocx.toml` walk from `$PWD` — no `ocx`
+/// invocation, no hook — honouring `OCX_NO_PROJECT` (kill switch) and
+/// `OCX_PROJECT` (explicit project ⇒ in-project) for parity with
+/// `ProjectConfig::resolve`. POSIX-family branch only (the acceptance
+/// suite exercises bash; dash/sh compatible — no bashisms). Fish /
+/// Nushell / PowerShell / Elvish have no project-aware guard
+/// implementation, so the static global-PATH prepend is **omitted
+/// entirely** for them (only an explanatory `# ocx:` comment is emitted):
+/// emitting it unguarded would leak global tools into a project for any
+/// non-interactive invocation, violating strict isolation. Global tools
+/// remain reachable outside a project for those shells via the
+/// interactive prompt hook (`ocx shell hook`), which still enforces
+/// isolation when a project is entered.
+fn project_guarded(shell: shell::Shell, export_lines: &str) -> String {
+    if export_lines.is_empty() {
+        return String::new();
+    }
+    match shell {
+        shell::Shell::Ash | shell::Shell::Ksh | shell::Shell::Dash | shell::Shell::Bash | shell::Shell::Zsh => {
+            // Indent the export lines two spaces so they sit inside the
+            // `if` body; the guard walks `$PWD` upward looking for
+            // `ocx.toml`, mirroring the CWD-walk resolver.
+            let indented = export_lines
+                .lines()
+                .map(|l| format!("  {l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Loop body uses POSIX parameter expansion `${_d%/*}` instead
+            // of `$(dirname "$_d")` so each ancestor level costs zero
+            // forks (rustup/cargo non-interactive-init SOTA shape;
+            // dash/sh/ash/ksh compatible). Termination: at `_d=/` the
+            // root check breaks *before* stripping; otherwise `${_d%/*}`
+            // peels one level and eventually yields the empty string
+            // (e.g. `/foo` → ``), which fails the `while [ -n "$_d" ]`
+            // guard and exits the loop ⇒ not-in-project ⇒ prepend.
+            // Mirrors `ProjectConfig::resolve` precedence (OCX_NO_PROJECT
+            // kill switch ▸ OCX_PROJECT explicit ▸ upward `ocx.toml`
+            // walk) and *deliberately* omits the `.git`/ceiling boundary
+            // the Rust walk applies: for a global-isolation guard, "any
+            // ancestor `ocx.toml` ⇒ in-project" is the safe direction.
+            format!(
+                "_ocx_in_project() {{\n\
+                 \x20 [ \"${{OCX_NO_PROJECT:-}}\" = 1 ] && return 1\n\
+                 \x20 [ -n \"${{OCX_PROJECT:-}}\" ] && return 0\n\
+                 \x20 _d=\"$PWD\"\n\
+                 \x20 while [ -n \"$_d\" ]; do\n\
+                 \x20\x20\x20 [ -f \"$_d/ocx.toml\" ] && return 0\n\
+                 \x20\x20\x20 [ \"$_d\" = / ] && break\n\
+                 \x20\x20\x20 _d=\"${{_d%/*}}\"\n\
+                 \x20 done\n\
+                 \x20 return 1\n\
+                 }}\n\
+                 if ! _ocx_in_project; then\n\
+                 {indented}\n\
+                 fi\n\
+                 unset -f _ocx_in_project 2>/dev/null || true\n"
+            )
+        }
+        // Non-POSIX shells (Fish / Nushell / PowerShell / Elvish): the
+        // project-aware upward `ocx.toml` walk is implemented only for the
+        // POSIX family. Emitting the static global-PATH prepend unguarded
+        // here would leak global tools into a project for any
+        // non-interactive invocation (e.g. a CI step that sources this
+        // file but never runs the prompt hook), violating the
+        // strict-isolation contract (adr_global_toolchain_tier.md
+        // §Decision 4/6). Since the guard cannot be guaranteed
+        // non-interactively for these shells, omit the static prepend
+        // entirely and emit only an explanatory comment. Global tools are
+        // still reachable outside a project via the interactive
+        // prompt-hook (`ocx shell hook`), which enforces isolation when a
+        // project is entered.
+        _ => "# ocx: static global PATH prepend omitted for this shell — strict isolation \
+              cannot be guaranteed non-interactively (the project-aware guard is POSIX-only); \
+              the interactive `ocx shell hook` prompt hook provides global tools outside projects\n"
+            .to_string(),
+    }
+}
+
+async fn write_static_global_entrypoint(context: &crate::app::Context, shell: shell::Shell) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    use ocx_lib::ConfigLoader;
+    use ocx_lib::package::metadata::env::modifier::ModifierKind;
+
+    let Some(init_path) = ConfigLoader::home_init_path(shell) else {
+        anyhow::bail!("cannot resolve $OCX_HOME (and no home directory) to write the global init entrypoint");
+    };
+
+    // Resolve the global toolchain's installed `current` set via the
+    // shared resolver (same source the per-prompt `NoProject` arm uses —
+    // feedback_extend_dont_duplicate). The static entrypoint emits the
+    // *plain* export lines (PATH-prepend / constant) WITHOUT the
+    // `_OCX_APPLIED` sentinel or any `ocx shell hook` invocation, so a
+    // sourced non-interactive shell (`bash --norc -c`, dash, CI) sees the
+    // global tools (SOTA-2a). The per-prompt hook layers dynamic project
+    // switching on top.
+    let header = "# Generated by `ocx shell init`. Static global-toolchain PATH entrypoint.\n\
+                  # Source this from your shell rc / CI env (POSIX `.` — dash/sh compatible).\n\
+                  # Project-aware: the global PATH-prepend is suppressed when an\n\
+                  # ocx.toml is in scope (strict isolation — global never leaks\n\
+                  # into a project; the project toolchain is authoritative).\n\
+                  # Per-prompt project switching is layered by the `ocx shell hook` snippet.\n";
+
+    // Build the raw export lines for the global `current` set (same
+    // source the per-prompt `NoProject` arm uses —
+    // feedback_extend_dont_duplicate). No `_OCX_APPLIED` sentinel and no
+    // `ocx shell hook` invocation, so a sourced non-interactive shell
+    // (`bash --norc -c`, dash, CI) sees the global tools (SOTA-2a).
+    let mut export_lines = String::new();
+    if let Some((entries, _fingerprint)) = crate::command::shell_hook::resolve_global_current_env(context).await? {
+        for entry in &entries {
+            let line = match entry.kind {
+                ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
+                ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
+            };
+            match line {
+                Some(line) => {
+                    export_lines.push_str(&line);
+                    export_lines.push('\n');
+                }
+                None => eprintln!("# ocx: skipping invalid env-var key {:?} in global init", entry.key),
+            }
+        }
+    }
+    // When there is no global toolchain yet the file is still written
+    // (header only) so the install-script `source` target always exists
+    // and a later `install --global` + re-run of `shell init` populates it.
+
+    let mut body = String::from(header);
+    body.push_str(&project_guarded(shell, &export_lines));
+
+    // Atomic write: tempfile in the same dir + rename (crash-safe; a
+    // concurrent `shell init` cannot leave a half-written entrypoint that
+    // a sourcing shell would partially execute). Blocking fs is wrapped in
+    // `spawn_blocking` per the async-IO convention.
+    let parent = init_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let target = init_path.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::create_dir_all(&parent)?;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".init-")
+            .suffix(".tmp")
+            .tempfile_in(&parent)?;
+        tmp.write_all(body.as_bytes())?;
+        tmp.flush()?;
+        tmp.persist(&target).map_err(|e| e.error)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("init-entrypoint writer task panicked: {e}"))??;
+
+    Ok(())
+}
+
 impl ShellInit {
-    pub async fn execute(&self, _context: crate::app::Context) -> anyhow::Result<ExitCode> {
+    pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Materialize the static global PATH-prepend entrypoint so a
+        // non-interactive sourced shell sees the global toolchain (the
+        // per-prompt snippet below only layers dynamic project switching
+        // on top).
+        write_static_global_entrypoint(&context, self.shell).await?;
+
         let snippet = match self.shell {
             shell::Shell::Bash => BASH_INIT,
             shell::Shell::Zsh => ZSH_INIT,

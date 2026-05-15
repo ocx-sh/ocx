@@ -5,7 +5,7 @@ outline: deep
 
 A repository's contributors and CI runners need the same tool versions — `cmake 3.28`, `shellcheck 0.11`, `goreleaser 2.0` — without arguing over chat or curl-piping installers. Earlier reproducibility mechanisms ([digest pin][in-depth-versioning-locking], [snapshot pin][in-depth-indices-local], [bundled snapshot][in-depth-indices-bundled]) describe how a *single* invocation freezes its inputs; none of them describe what the *project itself* expects.
 
-A committed [`ocx.toml`][project-toml] plus its sibling [`ocx.lock`][project-lock] closes that gap. The pair makes "the tools this project needs" a piece of source code — reviewable in pull requests, mergeable across branches, reproducible across machines, and resolvable offline once the lock is fetched. The user-facing surface — `ocx init`, `ocx add`, `ocx lock`, `ocx pull`, `ocx run` — lives in the [project section of the user guide][user-project]. This page explains the file formats, the locking contract, the group resolution model, the home-tier fallback, and what reproducibility guarantees actually ship today.
+A committed [`ocx.toml`][project-toml] plus its sibling [`ocx.lock`][project-lock] closes that gap. The pair makes "the tools this project needs" a piece of source code — reviewable in pull requests, mergeable across branches, reproducible across machines, and resolvable offline once the lock is fetched. The user-facing surface — `ocx init`, `ocx add`, `ocx lock`, `ocx pull`, `ocx run` — lives in the [project section of the user guide][user-project]. This page explains the file formats, the locking contract, the group resolution model, and what reproducibility guarantees actually ship today.
 
 ## Declaring tools — `ocx.toml` {#toml}
 
@@ -192,29 +192,29 @@ The hooks only export variables — they never install missing tools, never cont
 
 [`ocx direnv export`][cmd-direnv-export] is the [direnv][direnv] entry point. It is stateless — no `_OCX_APPLIED`, no diffing — and emits a fresh export block on every invocation. `direnv` supplies the cache layer (one re-evaluation per `cd`, watched files re-trigger), so the hook stays simple. Run [`ocx direnv init`][cmd-direnv-init] in a project directory to drop a ready-made `.envrc`, then `direnv allow`.
 
-[`ocx shell init <shell>`][cmd-shell-init] prints a one-time snippet you append to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. The snippet wires `ocx shell hook` into the shell's prompt-hook mechanism (`PROMPT_COMMAND` for Bash, `precmd` for Zsh, `fish_prompt` for Fish, `pre_prompt` for Nushell). All three commands work with both the project-tier `ocx.toml` and the [home-tier `ocx.toml`](#home-tier) — the resolver decides which file is in scope, the hooks emit exports for whichever wins.
+[`ocx shell init --shell <SHELL>`][cmd-shell-init] prints a one-time snippet you append to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. The snippet wires `ocx shell hook` into the shell's prompt-hook mechanism (`PROMPT_COMMAND` for Bash, `precmd` for Zsh, `fish_prompt` for Fish, `pre_prompt` for Nushell). It also writes a static entrypoint file (`$OCX_HOME/init.<shell>`) that makes global tools available in non-interactive shells. The resolver decides which file is in scope — project or global — and the hook emits exports for whichever wins.
 
 ::: tip Choose one entry point per workflow
 The three hooks are not meant to coexist in the same shell. `direnv` users want `ocx direnv`; pure shell-builtin users want `ocx shell init`; tooling that needs to skip the prompt-hook ceremony (CI, scripted environments) calls [`ocx exec`][cmd-exec] directly with no hook at all.
 :::
 
-## Home-tier fallback {#home-tier}
+## Global toolchain {#global-toolchain}
 
-A user-wide `ocx.toml` lives at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.ocx/ocx.toml`) and serves as a fallback when a developer's CWD has no project file in sight. Tools declared here become the implicit project — handy for scratch directories, system shells, and one-off invocations where you still want `ripgrep` or `cmake` available.
+A user-wide `ocx.toml` at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.ocx/ocx.toml`) holds tools that should be available in every shell — `ripgrep`, `cmake`, `shellcheck` — without being part of any specific project. This is the global toolchain tier, activated explicitly via the [`--global`][cmd-global-flag] flag or the [`OCX_GLOBAL`][env-ocx-global] environment variable.
 
-The home-tier file uses the same [schema][schema-project] and the same lock semantics; the lock lives at `$OCX_HOME/ocx.lock`. Commands that consult the project tier walk the directory tree first; only when the walk finds nothing does the home file activate.
+The global file uses the same [schema][schema-project] and lock semantics as a project file. The lock lives at `$OCX_HOME/ocx.lock`. Unlike the old home-tier fallback, the global toolchain is **never discovered implicitly** — the CWD walk does not activate it. You must pass `--global` or set `OCX_GLOBAL`.
 
-::: warning Project replaces home — never merges
-A project-tier `ocx.toml` and a home-tier `ocx.toml` never compose. Whichever the resolver finds first is the only one that contributes. This avoids the [`cargo`][cargo]-style "config-merging" cascade where it is hard to predict which file declared which tool.
+::: warning Global tools are removed from PATH inside projects
+When you `cd` into a project directory, the shell hook strips global tools from `PATH` entirely — not shadows them, removes them. `ocx run` and `ocx exec` are always hermetic: the global toolchain is never consulted. See [Strict isolation][env-composition-strict-isolation] for the full model.
 :::
 
-To opt out entirely (one-off CI invocation, hermetic test), set [`OCX_NO_PROJECT=1`][env-no-project]. The home-tier fallback is suppressed even when `$OCX_HOME/ocx.toml` exists.
+For managing global tools day-to-day, see [Keep everyday tools available everywhere][user-guide-global] in the user guide. To opt out of project-tier discovery entirely for a single invocation, set [`OCX_NO_PROJECT=1`][env-no-project].
 
 ## Multi-project retention {#multi-project-retention}
 
 When multiple projects on the same machine pin different package versions, [`ocx clean`][cmd-clean] retains every package referenced by *any* registered project's lockfile — not just the active project. A developer with project A and project B can run `ocx clean` from project B without losing packages that only project A's `ocx.lock` pins.
 
-OCX tracks registered projects automatically in `$OCX_HOME/projects.json`; the file is updated whenever [`ocx lock`][cmd-lock] runs in a project directory. You should not edit it manually.
+OCX tracks registered projects automatically in a flat symlink ledger at `$OCX_HOME/projects/` — one symlink per project, named after the SHA-256 hash of the project's canonical absolute path, pointing at the project directory. The ledger is updated whenever [`ocx lock`][cmd-lock] runs in a project directory. You should not edit it manually. It is browsable with `ls -l $OCX_HOME/projects/`.
 
 If you intentionally want to collect packages held only by other projects' lockfiles — for example, after removing a project from your machine — pass `--force` to bypass the registry: `ocx clean --force`. Live install symlinks are always honoured regardless of `--force`.
 
@@ -230,6 +230,8 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 
 - [User guide → Pin a project's tools][user-project] — task-driven overview.
 - [User guide → Run tools from your project][user-run] — quick-start examples for `ocx run`.
+- [User guide → Keep everyday tools available everywhere][user-guide-global] — global toolchain use-case narrative.
+- [Environment Composition reference][env-composition-strict-isolation] — reference-level statement of the strict isolation rule.
 - [Indices In Depth][in-depth-indices] — how `ocx pull` reads the lock and where the registry round-trips happen.
 - [Storage In Depth → Garbage collection][in-depth-storage-gc] — how project-lock back-references protect packages.
 - [Configuration In Depth][in-depth-configuration] — discovery tier rationale, `OCX_NO_PROJECT` kill switch.
@@ -247,7 +249,6 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [flock]: https://man7.org/linux/man-pages/man2/flock.2.html
 [mise]: https://mise.jdx.dev/
 [asdf]: https://asdf-vm.com/
-[cargo]: https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure
 [slsa-l1]: https://slsa.dev/spec/v1.0/levels#build-l1
 [slsa-attestation]: https://slsa.dev/spec/v1.0/attestation-model
 [sigstore]: https://www.sigstore.dev/
@@ -258,6 +259,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 <!-- commands -->
 [cmd-clean]: ../reference/command-line.md#clean
 [cmd-exec]: ../reference/command-line.md#exec
+[cmd-global-flag]: ../reference/command-line.md#global-flag
 [cmd-lock]: ../reference/command-line.md#lock
 [cmd-pull]: ../reference/command-line.md#pull
 [cmd-remove]: ../reference/command-line.md#remove
@@ -269,6 +271,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home
+[env-ocx-global]: ../reference/environment.md#ocx-global
 [env-no-project]: ../reference/environment.md#ocx-no-project
 
 <!-- internal anchors -->
@@ -278,6 +281,8 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 <!-- cross-page -->
 [user-project]: ../user-guide.md#project
 [user-run]: ../user-guide.md#run
+[user-guide-global]: ../user-guide.md#global-toolchain
+[env-composition-strict-isolation]: ../reference/env-composition.md#strict-isolation
 [in-depth-versioning-locking]: ./versioning.md#locking
 [in-depth-indices]: ./indices.md
 [in-depth-indices-local]: ./indices.md#local

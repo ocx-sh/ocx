@@ -151,8 +151,8 @@ async fn resolve_to_package_digests(
     }
 }
 
-/// Loads the project registry, reads each registered `ocx.lock`, and returns
-/// the resolved package digests as GC roots.
+/// Enumerates live registered projects from the flat symlink ledger, reads each
+/// project's `ocx.lock`, and returns the resolved package digests as GC roots.
 ///
 /// This is a free function (not a method on [`PackageManager`]) per the
 /// task-module architecture rule in `subsystem-package-manager.md`: helpers
@@ -170,38 +170,56 @@ async fn resolve_to_package_digests(
 /// blob and enumerates its children so that `ProjectRootDigests::digests`
 /// contains the digests that actually map to package-store paths.
 ///
-/// See [`adr_clean_project_backlinks.md`] "Read-Side Path" for the full
-/// algorithm, including the registry's lazy-prune behaviour on this call.
+/// Uses [`crate::project::registry::ProjectRegistry::live_projects`] — the flat
+/// symlink store at `$OCX_HOME/projects/` (ADR: `adr_project_gc_symlink_ledger.md`).
+/// There is no JSON parse surface: stale/broken links are silently pruned.
+/// A corrupt-registry exit-78 branch is deliberately absent — eliminated with
+/// the JSON ledger (ADR §Risks "Corrupt-state failure mode removed, not relocated").
 pub async fn collect_project_roots(
     ocx_home: &Path,
     file_structure: &FileStructure,
 ) -> crate::Result<Vec<ProjectRootDigests>> {
     let registry = ProjectRegistry::new(ocx_home);
 
-    // Load and lazily prune the registry. Errors here are surfaced so the
-    // caller (PackageManager::clean) can decide whether to abort or log and
-    // continue. A corrupt registry is returned as an I/O-level error so `ocx
-    // clean` exits 78 (ConfigError) rather than silently collecting everything.
-    let entries = match registry.load_and_prune().await {
-        Ok(e) => e,
-        Err(crate::project::registry::Error::Registry(ref inner))
-            if matches!(
-                inner.kind,
-                crate::project::registry::ProjectRegistryErrorKind::Corrupt(_)
-            ) =>
-        {
-            // Corrupt registry: surface as InternalFile so callers can exit 74/78.
-            return Err(crate::Error::InternalFile(
-                inner.path.clone(),
-                std::io::Error::new(std::io::ErrorKind::InvalidData, inner.kind.to_string()),
-            ));
-        }
+    // Opportunistic legacy cleanup: the superseded JSON ledger
+    // (`projects.json` + its `.projects.lock` advisory sentinel) is obsolete
+    // under the flat symlink store. No migration of contents — the symlink
+    // ledger is rebuilt by ordinary `ocx.lock` saves. Remove once if present,
+    // a single debug line (never WARN — benign legacy artifact).
+    let legacy_json = ocx_home.join("projects.json");
+    let legacy_lock = ocx_home.join(".projects.lock");
+    let legacy_present = crate::utility::fs::path_exists_lossy(&legacy_json).await
+        || crate::utility::fs::path_exists_lossy(&legacy_lock).await;
+    if legacy_present {
+        log::debug!(
+            "Removing obsolete legacy project ledger files ('{}', '{}').",
+            legacy_json.display(),
+            legacy_lock.display()
+        );
+        let _ = tokio::fs::remove_file(&legacy_json).await;
+        let _ = tokio::fs::remove_file(&legacy_lock).await;
+    }
+
+    // Enumerate the live project directories from the flat symlink ledger,
+    // self-pruning departed-project links along the way. There is no parse
+    // surface (no JSON document), so the old corrupt-registry →
+    // `crate::Error::InternalFile` (exit 78) branch is deliberately ELIMINATED
+    // — a bad/dangling link is simply pruned (ADR §Risks "Corrupt-state
+    // failure mode removed, not relocated"). A filesystem I/O error remains
+    // non-fatal: log and proceed with whatever roots were collected.
+    let project_dirs = match registry.live_projects().await {
+        Ok(dirs) => dirs,
         Err(e) => {
-            // Locked or I/O error: non-fatal for GC. Log and proceed with empty roots.
             log::warn!("Project registry unavailable, running GC without project roots: {e}");
             Vec::new()
         }
     };
+    // The ledger targets the project *directory*; the lock is its canonical
+    // sibling `<dir>/ocx.lock` (invariant
+    // `lock_path_for(config) == <dir>/ocx.lock`, ARCH-4d). Derive the lock
+    // path here so the downstream load/resolve pipeline (and the
+    // `ProjectRootDigests.ocx_lock_path` diagnostic field) is unchanged.
+    let entries: Vec<PathBuf> = project_dirs.into_iter().map(|dir| dir.join("ocx.lock")).collect();
 
     // Two-pass parallel walk:
     //   1. Read every registered `ocx.lock` in parallel (one task per entry).
@@ -220,8 +238,7 @@ pub async fn collect_project_roots(
     }
 
     let mut load_set: JoinSet<Option<LoadedLock>> = JoinSet::new();
-    for (index, entry) in entries.into_iter().enumerate() {
-        let lock_path = entry.ocx_lock_path.clone();
+    for (index, lock_path) in entries.into_iter().enumerate() {
         load_set.spawn(async move {
             match ProjectLock::from_path(&lock_path).await {
                 Ok(Some(lock)) => Some(LoadedLock {
@@ -316,7 +333,7 @@ impl PackageManager {
     /// project's `ocx.lock` are added as reachability roots so they are not
     /// collected. When `force` is `true` the project registry is ignored
     /// entirely — only live install symlinks protect packages from collection.
-    /// See [`adr_clean_project_backlinks.md`].
+    /// See `adr_project_gc_symlink_ledger.md` for the GC ledger design.
     pub async fn clean(&self, dry_run: bool, force: bool) -> crate::Result<CleanResult> {
         let ocx_home = self.file_structure().root().to_path_buf();
 

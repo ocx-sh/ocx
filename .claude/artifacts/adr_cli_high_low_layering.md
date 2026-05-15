@@ -13,6 +13,7 @@
 **Domain Tags:** api, integration
 **Supersedes:** N/A
 **Superseded By:** N/A
+**Amended By:** [`adr_global_toolchain_tier.md`](./adr_global_toolchain_tier.md) (2026-05-15) — adds the GLOBAL TIER and the strict-isolation rule (see Changelog).
 
 ## Context
 
@@ -293,4 +294,5 @@ Implementation lives in [`plan_cli_run_layering.md`](../state/plans/plan_cli_run
 |------|--------|--------|
 | 2026-05-08 | Architect | Initial draft — formalize high-level / low-level split, add `ocx run`, reserve `all` |
 | 2026-05-08 | Architect (Round 2) | Layer table refined (project-mutators, shell-activation, local-store-queries split out); `default`/`all` asymmetry documented; `expand_all_keyword` moved to lib; Hidden One-Way Doors section added |
+| 2026-05-15 | Architect (Opus) | **Amended by `adr_global_toolchain_tier.md`.** New **GLOBAL TIER**: `--global` (global flag on `ContextOptions`, `conflicts_with` `--project`) re-targets project-tier/mutator commands (`add`/`remove`/`lock`/`upgrade`/`pull`/`run`; `install --global` = add+lock+install+select) to `$OCX_HOME/ocx.toml`. Implicit home discovery (`home_project_path`/Tier-4) removed — the global file is reachable *only* via `--global`. Strict isolation: the global tier never composes into project resolution; `ocx run`/`ocx exec` are hermetic and never read it. Shell activation emits the global `current` set only when no project is in effect (project output supersedes on entry; no merge). |
 | 2026-05-15 | Hardening pass | Pre-release CLI name stabilization (breaking, allowed in early phase): `update`→`upgrade` (reserves `update` for the data-refresh `index update`; `upgrade` is the project-toolchain version-bump verb); `find`→`which` (path-lookup intent); top-level `info`→`about` (removes the `info` vs `package info` clash; bare `version` kept). The single-child `generate` group was removed and `shell direnv` relocated: all direnv concerns now live under a dedicated top-level `direnv` group — `direnv init` (writes `.envrc`, bare `ocx direnv` ≡ this) + `direnv export` (the stateless eval target, formerly `shell direnv`). Rationale: direnv is its own ecosystem, not a shell, so `shell` now holds only true shell integration (`env`/`completion`/`hook`/`init`). |

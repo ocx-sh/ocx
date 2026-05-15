@@ -497,8 +497,17 @@ hello = "{ocx.registry}/{repo}:{tag}"
 
 
 def test_shell_init_bash_outputs_prompt_command_snippet(ocx: OcxRunner) -> None:
-    """Plan §7 line 781: Bash init wires into ``PROMPT_COMMAND``."""
-    cmd = _ocx_cmd(ocx, "shell", "init", "bash")
+    """Plan §7 line 781: Bash init wires into ``PROMPT_COMMAND``.
+
+    Living Design — invocation form changed by
+    ``adr_global_toolchain_tier.md`` §Decision 6 / plan C2.7 W2-P4 LDR
+    ("``shell init`` flag form"): the shell argument moved from a
+    positional to ``-s/--shell`` for consistency with the sibling
+    ``ocx shell hook --shell`` and the W2-P3 spec contract. The
+    per-prompt hook snippet (``PROMPT_COMMAND`` wiring) is unchanged and
+    still emitted; only the CLI invocation is updated here.
+    """
+    cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "bash")
     result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
@@ -531,8 +540,13 @@ def test_shell_init_bash_outputs_prompt_command_snippet(ocx: OcxRunner) -> None:
 
 
 def test_shell_init_zsh_uses_add_zsh_hook(ocx: OcxRunner) -> None:
-    """Plan §7 line 782: Zsh init uses ``add-zsh-hook precmd``."""
-    cmd = _ocx_cmd(ocx, "shell", "init", "zsh")
+    """Plan §7 line 782: Zsh init uses ``add-zsh-hook precmd``.
+
+    Living Design — ``shell init`` shell arg is now ``-s/--shell``
+    (adr_global_toolchain_tier.md §Decision 6 / plan C2.7 W2-P4 LDR).
+    The ``add-zsh-hook precmd`` per-prompt snippet is unchanged.
+    """
+    cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "zsh")
     result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
@@ -554,8 +568,12 @@ def test_shell_init_fish_uses_prompt_event_hook(ocx: OcxRunner) -> None:
     ``--on-event fish_prompt``, which matches mise/direnv. The substring
     we assert on is the function definition prefix so the test stays
     lenient if the snippet's body wording shifts.
+
+    Living Design — ``shell init`` shell arg is now ``-s/--shell``
+    (adr_global_toolchain_tier.md §Decision 6 / plan C2.7 W2-P4 LDR).
+    The ``--on-event fish_prompt`` per-prompt snippet is unchanged.
     """
-    cmd = _ocx_cmd(ocx, "shell", "init", "fish")
+    cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "fish")
     result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
@@ -570,8 +588,13 @@ def test_shell_init_fish_uses_prompt_event_hook(ocx: OcxRunner) -> None:
 
 
 def test_shell_init_nushell_writes_autoload_path(ocx: OcxRunner) -> None:
-    """Plan §7 line 784: Nushell init references ``NU_VENDOR_AUTOLOAD_DIR`` (file-based, no eval)."""
-    cmd = _ocx_cmd(ocx, "shell", "init", "nushell")
+    """Plan §7 line 784: Nushell init references ``NU_VENDOR_AUTOLOAD_DIR`` (file-based, no eval).
+
+    Living Design — ``shell init`` shell arg is now ``-s/--shell``
+    (adr_global_toolchain_tier.md §Decision 6 / plan C2.7 W2-P4 LDR).
+    The file-based ``NU_VENDOR_AUTOLOAD_DIR`` snippet is unchanged.
+    """
+    cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "nushell")
     result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
@@ -791,3 +814,149 @@ def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
         f"expected clap unrecognized-subcommand stderr mentioning 'shell-hook'; got:\n"
         f"{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 19. (Codex finding #2) Departed global set must clear stale shell state
+# ---------------------------------------------------------------------------
+
+
+def test_shell_hook_global_departed_clears_stale_state(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """`ocx shell hook` outside a project must clear stale global state.
+
+    Codex cross-model gate finding #2: when the global set resolves EMPTY
+    (e.g. after the last global tool was ``ocx remove --global``'d) but the
+    shell previously had a global set applied (``_OCX_APPLIED`` carries the
+    prior non-empty fingerprint), the hook must NOT short-circuit to empty
+    stdout and leave the departed global PATH/env in place forever. It must
+    take the diff/clear path: emit the global-bin-dir PATH cleanup and
+    reset ``_OCX_APPLIED`` to the empty-set sentinel.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_gdepart"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["gtool"])
+    fq = f"{ocx.registry}/{repo}:1.0.0"
+
+    # Install the tool into the global tier (add + lock + install + select).
+    assert (
+        _run(ocx, tmp_path, "install", "--global", fq).returncode == EXIT_SUCCESS
+    )
+
+    # No project in scope: the hook emits the global `current` set and a
+    # fresh `_OCX_APPLIED` sentinel.
+    empty = tmp_path / "no_project"
+    empty.mkdir()
+    first = _run(
+        ocx, empty, "shell", "hook", "--shell", "bash",
+        extra_env={"OCX_NO_PROJECT": "1"},
+    )
+    assert first.returncode == EXIT_SUCCESS, first.stderr
+    applied = _extract_applied(first.stdout)
+    assert applied is not None, (
+        f"first shell hook (global set applied) must export _OCX_APPLIED; "
+        f"got stdout:\n{first.stdout}"
+    )
+    assert "export" in first.stdout, (
+        f"first shell hook must export the global set; got:\n{first.stdout}"
+    )
+
+    # Remove the last global tool — the global set is now empty.
+    assert (
+        _run(ocx, tmp_path, "remove", "--global", fq).returncode == EXIT_SUCCESS
+    )
+
+    # Re-run the hook carrying the prior `_OCX_APPLIED`. The global set is
+    # empty but a prior global set was applied → the clear path must fire.
+    second = _run(
+        ocx, empty, "shell", "hook", "--shell", "bash",
+        extra_env={"OCX_NO_PROJECT": "1", "_OCX_APPLIED": applied},
+    )
+
+    assert second.returncode == EXIT_SUCCESS, second.stderr
+    # NOT empty stdout (the bug): the stale state must be cleared.
+    assert second.stdout != "", (
+        "departed global set with prior applied state must NOT short-circuit "
+        "to empty stdout — stale PATH/env would persist forever"
+    )
+    # The global bin dir PATH cleanup must be emitted (existing
+    # `filter_path_excluding` mechanism), so the departed global bin dir is
+    # removed from PATH rather than left dangling.
+    assert "PATH=" in second.stdout, (
+        f"departed global set must emit the global-bin-dir PATH cleanup; "
+        f"got stdout:\n{second.stdout}"
+    )
+    # `_OCX_APPLIED` must be reset to the empty-set sentinel (differs from
+    # the prior non-empty one) so the next prompt's fast-path comparison has
+    # a fresh value and a later re-selection diffs correctly.
+    new_applied = _extract_applied(second.stdout)
+    assert new_applied is not None and new_applied != applied, (
+        f"departed global set must reset _OCX_APPLIED to the empty-set "
+        f"sentinel (≠ prior); prior={applied!r} new={new_applied!r}\n"
+        f"stdout:\n{second.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 20. (Codex finding #3) Non-POSIX static init must NOT prepend global PATH
+# ---------------------------------------------------------------------------
+
+
+def test_shell_init_non_posix_static_file_omits_global_prepend(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Non-POSIX ``$OCX_HOME/init.<shell>`` must omit the global-PATH prepend.
+
+    Codex cross-model gate finding #3 (Living Design): for Fish / Nushell /
+    PowerShell / Elvish the project-aware upward-walk guard is NOT
+    implemented, so a static unconditional global-PATH prepend would leak
+    global tools into a project for any non-interactive sourced invocation —
+    violating the strict-isolation contract
+    (``adr_global_toolchain_tier.md`` §Decision 4/6). The safe variant
+    (Codex-recommended): omit the static prepend entirely and emit only an
+    explanatory comment. Global tools are still provided outside a project
+    by the interactive ``ocx shell hook`` prompt hook (unchanged). This
+    test asserts the OMISSION + comment, replacing the prior (now-rejected)
+    unguarded-prepend behaviour per this Codex finding and the ADR
+    strict-isolation decision.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_nposix"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["gtool"])
+    fq = f"{ocx.registry}/{repo}:1.0.0"
+    # A real global tool so the global `current` set is non-empty — proving
+    # the omission is a deliberate isolation choice, not just an empty set.
+    assert (
+        _run(ocx, tmp_path, "install", "--global", fq).returncode == EXIT_SUCCESS
+    )
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    symlinks_root = str(ocx_home / "symlinks")
+
+    for shell, init_name in (
+        ("fish", "init.fish"),
+        ("nushell", "init.nu"),
+        ("powershell", "init.ps1"),
+        ("elvish", "init.elv"),
+    ):
+        init = _run(ocx, tmp_path, "shell", "init", "--shell", shell)
+        assert init.returncode == EXIT_SUCCESS, (
+            f"shell init --shell {shell} must succeed; stderr:\n{init.stderr}"
+        )
+        init_file = ocx_home / init_name
+        assert init_file.exists(), (
+            f"shell init --shell {shell} must write {init_name}"
+        )
+        body = init_file.read_text()
+        # The departed/omitted-prepend explanatory comment must be present.
+        assert "static global PATH prepend omitted" in body, (
+            f"{init_name} must carry the omission comment; got:\n{body}"
+        )
+        # And the global `current` bin dir must NOT be prepended in the
+        # static file (no unconditional global PATH leak).
+        assert symlinks_root not in body, (
+            f"{init_name} must NOT statically prepend the global bin dir "
+            f"(strict isolation — Codex finding #3 + "
+            f"adr_global_toolchain_tier.md §Decision 4/6); got:\n{body}"
+        )
