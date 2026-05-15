@@ -142,7 +142,7 @@ For interactive shells, [`ocx shell init`][cmd-shell-init] wires the project too
 ocx shell init bash >> ~/.bashrc
 ```
 
-For [direnv][direnv]-driven projects, [`ocx generate direnv`][cmd-generate-direnv] writes an `.envrc` file that calls [`ocx shell direnv`][cmd-shell-direnv] on each `cd`. The stateless export block is re-evaluated by direnv whenever `ocx.toml` or `ocx.lock` changes.
+For [direnv][direnv]-driven projects, [`ocx direnv init`][cmd-direnv-init] writes an `.envrc` file that calls [`ocx direnv export`][cmd-direnv-export] on each `cd`. The stateless export block is re-evaluated by direnv whenever `ocx.toml` or `ocx.lock` changes.
 
 Both approaches route through the [project toolchain][in-depth-project], so the tools on `$PATH` match exactly the digests locked in `ocx.lock`. No ambient installs or manual `export` statements needed.
 
@@ -289,7 +289,7 @@ The same binding name may appear in `[tools]` and any `[group.*]` table — iden
 Project tools should land on `PATH` whenever you `cd` into the project — without `eval`-ing on every shell startup. Three entry points, each suited to a different workflow:
 
 - [`ocx shell init <shell>`][cmd-shell-init] — appends a prompt-hook snippet to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. A fingerprint over the installed tool set lives in `_OCX_APPLIED`, so unchanged prompts emit nothing.
-- [`ocx shell direnv`][cmd-shell-direnv] — stateless [direnv][direnv] backend; [`ocx generate direnv`][cmd-generate-direnv] drops a ready `.envrc`.
+- [`ocx direnv export`][cmd-direnv-export] — stateless [direnv][direnv] backend; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc`.
 - [`ocx exec`][cmd-exec] — no hook at all, for CI and scripts.
 
 The hooks export only — they never install missing tools or contact the registry. Run [`ocx pull`][cmd-pull] first.
@@ -545,7 +545,7 @@ This section covers the changes introduced in the `feat/project-toolchain` relea
 2. Add each tool: `ocx add cmake:3.28 nodejs:24`
 3. Wire the hook into your shell once: `ocx shell init bash >> ~/.bashrc`
 
-After that, every new shell picks up the locked tools automatically. No `shell profile load` line needed in `~/.bashrc`. For [direnv][direnv]-driven repos, use `ocx generate direnv` instead of the hook.
+After that, every new shell picks up the locked tools automatically. No `shell profile load` line needed in `~/.bashrc`. For [direnv][direnv]-driven repos, use `ocx direnv init` instead of the hook.
 
 ### Project mutators are atomic {#migration-atomic-mutators}
 
@@ -608,8 +608,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-upgrade]: ./reference/command-line.md#upgrade
 [cmd-pull]: ./reference/command-line.md#pull
 [cmd-shell-init]: ./reference/command-line.md#shell-init
-[cmd-shell-direnv]: ./reference/command-line.md#shell-direnv
-[cmd-generate-direnv]: ./reference/command-line.md#generate-direnv
+[cmd-direnv-export]: ./reference/command-line.md#direnv-export
+[cmd-direnv-init]: ./reference/command-line.md#direnv-init
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-offline]: ./reference/command-line.md#arg-offline
 [arg-index]: ./reference/command-line.md#arg-index

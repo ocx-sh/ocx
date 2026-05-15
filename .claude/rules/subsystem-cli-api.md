@@ -58,7 +58,7 @@ OCX is a **backend tool** (`product-context.md`: automation-first, "not user-fac
   ```
 - **Interactive input → `UserInterface::prompt_line` / `prompt_secret`.** Both return `Err(Unsupported)` when non-interactive; the command maps that to the usual `UsageError` (e.g. login → "requires --password-stdin"). No ad-hoc `is_terminal()` checks scattered in commands.
 
-**Known exception:** `shell hook` / `shell direnv` / `shell env` emit `# ocx: …` shell-comment lines into the shell-eval stream by design (consumer = the shell, not a human). Keep the `# ocx:` prefix so they are inert when sourced.
+**Known exception:** `shell hook` / `direnv export` / `shell env` emit `# ocx: …` shell-comment lines into the shell-eval stream by design (consumer = the shell, not a human). Keep the `# ocx:` prefix so they are inert when sourced.
 
 ## Semantic intent, not display attributes (Block-tier)
 

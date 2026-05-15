@@ -75,7 +75,7 @@ impl ShellHook {
             },
         };
 
-        // Project tier ONLY in Phase 7. See `shell_direnv.rs` for the same
+        // Project tier ONLY in Phase 7. See `direnv_export.rs` for the same
         // policy rationale.
         let cwd = env::current_dir()?;
         let project = match load_project_state(&cwd, context.project_path()).await? {

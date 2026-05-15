@@ -190,12 +190,12 @@ The hooks only export variables — they never install missing tools, never cont
 
 [`ocx shell hook`][cmd-shell-hook] is the prompt-hook entry point. It reads the nearest `ocx.toml` plus its lock, computes a fingerprint over the actually-installed tools, and emits export lines only when something changed. The fingerprint lives in the `_OCX_APPLIED` environment variable; if the hook is invoked twice with the same lock and the same on-disk tool set, the second invocation prints nothing and exits zero. This is how the prompt stays cheap.
 
-[`ocx shell direnv`][cmd-shell-direnv] is the [direnv][direnv] entry point. It is stateless — no `_OCX_APPLIED`, no diffing — and emits a fresh export block on every invocation. `direnv` supplies the cache layer (one re-evaluation per `cd`, watched files re-trigger), so the hook stays simple. Run [`ocx generate direnv`][cmd-generate-direnv] in a project directory to drop a ready-made `.envrc`, then `direnv allow`.
+[`ocx direnv export`][cmd-direnv-export] is the [direnv][direnv] entry point. It is stateless — no `_OCX_APPLIED`, no diffing — and emits a fresh export block on every invocation. `direnv` supplies the cache layer (one re-evaluation per `cd`, watched files re-trigger), so the hook stays simple. Run [`ocx direnv init`][cmd-direnv-init] in a project directory to drop a ready-made `.envrc`, then `direnv allow`.
 
 [`ocx shell init <shell>`][cmd-shell-init] prints a one-time snippet you append to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. The snippet wires `ocx shell hook` into the shell's prompt-hook mechanism (`PROMPT_COMMAND` for Bash, `precmd` for Zsh, `fish_prompt` for Fish, `pre_prompt` for Nushell). All three commands work with both the project-tier `ocx.toml` and the [home-tier `ocx.toml`](#home-tier) — the resolver decides which file is in scope, the hooks emit exports for whichever wins.
 
 ::: tip Choose one entry point per workflow
-The three hooks are not meant to coexist in the same shell. `direnv` users want `ocx shell direnv`; pure shell-builtin users want `ocx shell init`; tooling that needs to skip the prompt-hook ceremony (CI, scripted environments) calls [`ocx exec`][cmd-exec] directly with no hook at all.
+The three hooks are not meant to coexist in the same shell. `direnv` users want `ocx direnv`; pure shell-builtin users want `ocx shell init`; tooling that needs to skip the prompt-hook ceremony (CI, scripted environments) calls [`ocx exec`][cmd-exec] directly with no hook at all.
 :::
 
 ## Home-tier fallback {#home-tier}
@@ -263,9 +263,9 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [cmd-remove]: ../reference/command-line.md#remove
 [cmd-run]: ../reference/command-line.md#run
 [cmd-shell-hook]: ../reference/command-line.md#shell-hook
-[cmd-shell-direnv]: ../reference/command-line.md#shell-direnv
+[cmd-direnv-export]: ../reference/command-line.md#direnv-export
 [cmd-shell-init]: ../reference/command-line.md#shell-init
-[cmd-generate-direnv]: ../reference/command-line.md#generate-direnv
+[cmd-direnv-init]: ../reference/command-line.md#direnv-init
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home

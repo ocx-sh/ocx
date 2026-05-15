@@ -12,10 +12,11 @@ pub mod ci_export;
 pub mod clean;
 pub mod deps;
 pub mod deselect;
+pub mod direnv;
+pub mod direnv_export;
+pub mod direnv_init;
 pub mod env;
 pub mod exec;
-pub mod generate;
-pub mod generate_direnv;
 pub mod index;
 pub mod index_catalog;
 pub mod index_list;
@@ -40,7 +41,6 @@ pub mod run;
 pub mod select;
 pub mod shell;
 pub mod shell_completion;
-pub mod shell_direnv;
 pub mod shell_env;
 pub mod shell_hook;
 pub mod shell_init;
@@ -64,9 +64,8 @@ pub enum Command {
     Deselect(deselect::Deselect),
     /// Resolve packages and print their content directory paths.
     Which(which::Which),
-    /// Generate scaffolding files for project integration (e.g. direnv).
-    #[command(subcommand)]
-    Generate(generate::Generate),
+    /// direnv integration (init writes .envrc; export emits the env block).
+    Direnv(direnv::Direnv),
     /// Operations related to the package index
     #[command(subcommand)]
     Index(index::Index),
@@ -119,7 +118,7 @@ impl Command {
             Command::Deps(deps) => deps.execute(context).await,
             Command::Deselect(deselect) => deselect.execute(context).await,
             Command::Which(which) => which.execute(context).await,
-            Command::Generate(generate) => generate.execute(context).await,
+            Command::Direnv(direnv) => direnv.execute(context).await,
             Command::Index(index) => index.execute(context).await,
             Command::About(about) => about.execute(context).await,
             Command::Init(init) => init.execute(context).await,

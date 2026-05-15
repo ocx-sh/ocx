@@ -568,30 +568,28 @@ cmake_root=$(ocx which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.
 ```
 :::
 
-### `generate` {#generate}
+### `direnv` {#direnv}
 
-Parent command for project-tier generators. Each subcommand writes a single configuration file in the current directory based on the project's `ocx.toml`.
+[direnv](https://direnv.net/) integration for the project toolchain. Bare `ocx direnv` is shorthand for [`ocx direnv init`](#direnv-init) — the once-per-project setup that writes a `.envrc`. The generated `.envrc` evaluates [`ocx direnv export`](#direnv-export) on every directory entry.
 
 **Usage**
 
 ```shell
-ocx generate <SUBCOMMAND> [OPTIONS]
+ocx direnv [SUBCOMMAND] [OPTIONS]
 ```
 
 **Options**
 
 - `-h`, `--help`: Print help information.
 
-The only subcommand today is [`direnv`](#generate-direnv); additional generators (e.g. `gitignore`, `editorconfig`) may land in future releases.
+#### `init` {#direnv-init}
 
-#### `direnv` {#generate-direnv}
-
-Writes a `.envrc` file in the current directory that wires [`ocx shell direnv`](#shell-direnv) into [direnv](https://direnv.net/). After running `ocx generate direnv`, run `direnv allow` in the same directory to activate the hook. The generated `.envrc` watches `ocx.toml` and `ocx.lock`, so direnv re-runs the hook whenever either file changes.
+Writes a `.envrc` file in the current directory that wires [`ocx direnv export`](#direnv-export) into [direnv](https://direnv.net/). After running `ocx direnv init` (or bare `ocx direnv`), run `direnv allow` in the same directory to activate the hook. The generated `.envrc` watches `ocx.toml` and `ocx.lock`, so direnv re-runs the hook whenever either file changes.
 
 **Usage**
 
 ```shell
-ocx generate direnv [OPTIONS]
+ocx direnv init [OPTIONS]
 ```
 
 **Options**
@@ -606,6 +604,33 @@ ocx generate direnv [OPTIONS]
 | 0 | `.envrc` written successfully. |
 | 74 | I/O error writing `.envrc`. |
 | 78 | `.envrc` already exists and `--force` was not given. |
+
+#### `export` {#direnv-export}
+
+Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints **bash** export lines for the resolved environment. Unlike [`shell hook`](#shell-hook), this command does not consult or update `_OCX_APPLIED` — it emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)). It is what the generated `.envrc` evaluates; you do not normally type it by hand.
+
+Output is always bash. [direnv](https://direnv.net/) sources `.envrc` files in a bash sub-shell regardless of the user's interactive shell, then translates the resulting environment to the interactive shell internally via `direnv export <shell>`. Programs invoked via `eval` from `.envrc` therefore have to emit bash — there is no shell-dialect option on this command.
+
+The command never contacts the network and never installs missing tools. Tools missing from the object store produce a one-line stderr note and are skipped; a stale lock produces a stderr warning but the stale digests are still used. When no project `ocx.toml` is found in scope, the command exits 0 with no output.
+
+**Usage**
+
+```shell
+ocx direnv export [OPTIONS]
+```
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (no project, or exports emitted). |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
+| 74 | I/O error during resolution. |
+| 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
 
 ### `index` {#index}
 
@@ -1204,36 +1229,9 @@ ocx shell hook [OPTIONS]
 | 74 | I/O error during resolution. |
 | 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
 
-#### `direnv` {#shell-direnv}
-
-Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints **bash** export lines for the resolved environment. Unlike [`shell hook`](#shell-hook), this command does not consult or update `_OCX_APPLIED` — it emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)).
-
-Output is always bash. [direnv](https://direnv.net/) sources `.envrc` files in a bash sub-shell regardless of the user's interactive shell, then translates the resulting environment to the interactive shell internally via `direnv export <shell>`. Programs invoked via `eval` from `.envrc` therefore have to emit bash — there is no shell-dialect option on this command.
-
-The command never contacts the network and never installs missing tools. Tools missing from the object store produce a one-line stderr note and are skipped; a stale lock produces a stderr warning but the stale digests are still used. When no project `ocx.toml` is found in scope, the command exits 0 with no output.
-
-**Usage**
-
-```shell
-ocx shell direnv [OPTIONS]
-```
-
-**Options**
-
-- `-h`, `--help`: Print help information.
-
-**Exit codes**
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success (no project, or exports emitted). |
-| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
-| 74 | I/O error during resolution. |
-| 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
-
 Shell-specific export emission, completion script generation, and project-toolchain hooks.
 
-`shell env` prints export statements meant for `eval`. `shell completion` emits a completion script for sourcing into the running shell. `shell hook` and `shell direnv` emit exports for the resolved project toolchain. `shell init` prints the per-shell snippet that wires `shell hook` into the shell's prompt cycle.
+`shell env` prints export statements meant for `eval`. `shell completion` emits a completion script for sourcing into the running shell. `shell hook` emits exports for the resolved project toolchain. `shell init` prints the per-shell snippet that wires `shell hook` into the shell's prompt cycle. (direnv integration moved to the top-level [`direnv`](#direnv) command.)
 
 #### `env` {#shell-env}
 

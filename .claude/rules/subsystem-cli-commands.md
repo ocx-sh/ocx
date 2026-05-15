@@ -17,8 +17,8 @@ The CLI surface splits into six rows. The split is firm — a command does not c
 |-----|----------|---------------|-------|--------|
 | **High-level read** | `pull`, `run` | Binding names (TOML keys) | `ocx.toml` + `ocx.lock` | Cache warm / child spawn |
 | **Project mutators** | `add`, `remove`, `lock`, `upgrade` | OCI identifier in → binding name written | `ocx.toml` + `ocx.lock` | Writes `ocx.toml` and/or `ocx.lock` |
-| **Shell activation** | `shell hook`, `shell direnv`, `shell init` | Binding names (resolved to installed paths) | Nearest `ocx.toml` + install store | Shell export lines |
-| **Bootstrap / mixed** | `init`, `about`, `version`, `shell completion` | Varies | Varies | No tier contract |
+| **Shell activation** | `shell hook`, `direnv export`, `shell init` | Binding names (resolved to installed paths) | Nearest `ocx.toml` + install store | Shell export lines |
+| **Bootstrap / mixed** | `init`, `direnv init`, `about`, `version`, `shell completion` | Varies | Varies | No tier contract |
 | **Low-level — registry** | `install`, `login`, `logout`, `uninstall`, `package pull/push/describe/info/create`, `index update/list/catalog` | OCI identifiers | Registry + local index | Install store / index |
 | **Low-level — local store** | `which`, `select`, `deselect`, `deps`, `env`, `exec`, `shell env`, `clean`, `launcher exec`, `ci export` | OCI identifiers | Install + symlink store | Reports / child spawn |
 
@@ -64,7 +64,8 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `shell env PKGS...` | Shell-specific export lines | No | `-s/--shell`, `-p`, `--candidate/--current`, `--self` |
 | `shell completion` | Generate completions | No | `--shell` |
 | `shell hook` | Stateful prompt-hook export generator (reads/updates `_OCX_APPLIED`) | No | `-s/--shell` |
-| `shell direnv` | Stateless export generator for direnv `.envrc` | No | `-s/--shell` |
+| `direnv init` | Write `.envrc` wiring `ocx direnv export` (bare `ocx direnv` ≡ this) | No | `--force` |
+| `direnv export` | Stateless bash export generator for direnv `.envrc` (the eval target) | No | — |
 | `index catalog` | List known repositories | No | `--tags` |
 | `index list PKGS...` | List tags for packages | No | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote | No | — |
@@ -141,4 +142,4 @@ Design intent not visible from flag table — read before changing CLI behavior 
 - **`exec` identifier form**: `ocx exec` accepts only bare OCI identifiers (e.g. `node:20`); identifiers resolve through the index and auto-install when missing. The former `file://` URI form was removed (generated launchers re-enter via `ocx launcher exec` instead). The `oci://` scheme is not parsed by `oci::Identifier::from_str`.
 - **`launcher exec` internal subcommand**: hidden from `--help` (`#[command(hide = true)]`). Wire ABI is `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Forces `self_view=true` internally. Validates `pkg-root`: must be absolute, canonical inside `$OCX_HOME/packages/`, and contain `metadata.json`. Exits 64 (UsageError) on any validation failure.
 - **Entrypoint collision behavior**: Within a single package, duplicate entrypoint names are rejected at deserialization (`EntrypointError::DuplicateName`). Cross-package collisions (two currently-selected packages with the same entrypoint name on the interface surface) are detected by `composer.rs` at compose time and surface as `PackageErrorKind::EntrypointCollision { name, owners }` (exit code `DataError` = 65). Entries that do not enter the active surface (e.g., `private` entries when composing the interface surface) are excluded from collision detection — they cannot collide at runtime under that surface.
-- **`shell hook` vs `shell direnv`**: `shell hook` is stateful — fingerprints the *actually-installed* default-group tools and short-circuits via `_OCX_APPLIED` when unchanged; emits `unset` + new exports + new sentinel on change. Designed for prompt-hook integration where every prompt fires the command. `shell direnv` is stateless — emits exports unconditionally without consulting/updating `_OCX_APPLIED`. Designed for direnv `.envrc` integration where direnv handles diffing/unset itself. Both never touch the network and never install.
+- **`shell hook` vs `direnv export`**: `shell hook` is stateful — fingerprints the *actually-installed* default-group tools and short-circuits via `_OCX_APPLIED` when unchanged; emits `unset` + new exports + new sentinel on change. Designed for prompt-hook integration where every prompt fires the command. `direnv export` is stateless — emits exports unconditionally without consulting/updating `_OCX_APPLIED`. Designed for direnv `.envrc` integration where direnv handles diffing/unset itself. Both never touch the network and never install. `direnv init` (bare `ocx direnv`) writes the `.envrc` that evals `direnv export`.

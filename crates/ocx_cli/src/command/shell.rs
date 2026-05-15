@@ -17,12 +17,6 @@ pub enum Shell {
     /// export lines only when the resolved set has changed since the last invocation.
     /// The `_OCX_APPLIED` environment variable carries the fingerprint for the fast path.
     Hook(super::shell_hook::ShellHook),
-    /// Print stateless shell exports for the project toolchain (direnv entry point).
-    ///
-    /// Reads the nearest project `ocx.toml`, loads `ocx.lock`, and emits a fresh
-    /// export block on every invocation — suitable for `eval "$(ocx shell direnv)"` in
-    /// `.envrc`. Unlike `shell hook`, this command does not consult or update `_OCX_APPLIED`.
-    Direnv(super::shell_direnv::ShellDirenv),
     /// Print a shell-specific init snippet that wires `ocx shell hook` into the shell.
     Init(super::shell_init::ShellInit),
 }
@@ -33,7 +27,6 @@ impl Shell {
             Shell::Env(env) => env.execute(context).await,
             Shell::Completion(completion) => completion.execute().await,
             Shell::Hook(hook) => hook.execute(context).await,
-            Shell::Direnv(direnv) => direnv.execute(context).await,
             Shell::Init(init) => init.execute(context).await,
         }
     }
