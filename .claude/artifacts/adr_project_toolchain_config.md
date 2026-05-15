@@ -684,7 +684,7 @@ Three parallel reviewers (spec-compliance, adversarial architecture, SOTA-gap) p
 
 - D1 (hermetic execution via lock) — groups always resolve against the lock.
 - D5 (explicit is authoritative) — an explicit positional override still wins over a group entry.
-- Amendment C (project replaces home in full) — unchanged.
+- Amendment C (project replaces home in full) — superseded 2026-05-15 by `adr_global_toolchain_tier.md` (implicit home discovery removed; `$OCX_HOME/ocx.toml` only via explicit `--global`, strictly isolated). The hermetic guarantee for `ocx exec` is unaffected.
 - Amendment D (unavailable semantics, lock atomicity) — unchanged.
 
 ---
@@ -717,6 +717,8 @@ pub struct LockMetadata {
 ---
 
 ### Amendment C — Home-tier vs project-tier composition (resolves Arch Finding 2, Spec WARN-6)
+
+> **Superseded 2026-05-15 by [`adr_global_toolchain_tier.md`](./adr_global_toolchain_tier.md).** The premise below ("home tier is the *implicit fallback* used when no project `ocx.toml` is found") no longer holds: implicit home discovery (`home_project_path()` / Tier-4) is **removed**. `$OCX_HOME/ocx.toml` is reachable *only* via an explicit `--global` flag, and is strictly isolated — it never composes into project resolution and `ocx run`/`ocx exec` never read it. "Project replaces home in full" is retained in spirit (no merge) but is now enforced by *not discovering* the home tier at all rather than by a replacement rule. Read the successor ADR for the binding semantics.
 
 The original Decision 6B and the Data model section are amended with a binding resolution:
 

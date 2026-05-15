@@ -139,7 +139,7 @@ The shim resolves `ocx` using `OCX_BINARY_PIN` if the variable is **defined** in
 For interactive shells, [`ocx shell init`][cmd-shell-init] wires the project toolchain into your shell's prompt cycle. Run it once to install the hook, then every new prompt re-evaluates `ocx.toml` and updates the environment automatically:
 
 ```shell
-ocx shell init bash >> ~/.bashrc
+ocx shell init --shell bash >> ~/.bashrc
 ```
 
 For [direnv][direnv]-driven projects, [`ocx direnv init`][cmd-direnv-init] writes an `.envrc` file that calls [`ocx direnv export`][cmd-direnv-export] on each `cd`. The stateless export block is re-evaluated by direnv whenever `ocx.toml` or `ocx.lock` changes.
@@ -222,6 +222,70 @@ A version bump to the action — proposed automatically by [Dependabot][dependab
 [Versioning In Depth → Locking][in-depth-versioning-locking] — digest pin rationale, OCI tag mutability.
 :::
 
+## Keep everyday tools available everywhere {#global-toolchain}
+
+You want `ripgrep`, `cmake`, and `shellcheck` available in every shell you open — but you also want project builds to be reproducible and immune to whatever you have installed globally. These two goals conflict unless there is a hard boundary between them.
+
+The global toolchain is that boundary. It gives you an `apt`-style "tools I always want around" set without letting any of those tools leak into a project's resolved environment.
+
+### Adding tools to the global toolchain {#global-toolchain-add}
+
+```shell
+ocx install --global ripgrep:14
+ocx install --global cmake:3.28
+```
+
+`--global` makes `$OCX_HOME/ocx.toml` the target instead of the nearest project file. Because a tool must be on PATH to be useful globally, `install --global` also selects the package — it installs, records the binding, and advances the `current` symlink in one step. The `--select` flag is implied and cannot be omitted.
+
+Subsequent calls to `add`, `remove`, `lock`, `upgrade`, and `pull` also accept `--global`:
+
+```shell
+ocx add --global fzf:0.62         # add binding + install + select
+ocx remove --global ripgrep       # drop binding + uninstall
+ocx lock --global                 # re-resolve all tags to digests
+ocx upgrade --global ripgrep      # advance ripgrep to the latest resolved tag
+```
+
+The global file lives at `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`). Mutators create it automatically on first use — no `ocx init` step required.
+
+::: warning `--global` and `--project` are mutually exclusive
+Both flags pick a project file. Passing them together exits with code 64 (`UsageError`).
+:::
+
+### Shell activation for global tools {#global-toolchain-shell}
+
+`ocx shell init` wires two things into your shell at once: the per-prompt project-switching hook and a static entrypoint file (`$OCX_HOME/init.<shell>`) that prepends the global `current` tools to `PATH`.
+
+```shell
+ocx shell init --shell bash >> ~/.bashrc
+```
+
+The static entrypoint is what makes global tools visible in non-interactive shells — CI `bash --norc`, editor-spawned terminals, `bash -c` scripts — without relying on the prompt hook. Source it from your CI environment alongside the hook snippet.
+
+When the global toolchain changes (you ran `ocx install --global` or `ocx remove --global`), re-run `ocx shell init --shell bash` to regenerate the static entrypoint.
+
+### Strict isolation — the hard boundary {#global-toolchain-isolation}
+
+The global toolchain is a **shell convenience tier only**. Once you `cd` into a project, the project toolchain is authoritative and the global tools are entirely removed from PATH — not shadowed, removed. The breadcrumb `# ocx: global toolchain suppressed` appears in the hook's output when this strip fires.
+
+:::info Why hard isolation, not gap-fill?
+[Volta][volta] pioneered this model for Node.js: "Volta covers its tracks … your npm/Yarn scripts never see what's in your toolchain." The alternative — filling in tools the project does not declare from the global set — is exactly what [mise][mise] and [asdf][asdf] do, and it produces the reproducibility hole that OCX is designed to avoid: a collaborator without the same `$OCX_HOME/ocx.toml` gets different resolved tools.
+:::
+
+Two commands that are always hermetic regardless of context:
+
+```shell
+ocx run linter     # reads ocx.toml + ocx.lock; global tools not consulted
+ocx exec cmake:3   # OCI-tier; no ocx.toml read at all
+```
+
+A project's `ocx run` cannot resolve a tool that exists only in `$OCX_HOME/ocx.toml`. This is intentional and not a bug — the project declared its dependencies; anything else is ambient noise.
+
+::: tip Learn more
+[Command-line reference → `--global`][cmd-add-global] — flag behavior on `add`, `remove`, `lock`, `upgrade`, `pull`, `install`.
+[Env-composition reference → Strict isolation][env-composition-strict-isolation] — reference-level statement of the no-composition rule.
+:::
+
 ## Pin a project's tools {#project}
 
 A repository's contributors and CI runners need the same tool versions — `cmake 3.28`, `shellcheck 0.11`, `goreleaser 2.0` — without arguing over chat or curl-piping installers. The locking mechanisms in the previous section pin a *single* invocation; none of them describe what *the project itself* expects.
@@ -288,14 +352,14 @@ The same binding name may appear in `[tools]` and any `[group.*]` table — iden
 
 Project tools should land on `PATH` whenever you `cd` into the project — without `eval`-ing on every shell startup. Three entry points, each suited to a different workflow:
 
-- [`ocx shell init <shell>`][cmd-shell-init] — appends a prompt-hook snippet to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. A fingerprint over the installed tool set lives in `_OCX_APPLIED`, so unchanged prompts emit nothing.
+- [`ocx shell init --shell <shell>`][cmd-shell-init] — appends a prompt-hook snippet to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. A fingerprint over the installed tool set lives in `_OCX_APPLIED`, so unchanged prompts emit nothing.
 - [`ocx direnv export`][cmd-direnv-export] — stateless [direnv][direnv] backend; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc`.
 - [`ocx exec`][cmd-exec] — no hook at all, for CI and scripts.
 
 The hooks export only — they never install missing tools or contact the registry. Run [`ocx pull`][cmd-pull] first.
 
 ::: tip Learn more
-[Project Toolchain In Depth][in-depth-project] — schema details, declaration-hash canonicalization (RFC 8785 JCS), in-place flock concurrency, home-tier fallback, per-group binding semantics, multi-project GC retention, SLSA roadmap.
+[Project Toolchain In Depth][in-depth-project] — schema details, declaration-hash canonicalization (RFC 8785 JCS), in-place flock concurrency, per-group binding semantics, multi-project GC retention, SLSA roadmap.
 :::
 
 ## Run tools from your project {#run}
@@ -508,12 +572,12 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 
 [`ocx clean`][cmd-clean] sweeps the entire store — packages with no live install symlink and no [forward-ref][in-depth-storage-gc] from a dependent package are removed in a single pass, along with any layers and blobs that become unreachable.
 
-When multiple [registered projects][in-depth-project-multi-project-retention] share the same `OCX_HOME`, `ocx clean` retains every package referenced by *any* project's `ocx.lock` — not just the active one. Pass `--force` to bypass the project registry; live install symlinks are always honoured.
+When multiple projects share the same `OCX_HOME`, `ocx clean` retains every package referenced by *any* registered project's `ocx.lock` — not just the active one. A project is registered automatically whenever `ocx lock`, `ocx add`, or `ocx remove` writes its lockfile. Deleting a project's directory makes its packages collectable at the next clean (silently — no warning). Browse `$OCX_HOME/projects/` to see which projects are currently registered. Pass `--force` to bypass the project registry; live install symlinks are always honoured.
 
 ::: tip Learn more
 [Storage In Depth → Garbage Collection][in-depth-storage-gc] — full reachability walk across `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`.
 [Dependencies In Depth → Garbage Collection][in-depth-dependencies-gc] — why dependencies are protected by dependents, not by back-references.
-[Project Toolchain In Depth → Multi-project retention][in-depth-project-multi-project-retention] — `projects.json` registry semantics.
+[Project Toolchain In Depth → Multi-project retention][in-depth-project-multi-project-retention] — symlink ledger, GC semantics, `$OCX_HOME/projects/` browsability.
 :::
 
 ### Lock-first by default: where are `--locked` and `--frozen`? {#locked-frozen-equivalents}
@@ -556,6 +620,9 @@ After that, every new shell picks up the locked tools automatically. No `shell p
 The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable now accept any path, not just files named `ocx.toml`. The CWD walk still only looks for files named exactly `ocx.toml`.
 
 <!-- external -->
+[volta]: https://volta.sh/
+[mise]: https://mise.jdx.dev/
+[asdf]: https://asdf-vm.com/
 [toml]: https://toml.io/
 [windows-pathext]: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/set
 [powershell-docs]: https://learn.microsoft.com/en-us/powershell/
@@ -584,6 +651,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [schema-project]: https://ocx.sh/schemas/project/v1.json
 
 <!-- commands -->
+[cmd-add-global]: ./reference/command-line.md#global-flag
 [cmd-logout]: ./reference/command-line.md#logout
 [cmd-login]: ./reference/command-line.md#login
 [cmd-run]: ./reference/command-line.md#run
@@ -630,6 +698,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 
 <!-- reference pages -->
 [config-ref]: ./reference/configuration.md
+[env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation
 [getting-started]: ./getting-started.md
 
 <!-- in-depth -->

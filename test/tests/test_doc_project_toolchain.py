@@ -43,13 +43,25 @@ IN_DEPTH = PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "project.md"
 
 # Required anchors in their declared order on the In Depth page. The
 # old slsa→reproducibility rename remains a hard constraint.
+#
+# Living Design — anchor rename by ``adr_global_toolchain_tier.md``
+# §Decision 1: the implicit ``$OCX_HOME/ocx.toml`` home-tier fallback was
+# DELETED and replaced by the explicit ``--global`` toolchain tier. The
+# In Depth page's ``## Home tier {#home-tier}`` section was rewritten to
+# ``## Global toolchain {#global-toolchain}`` accordingly (the page now
+# states verbatim "Unlike the old home-tier fallback, the global
+# toolchain is never discovered implicitly"). This is a sanctioned
+# rename, not a dropped anchor — it occupies the same ordinal slot the
+# home-tier section did and every other required anchor is unchanged and
+# still in order. Updating the contract list to the new structure (not
+# weakening it).
 REQUIRED_ANCHORS_IN_ORDER = [
     "{#toml}",
     "{#lock}",
     "{#pull-exec}",
     "{#groups}",
     "{#activation}",
-    "{#home-tier}",
+    "{#global-toolchain}",
     "{#reproducibility}",
 ]
 

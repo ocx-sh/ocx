@@ -31,6 +31,17 @@ pub struct ContextOptions {
     #[arg(long, value_name = "FILE")]
     pub project: Option<std::path::PathBuf>,
 
+    /// Select the global toolchain (`$OCX_HOME/ocx.toml`) as the project
+    /// file in effect, instead of discovering a project by CWD walk.
+    ///
+    /// Mutually exclusive with `--project` (both pick a project file).
+    /// Resolution-affecting: forwarded to child ocx processes via
+    /// `OCX_GLOBAL`. Equivalent env var: `OCX_GLOBAL`. The global
+    /// toolchain never composes into project resolution; `ocx run` and
+    /// `ocx exec` stay hermetic and never read it.
+    #[arg(long, conflicts_with = "project", default_value_t = env::flag(env::keys::OCX_GLOBAL, false))]
+    pub global: bool,
+
     /// Route mutable lookups (tag list, catalog, tag→manifest) to the
     /// remote registry instead of the local index.
     ///
@@ -105,6 +116,7 @@ impl ContextOptions {
             remote: self.remote,
             config: self.config.clone(),
             project: self.project.clone(),
+            global: self.global,
             index: self.index.clone(),
         }
     }

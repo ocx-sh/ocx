@@ -1,1167 +1,797 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Per-user registry of projects whose `ocx.lock` files pin packages on this
-//! machine.
+//! Per-user GC ledger of projects whose `ocx.lock` pins packages on this
+//! machine, expressed as a flat symlink store.
 //!
-//! The registry answers the question "which projects have been seen on this
-//! machine" so that `ocx clean` can retain packages held by lockfiles in
-//! projects other than the currently-active one.
+//! The ledger answers "which projects pin tools here" so that `ocx clean` can
+//! retain packages held by lockfiles in projects other than the active one.
 //!
-//! On disk: two files under `$OCX_HOME`:
+//! On disk this is a flat directory `$OCX_HOME/projects/`, one symlink per
+//! registered project:
 //!
-//! - `projects.json` — single JSON document listing registered project paths.
-//! - `.projects.lock` — sibling advisory-lock sentinel (never contains data).
+//! ```text
+//! $OCX_HOME/projects/
+//!   1f3a9c0b5e7d2a84  ->  /home/alice/dev/proj-a   (symlink, target = project dir)
+//!   9b2c4e6a8d0f1357  ->  /home/alice/dev/proj-b
+//! ```
 //!
-//! Write protocol: read → merge → tempfile → atomic rename, all gated behind
-//! an exclusive advisory lock on `.projects.lock`. Pattern identical to
-//! [`crate::project::ProjectLock::save`].
+//! - **Name** = first 16 hex of `SHA-256(canonical_abs_project_dir)` —
+//!   identical scheme to [`crate::reference_manager::ReferenceManager::name_for_path`].
+//!   Single source of truth for the hash; this module does not reinvent it.
+//! - **Target** = the canonicalised absolute **project directory** (the
+//!   directory containing `ocx.lock`). Never the lock file, never the config
+//!   file. Browsable: `ls -l $OCX_HOME/projects/` resolves into projects.
 //!
-//! See [`adr_clean_project_backlinks.md`] for full design rationale and
-//! on-disk schema specification.
+//! This collapses the project ledger into the same liveness model the rest of
+//! the store already uses (`refs/symlinks/`): a symlink whose
+//! existence-and-resolvability *is* the GC-root signal. There is no
+//! `projects.json`, no `.projects.lock` sentinel, no schema version, no
+//! whole-file rewrite. See [`adr_project_gc_symlink_ledger.md`] for the full
+//! rationale (supersedes `adr_clean_project_backlinks.md`).
+//!
+//! ## Sanctioned `symlink::create/update` exception
+//!
+//! The ledger symlink targets an absolute path **outside** `$OCX_HOME` (the
+//! project dir, Nix indirect-root shape). It therefore uses the low-level
+//! [`crate::symlink`] primitives directly and **must not** route through
+//! `symlink::validate_target` (whose containment policy is for `refs/`-internal
+//! links). `projects/` links are categorically not install back-refs, so the
+//! "never raw `symlink::create/update`, always `ReferenceManager`" rule does
+//! not apply here — this is a named, documented carve-out (ARCH-4b).
+//!
+//! ## Accepted collision blast-radius (ARCH-1a)
+//!
+//! Reusing the 16-hex (64-bit) `name_for_path` scheme is sound at realistic
+//! worktree counts (collision probability ≈10⁻¹³). The blast radius differs
+//! from the `refs/symlinks/` precedent though: a `refs/symlinks/` collision is
+//! a recoverable local mislink, whereas a `projects/` collision drops one of
+//! two live projects from the GC root set → silent collection of its pinned
+//! packages. Accepted at realistic scale; stated here so the reuse is a
+//! conscious decision, not precedent inertia.
 
 pub mod error;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-
-use serde::{Deserialize, Serialize};
 
 pub use error::{Error, ProjectRegistryError, ProjectRegistryErrorKind};
 
-use crate::file_lock::FileLock;
-use crate::log;
-
-// ── On-disk schema ─────────────────────────────────────────────────────────
-
-/// Current schema version — written on every save.
-const SCHEMA_VERSION: u8 = 1;
-
-/// On-disk representation of the registry JSON document.
-///
-/// Serialized at [`SCHEMA_VERSION`]. Anything other than the current version
-/// surfaces as [`ProjectRegistryErrorKind::UnknownVersion`].
-#[derive(Serialize, Deserialize, Debug)]
-struct RegistryDoc {
-    schema_version: u8,
-    entries: Vec<EntryOnDisk>,
+/// Converts a [`crate::Error`] from the low-level `symlink` primitives into a
+/// registry [`ProjectRegistryErrorKind::Io`], preserving the structural inner
+/// [`std::io::Error`] (never `.to_string()`-erasing the source) when the
+/// variant carries one.
+fn into_io_kind(error: crate::Error) -> ProjectRegistryErrorKind {
+    match error {
+        crate::Error::InternalFile(_, io) => ProjectRegistryErrorKind::Io(io),
+        other => ProjectRegistryErrorKind::Io(std::io::Error::other(other)),
+    }
 }
 
-/// Serialization form of a single project entry.
+/// Three-state outcome of a single ledger-entry liveness probe.
 ///
-/// `config_path` records the originating project config file (`ocx.toml` or a
-/// custom name when registered via `--project=<custom>.toml`) so the lazy-
-/// prune walker can honour custom config names.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct EntryOnDisk {
-    ocx_lock_path: PathBuf,
-    /// Absolute path to the project's config file (`ocx.toml` or a custom
-    /// name when registered via `--project=<custom>.toml`).
-    config_path: PathBuf,
-    last_seen: String,
+/// The distinction between [`ProbeResult::Dead`] and [`ProbeResult::Unknown`]
+/// is the SEC-1 silent-data-loss guard: collapsing a transient probe `Err`
+/// (NFS/automount/permission-flip) into "dead" would prune a live project's
+/// ledger link and GC its pinned packages. `Dead` is acted on (pruned);
+/// `Unknown` is retained and warned about (see [`ProjectRegistry::live_projects`]).
+enum ProbeResult {
+    /// The link resolves and `<target>/ocx.lock` exists — a live GC root.
+    Live(PathBuf),
+    /// Definitively absent: not a link, OR an `Ok` probe proved the target /
+    /// `ocx.lock` is gone. Safe to prune.
+    Dead,
+    /// A transient I/O `Err` from `is_link`/`canonicalize`/`try_exists` — the
+    /// filesystem was momentarily unreachable. Liveness is indeterminate;
+    /// the link MUST be retained (never pruned, never collected as a root).
+    Unknown,
 }
 
-// ── Public types ───────────────────────────────────────────────────────────
+/// Liveness probe for a single ledger entry.
+///
+/// Returns [`ProbeResult::Live`] when `entry_path` is a symlink whose target
+/// resolves to a directory containing an `ocx.lock` (a live GC root);
+/// [`ProbeResult::Dead`] when the entry is definitively not a live root (not
+/// a link, or an `Ok` probe proved the target / `ocx.lock` is absent);
+/// [`ProbeResult::Unknown`] when ANY probe step returned an `Err` (transient
+/// unreachable filesystem — must not be treated as dead). Used twice per
+/// non-`Live` entry to close the CODEX-BLOCK-1 TOCTOU window: a `Dead` is only
+/// acted on (pruned) if a re-probe immediately before removal also yields
+/// `Dead`.
+fn probe_live_target(entry_path: &Path) -> ProbeResult {
+    if !crate::symlink::is_link(entry_path) {
+        return ProbeResult::Dead;
+    }
+    // Resolve the link target to an absolute, canonical directory. A broken
+    // link (target removed) fails canonicalize with NotFound → Dead; any
+    // other Err (EACCES, ESTALE, ETIMEDOUT, ...) is transient → Unknown.
+    let target = match dunce::canonicalize(entry_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ProbeResult::Dead,
+        Err(_) => return ProbeResult::Unknown,
+    };
+    match target.join("ocx.lock").try_exists() {
+        Ok(true) => ProbeResult::Live(target),
+        Ok(false) => ProbeResult::Dead,
+        Err(_) => ProbeResult::Unknown,
+    }
+}
 
-/// Per-user registry of known project `ocx.lock` paths.
+/// Per-user GC ledger backed by the flat symlink store `$OCX_HOME/projects/`.
 ///
-/// Populated whenever an `ocx.lock` is saved and consulted by `ocx clean` to
-/// avoid collecting packages that are pinned by any registered project.
+/// Populated whenever an `ocx.lock` is saved (`ProjectLock::save` /
+/// `MutationGuard::commit` tails) and consulted by `ocx clean` to avoid
+/// collecting packages pinned by any registered project.
 ///
-/// Construct via [`ProjectRegistry::new`]; all I/O is async. See the module
-/// documentation and [`adr_clean_project_backlinks.md`] for the on-disk schema
-/// and locking protocol.
+/// Construct via [`ProjectRegistry::new`]; all I/O is async.
 pub struct ProjectRegistry {
-    /// Absolute path to `$OCX_HOME/projects.json`.
-    path: PathBuf,
-    /// Absolute path to `$OCX_HOME/.projects.lock` (advisory-lock sentinel).
-    sentinel_path: PathBuf,
+    /// Absolute path to `$OCX_HOME/projects/` (the flat symlink store).
+    projects_dir: PathBuf,
 }
-
-/// A single entry in the project registry.
-///
-/// Each entry records an absolute canonicalised path to a project's `ocx.lock`
-/// file (and its originating config file) plus the ISO-8601 UTC timestamp of
-/// the last registration call. The `last_seen` field is diagnostic-only; it
-/// is not load-bearing for GC decisions.
-#[derive(Clone, Debug)]
-pub struct ProjectEntry {
-    /// Absolute, canonicalised path to the project's `ocx.lock` file.
-    pub ocx_lock_path: PathBuf,
-    /// Absolute, canonicalised path to the project's config file
-    /// (`ocx.toml` or `--project=<custom>.toml`).
-    pub config_path: PathBuf,
-    /// ISO-8601 UTC timestamp of the most recent [`ProjectRegistry::register`]
-    /// call for this path.
-    pub last_seen: String,
-}
-
-// ── Lock acquisition helpers ───────────────────────────────────────────────
-
-/// Open the sentinel without following symlinks (mirrors `open_sidecar_no_follow`
-/// from `lock.rs`).
-///
-/// Returns a raw `std::fs::File` on success. The caller must then acquire the
-/// advisory lock via [`FileLock::try_exclusive`] or
-/// [`FileLock::lock_exclusive_with_timeout`].
-fn open_sentinel_no_follow(sentinel: &Path) -> Result<std::fs::File, Error> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            // O_NOFOLLOW is a standard POSIX flag; libc exposes it as c_int.
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(sentinel)
-            .map_err(|e| ProjectRegistryError::new(sentinel.to_path_buf(), ProjectRegistryErrorKind::Io(e)).into())
-    }
-    // On non-Unix platforms O_NOFOLLOW is unavailable; check via symlink_metadata
-    // and refuse if a symlink is present (best-effort — no atomic guarantee).
-    #[cfg(not(unix))]
-    {
-        match std::fs::symlink_metadata(sentinel) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(ProjectRegistryError::new(
-                    sentinel.to_path_buf(),
-                    ProjectRegistryErrorKind::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "sentinel path is a symlink",
-                    )),
-                )
-                .into());
-            }
-            _ => {}
-        }
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(sentinel)
-            .map_err(|e| ProjectRegistryError::new(sentinel.to_path_buf(), ProjectRegistryErrorKind::Io(e)).into())
-    }
-}
-
-/// Acquire the exclusive advisory lock on the registry sentinel.
-///
-/// Tries once without blocking; if contended, retries for up to 2 seconds
-/// (per ADR "Failure Modes"). On timeout, returns `Err(Locked)`. On a real
-/// I/O error from the lock primitive, returns `Err(Io)`.
-async fn acquire_exclusive(sentinel: &Path) -> Result<FileLock, Error> {
-    let sentinel_path = sentinel.to_path_buf();
-    // Fast path: open the sentinel and try once without blocking inside
-    // spawn_blocking to avoid calling std::fs::OpenOptions::open on the
-    // async executor thread (blocking I/O in async = Block-tier violation).
-    let sp = sentinel_path.clone();
-    let open_result = tokio::task::spawn_blocking(move || open_sentinel_no_follow(&sp))
-        .await
-        .expect("spawn_blocking panicked");
-    let file = open_result?;
-    match FileLock::try_exclusive(file) {
-        Ok(Some(lock)) => return Ok(lock),
-        Ok(None) => {} // contended — fall through to timed retry
-        Err(e) => {
-            return Err(ProjectRegistryError::new(sentinel_path, ProjectRegistryErrorKind::Io(e)).into());
-        }
-    }
-    // Retry: open a fresh file descriptor (the first one was consumed by
-    // `try_exclusive`), then block for up to 2 s.
-    let sp2 = sentinel_path.clone();
-    let open_result2 = tokio::task::spawn_blocking(move || open_sentinel_no_follow(&sp2))
-        .await
-        .expect("spawn_blocking panicked");
-    let file2 = open_result2?;
-    match FileLock::lock_exclusive_with_timeout(file2, std::time::Duration::from_secs(2)).await {
-        Ok(lock) => Ok(lock),
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            Err(ProjectRegistryError::new(sentinel_path, ProjectRegistryErrorKind::Locked).into())
-        }
-        Err(e) => Err(ProjectRegistryError::new(sentinel_path, ProjectRegistryErrorKind::Io(e)).into()),
-    }
-}
-
-// ── Read / write helpers ───────────────────────────────────────────────────
-
-/// Returns the current UTC timestamp as an ISO-8601 string.
-fn now_iso8601() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-}
-
-/// Read and parse the registry file. Returns `Ok(None)` when absent.
-///
-/// Documents written at any other [`SCHEMA_VERSION`] surface as
-/// [`ProjectRegistryErrorKind::UnknownVersion`].
-fn read_registry(path: &Path) -> Result<Option<RegistryDoc>, Error> {
-    let raw = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(ProjectRegistryError::new(path.to_path_buf(), ProjectRegistryErrorKind::Io(e)).into()),
-    };
-    let doc: RegistryDoc = serde_json::from_slice(&raw)
-        .map_err(|e| ProjectRegistryError::new(path.to_path_buf(), ProjectRegistryErrorKind::Corrupt(e)))?;
-    if doc.schema_version != SCHEMA_VERSION {
-        return Err(ProjectRegistryError::new(
-            path.to_path_buf(),
-            ProjectRegistryErrorKind::UnknownVersion {
-                found: doc.schema_version,
-                expected: SCHEMA_VERSION,
-            },
-        )
-        .into());
-    }
-    Ok(Some(doc))
-}
-
-/// Atomically rewrite the registry file via tempfile + rename (same pattern as
-/// `ProjectLock::save`). Caller holds the advisory lock; the file descriptor
-/// guard (`_lock`) must outlive this call.
-fn write_registry(path: &Path, doc: &RegistryDoc, _lock: &FileLock) -> Result<(), Error> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ProjectRegistryError::new(parent.to_path_buf(), ProjectRegistryErrorKind::Io(e)))?;
-    }
-
-    let serialized = serde_json::to_string_pretty(doc)
-        .map_err(|e| ProjectRegistryError::new(path.to_path_buf(), ProjectRegistryErrorKind::Corrupt(e)))?;
-
-    // Snapshot the existing file's permissions (if any) so the atomic rename
-    // does not change the mode. On first-ever save this lookup fails with
-    // NotFound, which is tolerated — tempfile's default mode stands.
-    //
-    // On Unix, cap the mode at 0o644 (user rw, group/other r) so an
-    // accidentally world-writable file is not perpetuated through the atomic
-    // rename cycle (mirrors lock.rs:426-441).
-    let prior_perms = std::fs::metadata(path).ok().map(|m| {
-        let mut perms = m.permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = perms.mode() & 0o644;
-            perms.set_mode(mode);
-        }
-        perms
-    });
-
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| ProjectRegistryError::new(parent.to_path_buf(), ProjectRegistryErrorKind::Io(e)))?;
-    tmp.write_all(serialized.as_bytes())
-        .map_err(|e| ProjectRegistryError::new(tmp.path().to_path_buf(), ProjectRegistryErrorKind::Io(e)))?;
-    tmp.as_file()
-        .sync_data()
-        .map_err(|e| ProjectRegistryError::new(tmp.path().to_path_buf(), ProjectRegistryErrorKind::Io(e)))?;
-    if let Some(perms) = prior_perms {
-        tmp.as_file()
-            .set_permissions(perms)
-            .map_err(|e| ProjectRegistryError::new(tmp.path().to_path_buf(), ProjectRegistryErrorKind::Io(e)))?;
-    }
-    tmp.persist(path)
-        .map_err(|e| ProjectRegistryError::new(path.to_path_buf(), ProjectRegistryErrorKind::Io(e.error)))?;
-
-    // fsync the directory so the rename is durable across a crash.
-    #[cfg(unix)]
-    if !parent.as_os_str().is_empty() {
-        let dir = std::fs::File::open(parent)
-            .map_err(|e| ProjectRegistryError::new(parent.to_path_buf(), ProjectRegistryErrorKind::Io(e)))?;
-        dir.sync_all()
-            .map_err(|e| ProjectRegistryError::new(parent.to_path_buf(), ProjectRegistryErrorKind::Io(e)))?;
-    }
-
-    Ok(())
-}
-
-// ── Lazy pruning helper ────────────────────────────────────────────────────
-
-/// Returns `true` when an entry still satisfies all three lazy-pruning rules:
-///
-/// 1. `ocx_lock_path` exists on disk.
-/// 2. `ocx_lock_path` is a regular file (not a directory or special file).
-/// 3. The recorded `config_path` exists on disk (the originating
-///    `ocx.toml` or `--project=<custom>.toml` path).
-///
-/// Async-only: callers run inside `ProjectRegistry::load_and_prune` under a
-/// tokio runtime, parallelising stat(2) syscalls across many entries via
-/// `JoinSet`.
-async fn entry_is_valid_async(entry: &EntryOnDisk) -> bool {
-    let path = &entry.ocx_lock_path;
-    let meta = match tokio::fs::metadata(path).await {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
-    if !meta.is_file() {
-        return false;
-    }
-    tokio::fs::try_exists(&entry.config_path).await.unwrap_or(false)
-}
-
-// ── impl ───────────────────────────────────────────────────────────────────
 
 impl ProjectRegistry {
     /// Constructs a [`ProjectRegistry`] rooted at `ocx_home`.
     ///
-    /// Pure path arithmetic; performs no I/O. The registry file
-    /// (`projects.json`) and sentinel (`.projects.lock`) are located at
-    /// `ocx_home/projects.json` and `ocx_home/.projects.lock` respectively,
-    /// matching the layout decided in [`adr_clean_project_backlinks.md`].
+    /// Pure path arithmetic; performs no I/O. The store directory is
+    /// `ocx_home/projects/`. The directory is **not** created here — it is
+    /// created lazily by [`Self::register`], and its absence is a valid
+    /// "no projects registered" state for [`Self::live_projects`].
     pub fn new(ocx_home: &Path) -> Self {
         Self {
-            path: ocx_home.join("projects.json"),
-            sentinel_path: ocx_home.join(".projects.lock"),
+            projects_dir: ocx_home.join("projects"),
         }
     }
 
-    /// Records (or refreshes) the entry for `ocx_lock_path` (paired with
-    /// its originating `config_path`) in the registry.
+    /// Records the GC-root symlink for `project_dir` in the ledger.
     ///
-    /// # Path contract
+    /// Idempotent. `project_dir` is canonicalised; the link name is
+    /// `ReferenceManager::name_for_path(canonical_project_dir)` (16-hex /
+    /// 64-bit SHA-256 — reused, not reinvented) and the link target is the
+    /// canonical project directory.
     ///
-    /// Both `ocx_lock_path` and `config_path` MUST be absolute and
-    /// canonical (no `.` / `..` segments, no symlinks resolved at the OS
-    /// level). Two callers reaching the same physical file through
-    /// different aliased paths would otherwise create two registry
-    /// entries — the lazy-prune pass would see both as valid, and
-    /// `ocx clean` would unnecessarily walk duplicate roots. Callers
-    /// obtain canonical paths via [`tokio::fs::canonicalize`] **after**
-    /// the atomic rename of the underlying lock file (so `canonicalize`
-    /// cannot fail with `NotFound`). The two in-tree call sites —
-    /// [`crate::project::ProjectLock::save`] and
-    /// [`crate::project::MutationGuard::commit`] — both follow this
-    /// pattern; new call sites must do the same.
+    /// # No self-link invariant (ARCH-1b — silent-data-loss class)
     ///
-    /// `config_path` records the originating project config file —
-    /// typically `<lock_parent>/ocx.toml`, but may carry a custom name
-    /// when `--project=<custom>.toml` was used. The lazy-prune pass
-    /// (`entry_is_valid_async`) honours this recorded path so projects
-    /// entered via custom config names are not silently pruned (Codex
-    /// High-4 fix).
+    /// **No-op** (returns `Ok(())`) when `project_dir` is the *same directory*
+    /// as `$OCX_HOME`. The identity test MUST be device+inode identity
+    /// ([`crate::utility::fs::same_dir`]: Unix `dev`/`ino`; Windows
+    /// canonicalized-handle equivalence), **not** canonical-path byte
+    /// equality. `tokio::fs::canonicalize` does not case-fold on
+    /// case-insensitive/normalizing filesystems (macOS APFS default, Windows —
+    /// both first-class platforms), so byte equality can return *false* when
+    /// the paths denote the same directory, letting the forbidden
+    /// `$OCX_HOME/projects/<hash> → $OCX_HOME` self-link slip through. The
+    /// global toolchain (`$OCX_HOME/ocx.toml`) is already a GC root via its
+    /// `current` install symlinks; the ledger never points at its own home.
     ///
-    /// A debug-assert enforces absoluteness in `cfg(debug_assertions)`
-    /// builds; canonicality is harder to assert cheaply (would require a
-    /// fresh `canonicalize` round-trip) and is left as a documented
-    /// caller obligation.
+    /// # Crash-safe atomic replace (CODEX-BLOCK-2)
     ///
-    /// # Behaviour
+    /// `symlink::update` is remove-then-create — NOT atomic; a crash or a
+    /// concurrent [`Self::live_projects`] between the remove and the create
+    /// transiently drops a live root. `register` instead stages the link at a
+    /// temp name in the **same** `projects/` directory (`.tmp-<pid>-<rand>`)
+    /// then `rename(2)`s it onto the final name (atomic same-dir rename on
+    /// POSIX; `ReplaceFile`/equivalent on Windows) via
+    /// [`crate::symlink::replace_atomic`]. [`Self::live_projects`] skips
+    /// `.tmp-*` names. Uses low-level [`crate::symlink`] directly — **not**
+    /// `validate_target` (target is an absolute external path by design).
     ///
-    /// Updates `last_seen` to the current UTC time. Persists atomically
-    /// via tempfile + rename under an exclusive advisory lock on the
-    /// sibling sentinel, mirroring the protocol in
-    /// [`crate::project::ProjectLock::save`].
+    /// # Error handling (ARCH-3 — split by failure class)
     ///
-    /// Registration failures are intentionally non-fatal at call sites: a
-    /// failed registration loses one window but does not abort the `ocx lock`
-    /// save that triggered it. Callers log at WARN and swallow the error.
+    /// Failure to create/update **this** project's own link (store dir
+    /// unwritable, ENOSPC, perms; or canonicalize failure of this project's
+    /// own paths) is the silent-data-loss class — the user's just-pinned
+    /// packages will not be a GC root. The caller logs at **`log::warn!`**
+    /// (NOT debug; `feedback_no_warn_on_common_benign` explicitly does not
+    /// cover this) and the failure is **non-fatal**: it never propagates and
+    /// never blocks the `ocx.toml`/`ocx.lock` mutation. (Departed-*other*-
+    /// project pruning is the benign common case and is debug-only — but that
+    /// happens in [`Self::live_projects`], not here.)
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Registry`] wrapping:
-    ///
-    /// - [`ProjectRegistryErrorKind::Io`] on directory creation, sentinel
-    ///   open, lock acquisition, or atomic rename failure.
-    /// - [`ProjectRegistryErrorKind::Corrupt`] if the existing registry file
-    ///   parses as garbage (refuses to overwrite blindly).
-    /// - [`ProjectRegistryErrorKind::Locked`] if the advisory lock cannot be
-    ///   acquired within the retry timeout.
-    pub async fn register(&self, ocx_lock_path: &Path, config_path: &Path) -> Result<(), Error> {
-        debug_assert!(
-            ocx_lock_path.is_absolute(),
-            "ProjectRegistry::register requires an absolute ocx_lock_path; got: {}",
-            ocx_lock_path.display()
-        );
-        debug_assert!(
-            config_path.is_absolute(),
-            "ProjectRegistry::register requires an absolute config_path; got: {}",
-            config_path.display()
-        );
-        let registry_path = self.path.clone();
-        let sentinel_path = self.sentinel_path.clone();
-        let ocx_lock_path = ocx_lock_path.to_path_buf();
-        let config_path = config_path.to_path_buf();
-        let now = now_iso8601();
+    /// Returns [`Error::Registry`] wrapping [`ProjectRegistryErrorKind::Io`]
+    /// on store-directory creation or atomic-replace failure. Callers treat
+    /// this as non-fatal and log at WARN (see above).
+    pub async fn register(&self, project_dir: &Path) -> Result<(), Error> {
+        let projects_dir = self.projects_dir.clone();
+        let project_dir = project_dir.to_path_buf();
 
-        // Ensure OCX_HOME exists (idempotent).
-        if let Some(parent) = registry_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ProjectRegistryError::new(parent.to_path_buf(), ProjectRegistryErrorKind::Io(e)))?;
-        }
-
-        // Acquire exclusive lock (sentinel open + fs4 exclusive).
-        let lock = acquire_exclusive(&sentinel_path).await?;
-
-        // All subsequent I/O is synchronous (no await while holding lock guard).
+        // All work is synchronous filesystem I/O (canonicalize, stat for the
+        // dev/inode identity probe, symlink staging + rename). Run it on a
+        // blocking thread so it never stalls the async runtime — same
+        // convention as `ProjectLock::save`.
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
-            // Read existing registry (or start empty).
-            let mut doc = match read_registry(&registry_path)? {
-                Some(d) => d,
-                None => RegistryDoc {
-                    schema_version: SCHEMA_VERSION,
-                    entries: Vec::new(),
-                },
-            };
+            let canonical_project_dir = dunce::canonicalize(&project_dir)
+                .map_err(|e| ProjectRegistryError::new(project_dir.clone(), ProjectRegistryErrorKind::Io(e)))?;
 
-            // Update or append entry.
-            if let Some(pos) = doc.entries.iter().position(|e| e.ocx_lock_path == ocx_lock_path) {
-                doc.entries[pos].last_seen = now;
-                doc.entries[pos].config_path = config_path;
-            } else {
-                doc.entries.push(EntryOnDisk {
-                    ocx_lock_path,
-                    config_path,
-                    last_seen: now,
-                });
+            // `$OCX_HOME` is the parent of `projects/`. The no-self-link
+            // invariant (ARCH-1b) suppresses a `$OCX_HOME/projects/<hash> ->
+            // $OCX_HOME` link. Identity is device+inode, NOT canonical-path
+            // byte equality — byte equality is unsound on case-insensitive /
+            // normalizing filesystems where the same dir has differing path
+            // bytes. A failure to probe identity is treated as "not the same
+            // dir, proceed" (the link is then created normally).
+            let ocx_home = projects_dir.parent().unwrap_or(&projects_dir);
+            if crate::utility::fs::same_dir(&canonical_project_dir, ocx_home).unwrap_or(false) {
+                return Ok(());
             }
 
-            write_registry(&registry_path, &doc, &lock)?;
+            let name = crate::reference_manager::ReferenceManager::name_for_path(&canonical_project_dir);
+            let link_path = projects_dir.join(name);
+
+            crate::symlink::replace_atomic(&canonical_project_dir, &link_path)
+                .map_err(|e| ProjectRegistryError::new(link_path.clone(), into_io_kind(e)))?;
             Ok(())
         })
         .await
-        .expect("spawn_blocking panicked in ProjectRegistry::register")?;
-
-        Ok(())
+        .map_err(|e| {
+            Error::Registry(ProjectRegistryError::new(
+                PathBuf::new(),
+                ProjectRegistryErrorKind::Io(std::io::Error::other(format!("register task panicked: {e}"))),
+            ))
+        })?
     }
 
-    /// Loads the registry and lazily prunes entries whose `ocx_lock_path` no
-    /// longer satisfies the validity criteria (file exists, is a regular file,
-    /// has a sibling `ocx.toml`).
+    /// Returns the canonical project directories that are still live GC roots,
+    /// pruning departed-project links as a side effect.
     ///
-    /// If pruning drops at least one entry the shrunken registry is persisted
-    /// under the same lock-then-rename protocol as [`Self::register`]. If
-    /// nothing is pruned, no write occurs.
+    /// Readdir `projects/` (skipping `.tmp-*` staging names). The per-entry
+    /// liveness probe is **three-state** ([`ProbeResult`]): a transient probe
+    /// `Err` (momentarily-unreachable filesystem: NFS/automount/permission-
+    /// flip) yields [`ProbeResult::Unknown`] — NOT "dead". For each entry:
+    /// - [`ProbeResult::Live`] → collect the canonical `<target>`.
+    /// - non-`Live` → **re-probe the entry immediately before removing** and
+    ///   only `symlink::remove(entry)` if BOTH probes return
+    ///   [`ProbeResult::Dead`] (CODEX-BLOCK-1 TOCTOU guard: a concurrent
+    ///   [`Self::register`] re-pointing the same hash between the snapshot and
+    ///   the remove must not be deleted — if the re-check now resolves `Live`,
+    ///   treat it as live, do not remove, collect it). A prune logs at
+    ///   `log::debug!` (the common benign departed-*other*-project case —
+    ///   never WARN).
+    /// - either probe [`ProbeResult::Unknown`] → **retain the link, do NOT
+    ///   prune it, do NOT collect it as a root this run**, and `log::warn!`
+    ///   once (SEC-1 silent-data-loss guard, consistent with the ADR §Risks
+    ///   ARCH-3 policy — WARN not debug: pruning a live-but-unreachable
+    ///   project would GC its pinned packages). The next `ocx clean`
+    ///   re-probes.
     ///
-    /// First-run behaviour (file absent): returns an empty `Vec` and writes
-    /// nothing, matching the migration contract in [`adr_clean_project_backlinks.md`].
+    /// Returns the collected dirs **sorted by link name** (deterministic, per
+    /// `quality-rust.md` JoinSet/ordering rule). A filesystem I/O error while
+    /// enumerating `projects/` logs at `log::debug!` and returns the
+    /// collected-so-far set (non-fatal — matches the superseded ADR's
+    /// "registry unreadable ⇒ non-fatal" stance). `projects/` absent →
+    /// returns `[]`, no error, no directory creation.
+    ///
+    /// Concurrency note: entries created mid-readdir by a concurrent
+    /// [`Self::register`] may or may not be observed (POSIX
+    /// implementation-defined). Acceptable — an already-installed package is
+    /// retained by its `current` install symlink, and a missed first-ever
+    /// registration is picked up at the next `ocx clean` (SOTA finding 1c).
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Registry`] wrapping:
-    ///
-    /// - [`ProjectRegistryErrorKind::Io`] on read or write failure.
-    /// - [`ProjectRegistryErrorKind::Corrupt`] if the file exists but cannot
-    ///   be parsed; the error surfaces so the caller can propagate as
-    ///   `ConfigError` (exit 78) rather than silently falling back to an empty
-    ///   registry (which would re-introduce GC false positives).
-    /// - [`ProjectRegistryErrorKind::Locked`] if the advisory lock cannot be
-    ///   acquired for the prune rewrite.
-    pub async fn load_and_prune(&self) -> Result<Vec<ProjectEntry>, Error> {
-        // First-run: if the file is absent return empty without acquiring the lock.
-        // Use tokio::fs::try_exists to avoid blocking the async executor with a
-        // synchronous stat(2) call.
-        if !tokio::fs::try_exists(&self.path)
-            .await
-            .map_err(|e| ProjectRegistryError::new(self.path.clone(), ProjectRegistryErrorKind::Io(e)))?
-        {
-            return Ok(Vec::new());
-        }
+    /// Returns [`Error::Registry`] wrapping [`ProjectRegistryErrorKind::Io`]
+    /// only for failures the caller should surface; routine enumeration I/O is
+    /// swallowed to the debug log per the non-fatal stance above.
+    pub async fn live_projects(&self) -> Result<Vec<PathBuf>, Error> {
+        let projects_dir = self.projects_dir.clone();
 
-        let registry_path = self.path.clone();
-        let sentinel_path = self.sentinel_path.clone();
+        // Synchronous readdir + per-entry stat/readlink/prune. Off the runtime
+        // for the same reason as `register`.
+        tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>, Error> {
+            let read_dir = match std::fs::read_dir(&projects_dir) {
+                Ok(rd) => rd,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // `projects/` absent → no projects registered. Not an
+                    // error, and the directory is NOT created as a side effect.
+                    return Ok(Vec::new());
+                }
+                Err(e) => {
+                    // Enumeration I/O failure is non-fatal (matches the
+                    // superseded ADR's "registry unreadable ⇒ non-fatal"
+                    // stance): debug, return nothing collected.
+                    crate::log::debug!(
+                        "Project registry: cannot read '{}' (non-fatal): {e}",
+                        projects_dir.display()
+                    );
+                    return Ok(Vec::new());
+                }
+            };
 
-        // Acquire exclusive lock before reading so the read + conditional rewrite
-        // is atomic with respect to concurrent `register` calls.
-        let lock = acquire_exclusive(&sentinel_path).await?;
+            // Collect (link_name, canonical_target) so the result is
+            // deterministic (sorted by link name) per the ordering rule.
+            let mut live: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
 
-        // Phase 1 (sync): read the registry on a blocking thread.
-        let read_path = registry_path.clone();
-        let doc_opt = tokio::task::spawn_blocking(move || read_registry(&read_path))
-            .await
-            .expect("spawn_blocking panicked in ProjectRegistry::load_and_prune (read)")?;
-        let doc = match doc_opt {
-            Some(d) => d,
-            None => {
-                // File disappeared between the pre-check and the lock
-                // acquisition — treat as first-run.
-                return Ok(Vec::new());
+            for entry in read_dir {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        crate::log::debug!(
+                            "Project registry: skipping unreadable entry in '{}' (non-fatal): {e}",
+                            projects_dir.display()
+                        );
+                        continue;
+                    }
+                };
+                let file_name = entry.file_name();
+                // Skip in-flight `.tmp-*` staging links from a concurrent
+                // `register` — they are not ledger entries.
+                if file_name.to_string_lossy().starts_with(".tmp-") {
+                    continue;
+                }
+                let entry_path = entry.path();
+
+                match probe_live_target(&entry_path) {
+                    ProbeResult::Live(target) => live.push((file_name, target)),
+                    ProbeResult::Unknown => {
+                        // Transient probe failure (filesystem momentarily
+                        // unreachable). SEC-1 silent-data-loss guard: this
+                        // project may be perfectly live — pruning its link
+                        // would GC its pinned packages. Retain the link, do
+                        // NOT collect it as a root this run, WARN once (per
+                        // ARCH-3 silent-data-loss policy — WARN not debug).
+                        // The next `ocx clean` re-probes.
+                        crate::log::warn!(
+                            "Project registry: liveness of '{}' is indeterminate (transient I/O); \
+                             retaining link, skipping as a GC root this run.",
+                            entry_path.display()
+                        );
+                    }
+                    ProbeResult::Dead => {
+                        // First check is Dead. Re-probe immediately before
+                        // removing: a concurrent `register` may have just
+                        // re-pointed this same hash to a now-live project
+                        // (CODEX-BLOCK-1 TOCTOU). Only prune if BOTH probes
+                        // are Dead; an Unknown re-probe (now unreachable) must
+                        // also retain the link (SEC-1).
+                        match probe_live_target(&entry_path) {
+                            ProbeResult::Live(target) => live.push((file_name, target)),
+                            ProbeResult::Unknown => {
+                                crate::log::warn!(
+                                    "Project registry: liveness of '{}' is indeterminate (transient I/O \
+                                     on re-probe); retaining link, skipping as a GC root this run.",
+                                    entry_path.display()
+                                );
+                            }
+                            ProbeResult::Dead => {
+                                // Departed-other-project (the common benign
+                                // case) → debug only, never WARN (ARCH-3).
+                                crate::log::debug!(
+                                    "Project registry: pruning departed link '{}'.",
+                                    entry_path.display()
+                                );
+                                if let Err(e) = crate::symlink::remove(&entry_path) {
+                                    crate::log::debug!(
+                                        "Project registry: prune of '{}' failed (non-fatal): {e}",
+                                        entry_path.display()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        };
 
-        // Phase 2 (async): probe every entry's validity in parallel via tokio::fs.
-        // The previous implementation chained sync `std::fs::metadata` calls inside
-        // `spawn_blocking`; for registries with 100+ projects this serialised the
-        // stat(2) syscalls. `JoinSet` + `tokio::fs::metadata` lets the runtime
-        // overlap them. The cap mirrors `BUILD_CONCURRENCY` in the GC walker.
-        const PRUNE_CONCURRENCY: usize = 50;
-        let original_len = doc.entries.len();
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(PRUNE_CONCURRENCY));
-        let mut probe_set: tokio::task::JoinSet<(usize, EntryOnDisk, bool)> = tokio::task::JoinSet::new();
-        for (i, entry) in doc.entries.into_iter().enumerate() {
-            let sem = std::sync::Arc::clone(&sem);
-            probe_set.spawn(async move {
-                let _permit = sem.acquire_owned().await.expect("semaphore closed");
-                let valid = entry_is_valid_async(&entry).await;
-                (i, entry, valid)
-            });
-        }
-
-        let mut pairs: Vec<(usize, EntryOnDisk, bool)> = Vec::with_capacity(original_len);
-        while let Some(join) = probe_set.join_next().await {
-            pairs.push(join.expect("probe task panicked in ProjectRegistry::load_and_prune"));
-        }
-        // Restore original ordering so the persisted file is byte-stable
-        // (the pre-refactor sequential filter preserved input order).
-        pairs.sort_by_key(|(i, _, _)| *i);
-        let surviving: Vec<EntryOnDisk> = pairs
-            .into_iter()
-            .filter_map(|(_, entry, valid)| if valid { Some(entry) } else { None })
-            .collect();
-        let pruned_count = original_len - surviving.len();
-
-        // Phase 3 (sync): write back the shrunken registry on a blocking thread.
-        // Persist shrunken registry only when something was dropped. Build
-        // `new_doc` unconditionally to own `surviving`; write only when
-        // `pruned_count > 0`, then consume `new_doc.entries` for the return value.
-        let new_doc = RegistryDoc {
-            schema_version: SCHEMA_VERSION,
-            entries: surviving,
-        };
-        let write_path = registry_path.clone();
-        let entries = tokio::task::spawn_blocking(move || -> Result<Vec<EntryOnDisk>, Error> {
-            if pruned_count > 0 {
-                log::debug!(
-                    "Pruned {} stale project registry entry/entries from {}.",
-                    pruned_count,
-                    write_path.display()
-                );
-                write_registry(&write_path, &new_doc, &lock)?;
-            }
-            Ok(new_doc.entries)
+            live.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(live.into_iter().map(|(_, target)| target).collect())
         })
         .await
-        .expect("spawn_blocking panicked in ProjectRegistry::load_and_prune (write)")?;
-
-        Ok(entries
-            .into_iter()
-            .map(|e| ProjectEntry {
-                ocx_lock_path: e.ocx_lock_path,
-                config_path: e.config_path,
-                last_seen: e.last_seen,
-            })
-            .collect())
-    }
-
-    /// Registers `ocx_lock_path` (paired with `config_path`) if the lock
-    /// exists on disk; no-ops silently when the lock file is absent.
-    ///
-    /// Used by code paths that resolve a project lock without saving it (e.g.
-    /// `ocx pull --project`): the lock may or may not be present depending on
-    /// whether the project has been initialised yet. Calling `register` directly
-    /// with a non-existent path would create a registry entry that immediately
-    /// prunes on the next `load_and_prune`, so this helper guards the call.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::register`]; propagated unchanged when the file exists.
-    /// Returns `Ok(())` immediately when the file is absent without touching
-    /// the registry.
-    pub async fn register_if_present(&self, ocx_lock_path: &Path, config_path: &Path) -> Result<(), Error> {
-        match tokio::fs::metadata(ocx_lock_path).await {
-            Ok(meta) if meta.is_file() => self.register(ocx_lock_path, config_path).await,
-            Ok(_) | Err(_) => Ok(()),
-        }
+        .map_err(|e| {
+            Error::Registry(ProjectRegistryError::new(
+                PathBuf::new(),
+                ProjectRegistryErrorKind::Io(std::io::Error::other(format!("live_projects task panicked: {e}"))),
+            ))
+        })?
     }
 }
 
-// ── Unit tests ──────────────────────────────────────────────────────────────
-//
-// Contract-first specification tests for [`ProjectRegistry`]. Every test is
-// written against the `unimplemented!()` stubs and is therefore expected to
-// FAIL (panic) until the Unit 6 implementation phase fills the method bodies.
-//
-// Test inventory (per ADR "Testing Surface"):
-//
-//  1. `register_creates_file_when_absent`
-//  2. `register_updates_last_seen_for_existing_entry`
-//  3. `register_idempotent_for_same_path`
-//  4. `register_atomic_under_concurrent_callers`
-//  5. `load_and_prune_drops_entries_with_missing_lockfile`
-//  6. `load_and_prune_no_write_when_nothing_to_prune`
-//  7. `corrupt_registry_returns_corrupt_error`
-//  8. `register_rejects_symlink_at_sentinel` (Unix-only)
-//  9. `load_and_prune_drops_entry_with_missing_sibling_ocx_toml`
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    //! Specification tests for the flat-symlink-store `ProjectRegistry`
+    //! (W1-P3, contract-first TDD).
+    //!
+    //! These tests encode the behavioural contract from
+    //! `adr_project_gc_symlink_ledger.md` §Validation + the plan
+    //! `plan_project_toolchain_hardening.md` Component Contracts C1.1–C1.4.
+    //! They are authored **before** the W1-P4 implementation: every test that
+    //! drives `register` / `live_projects` MUST fail by panicking at the
+    //! `unimplemented!()` stub (or, for the helpers, `same_dir` /
+    //! `replace_atomic`). A compile error here is a contract bug, not an
+    //! expected stub failure.
+    //!
+    //! The obsolete JSON-ledger tests
+    //! (`corrupt_registry_returns_corrupt_error`,
+    //! `unknown_schema_version_returns_unknown_version_error`,
+    //! `register_rejects_symlink_at_sentinel`,
+    //! `load_and_prune_no_write_when_nothing_to_prune`) are intentionally
+    //! absent: the symlink store has no JSON document, no schema version, no
+    //! sentinel, and no rewrite concept, so those behaviours no longer exist.
+    //!
+    //! `collect_project_roots_io_failure_is_non_fatal` (plan W1-P3, F4) is
+    //! **relocated** to the pytest acceptance file
+    //! `test/tests/test_clean_project_backlinks.py::test_clean_io_failure_is_non_fatal`:
+    //! `collect_project_roots` lives behind the private `package_manager::tasks`
+    //! module (not re-exported — only `CleanResult`/`CleanedObject` are), so it
+    //! is unreachable from this crate-internal test module and is not
+    //! unit-testable here. The deliberate exit-78 elimination is therefore
+    //! pinned at the acceptance level. See that pytest test's docstring.
 
     use super::*;
-    use crate::project::registry::error::ProjectRegistryErrorKind;
+    use crate::symlink;
+    use std::path::Path;
 
-    // ── Helper ────────────────────────────────────────────────────────────────
-
-    /// Write a minimal `ocx.toml` into `dir` so the registry prune rules see a
-    /// sibling config file (Lazy Pruning Rule 3: "sibling ocx.toml must exist").
-    fn write_ocx_toml(dir: &std::path::Path) {
-        let toml_path = dir.join("ocx.toml");
-        std::fs::write(toml_path, "[tools]\n").expect("write ocx.toml");
+    /// Canonicalises like the production code (`tokio::fs::canonicalize`'s
+    /// sync sibling via `dunce` to keep Windows verbatim prefixes off paths).
+    fn canon(p: &Path) -> PathBuf {
+        dunce::canonicalize(p).expect("canonicalize test path")
     }
 
-    /// Create a real (empty) `ocx.lock` file at `path`, plus its sibling
-    /// `ocx.toml`, so the registry sees a valid project directory.
-    fn touch_lock_and_toml(lock_path: &std::path::Path) {
-        if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dir");
-            write_ocx_toml(parent);
-        }
-        std::fs::write(lock_path, "").expect("write ocx.lock");
+    /// Creates a project directory containing an `ocx.lock` so that
+    /// `live_projects`'s `try_exists(<target>/ocx.lock)` liveness probe
+    /// observes it as a live GC root. Returns the canonical project dir.
+    fn make_live_project(parent: &Path, name: &str) -> PathBuf {
+        let dir = parent.join(name);
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        std::fs::write(dir.join("ocx.lock"), b"# test lock\n").expect("write ocx.lock");
+        canon(&dir)
     }
 
-    /// Convenience: derive the canonical `<lock_parent>/ocx.toml` path that
-    /// matches what `touch_lock_and_toml` writes. Used by every test that
-    /// only exercises the canonical `ocx.toml` case.
-    fn config_path_for(lock_path: &std::path::Path) -> std::path::PathBuf {
-        lock_path
-            .parent()
-            .expect("lock_path must have a parent dir for testing")
-            .join("ocx.toml")
+    /// The ledger link name for a project dir — the single-source-of-truth
+    /// hash the registry must reuse (`ReferenceManager::name_for_path`,
+    /// 16-hex / 64-bit SHA-256). Used to assert link *location*, never
+    /// recomputed with a private scheme.
+    fn link_name(project_dir: &Path) -> String {
+        crate::reference_manager::ReferenceManager::name_for_path(project_dir)
     }
 
-    // ── Test 1 ────────────────────────────────────────────────────────────────
+    // ── register: link creation + idempotency ────────────────────────────
 
-    /// `register` must create `projects.json` and `.projects.lock` when the
-    /// registry is absent, and the JSON must contain exactly one entry whose
-    /// `ocx_lock_path` matches the registered path.
-    ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: register"`.
+    /// C1.1: `register` creates `$OCX_HOME/projects/<hash>` as a symlink
+    /// resolving to the canonical project directory when none exists.
     #[tokio::test]
-    async fn register_creates_file_when_absent() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
+    async fn register_creates_symlink_when_absent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let registry = ProjectRegistry::new(home.path());
 
-        let lock_dir = ocx_home.join("proj");
-        let lock_path = lock_dir.join("ocx.lock");
-        touch_lock_and_toml(&lock_path);
+        registry.register(&project).await.expect("register should succeed");
 
-        let registry = ProjectRegistry::new(&ocx_home);
-        let config_path = config_path_for(&lock_path);
-        registry
-            .register(&lock_path, &config_path)
-            .await
-            .expect("register must succeed");
-
-        // Both files must exist under OCX_HOME.
-        let registry_file = ocx_home.join("projects.json");
-        let sentinel = ocx_home.join(".projects.lock");
-        assert!(
-            registry_file.exists(),
-            "projects.json must be created after first register"
-        );
-        assert!(sentinel.exists(), ".projects.lock sentinel must be created by register");
-
-        // Deserialize and assert one entry with the expected path and a
-        // parseable last_seen timestamp.
-        let raw = std::fs::read(&registry_file).expect("read projects.json");
-        let doc: serde_json::Value = serde_json::from_slice(&raw).expect("valid JSON");
-        assert_eq!(doc["schema_version"], serde_json::json!(1), "schema_version must be 1");
-        let entries = doc["entries"].as_array().expect("entries is an array");
-        assert_eq!(entries.len(), 1, "exactly one entry after first register");
-        let ocx_lock_path = PathBuf::from(entries[0]["ocx_lock_path"].as_str().expect("ocx_lock_path is a string"));
-        assert_eq!(ocx_lock_path, lock_path, "ocx_lock_path must match registered path");
-        let recorded_config = PathBuf::from(entries[0]["config_path"].as_str().expect("config_path is a string"));
+        let link = home.path().join("projects").join(link_name(&project));
+        assert!(symlink::is_link(&link), "ledger entry must be a symlink");
         assert_eq!(
-            recorded_config, config_path,
-            "config_path must match the supplied originating config file"
+            canon(&std::fs::read_link(&link).expect("read_link")),
+            project,
+            "symlink must resolve to the canonical project dir"
         );
-
-        let last_seen = entries[0]["last_seen"].as_str().expect("last_seen is a string");
-        chrono::DateTime::parse_from_rfc3339(last_seen).expect("last_seen must be a parseable ISO-8601 UTC timestamp");
     }
 
-    // ── Test 2 ────────────────────────────────────────────────────────────────
-
-    /// Calling `register` twice for the same path must update `last_seen` to a
-    /// later timestamp and leave exactly one entry in the registry.
-    ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: register"`.
+    /// C1.1: re-registering the same project is idempotent — exactly one
+    /// link, no error, still resolving to the project dir.
     #[tokio::test]
-    async fn register_updates_last_seen_for_existing_entry() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
+    async fn register_idempotent_same_project() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let registry = ProjectRegistry::new(home.path());
 
-        let lock_path = ocx_home.join("proj").join("ocx.lock");
-        touch_lock_and_toml(&lock_path);
+        registry.register(&project).await.expect("first register");
+        registry.register(&project).await.expect("second register (idempotent)");
 
-        let registry = ProjectRegistry::new(&ocx_home);
-        let config_path = config_path_for(&lock_path);
-
-        // First registration.
-        registry
-            .register(&lock_path, &config_path)
-            .await
-            .expect("first register");
-
-        // Read first last_seen.
-        let raw_before = std::fs::read(ocx_home.join("projects.json")).expect("read");
-        let doc_before: serde_json::Value = serde_json::from_slice(&raw_before).expect("parse");
-        let first_seen = doc_before["entries"][0]["last_seen"]
-            .as_str()
-            .expect("last_seen")
-            .to_string();
-
-        // Brief sleep to ensure clock advances (1 ms is enough for
-        // ISO-8601 second-level granularity once the implementation uses
-        // sub-second precision, but we use a longer delay to be safe).
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        // Second registration.
-        registry
-            .register(&lock_path, &config_path)
-            .await
-            .expect("second register");
-
-        let raw_after = std::fs::read(ocx_home.join("projects.json")).expect("read");
-        let doc_after: serde_json::Value = serde_json::from_slice(&raw_after).expect("parse");
-        let entries = doc_after["entries"].as_array().expect("entries");
-
-        // Still exactly one entry.
-        assert_eq!(entries.len(), 1, "register must not create duplicate entries");
-
-        let second_seen = entries[0]["last_seen"].as_str().expect("last_seen");
-
-        // The second timestamp must be >= the first (strictly greater when clock
-        // advances; equal is tolerated in case of sub-millisecond resolution).
-        let t1 = chrono::DateTime::parse_from_rfc3339(&first_seen).expect("parse t1");
-        let t2 = chrono::DateTime::parse_from_rfc3339(second_seen).expect("parse t2");
-        assert!(t2 >= t1, "second last_seen ({t2}) must be >= first last_seen ({t1})");
-    }
-
-    // ── Test 3 ────────────────────────────────────────────────────────────────
-
-    /// Registering the same path N times must leave exactly one entry.
-    ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: register"`.
-    #[tokio::test]
-    async fn register_idempotent_for_same_path() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
-
-        let lock_path = ocx_home.join("proj").join("ocx.lock");
-        touch_lock_and_toml(&lock_path);
-
-        let registry = ProjectRegistry::new(&ocx_home);
-        let config_path = config_path_for(&lock_path);
-
-        for _ in 0..5 {
-            registry.register(&lock_path, &config_path).await.expect("register");
-        }
-
-        let raw = std::fs::read(ocx_home.join("projects.json")).expect("read");
-        let doc: serde_json::Value = serde_json::from_slice(&raw).expect("parse");
-        let entries = doc["entries"].as_array().expect("entries");
-        assert_eq!(
-            entries.len(),
-            1,
-            "repeated register of same path must yield exactly one entry; got {}",
-            entries.len()
-        );
-    }
-
-    // ── Test 4 ────────────────────────────────────────────────────────────────
-
-    /// Two concurrent `register` calls for *different* lock paths must both
-    /// land in the registry. Uses a multi-thread runtime to exercise the
-    /// advisory-lock serialisation path.
-    ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: register"`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn register_atomic_under_concurrent_callers() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
-
-        let lock_a = ocx_home.join("proj-a").join("ocx.lock");
-        let lock_b = ocx_home.join("proj-b").join("ocx.lock");
-        touch_lock_and_toml(&lock_a);
-        touch_lock_and_toml(&lock_b);
-
-        let registry = std::sync::Arc::new(ProjectRegistry::new(&ocx_home));
-        let ra = registry.clone();
-        let rb = registry.clone();
-        let pa = lock_a.clone();
-        let pb = lock_b.clone();
-        let ca = config_path_for(&lock_a);
-        let cb = config_path_for(&lock_b);
-
-        let (res_a, res_b) = tokio::join!(async move { ra.register(&pa, &ca).await }, async move {
-            rb.register(&pb, &cb).await
-        },);
-        res_a.expect("register proj-a must succeed");
-        res_b.expect("register proj-b must succeed");
-
-        let raw = std::fs::read(ocx_home.join("projects.json")).expect("read");
-        let doc: serde_json::Value = serde_json::from_slice(&raw).expect("parse");
-        let entries = doc["entries"].as_array().expect("entries");
-        assert_eq!(
-            entries.len(),
-            2,
-            "both concurrent registrations must land; got {} entries",
-            entries.len()
-        );
-
-        let paths: std::collections::HashSet<PathBuf> = entries
-            .iter()
-            .map(|e| PathBuf::from(e["ocx_lock_path"].as_str().expect("path")))
+        let projects_dir = home.path().join("projects");
+        let links: Vec<_> = std::fs::read_dir(&projects_dir)
+            .expect("read projects dir")
+            .map(|e| e.expect("dir entry").file_name())
+            .filter(|n| !n.to_string_lossy().starts_with(".tmp-"))
             .collect();
-        assert!(paths.contains(&lock_a), "proj-a must be in registry");
-        assert!(paths.contains(&lock_b), "proj-b must be in registry");
+        assert_eq!(links.len(), 1, "exactly one ledger entry after double register");
+        let link = projects_dir.join(link_name(&project));
+        assert_eq!(canon(&std::fs::read_link(&link).expect("read_link")), project);
     }
 
-    // ── Test 5 ────────────────────────────────────────────────────────────────
-
-    /// `load_and_prune` must drop an entry whose `ocx_lock_path` has been
-    /// deleted from disk, persist the shrunken registry, and return only the
-    /// surviving entry.
+    /// C1.1 / ADR §"No self-link invariant" (ARCH-1b): `register` is a no-op
+    /// when `project_dir` is the *same directory* as `$OCX_HOME`. The
+    /// identity test is device+inode identity, **not** canonical-path byte
+    /// equality.
     ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: load_and_prune"`.
+    /// Case-fold dimension (ARCH-1b): on a case-insensitive / normalising
+    /// filesystem (macOS APFS default, Windows) the binding rule is that a
+    /// case-differing spelling of `$OCX_HOME` (e.g. `OCX_HOME` typed back as
+    /// `ocx_home`) still denotes the *same* directory by `dev`/`ino`, so the
+    /// self-link must still be suppressed even though the path bytes differ.
+    /// On case-sensitive Linux CI such a spelling is a *different* directory,
+    /// so this test exercises the inode-identity path with the dev/inode-
+    /// identical spelling (the same canonical dir) and asserts the no-op.
+    /// Byte-equality alone would be insufficient on the case-insensitive
+    /// platforms; this test pins the same-directory contract on the platform
+    /// it runs on while documenting the case-fold dimension it cannot
+    /// directly exercise on Linux.
     #[tokio::test]
-    async fn load_and_prune_drops_entries_with_missing_lockfile() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
-
-        let lock_a = ocx_home.join("proj-a").join("ocx.lock");
-        let lock_b = ocx_home.join("proj-b").join("ocx.lock");
-        touch_lock_and_toml(&lock_a);
-        touch_lock_and_toml(&lock_b);
-
+    async fn register_noop_when_project_dir_is_ocx_home() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let ocx_home = canon(home.path());
         let registry = ProjectRegistry::new(&ocx_home);
+
+        // project_dir IS $OCX_HOME (dev/inode-identical) → must be a no-op.
         registry
-            .register(&lock_a, &config_path_for(&lock_a))
+            .register(&ocx_home)
             .await
-            .expect("register a");
-        registry
-            .register(&lock_b, &config_path_for(&lock_b))
-            .await
-            .expect("register b");
+            .expect("self-register must be a no-op returning Ok(())");
 
-        // Capture mtime before deletion so we can verify the file was rewritten.
-        let mtime_before = std::fs::metadata(ocx_home.join("projects.json"))
-            .expect("stat projects.json before delete")
-            .modified()
-            .expect("mtime supported");
-
-        // Delete proj-a's lock file: it should be pruned on the next load.
-        std::fs::remove_file(&lock_a).expect("delete lock_a");
-
-        // Brief sleep so the rewrite lands with a strictly later mtime.
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        let entries = registry.load_and_prune().await.expect("load_and_prune");
-
-        // Only proj-b survives.
-        assert_eq!(entries.len(), 1, "only one entry should survive prune");
-        assert_eq!(entries[0].ocx_lock_path, lock_b, "surviving entry must be proj-b");
-
-        // On-disk file must have been rewritten (mtime must advance).
-        let mtime_after = std::fs::metadata(ocx_home.join("projects.json"))
-            .expect("stat projects.json after prune")
-            .modified()
-            .expect("mtime after");
+        let self_link = ocx_home.join("projects").join(link_name(&ocx_home));
         assert!(
-            mtime_after >= mtime_before,
-            "projects.json must be rewritten after a prune (mtime must advance)"
-        );
-
-        // Deserialize and confirm on-disk content matches in-memory return.
-        let raw = std::fs::read(ocx_home.join("projects.json")).expect("read after prune");
-        let doc: serde_json::Value = serde_json::from_slice(&raw).expect("parse");
-        let disk_entries = doc["entries"].as_array().expect("entries array");
-        assert_eq!(disk_entries.len(), 1, "on-disk entries must also be 1 after prune");
-    }
-
-    // ── Test 6 ────────────────────────────────────────────────────────────────
-
-    /// `load_and_prune` must NOT rewrite `projects.json` when nothing is pruned.
-    ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: load_and_prune"`.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn load_and_prune_no_write_when_nothing_to_prune() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
-
-        let lock_a = ocx_home.join("proj-a").join("ocx.lock");
-        let lock_b = ocx_home.join("proj-b").join("ocx.lock");
-        touch_lock_and_toml(&lock_a);
-        touch_lock_and_toml(&lock_b);
-
-        let registry = ProjectRegistry::new(&ocx_home);
-        registry
-            .register(&lock_a, &config_path_for(&lock_a))
-            .await
-            .expect("register a");
-        registry
-            .register(&lock_b, &config_path_for(&lock_b))
-            .await
-            .expect("register b");
-
-        // Capture mtime after registrations (both files on disk).
-        let mtime_before = std::fs::metadata(ocx_home.join("projects.json"))
-            .expect("stat")
-            .modified()
-            .expect("mtime");
-
-        // Sleep briefly to ensure the clock advances — if the implementation
-        // incorrectly rewrites, the mtime will change.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
-        let entries = registry.load_and_prune().await.expect("load_and_prune");
-        assert_eq!(entries.len(), 2, "no entries dropped when all locks exist");
-
-        // mtime must be UNCHANGED: no rewrite should have occurred.
-        let mtime_after = std::fs::metadata(ocx_home.join("projects.json"))
-            .expect("stat after")
-            .modified()
-            .expect("mtime after");
-        assert_eq!(
-            mtime_before, mtime_after,
-            "projects.json must NOT be rewritten when no entries are pruned"
+            !symlink::is_link(&self_link),
+            "no $OCX_HOME/projects/<hash> -> $OCX_HOME self-link may be created"
         );
     }
 
-    // ── Test 7 ────────────────────────────────────────────────────────────────
-
-    /// `load_and_prune` must return `ProjectRegistryErrorKind::Corrupt` when
-    /// `projects.json` exists but contains invalid JSON.
-    ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: load_and_prune"`.
+    /// C1.1 / ADR §Technical Details: the symlink target is the project
+    /// **directory**, never the lock file and never the config file.
     #[tokio::test]
-    async fn corrupt_registry_returns_corrupt_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
+    async fn register_target_is_project_dir_not_lockfile() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let registry = ProjectRegistry::new(home.path());
 
-        // Write garbage bytes to the registry file.
-        std::fs::write(ocx_home.join("projects.json"), b"not valid json { garbage!!!").expect("write garbage");
+        registry.register(&project).await.expect("register");
 
-        let registry = ProjectRegistry::new(&ocx_home);
-        let err = registry
-            .load_and_prune()
-            .await
-            .expect_err("load_and_prune must fail on corrupt file");
-
-        // Verify the error kind — must be Corrupt, not Io.
-        let Error::Registry(inner) = &err;
-        let ProjectRegistryErrorKind::Corrupt(_) = &inner.kind else {
-            panic!("expected ProjectRegistryErrorKind::Corrupt, got: {:?}", inner.kind);
-        };
+        let link = home.path().join("projects").join(link_name(&project));
+        let target = canon(&std::fs::read_link(&link).expect("read_link"));
+        assert_eq!(target, project, "target must be the project dir");
+        assert!(target.is_dir(), "target must resolve to a directory");
+        assert_ne!(target, project.join("ocx.lock"), "target must NOT be the lock file");
     }
 
-    // ── Test 8 ────────────────────────────────────────────────────────────────
-
-    /// On Unix, a symlink planted at `.projects.lock` must cause `register` to
-    /// return an `Io` error rather than following the symlink.
+    /// C1.1 / ADR §Risks (ARCH-3, silent-data-loss class): a failure to
+    /// create **this** project's own link (store dir unwritable) is logged at
+    /// WARN by the caller but is **non-fatal** — `register` itself never
+    /// blocks the mutation. The contract for `register` is that the mutation
+    /// is unaffected; the caller (`ProjectLock::save`) already swallows the
+    /// `Err` to WARN. Here we assert the store-unwritable case does not panic
+    /// the caller's transaction model: the call resolves (Ok or Err) without
+    /// unwinding past the registry boundary, and a subsequent registration of
+    /// a *different* writable project still succeeds (mutation unaffected).
     ///
-    /// Mirrors `acquire_project_lock_rejects_symlink_at_ocx_toml` in `lock.rs`.
-    ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: register"`.
-    #[cfg(unix)]
+    /// Skips gracefully when running as root (chmod 0 is ignored by root).
     #[tokio::test]
-    async fn register_rejects_symlink_at_sentinel() {
-        use std::os::unix::fs::symlink;
+    #[cfg(unix)]
+    async fn register_self_failure_is_warn_not_propagated() {
+        use std::os::unix::fs::PermissionsExt;
 
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
-        let sentinel = ocx_home.join(".projects.lock");
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
 
-        // Plant a symlink at the sentinel path pointing to a file outside
-        // the OCX_HOME directory.
-        let target = ocx_home.join("sensitive_target");
-        symlink(&target, &sentinel).expect("create symlink at sentinel path");
+        // Make the projects/ parent ($OCX_HOME) read-only so the registry
+        // cannot create projects/ or stage a temp link inside it.
+        let projects_parent = home.path().to_path_buf();
+        let mut perms = std::fs::metadata(&projects_parent).expect("stat home").permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&projects_parent, perms).expect("chmod home read-only");
 
-        let lock_path = ocx_home.join("proj").join("ocx.lock");
-        touch_lock_and_toml(&lock_path);
+        // Root ignores DAC permission bits, so the unwritable condition
+        // cannot be constructed. Detect that by probing: if a write into the
+        // chmod-0555 dir still succeeds we are root — skip without failing
+        // (no `unsafe` geteuid needed; the probe IS the precondition).
+        let probe = projects_parent.join(".root-probe");
+        if std::fs::write(&probe, b"x").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            let mut restore = std::fs::metadata(&projects_parent).expect("stat home").permissions();
+            restore.set_mode(0o755);
+            std::fs::set_permissions(&projects_parent, restore).expect("restore perms");
+            eprintln!("skipping register_self_failure_is_warn_not_propagated: running as root");
+            return;
+        }
 
-        let registry = ProjectRegistry::new(&ocx_home);
-        let err = registry
-            .register(&lock_path, &config_path_for(&lock_path))
+        let registry = ProjectRegistry::new(home.path());
+        // Per ARCH-3 the failure is non-fatal at the registry boundary: it
+        // either returns Err (caller logs WARN) or Ok (best-effort no-op).
+        // It must NOT panic / unwind past this point — that would abort the
+        // caller's ocx.lock save transaction.
+        let _ = registry.register(&project).await;
+
+        // Restore perms so the tempdir can be cleaned and so we can prove the
+        // mutation path is unaffected by registering a writable project.
+        let mut restore = std::fs::metadata(&projects_parent).expect("stat home").permissions();
+        restore.set_mode(0o755);
+        std::fs::set_permissions(&projects_parent, restore).expect("restore perms");
+
+        let other = make_live_project(home.path(), "proj-writable");
+        registry
+            .register(&other)
             .await
-            .expect_err("register must fail when sentinel is a symlink");
+            .expect("registration of a writable project must still succeed (mutation unaffected)");
+    }
 
-        // Must be Io, not Locked (mirrors `acquire_project_lock_rejects_symlink_at_ocx_toml`).
-        let Error::Registry(inner) = &err;
-        let ProjectRegistryErrorKind::Io(_) = &inner.kind else {
-            panic!("expected ProjectRegistryErrorKind::Io, got: {:?}", inner.kind);
-        };
+    // ── live_projects: prune + collect ───────────────────────────────────
 
-        // The symlink target must NOT have been created or touched.
+    /// C1.1: a broken ledger link (target directory removed) is pruned and
+    /// not returned as a live root.
+    #[tokio::test]
+    async fn live_projects_prunes_broken_link() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let registry = ProjectRegistry::new(home.path());
+        registry.register(&project).await.expect("register");
+
+        // Remove the project dir entirely — the ledger link now dangles.
+        std::fs::remove_dir_all(&project).expect("remove project dir");
+
+        let live = registry.live_projects().await.expect("live_projects");
+
+        assert!(live.is_empty(), "broken link must not be a live root: {live:?}");
+        let link = home.path().join("projects").join(link_name(&project));
+        assert!(!symlink::is_link(&link), "broken link must be pruned");
+    }
+
+    /// C1.1: a link whose target directory exists but has no `ocx.lock` is
+    /// pruned (lock-absent liveness probe fails).
+    #[tokio::test]
+    async fn live_projects_prunes_when_ocx_lock_absent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let registry = ProjectRegistry::new(home.path());
+        registry.register(&project).await.expect("register");
+
+        // Project dir survives but its ocx.lock is deleted.
+        std::fs::remove_file(project.join("ocx.lock")).expect("rm ocx.lock");
+
+        let live = registry.live_projects().await.expect("live_projects");
+
+        assert!(live.is_empty(), "lock-absent project must not be live: {live:?}");
+        let link = home.path().join("projects").join(link_name(&project));
+        assert!(!symlink::is_link(&link), "lock-absent link must be pruned");
+    }
+
+    /// C1.1 / ADR §Decision: a departed *other* project is pruned silently
+    /// at DEBUG, never WARN — this is the common benign churn case.
+    ///
+    /// No log-capture facility exists in `ocx_lib` (`crate::log` is a bare
+    /// re-export of `tracing_log::log`), so the no-WARN expectation cannot be
+    /// asserted programmatically here. This test asserts the observable
+    /// side-effect — the departed link is pruned and the surviving project is
+    /// still collected — and documents the no-WARN contract: per
+    /// `feedback_no_warn_on_common_benign` and ADR §Decision, the prune in
+    /// `live_projects` MUST log at `log::debug!`, NOT `log::warn!`. (The
+    /// WARN-level path is reserved exclusively for self-register failure in
+    /// `register`, ARCH-3.)
+    #[tokio::test]
+    async fn live_projects_departed_other_project_is_debug_only() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let surviving = make_live_project(home.path(), "proj-surviving");
+        let departed = make_live_project(home.path(), "proj-departed");
+        let registry = ProjectRegistry::new(home.path());
+        registry.register(&surviving).await.expect("register surviving");
+        registry.register(&departed).await.expect("register departed");
+
+        // The "other" project departs (developer deleted the worktree).
+        std::fs::remove_dir_all(&departed).expect("remove departed project");
+
+        let live = registry.live_projects().await.expect("live_projects");
+
+        assert_eq!(live, vec![surviving.clone()], "only the surviving project is live");
+        let departed_link = home.path().join("projects").join(link_name(&departed));
         assert!(
-            !target.exists(),
-            "symlink target must not be created; found: {target:?}"
+            !symlink::is_link(&departed_link),
+            "departed-other-project link is pruned (silently, at DEBUG — never WARN)"
         );
     }
 
-    // ── Test 9 ────────────────────────────────────────────────────────────────
+    /// C1.1 / edge case: `projects/` absent → `[]`, no error, and the
+    /// directory is NOT created as a side effect.
+    #[tokio::test]
+    async fn live_projects_empty_when_dir_absent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let registry = ProjectRegistry::new(home.path());
 
-    /// `load_and_prune` must drop an entry whose `ocx.lock` file exists but
-    /// whose sibling `ocx.toml` does NOT exist (Lazy Pruning Rule 3).
+        let live = registry.live_projects().await.expect("live_projects on absent dir");
+
+        assert!(live.is_empty(), "absent projects/ must yield []");
+        assert!(
+            !home.path().join("projects").exists(),
+            "live_projects must not create the projects/ dir"
+        );
+    }
+
+    /// SOTA-1c / CODEX-BLOCK-1: a concurrent `register` racing a
+    /// `live_projects` readdir must be safe — the registered project is
+    /// either observed-and-collected or not-yet-observed, but it is never
+    /// corrupted and the `register`d link is never erroneously pruned (its
+    /// target is a live project with an `ocx.lock`).
+    #[tokio::test]
+    async fn live_projects_concurrent_register_during_readdir_is_safe() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let existing = make_live_project(home.path(), "proj-existing");
+        let racing = make_live_project(home.path(), "proj-racing");
+        let registry = ProjectRegistry::new(home.path());
+        registry.register(&existing).await.expect("register existing");
+
+        let reg_for_task = ProjectRegistry::new(home.path());
+        let racing_clone = racing.clone();
+        let register_task = tokio::spawn(async move { reg_for_task.register(&racing_clone).await });
+        let live = registry
+            .live_projects()
+            .await
+            .expect("live_projects during concurrent register");
+        register_task
+            .await
+            .expect("join register task")
+            .expect("concurrent register must still succeed");
+
+        // The pre-existing project is always live. The racing one may or may
+        // not be observed (POSIX implementation-defined) but its link must
+        // never be pruned and live_projects must not corrupt either entry.
+        assert!(
+            live.contains(&existing),
+            "pre-existing live project must always be collected: {live:?}"
+        );
+        let racing_link = home.path().join("projects").join(link_name(&racing));
+        assert!(
+            symlink::is_link(&racing_link),
+            "concurrently-registered link must not be erroneously pruned"
+        );
+        assert!(
+            live.iter().all(|p| p == &existing || p == &racing),
+            "no spurious roots: {live:?}"
+        );
+    }
+
+    /// C1.1: concurrent `register` of two *different* projects — independent
+    /// per-project atomic paths, no contention, both links present.
+    #[tokio::test]
+    async fn register_concurrent_two_projects_both_present() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let proj_a = make_live_project(home.path(), "proj-a");
+        let proj_b = make_live_project(home.path(), "proj-b");
+
+        let reg_a = ProjectRegistry::new(home.path());
+        let reg_b = ProjectRegistry::new(home.path());
+        let a = proj_a.clone();
+        let b = proj_b.clone();
+        let ta = tokio::spawn(async move { reg_a.register(&a).await });
+        let tb = tokio::spawn(async move { reg_b.register(&b).await });
+        ta.await.expect("join a").expect("register a");
+        tb.await.expect("join b").expect("register b");
+
+        let projects_dir = home.path().join("projects");
+        let link_a = projects_dir.join(link_name(&proj_a));
+        let link_b = projects_dir.join(link_name(&proj_b));
+        assert!(symlink::is_link(&link_a), "proj-a link present");
+        assert!(symlink::is_link(&link_b), "proj-b link present");
+        assert_eq!(canon(&std::fs::read_link(&link_a).expect("readlink a")), proj_a);
+        assert_eq!(canon(&std::fs::read_link(&link_b).expect("readlink b")), proj_b);
+    }
+
+    // ── invariant guard for the dropped canonical_config capture ──────────
+
+    /// C1.3 / ARCH-4d regression: the register call sites dropped the
+    /// separate `canonical_config` capture (the old JSON model needed it to
+    /// record a custom `--project=<custom>.toml` basename). That is safe
+    /// **only** because `lock_path_for(config)` is invariantly
+    /// `<config.parent()>/ocx.lock` for *every* config basename. This test
+    /// guards that invariant directly so a future weakening of
+    /// `lock_path_for` (which would silently break the custom-`--project`
+    /// multi-project GC contract) fails here loudly.
     ///
-    /// Failure signal: panics with `"Unit 6 implementation phase: load_and_prune"`.
-    #[tokio::test]
-    async fn load_and_prune_drops_entry_with_missing_sibling_ocx_toml() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
+    /// This intentionally duplicates the assertion of
+    /// `lock::tests::lock_path_for_always_produces_ocx_lock_in_config_dir`:
+    /// the duplication is the point — it pins the invariant *from the
+    /// registry's perspective* (the consumer that depends on it for the
+    /// dropped capture) so the coupling is visible at the registry site.
+    #[test]
+    fn lock_path_for_invariant_protects_custom_project_basename() {
+        use crate::project::lock::lock_path_for;
 
-        // proj-a: lock exists, ocx.toml present → will be registered normally.
-        let lock_a = ocx_home.join("proj-a").join("ocx.lock");
-        touch_lock_and_toml(&lock_a);
-
-        // proj-b: lock exists, ocx.toml will be deleted after registration.
-        let lock_b = ocx_home.join("proj-b").join("ocx.lock");
-        touch_lock_and_toml(&lock_b);
-
-        let registry = ProjectRegistry::new(&ocx_home);
-        registry
-            .register(&lock_a, &config_path_for(&lock_a))
-            .await
-            .expect("register a");
-        registry
-            .register(&lock_b, &config_path_for(&lock_b))
-            .await
-            .expect("register b");
-
-        // Remove proj-b's ocx.toml while keeping ocx.lock intact.
-        let toml_b = ocx_home.join("proj-b").join("ocx.toml");
-        std::fs::remove_file(&toml_b).expect("remove ocx.toml for proj-b");
-
-        let entries = registry.load_and_prune().await.expect("load_and_prune");
-
-        // Only proj-a survives (it still has ocx.toml).
         assert_eq!(
-            entries.len(),
-            1,
-            "entry with missing ocx.toml must be pruned; got {} entries",
-            entries.len()
+            lock_path_for(Path::new("/dev/proj-a/ocx.toml")),
+            PathBuf::from("/dev/proj-a/ocx.lock"),
+            "standard basename"
         );
         assert_eq!(
-            entries[0].ocx_lock_path, lock_a,
-            "surviving entry must be proj-a (has ocx.toml)"
-        );
-
-        // Verify on-disk state matches.
-        let raw = std::fs::read(ocx_home.join("projects.json")).expect("read after prune");
-        let doc: serde_json::Value = serde_json::from_slice(&raw).expect("parse");
-        let disk_entries = doc["entries"].as_array().expect("entries");
-        assert_eq!(disk_entries.len(), 1, "on-disk registry must also contain 1 entry");
-    }
-
-    // ── Test 10 ───────────────────────────────────────────────────────────────
-
-    /// `load_and_prune` must drop an entry where `ocx_lock_path` is a directory
-    /// rather than a regular file (Lazy Pruning Rule 2).
-    ///
-    /// Defence against a directory or special file occupying the lock path:
-    /// `entry_is_valid` checks `meta.is_file()` and returns `false` for
-    /// non-regular-file paths. This test exercises that branch.
-    #[tokio::test]
-    async fn load_and_prune_drops_entry_with_directory_at_lockfile_path() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
-
-        // proj-a: valid lock + sibling ocx.toml — survives prune.
-        let lock_a = ocx_home.join("proj-a").join("ocx.lock");
-        touch_lock_and_toml(&lock_a);
-
-        // proj-b: lock + sibling ocx.toml exist at registration time.
-        let lock_b = ocx_home.join("proj-b").join("ocx.lock");
-        touch_lock_and_toml(&lock_b);
-
-        let registry = ProjectRegistry::new(&ocx_home);
-        registry
-            .register(&lock_a, &config_path_for(&lock_a))
-            .await
-            .expect("register a");
-        registry
-            .register(&lock_b, &config_path_for(&lock_b))
-            .await
-            .expect("register b");
-
-        // Replace proj-b's lock file with a directory at the same path.
-        // Remove the file first, then create a directory in its place.
-        std::fs::remove_file(&lock_b).expect("remove lock_b file");
-        std::fs::create_dir(&lock_b).expect("create directory at lock_b path");
-
-        let entries = registry.load_and_prune().await.expect("load_and_prune");
-
-        // Only proj-a survives — proj-b's path is a directory, not a regular file.
-        assert_eq!(
-            entries.len(),
-            1,
-            "entry with a directory at lockfile path must be pruned; got {} entries",
-            entries.len()
+            lock_path_for(Path::new("/dev/proj-a/workspace.toml")),
+            PathBuf::from("/dev/proj-a/ocx.lock"),
+            "custom --project=workspace.toml basename must still derive <dir>/ocx.lock"
         );
         assert_eq!(
-            entries[0].ocx_lock_path, lock_a,
-            "surviving entry must be proj-a (regular file)"
+            lock_path_for(Path::new("/dev/proj-a/Manifest")),
+            PathBuf::from("/dev/proj-a/ocx.lock"),
+            "extension-free custom basename"
         );
-    }
-
-    // ── Test 11 ───────────────────────────────────────────────────────────────
-
-    /// `load_and_prune` must return `ProjectRegistryErrorKind::UnknownVersion`
-    /// when `projects.json` parses as valid JSON but carries a `schema_version`
-    /// other than `1`.
-    ///
-    /// This is distinct from `corrupt_registry_returns_corrupt_error` (Test 7),
-    /// which tests genuine JSON parse failures. This test exercises the explicit
-    /// schema-version guard and must NOT return `Corrupt`.
-    #[tokio::test]
-    async fn unknown_schema_version_returns_unknown_version_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
-
-        // Write a syntactically valid registry with an unrecognised schema version.
-        std::fs::write(
-            ocx_home.join("projects.json"),
-            br#"{"schema_version": 99, "entries": []}"#,
-        )
-        .expect("write registry with unknown version");
-
-        let registry = ProjectRegistry::new(&ocx_home);
-        let err = registry
-            .load_and_prune()
-            .await
-            .expect_err("load_and_prune must fail on unknown schema version");
-
-        // Must be UnknownVersion, not Corrupt and not Io.
-        let Error::Registry(inner) = &err;
-        let ProjectRegistryErrorKind::UnknownVersion { found, expected } = &inner.kind else {
-            panic!(
-                "expected ProjectRegistryErrorKind::UnknownVersion, got: {:?}",
-                inner.kind
-            );
-        };
-        assert_eq!(*found, 99, "found must be the version in the file");
-        assert_eq!(*expected, 1, "expected must be SCHEMA_VERSION (1)");
-    }
-
-    // ── Test 12 ───────────────────────────────────────────────────────────────
-
-    /// A project registered via `--project=<custom>.toml` must NOT be pruned
-    /// by `load_and_prune` even though its config file is not literally
-    /// `ocx.toml`. `entry_is_valid_async` honours the recorded `config_path`,
-    /// not a hardcoded sibling lookup.
-    #[tokio::test]
-    async fn custom_named_config_path_survives_prune() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ocx_home = tmp.path().to_path_buf();
-
-        let proj_dir = ocx_home.join("custom-proj");
-        std::fs::create_dir_all(&proj_dir).expect("mkdir");
-        let config_path = proj_dir.join("workspace.toml");
-        std::fs::write(&config_path, "[tools]\n").expect("write custom config");
-        let lock_path = proj_dir.join("ocx.lock");
-        std::fs::write(&lock_path, "").expect("write ocx.lock");
-
-        let registry = ProjectRegistry::new(&ocx_home);
-        registry
-            .register(&lock_path, &config_path)
-            .await
-            .expect("register custom-named project");
-
-        let entries = registry.load_and_prune().await.expect("load_and_prune must succeed");
-        assert_eq!(
-            entries.len(),
-            1,
-            "custom-named project must NOT be pruned (Codex High-4)"
-        );
-        assert_eq!(entries[0].ocx_lock_path, lock_path);
     }
 }

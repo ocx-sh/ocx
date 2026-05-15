@@ -112,11 +112,26 @@ Seven env-consuming commands (`exec`, `run`, `env`, `shell env`, `shell profile 
 
 The manager calls `composer::compose(roots, store, self_view)` which gates TC entry emission via `tc_entry.visibility.has_interface()` (false) or `has_private()` (true).
 
+## Cross-Cutting: `--global` Toolchain Tier
+
+`--global` selects `$OCX_HOME/ocx.toml` as the project file for project-tier and mutator commands (`add`, `remove`, `lock`, `upgrade`, `pull`, `run`). `install --global <pkg>` is sugar: add to global file + re-lock + install + select (makes the tool a `current` symlink on the global PATH). Defined in `ContextOptions` as `pub global: bool` with `conflicts_with = "project"`.
+
+Strict isolation rules:
+- `--global` and `--project` together → `UsageError` (64) via clap `conflicts_with`. No precedence guessing.
+- `ocx run` and `ocx exec` are hermetic. Without `--global`, `run` reads only the in-effect project file; the global file is never consulted. No gap-fill, no union.
+- The global file's project dir is `$OCX_HOME` itself, so `ProjectRegistry` never creates a `$OCX_HOME/projects/` self-link for it (ADR: `adr_project_gc_symlink_ledger.md` no-self-link invariant).
+- `OCX_GLOBAL` is the env-var equivalent (resolution-affecting; forwarded to child ocx via `apply_ocx_config`).
+- No implicit `$OCX_HOME/ocx.toml` discovery: `home_project_path()` is deleted. Project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
+
+Shell exposure: `ocx shell hook` emits the global `current` set when no project is in effect; entering a project replaces it (no merge). `ocx shell init` writes `$OCX_HOME/init.<shell>` — a static PATH-prepend entrypoint sourced by non-interactive shells (CI, `bash --norc`). The static entrypoint contains a self-contained POSIX upward `ocx.toml` walk and suppresses the global PATH-prepend when a project is in scope (strict isolation at the static-file layer too).
+
+ADR: `adr_global_toolchain_tier.md`.
+
 ## Cross-Cutting: OCX Configuration Forwarding
 
 Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env (whether `Env::new()` or `Env::clean()`) and before `Command::envs()`. `apply_ocx_config` is the **sole** path that lands `OCX_*` keys on a child env — the running ocx's parsed config is authoritative, never ambient parent-shell exports.
 
-New resolution-affecting `ContextOptions` fields (offline / remote / config / index / similar) MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env — they leak into entrypoint child streams. PR review:
+New resolution-affecting `ContextOptions` fields (offline / remote / config / index / global / similar) MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env — they leak into entrypoint child streams. PR review:
 - Adding a resolution flag without all three updates → **Block-tier**
 - Routing a presentation flag through `apply_ocx_config` → **Block-tier**
 

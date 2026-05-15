@@ -26,6 +26,11 @@ use crate::app::project_context::load_project_for_mutate;
 /// group when `--group` is absent).
 #[derive(Parser, Clone)]
 pub struct Remove {
+    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of
+    /// a discovered project. Mutually exclusive with `--project`.
+    #[arg(long)]
+    pub global: bool,
+
     /// Identifier of the tool to remove (binding name or fully-qualified
     /// identifier, e.g. `cmake` or `ocx.sh/cmake:3.28`).
     #[arg(value_name = "IDENTIFIER")]
@@ -41,6 +46,8 @@ pub struct Remove {
 
 impl Remove {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        let context = context.with_command_global(self.global)?;
+
         // Validate the group name early — before flock acquisition — so a
         // typo doesn't lock out other writers waiting on `ocx.toml`.
         if let Some(ref g) = self.group

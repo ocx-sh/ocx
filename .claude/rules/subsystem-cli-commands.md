@@ -40,17 +40,27 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `--index PATH` | `OCX_INDEX` | — | Override local index directory |
 | `-l/--log-level` | — | — | Tracing level (trace/debug/info/warn/error) |
 
+## Project-Tier Layering — Global vs Project
+
+Project-tier commands resolve their project file in strict precedence order: `--global` (explicit) → `--project`/`OCX_PROJECT` (explicit) → CWD walk → None.
+
+`--global` re-targets the project file to `$OCX_HOME/ocx.toml`. It is mutually exclusive with `--project` — combining both is a `UsageError` (64). There is no implicit discovery of `$OCX_HOME/ocx.toml`; the prior home-tier fallback (`home_project_path`) is deleted.
+
+`--global` is accepted on: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, `install`. `install --global` is sugar (add + re-lock + install + select). `ocx run` and `ocx exec` are hermetic — `run` without `--global` never reads `$OCX_HOME/ocx.toml`. `OCX_GLOBAL` is the env equivalent (resolution-affecting, forwarded to child ocx).
+
+ADR: `adr_global_toolchain_tier.md`.
+
 ---
 
 ## Command Summary
 
 | Command | Purpose | Auto-Install | Key Flags |
 |---------|---------|-------------|-----------|
-| `add IDENTIFIER` | Append binding to `ocx.toml`, update lock, install | **Yes** | `-g/--group` |
+| `add IDENTIFIER` | Append binding to `ocx.toml`, update lock, install | **Yes** | `-g/--group`, `--global` |
 | `init` | Create minimal `ocx.toml` in current directory | No | — |
-| `remove IDENTIFIER` | Drop binding from `ocx.toml`, rewrite lock, uninstall | No | — |
-| `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with project-tier composed env (binding names from `ocx.lock`) | **Yes** | `-g/--group`, `--clean`, `--self` |
-| `install PKGS...` | Download and install packages | N/A (is install) | `-s/--select`, `-p/--platform` |
+| `remove IDENTIFIER` | Drop binding from `ocx.toml`, rewrite lock, uninstall | No | `--global` |
+| `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with project-tier composed env (binding names from `ocx.lock`) | **Yes** | `-g/--group`, `--clean`, `--self`, `--global` |
+| `install PKGS...` | Download and install packages; `--global` = add+lock+install+select for global toolchain | N/A (is install) | `-s/--select`, `-p/--platform`, `--global` |
 | `login [REGISTRY]` | Authenticate to a registry; persists via docker credential store | No | `-u/--username`, `--password-stdin`, `--insecure`, `--allow-insecure-store` |
 | `logout [REGISTRY]` | Remove stored credentials for a registry | No | — |
 | `which PKGS...` | Resolve installed packages to paths | No | `--candidate`, `--current`, `-p` |
@@ -60,16 +70,19 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `uninstall PKGS...` | Remove candidate symlink | No | `-d/--deselect`, `--purge` |
 | `clean` | GC unreferenced objects | No | `--dry-run`, `--force` |
 | `env PKGS...` | Print resolved env vars | **Yes** | `--candidate`, `--current`, `-p`, `--self` |
-| `exec PKGS... -- CMD` | Run command with package env | **Yes** | `--clean`, `-p`, `--self` |
+| `exec PKGS... -- CMD` | Run command with package env (hermetic — never reads global toolchain) | **Yes** | `--clean`, `-p`, `--self` |
 | `shell env PKGS...` | Shell-specific export lines | No | `-s/--shell`, `-p`, `--candidate/--current`, `--self` |
 | `shell completion` | Generate completions | No | `--shell` |
-| `shell hook` | Stateful prompt-hook export generator (reads/updates `_OCX_APPLIED`) | No | `-s/--shell` |
+| `shell hook` | Stateful prompt-hook export generator (reads/updates `_OCX_APPLIED`); emits global `current` set when no project in scope | No | `-s/--shell` |
+| `shell init` | Print per-shell rc snippet wiring `ocx shell hook`; writes `$OCX_HOME/init.<shell>` static PATH-prepend entrypoint for non-interactive shells | No | `-s/--shell` |
 | `direnv init` | Write `.envrc` wiring `ocx direnv export` (bare `ocx direnv` ≡ this) | No | `--force` |
 | `direnv export` | Stateless bash export generator for direnv `.envrc` (the eval target) | No | — |
 | `index catalog` | List known repositories | No | `--tags` |
 | `index list PKGS...` | List tags for packages | No | `--platforms`, `--variants` |
 | `index update PKGS...` | Sync local index from remote | No | — |
-| `lock` | Resolve project tool tags to digests and write `ocx.lock` | No | `-g/--group` |
+| `lock` | Resolve project tool tags to digests and write `ocx.lock` | No | `-g/--group`, `--global` |
+| `upgrade PKGS...` | Re-resolve advisory tags in lock — opt-in upgrade | No | `-g/--group`, `--global` |
+| `pull` | Pre-warm package store from `ocx.lock` without creating symlinks | No | `--global` |
 | `package pull PKGS...` | Download to object store only | N/A (is pull) | `-p` |
 | `package create PATH` | Bundle directory into archive | No | `-o`, `-m`, `-l`, `-j`, `--force` |
 | `package push -i ID LAYERS...` | Publish archive to registry | No | `-i/--identifier` (required), `-c/--cascade`, `-n`, `-m`, `-p`, `--build-timestamp [datetime\|date\|none]` |

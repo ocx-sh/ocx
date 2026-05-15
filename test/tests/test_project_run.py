@@ -963,12 +963,16 @@ def test_exec_unaffected_by_project_presence(ocx: OcxRunner, tmp_path: Path) -> 
 
 
 def test_run_registers_in_project_registry(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx run -- echo hi`` causes ``projects.json`` to contain the lock path.
+    """``ocx run`` registers the project as a GC root in the symlink ledger.
 
-    Plan §3.2 test 23: ``load_project_with_lock`` (Phase B.5) calls
-    ``ProjectRegistry::register_if_present`` so the lock path is registered
-    for ``ocx clean`` GC-root tracking. The ``projects.json`` file at
-    ``$OCX_HOME/projects.json`` must exist and contain the lock path.
+    Living Design — storage swapped by ``adr_project_gc_symlink_ledger.md``
+    (W1): the per-user JSON ledger ``$OCX_HOME/projects.json`` is REPLACED
+    by a flat symlink store ``$OCX_HOME/projects/<16hex> → <project dir>``.
+    The behavioural contract is unchanged — running in a project registers
+    it as a GC root for ``ocx clean`` — so this test still verifies that
+    contract; only the storage assertion changes from "``projects.json``
+    contains the lock path" to "a symlink under ``$OCX_HOME/projects/``
+    resolves to the canonical project directory".
     """
     repo, tag = _published_tool(ocx, tmp_path, "projreg")
 
@@ -989,15 +993,22 @@ def test_run_registers_in_project_registry(ocx: OcxRunner, tmp_path: Path) -> No
     )
 
     ocx_home = Path(ocx.env["OCX_HOME"])
-    projects_json = ocx_home / "projects.json"
-    assert projects_json.exists(), (
-        f"projects.json must exist after ocx run; not found at {projects_json}"
+    projects_dir = ocx_home / "projects"
+    assert projects_dir.is_dir(), (
+        f"$OCX_HOME/projects/ symlink store must exist after ocx run; "
+        f"not found at {projects_dir}"
     )
-    lock_path = str(project / "ocx.lock")
-    projects_content = projects_json.read_text()
-    assert lock_path in projects_content, (
-        f"projects.json must contain the lock path {lock_path!r}; "
-        f"content:\n{projects_content[:500]}"
+    project_resolved = project.resolve()
+    registered = []
+    for link in projects_dir.iterdir():
+        if link.name.startswith(".tmp-"):
+            continue  # in-flight staging entry — not a ledger root
+        if link.is_symlink() and link.resolve() == project_resolved:
+            registered.append(link)
+    assert registered, (
+        f"a $OCX_HOME/projects/ symlink must resolve to the canonical "
+        f"project dir {project_resolved} after ocx run; entries: "
+        f"{sorted(p.name for p in projects_dir.iterdir())}"
     )
 
 

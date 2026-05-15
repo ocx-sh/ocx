@@ -31,7 +31,18 @@ Test inventory (per ADR "Testing Surface" + plan Verification block):
 1. ``test_package_held_by_other_project_survives_clean``
 2. ``test_force_flag_bypasses_registry``
 3. ``test_lazy_prune_after_lockfile_deletion``
-4. ``test_force_does_not_collect_actively_installed_packages``
+4. ``test_custom_named_project_registered_and_protected_from_clean``
+5. ``test_force_does_not_collect_actively_installed_packages``
+6. ``test_clean_io_failure_is_non_fatal``
+
+``test_clean_io_failure_is_non_fatal`` is **relocated here from the Rust unit
+suite** (plan W1-P3 unit test ``collect_project_roots_io_failure_is_non_fatal``,
+F4): ``collect_project_roots`` lives behind the private
+``package_manager::tasks`` module and is not re-exported (only
+``CleanResult``/``CleanedObject`` are), so it is unreachable from a
+crate-internal Rust test. The deliberate exit-78 elimination (no JSON parse
+surface ⇒ a broken ledger is pruned, never a fatal ``ConfigError``) is
+therefore pinned at the acceptance level instead.
 """
 from __future__ import annotations
 
@@ -230,15 +241,17 @@ def test_package_held_by_other_project_survives_clean(
         "expected at least one held entry pointing to proj-a's lock"
     )
 
-    # Every held entry must reference proj-a's ocx.lock.
-    lock_a = str(proj_a / "ocx.lock")
+    # Every held entry must reference proj-a's project directory. Under the
+    # symlink ledger ``held_by`` carries the project dir (the ledger key),
+    # not the lock path.
+    proj_a_dir = str(proj_a)
     for entry in held_entries:
         held_by: list[str] = entry["held_by"]
         assert any(
-            lock_a in str(p) for p in held_by
+            proj_a_dir in str(p) for p in held_by
         ), (
-            f"held entry missing reference to proj-a/ocx.lock.\n"
-            f"entry: {entry}\nexpected path containing: {lock_a}"
+            f"held entry missing reference to proj-a project dir.\n"
+            f"entry: {entry}\nexpected path containing: {proj_a_dir}"
         )
 
 
@@ -295,12 +308,13 @@ def test_lazy_prune_after_lockfile_deletion(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """After deleting project A's ``ocx.lock``, running ``ocx clean`` from
-    project B must lazily prune the registry entry and include the previously-
-    held package in the would-collect set.
+    project B must lazily prune the stale ledger symlink and include the
+    previously-held package in the would-collect set.
 
-    ADR contract (Lazy Pruning Rules):
-    - Rule 1: "``ocx_lock_path`` does not exist on disk → drop entry".
-    - The on-disk ``projects.json`` must be rewritten (entry removed).
+    ADR contract (``adr_project_gc_symlink_ledger.md``, flat symlink store):
+    - ``<target>/ocx.lock`` absent → the ``$OCX_HOME/projects/<hash>`` symlink
+      is pruned silently at DEBUG (no JSON document, no schema, no sentinel —
+      the symlink's resolvability *is* the liveness signal).
 
     Failure signals (stub mode): same as tests 1 and 2.
     """
@@ -326,21 +340,25 @@ def test_lazy_prune_after_lockfile_deletion(
         f"still held: {held_entries}"
     )
 
-    # The registry must have been pruned: projects.json must not list proj-a.
+    # The ledger must have been pruned: no symlink under
+    # ``$OCX_HOME/projects/`` may still resolve into proj-a. The flat symlink
+    # store has no JSON document — the absence (or non-resolution) of the
+    # per-project symlink *is* the pruned state.
     ocx_home = Path(ocx.env["OCX_HOME"])
-    registry_file = ocx_home / "projects.json"
-    assert registry_file.exists(), "projects.json must still exist after prune"
-    doc = json.loads(registry_file.read_text(encoding="utf-8"))
-    entries_in_registry: list[dict] = doc.get("entries", [])
-    proj_a_lock = str(lock_a)
-    still_registered = [
-        e for e in entries_in_registry
-        if e.get("ocx_lock_path") == proj_a_lock
-    ]
-    assert len(still_registered) == 0, (
-        f"proj-a's entry must be lazily pruned from registry after "
-        f"ocx.lock deletion; still present: {still_registered}"
-    )
+    projects_dir = ocx_home / "projects"
+    proj_a_resolved = proj_a.resolve()
+    if projects_dir.exists():
+        for link in projects_dir.iterdir():
+            if link.name.startswith(".tmp-"):
+                continue  # in-flight staging entry — not a ledger root
+            try:
+                target = link.resolve()
+            except OSError:
+                continue  # dangling link mid-prune — acceptable
+            assert target != proj_a_resolved, (
+                f"proj-a's ledger symlink must be lazily pruned after "
+                f"ocx.lock deletion; still resolves: {link} -> {target}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +419,11 @@ the_tool = "{ocx.registry}/{repo}:{tag}"
     # Codex-High-4 fix, the lazy-prune walker would have pruned the
     # custom-named entry on this very call (no sibling ocx.toml at the
     # historical hardcoded path), and the package would then be free.
+    # Deliberate verification (plan W1-P3, F3): this test asserts ONLY
+    # ``free_entries == 0`` and never inspects ``held_by`` shape/contents, so
+    # the symlink-ledger migration (held_by now keys on the project dir, not
+    # the lock path) does NOT require any change here. Recorded as a conscious
+    # no-op, not an oversight.
     entries = _run_clean_json(ocx, proj_b)
     object_entries = [e for e in entries if e.get("kind") == "object"]
     free_entries = [e for e in object_entries if not e.get("held_by")]
@@ -460,4 +483,62 @@ def test_force_does_not_collect_actively_installed_packages(
     assert len(free_entries) == 0, (
         f"installed package must not be collected even with --force; "
         f"free entries: {free_entries}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. Broken ledger state is non-fatal — deliberate exit-78 elimination (F4)
+# ---------------------------------------------------------------------------
+
+
+def test_clean_io_failure_is_non_fatal(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A broken/garbage ``$OCX_HOME/projects/`` ledger state must NOT make
+    ``ocx clean`` fail — it proceeds (rc=0), pruning what it can.
+
+    Relocated from the Rust unit suite (plan W1-P3
+    ``collect_project_roots_io_failure_is_non_fatal``, F4):
+    ``collect_project_roots`` is not reachable from a crate-internal Rust
+    test (private ``package_manager::tasks`` module, not re-exported), so the
+    contract is pinned here instead.
+
+    ADR ``adr_project_gc_symlink_ledger.md`` §Risks "Corrupt-state failure
+    mode removed, not relocated": the superseded JSON model exited ``ocx
+    clean`` with ``ConfigError`` (exit 78) on a corrupt ``projects.json``.
+    The flat symlink store has **no parse surface** — a bad entry is simply a
+    dangling/garbage directory entry that is pruned. This test asserts the
+    deliberate *elimination*: a clobbered ``projects/`` (a non-symlink file
+    where a hash symlink is expected) does not yield exit 78 and does not
+    abort the clean.
+
+    Failure signals (stub mode): ``ocx lock`` in ``_setup_project_a`` panics
+    at ``ProjectRegistry::register`` → ``unimplemented!()``; if that somehow
+    succeeded, ``ocx clean`` panics at ``collect_project_roots`` →
+    ``live_projects`` → ``unimplemented!()``.
+    """
+    proj_a = tmp_path / "proj-a"
+    proj_b = tmp_path / "proj-b"
+    proj_b.mkdir(parents=True, exist_ok=True)
+
+    _setup_project_a(ocx, tmp_path, proj_a)
+
+    # Clobber the ledger: drop a garbage *regular file* into the projects/
+    # store where only hash symlinks belong. There is no JSON to corrupt;
+    # this is the closest analogue of a broken ledger entry.
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    projects_dir = ocx_home / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    (projects_dir / "deadbeefdeadbeef").write_text(
+        "not a symlink — garbage ledger entry", encoding="utf-8"
+    )
+
+    # ``ocx clean --dry-run`` from project B must still succeed (rc=0), NOT
+    # exit 78 (ConfigError). The exact would-collect set is unconstrained
+    # here — the contract under test is "non-fatal", i.e. clean proceeds.
+    result = _run(ocx, proj_b, "--format", "json", "clean", "--dry-run")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"broken ledger state must be non-fatal (no exit 78); "
+        f"got rc={result.returncode}\nstderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout}"
     )

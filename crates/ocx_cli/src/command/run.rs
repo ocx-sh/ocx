@@ -63,6 +63,14 @@ pub struct Run {
     #[arg(long = "self", default_value_t = false)]
     pub self_view: bool,
 
+    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of
+    /// a discovered project. Read-only: an absent global file yields the
+    /// existing `NoProject` semantics. `run` stays hermetic — it composes
+    /// exactly the in-effect project file (here the global one), never a
+    /// union with a project. Mutually exclusive with `--project`.
+    #[arg(long)]
+    pub global: bool,
+
     /// Binding names to compose into the child env. Each name must
     /// resolve unambiguously inside the selected scope. Empty list means
     /// "every binding in scope."
@@ -113,6 +121,12 @@ impl Run {
     ///   via the existing `ClassifyExitCode` chain.
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         use ocx_lib::cli;
+
+        // Strict isolation (C2.6): `run` composes exactly the in-effect
+        // project file. `--global` only re-targets which single file that
+        // is (the global one) — `compose_tool_set` below is still fed one
+        // tier (`&ctx.config`/`&ctx.lock`), never a union with a project.
+        let context = context.with_command_global(self.global)?;
 
         // ── Phase A: parse-time validation ───────────────────────────────
 

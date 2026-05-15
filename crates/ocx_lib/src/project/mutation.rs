@@ -327,33 +327,46 @@ impl MutationGuard {
             return Err(primary);
         }
 
-        // Best-effort registry registration so `ocx clean` retains
-        // packages pinned by this lock. Canonicalize the path first so
-        // aliased lookups (relative segments, symlinks) collapse to a
-        // single entry instead of duplicating registrations. Mirrors
-        // `ProjectLock::save`'s post-rename non-fatal registration.
-        let canonical_path = match tokio::fs::canonicalize(&self.lock_path).await {
-            Ok(p) => p,
+        // Best-effort GC-ledger registration so `ocx clean` retains packages
+        // pinned by this lock. The ledger keys on the project *directory*,
+        // not the lock+config path pair. Dropping the separate config-path
+        // capture is safe ONLY because of the invariant
+        // `lock_path_for(config) == config.parent()/ocx.lock` for every
+        // `--project` basename — pinned by test
+        // `lock_path_for_always_produces_ocx_lock_in_config_dir` (ARCH-4d).
+        // If that test is ever weakened the custom-`--project` multi-project
+        // GC contract breaks.
+        //
+        // Canonicalize the *config file* first, then take its parent, so a
+        // bare relative `--project` basename (e.g. `workspace.toml`, whose
+        // `Path::parent()` is `Some("")` — NOT `None`) resolves against the
+        // CWD instead of canonicalizing the empty path and silently skipping
+        // registration. The config file exists on disk here (the commit just
+        // wrote next to it). Canonicalizing the file also collapses aliased
+        // lookups (relative segments, symlinks) to one ledger entry.
+        // Canonicalize failure of THIS project's own path is the
+        // silent-data-loss class: log at WARN (NOT debug — C1.1
+        // self-register-failure rule) and skip registration without aborting
+        // the commit.
+        let canonical_project_dir = match tokio::fs::canonicalize(&self.config_path).await {
+            Ok(canonical_config) => match canonical_config.parent() {
+                Some(dir) => dir.to_path_buf(),
+                None => {
+                    log::warn!(
+                        "Project registry: config path '{}' has no parent directory \
+                         (non-fatal, registration skipped)",
+                        canonical_config.display()
+                    );
+                    return Ok(MutationCommit {
+                        config_path: self.config_path,
+                        lock_path: self.lock_path,
+                    });
+                }
+            },
             Err(e) => {
                 log::warn!(
-                    "Project registry: canonicalize of '{}' failed (non-fatal, registration skipped): {e}",
-                    self.lock_path.display()
-                );
-                return Ok(MutationCommit {
-                    config_path: self.config_path,
-                    lock_path: self.lock_path,
-                });
-            }
-        };
-        // Canonicalize the originating config path too — Codex High-4
-        // requires the registry to record the actual project file (which
-        // may carry a custom name when `--project=<custom>.toml` is in
-        // effect) so the lazy-prune walker honours it.
-        let canonical_config = match tokio::fs::canonicalize(&self.config_path).await {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!(
-                    "Project registry: canonicalize of config '{}' failed (non-fatal, registration skipped): {e}",
+                    "Project registry: canonicalize of config path '{}' failed \
+                     (non-fatal, registration skipped): {e}",
                     self.config_path.display()
                 );
                 return Ok(MutationCommit {
@@ -363,10 +376,10 @@ impl MutationGuard {
             }
         };
         let registry = ProjectRegistry::new(&self.home);
-        if let Err(e) = registry.register(&canonical_path, &canonical_config).await {
+        if let Err(e) = registry.register(&canonical_project_dir).await {
             log::warn!(
                 "Project registry: registration of '{}' failed (non-fatal): {e}",
-                canonical_path.display()
+                canonical_project_dir.display()
             );
         }
 

@@ -116,6 +116,108 @@ pub fn create(target: impl AsRef<std::path::Path>, link_path: impl AsRef<std::pa
     Ok(())
 }
 
+/// Crash-safe atomic symlink replace: create a temp symlink in the **same
+/// directory** as `link_path`, then `rename(2)` it onto `link_path`.
+///
+/// Unlike [`update`] (which is remove-then-create and therefore transiently
+/// drops the link if the process crashes — or a concurrent reader observes —
+/// between the remove and the create), this operation is atomic: an observer
+/// sees either the old link or the new link, never an absent one. The temp
+/// name lives in the same directory so the `rename(2)` is an atomic same-dir
+/// rename on POSIX (`ReplaceFile`/equivalent on Windows). This is required by
+/// `ProjectRegistry::register` per ADR `adr_project_gc_symlink_ledger.md`
+/// (CODEX-BLOCK-2): a crash or concurrent `live_projects` between a
+/// remove-then-create would transiently drop a live GC root.
+///
+/// Creates any missing parent directories. The temp name is
+/// `.tmp-<pid>-<rand>` so a concurrent `ProjectRegistry::live_projects`
+/// readdir can skip in-flight staging entries.
+///
+/// For install symlinks, use [`crate::reference_manager::ReferenceManager::link`].
+pub fn replace_atomic(target: impl AsRef<std::path::Path>, link_path: impl AsRef<std::path::Path>) -> Result<()> {
+    let target = target.as_ref();
+    let link_path = link_path.as_ref();
+
+    let parent = match link_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        // No parent component (e.g. a bare relative name). The temp link must
+        // live in the same directory as the final name for the rename to be an
+        // atomic same-dir rename; with no parent that is the current dir.
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent).map_err(|error| Error::InternalFile(parent.to_path_buf(), error))?;
+
+    // Stage the link at a `.tmp-<pid>-<unique>` name in the *same* directory so
+    // the rename below is an atomic same-dir rename (POSIX) /
+    // `ReplaceFile`-class (Windows). `live_projects` skips `.tmp-*` names so a
+    // concurrent readdir never observes the staging entry as a ledger link.
+    let temp_path = parent.join(temp_link_name());
+
+    // Defensive: a previous crashed run may have left this exact staging name.
+    // Best-effort removal; a real failure surfaces from `create_link` below.
+    if is_link(&temp_path) || temp_path.exists() {
+        let _ = remove_link(&temp_path);
+    }
+
+    create_link(target, &temp_path).map_err(|error| Error::InternalFile(temp_path.clone(), error))?;
+
+    match rename_replace(&temp_path, link_path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // The rename failed; the staging link would otherwise leak.
+            let _ = remove_link(&temp_path);
+            Err(Error::InternalFile(link_path.to_path_buf(), error))
+        }
+    }
+}
+
+/// A process-and-call-unique staging name `.tmp-<pid>-<seq>-<nanos>`.
+///
+/// `live_projects` filters `.tmp-*` so this is never mistaken for a ledger
+/// link. No `rand` dependency exists in the crate; uniqueness within a process
+/// is guaranteed by a monotonic counter, and cross-process uniqueness by the
+/// pid plus a high-resolution timestamp (collision would require two processes
+/// to stage in the same nanosecond with the same pid — impossible).
+fn temp_link_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(".tmp-{}-{seq}-{nanos}", std::process::id())
+}
+
+/// Renames `from` onto `to`, replacing an existing `to`.
+///
+/// On POSIX `rename(2)` replaces the destination **atomically**: a concurrent
+/// reader observes either the old link or the new link, never an absent one.
+///
+/// On Windows `std::fs::rename` fails if the destination exists, so a
+/// junction/symlink at `to` is removed first, then the staging link is renamed
+/// onto it. This remove-then-rename has a **bounded non-atomic window**: a
+/// concurrent same-hash `register` racing a reader between the remove and the
+/// rename can briefly expose no entry at `to`. The `.tmp-*` staging name does
+/// **not** cover this window — `ProjectRegistry::live_projects` deliberately
+/// skips `.tmp-*` entries, so the staged link is invisible to a reader by
+/// design. This is a documented residual on Windows only (POSIX is atomic); a
+/// Windows FFI atomic-replace (`MoveFileEx`/`ReplaceFile`) is a deferred scope
+/// decision, not attempted here.
+#[cfg(not(windows))]
+fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    if is_link(to) || to.exists() {
+        remove_link(to)?;
+    }
+    std::fs::rename(from, to)
+}
+
 /// Removes the symlink at `link_path`.
 ///
 /// No-op if `link_path` does not exist and is not a dangling symlink.
@@ -311,6 +413,91 @@ mod tests {
         update(&target, &link).unwrap();
 
         assert_eq!(std::fs::read_link(&link).unwrap(), target);
+    }
+
+    // ── replace_atomic ───────────────────────────────────────────────────────
+
+    /// `replace_atomic` over an *existing* link (not just first create) must
+    /// leave the final link pointing at the NEW target and must not leak any
+    /// `.tmp-*` staging entry in the directory.
+    #[test]
+    fn replace_atomic_replaces_existing_link_no_temp_leak() {
+        let (_dir, root) = setup();
+        let store = make_dir(&root, "store");
+        let old = make_dir(&root, "old");
+        let new = make_dir(&root, "new");
+        let link = store.join("entry");
+
+        replace_atomic(&old, &link).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), old);
+
+        // Replace over the existing link.
+        replace_atomic(&new, &link).unwrap();
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            new,
+            "final link must point at the new target after replace"
+        );
+
+        let leftovers: Vec<_> = std::fs::read_dir(&store)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().starts_with(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no .tmp-* staging entry may leak: {leftovers:?}");
+    }
+
+    /// `temp_link_name` produces a `.tmp-`-prefixed name, and two successive
+    /// calls differ. Uniqueness is load-bearing: `live_projects`'s
+    /// readdir-skip of `.tmp-*` relies on staging names never colliding with a
+    /// real ledger entry, and concurrent stagers must not collide.
+    #[test]
+    fn temp_link_name_is_prefixed_and_unique() {
+        let a = temp_link_name();
+        let b = temp_link_name();
+        assert!(a.starts_with(".tmp-"), "temp name must be .tmp-prefixed: {a}");
+        assert!(b.starts_with(".tmp-"), "temp name must be .tmp-prefixed: {b}");
+        assert_ne!(a, b, "two temp names must be unique (monotonic counter)");
+    }
+
+    /// The parentless/relative-path branch of `replace_atomic` must not panic:
+    /// `link_path.parent()` is `Some("")` for a bare relative name, which the
+    /// helper maps to `.` (the current dir) so the rename stays same-dir.
+    #[test]
+    fn replace_atomic_relative_bare_name_does_not_panic() {
+        let (_dir, root) = setup();
+        let target = make_dir(&root, "target");
+
+        // Run inside the tempdir so the bare relative name resolves there and
+        // we do not pollute the real CWD. Serialised: process-global CWD.
+        let _guard = CwdGuard::enter(&root);
+        let bare = Path::new("bare-entry");
+
+        replace_atomic(&target, bare).expect("bare relative name must not panic");
+        assert!(is_link(bare), "bare relative link must be created");
+        assert_eq!(std::fs::read_link(bare).unwrap(), target);
+    }
+
+    /// RAII current-directory guard so the relative-path test does not leak a
+    /// changed process CWD into other tests. `set_current_dir` is
+    /// process-global; this test does not run in parallel with CWD-sensitive
+    /// code under nextest's per-test isolation, and the guard restores on drop.
+    struct CwdGuard {
+        prev: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn enter(dir: &Path) -> Self {
+            let prev = std::env::current_dir().expect("read cwd");
+            std::env::set_current_dir(dir).expect("set cwd");
+            Self { prev }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prev);
+        }
     }
 
     // ── chained links (back-ref style) ──────────────────────────────────────

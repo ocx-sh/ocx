@@ -10,7 +10,6 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use super::error::{ProjectError, ProjectErrorKind};
-use crate::log;
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierErrorKind;
 
@@ -174,10 +173,18 @@ impl ProjectConfig {
 
     /// Resolve the project-tier `ocx.toml` and adjacent lock paths.
     ///
-    /// Precedence: explicit > `OCX_PROJECT` > CWD walk >
-    /// `$OCX_HOME/ocx.toml` home-tier fallback. Returns `None` when no
-    /// source produces a path or `OCX_NO_PROJECT=1` is set (kill switch
-    /// beats the home fallback per plan §3 step 3).
+    /// Precedence: `--global`/`OCX_GLOBAL` (exclusive with `--project`) >
+    /// explicit `--project` > `OCX_PROJECT` > CWD walk > **None**. There
+    /// is no implicit `$OCX_HOME/ocx.toml` fallback — the global toolchain
+    /// is reachable *only* via the explicit `global` selector, never
+    /// discovered implicitly (adr_global_toolchain_tier.md §Decision 1).
+    /// Returns `None` when no source produces a path or `OCX_NO_PROJECT=1`
+    /// prunes discovery.
+    ///
+    /// When `global` is set, the in-effect project file is
+    /// `<ocx_home>/ocx.toml` with its sibling `<ocx_home>/ocx.lock`,
+    /// bypassing the CWD walk entirely (peer to the explicit `--project`
+    /// branch). `ocx_home` is the caller's `$OCX_HOME` root.
     ///
     /// Lock path is derived via [`super::lock::lock_path_for`] as
     /// `<parent>/ocx.lock`, independent of the config file's extension.
@@ -189,9 +196,32 @@ impl ProjectConfig {
     pub async fn resolve(
         cwd: Option<&Path>,
         explicit: Option<&Path>,
-        home: Option<&Path>,
+        ocx_home: Option<&Path>,
+        global: bool,
     ) -> std::result::Result<Option<(PathBuf, PathBuf)>, crate::config::error::Error> {
-        // Steps 1-4: delegate to ConfigLoader (explicit flag > env > CWD walk).
+        // Global selector: explicit, exclusive with `--project` (clap
+        // `conflicts_with` enforces the exclusion at parse time). Selects
+        // `<ocx_home>/ocx.toml` directly and bypasses the CWD walk. This
+        // branch is a peer of the explicit `--project` branch — never an
+        // implicit fallback (adr_global_toolchain_tier.md §Decision 1/2).
+        if global {
+            // Peer of the explicit `--project` branch: select
+            // `<ocx_home>/ocx.toml` directly and bypass the CWD walk.
+            // `ocx_home` is the caller's `$OCX_HOME` root (plumbed by
+            // every project-tier prologue). Absence of an `ocx_home`
+            // (no `$OCX_HOME`, no home dir) is a hard config error —
+            // `--global` cannot name a file without a root.
+            let home = ocx_home.ok_or_else(|| crate::config::error::Error::FileNotFound {
+                path: PathBuf::from("ocx.toml"),
+                tier: crate::config::error::ConfigSource::Project,
+            })?;
+            let config_path = home.join("ocx.toml");
+            let lock = super::lock::lock_path_for(&config_path);
+            return Ok(Some((config_path, lock)));
+        }
+
+        // Steps 1-3: delegate to ConfigLoader (explicit flag > env > CWD
+        // walk). No home-tier fallback: a CWD-walk miss is a hard `None`.
         let walk_result = crate::config::loader::ConfigLoader::project_path(cwd, explicit).await?;
 
         if let Some(p) = walk_result {
@@ -199,43 +229,7 @@ impl ProjectConfig {
             return Ok(Some((p, lock)));
         }
 
-        // Step 3 kill switch: OCX_NO_PROJECT=1 returns None even when a home
-        // fallback exists (per plan §3 step 3). Explicit flag is NOT gated by
-        // this (Amendment G3), so we check only after the walk returned None.
-        if crate::env::flag("OCX_NO_PROJECT", false) {
-            return Ok(None);
-        }
-
-        // Step 5: home-tier fallback.
-        let Some(home_dir) = home else {
-            return Ok(None);
-        };
-        let candidate = home_dir.join("ocx.toml");
-
-        // Probe with metadata — follows symlinks intentionally (plan §3
-        // "Symlink-at-home policy: symlinks are followed").
-        match tokio::fs::metadata(&candidate).await {
-            Ok(meta) if meta.file_type().is_file() => {
-                let lock = super::lock::lock_path_for(&candidate);
-                Ok(Some((candidate, lock)))
-            }
-            Ok(_) => {
-                // Exists but is not a regular file (directory, FIFO, …) — same
-                // permissive policy as `discover_paths` in the ambient loader.
-                log::warn!(
-                    "skipping non-regular-file home-tier candidate {} (expected a regular file)",
-                    candidate.display()
-                );
-                Ok(None)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => {
-                // Permission denied, broken symlink, etc. — permissive, same
-                // as the ambient discovery tier.
-                log::warn!("skipping unreadable home-tier candidate {}: {e}", candidate.display());
-                Ok(None)
-            }
-        }
+        Ok(None)
     }
 
     /// Parse a [`ProjectConfig`] from a TOML string.
@@ -893,6 +887,16 @@ bad = "ocx.sh/CMAKE:3.28"
     // vars that influence resolution so tests do not bleed state.
     // `OCX_CEILING_PATH` is set to the workspace root in CWD-walk tests so
     // the walk cannot escape into the real filesystem.
+    //
+    // W2-P3 (adr_global_toolchain_tier.md §Decision 1): the implicit
+    // `$OCX_HOME/ocx.toml` home-tier fallback was removed. The home-fallback
+    // tests (`resolve_walk_miss_falls_back_to_home`, `resolve_explicit_beats_home`,
+    // `resolve_no_project_kill_switch_returns_none_even_with_home`,
+    // `resolve_walk_hit_beats_home`, the home-tier half of
+    // `resolve_lock_path_is_with_extension_lock`, `resolve_home_follows_symlinks`,
+    // `resolve_home_directory_returns_none`) were deleted with the behaviour
+    // they pinned. The surviving non-home tests below are updated to the new
+    // 4-arg `resolve(cwd, explicit, ocx_home, global)` signature.
 
     /// CWD walk finds `ocx.toml` → returns `(config_path, lock_path)`.
     #[tokio::test]
@@ -904,7 +908,7 @@ bad = "ocx.sh/CMAKE:3.28"
         env.set("OCX_CEILING_PATH", tmp.path().to_str().unwrap());
         let config_path = tmp.path().join("ocx.toml");
         tokio::fs::write(&config_path, "").await.expect("write");
-        let result = ProjectConfig::resolve(Some(tmp.path()), None, None)
+        let result = ProjectConfig::resolve(Some(tmp.path()), None, None, false)
             .await
             .expect("resolve ok");
         let (cp, lp) = result.expect("Some expected");
@@ -912,179 +916,67 @@ bad = "ocx.sh/CMAKE:3.28"
         assert_eq!(lp, tmp.path().join("ocx.lock"));
     }
 
-    /// Walk miss with a valid `home/ocx.toml` → returns home-tier paths.
+    /// W2-P3 (adr_global_toolchain_tier.md §Decision 1): regression for the
+    /// deleted home fallback. With no explicit `--project`, no `OCX_PROJECT`,
+    /// no `global`, and a CWD-walk miss, `resolve` returns `None` even when an
+    /// `$OCX_HOME/ocx.toml` exists — there is no implicit home discovery. The
+    /// `ocx_home` argument names a dir that DOES contain an `ocx.toml`, so a
+    /// regression that re-adds the fallback would make this `Some` and fail.
     #[tokio::test]
-    async fn resolve_walk_miss_falls_back_to_home() {
+    async fn project_path_returns_none_without_global_or_project() {
         let env = crate::test::env::lock();
-        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let home_dir = tempfile::tempdir().expect("home tempdir");
         env.set("OCX_CEILING_PATH", workspace.path().to_str().unwrap());
-        // No ocx.toml in workspace — walk miss.
-        let home_config = home_dir.path().join("ocx.toml");
-        tokio::fs::write(&home_config, "").await.expect("write home");
-        let result = ProjectConfig::resolve(Some(workspace.path()), None, Some(home_dir.path()))
+        // A home `ocx.toml` exists but must NOT be discovered implicitly.
+        tokio::fs::write(home_dir.path().join("ocx.toml"), "")
+            .await
+            .expect("write home ocx.toml");
+        let result = ProjectConfig::resolve(Some(workspace.path()), None, Some(home_dir.path()), false)
             .await
             .expect("resolve ok");
-        let (cp, lp) = result.expect("Some expected from home fallback");
-        assert_eq!(cp, home_config);
-        assert_eq!(lp, home_dir.path().join("ocx.lock"));
-    }
-
-    /// Walk miss, no home dir provided → `None`.
-    #[tokio::test]
-    async fn resolve_walk_miss_no_home_returns_none() {
-        let env = crate::test::env::lock();
-        let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        let workspace = tempfile::tempdir().expect("tempdir");
-        env.set("OCX_CEILING_PATH", workspace.path().to_str().unwrap());
-        let result = ProjectConfig::resolve(Some(workspace.path()), None, None)
-            .await
-            .expect("resolve ok");
-        assert!(result.is_none(), "expected None when no home provided");
-    }
-
-    /// Explicit path beats the home fallback.
-    #[tokio::test]
-    async fn resolve_explicit_beats_home() {
-        let env = crate::test::env::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        let flag_dir = tempfile::tempdir().expect("flag dir");
-        let home_dir = tempfile::tempdir().expect("home dir");
-        let flag_config = flag_dir.path().join("ocx.toml");
-        let home_config = home_dir.path().join("ocx.toml");
-        tokio::fs::write(&flag_config, "").await.expect("write flag");
-        tokio::fs::write(&home_config, "").await.expect("write home");
-        env.set("OCX_CEILING_PATH", flag_dir.path().to_str().unwrap());
-        let result = ProjectConfig::resolve(None, Some(&flag_config), Some(home_dir.path()))
-            .await
-            .expect("resolve ok");
-        let (cp, _lp) = result.expect("Some expected");
-        assert_eq!(cp, flag_config, "explicit path must beat home fallback");
-    }
-
-    /// `OCX_NO_PROJECT=1` suppresses the home fallback.
-    #[tokio::test]
-    async fn resolve_no_project_kill_switch_returns_none_even_with_home() {
-        let env = crate::test::env::lock();
-        env.set("OCX_NO_PROJECT", "1");
-        env.remove("OCX_PROJECT");
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let home_dir = tempfile::tempdir().expect("home tempdir");
-        env.set("OCX_CEILING_PATH", workspace.path().to_str().unwrap());
-        let home_config = home_dir.path().join("ocx.toml");
-        tokio::fs::write(&home_config, "").await.expect("write home");
-        let result = ProjectConfig::resolve(Some(workspace.path()), None, Some(home_dir.path()))
-            .await
-            .expect("resolve ok");
-        assert!(result.is_none(), "OCX_NO_PROJECT=1 must suppress home fallback");
-    }
-
-    /// CWD walk hit beats the home fallback (wholesale replacement, plan §3
-    /// line 379).
-    #[tokio::test]
-    async fn resolve_walk_hit_beats_home() {
-        let env = crate::test::env::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        let walk_dir = tempfile::tempdir().expect("walk dir");
-        let home_dir = tempfile::tempdir().expect("home dir");
-        let walk_config = walk_dir.path().join("ocx.toml");
-        let home_config = home_dir.path().join("ocx.toml");
-        tokio::fs::write(&walk_config, "").await.expect("write walk");
-        tokio::fs::write(&home_config, "").await.expect("write home");
-        env.set("OCX_CEILING_PATH", walk_dir.path().to_str().unwrap());
-        let result = ProjectConfig::resolve(Some(walk_dir.path()), None, Some(home_dir.path()))
-            .await
-            .expect("resolve ok");
-        let (cp, _lp) = result.expect("Some expected");
-        assert_eq!(cp, walk_config, "walk hit must beat home fallback");
-    }
-
-    /// Lock path is `config_path.with_extension("lock")` for both tiers.
-    #[tokio::test]
-    async fn resolve_lock_path_is_with_extension_lock() {
-        let env = crate::test::env::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-
-        // Project-tier hit
-        let proj_dir = tempfile::tempdir().expect("proj tempdir");
-        let proj_config = proj_dir.path().join("ocx.toml");
-        tokio::fs::write(&proj_config, "").await.expect("write proj");
-        env.set("OCX_CEILING_PATH", proj_dir.path().to_str().unwrap());
-        let (_, lp) = ProjectConfig::resolve(Some(proj_dir.path()), None, None)
-            .await
-            .expect("resolve ok")
-            .expect("Some");
-        assert_eq!(
-            lp.file_name().unwrap(),
-            "ocx.lock",
-            "project-tier lock must be ocx.lock"
+        assert!(
+            result.is_none(),
+            "walk-miss with no --global/--project must be None — no implicit \
+             $OCX_HOME/ocx.toml fallback (adr_global_toolchain_tier.md §Decision 1)"
         );
-
-        // Home-tier hit
-        let home_dir = tempfile::tempdir().expect("home tempdir");
-        let home_config = home_dir.path().join("ocx.toml");
-        tokio::fs::write(&home_config, "").await.expect("write home");
-        let empty_ws = tempfile::tempdir().expect("empty ws");
-        env.set("OCX_CEILING_PATH", empty_ws.path().to_str().unwrap());
-        let (_, lp) = ProjectConfig::resolve(Some(empty_ws.path()), None, Some(home_dir.path()))
-            .await
-            .expect("resolve ok")
-            .expect("Some from home");
-        assert_eq!(lp.file_name().unwrap(), "ocx.lock", "home-tier lock must be ocx.lock");
     }
 
-    /// Home `ocx.toml` that is a symlink is followed (symlink-at-home policy).
-    #[cfg(unix)]
+    /// W2-P3 (adr_global_toolchain_tier.md §Decision 1/2): `global = true`
+    /// selects `<ocx_home>/ocx.toml` directly with its sibling
+    /// `<ocx_home>/ocx.lock`, bypassing the CWD walk entirely (peer to the
+    /// explicit `--project` branch). A project `ocx.toml` placed in the CWD
+    /// must be ignored under `global` — the global selector never consults the
+    /// walk.
     #[tokio::test]
-    async fn resolve_home_follows_symlinks() {
+    async fn resolve_selects_ocx_home_under_global() {
         let env = crate::test::env::lock();
-        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
-        let home_dir = tempfile::tempdir().expect("home tempdir");
-        let real = home_dir.path().join("real.toml");
-        tokio::fs::write(&real, "").await.expect("write real");
-        let link = home_dir.path().join("ocx.toml");
-        tokio::fs::symlink(&real, &link).await.expect("symlink");
-        let workspace = tempfile::tempdir().expect("ws tempdir");
+        let ocx_home = tempfile::tempdir().expect("ocx_home tempdir");
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
         env.set("OCX_CEILING_PATH", workspace.path().to_str().unwrap());
-        let result = ProjectConfig::resolve(Some(workspace.path()), None, Some(home_dir.path()))
+        // A competing project file in the CWD must be bypassed by `global`.
+        tokio::fs::write(workspace.path().join("ocx.toml"), "")
             .await
-            .expect("resolve ok");
-        let (cp, lp) = result.expect("Some expected — symlink followed");
-        // The resolver returns the candidate path (`home/ocx.toml`), not the
-        // resolved target (`home/real.toml`).
-        assert_eq!(cp, link);
-        assert_eq!(lp, home_dir.path().join("ocx.lock"));
-    }
+            .expect("write cwd ocx.toml");
 
-    /// Home `ocx.toml` that is a directory → `None` (permissive, with warn).
-    #[tokio::test]
-    async fn resolve_home_directory_returns_none() {
-        let env = crate::test::env::lock();
-        let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        let home_dir = tempfile::tempdir().expect("home tempdir");
-        // Create `ocx.toml` as a directory instead of a file.
-        let dir_candidate = home_dir.path().join("ocx.toml");
-        tokio::fs::create_dir(&dir_candidate)
-            .await
-            .expect("create dir candidate");
-        let workspace = tempfile::tempdir().expect("ws tempdir");
-        env.set("OCX_CEILING_PATH", workspace.path().to_str().unwrap());
-        let result = ProjectConfig::resolve(Some(workspace.path()), None, Some(home_dir.path()))
+        let result = ProjectConfig::resolve(Some(workspace.path()), None, Some(ocx_home.path()), true)
             .await
             .expect("resolve ok");
-        assert!(result.is_none(), "directory candidate must yield None");
+        let (cp, lp) = result.expect("Some expected under --global");
+        assert_eq!(
+            cp,
+            ocx_home.path().join("ocx.toml"),
+            "--global must select <ocx_home>/ocx.toml, not the CWD project file"
+        );
+        assert_eq!(
+            lp,
+            ocx_home.path().join("ocx.lock"),
+            "--global lock must be <ocx_home>/ocx.lock"
+        );
     }
 
     /// Explicit missing path → `Err(FileNotFound)` propagated from Phase 1.
@@ -1095,7 +987,7 @@ bad = "ocx.sh/CMAKE:3.28"
         env.remove("OCX_PROJECT");
         env.remove("OCX_CEILING_PATH");
         let missing = PathBuf::from("/tmp/ocx-resolve-test-nonexistent-explicit.toml");
-        let err = ProjectConfig::resolve(None, Some(&missing), None)
+        let err = ProjectConfig::resolve(None, Some(&missing), None, false)
             .await
             .expect_err("missing explicit path must be FileNotFound");
         assert!(

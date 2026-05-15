@@ -172,6 +172,35 @@ The same override can be set persistently via the [`OCX_PROJECT`][env-project] e
 
 **Error cases:** A missing explicit path exits with code 79 ([`NotFound`][exit-codes]). A path that exists but cannot be read (permission denied, not a regular file) exits with code 74 ([`IoError`][exit-codes]).
 
+### `--global` {#global-flag}
+
+Selects `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) as the project file for project-tier and mutator commands.
+
+Accepted on: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, and `install`.
+
+`--global` is mutually exclusive with `--project`. Passing both exits with code 64 (`UsageError`).
+
+::: warning No implicit home discovery
+There is no implicit fallback to `$OCX_HOME/ocx.toml` when no project is found in the CWD walk. You must pass `--global` explicitly to target the global file. The prior automatic home-tier discovery has been removed.
+:::
+
+**`install --global` implies `--select`**
+
+`ocx install --global <pkg>` is sugar for: add the binding to the global file → re-lock → install → select. Because a tool must be a `current` symlink to appear on the global PATH, `--global` implies `--select` and the flag cannot be omitted.
+
+**Strict isolation**
+
+The global toolchain is a shell-convenience tier only. `ocx run` and `ocx exec` are always hermetic:
+
+- `ocx run` without `--global` reads only the in-effect project file. The global file is never consulted.
+- `ocx exec` reads no project file at all.
+
+Neither command performs gap-fill from the global toolchain.
+
+**Environment variable**
+
+[`OCX_GLOBAL`][env-ocx-global] is the environment-variable equivalent. It is forwarded to child `ocx` processes the same way as other resolution-affecting flags.
+
 ### `--config` {#arg-config}
 
 Path to an extra [configuration file][config-ref] to load for this invocation.
@@ -295,6 +324,7 @@ ocx add [OPTIONS] <IDENTIFIER>
 
 | Flag | Short | Description |
 |------|-------|-------------|
+| `--global` | — | Target `$OCX_HOME/ocx.toml` instead of the nearest project file. Mutually exclusive with `--project`. Auto-creates `$OCX_HOME/ocx.toml` when absent. |
 | `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
 | `--help` | `-h` | Print help information. |
 
@@ -303,7 +333,7 @@ ocx add [OPTIONS] <IDENTIFIER>
 | Code | Meaning |
 |------|---------|
 | 0 | Binding added, lock updated, tool installed. |
-| 64 | No `ocx.toml` found, binding already exists, or invalid `--group` name. |
+| 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, or `--global` combined with `--project`. |
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
@@ -315,7 +345,7 @@ ocx add [OPTIONS] <IDENTIFIER>
 
 Removes unreferenced objects from the local object store.
 
-An object is unreferenced when nothing points to it — no candidate or current symlink, no other installed package depends on it, and no project's `ocx.lock` (registered in `$OCX_HOME/projects.json`) pins it. This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
+An object is unreferenced when nothing points to it — no candidate or current symlink, no other installed package depends on it, and no registered project's `ocx.lock` pins it. Projects are registered in the `$OCX_HOME/projects/` ledger (a flat directory of symlinks, one per project; created automatically when `ocx lock` or `ocx add` writes a lockfile). This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
 
 ::: danger
 Do not run `clean` concurrently with other OCX commands. A concurrent install may reference an object that `clean` is about to remove, causing the install to fail.
@@ -332,7 +362,7 @@ ocx clean [OPTIONS]
 | Name | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--dry-run` | — | Show what would be removed without making any changes. | false |
-| `--force` | — | Bypass the project registry and collect packages held only by other projects' `ocx.lock` files. Live install symlinks are still honoured. | false |
+| `--force` | — | Bypass the `$OCX_HOME/projects/` ledger and collect packages held only by other projects' `ocx.lock` files. Live install symlinks are still honoured. | false |
 | `--help` | `-h` | Print help information. | — |
 
 **JSON output schema** (`--format json`)
@@ -344,7 +374,7 @@ ocx clean [OPTIONS]
 | `kind` | `"object"` \| `"temp"` | Storage tier of the entry. |
 | `dry_run` | boolean | `true` when `--dry-run` was passed; `false` on a live run. |
 | `path` | string | Absolute path to the package or temp directory. |
-| `held_by` | array of strings | Absolute paths to `ocx.lock` files that pin this package. Populated only in dry-run mode, only for entries the registry retained (never collected). Empty array when nothing holds the entry. |
+| `held_by` | array of strings | Absolute paths to project directories whose `ocx.lock` pins this package. Populated only in dry-run mode, only for entries the ledger retained (never collected). Empty array when nothing holds the entry. |
 
 ```json
 [
@@ -352,7 +382,7 @@ ocx clean [OPTIONS]
     "kind": "object",
     "dry_run": true,
     "path": "/home/alice/.ocx/packages/.../sha256/ab/cdef.../",
-    "held_by": ["/home/alice/dev/proj-a/ocx.lock"]
+    "held_by": ["/home/alice/dev/proj-a"]
   },
   {
     "kind": "object",
@@ -369,12 +399,12 @@ Dry-run output is a table. When any entry has a non-empty `held_by`, the table g
 
 ```
 Type    Held By                     Path
-object  /home/alice/dev/proj-a/ocx.lock  /home/alice/.ocx/packages/.../
+object  /home/alice/dev/proj-a      /home/alice/.ocx/packages/.../
 object                              /home/alice/.ocx/packages/.../
 temp                                /home/alice/.ocx/temp/abc.../
 ```
 
-A blank `Held By` cell means the entry is unreferenced and will be collected. A populated cell lists the project(s) holding it. The `Held By` column is omitted when no entries are held. `temp` entries are never governed by the registry and never show a `Held By` value.
+A blank `Held By` cell means the entry is unreferenced and will be collected. A populated cell lists the project directory (or directories) holding the package. The `Held By` column is omitted when no entries are held. `temp` entries are never governed by the ledger and never show a `Held By` value.
 
 Non-dry-run output is always 2-column (`Type | Path`): held entries are never collected and therefore never appear.
 
@@ -754,6 +784,7 @@ ocx install [OPTIONS] <PACKAGE>...
 
 **Options**
 
+- `--global`: Target `$OCX_HOME/ocx.toml` as the global toolchain file. Implies `--select` — the resolved package is also made `current` so it appears on the global PATH. Auto-creates `$OCX_HOME/ocx.toml` when absent. Mutually exclusive with `--project`.
 - `-p`, `--platform`: Target platforms to consider.
 - `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
 - `-h`, `--help`: Print help information.
@@ -910,6 +941,7 @@ ocx lock [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
+| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. | off |
 | `--group <NAME>` | `-g` | Restrict resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every `[tools]` and `[group.*]` entry is resolved. | *(all groups)* |
 | `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
 | `--help` | `-h` | Print help information. | — |
@@ -919,7 +951,7 @@ ocx lock [OPTIONS]
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written (or preserved if content was unchanged). |
-| 64 | Missing `ocx.toml`, unknown `--group` name, or empty comma segment. |
+| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `--global` combined with `--project`. |
 | 65 | `--check` reported drift. |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
@@ -951,6 +983,7 @@ ocx upgrade [OPTIONS] [BINDING...]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
+| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. | off |
 | `--group <NAME>` | `-g` | Restrict re-resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. Combinable with positional binding names (intersection). | *(all groups)* |
 | `--check` | — | Verify the candidate lock would match the predecessor and exit. Mirrors `lock --check`: re-resolves the requested subset (or the full toolchain when no positional names and no `-g` are supplied), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, candidate would change). When the predecessor lock is absent, exits 78. No writes, no commit. | off |
 | `--project <PATH>` | | Path to `ocx.toml`. Bypasses the CWD walk. | CWD walk |
@@ -1011,6 +1044,7 @@ ocx pull [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
+| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. | off |
 | `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every entry from the lock is pulled. | *(all groups)* |
 | `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
 | `--help` | `-h` | Print help information. | — |
@@ -1063,6 +1097,7 @@ ocx run [OPTIONS] [NAME...] -- ARGV...
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
+| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. The global file must exist (no auto-init for read commands). | off |
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
 | `--self` | — | Expose each package's private-visibility env entries (same semantics as `ocx exec --self`). | off |
@@ -1148,6 +1183,7 @@ ocx remove [OPTIONS] <IDENTIFIER>
 
 | Flag | Short | Description |
 |------|-------|-------------|
+| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. |
 | `--group <NAME>` | `-g` | Remove the binding from this named group only. Use when the same name exists in multiple groups. |
 | `--help` | `-h` | Print help information. |
 
@@ -1156,7 +1192,7 @@ ocx remove [OPTIONS] <IDENTIFIER>
 | Code | Meaning |
 |------|---------|
 | 0 | Binding removed, lock rewritten. |
-| 64 | No `ocx.toml` found in scope, or binding name is ambiguous across groups (use `--group`). |
+| 64 | No `ocx.toml` found in scope, binding name is ambiguous across groups (use `--group`), or `--global` combined with `--project`. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
 | 78 | `ocx.toml` schema invalid or TOML parse error. |
@@ -1312,16 +1348,15 @@ The exact mechanism differs per shell: Bash inserts into `PROMPT_COMMAND`, Zsh r
 **Usage**
 
 ```shell
-ocx shell init <SHELL>
+ocx shell init --shell <SHELL>
 ```
-
-**Arguments**
-
-- `<SHELL>`: Target shell. Required. Accepts `bash`, `zsh`, `fish`, `nushell`. Other recognized shells (`ash`, `ksh`, `dash`, `elvish`, `powershell`, `batch`) print a `# ocx shell init does not yet ship a prompt-hook snippet for this shell` placeholder.
 
 **Options**
 
-- `-h`, `--help`: Print help information.
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--shell <SHELL>` | `-s` | Target shell. Required. Accepts `bash`, `zsh`, `fish`, `nushell`. Other recognized shells (`ash`, `ksh`, `dash`, `elvish`, `powershell`, `batch`) print a `# ocx shell init does not yet ship a prompt-hook snippet for this shell` placeholder. |
+| `--help` | `-h` | Print help information. |
 
 **Exit codes**
 
@@ -1730,6 +1765,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [in-depth-project-running]: ../in-depth/project.md#running
 
 <!-- environment -->
+[env-ocx-global]: ./environment.md#ocx-global
 [env-no-color]: ./environment.md#external-no-color
 [env-clicolor]: ./environment.md#external-clicolor
 [env-clicolor-force]: ./environment.md#external-clicolor-force
