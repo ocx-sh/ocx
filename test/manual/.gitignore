@@ -9,3 +9,9 @@ packages/*/out/
 # or as a plain copy for packages with no variables). The source of truth
 # is `metadata.in.json`, which is committed.
 packages/*/metadata.json
+
+# Generated `bin/` payload trees scaffolded by scripts/_lib.sh
+# (scaffold_payloads). The committed multi-layer-app layer-base/layer-libs
+# `.so` stubs are NOT covered by these globs.
+packages/*/build/
+packages/multi-layer-app/layer-app/

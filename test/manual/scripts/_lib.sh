@@ -63,3 +63,72 @@ ocx_warn() {
 ocx_done() {
     printf '%s%s%s\n' "$OCX_C_DONE" "$*" "$OCX_C_RESET"
 }
+
+# Write an executable `bin/<name>` script under <pkg_root>/<src>. Body read
+# from stdin. Parents created; mode 0755.
+scaffold_bin() {
+    local dest="$1/bin/$2"
+    mkdir -p "$(dirname "$dest")"
+    cat >"$dest"
+    chmod 0755 "$dest"
+}
+
+# Materialize the per-package source trees `ocx package create` consumes.
+# These trees are NOT committed (only `metadata.in.json` and the
+# `multi-layer-app` `.so` layer stubs are) — they are generated build
+# artifacts, gitignored alongside `metadata.json` and `out/`. Idempotent:
+# every run overwrites. Arg: the `packages/` root.
+#
+# Each entrypoint resolves through the composed PATH to
+# `${installPath}/bin/<entry>`, so the dispatch target for entrypoint `X`
+# is `<src>/bin/X`.
+scaffold_payloads() {
+    local r="$1" t
+
+    scaffold_bin "$r/single-layer-hello/build" hello <<'EOF'
+#!/usr/bin/env bash
+echo "hello from single-layer-hello (HELLO_HOME=${HELLO_HOME:-unset})"
+EOF
+
+    for t in tool-a tool-b tool-c tool-d; do
+        scaffold_bin "$r/multi-entry-toolkit/build" "$t" <<'EOF'
+#!/usr/bin/env bash
+echo "multi-entry-toolkit: $(basename "$0")"
+EOF
+    done
+
+    scaffold_bin "$r/deps-leaf-a/build" leaf-a <<'EOF'
+#!/usr/bin/env bash
+echo "leaf-a (LEAF_A_HOME=${LEAF_A_HOME:-unset})"
+EOF
+
+    scaffold_bin "$r/deps-leaf-b/build" leaf-b <<'EOF'
+#!/usr/bin/env bash
+echo "leaf-b (LEAF_B_HOME=${LEAF_B_HOME:-unset})"
+EOF
+
+    # Interface dep leaf-a is on the composed PATH.
+    scaffold_bin "$r/deps-mid/build" mid <<'EOF'
+#!/usr/bin/env bash
+echo "mid (MID_HOME=${MID_HOME:-unset}) -> $(leaf-a)"
+EOF
+
+    # mid is interface (on PATH); leaf-b is private (NOT on PATH) — calling
+    # `leaf-b` here would fail by design, which is the visibility exercise.
+    scaffold_bin "$r/deps-app/build" app <<'EOF'
+#!/usr/bin/env bash
+echo "app (APP_HOME=${APP_HOME:-unset}) -> $(mid)"
+EOF
+
+    scaffold_bin "$r/cross-layer-entrypoint/build" wrap-leaf-a <<'EOF'
+#!/usr/bin/env bash
+echo "wrap-leaf-a -> $(leaf-a)"
+EOF
+
+    # multi-layer-app: layer-base/layer-libs ship committed `.so` stubs;
+    # only the layer-app entrypoint tree is generated.
+    scaffold_bin "$r/multi-layer-app/layer-app" myapp <<'EOF'
+#!/usr/bin/env bash
+echo "myapp from multi-layer-app"
+EOF
+}
