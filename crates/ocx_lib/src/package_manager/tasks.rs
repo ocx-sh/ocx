@@ -9,6 +9,7 @@ pub mod find_or_install;
 pub mod find_symlink;
 pub mod garbage_collection;
 pub mod hook;
+pub mod inspect;
 pub mod install;
 pub mod layer_staging;
 pub mod pull;

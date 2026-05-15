@@ -40,6 +40,20 @@ impl Metadata {
         }
     }
 
+    /// The bundle metadata format version.
+    pub fn version(&self) -> bundle::Version {
+        match self {
+            Metadata::Bundle(bundle) => bundle.version,
+        }
+    }
+
+    /// Number of leading path components stripped on extraction, if declared.
+    pub fn strip_components(&self) -> Option<u8> {
+        match self {
+            Metadata::Bundle(bundle) => bundle.strip_components,
+        }
+    }
+
     /// Returns the `entrypoints` field for bundle metadata, or `None` for non-bundle variants.
     ///
     /// Mirrors the pattern of `bundle_dependencies()` — returns `None` for

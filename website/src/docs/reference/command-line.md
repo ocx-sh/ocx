@@ -1587,6 +1587,93 @@ Without `--keep` or `--output`, the temp directory is deleted on any exit — su
 
 See the [testing locally guide][authoring-testing] for a full pre-push workflow example.
 
+#### `inspect` {#package-inspect}
+
+Inspects what sits at a package reference — read-only, nothing is installed and no symlinks are created. The output adapts to the reference shape:
+
+- **Default, image-index reference** (the usual multi-platform tag): lists the platform **candidates** — for each child manifest the platform, child digest, media type, and size. No metadata is loaded and no platform is selected.
+- **Default, single-manifest reference** (a flat tag or an `@digest` pointing directly at an image manifest): emits the declared **metadata** (bundle version, `strip_components`, env vars, dependencies, entrypoints). No resolution chain.
+- **`--resolve`**: platform-selects through the index, then emits metadata plus the OCI **resolution** chain.
+
+Unlike [`package test`][cmd-package-test], the identifier accepts an explicit `@digest` (a tag or digest both resolve).
+
+**Usage**
+
+```shell
+ocx package inspect [OPTIONS] <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier to inspect. Tag (`repo:tag`) or `@digest`.
+
+**Options**
+
+- `-p`, `--platform <PLATFORM>`: Platform to select. Applies **only** with `--resolve`; ignored in default mode (the candidate list always shows every platform).
+- `--resolve`: Platform-select through the index and emit metadata plus the resolution chain — the pinned identifier, the walk-order chain blob digests (index → platform manifest → config blob), and the platform-selected manifest's layer descriptors.
+- `-h`, `--help`: Print help information.
+
+Honors the global [`--offline`][arg-offline], [`--remote`][arg-remote], and [`--format`][arg-format] flags. JSON is the primary consumer surface.
+
+**JSON shape**
+
+Default, image index — candidate listing:
+
+```json
+{
+  "identifier": "registry/repo:tag",
+  "pinned_digest": "sha256:…",
+  "candidates": [
+    { "digest": "sha256:…", "platform": "linux/amd64", "media_type": "…", "size": 123 }
+  ]
+}
+```
+
+Default, single manifest (`@digest` or flat tag) — metadata only:
+
+```json
+{
+  "identifier": "registry/repo@sha256:…",
+  "pinned_digest": "sha256:…",
+  "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} }
+}
+```
+
+`--resolve` — platform-selected metadata + chain:
+
+```json
+{
+  "identifier": "registry/repo:tag",
+  "pinned_digest": "sha256:…",
+  "platforms": ["linux/amd64"],
+  "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} },
+  "resolution": {
+    "pinned": "registry/repo:tag@sha256:…",
+    "chain": ["sha256:…", "sha256:…"],
+    "layers": [{ "digest": "sha256:…", "media_type": "…", "size": 123 }]
+  }
+}
+```
+
+**Examples**
+
+```shell
+# List the platforms a multi-platform tag offers.
+ocx --format json package inspect mytool:1.0.0 | jq .candidates
+
+# Inspect one platform child by digest (same repo, online or cached).
+ocx package inspect mytool@sha256:abc…
+
+# Platform-select and include the OCI resolution chain.
+ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq .resolution
+```
+
+**Exit codes**
+
+- `79` (`NotFound`) — the tag or digest does not resolve.
+- `81` (`OfflineBlocked`) — `--offline` and the manifest or config blob is absent from the local cache.
+- `65` (`DataError`) — the resolved metadata is malformed or fails validation.
+
 #### `describe` {#package-describe}
 
 Pushes package description metadata (title, description, keywords, README, logo) to the registry.
@@ -1679,8 +1766,14 @@ ocx package info [OPTIONS] <IDENTIFIER>
 
 <!-- commands (package-test options) -->
 [cmd-package-push]: #package-push
+[cmd-package-test]: #package-test
 [cmd-exec-self]: #exec
 [cmd-exec-clean]: #exec
+
+<!-- global flags (package-inspect) -->
+[arg-offline]: #arg-offline
+[arg-remote]: #arg-remote
+[arg-format]: #arg-format
 
 <!-- authoring -->
 [authoring-testing]: ../authoring/testing.md
