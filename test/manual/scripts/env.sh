@@ -33,5 +33,5 @@ Configured environment for manual testing with local registry:
 registry  : ${OCX_DEFAULT_REGISTRY} (insecure)
 OCX_HOME  : ${OCX_HOME}
 
-tip: run \`ocx index update\` after publishing if you want \`ocx find\` lookups to work.
+tip: run \`ocx index update\` after publishing if you want \`ocx which\` lookups to work.
 EOF

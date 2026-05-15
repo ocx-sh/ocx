@@ -6,7 +6,7 @@ outline: deep
 This guide walks through the core ocx workflow — from running your first package to managing multiple versions. It assumes ocx is [already installed][installation]. Each section builds on the previous one, but they can be read independently.
 
 ::: tip First-time setup
-On a fresh install, your [local index][fs-index] is empty — ocx won't find any packages. Pass `--remote` to query the registry directly. Once a package is installed, commands that operate on it ([`find`][cmd-find], [`select`][cmd-select], [`env`][cmd-env], [`exec`][cmd-exec]) work without the flag. To populate your local index for browsing and offline use, run [`ocx index update`][cmd-index-update] with the packages you need.
+On a fresh install, your [local index][fs-index] is empty — ocx won't find any packages. Pass `--remote` to query the registry directly. Once a package is installed, commands that operate on it ([`which`][cmd-which], [`select`][cmd-select], [`env`][cmd-env], [`exec`][cmd-exec]) work without the flag. To populate your local index for browsing and offline use, run [`ocx index update`][cmd-index-update] with the packages you need.
 :::
 
 ## Quick Start {#quick-start}
@@ -51,10 +51,10 @@ ocx --remote install uv:0.10
 
 <Terminal src="/casts/install.cast" title="Installing a package" collapsed />
 
-Once installed, [`ocx find --candidate`][cmd-find] returns the stable candidate path without re-resolving the package — useful for embedding in build scripts, IDE configs, or CI pipelines that need a fixed path pinned to a specific version:
+Once installed, [`ocx which --candidate`][cmd-which] returns the stable candidate path without re-resolving the package — useful for embedding in build scripts, IDE configs, or CI pipelines that need a fixed path pinned to a specific version:
 
 ```sh
-ocx find --candidate uv:0.10
+ocx which --candidate uv:0.10
 ```
 
 <Terminal src="/casts/find-candidate.cast" title="Finding an installed package" collapsed />
@@ -84,7 +84,7 @@ Installing a package creates a candidate path that includes the tag: `candidates
 
 ```sh
 ocx --remote install --select corretto:21
-ocx find --current corretto
+ocx which --current corretto
 ```
 
 <Terminal src="/casts/install-select.cast" title="Installing and selecting a version" collapsed />
@@ -220,7 +220,7 @@ Environment variables and CLI flags always override config values. For full deta
 [cmd-add]: ./reference/command-line.md#add
 [cmd-run]: ./reference/command-line.md#run
 [cmd-install]: ./reference/command-line.md#install
-[cmd-find]: ./reference/command-line.md#find
+[cmd-which]: ./reference/command-line.md#which
 [cmd-exec]: ./reference/command-line.md#exec
 [cmd-env]: ./reference/command-line.md#env
 [cmd-select]: ./reference/command-line.md#select

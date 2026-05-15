@@ -257,7 +257,7 @@ def test_package_without_deps_works(published_package: PackageInfo, ocx: OcxRunn
     result = ocx.json("install", "--select", published_package.short)
     assert result is not None
 
-    find_result = ocx.json("find", published_package.short)
+    find_result = ocx.json("which", published_package.short)
     assert find_result is not None
 
 
@@ -268,7 +268,7 @@ def test_package_without_deps_works(published_package: PackageInfo, ocx: OcxRunn
 
 def _find_package_root(ocx: OcxRunner, pkg: PackageInfo) -> Path:
     """Return the package root for an installed package."""
-    result = ocx.json("find", pkg.short)
+    result = ocx.json("which", pkg.short)
     return Path(result[pkg.short])
 
 
@@ -1338,10 +1338,10 @@ def _find_object_dir(ocx: OcxRunner, reg_slug: str, repo: str) -> Path:
     Package dirs are sharded by registry + digest only (no repo in the path),
     so ``find`` is the authoritative way to resolve a repo name to a package
     root. For transitive deps (not installed directly and thus without an
-    install symlink) we fall back to the bare repo name so ``ocx find``
+    install symlink) we fall back to the bare repo name so ``ocx which``
     resolves via the local index.
     """
-    find_result = ocx.json("find", repo)
+    find_result = ocx.json("which", repo)
     key = next(iter(find_result))
     package_root = Path(find_result[key]).resolve()
     assert (package_root / "content").is_dir(), (
@@ -1434,7 +1434,7 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
     path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
 
     # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
-    b_find = ocx.json("find", pkg_b.short)
+    b_find = ocx.json("which", pkg_b.short)
     b_pkg_root = str(Path(next(iter(b_find.values()))))
 
     assert not any(v.startswith(b_pkg_root) and "entrypoints" in v for v in path_values), (

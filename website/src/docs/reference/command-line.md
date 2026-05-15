@@ -235,7 +235,7 @@ esac
 ### `--candidate` / `--current` {#path-resolution}
 
 The `--candidate` and `--current` flags are available on commands that resolve a package's
-location on disk, for example [`env`](#env), [`find`](#find), or [`shell env`](#shell-env).
+location on disk, for example [`env`](#env), [`which`](#which), or [`shell env`](#shell-env).
 
 Every mode returns a **package root** — the directory that contains the package's `content/` and
 `entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package
@@ -534,7 +534,7 @@ On Unix, `ocx exec` hands the current process image off to the target via `execv
 | 0 | Command exited successfully (`exec` propagates the wrapped command's exit code). |
 | _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
 
-### `find` {#find}
+### `which` {#which}
 
 Resolves one or more packages and prints their package root paths.
 
@@ -547,7 +547,7 @@ No downloading is performed — the package must already be installed.
 **Usage**
 
 ```shell
-ocx find [OPTIONS] <PACKAGE>...
+ocx which [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
@@ -564,7 +564,7 @@ ocx find [OPTIONS] <PACKAGE>...
 Use `--format json` with `jq` to embed the path in a script:
 
 ```shell
-cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
+cmake_root=$(ocx which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 ```
 :::
 
@@ -1469,7 +1469,7 @@ ocx package pull [OPTIONS] <PACKAGE>...
 
 ::: tip
 `package pull` reports the package root for each package — the same
-digest-derived directory that [`find`](#find) and [`exec`](#exec) resolve to.
+digest-derived directory that [`which`](#which) and [`exec`](#exec) resolve to.
 The package root contains `content/` and `entrypoints/` as siblings; consumers
 traverse one level in. Two pulls of the same digest are safe to run concurrently.
 

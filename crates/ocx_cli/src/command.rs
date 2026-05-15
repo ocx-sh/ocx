@@ -13,7 +13,6 @@ pub mod deps;
 pub mod deselect;
 pub mod env;
 pub mod exec;
-pub mod find;
 pub mod generate;
 pub mod generate_direnv;
 pub mod index;
@@ -48,6 +47,7 @@ pub mod shell_init;
 pub mod uninstall;
 pub mod upgrade;
 pub mod version;
+pub mod which;
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -63,7 +63,7 @@ pub enum Command {
     /// Remove the current-version symlink for one or more packages.
     Deselect(deselect::Deselect),
     /// Resolve packages and print their content directory paths.
-    Find(find::Find),
+    Which(which::Which),
     /// Generate scaffolding files for project integration (e.g. direnv).
     #[command(subcommand)]
     Generate(generate::Generate),
@@ -118,7 +118,7 @@ impl Command {
             Command::Clean(clean) => clean.execute(context).await,
             Command::Deps(deps) => deps.execute(context).await,
             Command::Deselect(deselect) => deselect.execute(context).await,
-            Command::Find(find) => find.execute(context).await,
+            Command::Which(which) => which.execute(context).await,
             Command::Generate(generate) => generate.execute(context).await,
             Command::Index(index) => index.execute(context).await,
             Command::Info(info) => info.execute(context).await,
