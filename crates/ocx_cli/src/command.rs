@@ -46,7 +46,7 @@ pub mod shell_env;
 pub mod shell_hook;
 pub mod shell_init;
 pub mod uninstall;
-pub mod update;
+pub mod upgrade;
 pub mod version;
 
 #[derive(Subcommand)]
@@ -85,7 +85,7 @@ pub enum Command {
     /// Remove an installed candidate for one or more packages.
     Uninstall(uninstall::Uninstall),
     /// Re-resolve advisory tags and rewrite ocx.lock for one or more tools.
-    Update(update::Update),
+    Upgrade(upgrade::Upgrade),
     /// Runs installed packages.
     Exec(exec::Exec),
     /// Print resolved environment variables for one or more packages.
@@ -128,7 +128,7 @@ impl Command {
             Command::Login(login) => login.execute(context).await,
             Command::Logout(logout) => logout.execute(context).await,
             Command::Uninstall(uninstall) => uninstall.execute(context).await,
-            Command::Update(update) => update.execute(context).await,
+            Command::Upgrade(upgrade) => upgrade.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,
             Command::Env(env) => env.execute(context).await,
             Command::Launcher(launcher) => launcher.execute(context).await,

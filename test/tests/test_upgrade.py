@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for ``ocx update`` (plan Phase 5).
+"""Acceptance tests for ``ocx upgrade`` (plan Phase 5).
 
 Tests trace one-to-one to the four spec bullets in plan Phase 5:
 
-1. ``ocx update cmake``               — only the ``cmake`` entry changes
-2. ``ocx update`` (no args)           — full re-resolution, equivalent to ``ocx lock``
-3. ``ocx update nonexistent``         — ``NotFound`` (79), no lock written
-4. ``ocx update --group ci``          — only ci-group tools change
+1. ``ocx upgrade cmake``               — only the ``cmake`` entry changes
+2. ``ocx upgrade`` (no args)           — full re-resolution, equivalent to ``ocx lock``
+3. ``ocx upgrade nonexistent``         — ``NotFound`` (79), no lock written
+4. ``ocx upgrade --group ci``          — only ci-group tools change
 
 Specification mode (contract-first TDD)
 ---------------------------------------
 All tests run against the current Phase 5 stub. Both the CLI command
-(``command/update.rs``) and the library helper
+(``command/upgrade.rs``) and the library helper
 (``project/resolve.rs::resolve_lock_partial``) call ``unimplemented!()``.
 Every test is therefore expected to FAIL against the stub — the
 contract they encode is the Phase 5 implementation target.
@@ -48,7 +48,7 @@ def _run_lock(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedPro
 
 def _run_update(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        _ocx_cmd(ocx, "update", *extra),
+        _ocx_cmd(ocx, "upgrade", *extra),
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -96,14 +96,14 @@ def _generated_at(lock_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. ``ocx update <name>`` — only the named entry changes
+# 1. ``ocx upgrade <name>`` — only the named entry changes
 # ---------------------------------------------------------------------------
 
 
 def test_update_named_tool_rewrites_only_that_entry(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx update a`` after swapping ``a``'s tag → only ``a``'s pinned
+    """``ocx upgrade a`` after swapping ``a``'s tag → only ``a``'s pinned
     digest changes; ``b``'s entry stays byte-identical to the prior lock.
     """
     short = uuid4().hex[:8]
@@ -132,7 +132,7 @@ b = "{ocx.registry}/{repo_b}:1.0.0"
     initial_b = _pinned_for(initial_text, "b")
     assert initial_a is not None and initial_b is not None
 
-    # Swap 'a' tag in ocx.toml then run `ocx update a`.
+    # Swap 'a' tag in ocx.toml then run `ocx upgrade a`.
     _write_ocx_toml(
         project,
         f"""\
@@ -144,7 +144,7 @@ b = "{ocx.registry}/{repo_b}:1.0.0"
 
     result = _run_update(ocx, project, "a")
     assert result.returncode == EXIT_SUCCESS, (
-        f"ocx update a failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+        f"ocx upgrade a failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
 
     after_text = _read_lock_text(project)
@@ -152,19 +152,19 @@ b = "{ocx.registry}/{repo_b}:1.0.0"
     after_b = _pinned_for(after_text, "b")
     assert after_a is not None and after_b is not None
 
-    assert after_a != initial_a, "'a' digest must change after `ocx update a`"
+    assert after_a != initial_a, "'a' digest must change after `ocx upgrade a`"
     assert after_b == initial_b, "'b' digest must be unchanged when not selected"
 
 
 # ---------------------------------------------------------------------------
-# 2. ``ocx update`` (no args) — full re-resolution, equivalent to ``ocx lock``
+# 2. ``ocx upgrade`` (no args) — full re-resolution, equivalent to ``ocx lock``
 # ---------------------------------------------------------------------------
 
 
 def test_update_no_args_full_resolution_equivalent_to_lock(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx update`` with no args on an unchanged ``ocx.toml`` → produces
+    """``ocx upgrade`` with no args on an unchanged ``ocx.toml`` → produces
     a byte-identical lock to a fresh ``ocx lock`` run from scratch.
     """
     short = uuid4().hex[:8]
@@ -190,19 +190,19 @@ b = "{ocx.registry}/{repo_b}:2.0.0"
     initial_pinned = sorted(_PINNED_RE.findall(initial_text))
     initial_hash = _declaration_hash(initial_text)
 
-    # `ocx update` (no args) re-resolves everything against the same
+    # `ocx upgrade` (no args) re-resolves everything against the same
     # ocx.toml — every digest must match the initial lock and the
     # declaration_hash must be unchanged.
     result = _run_update(ocx, project)
     assert result.returncode == EXIT_SUCCESS, (
-        f"ocx update failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+        f"ocx upgrade failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     after_text = _read_lock_text(project)
     after_pinned = sorted(_PINNED_RE.findall(after_text))
     after_hash = _declaration_hash(after_text)
 
     assert after_pinned == initial_pinned, (
-        "no-args `ocx update` must keep every tool's pinned digest equal to `ocx lock`"
+        "no-args `ocx upgrade` must keep every tool's pinned digest equal to `ocx lock`"
     )
     assert after_hash == initial_hash, (
         "declaration_hash must be unchanged when ocx.toml has not changed"
@@ -210,14 +210,14 @@ b = "{ocx.registry}/{repo_b}:2.0.0"
 
 
 # ---------------------------------------------------------------------------
-# 3. ``ocx update <unknown>`` — exit 79, no lock changes
+# 3. ``ocx upgrade <unknown>`` — exit 79, no lock changes
 # ---------------------------------------------------------------------------
 
 
 def test_update_unknown_binding_exits_79_no_lock_change(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx update nonexistent`` when ``nonexistent`` is not declared in
+    """``ocx upgrade nonexistent`` when ``nonexistent`` is not declared in
     ``ocx.toml`` → exit 79 (NotFound); the existing ``ocx.lock`` is left
     untouched (byte-identical).
     """
@@ -251,14 +251,14 @@ tool = "{ocx.registry}/{repo}:1.0.0"
 
 
 # ---------------------------------------------------------------------------
-# 4. ``ocx update --group ci`` — only ci-group tools change
+# 4. ``ocx upgrade --group ci`` — only ci-group tools change
 # ---------------------------------------------------------------------------
 
 
 def test_update_check_succeeds_on_current(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx update --check`` exits 0 without writing when the candidate
+    """``ocx upgrade --check`` exits 0 without writing when the candidate
     lock matches the predecessor.
     """
     short = uuid4().hex[:8]
@@ -280,17 +280,17 @@ tool = "{ocx.registry}/{repo}:1.0.0"
 
     result = _run_update(ocx, project, "--check")
     assert result.returncode == EXIT_SUCCESS, (
-        f"ocx update --check must exit 0 on a current lock; "
+        f"ocx upgrade --check must exit 0 on a current lock; "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     after = (project / "ocx.lock").read_bytes()
-    assert before == after, "ocx update --check must NOT rewrite ocx.lock"
+    assert before == after, "ocx upgrade --check must NOT rewrite ocx.lock"
 
 
 def test_update_check_exits_65_on_subset_drift(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx update --check`` exits 65 (DataError) without writing when
+    """``ocx upgrade --check`` exits 65 (DataError) without writing when
     an advisory tag has moved upstream — even though ``ocx.toml`` is
     byte-identical to the lock's recorded ``declaration_hash``.
     """
@@ -325,19 +325,19 @@ mover = "{ocx.registry}/{repo}:latest"
 
     result = _run_update(ocx, project, "--check")
     assert result.returncode == 65, (
-        f"ocx update --check must exit 65 when an advisory tag moved; "
+        f"ocx upgrade --check must exit 65 when an advisory tag moved; "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     after_lock = (project / "ocx.lock").read_bytes()
     assert before_lock == after_lock, (
-        "ocx update --check must NOT rewrite ocx.lock when refusing"
+        "ocx upgrade --check must NOT rewrite ocx.lock when refusing"
     )
 
 
 def test_update_group_filter_only_changes_named_group(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx update --group ci`` after swapping a ci-group tool's tag →
+    """``ocx upgrade --group ci`` after swapping a ci-group tool's tag →
     that ci-group entry's digest changes; the default-group entry stays
     byte-identical.
     """
@@ -385,7 +385,7 @@ citool = "{ocx.registry}/{repo_ci}:2.0.0"
 
     result = _run_update(ocx, project, "--group", "ci")
     assert result.returncode == EXIT_SUCCESS, (
-        f"ocx update --group ci failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+        f"ocx upgrade --group ci failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
 
     after_text = _read_lock_text(project)
@@ -394,7 +394,7 @@ citool = "{ocx.registry}/{repo_ci}:2.0.0"
     assert after_def is not None and after_ci is not None
 
     assert after_ci != initial_ci, (
-        "citool digest must change after `ocx update --group ci`"
+        "citool digest must change after `ocx upgrade --group ci`"
     )
     assert after_def == initial_def, (
         "defaulttool digest must be unchanged when not selected by --group"

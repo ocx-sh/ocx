@@ -16,7 +16,7 @@ The CLI surface splits into six rows. The split is firm — a command does not c
 | Row | Commands | Input symbols | Input | Output |
 |-----|----------|---------------|-------|--------|
 | **High-level read** | `pull`, `run` | Binding names (TOML keys) | `ocx.toml` + `ocx.lock` | Cache warm / child spawn |
-| **Project mutators** | `add`, `remove`, `lock`, `update` | OCI identifier in → binding name written | `ocx.toml` + `ocx.lock` | Writes `ocx.toml` and/or `ocx.lock` |
+| **Project mutators** | `add`, `remove`, `lock`, `upgrade` | OCI identifier in → binding name written | `ocx.toml` + `ocx.lock` | Writes `ocx.toml` and/or `ocx.lock` |
 | **Shell activation** | `shell hook`, `shell direnv`, `shell init` | Binding names (resolved to installed paths) | Nearest `ocx.toml` + install store | Shell export lines |
 | **Bootstrap / mixed** | `init`, `info`, `version`, `shell completion` | Varies | Varies | No tier contract |
 | **Low-level — registry** | `install`, `login`, `logout`, `uninstall`, `package pull/push/describe/info/create`, `index update/list/catalog` | OCI identifiers | Registry + local index | Install store / index |

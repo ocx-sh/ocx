@@ -23,7 +23,7 @@ use crate::app::project_context::load_project_for_mutate;
 /// already present in `ocx.lock`. Fully transactional — on any
 /// resolution failure nothing is written.
 #[derive(Parser, Clone)]
-pub struct Update {
+pub struct Upgrade {
     /// Restrict re-resolution to the named group(s).
     ///
     /// Repeatable and comma-separated: `-g ci,lint -g release`. The
@@ -52,7 +52,7 @@ pub struct Update {
     pub check: bool,
 }
 
-impl Update {
+impl Upgrade {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Pre-validate empty `--group` segments before any I/O.
         for raw in &self.groups {
@@ -103,7 +103,7 @@ impl Update {
                 None => {
                     return Err(CommandError::new(
                         format!(
-                            "ocx.lock not found at {}; run `ocx lock` to create it before updating a subset",
+                            "ocx.lock not found at {}; run `ocx lock` to create it before upgrading a subset",
                             guard.lock_path().display()
                         ),
                         cli::ExitCode::ConfigError,
@@ -160,7 +160,7 @@ impl Update {
             if !lock_content_matches(&new_lock, prev) {
                 return Err(CommandError::new(
                     "ocx.lock candidate would change pinned content; \
-                     re-run `ocx update` (without --check) to refresh the lock.",
+                     re-run `ocx upgrade` (without --check) to refresh the lock.",
                     cli::ExitCode::DataError,
                 )
                 .into());
@@ -192,7 +192,7 @@ impl Update {
 /// metadata (declaration_hash, lock_version, declaration_hash_version).
 /// Advisory metadata (`generated_at`, `generated_by`) is ignored.
 ///
-/// Used by the `update --check` verify-only path: a candidate that
+/// Used by the `upgrade --check` verify-only path: a candidate that
 /// resolves to a different digest for any selected or preserved entry
 /// must surface as `DataError` (exit 65) without writing.
 fn lock_content_matches(candidate: &ProjectLock, prev: &ProjectLock) -> bool {
