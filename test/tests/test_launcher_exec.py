@@ -52,7 +52,7 @@ def test_launcher_exec_success(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=["hello"],
         bins=["hello"],
     )
     ocx.plain("install", pkg.short)
@@ -79,7 +79,7 @@ def test_launcher_exec_forwards_args(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=["hello"],
         bins=["hello"],
     )
     ocx.plain("install", pkg.short)

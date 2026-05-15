@@ -16,7 +16,7 @@
       "visibility": "public"
     }
   ],
-  "entrypoints": [
-    { "name": "leaf-b", "target": "${installPath}/bin/leaf-b" }
-  ]
+  "entrypoints": {
+    "leaf-b": {}
+  }
 }

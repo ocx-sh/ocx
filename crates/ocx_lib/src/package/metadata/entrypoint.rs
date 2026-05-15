@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,7 @@ impl TryFrom<String> for EntrypointName {
     type Error = EntrypointError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
+        // Length checked first to avoid running the regex on pathologically long input.
         if value.len() > Self::MAX_LEN {
             return Err(EntrypointError::InvalidName { name: value });
         }
@@ -68,6 +70,12 @@ impl std::fmt::Display for EntrypointName {
     }
 }
 
+impl std::borrow::Borrow<str> for EntrypointName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 impl<'de> Deserialize<'de> for EntrypointName {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -95,62 +103,72 @@ impl schemars::JsonSchema for EntrypointName {
 
 /// A single named entrypoint for a package.
 ///
-/// Declares a named launcher that `ocx install` generates at install time.
-/// The launcher re-enters via `ocx launcher exec '<package-root>' -- <argv0> [args...]`,
-/// preserving clean-env execution semantics. The launcher resolves `<argv0>`
-/// against the composed `PATH` from the package's `env` block.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct Entrypoint {
-    /// The name users will invoke (e.g. `"cmake"`). Must match `^[a-z0-9][a-z0-9_-]*$`.
-    pub name: EntrypointName,
-}
+/// The map key in [`Entrypoints`] supplies the name; this struct holds the
+/// per-entry value. It is intentionally empty today — kept as a struct (not
+/// a unit type) so future per-entry fields (aliases, description, platform
+/// gating) land here without a wire-format break.
+///
+/// The launcher generated for each entry re-enters via
+/// `ocx launcher exec '<package-root>' -- <name> [args...]`, preserving
+/// clean-env execution semantics. The launcher resolves `<name>` against the
+/// composed `PATH` from the package's `env` block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Entrypoint {}
 
-/// Ordered, uniqueness-validated list of entrypoints for a package.
+/// Map of entrypoint names to entrypoint definitions for a package.
 ///
-/// Serializes as a JSON array (transparent wrapper over `Vec<Entrypoint>`).
-/// `#[serde(default)]` means an absent `entrypoints` field deserializes
-/// to an empty list; `skip_serializing_if = "Entrypoints::is_empty"` means an
-/// empty list is omitted on serialization (additive-optional, forward-compat).
+/// Serializes as a JSON object keyed by entrypoint name (e.g.
+/// `{"cmake": {}, "ctest": {}}`). The map shape mirrors the Cargo
+/// `[dependencies.X]`, Compose `services:`, and GitHub Actions `jobs:`
+/// idioms — uniqueness within a package is given by JSON object key
+/// semantics.
 ///
-/// Deserialization enforces uniqueness via [`Entrypoints::new`] — duplicate
-/// names are rejected with a descriptive error.
-#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
-#[serde(transparent)]
+/// `#[serde(default)]` on the containing field means an absent
+/// `entrypoints` field deserializes to an empty map;
+/// `skip_serializing_if = "Entrypoints::is_empty"` means an empty map is
+/// omitted on serialization (additive-optional, forward-compat).
+///
+/// Deserialization uses a custom `MapAccess` visitor that rejects duplicate
+/// keys with [`EntrypointError::DuplicateName`]. The `serde_json` default of
+/// silently last-wins on duplicate keys is unsafe for a registry where
+/// duplicate names indicate publisher error.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entrypoints {
-    entries: Vec<Entrypoint>,
-}
-
-impl<'de> Deserialize<'de> for Entrypoints {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let entries = Vec::<Entrypoint>::deserialize(deserializer)?;
-        Entrypoints::new(entries).map_err(serde::de::Error::custom)
-    }
+    entries: BTreeMap<EntrypointName, Entrypoint>,
 }
 
 impl Entrypoints {
-    /// Constructs a validated `Entrypoints`, rejecting duplicate names.
+    /// Constructs an `Entrypoints` from a name-keyed map.
     ///
-    /// Each [`Entrypoint`] is already name-validated by the time it reaches this
-    /// constructor: [`EntrypointName`] enforces the slug regex on construction
-    /// (and on deserialization), so the only remaining invariant to check here
-    /// is uniqueness across the collection.
+    /// Uniqueness is given by `BTreeMap` key semantics; this constructor is
+    /// infallible. The custom `Deserialize` impl is the only path that can
+    /// observe duplicate keys (raw JSON), and it surfaces them as
+    /// [`EntrypointError::DuplicateName`].
+    pub fn new(entries: BTreeMap<EntrypointName, Entrypoint>) -> Self {
+        Self { entries }
+    }
+
+    /// Convenience constructor for tests that pass known-valid name literals.
     ///
-    /// # Errors
-    ///
-    /// - [`EntrypointError::DuplicateName`] if two entries share the same name.
-    pub fn new(entries: Vec<Entrypoint>) -> Result<Self, EntrypointError> {
-        let mut seen: HashSet<String> = HashSet::new();
-        for entry in &entries {
-            if !seen.insert(entry.name.0.clone()) {
-                return Err(EntrypointError::DuplicateName {
-                    name: entry.name.0.clone(),
-                });
-            }
-        }
-        Ok(Self { entries })
+    /// Each name is validated by [`EntrypointName::try_from`]. Panics on an
+    /// invalid name — callers must pass slug-valid literals. This is acceptable
+    /// here because all callers are test helpers constructing compile-time
+    /// constants; invalid input is a programming error, not a runtime condition.
+    #[cfg(test)]
+    pub(crate) fn from_names<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let entries = names
+            .into_iter()
+            .map(|s| {
+                let name =
+                    EntrypointName::try_from(s.as_ref()).expect("from_names: caller must pass a valid slug name");
+                (name, Entrypoint::default())
+            })
+            .collect();
+        Self { entries }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -161,19 +179,100 @@ impl Entrypoints {
         self.entries.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Entrypoint> {
+    /// Iterates `(name, entry)` pairs in name-sorted order.
+    pub fn iter(&self) -> impl Iterator<Item = (&EntrypointName, &Entrypoint)> + use<'_> {
         self.entries.iter()
+    }
+
+    /// Iterates declared entrypoint names in name-sorted order.
+    pub fn names(&self) -> impl Iterator<Item = &EntrypointName> + use<'_> {
+        self.entries.keys()
     }
 }
 
-/// Errors that can occur when constructing or validating [`Entrypoints`].
+impl Serialize for Entrypoints {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.entries.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Entrypoints {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct MapVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for MapVisitor {
+            type Value = Entrypoints;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map of entrypoint name to entrypoint definition")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Entrypoints, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut entries: BTreeMap<EntrypointName, Entrypoint> = BTreeMap::new();
+                while let Some(key) = map.next_key::<EntrypointName>()? {
+                    let value: Entrypoint = map.next_value()?;
+                    // serde_json's default behaviour silently last-wins on
+                    // duplicate keys. Reject them so publishers see the
+                    // mistake rather than a silently dropped entry.
+                    match entries.entry(key) {
+                        Entry::Occupied(occ) => {
+                            return Err(serde::de::Error::custom(EntrypointError::DuplicateName {
+                                name: occ.key().0.clone(),
+                            }));
+                        }
+                        Entry::Vacant(vac) => {
+                            vac.insert(value);
+                        }
+                    }
+                }
+                Ok(Entrypoints { entries })
+            }
+        }
+
+        deserializer.deserialize_map(MapVisitor)
+    }
+}
+
+impl schemars::JsonSchema for Entrypoints {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Entrypoints")
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let value_schema = generator.subschema_for::<Entrypoint>();
+        schemars::json_schema!({
+            "type": "object",
+            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object is reserved for per-entry fields (currently always empty).",
+            "additionalProperties": value_schema,
+            "propertyNames": {
+                "pattern": SLUG_PATTERN_STR,
+                "maxLength": SLUG_MAX_LEN
+            }
+        })
+    }
+}
+
+/// Errors that can occur when validating entrypoint metadata.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EntrypointError {
-    /// An entrypoint name fails the slug regex `^[a-z0-9][a-z0-9_-]*$`.
-    #[error("invalid entrypoint name '{name}': must match ^[a-z0-9][a-z0-9_-]*$")]
+    /// An entrypoint name fails the slug regex `^[a-z0-9][a-z0-9_-]*$`
+    /// or exceeds [`EntrypointName::MAX_LEN`].
+    // The literal `64` must stay in sync with `EntrypointName::MAX_LEN` (= slug::SLUG_MAX_LEN);
+    // serde/thiserror `#[error]` attributes cannot interpolate a const at compile time.
+    #[error("invalid entrypoint name '{name}': must match ^[a-z0-9][a-z0-9_-]*$ (max 64 chars)")]
     InvalidName { name: String },
-    /// Two entrypoints share the same name.
+    /// A JSON object contains the same entrypoint name twice. Surfaced by
+    /// the custom [`Entrypoints`] deserializer.
     #[error("duplicate entrypoint name '{name}'")]
     DuplicateName { name: String },
 }
@@ -182,7 +281,15 @@ pub enum EntrypointError {
 mod tests {
     use super::*;
 
-    // ── 3.1 EntrypointName slug validation ─────────────────────────────────
+    fn ep_name(s: &str) -> EntrypointName {
+        EntrypointName::try_from(s).unwrap()
+    }
+
+    fn map_of(names: &[&str]) -> BTreeMap<EntrypointName, Entrypoint> {
+        names.iter().map(|n| (ep_name(n), Entrypoint::default())).collect()
+    }
+
+    // ── EntrypointName slug validation ────────────────────────────────────
 
     #[test]
     fn name_accepts_simple_lowercase() {
@@ -211,25 +318,19 @@ mod tests {
     }
 
     #[test]
-    fn name_rejects_leading_digit() {
-        // Slug pattern requires starting char to be [a-z0-9] but the regex
-        // is ^[a-z0-9][a-z0-9_-]*$ which DOES allow a leading digit.
-        // ADR §1 says "slug regex reused from dependency.rs:12-13" which is
-        // ^[a-z0-9][a-z0-9_-]*$. So leading digit IS allowed per the ADR contract.
-        // This test confirms leading-digit names are ACCEPTED (not rejected).
+    fn name_accepts_leading_digit() {
+        // Slug pattern ^[a-z0-9][a-z0-9_-]*$ allows a leading digit.
         assert!(EntrypointName::try_from("1abc").is_ok());
     }
 
     #[test]
     fn name_rejects_leading_underscore() {
-        // Underscore is not in the leading character class [a-z0-9]
         let err = EntrypointName::try_from("_cmake").unwrap_err();
         assert!(matches!(err, EntrypointError::InvalidName { .. }));
     }
 
     #[test]
     fn name_rejects_leading_dash() {
-        // Dash is not in the leading character class [a-z0-9]
         let err = EntrypointName::try_from("-cmake").unwrap_err();
         assert!(matches!(err, EntrypointError::InvalidName { .. }));
     }
@@ -254,156 +355,147 @@ mod tests {
 
     #[test]
     fn name_accepts_64_char_slug() {
-        // Plan §3.13 (F.3): names exactly at `MAX_LEN = 64` must remain accepted.
         let at_cap: String = "a".repeat(EntrypointName::MAX_LEN);
-        assert!(
-            EntrypointName::try_from(at_cap.as_str()).is_ok(),
-            "64-char slug at the cap must be accepted",
-        );
+        assert!(EntrypointName::try_from(at_cap.as_str()).is_ok());
     }
 
-    #[test]
-    fn name_rejects_70_char_slug_at_boundary() {
-        // Plan §3.13 (F.3): names longer than the documented `MAX_LEN = 64` cap
-        // must be rejected. A 70-character all-`a` slug exceeds the cap and
-        // currently passes (no length check); after F.3 lands, this assertion
-        // holds.
-        let long_name: String = "a".repeat(70);
-        let err = EntrypointName::try_from(long_name.as_str()).unwrap_err();
-        assert!(
-            matches!(err, EntrypointError::InvalidName { .. }),
-            "70-char slug must be rejected as InvalidName, got: {err:?}",
-        );
-    }
-
-    /// Plan §3.13 (F.3): boundary test at MAX_LEN+1 = 65. A 64-char name must
-    /// remain accepted; the first character past the cap (65 chars) must be
-    /// rejected. Currently no length cap exists, so 65 chars is accepted —
-    /// this test fails until F.3 introduces the cap.
     #[test]
     fn name_rejects_65_char_slug() {
-        let at_cap: String = "a".repeat(64);
-        assert!(
-            EntrypointName::try_from(at_cap.as_str()).is_ok(),
-            "64-char slug at the cap must remain accepted",
-        );
-        let over_cap: String = "a".repeat(65);
-        let err = EntrypointName::try_from(over_cap.as_str()).expect_err("65-char slug must be rejected");
-        assert!(
-            matches!(err, EntrypointError::InvalidName { .. }),
-            "65-char slug must surface as InvalidName, got: {err:?}",
-        );
+        let over_cap: String = "a".repeat(EntrypointName::MAX_LEN + 1);
+        let err = EntrypointName::try_from(over_cap.as_str()).unwrap_err();
+        assert!(matches!(err, EntrypointError::InvalidName { .. }));
     }
 
-    // ── 3.1 Entrypoints::new duplicate-name uniqueness ─────────────────────
+    // ── Entrypoints constructor ───────────────────────────────────────────
 
     #[test]
     fn entrypoints_new_accepts_unique_names() {
-        let entries = vec![
-            Entrypoint {
-                name: EntrypointName::try_from("cmake").unwrap(),
-            },
-            Entrypoint {
-                name: EntrypointName::try_from("ctest").unwrap(),
-            },
-        ];
-        assert!(Entrypoints::new(entries).is_ok());
-    }
-
-    #[test]
-    fn entrypoints_new_rejects_duplicate_name() {
-        let entries = vec![
-            Entrypoint {
-                name: EntrypointName::try_from("cmake").unwrap(),
-            },
-            Entrypoint {
-                name: EntrypointName::try_from("cmake").unwrap(),
-            },
-        ];
-        let err = Entrypoints::new(entries).unwrap_err();
-        assert!(matches!(err, EntrypointError::DuplicateName { name } if name == "cmake"));
+        let eps = Entrypoints::new(map_of(&["cmake", "ctest"]));
+        assert_eq!(eps.len(), 2);
+        assert!(!eps.is_empty());
     }
 
     #[test]
     fn entrypoints_new_accepts_empty() {
-        let ep = Entrypoints::new(vec![]).unwrap();
-        assert!(ep.is_empty());
+        let eps = Entrypoints::new(BTreeMap::new());
+        assert!(eps.is_empty());
     }
 
-    // ── 3.1 Entrypoint serde round-trip ────────────────────────────────────
+    #[test]
+    fn entrypoints_iter_in_sorted_order() {
+        let eps = Entrypoints::new(map_of(&["ctest", "cmake", "cpack"]));
+        let names: Vec<&str> = eps.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["cmake", "cpack", "ctest"]);
+    }
+
+    // ── Entrypoint serde ──────────────────────────────────────────────────
 
     #[test]
-    fn entrypoint_round_trip_via_serde() {
-        let json = r#"{"name":"cmake"}"#;
-        let ep: Entrypoint = serde_json::from_str(json).unwrap();
-        assert_eq!(ep.name.as_str(), "cmake");
-        let back = serde_json::to_string(&ep).unwrap();
+    fn entrypoint_value_is_empty_object() {
+        let ep = Entrypoint::default();
+        let json = serde_json::to_string(&ep).unwrap();
+        assert_eq!(json, "{}");
+        let back: Entrypoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(ep, back);
+    }
+
+    // ── Entrypoints serde — map shape ─────────────────────────────────────
+
+    #[test]
+    fn entrypoints_round_trip_via_serde() {
+        let json = r#"{"cmake":{},"ctest":{}}"#;
+        let eps: Entrypoints = serde_json::from_str(json).unwrap();
+        assert_eq!(eps.len(), 2);
+        let back = serde_json::to_string(&eps).unwrap();
         assert_eq!(back, json);
     }
 
     #[test]
-    fn entrypoint_name_deserialization_rejects_invalid() {
-        let json = r#"{"name":""}"#;
-        assert!(serde_json::from_str::<Entrypoint>(json).is_err());
+    fn entrypoints_empty_map_round_trips() {
+        let json = "{}";
+        let eps: Entrypoints = serde_json::from_str(json).unwrap();
+        assert!(eps.is_empty());
+        let back = serde_json::to_string(&eps).unwrap();
+        assert_eq!(back, "{}");
     }
 
-    /// W6: pin the contract that an `EntrypointName` deserialization error
-    /// message carries enough diagnostic content for users to fix the
-    /// metadata. Specifically, the slug regex pattern must appear in the
-    /// surfaced error so publishers see *why* their name was rejected and
-    /// what shape is expected. Future refactors that reword the error string
-    /// must keep this hint or risk silently degrading UX.
+    #[test]
+    fn entrypoints_rejects_invalid_key() {
+        let json = r#"{"":{}}"#;
+        let err = serde_json::from_str::<Entrypoints>(json).unwrap_err();
+        assert!(err.to_string().contains("name"), "expected name error: {err}");
+    }
+
+    #[test]
+    fn entrypoints_rejects_uppercase_key() {
+        let json = r#"{"Cmake":{}}"#;
+        let err = serde_json::from_str::<Entrypoints>(json).unwrap_err();
+        assert!(err.to_string().contains("name"), "expected name error: {err}");
+    }
+
+    #[test]
+    fn entrypoints_rejects_array_shape() {
+        let json = r#"[{"name":"cmake"}]"#;
+        let err = serde_json::from_str::<Entrypoints>(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("a map of entrypoint name"),
+            "expected map-shape error citing visitor expecting text: {msg}"
+        );
+    }
+
+    /// Pin the contract: serde_json's default last-wins behaviour for
+    /// duplicate object keys is a publisher footgun. The custom MapVisitor
+    /// must reject duplicates with the typed `EntrypointError::DuplicateName`
+    /// diagnostic so the offending name surfaces verbatim.
+    #[test]
+    fn entrypoints_rejects_duplicate_keys() {
+        let json = r#"{"cmake":{},"cmake":{}}"#;
+        let err = serde_json::from_str::<Entrypoints>(json)
+            .expect_err("duplicate entrypoint keys must be rejected during deserialization");
+        let msg = err.to_string();
+        // Match the typed DuplicateName Display: `duplicate entrypoint name 'cmake'`
+        assert!(msg.contains("duplicate"), "error must cite duplication: {msg}");
+        assert!(
+            msg.contains("entrypoint name"),
+            "error must say 'entrypoint name': {msg}"
+        );
+        assert!(
+            msg.contains("'cmake'"),
+            "error must cite the offending key 'cmake': {msg}"
+        );
+    }
+
+    /// W6: pin that EntrypointName deserialization errors carry enough
+    /// diagnostic content for users to fix the metadata. The slug regex
+    /// pattern hint must appear so publishers see *what* shape is expected.
     #[test]
     fn entrypoint_name_deserialize_error_message_contains_pattern_hint() {
-        // "Foo Bar" — uppercase + space, both forbidden by `^[a-z0-9][a-z0-9_-]*$`.
         let json = r#""Foo Bar""#;
         let err =
             serde_json::from_str::<EntrypointName>(json).expect_err("invalid entrypoint name must fail to deserialize");
         let msg = err.to_string();
-        assert!(
-            msg.contains("Foo Bar"),
-            "error must echo the rejected name 'Foo Bar': {msg}"
-        );
+        assert!(msg.contains("Foo Bar"), "error must echo 'Foo Bar': {msg}");
         assert!(
             msg.contains("[a-z0-9]") || msg.contains("must match"),
-            "error must hint at the slug pattern (regex char class or 'must match'): {msg}"
+            "error must hint at the slug pattern: {msg}"
         );
     }
 
-    // ── 3.1 Entrypoints::is_empty ──────────────────────────────────────────
-
-    #[test]
-    fn entrypoints_is_empty_for_default() {
-        let ep = Entrypoints::default();
-        assert!(ep.is_empty());
-    }
-
-    #[test]
-    fn entrypoints_is_not_empty_when_populated() {
-        let entries = vec![Entrypoint {
-            name: EntrypointName::try_from("cmake").unwrap(),
-        }];
-        let ep = Entrypoints::new(entries).unwrap();
-        assert!(!ep.is_empty());
-    }
-
-    // ── 3.1 Bundle TOML/JSON round-trips with entrypoints ──────────────────
+    // ── Bundle round-trips with new map shape ─────────────────────────────
 
     #[test]
     fn bundle_without_entrypoints_round_trips() {
-        // Old JSON without entrypoints — must deserialize and default to empty.
         let json = r#"{"version":1}"#;
         let bundle: crate::package::metadata::bundle::Bundle = serde_json::from_str(json).unwrap();
         assert!(bundle.entrypoints.is_empty());
-        // When serializing with empty entrypoints, the field is skipped.
         let serialized = serde_json::to_string(&bundle).unwrap();
         assert!(!serialized.contains("entrypoints"));
     }
 
     #[test]
     fn bundle_with_empty_entrypoints_skip_serialized() {
-        // Explicit empty array → serialized without the field.
-        let json = r#"{"version":1,"entrypoints":[]}"#;
+        let json = r#"{"version":1,"entrypoints":{}}"#;
         let bundle: crate::package::metadata::bundle::Bundle = serde_json::from_str(json).unwrap();
         assert!(bundle.entrypoints.is_empty());
         let serialized = serde_json::to_string(&bundle).unwrap();
@@ -415,33 +507,12 @@ mod tests {
 
     #[test]
     fn bundle_with_populated_entrypoints_round_trips() {
-        let json = r#"{"version":1,"entrypoints":[{"name":"cmake"}]}"#;
+        let json = r#"{"version":1,"entrypoints":{"cmake":{}}}"#;
         let bundle: crate::package::metadata::bundle::Bundle = serde_json::from_str(json).unwrap();
         assert!(!bundle.entrypoints.is_empty());
-        assert_eq!(bundle.entrypoints.iter().next().unwrap().name.as_str(), "cmake");
-        // Serialized back must include entrypoints.
+        assert_eq!(bundle.entrypoints.names().next().unwrap().as_str(), "cmake");
         let serialized = serde_json::to_string(&bundle).unwrap();
-        assert!(
-            serialized.contains("entrypoints"),
-            "populated entrypoints must serialize: {serialized}"
-        );
+        assert!(serialized.contains("entrypoints"));
         assert!(serialized.contains("cmake"));
-    }
-
-    #[test]
-    fn entrypoints_deserialization_error_surfaces_for_duplicate_names() {
-        // Two entries with the same name — custom Deserialize calls Entrypoints::new()
-        // which enforces uniqueness, so duplicate names are rejected at serde time.
-        let json = r#"[{"name":"cmake"},{"name":"cmake"}]"#;
-        let result: Result<Entrypoints, _> = serde_json::from_str(json);
-        assert!(
-            result.is_err(),
-            "duplicate entrypoint names must be rejected during deserialization"
-        );
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("cmake") || msg.contains("duplicate"),
-            "error must mention 'cmake' or 'duplicate': {msg}"
-        );
     }
 }

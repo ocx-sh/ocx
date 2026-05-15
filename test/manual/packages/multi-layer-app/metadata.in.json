@@ -10,7 +10,7 @@
       "visibility": "public"
     }
   ],
-  "entrypoints": [
-    { "name": "myapp", "target": "${installPath}/bin/myapp" }
-  ]
+  "entrypoints": {
+    "myapp": {}
+  }
 }

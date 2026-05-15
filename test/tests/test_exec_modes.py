@@ -371,7 +371,7 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
     """
     pkg = make_package_with_entrypoints(
         ocx, f"{unique_repo}_ep", tmp_path,
-        entrypoints=[{"name": "tool", "target": "${installPath}/bin/tool"}],
+        entrypoints=["tool"],
         bins=["tool"], tag="1.0.0",
     )
     ocx.json("install", "--select", pkg.short)

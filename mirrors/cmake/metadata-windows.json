@@ -10,18 +10,10 @@
       "visibility": "public"
     }
   ],
-  "entrypoints": [
-    {
-      "name": "cmake"
-    },
-    {
-      "name": "cmake-gui"
-    },
-    {
-      "name": "cpack"
-    },
-    {
-      "name": "ctest"
-    }
-  ]
+  "entrypoints": {
+    "cmake": {},
+    "cmake-gui": {},
+    "cpack": {},
+    "ctest": {}
+  }
 }

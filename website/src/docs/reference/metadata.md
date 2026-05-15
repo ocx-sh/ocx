@@ -35,7 +35,7 @@ The metadata file is a JSON object with a `type` discriminator. Currently only t
 | `strip_components` | integer | No | Leading path components to strip during extraction. |
 | `env` | array | No | [Environment variable declarations](#env). |
 | `dependencies` | array | No | [Package dependencies](#dependencies) pinned by digest. |
-| `entrypoints` | array | No | Named entry points for generating launcher scripts. |
+| `entrypoints` | object | No | [Named entry points](#entry-points), keyed by command name. |
 
 ::: details Why a type discriminator?
 The `type` field allows future metadata formats (e.g. `"manifest"`, `"virtual"`) without
@@ -91,11 +91,9 @@ A language runtime with multiple environment variables, archive stripping, a dep
       "identifier": "ocx.sh/gcc:13@sha256:a1b2c3d4e5f6..."
     }
   ],
-  "entrypoints": [
-    {
-      "name": "cmake"
-    }
-  ]
+  "entrypoints": {
+    "cmake": {}
+  }
 }
 ```
 
@@ -309,23 +307,29 @@ installation, environment composition, and garbage collection from a user's pers
 
 ## Entry Points {#entry-points}
 
-The `entrypoints` array declares named launchers that `ocx install` generates at install time. Each
-launcher is a small shell script (or `.cmd` on Windows) placed in an `entrypoints/` directory inside
-the package directory. When the package is selected with `--select`, the per-repo `current` symlink
-is flipped to the package root and consumers traverse `current/entrypoints` from the same anchor to
-add the launchers to `PATH`.
+The `entrypoints` object declares named launchers that `ocx install` generates at install time.
+Each launcher is a small shell script (or `.cmd` on Windows) placed in an `entrypoints/` directory
+inside the package directory. When the package is selected with `--select`, the per-repo `current`
+symlink is flipped to the package root and consumers traverse `current/entrypoints` from the same
+anchor to add the launchers to `PATH`.
 
 Each launcher re-enters via [`ocx launcher exec`][cmd-launcher-exec] with the package root baked at
 install time, preserving clean-environment execution semantics on every invocation. The launcher
-resolves the entry point's `name` against the composed `PATH` from the package's [`env`](#env)
+resolves the entry point's name against the composed `PATH` from the package's [`env`](#env)
 block — there is no separate `target` field; the publisher declares the binary's location once via
 `env`, and the launcher exec resolver picks it up from there.
 
-### Entry Point Fields {#entry-points-fields}
+### Wire Shape {#entry-points-wire-shape}
 
-| Field | Type | Required | Description |
+`entrypoints` is a JSON object keyed by command name. The map shape mirrors the Cargo
+`[dependencies.X]`, Compose `services:`, and GitHub Actions `jobs:` idioms — uniqueness within a
+package follows from JSON object key semantics, and per-entry fields (when added in the future)
+land naturally inside each value object.
+
+| Position | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | Yes | The launcher name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Used as the script filename, the command users invoke, and the key the launcher resolves against the composed `PATH`. |
+| Key | string | Yes | The launcher name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Used as the script filename, the command users invoke, and the key the launcher resolves against the composed `PATH`. |
+| Value | object | Yes | Reserved for future per-entry fields (aliases, description, platform gating). Currently always `{}`. |
 
 ### Disk Layout {#entry-points-disk-layout}
 
@@ -337,18 +341,19 @@ directory, so the same `current/entrypoints` path simply does not exist for them
 
 ### Uniqueness {#entry-points-uniqueness}
 
-Duplicate `name` values within the same `entrypoints` array are rejected at deserialization with
-a descriptive error. Name collisions across different currently-selected packages are detected at
-select time.
+The map shape gives intra-package uniqueness via JSON object key semantics. Duplicate keys in the
+on-wire JSON are rejected at deserialization with a descriptive error rather than silently
+last-wins (the `serde_json` default). Name collisions across different currently-selected
+packages are detected at select time.
 
 ### Example {#entry-points-example}
 
 ```json
 {
-  "entrypoints": [
-    { "name": "cmake" },
-    { "name": "ctest" }
-  ]
+  "entrypoints": {
+    "cmake": {},
+    "ctest": {}
+  }
 }
 ```
 
@@ -410,7 +415,7 @@ The metadata format carries an integer `version` field reserved for future schem
 - `strip_components` — optional leading path components to strip during extraction.
 - `env` — optional declarations of environment variables.
 - `dependencies` — optional digest-pinned package dependencies. Each entry carries an `identifier`, optional `name` override (used as `NAME` in `${deps.NAME.installPath}` tokens), and optional `visibility` controlling env propagation through the chain.
-- `entrypoints` — optional array of named launcher declarations.
+- `entrypoints` — optional object keyed by command name. Each value object is reserved for future per-entry fields.
 
 Visibility model:
 

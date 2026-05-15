@@ -16,7 +16,7 @@
       "visibility": "public"
     }
   ],
-  "entrypoints": [
-    { "name": "hello", "target": "${installPath}/bin/hello" }
-  ]
+  "entrypoints": {
+    "hello": {}
+  }
 }

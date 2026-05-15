@@ -519,9 +519,8 @@ mod tests {
     fn fixture_info_with_entrypoint(dir_name: &str) -> Info {
         let mut info = fixture_info(dir_name);
         let name = crate::package::metadata::entrypoint::EntrypointName::try_from("hello").unwrap();
-        let ep = Entrypoint { name };
         let Metadata::Bundle(ref mut b) = info.metadata;
-        b.entrypoints = Entrypoints::new(vec![ep]).unwrap();
+        b.entrypoints = Entrypoints::new(std::collections::BTreeMap::from([(name, Entrypoint::default())]));
         info
     }
 

@@ -22,7 +22,7 @@
       "visibility": "interface"
     }
   ],
-  "entrypoints": [
-    { "name": "mid", "target": "${installPath}/bin/mid" }
-  ]
+  "entrypoints": {
+    "mid": {}
+  }
 }
