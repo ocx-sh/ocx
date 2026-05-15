@@ -56,7 +56,7 @@ Each `[[tool]]` entry is independent, so concatenation usually produces a syntac
 
 ### Concurrent writes {#lock-concurrency}
 
-Project-state writes (`ocx lock`, `ocx update`, `ocx add`, `ocx remove`) serialize through an exclusive advisory [flock][flock] taken in-place on `ocx.toml` itself. No sentinel or sidecar file is created — the lock is invisible and leaves no artefact on disk. Concurrent readers ([`ocx pull`][cmd-pull], IDE integrations, `git`) never acquire any lock: they parse `ocx.lock` directly via an atomic read.
+Project-state writes (`ocx lock`, `ocx upgrade`, `ocx add`, `ocx remove`) serialize through an exclusive advisory [flock][flock] taken in-place on `ocx.toml` itself. No sentinel or sidecar file is created — the lock is invisible and leaves no artefact on disk. Concurrent readers ([`ocx pull`][cmd-pull], IDE integrations, `git`) never acquire any lock: they parse `ocx.lock` directly via an atomic read.
 
 ## Pulling and executing {#pull-exec}
 

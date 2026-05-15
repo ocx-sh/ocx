@@ -902,20 +902,20 @@ ocx lock [OPTIONS]
 | 79 | Tag unresolvable during resolution (package not found in registry after retries). |
 | 80 | Authentication failure against the registry. |
 
-Concurrent invocations of `ocx lock` and `ocx update` are serialised via an in-place exclusive flock on `ocx.toml`. Readers (`ocx pull`, `git`, IDE tooling) never acquire any lock and are never blocked by a running `ocx lock`.
+Concurrent invocations of `ocx lock` and `ocx upgrade` are serialised via an in-place exclusive flock on `ocx.toml`. Readers (`ocx pull`, `git`, IDE tooling) never acquire any lock and are never blocked by a running `ocx lock`.
 
-### `update` {#update}
+### `upgrade` {#upgrade}
 
-Re-resolves advisory tags in `ocx.lock` and rewrites the file. Unlike `ocx lock`, which freezes whatever the registry surfaces at that moment for every tool, `update` is an opt-in upgrade flow — you decide which tools to advance.
+Re-resolves advisory tags in `ocx.lock` and rewrites the file. Unlike `ocx lock`, which freezes whatever the registry surfaces at that moment for every tool, `upgrade` is an opt-in flow — you decide which tools to advance.
 
-With no arguments, `update` re-resolves every tool declared in `ocx.toml` (equivalent to re-running `ocx lock` from scratch). With positional binding names or `--group` filters, it re-resolves only the named subset and preserves every other entry already in `ocx.lock`. The operation is fully transactional — on any resolution failure nothing is written.
+With no arguments, `upgrade` re-resolves every tool declared in `ocx.toml` (equivalent to re-running `ocx lock` from scratch). With positional binding names or `--group` filters, it re-resolves only the named subset and preserves every other entry already in `ocx.lock`. The operation is fully transactional — on any resolution failure nothing is written.
 
-When a partial update detects that `ocx.toml` has changed since the lock was written (the `declaration_hash` drifts), `update` falls back to a full re-resolve automatically rather than silently mixing stale and fresh entries.
+When a partial upgrade detects that `ocx.toml` has changed since the lock was written (the `declaration_hash` drifts), `upgrade` falls back to a full re-resolve automatically rather than silently mixing stale and fresh entries.
 
 **Usage**
 
 ```shell
-ocx update [OPTIONS] [BINDING...]
+ocx upgrade [OPTIONS] [BINDING...]
 ```
 
 **Arguments**
@@ -938,7 +938,7 @@ ocx update [OPTIONS] [BINDING...]
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written, or `--check` confirmed the candidate matches. |
-| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `ocx.lock` absent when a partial update was requested. |
+| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `ocx.lock` absent when a partial upgrade was requested. |
 | 65 | `--check` reported the candidate would change pinned content (advisory tag moved upstream for a selected or preserved entry). |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
@@ -951,19 +951,19 @@ ocx update [OPTIONS] [BINDING...]
 
 ```shell
 # Re-resolve all tools (equivalent to ocx lock):
-ocx update
+ocx upgrade
 
 # Re-resolve only cmake and ninja:
-ocx update cmake ninja
+ocx upgrade cmake ninja
 
 # Re-resolve every tool in the ci group:
-ocx update -g ci
+ocx upgrade -g ci
 
 # Re-resolve ripgrep in the lint group with a live registry lookup:
-ocx update --remote -g lint ripgrep
+ocx upgrade --remote -g lint ripgrep
 ```
 
-Concurrent invocations of `ocx update` and `ocx lock` are serialised via an in-place exclusive flock on `ocx.toml`.
+Concurrent invocations of `ocx upgrade` and `ocx lock` are serialised via an in-place exclusive flock on `ocx.toml`.
 
 ### `pull` {#pull}
 
@@ -973,7 +973,7 @@ creating [install symlinks][fs-symlinks]. Distinct from
 tool comes from the digest-pinned lock, never from the index — making it the
 recommended primitive for reproducible CI setups.
 
-`ocx pull` is read-only on `ocx.lock`. Re-resolution lives in `ocx update`;
+`ocx pull` is read-only on `ocx.lock`. Re-resolution lives in `ocx upgrade`;
 rewriting from the config lives in `ocx lock`.
 
 **Usage**

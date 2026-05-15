@@ -529,9 +529,9 @@ Users coming from [uv][uv], [Cargo][cargo], or [pnpm][pnpm] often look for `--lo
 | [`cargo build --frozen`][cargo-build] | `--offline` |
 | [`pnpm install --frozen-lockfile`][pnpm-install] | [`ocx pull`][cmd-pull] (default) |
 
-Why this asymmetry? OCX is [backend-first][product-context]: read paths refuse stale locks unconditionally so CI scripts cannot silently drift. The mutating commands ([`ocx add`][cmd-add], [`ocx remove`][cmd-remove], [`ocx lock`][cmd-lock], [`ocx update`][cmd-update]) are the only commands that touch `ocx.lock`; if you do not run them, the lock cannot change.
+Why this asymmetry? OCX is [backend-first][product-context]: read paths refuse stale locks unconditionally so CI scripts cannot silently drift. The mutating commands ([`ocx add`][cmd-add], [`ocx remove`][cmd-remove], [`ocx lock`][cmd-lock], [`ocx upgrade`][cmd-upgrade]) are the only commands that touch `ocx.lock`; if you do not run them, the lock cannot change.
 
-For the `update --locked` flow — "verify a subset would not change without writing" — use [`ocx update --check`][cmd-update]. It mirrors [`ocx lock --check`][cmd-lock] but evaluates the partial-resolve candidate against the predecessor.
+For the "verify a subset would not change without writing" flow, use [`ocx upgrade --check`][cmd-upgrade]. It mirrors [`ocx lock --check`][cmd-lock] but evaluates the partial-resolve candidate against the predecessor.
 
 ## Migration {#project-toolchain-migration}
 
@@ -605,7 +605,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-add]: ./reference/command-line.md#add
 [cmd-remove]: ./reference/command-line.md#remove
 [cmd-lock]: ./reference/command-line.md#lock
-[cmd-update]: ./reference/command-line.md#update
+[cmd-upgrade]: ./reference/command-line.md#upgrade
 [cmd-pull]: ./reference/command-line.md#pull
 [cmd-shell-init]: ./reference/command-line.md#shell-init
 [cmd-shell-direnv]: ./reference/command-line.md#shell-direnv

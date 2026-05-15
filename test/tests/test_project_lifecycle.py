@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 """Roundtrip lifecycle acceptance test for ocx project commands (Unit 7 — specification mode).
 
-Exercises init → add → update → pull → remove in a single scenario to
+Exercises init → add → upgrade → pull → remove in a single scenario to
 verify that the full workflow integrates correctly. The test is expected
 to FAIL against the current Unit 7 stubs.
 
@@ -40,7 +40,7 @@ def test_init_add_update_pull_remove_roundtrip(
 
     1. ``ocx init``           — creates ocx.toml with empty [tools]
     2. ``ocx add cmake:3.28`` — appends binding, writes lock, installs
-    3. ``ocx update cmake``   — re-resolves only cmake (selectivity per Unit 4)
+    3. ``ocx upgrade cmake``   — re-resolves only cmake (selectivity per Unit 4)
     4. ``ocx pull cmake``     — succeeds against the installed binding
     5. ``ocx remove cmake``   — drops binding from ocx.toml and lock
 
@@ -50,7 +50,7 @@ def test_init_add_update_pull_remove_roundtrip(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_lifecycle"
-    # Push both 3.28.0 and a "3.28" alias so update has a real target.
+    # Push both 3.28.0 and a "3.28" alias so upgrade has a real target.
     make_package(ocx, repo, "3.28.0", tmp_path, new=True, cascade=False)
 
     project_dir = tmp_path / "project"
@@ -75,10 +75,10 @@ def test_init_add_update_pull_remove_roundtrip(
     assert repo in toml_path.read_text(), "binding must be in ocx.toml after add"
     assert (project_dir / "ocx.lock").exists(), "ocx.lock must exist after add"
 
-    # Step 3: ocx update cmake (selective re-resolution)
-    update_r = _run(ocx, project_dir, "update", repo)
+    # Step 3: ocx upgrade cmake (selective re-resolution)
+    update_r = _run(ocx, project_dir, "upgrade", repo)
     assert update_r.returncode == EXIT_SUCCESS, (
-        f"ocx update {repo} failed: rc={update_r.returncode}, stderr={update_r.stderr!r}"
+        f"ocx upgrade {repo} failed: rc={update_r.returncode}, stderr={update_r.stderr!r}"
     )
 
     # Step 4: ocx pull <repo> (existing package pull command — exercises installed binding)
