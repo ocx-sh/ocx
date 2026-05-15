@@ -2,14 +2,14 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for Phase 7 — shell hook trio.
 
-Covers ``ocx shell direnv``, ``ocx shell hook``, ``ocx shell init`` per
+Covers ``ocx direnv export``, ``ocx shell hook``, ``ocx shell init`` per
 ``.claude/state/plans/plan_project_toolchain.md`` lines 755–798 and ADR §5B
 (decision 5B contracts at lines 320–365 of
 ``.claude/artifacts/adr_project_toolchain_config.md``).
 
 Specification mode (contract-first TDD)
 ---------------------------------------
-The Phase 7 stubs at ``crates/ocx_cli/src/command/{shell_direnv,shell_hook,shell_init}.rs``
+The Phase 7 stubs at ``crates/ocx_cli/src/command/{direnv_export,shell_hook,shell_init}.rs``
 return ``unimplemented!()``. Every test in this file is therefore expected to
 FAIL against today's binary — the contract they encode is the Phase 7
 implementation target. Tests assert on:
@@ -23,10 +23,10 @@ implementation target. Tests assert on:
 
 Test inventory
 --------------
-1.  ``test_shell_direnv_emits_bash_exports``
-2.  ``test_shell_direnv_skips_uninstalled_tool_with_stderr_note``
-3.  ``test_shell_direnv_warns_on_stale_lock``
-4.  ``test_shell_direnv_no_project_emits_nothing``
+1.  ``test_direnv_export_emits_bash_exports``
+2.  ``test_direnv_export_skips_uninstalled_tool_with_stderr_note``
+3.  ``test_direnv_export_warns_on_stale_lock``
+4.  ``test_direnv_export_no_project_emits_nothing``
 5.  ``test_shell_hook_unchanged_fingerprint_emits_empty``
 6.  ``test_shell_hook_changed_fingerprint_emits_unset_and_reexport``
 7.  ``test_shell_hook_no_prior_applied_emits_full_set``
@@ -35,10 +35,10 @@ Test inventory
 10. ``test_shell_init_zsh_uses_add_zsh_hook``
 11. ``test_shell_init_fish_uses_prompt_event_hook``
 12. ``test_shell_init_nushell_writes_autoload_path``
-13. ``test_remote_flag_does_not_force_network_for_shell_direnv``
+13. ``test_remote_flag_does_not_force_network_for_direnv_export``
 14. ``test_remote_flag_does_not_force_network_for_shell_hook``
 15. ``test_shell_hook_empty_applied_treated_as_no_prior_state`` (Round 2)
-16. ``test_shell_direnv_missing_lock_present_toml_emits_stderr_and_exits_zero`` (Round 2)
+16. ``test_direnv_export_missing_lock_present_toml_emits_stderr_and_exits_zero`` (Round 2)
 17. ``test_top_level_hook_env_removed``
 18. ``test_top_level_shell_hook_removed``
 """
@@ -140,11 +140,11 @@ def _bash_syntax_ok(script: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# 1. shell direnv emits valid bash exports for installed tools
+# 1. direnv export emits valid bash exports for installed tools
 # ---------------------------------------------------------------------------
 
 
-def test_shell_direnv_emits_bash_exports(ocx: OcxRunner, tmp_path: Path) -> None:
+def test_direnv_export_emits_bash_exports(ocx: OcxRunner, tmp_path: Path) -> None:
     """Plan §7 line 787: project with installed tool → valid bash exports."""
     repo, tag = _published_tool(ocx, tmp_path, "bash_export")
     project = tmp_path / "proj"
@@ -159,24 +159,24 @@ hello = "{ocx.registry}/{repo}:{tag}"
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
     assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "shell", "direnv")
+    result = _run(ocx, project, "direnv", "export")
 
     assert result.returncode == EXIT_SUCCESS, (
-        f"shell direnv must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+        f"direnv export must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     assert "export" in result.stdout, (
         f"expected at least one export line; got stdout:\n{result.stdout}"
     )
     ok, syn_err = _bash_syntax_ok(result.stdout)
-    assert ok, f"shell direnv output failed bash -n: {syn_err}\nstdout:\n{result.stdout}"
+    assert ok, f"direnv export output failed bash -n: {syn_err}\nstdout:\n{result.stdout}"
 
 
 # ---------------------------------------------------------------------------
-# 2. shell direnv skips uninstalled tool with a stderr note
+# 2. direnv export skips uninstalled tool with a stderr note
 # ---------------------------------------------------------------------------
 
 
-def test_shell_direnv_skips_uninstalled_tool_with_stderr_note(
+def test_direnv_export_skips_uninstalled_tool_with_stderr_note(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Plan §7 line 768: missing tool → stderr ``# ocx: <name> not installed``.
@@ -205,7 +205,7 @@ beta = "{ocx.registry}/{repo_missing}:{tag_missing}"
         == EXIT_SUCCESS
     )
 
-    result = _run(ocx, project, "shell", "direnv")
+    result = _run(ocx, project, "direnv", "export")
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
     # The missing tool's stderr note format from plan §7 line 768.
@@ -218,14 +218,14 @@ beta = "{ocx.registry}/{repo_missing}:{tag_missing}"
 
 
 # ---------------------------------------------------------------------------
-# 3. shell direnv with stale lock → stderr warning, exports use stale digests
+# 3. direnv export with stale lock → stderr warning, exports use stale digests
 # ---------------------------------------------------------------------------
 
 
-def test_shell_direnv_warns_on_stale_lock(ocx: OcxRunner, tmp_path: Path) -> None:
+def test_direnv_export_warns_on_stale_lock(ocx: OcxRunner, tmp_path: Path) -> None:
     """Plan §7 line 770: stale lock → stderr warning, continue with stale digests.
 
-    Distinct from ``ocx exec`` which exits 65 on stale lock. ``shell direnv``
+    Distinct from ``ocx exec`` which exits 65 on stale lock. `direnv export`
     must NOT fail — interactive shells should keep working with the last
     known good environment until the user manually re-locks.
     """
@@ -253,10 +253,10 @@ beta = "{ocx.registry}/{repo_b}:{tag_b}"
 """,
     )
 
-    result = _run(ocx, project, "shell", "direnv")
+    result = _run(ocx, project, "direnv", "export")
 
     assert result.returncode == EXIT_SUCCESS, (
-        f"shell direnv with stale lock must NOT fail (unlike ocx exec); "
+        f"direnv export with stale lock must NOT fail (unlike ocx exec); "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     stderr_lower = result.stderr.lower()
@@ -274,7 +274,7 @@ beta = "{ocx.registry}/{repo_b}:{tag_b}"
 # ---------------------------------------------------------------------------
 
 
-def test_shell_direnv_no_project_emits_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
+def test_direnv_export_no_project_emits_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
     """Plan §7 line 762/795: no ocx.toml in tree → exit 0, nothing written.
 
     Phase 9 introduces home-tier fallback; Phase 7 must no-op. Set
@@ -285,7 +285,7 @@ def test_shell_direnv_no_project_emits_nothing(ocx: OcxRunner, tmp_path: Path) -
     empty.mkdir()
 
     result = _run(
-        ocx, empty, "shell", "direnv",
+        ocx, empty, "direnv", "export",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
 
@@ -590,10 +590,10 @@ def test_shell_init_nushell_writes_autoload_path(ocx: OcxRunner) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_remote_flag_does_not_force_network_for_shell_direnv(
+def test_remote_flag_does_not_force_network_for_direnv_export(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Architect: ``--remote shell direnv`` with ``OCX_OFFLINE=1`` → still succeeds.
+    """Architect: ``--remote direnv export` with ``OCX_OFFLINE=1`` → still succeeds.
 
     The hook never contacts the registry regardless of ``--remote``;
     setting ``OCX_OFFLINE=1`` is the harness assertion that no network
@@ -613,7 +613,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
     assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
 
     result = _run(
-        ocx, project, "--remote", "shell", "direnv",
+        ocx, project, "--remote", "direnv", "export",
         extra_env={"OCX_OFFLINE": "1"},
     )
 
@@ -622,7 +622,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         f"registry); rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     assert "export" in result.stdout, (
-        f"shell direnv must still emit exports under --remote; got stdout:\n{result.stdout}"
+        f"direnv export must still emit exports under --remote; got stdout:\n{result.stdout}"
     )
 
 
@@ -701,16 +701,16 @@ hello = "{ocx.registry}/{repo}:{tag}"
 
 
 # ---------------------------------------------------------------------------
-# 16. (Round 2 W4) shell direnv with ocx.toml but no ocx.lock
+# 16. (Round 2 W4) direnv export with ocx.toml but no ocx.lock
 # ---------------------------------------------------------------------------
 
 
-def test_shell_direnv_missing_lock_present_toml_emits_stderr_and_exits_zero(
+def test_direnv_export_missing_lock_present_toml_emits_stderr_and_exits_zero(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Project has ``ocx.toml`` but no ``ocx.lock`` → exit 0, stderr mentions lock.
 
-    Mirrors the prompt-hook contract from plan §7 line 770: shell direnv
+    Mirrors the prompt-hook contract from plan §7 line 770: direnv export
     must NEVER fail the prompt cycle. A freshly cloned project (toml without
     lock) emits a one-line stderr note pointing at ``ocx lock`` and produces
     no stdout exports.
@@ -727,10 +727,10 @@ hello = "{ocx.registry}/{repo}:{tag}"
     )
     # Deliberately skip `ocx lock` and `ocx pull`.
 
-    result = _run(ocx, project, "shell", "direnv")
+    result = _run(ocx, project, "direnv", "export")
 
     assert result.returncode == EXIT_SUCCESS, (
-        f"missing lock must NOT fail shell direnv; rc={result.returncode}\n"
+        f"missing lock must NOT fail direnv export; rc={result.returncode}\n"
         f"stderr:\n{result.stderr}"
     )
     assert "lock" in result.stderr.lower(), (
@@ -773,7 +773,7 @@ def test_top_level_hook_env_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
     """``ocx shell-hook`` must exit non-zero (clap unrecognized-subcommand error).
 
-    The command was moved to ``ocx shell direnv``. No deprecation shim — the
+    The command was moved to ``ocx direnv export``. No deprecation shim — the
     old top-level name must hard-fail per the breaking-compat memo.
     """
     result = _run(ocx, tmp_path, "shell-hook")

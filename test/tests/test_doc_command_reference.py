@@ -37,10 +37,10 @@ CLI_REF = PROJECT_ROOT / "website" / "src" / "docs" / "reference" / "command-lin
 NEW_COMMAND_ANCHORS = [
     ("{#lock}", "lock"),
     ("{#shell-hook}", "shell hook"),
-    ("{#shell-direnv}", "shell direnv"),
     ("{#shell-init}", "shell init"),
-    ("{#generate}", "generate"),
-    ("{#generate-direnv}", "generate direnv"),
+    ("{#direnv}", "direnv"),
+    ("{#direnv-init}", "direnv init"),
+    ("{#direnv-export}", "direnv export"),
 ]
 
 

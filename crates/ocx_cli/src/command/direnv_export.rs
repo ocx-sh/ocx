@@ -21,7 +21,7 @@ use crate::conventions::supported_platforms;
 /// default-group tool in the local object store, and prints bash export
 /// lines for the resolved environment. The command is stateless: it does
 /// not consult or update `_OCX_APPLIED`, making it suitable for use from
-/// `direnv`'s `.envrc` via `eval "$(ocx shell direnv)"`.
+/// `direnv`'s `.envrc` via `eval "$(ocx direnv export)"`.
 ///
 /// Output is always bash. `direnv` evaluates `.envrc` files in a bash
 /// sub-shell regardless of the user's interactive shell; translation to
@@ -35,9 +35,9 @@ use crate::conventions::supported_platforms;
 /// the stale digests are still used. When no project `ocx.toml` is found,
 /// the command exits 0 with no output.
 #[derive(Parser)]
-pub struct ShellDirenv {}
+pub struct DirenvExport {}
 
-impl ShellDirenv {
+impl DirenvExport {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let shell = shell::Shell::Bash;
 
