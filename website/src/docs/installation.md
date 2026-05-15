@@ -21,7 +21,7 @@ irm https://ocx.sh/install.ps1 | iex
 After installation, open a new terminal and verify:
 
 ```sh
-ocx info
+ocx about
 ```
 
 ::: tip Skip shell profile modification
@@ -107,10 +107,10 @@ curl -fsSL https://ocx.sh/install.sh | sh -s -- --version 0.5.0
 
 ## Verify Installation {#verify}
 
-[`ocx info`][cmd-info] prints the installed version, supported platforms, and detected shell:
+[`ocx about`][cmd-about] prints the installed version, supported platforms, and detected shell:
 
 ```sh
-ocx info
+ocx about
 ```
 
 ## Uninstalling {#uninstalling}
@@ -166,7 +166,7 @@ This removes all installed packages, the local index cache, and ocx itself. If y
 [env-ref]: ./reference/environment.md
 
 <!-- commands -->
-[cmd-info]: ./reference/command-line.md#info
+[cmd-about]: ./reference/command-line.md#about
 [cmd-uninstall]: ./reference/command-line.md#uninstall
 [cmd-clean]: ./reference/command-line.md#clean
 

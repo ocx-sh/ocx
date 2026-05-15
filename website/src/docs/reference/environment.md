@@ -204,7 +204,7 @@ The update check is also automatically suppressed when:
 - `CI` is set to a truthy value
 - [`OCX_OFFLINE`](#ocx-offline) is set to a truthy value (or `--offline` flag)
 - stderr is not a terminal (e.g., piped or redirected)
-- the command is `version`, `info`, or `shell completion`
+- the command is `version`, `about`, or `shell completion`
 
 ### `OCX_NO_PROJECT` {#ocx-no-project}
 

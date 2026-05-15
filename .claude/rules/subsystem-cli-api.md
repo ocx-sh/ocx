@@ -69,7 +69,7 @@ Callers declare **what a line means**, never **how it looks**. `status` / `warn`
 
 New visual concept → add a named intent method + `STYLE_*` const inside `data_interface.rs` or `user_interface.rs` (whichever stream owns it). The vocabulary is small and semantic on purpose. Sole place a raw `console::Style` legitimately crosses a call site: per-tree-node `Annotation::with_style(...)`, which `DataInterface`'s tree renderer applies/strips (see `api/data/deps.rs`).
 
-**Known exception:** `command/info.rs::print_logo` renders bespoke logo+sidebar art with manual term layout — inline styling tolerated there, not copied elsewhere; do not generalize a struct API for it (YAGNI).
+**Known exception:** `command/about.rs::print_logo` renders bespoke logo+sidebar art with manual term layout — inline styling tolerated there, not copied elsewhere; do not generalize a struct API for it (YAGNI).
 
 ## Single-Table Rule
 

@@ -160,7 +160,7 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
         command,
         Some(
             command::Command::Version(_)
-                | command::Command::Info(_)
+                | command::Command::About(_)
                 | command::Command::Shell(command::shell::Shell::Completion(_))
         )
     )

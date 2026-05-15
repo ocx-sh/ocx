@@ -679,14 +679,14 @@ After running `ocx index update <pkg>`, an `ocx --offline install <pkg>` will fa
 
 - `<PACKAGE>`: Package identifiers to update in the local index for. Include a tag to update only that tag; omit the tag to update all tags.
 
-### `info` {#info}
+### `about` {#about}
 
-Prints build information: the ocx version, supported platforms, and the detected shell.
+Prints environment information: the ocx version, default registry, supported platforms, detected shell, and home directory.
 
 **Usage**
 
 ```shell
-ocx info
+ocx about
 ```
 
 ### `init` {#init}

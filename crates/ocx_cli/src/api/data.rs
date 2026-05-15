@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod about;
 pub mod catalog;
 pub mod ci_export;
 pub mod clean;
 pub mod deps;
 pub mod env;
-pub mod info;
 pub mod install;
 pub mod lock;
 pub mod login;
