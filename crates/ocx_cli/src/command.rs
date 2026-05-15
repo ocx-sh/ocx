@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+pub mod about;
 pub mod add;
 pub mod ci;
 pub mod ci_export;
@@ -19,7 +20,6 @@ pub mod index;
 pub mod index_catalog;
 pub mod index_list;
 pub mod index_update;
-pub mod info;
 pub mod init;
 pub mod install;
 pub mod launcher;
@@ -70,8 +70,8 @@ pub enum Command {
     /// Operations related to the package index
     #[command(subcommand)]
     Index(index::Index),
-    /// Print ocx version and build information
-    Info(info::Info),
+    /// Print ocx version, registry, platform, shell, and home directory.
+    About(about::About),
     /// Create a minimal ocx.toml in the current directory.
     Init(init::Init),
     /// Install packages from a local or remote index.
@@ -121,7 +121,7 @@ impl Command {
             Command::Which(which) => which.execute(context).await,
             Command::Generate(generate) => generate.execute(context).await,
             Command::Index(index) => index.execute(context).await,
-            Command::Info(info) => info.execute(context).await,
+            Command::About(about) => about.execute(context).await,
             Command::Init(init) => init.execute(context).await,
             Command::Install(install) => install.execute(context).await,
             Command::Lock(lock) => lock.execute(context).await,

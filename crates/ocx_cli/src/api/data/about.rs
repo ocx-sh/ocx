@@ -11,7 +11,7 @@ use crate::api::Printable;
 ///
 /// JSON format: flat object with version, registry, platforms, shell, home.
 #[derive(Serialize)]
-pub struct Info {
+pub struct About {
     pub version: String,
     pub registry: String,
     pub platforms: Vec<String>,
@@ -19,7 +19,7 @@ pub struct Info {
     pub home: String,
 }
 
-impl Info {
+impl About {
     pub fn new(version: String, registry: String, platforms: Vec<String>, shell: Option<String>, home: String) -> Self {
         Self {
             version,
@@ -31,7 +31,7 @@ impl Info {
     }
 }
 
-impl Printable for Info {
+impl Printable for About {
     fn print_plain(&self, _printer: &ocx_lib::cli::DataInterface) {
         // Plain format is handled directly by the command (logo rendering).
         // This is only called as a fallback.

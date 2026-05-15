@@ -18,7 +18,7 @@ The CLI surface splits into six rows. The split is firm — a command does not c
 | **High-level read** | `pull`, `run` | Binding names (TOML keys) | `ocx.toml` + `ocx.lock` | Cache warm / child spawn |
 | **Project mutators** | `add`, `remove`, `lock`, `upgrade` | OCI identifier in → binding name written | `ocx.toml` + `ocx.lock` | Writes `ocx.toml` and/or `ocx.lock` |
 | **Shell activation** | `shell hook`, `shell direnv`, `shell init` | Binding names (resolved to installed paths) | Nearest `ocx.toml` + install store | Shell export lines |
-| **Bootstrap / mixed** | `init`, `info`, `version`, `shell completion` | Varies | Varies | No tier contract |
+| **Bootstrap / mixed** | `init`, `about`, `version`, `shell completion` | Varies | Varies | No tier contract |
 | **Low-level — registry** | `install`, `login`, `logout`, `uninstall`, `package pull/push/describe/info/create`, `index update/list/catalog` | OCI identifiers | Registry + local index | Install store / index |
 | **Low-level — local store** | `which`, `select`, `deselect`, `deps`, `env`, `exec`, `shell env`, `clean`, `launcher exec`, `ci export` | OCI identifiers | Install + symlink store | Reports / child spawn |
 
@@ -78,7 +78,7 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `package inspect ID` | Ref-shape adaptive: index→candidates, manifest→metadata; `--resolve`→metadata+chain | No | `--resolve`, `-p` (with `--resolve` only) |
 | `ci export PKGS...` | Export env to CI system | No | `-p`, `--flavor`, `--candidate/--current`, `--mode` |
 | `version` | Print version | No | — |
-| `info` | Print version + platform + shell | No | — |
+| `about` | Print version + registry + platform + shell + home | No | — |
 
 ---
 

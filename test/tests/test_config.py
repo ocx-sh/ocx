@@ -184,7 +184,7 @@ def test_invalid_config_produces_clear_error_with_path(ocx: OcxRunner) -> None:
 # Tests: static commands survive malformed ambient config
 # Regression guard for the bug where `ocx version` and `ocx shell completion`
 # (both Context-free commands) were aborted by `Context::try_init` → config
-# parse error before command dispatch. `ocx info` is deliberately excluded:
+# parse error before command dispatch. `ocx about` is deliberately excluded:
 # it displays `default_registry()` from the loaded config and must keep its
 # current config-coupled behavior, so users can fall back to `ocx version`
 # as the diagnostic entry point when config is broken.
@@ -274,7 +274,7 @@ def test_help_survives_invalid_ambient_config(ocx: OcxRunner) -> None:
         ("install", "--help"),
         ("shell", "--help"),
         ("shell", "completion", "--help"),
-        ("info", "--help"),
+        ("about", "--help"),
         ("version", "--help"),
     ):
         result = ocx.run(*args, format=None, check=False)
@@ -288,24 +288,24 @@ def test_help_survives_invalid_ambient_config(ocx: OcxRunner) -> None:
         )
 
 
-def test_info_still_requires_valid_config_when_ambient_broken(ocx: OcxRunner) -> None:
-    """`ocx info` intentionally stays config-coupled — fails on broken config.
+def test_about_still_requires_valid_config_when_ambient_broken(ocx: OcxRunner) -> None:
+    """`ocx about` intentionally stays config-coupled — fails on broken config.
 
-    Regression guard for the deliberate design decision: `info` reads
+    Regression guard for the deliberate design decision: `about` reads
     `context.default_registry()` from the loaded config and will surface more
     config-derived fields in the future. When ambient config is broken,
-    `info` failing IS the diagnostic — the fallback is `ocx version`.
+    `about` failing IS the diagnostic — the fallback is `ocx version`.
 
-    If a future change "fixes" this by adding `info` to the static-command
+    If a future change "fixes" this by adding `about` to the static-command
     bypass list in `app.rs::run`, this test will fail and force the author
     to revisit both the comment in `app.rs` and the decision rationale.
     """
     config_path = write_home_config(ocx, "this is not valid toml =[[[")
 
-    result = ocx.run("info", format=None, check=False)
+    result = ocx.run("about", format=None, check=False)
 
     assert result.returncode != 0, (
-        f"`ocx info` should fail on malformed ambient config (by design); "
+        f"`ocx about` should fail on malformed ambient config (by design); "
         f"got rc=0, stdout={result.stdout!r}"
     )
     combined = result.stdout + result.stderr

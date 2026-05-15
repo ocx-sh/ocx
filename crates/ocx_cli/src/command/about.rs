@@ -11,7 +11,7 @@ use crate::api::Printable;
 use crate::app::Context;
 
 #[derive(Parser)]
-pub struct Info;
+pub struct About;
 
 /// Isometric cube logo rendered with `+` and `=` characters.
 /// 21 lines tall, max 52 chars wide.
@@ -42,7 +42,7 @@ const LOGO: [&str; 21] = [
 
 const LOGO_WIDTH: usize = 52;
 
-impl Info {
+impl About {
     pub async fn execute(&self, context: Context) -> anyhow::Result<ExitCode> {
         let version = env!("CARGO_PKG_VERSION").to_string();
         // Reflect the same default registry the rest of the CLI resolves —
@@ -58,7 +58,7 @@ impl Info {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/.ocx".to_string());
 
-        let info = crate::api::data::info::Info::new(version, registry, platforms, current_shell, home);
+        let info = crate::api::data::about::About::new(version, registry, platforms, current_shell, home);
 
         let data = context.api().data();
         if context.api().is_json() {
@@ -74,7 +74,7 @@ impl Info {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn print_logo(&self, info: &crate::api::data::info::Info, color: bool) -> anyhow::Result<()> {
+    fn print_logo(&self, info: &crate::api::data::about::About, color: bool) -> anyhow::Result<()> {
         let term = Term::stdout();
 
         let logo_style = if color {
