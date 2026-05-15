@@ -893,7 +893,7 @@ def test_run_auto_installs_missing_packages(ocx: OcxRunner, tmp_path: Path) -> N
 
     Plan §3.2 test 21: Phase F.2 calls ``find_or_install_all`` which installs
     missing packages. The test verifies the binary runs successfully (i.e.,
-    the package was installed) and that ``ocx find`` can locate it afterward.
+    the package was installed) and that ``ocx which`` can locate it afterward.
     """
     repo, tag = _published_tool(ocx, tmp_path, "autoinst")
 
@@ -916,10 +916,10 @@ def test_run_auto_installs_missing_packages(ocx: OcxRunner, tmp_path: Path) -> N
 
     # Verify the package is now findable.
     find_result = _run_cmd(
-        ocx, project, "find", f"{ocx.registry}/{repo}:{tag}"
+        ocx, project, "which", f"{ocx.registry}/{repo}:{tag}"
     )
     assert find_result.returncode == EXIT_SUCCESS, (
-        f"ocx find after auto-install failed: rc={find_result.returncode}\n"
+        f"ocx which after auto-install failed: rc={find_result.returncode}\n"
         f"stderr:\n{find_result.stderr}"
     )
 

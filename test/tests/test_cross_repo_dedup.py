@@ -84,7 +84,7 @@ def test_cross_repo_dedup_preserves_query_repository(
     ocx.json("install", mirrors_short)
 
     # --- find should report the repository the user queried --------------
-    find_result = ocx.json("find", mirrors_short)
+    find_result = ocx.json("which", mirrors_short)
     assert mirrors_short in find_result, (
         f"find should key result by queried identifier, got keys {list(find_result)}"
     )

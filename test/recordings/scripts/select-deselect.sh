@@ -4,7 +4,7 @@
 ocx install corretto:21
 ocx install corretto:25
 ocx select corretto:21
-ocx find --current corretto
+ocx which --current corretto
 ocx select corretto:25
-ocx find --current corretto
+ocx which --current corretto
 ocx deselect corretto

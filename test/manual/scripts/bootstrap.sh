@@ -160,7 +160,7 @@ push_simple deps-app build \
 push_simple cross-layer-entrypoint build \
     "LEAF_A_FQ_DIGEST=$(fq deps-leaf-a)@${LEAF_A_DIGEST}"
 
-# Refresh local index so `ocx find` works.
+# Refresh local index so `ocx which` works.
 ocx index update "${NAMESPACE}/single-layer-hello" >/dev/null
 ocx index update "${NAMESPACE}/multi-entry-toolkit" >/dev/null
 ocx index update "${NAMESPACE}/multi-layer-app" >/dev/null

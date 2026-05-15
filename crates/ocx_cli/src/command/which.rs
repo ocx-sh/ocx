@@ -25,9 +25,9 @@ use crate::{api, conventions::platforms_or_default, options};
 ///
 /// Useful for scripting (use `--format json` for machine-readable output):
 ///
-///   cmake_root=$(ocx find --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
+///   cmake_root=$(ocx which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 #[derive(Parser)]
-pub struct Find {
+pub struct Which {
     #[clap(flatten)]
     platforms: options::Platforms,
 
@@ -39,7 +39,7 @@ pub struct Find {
     packages: Vec<options::Identifier>,
 }
 
-impl Find {
+impl Which {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 

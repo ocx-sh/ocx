@@ -6,12 +6,12 @@ from src import OcxRunner, PackageInfo, registry_dir
 def test_find_returns_package_root(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """ocx install <pkg>; ocx find <pkg>"""
+    """ocx install <pkg>; ocx which <pkg>"""
     pkg = published_package
     install_result = ocx.json("install", pkg.short)
     candidate = Path(install_result[pkg.short]["path"])
 
-    find_result = ocx.json("find", pkg.short)
+    find_result = ocx.json("which", pkg.short)
     # find (default) returns the package-store package root; the candidate
     # symlink also targets the package root, so resolving the symlink
     # yields the same path.
@@ -24,11 +24,11 @@ def test_find_returns_package_root(
 def test_find_candidate_returns_candidate_symlink(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """ocx install <pkg>; ocx find --candidate <pkg>"""
+    """ocx install <pkg>; ocx which --candidate <pkg>"""
     pkg = published_package
     ocx.json("install", pkg.short)
 
-    find_result = ocx.json("find", "--candidate", pkg.short)
+    find_result = ocx.json("which", "--candidate", pkg.short)
     candidate = Path(find_result[pkg.short])
 
     expected = (
@@ -45,11 +45,11 @@ def test_find_candidate_returns_candidate_symlink(
 def test_find_current_returns_current_symlink(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """ocx install -s <pkg>; ocx find --current <pkg>"""
+    """ocx install -s <pkg>; ocx which --current <pkg>"""
     pkg = published_package
     ocx.json("install", "-s", pkg.short)
 
-    find_result = ocx.json("find", "--current", pkg.short)
+    find_result = ocx.json("which", "--current", pkg.short)
     current = Path(find_result[pkg.short])
 
     expected = (
@@ -65,32 +65,32 @@ def test_find_current_returns_current_symlink(
 def test_find_fails_when_not_installed(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """ocx find <pkg>  (not installed, expects failure)"""
+    """ocx which <pkg>  (not installed, expects failure)"""
     pkg = published_package
-    result = ocx.plain("find", pkg.short, check=False)
+    result = ocx.plain("which", pkg.short, check=False)
     assert result.returncode != 0
 
 
 def test_find_returns_package_path_not_layer(
     ocx: OcxRunner, published_package: PackageInfo
 ):
-    """ocx find returns a path inside packages/, never inside layers/.
+    """ocx which returns a path inside packages/, never inside layers/.
 
     With hardlink-based assembly (Plan 8c), packages/{P}/content/ is a real
-    directory.  The path returned by `ocx find` must therefore point under
+    directory.  The path returned by `ocx which` must therefore point under
     the packages/ subtree of OCX_HOME.
 
     This guards against regressions to the previous symlink-based assembly
-    where `ocx find` could return a path that, when resolved, pointed into
+    where `ocx which` could return a path that, when resolved, pointed into
     layers/.
     """
     pkg = published_package
     ocx.json("install", pkg.short)
 
-    find_result = ocx.json("find", pkg.short)
+    find_result = ocx.json("which", pkg.short)
     find_path = Path(find_result[pkg.short])
 
-    # `ocx find` (without `--candidate`/`--current`) returns the raw
+    # `ocx which` (without `--candidate`/`--current`) returns the raw
     # package-store package-root path directly — it is built from OCX_HOME
     # by path join, with no symlinks of its own.  `is_relative_to` is a
     # lexical prefix check, so we compare against OCX_HOME-derived paths
@@ -102,13 +102,13 @@ def test_find_returns_package_path_not_layer(
 
     # Must be inside the packages/ tree
     assert find_path.is_relative_to(packages_root), (
-        f"`ocx find` returned {find_path}, which is outside packages/ "
+        f"`ocx which` returned {find_path}, which is outside packages/ "
         f"({packages_root}).  Expected the package root directory."
     )
 
     # Must NOT be inside the layers/ tree (regression guard for symlink assembly)
     assert not find_path.is_relative_to(layers_root), (
-        f"`ocx find` returned {find_path}, which is inside layers/ "
+        f"`ocx which` returned {find_path}, which is inside layers/ "
         f"({layers_root}).  With hardlink assembly, the package root must "
         f"live under packages/, not symlinked into layers/."
     )

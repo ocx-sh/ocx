@@ -101,11 +101,11 @@ export PATH="$HOME/.ocx/symlinks/ocx.sh/cmake/current/content/bin:$PATH"
 
 When `ocx install --select cmake:3.32` runs later, `current` is re-pointed and the IDE / shell pick up the new version with no config edits.
 
-For automation, [`ocx find`][cmd-find] prints the resolved package root directly:
+For automation, [`ocx which`][cmd-which] prints the resolved package root directly:
 
 ```shell
-ocx find --current cmake          # ~/.ocx/symlinks/ocx.sh/cmake/current
-ocx find --candidate cmake:3.28   # ~/.ocx/symlinks/ocx.sh/cmake/candidates/3.28
+ocx which --current cmake          # ~/.ocx/symlinks/ocx.sh/cmake/current
+ocx which --candidate cmake:3.28   # ~/.ocx/symlinks/ocx.sh/cmake/candidates/3.28
 ```
 
 Both `--candidate` and `--current` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.
@@ -590,7 +590,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [arg-config]: ./reference/command-line.md#arg-config
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-deselect]: ./reference/command-line.md#deselect
-[cmd-find]: ./reference/command-line.md#find
+[cmd-which]: ./reference/command-line.md#which
 [cmd-exec]: ./reference/command-line.md#exec
 [cmd-launcher-exec]: ./reference/command-line.md#exec
 [cmd-install]: ./reference/command-line.md#install

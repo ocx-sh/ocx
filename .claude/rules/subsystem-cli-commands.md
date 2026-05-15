@@ -20,7 +20,7 @@ The CLI surface splits into six rows. The split is firm — a command does not c
 | **Shell activation** | `shell hook`, `shell direnv`, `shell init` | Binding names (resolved to installed paths) | Nearest `ocx.toml` + install store | Shell export lines |
 | **Bootstrap / mixed** | `init`, `info`, `version`, `shell completion` | Varies | Varies | No tier contract |
 | **Low-level — registry** | `install`, `login`, `logout`, `uninstall`, `package pull/push/describe/info/create`, `index update/list/catalog` | OCI identifiers | Registry + local index | Install store / index |
-| **Low-level — local store** | `find`, `select`, `deselect`, `deps`, `env`, `exec`, `shell env`, `clean`, `launcher exec`, `ci export` | OCI identifiers | Install + symlink store | Reports / child spawn |
+| **Low-level — local store** | `which`, `select`, `deselect`, `deps`, `env`, `exec`, `shell env`, `clean`, `launcher exec`, `ci export` | OCI identifiers | Install + symlink store | Reports / child spawn |
 
 **Layer-purity rule:** `ocx run` is project-tier (binding-name semantics); `ocx exec` is OCI-tier (identifier semantics). If you have `ocx.toml`, prefer `ocx run`; if you do not, use `ocx exec`. No command silently switches contract based on CWD or filesystem state.
 
@@ -53,7 +53,7 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `install PKGS...` | Download and install packages | N/A (is install) | `-s/--select`, `-p/--platform` |
 | `login [REGISTRY]` | Authenticate to a registry; persists via docker credential store | No | `-u/--username`, `--password-stdin`, `--insecure`, `--allow-insecure-store` |
 | `logout [REGISTRY]` | Remove stored credentials for a registry | No | — |
-| `find PKGS...` | Resolve installed packages to paths | No | `--candidate`, `--current`, `-p` |
+| `which PKGS...` | Resolve installed packages to paths | No | `--candidate`, `--current`, `-p` |
 | `select PKGS...` | Set `current` symlink | No | `-p` |
 | `deselect PKGS...` | Remove `current` symlink | No | — |
 | `deps PKGS...` | Show dependency tree/flat/why | No | `--flat`, `--why`, `--depth`, `-p`, `--mode` |
@@ -86,9 +86,9 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 
 | Manager Method | Auto-Install | Symlink | Use In |
 |----------------|-------------|---------|--------|
-| `find_all()` | No | No | `find`, `select`, `deps` |
+| `find_all()` | No | No | `which`, `select`, `deps` |
 | `resolver().build_graph()` | No | No | `deps` |
-| `find_symlink_all(kind)` | No | Yes (candidate/current) | `find --candidate`, `env --candidate` |
+| `find_symlink_all(kind)` | No | Yes (candidate/current) | `which --candidate`, `env --candidate` |
 | `find_or_install_all()` | **Yes** | No | `env`, `exec` |
 | `install_all(candidate=true)` | N/A (is install) | Creates candidate | `install` |
 | `install_all(candidate=false)` | N/A (is pull) | No | `package pull` |
@@ -103,8 +103,8 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | Mode | Path | Stable? | Auto-Install? | Commands |
 |------|------|---------|---------------|----------|
 | Object store (default) | `$OCX_HOME/objects/.../content/` | No (digest changes) | Yes (find_or_install) or No (find) | `exec`, `env`, `find` |
-| `--candidate` | `$OCX_HOME/symlinks/.../candidates/{tag}` | **Yes** | No | `find --candidate`, `env --candidate` |
-| `--current` | `$OCX_HOME/symlinks/.../current` | **Yes** | No | `find --current`, `env --current` |
+| `--candidate` | `$OCX_HOME/symlinks/.../candidates/{tag}` | **Yes** | No | `which --candidate`, `env --candidate` |
+| `--current` | `$OCX_HOME/symlinks/.../current` | **Yes** | No | `which --current`, `env --current` |
 
 Use `--candidate` or `--current` when embedding paths in configs, IDE settings, or shell profiles.
 
