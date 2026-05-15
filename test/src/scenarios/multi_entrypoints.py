@@ -17,15 +17,12 @@ class MultiEntrypoints(Scenario):
 
     def setup(self) -> None:
         bins = ["tool-a", "tool-b", "tool-c", "tool-d"]
-        entrypoints = [
-            {"name": b, "target": "${installPath}/bin/" + b} for b in bins
-        ]
         repo = self.repo("toolkit")
         pkg = make_package_with_entrypoints(
             self.ocx,
             repo,
             self.tmp_path,
-            entrypoints=entrypoints,
+            entrypoints=bins,
             bins=bins,
             tag="1.0.0",
             file_prefix="mep",

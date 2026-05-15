@@ -89,58 +89,89 @@ def test_schema_includes_entrypoints_as_additive_optional_property() -> None:
     )
 
 
-def test_schema_entrypoints_is_array_type() -> None:
-    """entrypoints in schema must be an array of objects."""
+def test_schema_entrypoints_is_object_type() -> None:
+    """entrypoints in schema must be an object keyed by entrypoint name.
+
+    The wire shape is a JSON object (`{"cmake": {}, "ctest": {}}`) — uniqueness
+    within a package follows from JSON object key semantics.
+    """
     schema = load_schema()
     bundle = find_bundle_definition(schema)
     ep_schema = bundle["properties"]["entrypoints"]
 
     # May be a $ref or inline type.
     if "$ref" in ep_schema:
-        # Dereference the $ref.
         ref_key = ep_schema["$ref"].split("/")[-1]
         defs = schema.get("$defs", schema.get("definitions", {}))
         ep_schema = defs.get(ref_key, ep_schema)
 
-    # After dereferencing, the schema should be array-shaped.
-    # Entrypoints is #[serde(transparent)] over Vec<Entrypoint>, so it
-    # serializes as an array.
     schema_type = ep_schema.get("type")
-    assert schema_type == "array", (
-        f"entrypoints must have type=array in schema, got: {ep_schema}"
+    assert schema_type == "object", (
+        f"entrypoints must have type=object in schema, got: {ep_schema}"
+    )
+    assert "additionalProperties" in ep_schema, (
+        f"entrypoints object must declare additionalProperties; got: {ep_schema}"
     )
 
 
-def test_schema_entrypoints_items_have_name() -> None:
-    """entrypoints array items must have a 'name' property.
+def test_schema_entrypoints_value_schema_is_entrypoint_object() -> None:
+    """The value type of each entrypoints entry must be the Entrypoint definition.
 
-    The `target` field was removed in 0.3.0 — entry-point dispatch resolves
-    `name` against the composed `PATH` from the package's `env` block at
-    launcher exec time.
+    The Entrypoint value object is reserved for future per-entry fields
+    (currently always empty) — it must remain a JSON object even with no
+    declared properties.
     """
     schema = load_schema()
     bundle = find_bundle_definition(schema)
     ep_schema = bundle["properties"]["entrypoints"]
 
-    # Dereference if needed.
     if "$ref" in ep_schema:
         ref_key = ep_schema["$ref"].split("/")[-1]
         defs = schema.get("$defs", schema.get("definitions", {}))
         ep_schema = defs.get(ref_key, ep_schema)
 
-    items = ep_schema.get("items", {})
-    if "$ref" in items:
-        ref_key = items["$ref"].split("/")[-1]
+    value_schema = ep_schema.get("additionalProperties", {})
+    if "$ref" in value_schema:
+        ref_key = value_schema["$ref"].split("/")[-1]
         defs = schema.get("$defs", schema.get("definitions", {}))
-        items = defs.get(ref_key, items)
+        value_schema = defs.get(ref_key, value_schema)
 
-    item_props = items.get("properties", {})
-    assert "name" in item_props, (
-        f"Entrypoint items must have 'name' property. Got: {list(item_props.keys())}"
+    assert value_schema.get("type") == "object", (
+        f"Entrypoint value must be type=object; got: {value_schema}"
     )
-    assert "target" not in item_props, (
-        f"Entrypoint items must NOT carry a 'target' property — that field was "
-        f"removed in 0.3.0. Got: {list(item_props.keys())}"
+    # Empty struct today: properties absent or empty. Future fields land here
+    # without breaking the wire format.
+    assert value_schema.get("properties", {}) == {} or "properties" not in value_schema, (
+        f"Entrypoint value object should have no declared properties yet; got: {value_schema}"
+    )
+
+
+def test_schema_entrypoints_propertyNames_has_slug_pattern() -> None:
+    """entrypoints propertyNames must declare the slug pattern and maxLength.
+
+    The Rust `EntrypointName` newtype enforces `^[a-z0-9][a-z0-9_-]*$` with a
+    64-byte cap. The JSON Schema must carry matching `propertyNames` constraints
+    so validators and editors can surface the restriction without running the
+    binary.
+    """
+    schema = load_schema()
+    bundle = find_bundle_definition(schema)
+    ep_schema = bundle["properties"]["entrypoints"]
+
+    if "$ref" in ep_schema:
+        ref_key = ep_schema["$ref"].split("/")[-1]
+        defs = schema.get("$defs", schema.get("definitions", {}))
+        ep_schema = defs.get(ref_key, ep_schema)
+
+    property_names = ep_schema.get("propertyNames")
+    assert property_names is not None, (
+        f"entrypoints schema must declare propertyNames; got: {ep_schema}"
+    )
+    assert property_names.get("pattern") == r"^[a-z0-9][a-z0-9_-]*$", (
+        f"propertyNames.pattern must be the slug regex; got: {property_names.get('pattern')!r}"
+    )
+    assert property_names.get("maxLength") == 64, (
+        f"propertyNames.maxLength must be 64; got: {property_names.get('maxLength')!r}"
     )
 
 
@@ -170,10 +201,10 @@ def test_old_metadata_without_entrypoints_parses_successfully(
     )
 
 
-def test_metadata_with_empty_entrypoints_array_installs(
+def test_metadata_with_empty_entrypoints_object_installs(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Metadata with explicit empty entrypoints: [] must install without error."""
+    """Metadata with explicit empty entrypoints: {} must install without error."""
     import json as _json  # noqa: PLC0415
     import sys  # noqa: PLC0415
     import stat  # noqa: PLC0415
@@ -192,7 +223,7 @@ def test_metadata_with_empty_entrypoints_array_installs(
 
     metadata_path = tmp_path / "metadata-empty-ep.json"
     metadata_obj = {
-        "type": "bundle", "version": 1, "entrypoints": [],
+        "type": "bundle", "version": 1, "entrypoints": {},
         "env": [{"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"}],
     }
     metadata_path.write_text(_json.dumps(metadata_obj))

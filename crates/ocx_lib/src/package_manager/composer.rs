@@ -247,11 +247,8 @@ pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore)
         if seen.insert(root.identifier().strip_advisory())
             && let Some(eps) = root.metadata().entrypoints()
         {
-            for ep in eps.iter() {
-                owners
-                    .entry(ep.name.clone())
-                    .or_default()
-                    .push(root.identifier().clone());
+            for name in eps.names() {
+                owners.entry(name.clone()).or_default().push(root.identifier().clone());
             }
         }
 
@@ -271,9 +268,9 @@ pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore)
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             if let Some(eps) = dep_metadata.entrypoints() {
-                for ep in eps.iter() {
+                for name in eps.names() {
                     owners
-                        .entry(ep.name.clone())
+                        .entry(name.clone())
                         .or_default()
                         .push(tc_entry.identifier.clone());
                 }
@@ -594,7 +591,7 @@ mod tests {
             install_info::InstallInfo,
             metadata::{
                 self, bundle, dependency,
-                entrypoint::{Entrypoint, EntrypointName, Entrypoints},
+                entrypoint::{EntrypointName, Entrypoints},
                 env::{
                     self as metadata_env,
                     var::{Modifier, Var},
@@ -690,10 +687,7 @@ mod tests {
         ep_name: &str,
     ) -> InstallInfo {
         let id = pinned(repo, hex_char);
-        let ep = Entrypoint {
-            name: EntrypointName::try_from(ep_name).unwrap(),
-        };
-        let entrypoints = Entrypoints::new(vec![ep]).unwrap();
+        let entrypoints = Entrypoints::from_names([ep_name]);
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
             version: bundle::Version::V1,
             strip_components: None,
@@ -1101,7 +1095,7 @@ mod tests {
         let meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "cmake" }],
+            "entrypoints": { "cmake": {} },
         });
         std::fs::write(pkg_path.join("metadata.json"), meta.to_string()).unwrap();
         let resolved_json = serde_json::to_string(&dep_resolved).unwrap();
@@ -1860,7 +1854,7 @@ mod tests {
         let b_meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "e" }],
+            "entrypoints": { "e": {} },
         });
         std::fs::write(b_path.join("metadata.json"), b_meta.to_string()).unwrap();
         std::fs::write(b_path.join("resolve.json"), serde_json::to_string(&b_resolved).unwrap()).unwrap();
@@ -1894,7 +1888,7 @@ mod tests {
         let b_meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "e" }],
+            "entrypoints": { "e": {} },
         });
         std::fs::write(b_path.join("metadata.json"), b_meta.to_string()).unwrap();
         std::fs::write(b_path.join("resolve.json"), serde_json::to_string(&b_resolved).unwrap()).unwrap();
@@ -1929,7 +1923,7 @@ mod tests {
         let b_meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "e" }],
+            "entrypoints": { "e": {} },
         });
         std::fs::write(b_path.join("metadata.json"), b_meta.to_string()).unwrap();
         std::fs::write(b_path.join("resolve.json"), serde_json::to_string(&b_resolved).unwrap()).unwrap();
@@ -1966,7 +1960,7 @@ mod tests {
         let b_meta = serde_json::json!({
             "type": "bundle",
             "version": 1,
-            "entrypoints": [{ "name": "e" }],
+            "entrypoints": { "e": {} },
         });
         std::fs::write(b_path.join("metadata.json"), b_meta.to_string()).unwrap();
         std::fs::write(b_path.join("resolve.json"), serde_json::to_string(&b_resolved).unwrap()).unwrap();
@@ -2222,10 +2216,7 @@ mod tests {
         env_builder.add_var(var);
         let env = env_builder.build();
 
-        let ep = Entrypoint {
-            name: EntrypointName::try_from("mytool").unwrap(),
-        };
-        let entrypoints = Entrypoints::new(vec![ep]).unwrap();
+        let entrypoints = Entrypoints::from_names(["mytool"]);
 
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
             version: bundle::Version::V1,
@@ -2520,10 +2511,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         // Build dep metadata: one entrypoint + one public PATH var (the bin/).
-        let ep = Entrypoint {
-            name: EntrypointName::try_from("tool").unwrap(),
-        };
-        let entrypoints = Entrypoints::new(vec![ep]).unwrap();
+        let entrypoints = Entrypoints::from_names(["tool"]);
 
         use crate::package::metadata::env::{path::Path as EnvPath, var::Modifier};
         let path_var = Var {
@@ -2595,10 +2583,7 @@ mod tests {
     fn emit_dep_path_block_swapped_order_fails_invariant() {
         let dir = tempfile::tempdir().unwrap();
 
-        let ep = Entrypoint {
-            name: EntrypointName::try_from("tool").unwrap(),
-        };
-        let entrypoints = Entrypoints::new(vec![ep]).unwrap();
+        let entrypoints = Entrypoints::from_names(["tool"]);
 
         use crate::package::metadata::env::{path::Path as EnvPath, var::Modifier};
         let path_var = Var {
@@ -2667,10 +2652,7 @@ mod tests {
     fn emit_root_path_block_declared_bin_precedes_synth_path_consumer_surface() {
         let dir = tempfile::tempdir().unwrap();
 
-        let ep = Entrypoint {
-            name: EntrypointName::try_from("rootool").unwrap(),
-        };
-        let entrypoints = Entrypoints::new(vec![ep]).unwrap();
+        let entrypoints = Entrypoints::from_names(["rootool"]);
 
         use crate::package::metadata::env::{path::Path as EnvPath, var::Modifier};
         let path_var = Var {
@@ -2740,10 +2722,7 @@ mod tests {
     fn emit_root_path_block_no_synth_path_on_self_surface() {
         let dir = tempfile::tempdir().unwrap();
 
-        let ep = Entrypoint {
-            name: EntrypointName::try_from("rootool").unwrap(),
-        };
-        let entrypoints = Entrypoints::new(vec![ep]).unwrap();
+        let entrypoints = Entrypoints::from_names(["rootool"]);
 
         use crate::package::metadata::env::{path::Path as EnvPath, var::Modifier};
         let path_var = Var {

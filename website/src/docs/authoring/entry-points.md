@@ -51,7 +51,7 @@ The full collision-detection mechanic, error format, and the cross-platform laun
 
 ## Name = Dispatch Key {#dispatch}
 
-`entrypoints` carries only one field per entry — `name`. There is no `target` template. At install time OCX writes one launcher per name; at exec time the launcher re-enters `ocx launcher exec`, which composes the package's env, and the entry-point name is resolved against the composed `PATH` using the standard PATH search (`PATHEXT` on Windows). Declare the binary's location once via `env`, and every entry-point name picks it up from there.
+`entrypoints` is a JSON object keyed by command name. The value object holds per-entry fields and is reserved for future additions (currently always `{}`) — there is no `target` template. At install time OCX writes one launcher per key; at exec time the launcher re-enters `ocx launcher exec`, which composes the package's env, and the entry's name is resolved against the composed `PATH` using the standard PATH search (`PATHEXT` on Windows). Declare the binary's location once via `env`, and every entry name picks it up from there.
 
 A simple wrapper around a single bundled binary — declare `bin/` on the PATH, declare the entry points:
 
@@ -60,9 +60,9 @@ A simple wrapper around a single bundled binary — declare `bin/` on the PATH, 
   "env": [
     { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "private" }
   ],
-  "entrypoints": [
-    { "name": "cmake" }
-  ]
+  "entrypoints": {
+    "cmake": {}
+  }
 }
 ```
 
@@ -76,9 +76,9 @@ A meta-package that exposes a tool from a dependency without re-bundling it — 
   "env": [
     { "key": "PATH", "type": "path", "value": "${deps.cmake.installPath}/bin", "visibility": "private" }
   ],
-  "entrypoints": [
-    { "name": "cmake" }
-  ]
+  "entrypoints": {
+    "cmake": {}
+  }
 }
 ```
 
@@ -114,9 +114,9 @@ Entrypoints encapsulate by pinning Python *inside the launcher's environment*. D
   "env": [
     { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "private" }
   ],
-  "entrypoints": [
-    { "name": "mytool" }
-  ]
+  "entrypoints": {
+    "mytool": {}
+  }
 }
 ```
 

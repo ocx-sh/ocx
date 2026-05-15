@@ -79,7 +79,7 @@ The [Nix package manager][nix] stores every package at `/nix/store/{hash}-name/`
 
 ### Generated Launchers {#generated-launchers}
 
-When a package's [`metadata.json`][metadata-ref] declares an [`entrypoints`][metadata-entry-points] array, OCX materializes a sibling `entrypoints/` directory at install time with one script per entry — a POSIX `.sh` launcher for Unix shells and a `.cmd` launcher for Windows. Each launcher bakes the digest-addressed `content/` path and re-enters via [`ocx launcher exec`][cmd-launcher-exec], so every invocation runs under the same clean-environment guarantee as [`ocx exec <package>`][cmd-exec].
+When a package's [`metadata.json`][metadata-ref] declares a non-empty [`entrypoints`][metadata-entry-points] object, OCX materializes a sibling `entrypoints/` directory at install time with one script per entry — a POSIX `.sh` launcher for Unix shells and a `.cmd` launcher for Windows. Each launcher bakes the digest-addressed `content/` path and re-enters via [`ocx launcher exec`][cmd-launcher-exec], so every invocation runs under the same clean-environment guarantee as [`ocx exec <package>`][cmd-exec].
 
 Packages that declare no entrypoints never get an `entrypoints/` directory. See the [entry points guide][in-depth-entry-points] for the publisher workflow.
 

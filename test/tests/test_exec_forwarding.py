@@ -223,7 +223,7 @@ def test_generated_launcher_uses_ocx_binary_and_silences_presentation(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=["hello"],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)
@@ -295,7 +295,7 @@ def test_launcher_chain_offline_propagates(
         ocx,
         unique_repo,
         tmp_path,
-        entrypoints=[{"name": "hello", "target": "${installPath}/bin/hello"}],
+        entrypoints=["hello"],
         bins=["hello"],
     )
     ocx.plain("install", "--select", pkg.short)

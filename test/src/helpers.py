@@ -229,7 +229,7 @@ def make_package_with_entrypoints(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
-    entrypoints: list[dict],
+    entrypoints: list[str] | dict[str, dict],
     bins: list[str] | None = None,
     tag: str = "1.0.0",
     *,
@@ -245,6 +245,10 @@ def make_package_with_entrypoints(
 
     Parameters
     ----------
+    entrypoints:
+        Either a list of entrypoint names (each materializes as an empty
+        value object) or a pre-built map of name -> value object. The on-wire
+        shape is a JSON object keyed by name.
     dependencies:
         Optional list of dependency descriptors to embed in metadata.  Each
         entry must be a dict with at least an ``identifier`` key (same shape
@@ -255,6 +259,17 @@ def make_package_with_entrypoints(
         v2 default `private`). Pass an explicit list when a test needs
         consumer-visible PATH or other env shapes.
     """
+    if isinstance(entrypoints, list):
+        for n in entrypoints:
+            if not isinstance(n, str):
+                raise TypeError(
+                    "entrypoints list must contain plain command-name strings "
+                    f"(got element of type {type(n).__name__}); pass a dict[str, dict] "
+                    "if per-entry value objects are needed"
+                )
+        entrypoints_obj: dict[str, dict] = {name: {} for name in entrypoints}
+    else:
+        entrypoints_obj = dict(entrypoints)
     bin_names = bins or ["hello"]
     if env is None:
         env = [
@@ -283,7 +298,7 @@ def make_package_with_entrypoints(
     metadata_path = tmp_path / f"metadata-{file_prefix}-{unique_repo}-{tag}.json"
     metadata_obj: dict = {
         "type": "bundle", "version": 1, "env": env,
-        "entrypoints": entrypoints,
+        "entrypoints": entrypoints_obj,
     }
     if dependencies:
         metadata_obj["dependencies"] = dependencies

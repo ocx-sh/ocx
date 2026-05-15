@@ -17,10 +17,7 @@
       "name": "leaf-a"
     }
   ],
-  "entrypoints": [
-    {
-      "name": "wrap-leaf-a",
-      "target": "${installPath}/bin/wrap-leaf-a"
-    }
-  ]
+  "entrypoints": {
+    "wrap-leaf-a": {}
+  }
 }

@@ -57,8 +57,8 @@ pub async fn generate(pkg_root: &Path, entries: &Entrypoints, dest: &Path) -> Re
     // syscall latency over a large `entrypoints/` directory.
     let mut tasks: JoinSet<Result<(), crate::Error>> = JoinSet::new();
 
-    for entry in entries.iter() {
-        let name = entry.name.as_str();
+    for (name, _entry) in entries.iter() {
+        let name = name.as_str();
 
         // Unix launcher: write body, then set the executable bit.
         let unix_body = unix_launcher_body(&pkg_root_str);
@@ -114,16 +114,16 @@ async fn write_unix_launcher(path: PathBuf, body: String) -> Result<(), crate::E
 mod tests {
     use tempfile::tempdir;
 
+    use std::collections::BTreeMap;
+
     use crate::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
 
-    fn make_entrypoint(name: &str) -> Entrypoint {
-        Entrypoint {
-            name: EntrypointName::try_from(name).unwrap(),
-        }
-    }
-
-    fn make_entrypoints(entries: Vec<Entrypoint>) -> Entrypoints {
-        Entrypoints::new(entries).unwrap()
+    fn entries_for(names: &[&str]) -> Entrypoints {
+        let map: BTreeMap<EntrypointName, Entrypoint> = names
+            .iter()
+            .map(|n| (EntrypointName::try_from(*n).unwrap(), Entrypoint::default()))
+            .collect();
+        Entrypoints::new(map)
     }
 
     // ── Empty Entrypoints — no files generated ────────────────────────────
@@ -133,7 +133,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let pkg_root = tmp.path().join("pkg");
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![]);
+        let entrypoints = entries_for(&[]);
 
         super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
         assert!(
@@ -150,7 +150,7 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake")]);
+        let entrypoints = entries_for(&["cmake"]);
 
         super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
         assert!(dest.join("cmake").exists(), "unix launcher must be created");
@@ -167,7 +167,7 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake")]);
+        let entrypoints = entries_for(&["cmake"]);
 
         super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
         let mode = std::fs::metadata(dest.join("cmake")).unwrap().permissions().mode();
@@ -193,7 +193,7 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake")]);
+        let entrypoints = entries_for(&["cmake"]);
 
         // First call
         let _ = super::generate(&pkg_root, &entrypoints, &dest).await;
@@ -219,7 +219,7 @@ mod tests {
         let pkg_root = tmp.path().join("pkg'with'quote");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
-        let entrypoints = make_entrypoints(vec![make_entrypoint("cmake")]);
+        let entrypoints = entries_for(&["cmake"]);
 
         let err = super::generate(&pkg_root, &entrypoints, &dest)
             .await

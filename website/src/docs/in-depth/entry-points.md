@@ -11,7 +11,7 @@ This page explains the inner workings of entry points — how launchers are gene
 
 ## Declaring Entry Points {#declaring}
 
-Entry points live as a sibling array on the bundle metadata:
+Entry points live as a sibling object on the bundle metadata, keyed by the command name users will invoke:
 
 ```json
 {
@@ -20,14 +20,14 @@ Entry points live as a sibling array on the bundle metadata:
   "env": [
     { "key": "CMAKE_ROOT", "type": "constant", "value": "${installPath}/share/cmake" }
   ],
-  "entrypoints": [
-    { "name": "cmake" },
-    { "name": "ctest" }
-  ]
+  "entrypoints": {
+    "cmake": {},
+    "ctest": {}
+  }
 }
 ```
 
-Every entry has exactly one field — `name` — which is both the launcher filename and the command users type. At runtime the launcher resolves `name` against the composed `PATH` from the package's [`env`][metadata-env] block, so the publisher declares the binary's location once via `env` and the launcher exec resolver picks it up from there. The complete field reference, including optional schema additions, lives at [Entry Points in the metadata reference][metadata-entry-points].
+`entrypoints` is a JSON object keyed by command name; the value object holds per-entry fields and is reserved for future additions (currently always `{}`). The map shape mirrors Cargo's `[dependencies.X]`, Compose's `services:`, and GitHub Actions's `jobs:` — uniqueness within a package follows from JSON object key semantics. At runtime the launcher resolves the entry's name against the composed `PATH` from the package's [`env`][metadata-env] block, so the publisher declares the binary's location once via `env` and the launcher exec resolver picks it up from there. The complete field reference lives at [Entry Points in the metadata reference][metadata-entry-points].
 
 At install time OCX writes one script per entry into a sibling [`entrypoints/` directory][fs-packages] inside the content-addressed package directory — a POSIX `.sh` launcher (mode `0755`) and a Windows `.cmd` launcher for every declared name, regardless of which platform is currently installing. Generating both shapes on every platform keeps publishers from having to fork metadata per host OS.
 
@@ -49,7 +49,7 @@ Names are validated at metadata deserialization time. The regex is `^[a-z0-9][a-
 
 Uniqueness is enforced at three layers:
 
-- **Within a package** — duplicate `name` values in the same `entrypoints` array are rejected at deserialization (so the bundle never publishes in a broken state). A package shipping both a `cmake` and a second `cmake` entry will fail to parse.
+- **Within a package** — the map shape gives intra-package uniqueness via JSON object key semantics, and duplicate keys in the on-wire JSON are rejected at deserialization (rather than silently last-wins, the `serde_json` default). A bundle that lists `"cmake"` twice fails to parse and never reaches the registry.
 - **Across the interface surface (install time)** — when [`ocx install`][cmd-install] generates launchers, it iterates the transitive closure in topological order and reports all owners when an entry-point name collides on the composed interface surface. Two packages with the same entrypoint name on the interface surface produce an install error. See [Multi-Owner Collision Reporting](#multi-owner) below for the exact error shape.
 - **Across selected packages (select time)** — two different installed packages that both declare `cmake` coexist on disk, but only one can contribute `cmake` to `$PATH` at a time. Collisions are detected when the user runs [`ocx select`][cmd-select] (or `ocx install --select`) — the command reports the conflict and refuses to flip `current` until the user deselects the competing package.
 
@@ -111,7 +111,7 @@ Launchers are harmless files until something puts them on `$PATH`. OCX does that
 
 - [`ocx select <package>`][cmd-select] flips `current` to the selected package root. Tools that need launchers reach them via `{registry}/{repo}/current/entrypoints` — there is no separate symlink for entry points; the same anchor exposes content (`current/content`), launchers (`current/entrypoints`), and metadata (`current/metadata.json`).
 - [`ocx deselect <package>`][cmd-deselect] and [`ocx uninstall <package>`][cmd-uninstall] remove `current` as part of their cleanup. Both operations are idempotent — an already-absent symlink is not an error.
-- [`ocx shell hook`][cmd-shell-hook] emits shell export statements for every selected package whose `current` symlink exists *and* whose metadata has a non-empty `entrypoints` array; the exported `PATH` entry is `{registry}/{repo}/current/entrypoints`. Packages that haven't been `ocx select`ed yet are silently skipped, so the hook never points `$PATH` at a missing directory.
+- [`ocx shell hook`][cmd-shell-hook] emits shell export statements for every selected package whose `current` symlink exists *and* whose metadata has a non-empty `entrypoints` map; the exported `PATH` entry is `{registry}/{repo}/current/entrypoints`. Packages that haven't been `ocx select`ed yet are silently skipped, so the hook never points `$PATH` at a missing directory.
 
 The typical shell wire-up is a single line in a dotfile:
 
@@ -216,10 +216,10 @@ Publishing a CMake package with two launchers looks like this on the publisher s
   "env": [
     { "key": "PATH", "type": "path", "required": true, "value": "${installPath}/bin" }
   ],
-  "entrypoints": [
-    { "name": "cmake" },
-    { "name": "ctest" }
-  ]
+  "entrypoints": {
+    "cmake": {},
+    "ctest": {}
+  }
 }
 ```
 
