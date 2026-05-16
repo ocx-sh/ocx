@@ -227,13 +227,7 @@ impl TreeItem for Node {
     }
 
     fn annotations(&self) -> Vec<Annotation> {
-        self.annotations
-            .iter()
-            .map(|a| match a.style.clone() {
-                Some(style) => Annotation::new(a.text.clone()).with_style(style),
-                None => Annotation::new(a.text.clone()),
-            })
-            .collect()
+        self.annotations.clone()
     }
 }
 

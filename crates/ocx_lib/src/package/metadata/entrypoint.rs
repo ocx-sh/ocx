@@ -120,7 +120,7 @@ pub struct Entrypoint {
     /// (the common case): a package may expose `hello` while dispatching a
     /// differently named binary such as `hello-bin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<EntrypointName>,
+    command: Option<EntrypointName>,
 }
 
 impl Entrypoint {
@@ -282,7 +282,7 @@ impl schemars::JsonSchema for Entrypoints {
         let value_schema = generator.subschema_for::<Entrypoint>();
         schemars::json_schema!({
             "type": "object",
-            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object is reserved for per-entry fields (currently always empty).",
+            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly).",
             "additionalProperties": value_schema,
             "propertyNames": {
                 "pattern": SLUG_PATTERN_STR,
