@@ -15,6 +15,14 @@ use crate::api::Printable;
 const STYLE_DIGEST: Style = Style::new().style(console::Style::new().color256(117)); // light sky blue
 const STYLE_DETAIL: Style = Style::new().style(console::Style::new().dim());
 
+/// A digest-styled annotation. Single source of truth for how a digest (or
+/// digest-bearing identifier) is rendered across every `inspect` view —
+/// `candidates`, `metadata.dependencies`, and the `--resolve` chain/layers —
+/// so the colour stays consistent regardless of which sub-tree emits it.
+fn digest_annotation(text: String) -> Annotation {
+    Annotation::new(text).with_style(STYLE_DIGEST)
+}
+
 /// Read-only view of a package. The shape adapts to the requested reference
 /// and whether `--resolve` was given:
 ///
@@ -259,8 +267,7 @@ fn metadata_node(metadata: &Metadata) -> Node {
         let dep_nodes = deps
             .iter()
             .map(|dep| {
-                Node::leaf(dep.name().to_string())
-                    .with_annotation(Annotation::new(dep.identifier.to_string()).with_style(STYLE_DIGEST))
+                Node::leaf(dep.name().to_string()).with_annotation(digest_annotation(dep.identifier.to_string()))
             })
             .collect();
         children.push(Node::branch("dependencies", dep_nodes));
@@ -295,7 +302,7 @@ fn candidates_node(candidates: &[CandidateOut]) -> Node {
         .iter()
         .map(|c| {
             Node::leaf(c.platform.clone())
-                .with_annotation(Annotation::new(c.digest.clone()).with_style(STYLE_DIGEST))
+                .with_annotation(digest_annotation(c.digest.clone()))
                 .with_annotation(Annotation::new(c.media_type.clone()).with_style(STYLE_DETAIL))
                 .with_annotation(Annotation::new(format!("{} bytes", c.size)).with_style(STYLE_DETAIL))
         })
@@ -304,12 +311,22 @@ fn candidates_node(candidates: &[CandidateOut]) -> Node {
 }
 
 fn resolution_node(resolution: &Resolution) -> Node {
-    let chain = resolution.chain.iter().map(|d| Node::leaf(d.clone())).collect();
+    // Digests render as styled annotations everywhere (labels carry a fixed
+    // style and cannot be coloured); a positional `[i]` label preserves the
+    // walk order that used to be implicit in the bare-digest list.
+    let chain = resolution
+        .chain
+        .iter()
+        .enumerate()
+        .map(|(i, d)| Node::leaf(format!("[{i}]")).with_annotation(digest_annotation(d.clone())))
+        .collect();
     let layers = resolution
         .layers
         .iter()
-        .map(|l| {
-            Node::leaf(l.digest.clone())
+        .enumerate()
+        .map(|(i, l)| {
+            Node::leaf(format!("[{i}]"))
+                .with_annotation(digest_annotation(l.digest.clone()))
                 .with_annotation(Annotation::new(l.media_type.clone()).with_style(STYLE_DETAIL))
                 .with_annotation(Annotation::new(format!("{} bytes", l.size)).with_style(STYLE_DETAIL))
         })
@@ -317,7 +334,7 @@ fn resolution_node(resolution: &Resolution) -> Node {
     Node::branch(
         "resolution",
         vec![
-            Node::leaf(format!("pinned {}", resolution.pinned)),
+            Node::leaf("pinned".to_string()).with_annotation(digest_annotation(resolution.pinned.clone())),
             Node::branch("chain", chain),
             Node::branch("layers", layers),
         ],
