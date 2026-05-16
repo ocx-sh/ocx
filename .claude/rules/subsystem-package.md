@@ -19,7 +19,7 @@ Tagged enum metadata (`Metadata::Bundle`) supports future format versions, no br
 | `metadata.rs` | Root `Metadata` enum (tagged: currently `Bundle` only); re-exports `Entrypoint`, `EntrypointName`, `Entrypoints`, `ValidMetadata` |
 | `metadata/bundle.rs` | `Version` enum (single variant `V1`; `serde_repr` rejects unknown on deser); `Bundle` struct (version + strip_components + env + dependencies + entrypoints) |
 | `metadata/dependency.rs` | `Dependency` struct; `DependencyName` newtype; `Dependencies` validated collection; `DependencyError` variants |
-| `metadata/entrypoint.rs` | `Entrypoint` empty-struct value (per-entry fields land here in future); `EntrypointName` slug newtype; `Entrypoints` wraps `BTreeMap<EntrypointName, Entrypoint>` with custom `MapAccess` `Deserialize` that rejects duplicate keys (overrides `serde_json` last-wins default); iter yields `(&EntrypointName, &Entrypoint)`; `EntrypointError` variants |
+| `metadata/entrypoint.rs` | `Entrypoint` value struct — optional `command: Option<EntrypointName>` (dispatch target when ≠ invocable name; absent = name dispatched directly); `Entrypoints::dispatch_command(name)` resolves it, consumed by `ocx launcher exec`; `EntrypointName` slug newtype; `Entrypoints` wraps `BTreeMap<EntrypointName, Entrypoint>` with custom `MapAccess` `Deserialize` that rejects duplicate keys (overrides `serde_json` last-wins default); iter yields `(&EntrypointName, &Entrypoint)`; `EntrypointError` variants |
 | `metadata/env.rs` | `Env` struct (array of Var); `resolve_into_env()`, `EnvBuilder` |
 | `metadata/env/var.rs` | `Var` with flattened modifier (key + Path or Constant) |
 | `metadata/env/path.rs` | Path modifier: prepended to existing values, `${installPath}` template |

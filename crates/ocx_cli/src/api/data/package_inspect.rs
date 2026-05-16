@@ -271,7 +271,18 @@ fn metadata_node(metadata: &Metadata) -> Node {
     {
         let names = entrypoints
             .iter()
-            .map(|(name, _)| Node::leaf(name.to_string()))
+            .map(|(name, entry)| {
+                let node = Node::leaf(name.to_string());
+                // Annotate the dispatch command only when it diverges from
+                // the invocable name — no noise for the common case where
+                // they coincide.
+                match entry.command() {
+                    Some(cmd) if cmd.as_str() != name.as_str() => {
+                        node.with_annotation(Annotation::new(format!("→ {cmd}")).with_style(STYLE_DETAIL))
+                    }
+                    _ => node,
+                }
+            })
             .collect();
         children.push(Node::branch("entrypoints", names));
     }

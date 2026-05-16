@@ -315,21 +315,22 @@ anchor to add the launchers to `PATH`.
 
 Each launcher re-enters via [`ocx launcher exec`][cmd-launcher-exec] with the package root baked at
 install time, preserving clean-environment execution semantics on every invocation. The launcher
-resolves the entry point's name against the composed `PATH` from the package's [`env`](#env)
-block — there is no separate `target` field; the publisher declares the binary's location once via
-`env`, and the launcher exec resolver picks it up from there.
+resolves a *dispatch command* against the composed `PATH` from the package's [`env`](#env) block.
+By default the dispatch command is the entry point's own name — the publisher declares the binary's
+location once via `env` and the launcher exec resolver picks it up from there. A package that needs
+the invocable name to differ from the binary it runs sets the optional `command` field (see below).
 
 ### Wire Shape {#entry-points-wire-shape}
 
-`entrypoints` is a JSON object keyed by command name. The map shape mirrors the Cargo
+`entrypoints` is a JSON object keyed by the invocable name. The map shape mirrors the Cargo
 `[dependencies.X]`, Compose `services:`, and GitHub Actions `jobs:` idioms — uniqueness within a
-package follows from JSON object key semantics, and per-entry fields (when added in the future)
-land naturally inside each value object.
+package follows from JSON object key semantics, and per-entry fields land inside each value object.
 
 | Position | Type | Required | Description |
 |---|---|---|---|
-| Key | string | Yes | The launcher name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Used as the script filename, the command users invoke, and the key the launcher resolves against the composed `PATH`. |
-| Value | object | Yes | Reserved for future per-entry fields (aliases, description, platform gating). Currently always `{}`. |
+| Key | string | Yes | The invocable name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Used as the launcher script filename and the command users invoke. |
+| Value | object | Yes | Per-entry fields. `{}` is the common case: the invocable name *is* the dispatched command. |
+| `command` | string | No | Dispatch target resolved on the composed `PATH` when it differs from the invocable name. Same `^[a-z0-9][a-z0-9_-]*$` / 64-char rule as the key. Omit it (the common case) and the invocable name is dispatched directly. Example: expose `hello` while running a binary named `hello-bin`. |
 
 ### Disk Layout {#entry-points-disk-layout}
 
@@ -352,10 +353,14 @@ packages are detected at select time.
 {
   "entrypoints": {
     "cmake": {},
-    "ctest": {}
+    "ctest": {},
+    "hello": { "command": "hello-bin" }
   }
 }
 ```
+
+`cmake` and `ctest` dispatch the binaries of the same name. `hello` is the name users invoke,
+but the launcher dispatches `hello-bin` resolved on the composed `PATH`.
 
 ## Extraction {#extraction}
 
