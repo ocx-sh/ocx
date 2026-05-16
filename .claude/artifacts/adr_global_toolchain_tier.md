@@ -11,8 +11,20 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` — Rust 2024, no new dep; reuses install/select symlinks and the shell-activation surface.
 **Domain Tags:** api | integration | dx
 **Supersedes:** Amendment C of [`adr_project_toolchain_config.md`](./adr_project_toolchain_config.md) (home-tier-as-implicit-fallback)
-**Superseded By:** N/A
+**Superseded By:** N/A (activation surface, command taxonomy, and Decisions 3/4/6 re-anchored by [`handshake_toolchain_cli.md`](./handshake_toolchain_cli.md), 2026-05-16 — Decisions 1, 2, 5 still hold)
 **Amends:** [`adr_cli_high_low_layering.md`](./adr_cli_high_low_layering.md) (layer table — adds the global tier and the strict-isolation rule)
+
+> ## ⚠ SAFEGUARD — PARTIALLY SUPERSEDED. DO NOT IMPLEMENT FROM THIS FILE.
+>
+> The authoritative spec for activation, command taxonomy, and the
+> global-env exporter is **[`handshake_toolchain_cli.md`](./handshake_toolchain_cli.md)**
+> (2026-05-16). From *this* ADR, only **Decisions 1, 2, 5** still hold.
+> **Decisions 3, 4, 6, 7 are SUPERSEDED** and each carries an inline
+> `[SUPERSEDED]` marker — they describe a model that was rejected
+> (`install --global` sugar, `run` never sees global, per-prompt-hook /
+> static-`init.<shell>` activation, downstream `setup.ocx.sh` website
+> repo). A reviewer or cross-model adversary MUST treat the marked
+> decisions as historical context, never as an implementation target.
 
 ## Context
 
@@ -151,23 +163,23 @@ shell-only exposure.**
    `UsageError` (64), enforced by clap `conflicts_with`. Flags precede
    positionals (project CLI convention).
 
-3. **`--global` is accepted on project-tier and mutator commands:** `add`,
-   `remove`, `lock`, `upgrade`, `pull`, `run`. Semantics are identical to
-   operating on a project `ocx.toml`, except the file is `$OCX_HOME/ocx.toml`.
-   `ocx install --global <pkg>` is defined as sugar = `ocx add --global <pkg>`
-   + re-lock the global file + install **and `select`** the resolved package
-   (so the tool is a `current` symlink on the global PATH). `install`/`select`
-   remain OCI-tier primitives; `--global` only adds the "also record into and
-   select for the global toolchain" effect.
+3. **[SUPERSEDED → handshake §2, §7]** `--global` on the toolchain-tier
+   mutators (`add`/`remove`/`lock`/`upgrade`/`run`) still holds. The
+   `ocx install --global` sugar described here is **rejected**: `install`
+   is OCI-tier, moves under `ocx package`, and never touches any
+   `ocx.toml`. Do not implement the sugar.
+   ~~`--global` is accepted on project-tier and mutator commands: `add`,
+   `remove`, `lock`, `upgrade`, `pull`, `run`. `ocx install --global <pkg>`
+   is defined as sugar = `ocx add --global <pkg>` + re-lock + install and
+   `select`.~~
 
-4. **Strict isolation — no composition, ever.** The global toolchain never
-   composes into project resolution. `ocx run` and `ocx exec` are hermetic and
-   **never** consult `$OCX_HOME/ocx.toml`: `ocx exec` already reads no
-   `ocx.toml`; `ocx run` reads only the in-effect project file (the project's
-   own, or — only under explicit `--global` — the global one). A project `run`
-   without `--global` is structurally incapable of seeing global tools. This is
-   the resolved answer to the plan's open composition question: **strict
-   tiers**, Volta-style hard isolation.
+4. **[SUPERSEDED → handshake §5]** No-composition / strict tiers still
+   holds, but the framing "`run` never sees global" is softened:
+   `ocx run --global -- cmd` *explicitly* composes the global toolchain
+   for that child only (single tier, no merge, no shell mutation). Bare
+   `ocx run` is project-only. Implement per handshake §5, not this text.
+   ~~The global toolchain never composes into project resolution; `ocx run`
+   and `ocx exec` never consult `$OCX_HOME/ocx.toml`.~~
 
 5. **Materialisation via existing install→`current` symlinks.** Global tools
    become `current` selections through the unchanged install/select path
@@ -177,7 +189,15 @@ shell-only exposure.**
    **no `$OCX_HOME/projects/` self-link** — it is protected purely by its
    `current` install symlinks. No new storage.
 
-6. **Shell exposure of the global set.** The existing shell-activation surface
+6. **[SUPERSEDED → handshake §4, §7] DO NOT IMPLEMENT.** The entire
+   per-prompt-hook + static `$OCX_HOME/init.<shell>` activation model
+   below (including the "Non-interactive coverage" correction) is
+   rejected. Activation is a stateless `ocx env --global --shell=<S>`
+   exporter sourced from a thin installer-generated env file; `ocx shell
+   hook` and `ocx shell init` are deleted. Use handshake §4 only.
+   The strikethrough text is retained for rationale history.
+
+   ~~**Shell exposure of the global set.**~~ The existing shell-activation surface
    (`ocx shell hook`, the per-prompt evaluator described in
    `adr_cli_high_low_layering.md` line 231) is extended: **when no project
    `ocx.toml` is in effect**, the hook additionally emits the global toolchain's
@@ -199,16 +219,15 @@ shell-only exposure.**
    layers dynamic project switching on top. The static entrypoint uses POSIX
    `.` (not bash `source`) for dash/sh CI compatibility (SOTA-2b).
 
-7. **Install-script integration is a contract, implemented downstream.** The
-   OS install script (the `setup.ocx.sh` website repo per project memory
-   `project_setup_ocx_canonical_install.md`, not this repo) must `source` the
-   global activation entrypoint in the generated shell env file — the same way
-   `direnv` sources project env. **In-scope here:** provide a stable,
-   documented activation entrypoint (the `ocx shell init` snippet / written
-   `$OCX_HOME/init.<shell>`). **Out of scope (noted follow-up):** the actual
-   install-script edit (different repo) and live re-import of env when the
-   global set later changes in a long-lived shell (the per-prompt hook covers
-   interactive refresh; static-file re-source is the follow-up).
+7. **[SUPERSEDED → handshake §4] DO NOT IMPLEMENT.** The "downstream
+   `setup.ocx.sh` website repo" framing is **invalid** — that repo does
+   not exist and is not planned now. Per handshake §4 the **in-repo OCX
+   install script** itself modifies the user's shell rc/profile to
+   `source` a thin generated `$OCX_HOME` env file that `eval`s
+   `ocx env --global --shell=<S>`. No separate repo, no `$OCX_HOME/init.<shell>`
+   static render.
+   ~~Install-script integration is a contract implemented downstream in the
+   `setup.ocx.sh` website repo; in-scope = provide `$OCX_HOME/init.<shell>`.~~
 
 ### Quantified Impact
 
