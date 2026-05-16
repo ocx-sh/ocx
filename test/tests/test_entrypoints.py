@@ -269,6 +269,51 @@ def test_launcher_invocation_runs_target_and_forwards_args(
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix launcher invocation test")
+def test_launcher_dispatches_divergent_command(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """An entrypoint whose ``command`` differs from its name dispatches the command.
+
+    The package exposes the invocable name ``hello`` but declares
+    ``command: hello-bin``; only ``hello-bin`` exists on the composed PATH
+    (there is no ``hello`` binary). The launcher named ``hello`` must run
+    ``hello-bin`` — proving the name -> command mapping in ``ocx launcher
+    exec`` rather than a coincidental name-on-PATH resolution.
+    """
+    pkg = make_package_with_entrypoints(
+        ocx, unique_repo, tmp_path,
+        entrypoints={"hello": {"command": "hello-bin"}},
+        bins=["hello-bin"],
+        tag="1.0.0",
+    )
+    ocx.plain("install", "--select", pkg.short)
+
+    launcher = current_entrypoints(ocx, pkg) / "hello"
+    assert launcher.exists(), f"launcher must be named after the invocable name: {launcher}"
+    assert not (launcher.parent / "hello-bin").exists(), (
+        "no launcher is generated for the dispatch command — only the invocable name"
+    )
+
+    launcher_env = dict(ocx.env)
+    launcher_env["PATH"] = f"{ocx.binary.parent}{os.pathsep}{launcher_env.get('PATH', '')}"
+    completed = subprocess.run(
+        [str(launcher)],
+        capture_output=True,
+        text=True,
+        env=launcher_env,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"divergent-command launcher must succeed; rc={completed.returncode} "
+        f"stderr={completed.stderr.strip()!r}"
+    )
+    assert f"entry-point-hello-bin {pkg.marker}" in completed.stdout, (
+        f"launcher 'hello' must dispatch 'hello-bin'; stdout={completed.stdout!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Synthetic PATH entry: entrypoints/ added to env
 # ---------------------------------------------------------------------------

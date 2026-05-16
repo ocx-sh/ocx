@@ -103,17 +103,34 @@ impl schemars::JsonSchema for EntrypointName {
 
 /// A single named entrypoint for a package.
 ///
-/// The map key in [`Entrypoints`] supplies the name; this struct holds the
-/// per-entry value. It is intentionally empty today — kept as a struct (not
-/// a unit type) so future per-entry fields (aliases, description, platform
-/// gating) land here without a wire-format break.
+/// The map key in [`Entrypoints`] supplies the *invocable name* — the
+/// filename of the generated launcher. This struct holds the per-entry
+/// value.
 ///
 /// The launcher generated for each entry re-enters via
 /// `ocx launcher exec '<package-root>' -- <name> [args...]`, preserving
-/// clean-env execution semantics. The launcher resolves `<name>` against the
-/// composed `PATH` from the package's `env` block.
+/// clean-env execution semantics. `ocx launcher exec` resolves the
+/// *dispatch command* against the composed `PATH` from the package's `env`
+/// block: [`Entrypoint::command`] when set, otherwise the invocable name
+/// itself (the common case where they coincide).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct Entrypoint {}
+pub struct Entrypoint {
+    /// Dispatch target resolved on the composed `PATH`, when it differs from
+    /// the invocable name. Absent means the entrypoint name *is* the command
+    /// (the common case): a package may expose `hello` while dispatching a
+    /// differently named binary such as `hello-bin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<EntrypointName>,
+}
+
+impl Entrypoint {
+    /// The dispatch command, or `None` when it coincides with the invocable
+    /// name. Callers wanting the effective command should fall back to the
+    /// entrypoint's map key — see [`Entrypoints::dispatch_command`].
+    pub fn command(&self) -> Option<&EntrypointName> {
+        self.command.as_ref()
+    }
+}
 
 /// Map of entrypoint names to entrypoint definitions for a package.
 ///
@@ -187,6 +204,20 @@ impl Entrypoints {
     /// Iterates declared entrypoint names in name-sorted order.
     pub fn names(&self) -> impl Iterator<Item = &EntrypointName> + use<'_> {
         self.entries.keys()
+    }
+
+    /// Resolves the dispatch command for an invocable entrypoint `name`.
+    ///
+    /// Returns the entry's [`Entrypoint::command`] when set, otherwise `name`
+    /// itself. `name` is returned verbatim when it is not a declared
+    /// entrypoint, so callers that already validated the name (e.g.
+    /// `ocx launcher exec`, where the launcher filename is the name) keep
+    /// today's "resolve the name on PATH" behaviour with no special-casing.
+    pub fn dispatch_command<'a>(&'a self, name: &'a str) -> &'a str {
+        self.entries
+            .get(name)
+            .and_then(Entrypoint::command)
+            .map_or(name, EntrypointName::as_str)
     }
 }
 
@@ -514,5 +545,52 @@ mod tests {
         let serialized = serde_json::to_string(&bundle).unwrap();
         assert!(serialized.contains("entrypoints"));
         assert!(serialized.contains("cmake"));
+    }
+
+    #[test]
+    fn entry_without_command_deserializes_and_omits_on_serialize() {
+        let entry: Entrypoint = serde_json::from_str("{}").unwrap();
+        assert!(entry.command().is_none());
+        // skip_serializing_if keeps the wire format byte-identical with the
+        // pre-`command` shape for the common case.
+        assert_eq!(serde_json::to_string(&entry).unwrap(), "{}");
+    }
+
+    #[test]
+    fn entry_with_command_round_trips() {
+        let entry: Entrypoint = serde_json::from_str(r#"{"command":"hello-bin"}"#).unwrap();
+        assert_eq!(entry.command().unwrap().as_str(), "hello-bin");
+        assert_eq!(serde_json::to_string(&entry).unwrap(), r#"{"command":"hello-bin"}"#);
+    }
+
+    #[test]
+    fn entry_command_rejects_invalid_slug() {
+        // `command` reuses EntrypointName validation — a path traversal
+        // attempt is rejected at deserialization, not silently dispatched.
+        let err = serde_json::from_str::<Entrypoint>(r#"{"command":"../evil"}"#).unwrap_err();
+        assert!(err.to_string().contains("invalid"), "{err}");
+    }
+
+    #[test]
+    fn dispatch_command_falls_back_to_name_without_command() {
+        let eps = Entrypoints::from_names(["hello"]);
+        assert_eq!(eps.dispatch_command("hello"), "hello");
+    }
+
+    #[test]
+    fn dispatch_command_returns_declared_command() {
+        let json = r#"{"hello":{"command":"hello-bin"},"plain":{}}"#;
+        let eps: Entrypoints = serde_json::from_str(json).unwrap();
+        assert_eq!(eps.dispatch_command("hello"), "hello-bin");
+        assert_eq!(eps.dispatch_command("plain"), "plain");
+    }
+
+    #[test]
+    fn dispatch_command_returns_name_verbatim_when_undeclared() {
+        // `ocx launcher exec` relies on this: an unknown name (should not
+        // happen — the launcher filename is always declared) degrades to
+        // today's resolve-name-on-PATH behaviour, never panics.
+        let eps = Entrypoints::from_names(["hello"]);
+        assert_eq!(eps.dispatch_command("ghost"), "ghost");
     }
 }

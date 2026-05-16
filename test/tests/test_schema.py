@@ -117,9 +117,10 @@ def test_schema_entrypoints_is_object_type() -> None:
 def test_schema_entrypoints_value_schema_is_entrypoint_object() -> None:
     """The value type of each entrypoints entry must be the Entrypoint definition.
 
-    The Entrypoint value object is reserved for future per-entry fields
-    (currently always empty) — it must remain a JSON object even with no
-    declared properties.
+    The Entrypoint value object carries an optional ``command`` field (the
+    dispatch target when it diverges from the invocable name). ``command``
+    must be additive-optional: present in ``properties`` but absent from any
+    ``required`` list, so ``{}`` stays a valid entry.
     """
     schema = load_schema()
     bundle = find_bundle_definition(schema)
@@ -139,10 +140,12 @@ def test_schema_entrypoints_value_schema_is_entrypoint_object() -> None:
     assert value_schema.get("type") == "object", (
         f"Entrypoint value must be type=object; got: {value_schema}"
     )
-    # Empty struct today: properties absent or empty. Future fields land here
-    # without breaking the wire format.
-    assert value_schema.get("properties", {}) == {} or "properties" not in value_schema, (
-        f"Entrypoint value object should have no declared properties yet; got: {value_schema}"
+    props = value_schema.get("properties", {})
+    assert "command" in props, (
+        f"Entrypoint value object must declare the optional 'command' property; got: {value_schema}"
+    )
+    assert "command" not in value_schema.get("required", []), (
+        f"'command' must be additive-optional, not required; got: {value_schema}"
     )
 
 

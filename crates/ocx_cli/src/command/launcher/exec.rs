@@ -16,8 +16,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::cli::UsageError;
+use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::metadata::env::entry::Entry as EnvEntry;
 use ocx_lib::package_manager::launcher;
+use ocx_lib::prelude::SerdeExt;
 use ocx_lib::utility::child_process;
 use ocx_lib::{env, env::OcxConfigView};
 
@@ -50,14 +52,23 @@ impl LauncherExec {
         let info = manager.install_info_from_package_root(&validated).await?;
         let entries = manager.resolve_env(&[std::sync::Arc::new(info)], true).await?;
 
-        // argv[0] is the launcher's own filename — the entrypoint name.
-        // argv[1..] are the user args.
+        // argv[0] is the launcher's own filename — the invocable entrypoint
+        // name. argv[1..] are the user args.
         let (argv0, args) = self
             .argv
             .split_first()
             .expect("clap required=true guarantees at least one argv element");
 
-        self.run_with_env(entries, args, argv0, context.config_view()).await
+        // Map the invocable name to its dispatch command. Absent `command`
+        // (the common case) leaves `argv0` unchanged, so packages that do not
+        // declare a divergent command keep the existing resolve-name-on-PATH
+        // behaviour byte-for-byte.
+        let metadata = Metadata::read_json(&validated.join("metadata.json")).await?;
+        let command = metadata
+            .entrypoints()
+            .map_or(argv0.as_str(), |eps| eps.dispatch_command(argv0));
+
+        self.run_with_env(entries, args, command, context.config_view()).await
     }
 
     /// Run the resolved entrypoint with the given env.
