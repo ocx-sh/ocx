@@ -54,6 +54,44 @@ tasks:
       vars:
         ARGS: sync {{.PACKAGE_DIR}}/{{.SPEC_FILE}} --work-dir {{.ROOT_DIR}}/.mirror-work --latest {{.CLI_ARGS}}
 
+  test:script:
+    desc: "Run the scripted (.star) smoke test for {{.PACKAGE}} against its published mirror package"
+    # Single source of truth for the .star: the canonical script lives in-repo
+    # at mirrors/<pkg>/tests/smoke.star (the per-mirror candidate repos mirror
+    # it, but are separate repos not guaranteed present in CI).
+    #
+    # `ocx package test` has no published-ref form — it materializes from a
+    # local bundle or a `sha256:<hex>.<ext>` layer ref. So we exercise the REAL
+    # published package: pull it from the registry, re-bundle its materialized
+    # `content/` tree into a local archive (no registry round-trip on the test
+    # path — the layer is already the published artifact), then drive
+    # `package test --script` against that bundle. No version pinned here.
+    vars:
+      OCX_BIN: '{{.ROOT_DIR}}/target/release/ocx'
+      PLATFORM: '{{.PLATFORM | default "linux/amd64"}}'
+      PUBLISHED_REF: '{{.PUBLISHED_REF | default (printf "%s:3" .REPO)}}'
+      WORK_DIR: '{{.ROOT_DIR}}/.mirror-work/scripted-test/{{.PACKAGE}}'
+    preconditions:
+      - sh: test -f {{.PACKAGE_DIR}}/tests/smoke.star
+        msg: "No tests/smoke.star found for package '{{.PACKAGE}}'"
+    cmds:
+      - cargo build --release --bin ocx
+      - rm -rf "{{.WORK_DIR}}" && mkdir -p "{{.WORK_DIR}}"
+      - >-
+        "{{.OCX_BIN}}" package pull "{{.PUBLISHED_REF}}" -p "{{.PLATFORM}}"
+      - >-
+        PKGDIR="$("{{.OCX_BIN}}" --format json find "{{.PUBLISHED_REF}}" | python3 -c 'import json,sys;print(list(json.load(sys.stdin).values())[0])')";
+        "{{.OCX_BIN}}" package create "$PKGDIR/content"
+        -i "{{.PACKAGE}}:scripted-test" -p "{{.PLATFORM}}"
+        -m "{{.PACKAGE_DIR}}/metadata.json"
+        -o "{{.WORK_DIR}}" -f;
+        "{{.OCX_BIN}}" package test
+        -p "{{.PLATFORM}}"
+        -m "{{.PACKAGE_DIR}}/metadata.json"
+        -i "{{.PACKAGE}}:scripted-test"
+        "{{.WORK_DIR}}/{{.PACKAGE}}-scripted-test-{{.PLATFORM | replace "/" "-"}}.tar.xz"
+        --script "{{.PACKAGE_DIR}}/tests/smoke.star"
+
   describe:
     desc: "Push {{.PACKAGE}} README and logo to the registry"
     vars:

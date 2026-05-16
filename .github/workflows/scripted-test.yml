@@ -1,0 +1,63 @@
+name: Scripted Test
+
+# Smoke-tests the embedded Starlark test runner (`ocx package test --script`)
+# against a REAL published mirror package (ocx.sh/shfmt) end-to-end.
+#
+# OS-leg gating (pattern: .github/workflows/verify-deep.yml): this leg is
+# hard-wired `runs-on: ubuntu-latest` ONLY. The Windows/macOS legs below are
+# intentionally commented out — temporary + intentional, NOT the end-state.
+# Per plan R2-2: a pure-compute Starlark loop has no in-process preemption in
+# starlark 0.13.0 and would hang undetected; that hang is currently only
+# bounded on Linux CI. Re-enabling cross-OS legs is tracked in the ADR
+# Validation section once an out-of-process kill bound lands.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/ocx_lib/src/script/**'
+      - 'crates/ocx_cli/src/command/package_test.rs'
+      - 'mirrors/**/tests/*.star'
+      - 'mirrors/mirror.taskfile.yml'
+      - '.github/workflows/scripted-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  scripted-test:
+    name: Scripted Test (${{ matrix.job.name }})
+    runs-on: ${{ matrix.job.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { os: ubuntu-latest, name: Linux }
+          # Temporary + intentional, not end-state (plan R2-2: pure-compute
+          # Starlark hang undetected cross-OS — no in-process preemption in
+          # starlark 0.13.0; bound only on Linux CI for now).
+          # - { os: windows-latest, name: Windows }
+          # - { os: macos-latest, name: macOS }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build ocx (release)
+        run: cargo build --release --bin ocx --locked
+      - name: Setup Task
+        uses: go-task/setup-task@3be4020d41929789a01026e0e427a4321ce0ad44 # v2.0.0
+      - name: Scripted smoke — shfmt
+        run: task -d mirrors mirror:shfmt:test:script
+      - name: Scripted smoke — cmake (launcher entrypoints)
+        run: task -d mirrors mirror:cmake:test:script
