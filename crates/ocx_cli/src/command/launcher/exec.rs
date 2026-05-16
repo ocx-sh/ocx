@@ -133,12 +133,14 @@ async fn validate_launcher_pkg_root(
             dir.display()
         ))
     })?;
-    let canonical_root = tokio::fs::canonicalize(packages_root).await.map_err(|e| {
-        UsageError::new(format!(
-            "launcher exec: cannot resolve packages root ({e}): {}",
-            packages_root.display()
-        ))
-    })?;
+
+    // Use `.ok()` for packages_root so that a non-existent store (fresh
+    // OCX_HOME with no packages/ dir yet, as in `ocx package test` on a clean
+    // host) does not hard-fail here. When packages_root is absent it simply
+    // cannot match as a prefix — the extra_root check below covers the
+    // package-test case. Security boundary unchanged: an absent root matches
+    // nothing.
+    let canonical_root = tokio::fs::canonicalize(packages_root).await.ok();
 
     // Canonicalize extra_root when present; `.ok()` so that a non-existent
     // extra root (temp/test/ created lazily) simply yields None and cannot
@@ -149,13 +151,17 @@ async fn validate_launcher_pkg_root(
         None
     };
 
-    let under_packages = canonical_dir.starts_with(&canonical_root);
+    let under_packages = canonical_root.as_ref().is_some_and(|r| canonical_dir.starts_with(r));
     let under_extra = canonical_extra.as_ref().is_some_and(|r| canonical_dir.starts_with(r));
 
     if !under_packages && !under_extra {
+        // Build a display path for the error. When packages_root does not
+        // exist yet (fresh OCX_HOME), fall back to the raw path so the error
+        // message still names a useful location.
+        let root_display = canonical_root.as_deref().unwrap_or(packages_root).display();
         return Err(UsageError::new(format!(
             "launcher exec: pkg-root must point inside {} (got {})",
-            canonical_root.display(),
+            root_display,
             canonical_dir.display()
         )));
     }
@@ -207,6 +213,53 @@ mod tests {
         std::fs::create_dir_all(&packages_root).unwrap();
         let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, Some(&temp_test_root)).await;
         assert!(result.is_ok(), "expected Ok for temp/test path; got {result:?}");
+    }
+
+    /// Regression: pkg root inside extra_root when packages_root does NOT EXIST
+    /// (fresh OCX_HOME, no packages ever installed). This was the actual bug:
+    /// `canonicalize(packages_root)` hard-failed with ENOENT before the
+    /// extra_root check was reached, causing exit 64 on every `ocx package test`
+    /// invocation on a clean host for packages with entrypoint launchers.
+    #[tokio::test]
+    async fn accepts_path_under_extra_root_when_packages_root_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (temp_test_root, pkg_dir) = make_pkg_tree(tmp.path(), "temp/test", "test-ABCDE");
+        // packages_root intentionally NOT created — simulates fresh OCX_HOME
+        // where no `ocx install` has ever been run.
+        let packages_root = tmp.path().join("packages");
+        assert!(!packages_root.exists(), "test setup: packages_root must be absent");
+        let result = validate_launcher_pkg_root(&pkg_dir, &packages_root, Some(&temp_test_root)).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok for temp/test path with absent packages_root; got {result:?}"
+        );
+    }
+
+    /// Security boundary: path outside both allowed roots is rejected even when
+    /// packages_root does not exist (absent packages_root must not widen the
+    /// accepted set to "anything").
+    #[tokio::test]
+    async fn rejects_outside_path_when_packages_root_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let temp_test_root = tmp.path().join("temp/test");
+        std::fs::create_dir_all(&temp_test_root).unwrap();
+        // packages_root intentionally absent.
+        let packages_root = tmp.path().join("packages");
+
+        let outsider_dir = tmp.path().join("outsider/pkg");
+        std::fs::create_dir_all(&outsider_dir).unwrap();
+        std::fs::write(outsider_dir.join("metadata.json"), b"{}").unwrap();
+
+        let result = validate_launcher_pkg_root(&outsider_dir, &packages_root, Some(&temp_test_root)).await;
+        assert!(
+            result.is_err(),
+            "expected Err for outsider with absent packages_root; got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("pkg-root must point inside"),
+            "unexpected error message: {msg}"
+        );
     }
 
     /// Pkg root outside both allowed roots → rejected.
