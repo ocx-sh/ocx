@@ -92,10 +92,13 @@ A language runtime with multiple environment variables, archive stripping, a dep
     }
   ],
   "entrypoints": {
-    "cmake": {}
+    "cmake": {},
+    "fmt": { "command": "cmake-format" }
   }
 }
 ```
+
+Here `cmake` dispatches to a binary named `cmake` (empty object, the common case), while the `fmt` launcher dispatches to a differently-named binary `cmake-format`.
 
 ## Environment Variables {#env}
 
@@ -328,9 +331,9 @@ package follows from JSON object key semantics, and per-entry fields land inside
 
 | Position | Type | Required | Description |
 |---|---|---|---|
-| Key | string | Yes | The invocable name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. Used as the launcher script filename and the command users invoke. |
+| Key | string | Yes | The invocable name. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 bytes. Used as the launcher script filename and the command users invoke. |
 | Value | object | Yes | Per-entry fields. `{}` is the common case: the invocable name *is* the dispatched command. |
-| `command` | string | No | Dispatch target resolved on the composed `PATH` when it differs from the invocable name. Same `^[a-z0-9][a-z0-9_-]*$` / 64-char rule as the key. Omit it (the common case) and the invocable name is dispatched directly. Example: expose `hello` while running a binary named `hello-bin`. |
+| `command` | string | No | Dispatch target resolved on the composed `PATH` when it differs from the invocable name. Same `^[a-z0-9][a-z0-9_-]*$` / 64-byte rule as the key. Omit it (the common case) and the invocable name is dispatched directly. Example: expose `hello` while running a binary named `hello-bin`. |
 
 ### Disk Layout {#entry-points-disk-layout}
 
@@ -420,7 +423,7 @@ The metadata format carries an integer `version` field reserved for future schem
 - `strip_components` — optional leading path components to strip during extraction.
 - `env` — optional declarations of environment variables.
 - `dependencies` — optional digest-pinned package dependencies. Each entry carries an `identifier`, optional `name` override (used as `NAME` in `${deps.NAME.installPath}` tokens), and optional `visibility` controlling env propagation through the chain.
-- `entrypoints` — optional object keyed by command name. Each value object is reserved for future per-entry fields.
+- `entrypoints` — optional object keyed by the invocable name. Each value object carries an optional `command` field: the binary the generated launcher dispatches to when it must differ from the invocable name (e.g. expose `fmt` while running `cargo-fmt`). Omitted (the common case) means the invocable name *is* the dispatched command. `command` follows the same slug constraint as the invocable name (`[a-z0-9][a-z0-9_-]*`, at most 64 bytes).
 
 Visibility model:
 
@@ -466,7 +469,7 @@ If you published packages before the visibility-default flip, their untagged env
 
 <!-- commands -->
 [cmd-exec]: ./command-line.md#exec
-[cmd-launcher-exec]: ./command-line.md#exec
+[cmd-launcher-exec]: ./command-line.md#launcher-exec
 [cmd-env]: ./command-line.md#env
 
 <!-- guide -->
