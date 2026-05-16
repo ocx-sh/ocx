@@ -22,6 +22,7 @@ const STYLE_TREE_ANNOTATION: Style = Style::new().style(console::Style::new().ye
 ///
 /// Each annotation carries text and an optional [`Style`].  When no style is
 /// provided, the printer falls back to its default annotation style.
+#[derive(Clone)]
 pub struct Annotation {
     pub text: Cow<'static, str>,
     pub style: Option<Style>,

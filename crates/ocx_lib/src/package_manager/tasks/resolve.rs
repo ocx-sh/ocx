@@ -53,44 +53,20 @@ impl PackageManager {
         // returns cache-first with write-through persistence, so every digest
         // the walk touches is backed by an on-disk blob by the time it lands
         // in `chain` — that is the `ResolvedChain` invariant.
+        //
+        // The tag/digest top-id derivation + not-found-vs-offline split is
+        // shared with `inspect` via `common::resolve_top_manifest`; this
+        // method keeps the divergent chain-building below.
+        let (top_pinned, top_manifest) =
+            super::common::resolve_top_manifest(self.index(), package, IndexOperation::Resolve).await?;
+        // Reconstruct the tag-form top identifier the divergent chain-building
+        // below operates on (digest dropped — `clone_with_tag`/`select` derive
+        // their own digests, and `select` must see the unpinned index ref).
         let top_id = if package.digest().is_some() {
             package.clone()
         } else {
             package.clone_with_tag(package.tag_or_latest())
         };
-        let (top_digest, top_manifest) = match self
-            .index()
-            .fetch_manifest(&top_id, IndexOperation::Resolve)
-            .await
-            .map_err(PackageErrorKind::Internal)?
-        {
-            Some(result) => result,
-            None => {
-                // Distinguish "tag truly unknown" (NotFound) from "tag cached
-                // locally but manifest blob missing from the cache"
-                // (OfflineManifestMissing — requires online re-pull). We ask
-                // the index for the tag → digest mapping: if that succeeds,
-                // the tag is known, so fetch_manifest returning None implies
-                // the blob is missing rather than the tag is unknown.
-                if let Some(digest) = self
-                    .index()
-                    .fetch_manifest_digest(&top_id, IndexOperation::Resolve)
-                    .await
-                    .map_err(PackageErrorKind::Internal)?
-                {
-                    return Err(PackageErrorKind::OfflineManifestMissing(Box::new(
-                        package_manager::error::OfflineManifestMissing {
-                            identifier: top_id.clone(),
-                            digest,
-                        },
-                    )));
-                }
-                return Err(PackageErrorKind::NotFound);
-            }
-        };
-
-        let top_pinned = oci::PinnedIdentifier::try_from(top_id.clone_with_digest(top_digest.clone()))
-            .map_err(|_| PackageErrorKind::DigestMissing)?;
         let mut chain = vec![top_pinned.clone()];
 
         match top_manifest {

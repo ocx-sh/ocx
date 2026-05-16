@@ -216,6 +216,74 @@ pub async fn drain_package_tasks<T: 'static>(
     Ok(results.into_iter().flatten().collect())
 }
 
+/// Resolves the top-level manifest for `package` **without** platform
+/// selection, deriving the top-level pinned identifier from the tag (or the
+/// `@digest` when present) and discriminating "tag truly unknown" from "tag
+/// known but manifest blob missing offline".
+///
+/// When `package` carries no digest the tag is taken from
+/// [`oci::Identifier::tag_or_latest`], so a bare repository identifier falls
+/// back to the `latest` tag — the same default the `resolve` pipeline uses.
+///
+/// # Errors
+///
+/// - [`PackageErrorKind::NotFound`] — tag/digest truly unknown.
+/// - [`PackageErrorKind::OfflineManifestMissing`] — known tag but the manifest
+///   blob is absent from the local cache in offline mode.
+/// - [`PackageErrorKind::Internal`] — index I/O failure.
+/// - [`PackageErrorKind::DigestMissing`] — the resolved top-level digest
+///   could not be pinned onto the identifier.
+// Shared by `resolve::PackageManager::resolve` and `inspect`'s
+// `fetch_top_manifest`: both need the identical tag/digest top-id derivation
+// plus the not-found-vs-offline split before they diverge (resolve continues
+// into platform selection / chain building, inspect adapts the manifest as-is).
+// `op` is caller-supplied; both current callers pass `IndexOperation::Resolve`
+// (inspect deliberately uses `Resolve`, not `Query` — a prior review Block
+// proposing `Query` was rejected: default-mode inspect is a Resolve-class read).
+pub async fn resolve_top_manifest(
+    index: &oci::index::Index,
+    package: &oci::Identifier,
+    op: oci::index::IndexOperation,
+) -> Result<(oci::PinnedIdentifier, oci::Manifest), PackageErrorKind> {
+    let top_id = if package.digest().is_some() {
+        package.clone()
+    } else {
+        package.clone_with_tag(package.tag_or_latest())
+    };
+    let (top_digest, top_manifest) = match index
+        .fetch_manifest(&top_id, op)
+        .await
+        .map_err(PackageErrorKind::Internal)?
+    {
+        Some(result) => result,
+        None => {
+            // Distinguish "tag truly unknown" (NotFound) from "tag cached
+            // locally but manifest blob missing from the cache"
+            // (OfflineManifestMissing — requires online re-pull). We ask
+            // the index for the tag → digest mapping: if that succeeds,
+            // the tag is known, so fetch_manifest returning None implies
+            // the blob is missing rather than the tag is unknown.
+            if let Some(digest) = index
+                .fetch_manifest_digest(&top_id, op)
+                .await
+                .map_err(PackageErrorKind::Internal)?
+            {
+                return Err(PackageErrorKind::OfflineManifestMissing(Box::new(
+                    error::OfflineManifestMissing {
+                        identifier: top_id.clone(),
+                        digest,
+                    },
+                )));
+            }
+            return Err(PackageErrorKind::NotFound);
+        }
+    };
+
+    let top_pinned = oci::PinnedIdentifier::try_from(top_id.clone_with_digest(top_digest))
+        .map_err(|_| PackageErrorKind::DigestMissing)?;
+    Ok((top_pinned, top_manifest))
+}
+
 /// Creates a [`ReferenceManager`] from a [`FileStructure`].
 pub fn reference_manager(fs: &file_structure::FileStructure) -> ReferenceManager {
     ReferenceManager::new(fs.clone())
