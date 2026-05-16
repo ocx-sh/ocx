@@ -17,10 +17,14 @@ Exit codes per quality-rust-exit_codes.md:
 """
 from __future__ import annotations
 
+import json
+import shutil
+import urllib.request
 from pathlib import Path
 
 from src import OcxRunner
 from src.helpers import make_package
+from src.runner import registry_dir
 
 
 def test_inspect_default_lists_index_candidates(
@@ -134,3 +138,175 @@ def test_inspect_resolve_offline_missing_config_blob_exits_81(
     assert result.returncode == 81, (
         f"expected 81, got {result.returncode}\nstderr: {result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Specification tests for documented gaps in the `package inspect` design
+# record (`subsystem-cli-commands.md` "package inspect" gotcha checklist).
+# Each test traces to one gap (F1..F5). They are written before the
+# `resolve_top_manifest` implementation lands and currently fail (the stub
+# panics with `unimplemented!()` in every default-mode path, F2/F3/F5, and
+# F1 covers a genuinely uncovered ref shape).
+# ---------------------------------------------------------------------------
+
+
+def _registry_get(url: str, accept: str) -> tuple[bytes, str]:
+    """GET a manifest, returning ``(body, content_type)``."""
+    req = urllib.request.Request(url, headers={"Accept": accept})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.read(), resp.headers.get("Content-Type", "")
+
+
+def _registry_put(url: str, body: bytes, content_type: str) -> None:
+    """PUT a manifest body under ``url`` with the given media type."""
+    req = urllib.request.Request(
+        url, data=body, method="PUT",
+        headers={"Content-Type": content_type},
+    )
+    with urllib.request.urlopen(req, timeout=5):
+        return
+
+
+def test_inspect_default_platform_flag_ignored_without_resolve(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """F2 (Block gap): ``-p`` is ignored in default mode.
+
+    A multi-platform tag (image index, two platforms) inspected without
+    ``--resolve`` must return the FULL candidate set regardless of ``-p`` —
+    byte-identical to the same invocation without ``-p``. Proves the
+    platform flag does not narrow the candidate listing in default mode.
+    """
+    make_package(
+        ocx, unique_repo, "1.0.0", tmp_path / "amd64",
+        platform="linux/amd64", new=True, cascade=False,
+    )
+    make_package(
+        ocx, unique_repo, "1.0.0", tmp_path / "arm64",
+        platform="linux/arm64", new=False, cascade=False,
+    )
+    short = f"{unique_repo}:1.0.0"
+
+    without_flag = ocx.run("package", "inspect", short).stdout
+    with_flag = ocx.run(
+        "package", "inspect", "-p", "linux/amd64", short
+    ).stdout
+
+    assert with_flag == without_flag, (
+        "-p must be ignored in default mode (byte-identical output expected)\n"
+        f"without -p: {without_flag!r}\nwith -p: {with_flag!r}"
+    )
+    listed = {c["platform"] for c in json.loads(with_flag)["candidates"]}
+    assert {"linux/amd64", "linux/arm64"} <= listed, (
+        f"default mode must list ALL platforms even with -p, got {listed}"
+    )
+
+
+def test_inspect_default_flat_tag_shows_metadata_no_chain(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """F1 (Warn gap): a flat (non-index) image-manifest *tag*.
+
+    The existing suite only covers the flat shape via ``@digest``. This
+    covers the flat-*tag* entry shape: a tag pointing directly at a single
+    image manifest (no image index) must yield the ``metadata`` shape with
+    NO ``candidates`` and NO ``resolution`` keys.
+
+    ``ocx package push`` always wraps in an image index, so the flat-tag
+    manifest is materialized by retagging a child manifest digest directly
+    on the registry, then re-indexing that tag.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    child = ocx.json(
+        "package", "inspect", f"{unique_repo}:1.0.0"
+    )["candidates"][0]["digest"]
+
+    # Retag the child image manifest under a new tag so the tag points
+    # directly at a bare image manifest (not an image index).
+    img_mt = "application/vnd.oci.image.manifest.v1+json"
+    base = f"http://{ocx.registry}/v2/{unique_repo}/manifests"
+    body, _ = _registry_get(f"{base}/{child}", img_mt)
+    _registry_put(f"{base}/flat", body, img_mt)
+    ocx.plain("index", "update", f"{unique_repo}:flat")
+
+    data = ocx.json("package", "inspect", f"{unique_repo}:flat")
+
+    assert "candidates" not in data, "flat-tag manifest must not list candidates"
+    assert "resolution" not in data, "default mode must not add a resolution chain"
+    assert data["metadata"]["version"] == 1
+    env_keys = {v["key"] for v in data["metadata"]["env"]}
+    assert "PATH" in env_keys, f"expected PATH env var, got {env_keys}"
+
+
+def test_inspect_default_offline_missing_manifest_blob_exits_81(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """F3 (Warn gap): default-mode offline with the manifest blob absent.
+
+    Distinct from ``test_inspect_resolve_offline_missing_config_blob_exits_81``
+    (which is ``--resolve`` + config-blob miss). Here the tag→digest pointer
+    is pinned locally (``index update`` persists it) but the manifest blob
+    itself is removed before going offline, so a *default-mode* inspect
+    cannot fetch the manifest and must exit 81 (OfflineBlocked).
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+
+    # `index update` persisted the tag→digest pointer under tags/ and the
+    # manifest chain under blobs/. Drop the blob CAS so the digest stays
+    # pinned locally but the manifest blob is gone — default-mode offline
+    # inspect must report OfflineBlocked rather than NotFound.
+    # Note: the pin step does not persist the manifest blob under blobs/ —
+    # the digest stays pinned via tags/ while the manifest blob is absent,
+    # which is exactly the state this test needs. Remove blobs/ defensively
+    # if a future change starts persisting it.
+    blobs_root = Path(ocx.env["OCX_HOME"]) / "blobs"
+    if blobs_root.exists():
+        shutil.rmtree(blobs_root)
+    tags_root = Path(ocx.env["OCX_HOME"]) / "tags"
+    assert tags_root.exists(), "tag store must remain so the digest stays pinned"
+
+    result = ocx.run(
+        "--offline", "package", "inspect", pkg.short,
+        format=None, check=False,
+    )
+
+    assert result.returncode == 81, (
+        f"expected 81 (OfflineBlocked), got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+
+
+def test_inspect_default_has_no_install_side_effects(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """F5 (Block gap, reframed): inspect performs no install/symlink mutation.
+
+    After a default-mode inspect, no install or symlink side effects may
+    exist for the inspected repo: no candidate symlink and no assembled
+    package directory. The local index / blob CAS MAY be populated on a
+    cache miss (default-mode inspect uses ``IndexOperation::Resolve`` and is
+    permitted to warm the index) — only install/symlink mutation is forbidden.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
+
+    ocx.json("package", "inspect", pkg.short)
+
+    home = Path(ocx.env["OCX_HOME"])
+    reg = registry_dir(ocx.registry)
+
+    repo_symlink_root = home / "symlinks" / reg / unique_repo
+    assert not repo_symlink_root.exists(), (
+        f"inspect must not create symlinks for the repo: {repo_symlink_root}"
+    )
+
+    candidates_root = home / "symlinks" / reg / unique_repo / "candidates"
+    assert not candidates_root.exists(), (
+        f"inspect must not create a candidate symlink: {candidates_root}"
+    )
+
+    packages_root = home / "packages"
+    if packages_root.exists():
+        for entry in packages_root.rglob("metadata.json"):
+            assert unique_repo not in entry.read_text(), (
+                f"inspect must not assemble a package for {unique_repo}: {entry}"
+            )

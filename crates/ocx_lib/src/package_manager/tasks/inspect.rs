@@ -5,7 +5,7 @@ use crate::{
     oci,
     oci::index::IndexOperation,
     package::metadata::ValidMetadata,
-    package_manager::{self, error::PackageErrorKind, tasks::resolve::ResolvedChain},
+    package_manager::{error::PackageErrorKind, tasks::resolve::ResolvedChain},
 };
 
 use super::super::PackageManager;
@@ -35,7 +35,10 @@ pub struct Candidate {
 /// - [`Resolved`](InspectResult::Resolved) — `--resolve`: platform-select
 ///   through the index, then metadata plus the full resolution chain.
 ///
-/// No install or symlink side effects occur in any variant.
+/// No install or symlink side effects occur in any variant. Default mode may
+/// still populate the local index / blob cache on a tag cache miss — a
+/// `Resolve`-class read, not a write the caller asked for. "Read-only" here
+/// means "no install, no symlink mutation", not "touches no local cache".
 #[derive(Debug)]
 pub enum InspectResult {
     Candidates {
@@ -60,6 +63,11 @@ pub enum InspectResult {
 
 impl PackageManager {
     /// Inspects `package` without installing or creating symlinks.
+    ///
+    /// No install or symlink side effects occur. Default mode resolves the
+    /// tag through the index with `IndexOperation::Resolve`, so a tag cache
+    /// miss may populate the local index / blob cache as a side effect of
+    /// the read — intended behavior, not a write the caller requested.
     ///
     /// `resolve == false` (default): the manifest at the reference is fetched
     /// **without** platform selection. An image index yields
@@ -111,8 +119,12 @@ impl PackageManager {
             oci::Manifest::ImageIndex(index) => {
                 let mut candidates = Vec::with_capacity(index.manifests.len());
                 for entry in index.manifests {
-                    let digest =
-                        oci::Digest::try_from(entry.digest.as_str()).map_err(|_| PackageErrorKind::DigestMissing)?;
+                    // A child descriptor whose `digest` string does not parse
+                    // is a corrupt image index, not a "missing digest" — carry
+                    // the structured `DigestError` so the message names the
+                    // bad value (still classifies to DataError/65).
+                    let digest = oci::Digest::try_from(entry.digest.as_str())
+                        .map_err(|e| PackageErrorKind::Internal(crate::Error::from(e)))?;
                     let identifier =
                         oci::PinnedIdentifier::try_from(top_pinned.as_identifier().clone_with_digest(digest))
                             .map_err(|_| PackageErrorKind::DigestMissing)?;
@@ -135,7 +147,10 @@ impl PackageManager {
 
 /// Fetches the top-level manifest for `package` without platform selection.
 ///
-/// Mirrors the tag/digest top-id derivation and not-found discrimination of
+/// Thin wrapper over [`super::common::resolve_top_manifest`] pinning the
+/// default-inspect [`IndexOperation::Resolve`] routing (intended behavior —
+/// inspect deliberately uses `Resolve`, not `Query`). The shared helper
+/// mirrors the tag/digest top-id derivation and not-found discrimination of
 /// [`PackageManager::resolve`] (tag truly unknown → [`PackageErrorKind::NotFound`];
 /// known tag but blob missing offline → [`PackageErrorKind::OfflineManifestMissing`]),
 /// but stops before platform selection so callers can inspect an image index
@@ -144,38 +159,7 @@ async fn fetch_top_manifest(
     mgr: &PackageManager,
     package: &oci::Identifier,
 ) -> Result<(oci::PinnedIdentifier, oci::Manifest), PackageErrorKind> {
-    let top_id = if package.digest().is_some() {
-        package.clone()
-    } else {
-        package.clone_with_tag(package.tag_or_latest())
-    };
-    let (top_digest, top_manifest) = match mgr
-        .index()
-        .fetch_manifest(&top_id, IndexOperation::Resolve)
-        .await
-        .map_err(PackageErrorKind::Internal)?
-    {
-        Some(result) => result,
-        None => {
-            if let Some(digest) = mgr
-                .index()
-                .fetch_manifest_digest(&top_id, IndexOperation::Resolve)
-                .await
-                .map_err(PackageErrorKind::Internal)?
-            {
-                return Err(PackageErrorKind::OfflineManifestMissing(Box::new(
-                    package_manager::error::OfflineManifestMissing {
-                        identifier: top_id.clone(),
-                        digest,
-                    },
-                )));
-            }
-            return Err(PackageErrorKind::NotFound);
-        }
-    };
-    let top_pinned = oci::PinnedIdentifier::try_from(top_id.clone_with_digest(top_digest))
-        .map_err(|_| PackageErrorKind::DigestMissing)?;
-    Ok((top_pinned, top_manifest))
+    super::common::resolve_top_manifest(mgr.index(), package, IndexOperation::Resolve).await
 }
 
 #[cfg(test)]
@@ -329,6 +313,76 @@ mod spec_tests {
         assert!(
             matches!(err, PackageErrorKind::NotFound),
             "unknown tag must be NotFound, got {err:?}"
+        );
+    }
+
+    // ── F4 (Warn gap): exit-65 / malformed inputs ──
+    //
+    // Design record (`subsystem-cli-commands.md` "package inspect" gotcha):
+    // "Exit codes via `classify_error`: NotFound→79, offline manifest/blob
+    // miss→81, malformed metadata→65." The `Internal` / `DigestMissing`
+    // kinds are what `classify_error` maps to `DataError` (65) at the CLI
+    // boundary; these unit tests pin the kind the task layer must surface.
+
+    /// Default mode against a flat image manifest whose config blob holds
+    /// structurally-invalid metadata must surface `PackageErrorKind::Internal`
+    /// (the metadata-validation-failure path documented for `inspect`).
+    /// Mirrors the `common.rs` `load_object_data_rejects_invalid_metadata`
+    /// pattern: an env entry references an undeclared dependency, so
+    /// `ValidMetadata::try_from` rejects it at the ingress boundary.
+    #[tokio::test]
+    async fn inspect_default_malformed_metadata_is_internal() {
+        const BAD_METADATA_JSON: &str = r#"{"type":"bundle","version":1,"dependencies":[],"env":[{"key":"FOO","type":"constant","value":"${deps.missing.installPath}/x","visibility":"public"}],"entrypoints":{}}"#;
+
+        let dir = TempDir::new().unwrap();
+        let tag_store = TagStore::new(dir.path().join("tags"));
+        write_tag_lock(&tag_store.tags(&tagged_id()), &digest(HEX_A));
+        // The image manifest's config descriptor advertises the structurally
+        // invalid metadata blob's length so the media-type/size gate passes
+        // and validation is the failing step.
+        let manifest_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config}","size":{size}}},"layers":[]}}"#,
+            config = digest(HEX_C),
+            size = BAD_METADATA_JSON.len(),
+        );
+        write_blob(&dir, &digest(HEX_A), &manifest_json);
+        write_blob(&dir, &digest(HEX_C), BAD_METADATA_JSON);
+
+        let mgr = make_manager(&dir);
+        let err = mgr.inspect(&tagged_id(), vec![], false).await.unwrap_err();
+
+        assert!(
+            matches!(err, PackageErrorKind::Internal(_)),
+            "malformed metadata must surface Internal (→ DataError/65), got {err:?}"
+        );
+    }
+
+    /// Default mode against an image index whose child descriptor carries a
+    /// structurally-invalid `digest` string must surface
+    /// `PackageErrorKind::Internal` wrapping the structured `DigestError`
+    /// (so the message names the bad value), not the misleading
+    /// `DigestMissing` ("identifier has no digest after resolution"). The
+    /// kind still classifies to `DataError`/65.
+    #[tokio::test]
+    async fn inspect_default_bad_child_digest_is_internal_digest_error() {
+        let dir = TempDir::new().unwrap();
+        let tag_store = TagStore::new(dir.path().join("tags"));
+        write_tag_lock(&tag_store.tags(&tagged_id()), &digest(HEX_A));
+        // Child descriptor `digest` is not a valid `algorithm:hex` string.
+        let index_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"not-a-valid-digest","size":7,"platform":{"os":"linux","architecture":"amd64"}}]}"#;
+        write_blob(&dir, &digest(HEX_A), index_json);
+
+        let mgr = make_manager(&dir);
+        let err = mgr.inspect(&tagged_id(), vec![], false).await.unwrap_err();
+
+        assert!(
+            matches!(err, PackageErrorKind::Internal(_)),
+            "malformed child digest must surface Internal(DigestError), got {err:?}"
+        );
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("not-a-valid-digest"),
+            "error chain must name the bad digest value: {chain}"
         );
     }
 }
