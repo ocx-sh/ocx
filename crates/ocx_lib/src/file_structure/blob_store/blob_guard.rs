@@ -107,6 +107,18 @@ impl BlobGuard {
             .await
             .map_err(|e| file_error(&self.target_path, e))?;
         file.sync_all().await.map_err(|e| file_error(&self.target_path, e))?;
+        // Explicitly close the write handle before returning.
+        //
+        // On Windows, `tokio::fs::File` drop is asynchronous — the underlying
+        // OS handle is closed on a background threadpool thread, not during
+        // the drop call itself. Any subsequent open of the same path (e.g. by
+        // acquire_read or verify_blob_digest) before the background close
+        // completes causes ERROR_LOCK_VIOLATION (os error 33). POSIX advisory
+        // locks are optional so Linux tolerates the overlap silently.
+        // `shutdown()` drives the tokio file through its internal sync + close
+        // path synchronously, guaranteeing the handle is closed before this
+        // function returns to the caller.
+        file.shutdown().await.map_err(|e| file_error(&self.target_path, e))?;
         Ok(())
     }
 
@@ -326,4 +338,41 @@ mod tests {
     //   `::get_manifest_on_truncated_blob_file_returns_none_and_logs_warn`
     // Keeping this test would assert serde_json internals, not our API.
     // Deleted (Option A from the review plan).
+
+    // ── Regression: write handle must be closed before write_bytes returns ──
+    //
+    // Guards the Windows ERROR_LOCK_VIOLATION (os error 33) regression.
+    //
+    // On Windows, `tokio::fs::File` drop is asynchronous: the OS-level handle
+    // is closed on a background threadpool thread, NOT during the `drop()` call.
+    // Without the explicit `shutdown().await` at the end of `write_bytes`, a
+    // caller that immediately reopens the same path after `write_bytes` returns
+    // (e.g. `verify_blob_digest`, `acquire_read`) would race the background
+    // close and receive ERROR_LOCK_VIOLATION. POSIX advisory locks are optional
+    // so Linux never reproduces this.
+    //
+    // The test opens the same path for write immediately after `write_bytes`
+    // returns while the BlobGuard (advisory lock) is still held. A pre-fix
+    // Windows build would fail the open with ERROR_LOCK_VIOLATION because the
+    // write fd from `write_bytes` would still be open. On Linux this documents
+    // the contract: write handle must be closed before write_bytes returns.
+    #[tokio::test]
+    async fn write_bytes_handle_closed_before_return_allows_immediate_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sha256").join("ab").join("data");
+        let guard = BlobGuard::acquire_exclusive(target.clone()).await.unwrap();
+        guard.write_bytes(b"blob payload").await.unwrap();
+        // The BlobGuard (fs2 advisory lock) is still alive — only the write fd
+        // opened inside write_bytes must be closed. Reopen for read+write
+        // immediately; on Windows with a lingering write handle this would fail
+        // with ERROR_LOCK_VIOLATION (os error 33).
+        let reopen = std::fs::OpenOptions::new().read(true).write(true).open(&target);
+        assert!(
+            reopen.is_ok(),
+            "data file must be reopenable for write immediately after write_bytes returns; \
+             a lingering write handle would cause ERROR_LOCK_VIOLATION on Windows: {:?}",
+            reopen.err()
+        );
+        drop(guard);
+    }
 }

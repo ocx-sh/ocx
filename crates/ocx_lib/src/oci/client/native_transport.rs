@@ -7,6 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream;
+use tokio::io::AsyncWriteExt as _;
 
 use super::error::ClientError;
 use super::progress_writer::ProgressWriter;
@@ -190,11 +191,26 @@ impl OciTransport for NativeTransport {
             .open(path)
             .await
             .map_err(|e| io_error(path, e))?;
-        let writer = ProgressWriter::new(file, total_size, on_progress);
+        // Pass `&mut writer` so we retain the writer after pull_blob returns,
+        // allowing an explicit shutdown below. ProgressWriter<W>: Unpin so
+        // &mut ProgressWriter<W>: AsyncWrite via the tokio blanket impl.
+        let mut writer = ProgressWriter::new(file, total_size, on_progress);
         self.client
-            .pull_blob(image, digest_str.as_str(), writer)
+            .pull_blob(image, digest_str.as_str(), &mut writer)
             .await
-            .map_err(registry_error)
+            .map_err(registry_error)?;
+        // Explicitly flush + close the write handle before returning.
+        //
+        // On Windows, `tokio::fs::File` drop is asynchronous — the underlying
+        // OS handle is closed on a background threadpool thread, not during
+        // the drop call itself. If the caller immediately reopens the same
+        // path (e.g. `verify_blob_digest` opens for read right after this
+        // returns), the still-open write handle can cause ERROR_LOCK_VIOLATION
+        // (os error 33). POSIX advisory locks are optional so Linux tolerates
+        // the overlap silently. `shutdown()` drives the tokio file through its
+        // internal sync + close path synchronously before we return.
+        writer.shutdown().await.map_err(|e| io_error(path, e))?;
+        Ok(())
     }
 
     async fn head_blob(&self, image: &oci::native::Reference, digest: &oci::Digest) -> Result<u64> {
