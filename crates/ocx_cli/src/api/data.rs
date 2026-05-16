@@ -15,4 +15,5 @@ pub mod package_push;
 pub mod paths;
 pub mod pull_dry_run;
 pub mod removed;
+pub mod script_run;
 pub mod tag;

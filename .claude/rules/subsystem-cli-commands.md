@@ -73,7 +73,7 @@ ADR: [`adr_cli_high_low_layering.md`](../../.claude/artifacts/adr_cli_high_low_l
 | `package create PATH` | Bundle directory into archive | No | `-o`, `-m`, `-l`, `-j`, `--force` |
 | `package push -i ID LAYERS...` | Publish archive to registry | No | `-i/--identifier` (required), `-c/--cascade`, `-n`, `-m`, `-p`, `--format json` |
 | `package describe ID` | Push description metadata | No | `--readme`, `--logo`, `--title` |
-| `package test -i ID LAYERS... -- CMD` | Materialize + exec locally (no registry) | **Yes** (deps only) | `-i/--identifier` (required), `-p`, `-m`, `--keep`, `-o/--output`, `--self`, `--clean` |
+| `package test -i ID LAYERS... (--script PATH\|-- CMD)` | Materialize + exec or script locally (no registry) | **Yes** (deps only) | `-i/--identifier` (required), `-p`, `-m`, `--keep`, `-o/--output`, `--self`, `--clean`, `--script <PATH\|->` |
 | `package info ID` | Display description metadata | No | `--save-readme`, `--save-logo` |
 | `ci export PKGS...` | Export env to CI system | No | `-p`, `--flavor`, `--candidate/--current`, `--mode` |
 | `version` | Print version | No | — |
@@ -125,6 +125,14 @@ Design intent not visible from flag table — read before changing CLI behavior 
 - **`env` vs `shell env`**: `env` auto-installs missing packages (`find_or_install_all`); `shell env` does not (`find_all`). Split exists because `shell env` wired into shell init paths where surprise downloads hostile.
 - **`--self` flag** (shared by `exec`, `run`, `env`, `shell env`, `shell profile load`, `ci export`, `deps`): selects the private surface — emits vars where `has_private()` is true (`private` and `public`). Default (off) selects the interface surface — emits vars where `has_interface()` is true (`public` and `interface`). See `subsystem-cli.md` Cross-Cutting section.
 - **`package test` tempdir lifecycle**: without `--keep` or `--output`, the temp directory is deleted on **any** exit — success and failure. `--keep` is the explicit opt-in for post-failure inspection; re-run with `--keep` to preserve. The deletion is explicit (pre-exec `drop(td_guard)`) because `child_process::exec` diverges on Unix (execvp replaces the process image) so RAII `Drop` never fires on the success path.
+- **`package test --script` branch**:
+  - `--script <PATH>` and `-- CMD` are mutually exclusive (`conflicts_with`); neither supplied → clap rejects (`required_unless_present`); both cases exit 64.
+  - `--script -` reads the script SOURCE from the parent stdin (not a file). Stdin read failure → exit 74. Independent of `ocx.run(stdin=...)` (per-call child stdin string).
+  - Script branch returns `Ok(ExitCode)` directly — bypasses `classify_error`. Exit codes: 0 = all expectations passed, 1 = expectation failure or `expect.fail`, 64 = usage/missing-file, 65 = syntax/type/arity error, 74 = I/O failure (stdin read, scratch dir creation).
+  - Sandbox scope is host-API only: `ocx.*`/`expect.*` surface + script-driven FS access are sandboxed; binaries spawned via `ocx.run` run with normal host privileges (same as `-- CMD`).
+  - `--format json` emits a `ScriptRunReport` via `Api::report` (existing `Printable` path); exit code remains authoritative.
+  - Re-entrant `ocx` (`ocx.run("ocx", ...)`) is refused in v1 — exits 1 with a "re-entrant ocx not supported" message.
+- **`starlark-lsp` internal subcommand**: hidden from `--help` (`#[command(hide = true)]`). Wire ABI is `ocx starlark-lsp` (stdio LSP server). INTERNAL and UNSTABLE — not part of the user-facing CLI surface, name/wire format carry no stability promise. Documented only in authoring/IDE docs, never in the command-line reference. Implementation lives in `crates/ocx_cli/src/command/starlark_lsp.rs`.
 - **`package test --output` same-filesystem requirement**: `--output DIR` must be on the same filesystem as `$OCX_HOME/layers/` — hardlink assembly has no cross-device copy fallback. Validated via `dev()` device number comparison (Unix). Cross-fs → `IoError` (exit 74) with a message naming both paths.
 - **`package test` identifier rejects `@digest`**: the digest is computed locally from the supplied layers; supplying one would conflict. `UsageError` (exit 64).
 - **`--keep` + `--output` are mutually exclusive**: enforced by clap `conflicts_with`. Use one or the other; combining is a usage error.

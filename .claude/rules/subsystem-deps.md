@@ -25,9 +25,12 @@ All three run in CI via `.github/workflows/verify-licenses.yml`. Part of `task v
 ### Allowed Licenses (`deny.toml`)
 
 ```
-Apache-2.0, MIT, BSD-3-Clause, ISC, Unicode-3.0, CC0-1.0,
-CDLA-Permissive-2.0, MIT-0, Zlib, OpenSSL, EPL-2.0
+Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, CC0-1.0,
+CDLA-Permissive-2.0, MIT-0, Zlib, OpenSSL, EPL-2.0, MPL-2.0, BSL-1.0
 ```
+
+`MPL-2.0` (dirs-sys → option-ext), `BSL-1.0` + `BSD-2-Clause` (starlark
+family transitive) carry scoped REMOVE-condition comments in `deny.toml`.
 
 Confidence threshold: 0.8. Unknown registries denied, unknown git allowed (need for patched `oci-client`).
 
@@ -65,6 +68,17 @@ tokio = { version = "1", features = ["full"] }
 [dependencies]
 tokio = { workspace = true }
 ```
+
+## Manually-tracked exact pins
+
+Most deps use caret (`"1.2"`) ranges. A small set is **exact-pinned** (`=X.Y.Z`)
+because upstream does not promise API stability between releases. Treat any
+bump as a **breaking change**: it requires a manual review pass AND re-running
+the engine-isolation test (`crates/ocx_lib/src/script` firewall) before merge.
+
+| Crates | Pin | Reason / upgrade tripwire |
+|--------|-----|---------------------------|
+| `starlark`, `starlark_lsp`, `starlark_syntax`, `starlark_map`, `starlark_derive` | `=0.13.0` | starlark-rust has no API-stability promise between releases. The whole family is co-versioned and must move together. Any bump = breaking review + re-run the `script/` engine-isolation test + re-confirm the `derivative` advisory skip in `deny.toml` (remove it if `cargo tree -i derivative` is then empty). |
 
 ## Updating
 

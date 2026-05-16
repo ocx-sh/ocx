@@ -44,6 +44,7 @@ pub mod shell_direnv;
 pub mod shell_env;
 pub mod shell_hook;
 pub mod shell_init;
+pub mod starlark_lsp;
 pub mod uninstall;
 pub mod update;
 pub mod version;
@@ -105,6 +106,9 @@ pub enum Command {
     Select(select::Select),
     #[command(subcommand)]
     Shell(shell::Shell),
+    /// Internal Starlark LSP server for IDE integration (hidden, unstable).
+    #[command(hide = true)]
+    StarlarkLsp(starlark_lsp::StarlarkLsp),
     /// Print the version of ocx
     Version(version::Version),
 }
@@ -137,6 +141,7 @@ impl Command {
             Command::Run(r) => r.execute(context).await,
             Command::Select(select) => select.execute(context).await,
             Command::Shell(shell) => shell.execute(context).await,
+            Command::StarlarkLsp(lsp) => lsp.execute(context).await,
             Command::Version(version) => version.execute().await,
         }
     }

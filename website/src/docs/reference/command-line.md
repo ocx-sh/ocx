@@ -1562,35 +1562,49 @@ ocx package push -p linux/amd64 -i mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.
 
 #### `test` {#package-test}
 
-Materializes a package locally without a registry round-trip and runs a command in its composed env. Mirrors the argument shape of [`package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`. The trailing `-- CMD [ARGS...]` is required.
+Materializes a package locally without a registry round-trip and runs a command or script in its composed env. Mirrors the argument shape of [`package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`. Either a trailing `-- CMD [ARGS...]` or a `--script PATH` is required; the two forms are mutually exclusive.
 
 **Usage**
 
 ```shell
+# Trailing-command form
 ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYERS]... -- <CMD> [ARGS]...
+
+# Script form
+ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYERS]... --script <PATH|->
 ```
 
 **Arguments**
 
 - `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`: a path to a `.tar.gz`/`.tar.xz` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs in `--offline` mode produce exit code 81 (`OfflineBlocked`).
-- `-- <CMD> [ARGS]...`: Command to run inside the composed env. Required.
+- `-- <CMD> [ARGS]...`: Command to run inside the composed env. Required unless `--script` is given.
 
 **Options**
 
-- `-i`, `--identifier <IDENTIFIER>`: Package identifier in tag form (`repo:tag`) — required. An explicit `@digest` suffix is rejected (the digest is computed locally from the supplied layers).
-- `-p`, `--platform <PLATFORM>`: Target platform (required).
-- `-m`, `--metadata <PATH>`: Path to the metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided.
-- `--keep`: Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/`. Mutually exclusive with `--output`.
-- `-o`, `--output <DIR>`: Materialize into `DIR` instead of an auto-managed temp dir. `DIR` must not exist or must be empty. Implies keep — the directory is never deleted by ocx. Must reside on the same filesystem as `$OCX_HOME/layers/`; hardlink assembly does not fall back to copy. Mutually exclusive with `--keep`. On Windows, `--output` must point under `$OCX_HOME/` — cross-volume support is deferred.
-- `--self`: Compose the package's private env surface (default: interface surface). Same semantics as [`ocx exec --self`][cmd-exec-self].
-- `--clean`: Strip ambient parent env before composing — only `OCX_*` config and composed package vars reach the child. Mirrors [`ocx exec --clean`][cmd-exec-clean].
-- `-h`, `--help`: Print help information.
+| Name | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--identifier <IDENTIFIER>` | `-i` | Package identifier in tag form (`repo:tag`) — required. An explicit `@digest` suffix is rejected (the digest is computed locally from the supplied layers). | — |
+| `--platform <PLATFORM>` | `-p` | Target platform — required. | — |
+| `--script <PATH\|->` | — | Path to a [Starlark][starlark-lang] test script, or `-` to read the script source from stdin. Mutually exclusive with the trailing `-- CMD` form. | — |
+| `--metadata <PATH>` | `-m` | Path to the metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided. | auto-detected |
+| `--keep` | — | Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/`. Mutually exclusive with `--output`. | false |
+| `--output <DIR>` | `-o` | Materialize into `DIR` instead of an auto-managed temp dir. `DIR` must not exist or must be empty. Implies keep. Must reside on the same filesystem as `$OCX_HOME/layers/`. On Windows, must point under `$OCX_HOME/`. Mutually exclusive with `--keep`. | — |
+| `--self` | — | Compose the package's private env surface (default: interface surface). Same semantics as [`ocx exec --self`][cmd-exec-self]. | false |
+| `--clean` | — | Strip ambient parent env before composing — only `OCX_*` config and composed package vars reach the child. Mirrors [`ocx exec --clean`][cmd-exec-clean]. | false |
+| `--help` | `-h` | Print help information. | — |
 
 **Examples**
 
 ```shell
-# Run the binary in its composed env.
+# Run the binary in its composed env (trailing-command form).
 ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+
+# Run a Starlark test script against the package.
+ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz --script smoke.star
+
+# Read a Starlark script from stdin.
+printf 'r = ocx.run("mytool", "--version")\nexpect.ok(r)\n' \
+  | ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz --script -
 
 # Keep the temp dir for inspection on failure.
 ocx package test -p linux/amd64 --keep -i mytool:1.0.0 mytool.tar.xz -- mytool --version
@@ -1607,7 +1621,31 @@ ocx package test -p linux/amd64 -m metadata.json -i mytool:1.0.1 \
 Without `--keep` or `--output`, the temp directory is deleted on any exit — success or failure. Use `--keep` to opt in to preservation on failure. Re-run with `--keep` to inspect.
 :::
 
-See the [testing locally guide][authoring-testing] for a full pre-push workflow example.
+**Exit codes — `--script` branch**
+
+| Code | Meaning |
+|------|---------|
+| 0 | All expectations passed |
+| 1 | An expectation failed; `expect.fail` or `fail()` was called; or a host API returned a failure |
+| 64 | Usage error — both `--script` and `-- CMD` supplied; neither supplied; script file not found or unreadable |
+| 65 | Script syntax, type, or arity error |
+| 74 | I/O error — stdin read failure (`--script -`) or scratch directory creation failure |
+
+Exit code is the primary machine signal. When `--format json` is passed, a structured `ScriptRunReport` envelope is written to stdout alongside the exit code:
+
+```json
+{
+  "status": "passed|failed|usage|script_error|io|timeout",
+  "assertion": { "kind": "ok|eq|ne|…|unknown", "message": "…" },
+  "run":       { "exit_code": 0, "stdout": "…", "stderr": "…", "duration_ms": 12, "truncated": false }
+}
+```
+
+`assertion` and `run` are `null` when not applicable. `assertion.kind` reflects the failing `expect.*` function and is the stable machine field; `assertion.message` prose is not stable. The three top-level keys and their sub-field shapes are stable v1 contract.
+
+The `--script` command returns `Ok(ExitCode)` directly — it bypasses `classify_error` so exit codes always match this table regardless of upstream error state.
+
+See the [testing locally guide][authoring-testing] for a full pre-push workflow example including the scripted form.
 
 #### `describe` {#package-describe}
 
@@ -1891,6 +1929,7 @@ The webhook URL is read from the named environment variable at runtime. It is ne
 [devcontainer-features]: https://containers.dev/implementors/features/
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
 [gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
+[starlark-lang]: https://github.com/bazelbuild/starlark
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views
