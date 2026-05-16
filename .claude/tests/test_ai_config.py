@@ -1164,12 +1164,16 @@ class TestAiConfigOverhaulPhase2:
         # Action skills with side effects — must disable auto-invocation
         "commit": True,
         "finalize": True,
-        "codex-adversary": True,
         "meta-maintain-config": True,
         "ocx-create-mirror": True,
         "ocx-sync-roadmap": True,
-        "swarm-plan": True,
-        "swarm-execute": True,
+        # Owner-unlocked for autonomous multi-agent workflows (2026-05-16):
+        # the swarm pipeline + Codex gate are model-invocable so an
+        # autonomous run can plan → execute → cross-model-review without a
+        # manual gate at each hop. Reversible by flipping frontmatter back.
+        "codex-adversary": False,
+        "swarm-plan": False,
+        "swarm-execute": False,
         # Pure analysis / advisory — auto-invocation safe
         "architect": False,
         "builder": False,
