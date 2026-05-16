@@ -837,6 +837,91 @@ mod spec_tests {
             "returned digest must match the expected blob digest"
         );
     }
+
+    /// Regression for the Windows blob corruption symptom fixed in
+    /// `fix(windows): blob store locking + path normalization`.
+    ///
+    /// Production failure: `ocx package install` on a Windows runner observed
+    /// `EOF while parsing a value at line 1 column 0` on a cached manifest
+    /// blob, retried via the chain, and kept hitting the same zero-byte file
+    /// because the bug was the WRITE leaving zero bytes (NTFS
+    /// `ERROR_LOCK_VIOLATION` between an open write handle and the rename /
+    /// cross-process read), not the READ refusing to recover.
+    ///
+    /// `BlobGuard`'s sidecar-lock + `shutdown().await` fixes close the write
+    /// race directly (see `blob_guard.rs` unit tests). This test pins the
+    /// caller-side recovery contract that the production retry depends on:
+    /// when the on-disk manifest blob is corrupt or zero-byte,
+    /// `LocalIndex::get_manifest` must return `Ok(None)` and `ChainedIndex`
+    /// must walk the source and re-persist — never propagate as `Err`,
+    /// never collapse to "package not found".
+    ///
+    /// Cross-platform: the bug-producing write race is Windows-only, but the
+    /// recovery contract this test exercises must hold on every OS so future
+    /// regressions of the cache-miss treatment are caught at the unit level.
+    #[tokio::test]
+    async fn corrupted_manifest_blob_triggers_refetch_via_chain() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_index(&dir);
+
+        // Step 1: seed the manifest blob on disk via the production write
+        // path. `persist_manifest_chain` is the entry point used by
+        // `ChainedIndex` on cache miss; it writes the manifest blob (and
+        // recursively any child manifests). `seed_tag` would only write the
+        // tag pointer, not the blob the test needs to corrupt.
+        let d = digest('e');
+        let id = tagged_id("3.28");
+        let seed_source = make_source("3.28", d.clone());
+        let persisted = cache.persist_manifest_chain(&seed_source, &id).await.unwrap();
+        assert_eq!(
+            persisted,
+            Some(d.clone()),
+            "prerequisite: source must persist the seeded manifest digest"
+        );
+
+        // Step 2: corrupt the manifest blob to zero bytes — mirrors the
+        // on-disk outcome of the pre-fix Windows NTFS race. The pre-fix
+        // `BlobGuard::write_bytes` returned, but the tokio file handle had
+        // not flushed before a concurrent reopen tripped
+        // `ERROR_LOCK_VIOLATION` (os error 33). `serde_json::from_slice(&[])`
+        // then returns `EOF while parsing a value at line 1 column 0`.
+        let blob_path = cache.blob_store.data(REGISTRY, &d);
+        assert!(
+            blob_path.exists(),
+            "prerequisite: manifest blob must be on disk after seed_tag"
+        );
+        std::fs::write(&blob_path, b"").unwrap();
+        assert_eq!(
+            std::fs::metadata(&blob_path).unwrap().len(),
+            0,
+            "prerequisite: blob file must be truncated to zero bytes"
+        );
+
+        // Step 3: ChainedIndex with a source that can serve the manifest. We
+        // reuse the same `cache` value (the in-memory manifest cache holds
+        // no entry for `d` since seed_tag persisted via `persist_manifest_chain`,
+        // not via the read path that populates the manifest cache).
+        let source = make_source("3.28", d.clone());
+        let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
+
+        // Step 4: fetch_manifest must degrade to chain walk on the zero-byte
+        // blob and re-persist, returning Some — not propagate as Err, not
+        // return None.
+        let result = chained
+            .fetch_manifest(&id, super::IndexOperation::Resolve)
+            .await
+            .expect("zero-byte cached blob must degrade to chain walk, not propagate as error");
+        let (returned_digest, _) =
+            result.expect("chain walk must recover the manifest from the source after a zero-byte cache blob");
+        assert_eq!(returned_digest, d);
+
+        // Step 5: recovery must have rewritten the blob — asserts the chain
+        // actually re-persisted, so a follow-up cache-only read would succeed.
+        assert!(
+            std::fs::metadata(&blob_path).unwrap().len() > 0,
+            "chain walk must re-persist the manifest blob; file still zero bytes after recovery"
+        );
+    }
 }
 
 // ── Concurrency tests ────────────────────────────────────────────────────
