@@ -7,11 +7,38 @@ paths:
 
 Thin CLI shell. Use clap at `crates/ocx_cli/src/`. One file per subcommand. Output format via `Printable` trait.
 
+> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The command taxonomy below reflects that signed handshake. Any description of `ocx shell hook`, `ocx shell init`, `ocx shell env`, root `ocx install/uninstall/select/exec/deselect`, or `ocx ci` describes the **deleted** model — do not implement it.
+
 ## High-Level vs OCI-Tier Layering
 
-The CLI surface divides cleanly into two tiers. **High-level (project-tier)** commands operate on binding names declared in `ocx.toml` + `ocx.lock` — the unit of work is a lock-resolved name, not a registry identifier. **OCI-tier (low-level)** commands operate on OCI identifiers directly and never consult `ocx.toml`. The boundary is firm: a missing `ocx.toml` is a usage error (exit 64) for project-tier commands; `ocx.toml` presence is irrelevant and never consulted by OCI-tier commands.
+The CLI surface divides into two tiers. **Toolchain-tier (project-tier)** commands operate on `ocx.toml` + `ocx.lock` — the unit of work is a lock-resolved binding name. **OCI-tier (low-level)** commands operate on OCI identifiers directly and never consult `ocx.toml`. The boundary is firm: missing `ocx.toml` is a usage error (exit 64) for toolchain-tier commands; `ocx.toml` is irrelevant and never consulted by OCI-tier commands.
 
-`ocx run` is the project-tier env-composition command; `ocx exec` is its OCI-tier counterpart. Use `ocx run` when you have an `ocx.toml`; use `ocx exec` when you do not. For the full command classification table and semantics, see `subsystem-cli-commands.md`.
+`ocx run` is the toolchain-tier child-spawn command; `ocx package exec` is its OCI-tier counterpart. `ocx env` is the new toolchain-tier composed-env command. For the full command taxonomy, see `subsystem-cli-commands.md`.
+
+## Command Taxonomy (Signed Handshake Model)
+
+### OCI-tier — `ocx package <verb>`
+Per-package, identifier-driven, no `ocx.toml` at any tier:
+- `ocx package install <id>` — fetch + materialise into object store
+- `ocx package uninstall <id>` — remove from object store
+- `ocx package select <id>` — set `current` symlink
+- `ocx package deselect <id>` — clear `current` symlink
+- `ocx package exec <id> -- cmd` — run package binary, clean env
+- `ocx package env <ids...> [--shell[=NAME]]` — composed env for the named packages (reuses `env.rs`)
+
+### Toolchain-tier — root commands
+Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx.toml` under `--global`:
+- `ocx add [--global] <id>`, `ocx remove [--global] <name>`, `ocx lock [--global]`, `ocx upgrade [--global]`
+- `ocx run [--global] -- cmd` — compose toolchain env for child process only; never mutates parent shell
+- `ocx env [--global] [--shell[=NAME]]` — compose toolchain env: **JSON by default** (backend-first, handshake §3); `--format plain` for human inspection (NOT sourceable); `--shell[=NAME]` is the ONLY eval-safe channel
+
+### `ocx shell` — reduced to one survivor
+- `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)
+- `ocx shell hook`, `ocx shell init`, `ocx shell env` — **DELETED** (handshake §7)
+
+### Removed root commands (handshake §7 — exit 2 from clap if invoked)
+- `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect` → moved to `ocx package`
+- `ocx ci` → removed
 
 ## Design Rationale
 
@@ -28,11 +55,28 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 | `app/context_options.rs` | `ContextOptions`: global flags (offline, remote, format, color, log-level) |
 | `app/update_check.rs` | GitHub release update notification |
 | `app/version.rs` | Version string accessor |
-| `command/*.rs` | One file per subcommand (31 files) |
-| `command/run.rs` | Project-tier env-composition command (`ocx run`) |
+| `command/*.rs` | One file per subcommand |
+| `command/env.rs` | Toolchain-tier composed-env command (`ocx env`) |
+| `command/run.rs` | Toolchain-tier child-spawn command (`ocx run`) |
+| `command/package.rs` | OCI-tier `ocx package` group dispatcher |
 | `api.rs` | `Api` facade: dispatches JSON vs plain text |
 | `api/data/*.rs` | Report data types implementing `Printable` |
-| `options/*.rs` | Shared arg parsing helpers (Identifier, ContentPath, Platform, PackageRef + `validate_package_root`) |
+| `options/*.rs` | Shared arg parsing helpers |
+
+## `--shell` Flag Convention
+
+`--shell` is declared as `Option<Option<Shell>>` with clap `num_args=0..=1, require_equals=true, default_missing_value=…` (pattern from `package_push.rs`):
+- `--shell` absent → default-format path (JSON for `ocx env` / `ocx package env`)
+- `--shell` bare (equals form, no value) → autodetect from `$SHELL`/parent; error (exit 64) if undetectable
+- `--shell=bash` → explicit shell
+
+`require_equals=true` guarantees a following positional (`ocx package env --shell ripgrep`) is never swallowed.
+
+`--shell=sh` resolves to `Shell::Dash` via a `PossibleValue::new("sh")` alias — **no new enum variant**, zero new match arms (handshake C5).
+
+## `ContextOptions.format` — `Option<Format>` Precondition
+
+`ContextOptions.format` is `Option<options::Format>`. The `Api::new` call site applies `.unwrap_or(Format::Plain)` so **all legacy commands keep Plain default unchanged**. `ocx env` and `ocx package env` resolve `None → Json` for their own output.
 
 ## Context Struct
 
@@ -46,12 +90,10 @@ pub struct Context {
     local_index: LocalIndex,
     file_structure: FileStructure,
     api: Api,
-    default_index: Index,       // Local (default) or Remote (--remote flag)
+    default_index: Index,
     manager: PackageManager,
 }
 ```
-
-Accessors: `manager()`, `api()`, `file_structure()`, `default_index()`, `local_index()`, `remote_client()`.
 
 ## Command Pattern
 
@@ -62,80 +104,25 @@ Every command same flow:
 3. **Build report data** — from task return values (never from CLI args alone)
 4. **Report** — `context.api().report(&data_type)?`
 
-## Routing intent
-
-Commands that hit `Index::fetch_manifest{,_digest}` / `Index::select` / `Index::fetch_candidates` must declare caller intent via `IndexOperation::{Query, Resolve}`. Pure-read commands (`index list`, `index catalog`, `package info`) pass `Op::Query` so a cache miss returns `None` instead of triggering a chain walk + write-through. Install/pull paths in `package_manager::tasks::resolve` pass `Op::Resolve`. Misuse silently leaks writes through query paths — the structural test `chain_refs_tests::op_query_never_walks_source_in_any_mode` catches the most common regression mode. Full contract → [`subsystem-oci.md`](./subsystem-oci.md) and [`adr_index_routing_semantics.md`](../artifacts/adr_index_routing_semantics.md).
-
-## API Reporting Layer
-
-### Printable Trait
-
-```rust
-pub trait Printable: serde::Serialize {
-    fn print_plain(&self, printer: &Printer);
-    fn print_json(&self, printer: &Printer) -> anyhow::Result<()> { ... }
-}
-```
-
-### Rules
-
-- **Single table**: Each `print_plain()` make exactly one `print_table()` call
-- **Static headers**: Use `&str` array, never `format!()` for dynamic headers
-- **Typed enums**: Status values are enums with `Display` + `Serialize`, not raw strings
-- **Report actual results**: Build data from task return values, not echoed CLI args
-- **Preserve input order**: Zip task results with original identifiers for reporting
-
-### Adding a New Report Type
-
-1. Make `api/data/{name}.rs` with struct + doc comments + `Printable` impl
-2. Add `pub mod {name};` to `api/data.rs`
-3. Add `report_{name}()` method to `Api` (delegate to `self.report()`)
-4. Call from `command/{name}.rs` with data built from task results
-
-See `subsystem-cli-api.md` for full contract. `subsystem-cli-commands.md` for quick reference. User-facing per-command docs at `website/src/docs/reference/command-line.md`.
-
-## Cross-Cutting: `--keep` / `--output` Flags
-
-`package test` introduces two destination flags that appear together in clap with `conflicts_with`. `--keep` preserves an auto-managed temp dir; `--output DIR` materializes to a caller-managed directory (never deleted by ocx). Both are mutually exclusive — combined = usage error. `--output` requires the target to be on the same filesystem as `$OCX_HOME/layers/` (hardlink assembly, no copy fallback).
-
-## Cross-Cutting: `--self` Flag
-
-Seven env-consuming commands (`exec`, `run`, `env`, `shell env`, `shell profile load`, `ci export`, `deps`) share a single boolean `--self` flag (default off) that selects which env surface `ocx exec` emits:
-
-- **Off (default)** — interface surface: emits the consumer-visible env (vars where `has_interface()` is true). What a human or CI script sees when using a package.
-- **On (`--self`)** — private surface: emits the package's own runtime env (vars where `has_private()` is true). The `ocx launcher exec` subcommand forces `self_view=true` internally so generated launchers do not need to bake any flag.
-
-`ExecMode` and `ExecModeFlag` no longer exist. The lib accepts a plain `self_view: bool`. Pattern:
-
-- Add `#[clap(long = "self", default_value_t = false)] self_view: bool` to the command's clap `Args` struct.
-- Pass `self_view` to the manager task: `resolve_env(packages, self_view)`.
-
-The manager calls `composer::compose(roots, store, self_view)` which gates TC entry emission via `tc_entry.visibility.has_interface()` (false) or `has_private()` (true).
-
 ## Cross-Cutting: `--global` Toolchain Tier
 
-`--global` selects `$OCX_HOME/ocx.toml` as the project file for project-tier and mutator commands (`add`, `remove`, `lock`, `upgrade`, `pull`, `run`). `install --global <pkg>` is sugar: add to global file + re-lock + install + select (makes the tool a `current` symlink on the global PATH). Defined in `ContextOptions` as `pub global: bool` with `conflicts_with = "project"`.
+`--global` selects `$OCX_HOME/ocx.toml` as the project file for toolchain-tier commands (`add`, `remove`, `lock`, `upgrade`, `run`, `env`). Defined in `ContextOptions` as `pub global: bool` with `conflicts_with = "project"`.
 
 Strict isolation rules:
-- `--global` and `--project` together → `UsageError` (64) via clap `conflicts_with`. No precedence guessing.
-- `ocx run` and `ocx exec` are hermetic. Without `--global`, `run` reads only the in-effect project file; the global file is never consulted. No gap-fill, no union.
-- The global file's project dir is `$OCX_HOME` itself, so `ProjectRegistry` never creates a `$OCX_HOME/projects/` self-link for it (ADR: `adr_project_gc_symlink_ledger.md` no-self-link invariant).
+- `--global` and `--project` together → clap `conflicts_with` conflict (exit 2). No precedence guessing.
+- `ocx run` is hermetic: without `--global`, reads only the in-effect project file; global file never consulted.
+- `ocx run --global -- cmd` composes global toolchain env for child process only; never mutates parent shell.
 - `OCX_GLOBAL` is the env-var equivalent (resolution-affecting; forwarded to child ocx via `apply_ocx_config`).
-- No implicit `$OCX_HOME/ocx.toml` discovery: `home_project_path()` is deleted. Project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
+- No implicit `$OCX_HOME/ocx.toml` discovery: project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
+- `ocx package install --global` → clap unknown-flag error (exit 2). `--global` is NOT on `ocx package install`.
 
-Shell exposure: `ocx shell hook` emits the global `current` set when no project is in effect; entering a project replaces it (no merge). `ocx shell init` writes `$OCX_HOME/init.<shell>` — a static PATH-prepend entrypoint sourced by non-interactive shells (CI, `bash --norc`). The static entrypoint contains a self-contained POSIX upward `ocx.toml` walk and suppresses the global PATH-prepend when a project is in scope (strict isolation at the static-file layer too).
+Activation (new model): the OCX install script writes `$OCX_HOME/env.sh` containing `eval "$(ocx env --global --shell=sh)"` and appends a block-marker idempotent line to the user's login profile. No `$OCX_HOME/init.<shell>` static files. No `ocx shell hook`/`shell init`.
 
 ADR: `adr_global_toolchain_tier.md`.
 
 ## Cross-Cutting: OCX Configuration Forwarding
 
-Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env (whether `Env::new()` or `Env::clean()`) and before `Command::envs()`. `apply_ocx_config` is the **sole** path that lands `OCX_*` keys on a child env — the running ocx's parsed config is authoritative, never ambient parent-shell exports.
-
-New resolution-affecting `ContextOptions` fields (offline / remote / config / index / global / similar) MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env — they leak into entrypoint child streams. PR review:
-- Adding a resolution flag without all three updates → **Block-tier**
-- Routing a presentation flag through `apply_ocx_config` → **Block-tier**
-
-The `--interactive` flag on `ocx exec` was removed: stdin always inherits, matching shell exec semantics. Do not reintroduce a stdin-gating flag.
+Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env and before `Command::envs()`. Resolution-affecting `ContextOptions` fields MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env.
 
 ## Quality Gate
 
