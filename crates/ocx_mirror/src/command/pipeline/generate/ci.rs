@@ -1168,4 +1168,176 @@ ocx_mirror:
             "CI_JOB_URL capture must strip CR before exporting the URL"
         );
     }
+
+    // ── No-credentials guard: push job ─────────────────────────────────────────
+
+    #[test]
+    fn push_job_has_detect_credentials_step() {
+        // The push job must emit a 'Detect registry credentials' step with
+        // id: creds that probes OCX_MIRROR_REGISTRY_TOKEN via env-var injection
+        // without echoing the secret value.
+        let template = super::WORKFLOW_TEMPLATE;
+        assert!(
+            template.contains("name: Detect registry credentials"),
+            "push job must contain 'Detect registry credentials' step"
+        );
+        assert!(
+            template.contains("id: creds"),
+            "credentials-detect step must have id: creds"
+        );
+        assert!(
+            template.contains("OCX_MIRROR_REGISTRY_TOKEN: ${{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}"),
+            "credentials-detect step must inject secret as env var (not echo it)"
+        );
+        assert!(
+            template.contains("echo \"have=true\" >> \"${GITHUB_OUTPUT}\""),
+            "credentials-detect step must set have=true output when token present"
+        );
+        assert!(
+            template.contains("echo \"have=false\" >> \"${GITHUB_OUTPUT}\""),
+            "credentials-detect step must set have=false output when token absent"
+        );
+        assert!(
+            template.contains("::notice::No OCX_MIRROR_REGISTRY_TOKEN secret"),
+            "credentials-detect step must emit a notice annotation when no secret"
+        );
+    }
+
+    #[test]
+    fn push_job_login_step_has_creds_guard() {
+        // The docker-login step in the push job must be guarded so it is skipped
+        // when no credentials are present.
+        let template = super::WORKFLOW_TEMPLATE;
+        // The login step and its guard must both be present in the template.
+        assert!(
+            template.contains("if: ${{ steps.creds.outputs.have == 'true' }}"),
+            "at least one step in push job must carry if: steps.creds.outputs.have == 'true' guard"
+        );
+    }
+
+    #[test]
+    fn push_job_push_step_has_creds_guard() {
+        // The 'Push' step (ocx-mirror pipeline push) must also be guarded so the
+        // run-summary.json is only written when credentials are available.
+        let template = super::WORKFLOW_TEMPLATE;
+        // Count occurrences: both login and push steps must have the guard.
+        let guard = "if: ${{ steps.creds.outputs.have == 'true' }}";
+        let count = template.matches(guard).count();
+        assert!(
+            count >= 2,
+            "both login and push steps must carry the creds guard; found {count} occurrence(s)"
+        );
+    }
+
+    #[test]
+    fn push_job_has_no_creds_fallback_step() {
+        // When credentials are absent the push step is skipped, so run-summary.json
+        // is never written. A fallback step must emit safe defaults so the notify
+        // job's conditional evaluates cleanly to false rather than erroring.
+        let template = super::WORKFLOW_TEMPLATE;
+        assert!(
+            template.contains("id: summarise-no-creds"),
+            "push job must have a fallback summarise-no-creds step"
+        );
+        assert!(
+            template.contains("steps.creds.outputs.have != 'true'"),
+            "fallback step must be guarded with steps.creds.outputs.have != 'true'"
+        );
+        assert!(
+            template.contains("any_new_green=false"),
+            "fallback step must emit any_new_green=false"
+        );
+        assert!(
+            template.contains("any_red=false"),
+            "fallback step must emit any_red=false"
+        );
+    }
+
+    // ── No-credentials guard: describe workflow ─────────────────────────────────
+
+    #[test]
+    fn describe_workflow_has_detect_credentials_step() {
+        // describe.yml must also guard the docker-login so a repo with no secrets
+        // goes green on the describe job.
+        let template = super::DESCRIBE_TEMPLATE;
+        assert!(
+            template.contains("name: Detect registry credentials"),
+            "describe workflow must contain 'Detect registry credentials' step"
+        );
+        assert!(
+            template.contains("id: creds"),
+            "describe credentials-detect step must have id: creds"
+        );
+        assert!(
+            template.contains("OCX_MIRROR_REGISTRY_TOKEN: ${{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}"),
+            "describe credentials-detect step must inject secret as env var"
+        );
+    }
+
+    #[test]
+    fn describe_workflow_login_and_publish_steps_have_creds_guard() {
+        // Both the docker-login and the 'Publish catalog metadata' step in
+        // describe.yml must carry the creds guard.
+        let template = super::DESCRIBE_TEMPLATE;
+        let guard = "if: ${{ steps.creds.outputs.have == 'true' }}";
+        let count = template.matches(guard).count();
+        assert!(
+            count >= 2,
+            "describe workflow must guard both login and publish steps; found {count} occurrence(s)"
+        );
+    }
+
+    #[test]
+    fn rendered_workflow_contains_detect_step_and_guards() {
+        // End-to-end: render from a fixture and assert the generated workflow.yml
+        // carries the credential-detect step and the guards.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-minimal.yml", dir.path());
+        if let Ok(()) = result {
+            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow).unwrap();
+            assert!(
+                content.contains("Detect registry credentials"),
+                "rendered mirror.yml must contain 'Detect registry credentials' step"
+            );
+            assert!(
+                content.contains("id: creds"),
+                "rendered mirror.yml must contain 'id: creds'"
+            );
+            assert!(
+                content.contains("steps.creds.outputs.have == 'true'"),
+                "rendered mirror.yml must contain creds guard on login/push steps"
+            );
+            assert!(
+                content.contains("summarise-no-creds"),
+                "rendered mirror.yml must contain no-creds fallback summarise step"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_describe_contains_detect_step_and_guards() {
+        // End-to-end: render from a fixture and assert the generated describe.yml
+        // carries the credential-detect step and the guards.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-minimal.yml", dir.path());
+        if let Ok(()) = result {
+            let describe = dir.path().join(".github/workflows/describe.yml");
+            let content = std::fs::read_to_string(&describe).unwrap();
+            assert!(
+                content.contains("Detect registry credentials"),
+                "rendered describe.yml must contain 'Detect registry credentials' step"
+            );
+            assert!(
+                content.contains("steps.creds.outputs.have == 'true'"),
+                "rendered describe.yml must guard both login and publish steps"
+            );
+            let guard = "steps.creds.outputs.have == 'true'";
+            let count = content.matches(guard).count();
+            assert!(
+                count >= 2,
+                "rendered describe.yml must have guard on both login and publish steps; found {count}"
+            );
+        }
+    }
 }

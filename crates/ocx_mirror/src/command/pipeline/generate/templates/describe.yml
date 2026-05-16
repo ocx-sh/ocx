@@ -39,16 +39,32 @@ jobs:
           set -euo pipefail
           cargo install --path ocx/crates/ocx_cli --locked --root "${RUNNER_TEMP}/ocx-host"
           echo "${RUNNER_TEMP}/ocx-host/bin" >> "${GITHUB_PATH}"
+      # Detect whether registry credentials are configured.
+      # GitHub does not allow `secrets.*` in job-level `if:`, so we probe at
+      # step level via env-var injection (secret value never echoed to logs).
+      - name: Detect registry credentials
+        id: creds
+        env:
+          OCX_MIRROR_REGISTRY_TOKEN: ${{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "${OCX_MIRROR_REGISTRY_TOKEN}" ]; then
+            echo "have=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "have=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::No OCX_MIRROR_REGISTRY_TOKEN secret — registry push skipped (repo runs in test/validation mode)."
+          fi
       # Docker login lets ocx pick credentials via its native-credential
       # fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs). Env-var
       # auth (`OCX_AUTH_<REG>_USER/_TOKEN`) takes precedence inside ocx, so do
       # NOT also export those vars here.
       - name: Login to {TARGET_REGISTRY}
+        if: ${{ steps.creds.outputs.have == 'true' }}
         run: |
           echo "${{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}" \
             | docker login {TARGET_REGISTRY} \
                 -u "${{ secrets.OCX_MIRROR_REGISTRY_USER }}" \
                 --password-stdin
       - name: Publish catalog metadata
+        if: ${{ steps.creds.outputs.have == 'true' }}
         run: |
           ocx-mirror pipeline describe
