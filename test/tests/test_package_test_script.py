@@ -894,29 +894,31 @@ def test_u22_format_json_envelope_assertion_failure(
 
 
 # ---------------------------------------------------------------------------
-# U23 — hidden starlark-lsp subcommand (R4)
+# U23 — hidden lsp subcommand (R4)
 # ---------------------------------------------------------------------------
 
 
-def test_u23_starlark_lsp_hidden_from_help(ocx: OcxRunner) -> None:
-    """U23: `ocx --help` output does NOT contain `starlark-lsp` (hidden)."""
+def test_u23_lsp_hidden_from_help(ocx: OcxRunner) -> None:
+    """U23: `ocx --help` output does NOT contain `lsp` as a listed command (hidden)."""
     result = ocx.plain("--help", check=False)
     combined = result.stdout + result.stderr
-    assert "starlark-lsp" not in combined, (
-        "U23: `starlark-lsp` is `#[command(hide = true)]` and must NOT appear "
+    # The `lsp` subcommand carries `#[command(hide = true)]` — it must not
+    # appear in the top-level help listing.
+    assert "  lsp" not in combined, (
+        "U23: `lsp` is `#[command(hide = true)]` and must NOT appear "
         f"in `ocx --help`. Output:\n{combined}"
     )
 
 
-def test_u23_starlark_lsp_subcommand_still_dispatches(ocx: OcxRunner) -> None:
-    """U23: `ocx starlark-lsp` is hidden but still a real, dispatchable subcommand.
+def test_u23_lsp_subcommand_still_dispatches(ocx: OcxRunner) -> None:
+    """U23: `ocx lsp` is hidden but still a real, dispatchable subcommand.
 
     Its --help must parse (the subcommand exists even though absent from the
     top-level help), proving "hidden, not removed".
     """
-    result = ocx.plain("starlark-lsp", "--help", check=False)
+    result = ocx.plain("lsp", "--help", check=False)
     assert "error: unrecognized subcommand" not in (result.stderr + result.stdout), (
-        "U23: `ocx starlark-lsp` must remain a dispatchable subcommand "
+        "U23: `ocx lsp` must remain a dispatchable subcommand "
         f"(hidden, not removed). stderr: {result.stderr!r}"
     )
 

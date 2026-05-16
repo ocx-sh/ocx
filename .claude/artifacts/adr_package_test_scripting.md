@@ -319,7 +319,7 @@ Phased, effort-ranked:
   `.star` language association in `.vscode/extensions.json` / settings (de-facto
   standard: `BazelBuild.vscode-bazel`). Syntax highlighting only — no `ocx.*`
   awareness.
-- **Phase B+C (land together, medium effort):** ship an `ocx starlark-lsp`
+- **Phase B+C (land together, medium effort):** ship an `ocx lsp`
   subcommand — a thin wrapper over `starlark_lsp` stdio server with a custom
   `LspContext` whose `get_environment()` is populated from the `#[starlark_module]`
   doc metadata. Gives full completion + hover for `ocx.run`, `expect.ok`, etc.
@@ -330,7 +330,10 @@ Phased, effort-ranked:
   backend tool; the LSP name/wire is not a stability promise). It must be a
   subcommand (editors point at a binary + subcommand; a flag cannot serve
   this), but it is documented only in the authoring/IDE docs, not the
-  command-line reference.**
+  command-line reference. The name `lsp` is intentionally generic to preserve
+  room for a future dialect-selecting argument (e.g. `--dialect starlark`) if a
+  second script dialect is introduced — the subcommand name would not need to
+  change.**
 
 Rejected: tilt-dev-style `.pyi` stub files — second source of truth, drifts from
 the evolving module API.
@@ -369,7 +372,7 @@ Design only — not for execution here. Suggested phasing for the eventual `/bui
 9. [ ] Testbed: `.star` smoke test against the `shfmt` mirror in `mirror-shfmt-candidate`; wire scripted-test CI leg **linux-only** (Windows/macOS legs disabled, documented as temporary).
 10. [ ] Acceptance tests (pytest, `test/`): hermetic tool-package smoke + compile→run + sandbox-escape rejection.
 11. [ ] Phase A editor support: `.vscode/extensions.json` recommendation + `.star` association.
-12. [ ] Phase B+C: `ocx starlark-lsp` subcommand with `LspContext::get_environment()` fed from `#[starlark_module]` doc metadata.
+12. [ ] Phase B+C: `ocx lsp` subcommand with `LspContext::get_environment()` fed from `#[starlark_module]` doc metadata.
 13. [ ] Docs: add "Scripted tests" section to `website/src/docs/authoring/testing` once API stable.
 
 ## Open Questions (deferred — revisit before/with builder)

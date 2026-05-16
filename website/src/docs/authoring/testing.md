@@ -254,7 +254,7 @@ The envelope has three top-level keys — all stable v1 contract:
 
 ### Editor integration {#scripted-tests-ide}
 
-`ocx starlark-lsp` provides completion and hover for the `ocx.*` and `expect.*` APIs in editors that support the [Language Server Protocol][lsp]. It is an **internal, unstable** subcommand — it does not appear in `ocx --help` and its name and wire format carry no stability promise. Point your editor's `starlark.lspPath` setting at the `ocx` binary and add `starlark-lsp` as the subcommand argument.
+`ocx lsp` provides completion and hover for the `ocx.*` and `expect.*` APIs in editors that support the [Language Server Protocol][lsp]. It is an **internal, unstable** subcommand — it does not appear in `ocx --help` and its name and wire format carry no stability promise. Point your editor's `starlark.lspPath` setting at the `ocx` binary and add `lsp` as the subcommand argument.
 
 For basic syntax highlighting without the LSP, add the [vscode-bazel][vscode-bazel] extension to your VS Code workspace — it provides `.star` file syntax highlighting.
 

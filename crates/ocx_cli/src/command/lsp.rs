@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Hidden `ocx starlark-lsp` subcommand — INTERNAL + UNSTABLE.
+//! Hidden `ocx lsp` subcommand — INTERNAL + UNSTABLE.
 //!
 //! A thin wrapper over the `starlark_lsp` stdio LSP server with a custom
 //! `LspContext` whose `get_environment()` is populated from the SAME
@@ -11,10 +11,16 @@
 //! It MUST be a subcommand (editors point `starlark.lspPath` at a binary +
 //! subcommand; a flag cannot serve this), but it carries
 //! `#[command(hide = true)]` so it NEVER appears in `ocx --help`. The wire
-//! contract is exactly the `starlark-lsp` subcommand name; everything else is
+//! contract is exactly the `lsp` subcommand name; everything else is
 //! unstable. It is documented only in the authoring/IDE docs, never in the
 //! command-line reference (OCX is a backend tool; the LSP name/wire is not a
 //! stability promise).
+//!
+//! Design intent (comments only — no code yet): `ocx lsp` is intentionally
+//! named generically so that a future dialect-selecting argument (e.g.
+//! `--dialect starlark`) can be added without renaming the subcommand. Do not
+//! bake "starlark test script" assumptions into this command name or its
+//! top-level doc.
 //!
 //! It speaks LSP over stdio — it does NOT use `Printable` and has no
 //! `api/data/` type. It never writes to the package store.
@@ -23,15 +29,15 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-/// Internal Starlark LSP server (hidden from `ocx --help`).
+/// Internal LSP server for IDE integration (hidden from `ocx --help`).
 ///
-/// Long-lived stdio server. Editors invoke `ocx starlark-lsp` and pipe LSP
+/// Long-lived stdio server. Editors invoke `ocx lsp` and pipe LSP
 /// over stdin/stdout.
 #[derive(Parser)]
 #[command(hide = true)]
-pub struct StarlarkLsp {}
+pub struct Lsp {}
 
-impl StarlarkLsp {
+impl Lsp {
     /// D2: the dispatcher (`command.rs`) passes the already-constructed
     /// `Context` uniformly to every subcommand. The LSP server needs none of
     /// its heavy state (no store, no index, no registry), so we accept it for

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Starlark LSP server bootstrap (firewall side of `ocx starlark-lsp`).
+//! Starlark LSP server bootstrap (firewall side of `ocx lsp`).
 //!
 //! Lives inside the engine firewall so `ocx_cli` carries no `starlark*`
-//! dependency (the hidden `starlark-lsp` command delegates to
+//! dependency (the hidden `lsp` command delegates to
 //! [`run_lsp_server`]). The custom [`OcxLspContext::get_environment`] returns
 //! the SAME `#[starlark_module]` doc metadata the evaluator uses (single
 //! source of truth, zero drift). `load()` stays disabled.
@@ -101,7 +101,7 @@ impl LspContext for OcxLspContext {
 
 /// Runs the OCX Starlark LSP server over stdio until the client disconnects.
 ///
-/// Engine-neutral public entry point (the `ocx_cli` `starlark-lsp` command
+/// Engine-neutral public entry point (the `ocx_cli` `lsp` command
 /// delegates here so the firewall holds — no `starlark*` dep in `ocx_cli`).
 pub fn run_lsp_server() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ctx = OcxLspContext { globals: lsp_globals() };

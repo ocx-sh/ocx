@@ -246,9 +246,9 @@ mod firewall_tests {
     // Spec source: plan_package_test_scripting.md "C-test — engine isolation
     // structural test" + module doc. No `starlark`-family crate import path may
     // appear OUTSIDE this firewall directory (`crates/ocx_lib/src/script/`) and
-    // the `ocx_cli` `starlark_lsp` command module. This locks the engine swap
-    // to a single directory. The `StarlarkLsp` enum variant + `pub mod
-    // starlark_lsp;` wiring in `command.rs` is the dispatch arm for the lsp
+    // the `ocx_cli` `lsp` command module. This locks the engine swap
+    // to a single directory. The `Lsp` enum variant + `pub mod
+    // lsp;` wiring in `command.rs` is the dispatch arm for the lsp
     // command module and is explicitly permitted (it names the command module,
     // not the engine crate).
 
@@ -274,9 +274,9 @@ mod firewall_tests {
         // The firewall directory itself + its named module file.
         s.contains("/ocx_lib/src/script/")
             || s.ends_with("/ocx_lib/src/script.rs")
-            // The ocx_cli starlark-lsp command module (allowed per C-test).
-            || s.ends_with("/ocx_cli/src/command/starlark_lsp.rs")
-            // command.rs only names the StarlarkLsp variant / command module
+            // The ocx_cli lsp command module (allowed per C-test).
+            || s.ends_with("/ocx_cli/src/command/lsp.rs")
+            // command.rs only names the Lsp variant / command module
             // (dispatch wiring), never the engine crate — allowed.
             || s.ends_with("/ocx_cli/src/command.rs")
     }
