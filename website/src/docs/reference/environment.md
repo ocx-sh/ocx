@@ -264,6 +264,12 @@ When set to a [truthy value](#truthy-values), routes mutable lookups (tag list, 
 
 Equivalent to passing the [`--remote`][arg-remote] flag on every invocation. See the user guide for the [routing model][indices-routing] and the [pinned-only mode][cmd-pinned-only-mode] (combined with `OCX_OFFLINE`).
 
+### Script env access (`ocx package test --script`) {#script-env-access}
+
+`ocx.env(name)` in a [Starlark test script][authoring-testing-scripted] reads one variable from the **composed package env** — the same env surface that `ocx exec` exposes. It does not read the host process env.
+
+No new `OCX_*` variable was introduced by the `--script` feature. The resolution-affecting variables listed above (`OCX_BINARY_PIN`, `OCX_HOME`, `OCX_CONFIG`, `OCX_PROJECT`, `OCX_INDEX`, and others) remain inaccessible to script `ocx.env()` calls and cannot be overridden via the `ocx.run(env=...)` overlay kwarg — those keys are reserved and any attempt to set them results in a `Failed` outcome.
+
 ## External {#external}
 
 ### `CI` {#external-ci}
@@ -370,3 +376,6 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [fs-index]: ../user-guide.md#file-structure-index
 [fs-symlinks]: ../user-guide.md#file-structure-symlinks
 [faq-codesign]: ../faq.md#macos-codesign
+
+<!-- authoring -->
+[authoring-testing-scripted]: ../authoring/testing.md#scripted-tests

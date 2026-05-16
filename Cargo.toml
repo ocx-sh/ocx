@@ -27,6 +27,19 @@ ocx_lib = { path = "crates/ocx_lib" }
 tokio = { version = "1", features = ["full"] }
 serde_yaml_ng = "0.10"
 
+# Embedded Starlark interpreter for `ocx package test --script`.
+#
+# DELIBERATE EXACT PIN (deviation from this repo's caret-version convention):
+# starlark-rust does NOT promise API stability between releases. Every bump is
+# treated as a breaking change requiring a manual review pass (and re-running
+# the engine-isolation test). The whole family is co-versioned and must move
+# together. See .claude/rules/subsystem-deps.md "Manually-tracked exact pins".
+starlark = "=0.13.0"
+starlark_lsp = "=0.13.0"
+starlark_syntax = "=0.13.0"
+starlark_map = "=0.13.0"
+starlark_derive = "=0.13.0"
+
 [workspace.lints.clippy]
 # Placeholder for future workspace-wide clippy overrides. Crate-specific
 # overrides belong in each crate's own [lints.clippy] section so the

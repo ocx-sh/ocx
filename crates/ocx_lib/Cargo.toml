@@ -54,7 +54,21 @@ thiserror = "2"
 tracing-indicatif = { version = "0.3.14" }
 rpassword = "7"
 
-[dev-dependencies]
+# Embedded Starlark engine — exact-pinned family (see root Cargo.toml comment).
+starlark = { workspace = true }
+starlark_lsp = { workspace = true }
+starlark_syntax = { workspace = true }
+starlark_map = { workspace = true }
+starlark_derive = { workspace = true }
+# FIREWALL-SCOPED ONLY (Living Design Record, plan_package_test_scripting):
+# `starlark_lsp::server::LspContext` has `anyhow::Result` return types, forcing
+# `anyhow` into the (non-test) `script/lsp.rs` firewall module. This does NOT
+# breach the quality-rust-errors Block-tier rule: ocx_lib's PUBLIC error API
+# stays `thiserror` (`ScriptError` / `ScriptOutcomeKind`). `anyhow` here is
+# only the starlark/starlark_lsp boundary payload, confined to
+# `crates/ocx_lib/src/script/` (enforced by the engine-isolation firewall
+# test). It is already present transitively via the starlark family.
+anyhow = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

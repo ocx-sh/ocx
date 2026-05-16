@@ -36,6 +36,7 @@ pub mod package_manager;
 pub mod project;
 pub mod publisher;
 pub mod reference_manager;
+pub mod script;
 pub mod shell;
 pub mod symlink;
 pub mod utility;
