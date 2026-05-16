@@ -11,7 +11,7 @@ use ocx_lib::cli::DataInterface;
 
 use crate::command::options::OutputFormat;
 use crate::error::MirrorError;
-use crate::spec::{self, MirrorSpec, PlatformConfig};
+use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry};
 
 // ── Build-time constants ─────────────────────────────────────────────────────
 
@@ -142,6 +142,22 @@ fn effective_shell_for_container(image: &str, explicit: Option<&str>) -> &'stati
     if base.starts_with("alpine") { "sh" } else { "bash" }
 }
 
+/// The kind of a rendered test entry — mirrors [`spec::TestKind`] but owns its
+/// payload so it can outlive the spec borrow in `MatrixLeg`.
+#[derive(Debug, Clone, PartialEq)]
+enum RenderedTestKind {
+    Command(String),
+    Script(String),
+    ScriptInline(String),
+}
+
+/// One rendered test entry carried in a matrix leg.
+#[derive(Debug, Clone)]
+struct RenderedTest {
+    name: String,
+    kind: RenderedTestKind,
+}
+
 /// Describes one matrix leg (test job matrix entry).
 struct MatrixLeg {
     platform: String,
@@ -150,7 +166,29 @@ struct MatrixLeg {
     container_id: String,
     image: Option<String>,
     shell: String,
-    tests: Vec<(String, String)>, // (name, command)
+    tests: Vec<RenderedTest>,
+}
+
+/// Convert a slice of [`TestEntry`] into [`RenderedTest`] list.
+///
+/// Entries that fail `kind()` (i.e. validated-invalid specs that slip through)
+/// are silently omitted — `validate_tests` is the authoritative gate.
+fn render_tests(entries: &[TestEntry]) -> Vec<RenderedTest> {
+    entries
+        .iter()
+        .filter_map(|t| {
+            let kind = match t.kind() {
+                Ok(spec::TestKind::Command(cmd)) => RenderedTestKind::Command(cmd.to_owned()),
+                Ok(spec::TestKind::Script(p)) => RenderedTestKind::Script(p.display().to_string()),
+                Ok(spec::TestKind::ScriptInline(src)) => RenderedTestKind::ScriptInline(src.to_owned()),
+                Err(_) => return None,
+            };
+            Some(RenderedTest {
+                name: t.name.clone(),
+                kind,
+            })
+        })
+        .collect()
 }
 
 /// Build the flat list of matrix legs from a `MirrorSpec`.
@@ -159,13 +197,7 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
         return Vec::new();
     };
 
-    let top_level_tests: Vec<(String, String)> = spec
-        .tests
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .map(|t| (t.name.clone(), t.command.clone()))
-        .collect();
+    let top_level_tests: Vec<RenderedTest> = render_tests(spec.tests.as_deref().unwrap_or(&[]));
 
     // Stable ordering: sort platform keys alphabetically so the generated YAML
     // is deterministic across runs.
@@ -177,10 +209,10 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
         let config = &platforms[platform_key];
         let platform_slug = platform_key.replace('/', "_");
 
-        let effective_tests: Vec<(String, String)> = config
+        let effective_tests: Vec<RenderedTest> = config
             .tests
             .as_deref()
-            .map(|ts| ts.iter().map(|t| (t.name.clone(), t.command.clone())).collect())
+            .map(render_tests)
             .unwrap_or_else(|| top_level_tests.clone());
 
         if let Some(containers) = &config.containers {
@@ -290,13 +322,37 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
             out.push_str(&format!("            image: {}\n", image));
         }
         out.push_str(&format!("            shell: {}\n", leg.shell));
-        // Inline the test commands so they are visible in the generated YAML.
+        // Inline the test entries so they are visible in the generated YAML.
         out.push_str("            tests:\n");
-        for (name, command) in &leg.tests {
-            out.push_str(&format!(
-                "              - name: {}\n                command: {}\n",
-                name, command
-            ));
+        for test in &leg.tests {
+            match &test.kind {
+                RenderedTestKind::Command(cmd) => {
+                    out.push_str(&format!(
+                        "              - name: {}\n                kind: command\n                command: {}\n",
+                        test.name, cmd
+                    ));
+                }
+                RenderedTestKind::Script(path) => {
+                    out.push_str(&format!(
+                        "              - name: {}\n                kind: script\n                script: {}\n",
+                        test.name, path
+                    ));
+                }
+                RenderedTestKind::ScriptInline(src) => {
+                    // Use YAML block scalar `|` so multi-line Starlark survives.
+                    // Each line of the inline source is indented 18 spaces
+                    // (matrix entry indent 14 + 4 for block scalar body).
+                    let indented = src
+                        .lines()
+                        .map(|line| format!("                  {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    out.push_str(&format!(
+                        "              - name: {}\n                kind: script_inline\n                script_inline: |\n{indented}\n",
+                        test.name
+                    ));
+                }
+            }
         }
     }
     out
@@ -322,9 +378,10 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
     }
 
     // Emit a single parametric block:
-    // - For container legs: docker run with the test command.
-    // - For native legs: run command directly (with prefix if any).
+    // - For container legs: docker run with the test payload.
+    // - For native legs: run payload directly.
     // The test step uses ${{ matrix.shell }} and ${{ matrix.container_id }}.
+    // Branching on TEST_KIND selects command / script / script_inline behaviour.
     let body = r#"            METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json"
             mkdir -p junit
             JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
@@ -334,23 +391,58 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
             CASES=""
             for i in $(seq 0 $((TEST_COUNT - 1))); do
               TEST_NAME=$(echo "${TESTS_JSON}" | jq -r ".[$i].name")
-              TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
+              TEST_KIND=$(echo "${TESTS_JSON}" | jq -r ".[$i].kind")
               START=$(date +%s)
               RC=0
               if [ "${{ matrix.container_id }}" = "_native_" ]; then
-                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" -- \
-                  ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
+                if [ "${TEST_KIND}" = "command" ]; then
+                  TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
+                  ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" -- \
+                    ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
+                elif [ "${TEST_KIND}" = "script" ]; then
+                  TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
+                  ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
+                    --script "${TEST_SCRIPT}" || RC=$?
+                else
+                  TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
+                  printf '%s' "${TEST_INLINE}" | ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
+                    --script - || RC=$?
+                fi
               else
                 CONTAINER_ID="${{ matrix.container_id }}"
                 IMAGE_TAG="ocx-test-${{ matrix.platform_slug }}-${CONTAINER_ID}:{OCX_MIRROR_RELEASE_TAG}"
-                docker run --rm \
-                  -v "$(pwd)/${BUNDLE}:/bundle.tar.xz:ro" \
-                  -v "$(pwd)/${METADATA_SIBLING}:/bundle-metadata.json:ro" \
-                  -e OCX_VERSION="${VERSION}" \
-                  -e OCX_PLATFORM="${{ matrix.platform }}" \
-                  -e OCX_IMAGE="${{ matrix.image }}" \
-                  "${IMAGE_TAG}" \
-                  ${{ matrix.shell }} -c "ocx package test --platform '${{ matrix.platform }}' --identifier '{TARGET_IDENTIFIER}:${VERSION}' /bundle.tar.xz -- ${TEST_CMD}" || RC=$?
+                if [ "${TEST_KIND}" = "command" ]; then
+                  TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
+                  docker run --rm \
+                    -v "$(pwd)/${BUNDLE}:/bundle.tar.xz:ro" \
+                    -v "$(pwd)/${METADATA_SIBLING}:/bundle-metadata.json:ro" \
+                    -e OCX_VERSION="${VERSION}" \
+                    -e OCX_PLATFORM="${{ matrix.platform }}" \
+                    -e OCX_IMAGE="${{ matrix.image }}" \
+                    "${IMAGE_TAG}" \
+                    ${{ matrix.shell }} -c "ocx package test --platform '${{ matrix.platform }}' --identifier '{TARGET_IDENTIFIER}:${VERSION}' /bundle.tar.xz -- ${TEST_CMD}" || RC=$?
+                elif [ "${TEST_KIND}" = "script" ]; then
+                  TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
+                  docker run --rm \
+                    -v "$(pwd)/${BUNDLE}:/bundle.tar.xz:ro" \
+                    -v "$(pwd)/${METADATA_SIBLING}:/bundle-metadata.json:ro" \
+                    -v "$(pwd)/${TEST_SCRIPT}:/test.star:ro" \
+                    -e OCX_VERSION="${VERSION}" \
+                    -e OCX_PLATFORM="${{ matrix.platform }}" \
+                    -e OCX_IMAGE="${{ matrix.image }}" \
+                    "${IMAGE_TAG}" \
+                    ocx package test --platform '${{ matrix.platform }}' --identifier '{TARGET_IDENTIFIER}:${VERSION}' /bundle.tar.xz --script /test.star || RC=$?
+                else
+                  TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
+                  printf '%s' "${TEST_INLINE}" | docker run --rm -i \
+                    -v "$(pwd)/${BUNDLE}:/bundle.tar.xz:ro" \
+                    -v "$(pwd)/${METADATA_SIBLING}:/bundle-metadata.json:ro" \
+                    -e OCX_VERSION="${VERSION}" \
+                    -e OCX_PLATFORM="${{ matrix.platform }}" \
+                    -e OCX_IMAGE="${{ matrix.image }}" \
+                    "${IMAGE_TAG}" \
+                    ocx package test --platform '${{ matrix.platform }}' --identifier '{TARGET_IDENTIFIER}:${VERSION}' /bundle.tar.xz --script - || RC=$?
+                fi
               fi
               END=$(date +%s)
               DUR=$((END - START))
@@ -906,6 +998,158 @@ mod tests {
                 Err(e) => panic!("expected RendererDrift, got: {e}"),
             }
         }
+    }
+
+    // ── §TestEntry union: CI render tests ──────────────────────────────────────
+
+    /// Build a `MirrorSpec` from inline YAML and call `build_matrix` on it.
+    fn build_matrix_from_yaml(yaml: &str) -> Vec<MatrixLeg> {
+        let spec: crate::spec::MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        build_matrix(&spec)
+    }
+
+    #[test]
+    fn render_matrix_entries_emits_kind_command() {
+        // A spec with `command:` must produce `kind: command` + `command: <value>` in matrix.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-minimal.yml", dir.path());
+        if let Ok(()) = result {
+            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow).unwrap();
+            assert!(
+                content.contains("kind: command"),
+                "matrix entry for command test must contain 'kind: command'; content:\n{content}"
+            );
+            assert!(
+                content.contains("command: shfmt --version"),
+                "matrix entry must contain 'command: shfmt --version'; content:\n{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_matrix_entries_emits_kind_script() {
+        // A spec with `script:` must produce `kind: script` + `script: <path>` in matrix.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-all-test-kinds.yml", dir.path());
+        if let Ok(()) = result {
+            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow).unwrap();
+            assert!(
+                content.contains("kind: script"),
+                "matrix entry for script test must contain 'kind: script'; content:\n{content}"
+            );
+            assert!(
+                content.contains("script: tests/smoke.star"),
+                "matrix entry must contain 'script: tests/smoke.star'; content:\n{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_matrix_entries_emits_kind_script_inline() {
+        // A spec with `script_inline:` must produce `kind: script_inline` with YAML
+        // block scalar (`script_inline: |`) in the matrix entry.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-all-test-kinds.yml", dir.path());
+        if let Ok(()) = result {
+            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow).unwrap();
+            assert!(
+                content.contains("kind: script_inline"),
+                "matrix entry for inline test must contain 'kind: script_inline'; content:\n{content}"
+            );
+            assert!(
+                content.contains("script_inline: |"),
+                "inline test payload must use YAML block scalar ('script_inline: |'); content:\n{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_all_three_kinds_in_single_spec() {
+        // All three kinds must co-exist in the same matrix.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-all-test-kinds.yml", dir.path());
+        if let Ok(()) = result {
+            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow).unwrap();
+            assert!(content.contains("kind: command"), "command kind missing");
+            assert!(content.contains("kind: script"), "script kind missing");
+            assert!(content.contains("kind: script_inline"), "script_inline kind missing");
+        }
+    }
+
+    #[test]
+    fn shell_loop_branches_on_test_kind() {
+        // The generated shell loop must extract TEST_KIND and branch on its value.
+        let legs = build_matrix_from_yaml(
+            r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+asset_type:
+  type: binary
+  name: shfmt
+tests:
+  - name: version
+    command: shfmt --version
+  - name: smoke
+    script: tests/smoke.star
+  - name: inline
+    script_inline: |
+      ocx_assert(True)
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+        shell: bash
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+        );
+        let shell_block = render_test_run_steps(&legs);
+
+        // Must extract TEST_KIND.
+        assert!(
+            shell_block.contains("TEST_KIND=$(echo \"${TESTS_JSON}\" | jq -r \".[$i].kind\")"),
+            "shell loop must extract TEST_KIND; block:\n{shell_block}"
+        );
+        // Must branch on command.
+        assert!(
+            shell_block.contains("if [ \"${TEST_KIND}\" = \"command\" ]"),
+            "shell loop must have command branch; block:\n{shell_block}"
+        );
+        // Must branch on script.
+        assert!(
+            shell_block.contains("elif [ \"${TEST_KIND}\" = \"script\" ]"),
+            "shell loop must have script branch; block:\n{shell_block}"
+        );
+        // Must handle script_inline via else branch (includes printf piped to --script -).
+        assert!(
+            shell_block.contains("--script -"),
+            "shell loop must pipe script_inline to --script -; block:\n{shell_block}"
+        );
+        // Native script: uses --script $TEST_SCRIPT (not -c).
+        assert!(
+            shell_block.contains("--script \"${TEST_SCRIPT}\""),
+            "native script branch must pass --script; block:\n{shell_block}"
+        );
+        // Container script: bind-mounts script as /test.star.
+        assert!(
+            shell_block.contains("/test.star"),
+            "container script branch must bind-mount script as /test.star; block:\n{shell_block}"
+        );
     }
 
     // Regression: native jq.exe on Windows runners emits CRLF, so without
