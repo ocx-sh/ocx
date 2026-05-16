@@ -2,7 +2,7 @@
 name: swarm-plan
 description: Use for feature planning, task decomposition, multi-perspective research, or ADR scaffolding. Tier (`low | auto | high | max`) scales research depth, architect model, and review breadth. Canonical research primitive for AI config / ADR work.
 user-invocable: true
-disable-model-invocation: true
+disable-model-invocation: false
 argument-hint: "[tier] <target> [--flags]"
 triggers:
   - "plan the"

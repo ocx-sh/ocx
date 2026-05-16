@@ -2,8 +2,8 @@
 name: swarm-execute
 description: Use to implement a plan artifact from `/swarm-plan`, or a free-text implementation task with contract-first TDD + Review-Fix Loop. Tier (`low | auto | high | max`) scales builder model, loop rounds, review breadth, and Codex code-diff gate.
 user-invocable: true
+disable-model-invocation: false
 argument-hint: "[tier] <plan-artifact-or-task> [--flags]"
-disable-model-invocation: true
 triggers:
   - "execute this plan"
   - "execute the plan"

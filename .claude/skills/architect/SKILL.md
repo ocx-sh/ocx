@@ -2,6 +2,7 @@
 name: architect
 description: Use when task involve design spec, ADR, one-way-door decision, or evaluate trade-offs between architectural approaches. Invoke before implementation when requirements span subsystems or decision hard reverse. Trigger: /architect.
 user-invocable: true
+disable-model-invocation: false
 argument-hint: "design-topic"
 triggers:
   - "design spec"

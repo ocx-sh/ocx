@@ -2,6 +2,7 @@
 name: swarm-review
 description: Use for branch, PR, or diff review before landing on main. Tier (`low | auto | high | max`) scales breadth from single reviewer to adversarial panel with architect + SOTA-gap + Codex cross-model gate. Triggers: "review", "/swarm-review", pre-merge checks.
 user-invocable: true
+disable-model-invocation: false
 argument-hint: "[tier] <branch-or-pr> [--base=<ref>] [--flags]"
 triggers:
   - "review this branch"

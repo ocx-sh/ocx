@@ -2,7 +2,7 @@
 name: codex-adversary
 description: Use when the user says "codex review", "/codex-adversary", "adversarial review", "cross-model review", or asks for a different-model second opinion on a diff or plan artifact. Complements `/swarm-review` via Codex-CLI. Scopes: code-diff (default), plan-artifact (gate for `/swarm-plan`).
 user-invocable: true
-disable-model-invocation: true
+disable-model-invocation: false
 argument-hint: "[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch|plan-artifact] [--target-file <path>] [focus text]"
 triggers:
   - "codex review"
