@@ -1,0 +1,254 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! `ocx env` — toolchain-tier composed-env command.
+//!
+//! Reads the in-scope `ocx.toml` + `ocx.lock` (project tier) or resolves the
+//! global toolchain's installed `current` set offline (under `--global`) and
+//! emits the composed environment for the default group.
+//!
+//! Scope = command location (toolchain-tier).
+//! Format = flag: default JSON (backend-first, handshake §3); `--format plain`
+//! for human inspection; `--shell[=NAME]` for the only eval-safe output form.
+//!
+//! # Two resolution paths, no divergent global resolvers
+//!
+//! - **`--global`** routes through [`resolve_global_current_env`]: a strictly
+//!   **offline** `$OCX_HOME/ocx.lock` → `find_symlink(Current)` →
+//!   `resolve_env` composition (ADR `adr_global_toolchain_tier.md` Decision 5,
+//!   handshake §1/§4). The §4 login exporter
+//!   `eval "$(ocx env --global --shell=sh)"` runs on every shell start — it
+//!   MUST NOT contact the registry, install, or hang. No global tool has its
+//!   `current` symlink yet ⇒ silently skipped; no global lock at all ⇒ exit 64
+//!   ("no global toolchain configured"), never exit 74.
+//! - **project** (no `--global`) routes through `load_project_with_lock` +
+//!   `compose_tool_set`, then a **single batched** `find_or_install_all` over
+//!   all composed identifiers (mirrors `run.rs` — no per-tool N+1 network
+//!   round-trip).
+//!
+//! [`resolve_global_current_env`] is relocated here from `shell_hook.rs`.
+//! Rationale: it performs toolchain-tier `$OCX_HOME → lock →
+//! find_symlink(Current) → resolve_env` composition specific to the
+//! `ocx env --global` code path — it belongs with the command that consumes
+//! it, not in generic CLI helpers (`conventions.rs` holds stateless helpers
+//! with no toolchain-tier awareness).
+
+use std::io::IsTerminal;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use clap::Parser;
+use ocx_lib::{
+    cli::UsageError,
+    file_structure::SymlinkKind,
+    package::metadata::env::entry::Entry,
+    project::{DEFAULT_GROUP, ProjectLock, compose_tool_set, lock::lock_path_for},
+};
+
+use crate::{
+    api,
+    app::project_context::load_project_with_lock,
+    conventions::{emit_lines, platforms_or_default, resolve_shell_arg},
+    options,
+};
+
+/// Emit the composed environment for the in-scope toolchain.
+///
+/// Reads `ocx.toml` + `ocx.lock` (project tier, CWD-walk / `--project` /
+/// `OCX_PROJECT`) or resolves the global toolchain's offline `current` set
+/// (when `--global` is set), composes the default-group env, and writes it to
+/// stdout in the requested format.
+///
+/// # Formats
+///
+/// - Default (no `--shell`, no `--format`): **JSON** — backend-first per
+///   signed handshake §3. Machine-consumable; NOT eval-safe.
+/// - `--format plain`: human-readable table. NOT eval-safe.
+/// - `--shell[=NAME]`: eval-safe shell export lines. The ONLY sourceable form.
+///
+/// `eval "$(ocx env)"` is a user error — use `eval "$(ocx env --shell=bash)"`.
+///
+/// # Exit codes
+///
+/// - 64 (`UsageError`): no `ocx.toml` in scope (project tier); **no global
+///   toolchain configured** (`--global`, no `$OCX_HOME/ocx.lock`); `--shell`
+///   (bare) with undetectable `$SHELL`/parent; `--global` ⟂ `--project`
+///   (clap `conflicts_with`, mapped to EX_USAGE 64 — NOT exit 2).
+/// - 78 (`ConfigError`): `ocx.lock` absent (project tier).
+/// - 65 (`DataError`): `ocx.lock` stale (project tier).
+#[derive(Parser)]
+pub struct ToolchainEnv {
+    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of a
+    /// discovered project.  Mutually exclusive with `--project`.
+    #[arg(long)]
+    global: bool,
+
+    /// Output format for machine-readable output.
+    ///
+    /// When omitted alongside a missing `--shell`, defaults to `json`
+    /// (backend-first, handshake §3).  `plain` emits a human-readable table
+    /// that is NOT sourceable (paths with spaces break `eval`).
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    format: Option<options::Format>,
+
+    /// Target shell for eval-safe export lines.
+    ///
+    /// Must be supplied with `=` (`--shell=bash`).  Bare `--shell` (no `=`)
+    /// triggers autodetection from `$SHELL`/parent process; exit 64 if
+    /// undetectable.
+    ///
+    /// `--shell=sh` ≡ `--shell=dash` (POSIX strict; C5 alias, no new variant).
+    #[arg(
+        long,
+        value_enum,
+        value_name = "SHELL",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    shell: Option<Option<ocx_lib::shell::Shell>>,
+}
+
+impl ToolchainEnv {
+    pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Fold per-command `--global` into the context (seam reconciliation).
+        // `--global` ⟂ `--project` surfaces here as a usage error → exit 64.
+        let context = context.with_command_global(self.global)?;
+
+        // `None` → default-format path; `Some(s)` → eval-safe emit.
+        let shell = resolve_shell_arg(self.shell)?;
+
+        // ── Resolve entries: one global path, one project path ───────────────
+        let entries = if self.global {
+            // OFFLINE current-symlink resolution (ADR D5, handshake §1/§4).
+            // The login exporter runs this every shell — never network/install.
+            match resolve_global_current_env(&context).await? {
+                Some(entries) => entries,
+                None => {
+                    return Err(UsageError::new(
+                        "no global toolchain configured; run `ocx add --global <id>` to create one",
+                    )
+                    .into());
+                }
+            }
+        } else {
+            // Project tier: resolve + a SINGLE batched install (mirror run.rs).
+            let ctx = load_project_with_lock(&context).await?;
+            let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &[DEFAULT_GROUP.to_owned()], &[])?;
+
+            let identifiers: Vec<ocx_lib::oci::Identifier> = composed.into_iter().map(|tool| tool.identifier).collect();
+            let platforms = platforms_or_default(&[]);
+            let manager = context.manager();
+            let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = manager
+                .find_or_install_all(identifiers, platforms, context.concurrency())
+                .await?
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+            manager.resolve_env(&infos, false).await?
+        };
+
+        // ── Emit ─────────────────────────────────────────────────────────────
+        if let Some(s) = shell {
+            // Eval-safe: delegate to shared emit helper (C5).
+            emit_lines(s, &entries);
+            return Ok(ExitCode::SUCCESS);
+        }
+
+        // Machine-readable: JSON by default (None → Json); plain if explicit.
+        let effective_format = self.format.unwrap_or(options::Format::Json);
+
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+        let mut env_data: Vec<api::data::env::EnvEntry> = entries
+            .into_iter()
+            .map(|e| api::data::env::EnvEntry {
+                key: e.key,
+                value: e.value,
+                kind: e.kind,
+            })
+            .collect();
+
+        // On Windows, append a synthetic `PATHEXT ⊳ .CMD` entry so generated
+        // `.cmd` launcher shims resolve after the consumer sources our output.
+        // Shared with `ocx package env` (conventions::synthetic_pathext_entry).
+        #[cfg(target_os = "windows")]
+        {
+            let host_pathext = std::env::var("PATHEXT").unwrap_or_default();
+            if let Some(entry) = crate::conventions::synthetic_pathext_entry(&host_pathext) {
+                env_data.push(entry);
+            }
+        }
+        // Backend channel is stdout; if a human is watching a TTY, hint that
+        // the default JSON/plain output is not eval-safe (stderr only — stdout
+        // stays a pure machine channel).
+        if std::io::stdout().is_terminal() {
+            context
+                .ui()
+                .warn("default output is JSON (not eval-safe); use --shell=bash to activate or --format plain to read");
+        }
+
+        let local_api = crate::api::Api::new(effective_format, *context.api().data(), false);
+        local_api.report(&api::data::env::EnvVars::new(env_data))?;
+
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Resolve the global toolchain's installed `current` set into env entries.
+///
+/// Source = `$OCX_HOME/ocx.lock` default group ∩ installed `current` symlinks.
+/// Each global-lock tool is resolved through its **stable** `current` symlink
+/// (`find_symlink(Current)`); a tool that was `ocx add --global`'d but never
+/// selected has no `current` symlink and is silently skipped.
+///
+/// Returns `Ok(None)` when there is no global `ocx.lock`, or no selected
+/// global tool — the caller maps that to exit 64 ("no global toolchain
+/// configured"), not exit 74.
+///
+/// # Offline guarantee
+///
+/// Resolution goes through `manager().offline_view(...)` — it MUST NOT contact
+/// the registry regardless of `--remote`. This is the §4 login-exporter
+/// guarantee: `eval "$(ocx env --global --shell=sh)"` runs on every shell
+/// start and must never hit the network, install, or hang.
+///
+/// # Errors
+///
+/// Propagates `resolve_env` / index errors.  Never contacts the network.
+pub(crate) async fn resolve_global_current_env(context: &crate::app::Context) -> anyhow::Result<Option<Vec<Entry>>> {
+    let home = context.file_structure().root();
+    let global_config = home.join("ocx.toml");
+    let global_lock_path = lock_path_for(&global_config);
+
+    let Some(lock) = ProjectLock::from_path(&global_lock_path).await? else {
+        return Ok(None);
+    };
+
+    // Offline-only manager clone: MUST NOT contact the registry regardless
+    // of `--remote` (architect boundary; §4 login-path guarantee).
+    let manager = context.manager().offline_view(context.local_index().clone());
+
+    let mut infos = Vec::new();
+    for tool in &lock.tools {
+        if tool.group != DEFAULT_GROUP {
+            continue;
+        }
+        // `current` is keyed by registry/repository only — strip the
+        // lock's digest pin.
+        let identifier: ocx_lib::oci::Identifier = tool.pinned.clone().into();
+        let lookup = identifier.without_specifiers();
+        match manager.find_symlink(&lookup, SymlinkKind::Current).await {
+            Ok(info) => {
+                infos.push(Arc::new(info));
+            }
+            // Not selected (or symlink absent) — skip silently.
+            Err(_) => continue,
+        }
+    }
+
+    if infos.is_empty() {
+        return Ok(None);
+    }
+
+    let entries = manager.resolve_env(&infos, false).await?;
+    Ok(Some(entries))
+}

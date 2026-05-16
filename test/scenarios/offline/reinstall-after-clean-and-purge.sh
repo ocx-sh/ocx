@@ -8,7 +8,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-ocx install --select "$PKG_HELLO"
+ocx package install --select "$PKG_HELLO"
 ocx clean
 
 # After clean, blobs and layers must still be on disk — they are reachable
@@ -26,7 +26,7 @@ ocx clean
 rm -rf "$OCX_HOME/packages" "$OCX_HOME/installs"
 
 # Re-assemble offline. Must succeed from cached blobs (incl. metadata config) + layers.
-out="$(ocx --offline exec "$PKG_HELLO" -- hello)"
+out="$(ocx --offline package exec "$PKG_HELLO" -- hello)"
 if [[ "$out" != *"$MARKER_HELLO"* ]]; then
     echo "expected marker '$MARKER_HELLO' in offline-rebuilt exec output, got: $out" >&2
     exit 1

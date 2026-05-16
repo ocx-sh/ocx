@@ -65,8 +65,12 @@ pub struct ContextOptions {
     pub offline: bool,
 
     /// The format to use when outputting information.
-    #[arg(long, value_enum, value_name = "FORMAT", default_value_t = Default::default())]
-    pub format: options::Format,
+    ///
+    /// When omitted, each command chooses its own default: legacy commands
+    /// default to `plain`; `ocx env` and `ocx package env` default to `json`
+    /// (backend-first per handshake §3).
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub format: Option<options::Format>,
 
     /// Suppress stdout report output (errors and progress on stderr remain).
     ///

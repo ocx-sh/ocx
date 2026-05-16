@@ -4,9 +4,9 @@
 # description: Asserts the marker echoed by the test binary matches MARKER_HELLO.
 set -euo pipefail
 
-ocx install --select "$PKG_HELLO"
+ocx package install --select "$PKG_HELLO"
 
-out="$(ocx exec "$PKG_HELLO" -- hello)"
+out="$(ocx package exec "$PKG_HELLO" -- hello)"
 
 if [[ "$out" != *"$MARKER_HELLO"* ]]; then
     echo "expected marker '$MARKER_HELLO' in output, got: $out" >&2

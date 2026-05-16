@@ -76,7 +76,7 @@ def _install_content(ocx: OcxRunner, pkg: PackageInfo) -> Path:
     `content/`), so `candidate.resolve()` yields the root. Helpers that need
     the actual content tree should append `/content`.
     """
-    result = ocx.json("install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)
     candidate = Path(result[pkg.short]["path"])
     return candidate.resolve()
 
@@ -254,7 +254,7 @@ def test_clean_collects_orphaned_chain_after_uninstall_purge(
     """
     pkg = published_package
     _install_content(ocx, pkg)
-    ocx.plain("uninstall", "--purge", pkg.short)
+    ocx.plain("package", "uninstall", "--purge", pkg.short)
 
     # Inject a fake orphan blob directly into the blobs/ store.
     # This simulates a blob left by a crashed install (no refs link to it).
@@ -287,7 +287,7 @@ def test_offline_reresolve_survives_clean_after_full_chain_capture(
     Design record UX6.
     """
     pkg = published_package
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     # Offline find must succeed before clean.
     result = ocx.plain("--offline", "which", pkg.short, check=False)
@@ -345,7 +345,7 @@ def test_remote_flag_install_persists_and_links_chain(
     """
     pkg = published_package
 
-    result = ocx.json("--remote", "install", pkg.short)
+    result = ocx.json("--remote", "package", "install", pkg.short)
     assert pkg.short in result, f"AC8: --remote install must succeed for {pkg.short}"
 
     # Resolve the installed content path.
@@ -376,7 +376,7 @@ def test_remote_flag_index_list_refreshes_tags_from_source(
     """
     pkg = published_package
     # Install once to seed the local cache.
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     # --remote index list must succeed and reflect the live registry tags.
     result = ocx.plain("--remote", "index", "list", pkg.short, check=False)
@@ -412,7 +412,7 @@ def test_offline_install_after_bare_index_update_fails_cleanly(
     # Wipe blobs/ to ensure no blob cache exists.
     _wipe_blobs(ocx)
 
-    result = ocx.plain("--offline", "install", pkg.short, check=False)
+    result = ocx.plain("--offline", "package", "install", pkg.short, check=False)
     assert result.returncode != 0, (
         "AC10: --offline install after bare index update (no blobs) must fail"
     )
@@ -486,7 +486,7 @@ def test_parallel_install_races_preserve_full_chain(
 
     def run_install(pkg_short: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(ocx_binary), "--format", "json", "install", pkg_short],
+            [str(ocx_binary), "--format", "json", "package", "install", pkg_short],
             capture_output=True,
             text=True,
             env=ocx.env,
@@ -529,7 +529,7 @@ def test_no_sidecar_lock_files_in_blobs_dir_after_install(
     or .tmp files remain anywhere under $OCX_HOME/blobs/."
     """
     pkg = published_package
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     sidecars = _collect_sidecar_files(_blobs_dir(ocx))
     assert not sidecars, (
@@ -556,7 +556,7 @@ def test_missing_manifest_after_index_update_recovers_on_install(
     pkg = published_package
 
     # Step 1: install online to populate tags/ and blobs/.
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     # Step 2: wipe the entire blobs/ directory — leaves tag files in place.
     _wipe_blobs(ocx)
@@ -565,7 +565,7 @@ def test_missing_manifest_after_index_update_recovers_on_install(
     )
 
     # Step 3: re-install — must re-fetch the manifest and succeed.
-    result = ocx.plain("install", pkg.short, check=False)
+    result = ocx.plain("package", "install", pkg.short, check=False)
     assert result.returncode == 0, (
         f"AC13: install must succeed after blobs/ is wiped (latent bug fix).\n"
         f"stderr: {result.stderr.strip()}"
@@ -664,7 +664,7 @@ def test_resolution_chain_direct_digest_to_image_index(
     )
 
     digest_ref = f"{ocx.registry}/{unique_repo}@{index_digest}"
-    result = ocx.json("install", digest_ref)
+    result = ocx.json("package", "install", digest_ref)
     candidate = Path(result[digest_ref]["path"])
     content = candidate.resolve()
 
@@ -695,7 +695,7 @@ def test_resolution_chain_direct_digest_to_platform_manifest(
     child_digest = manifest["manifests"][0]["digest"]
 
     digest_ref = f"{ocx.registry}/{unique_repo}@{child_digest}"
-    result = ocx.json("install", digest_ref)
+    result = ocx.json("package", "install", digest_ref)
     candidate = Path(result[digest_ref]["path"])
     content = candidate.resolve()
 
@@ -750,7 +750,7 @@ def test_clean_collects_real_chain_blobs_after_uninstall_purge(
         "AC6 prerequisite: blobs must exist after install"
     )
 
-    ocx.plain("uninstall", "--purge", pkg.short)
+    ocx.plain("package", "uninstall", "--purge", pkg.short)
     ocx.plain("clean")
 
     blobs_after_clean = _count_blobs(_blobs_dir(ocx))
@@ -862,7 +862,7 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
     v1_dir = tmp_path / "v1"
     v1_dir.mkdir()
     pkg_v1 = make_package(ocx, unique_repo, "1.0.0", v1_dir, new=True, cascade=False)
-    ocx.json("install", pkg_v1.short)
+    ocx.json("package", "install", pkg_v1.short)
 
     tag_file = (
         Path(ocx.env["OCX_HOME"])

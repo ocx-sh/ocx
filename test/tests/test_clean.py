@@ -8,12 +8,12 @@ def test_clean_removes_unreferenced_objects(
 ):
     """ocx install <pkg>; ocx uninstall <pkg>; ocx clean"""
     pkg = published_package
-    result = ocx.json("install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)
     candidate = Path(result[pkg.short]["path"])
     content = candidate.resolve()
     assert_dir_exists(content)
 
-    ocx.plain("uninstall", pkg.short)
+    ocx.plain("package", "uninstall", pkg.short)
     assert_dir_exists(content)
 
     ocx.plain("clean")
@@ -61,7 +61,7 @@ def test_clean_preserves_referenced_objects(
 ):
     """ocx install <pkg>; ocx clean"""
     pkg = published_package
-    result = ocx.json("install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)
     content = Path(result[pkg.short]["path"]).resolve()
 
     ocx.plain("clean")
@@ -98,7 +98,7 @@ def test_clean_preserves_config_blob_of_installed_package(
 
     # Install the package; this creates packages/.../manifest.json from which
     # we can recover the config blob digest.
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
     # Walk packages/ to find the installed package's manifest.json.
     packages_root = ocx_home / "packages"

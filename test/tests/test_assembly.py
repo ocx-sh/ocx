@@ -316,7 +316,7 @@ def test_versioned_symlink_chain_preserved_after_install(
 
     # Install
     short = f"{unique_repo}:{tag}"
-    ocx.json("install", short)
+    ocx.json("package", "install", short)
     content_path = _find_content_path(ocx, short)
 
     # Verify: real library file exists
@@ -373,8 +373,8 @@ def test_shared_layer_files_have_same_inode(
     short_a, short_b, shared_file_rel = _make_two_packages_sharing_layer(ocx, tmp_path, unique_repo)
 
     # Install both packages
-    ocx.json("install", short_a)
-    ocx.json("install", short_b)
+    ocx.json("package", "install", short_a)
+    ocx.json("package", "install", short_b)
 
     content_a = _find_content_path(ocx, short_a)
     content_b = _find_content_path(ocx, short_b)
@@ -420,8 +420,8 @@ def test_shared_layer_disk_usage_is_not_doubled(
     short_a, short_b, _shared_file_rel = _make_two_packages_sharing_layer(ocx, tmp_path, unique_repo)
 
     # Install both packages
-    ocx.json("install", short_a)
-    ocx.json("install", short_b)
+    ocx.json("package", "install", short_a)
+    ocx.json("package", "install", short_b)
 
     content_a = _find_content_path(ocx, short_a)
     content_b = _find_content_path(ocx, short_b)

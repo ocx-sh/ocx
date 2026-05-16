@@ -7,8 +7,6 @@ use clap::Subcommand;
 
 pub mod about;
 pub mod add;
-pub mod ci;
-pub mod ci_export;
 pub mod clean;
 pub mod deps;
 pub mod deselect;
@@ -41,27 +39,35 @@ pub mod run;
 pub mod select;
 pub mod shell;
 pub mod shell_completion;
-pub mod shell_env;
-pub mod shell_hook;
-pub mod shell_init;
+pub mod toolchain_env;
 pub mod uninstall;
 pub mod upgrade;
 pub mod version;
 pub mod which;
 
+// ci.rs and ci_export.rs are deleted (C4 — handshake §7 / §6).
+// shell_hook.rs, shell_init.rs, shell_env.rs are deleted (C4); their command
+// bodies are gone and `resolve_global_current_env` is relocated into
+// `command/toolchain_env.rs` (Phase 2 relocate, now wired into `ocx env`).
+// install.rs global field + execute_global are deleted (C4).
+// Root variants Install, Uninstall, Select, Exec, Deselect are moved to
+// `Package` group (C1 — handshake §2). Deselect is a MOVE (body preserved).
+
 #[derive(Subcommand)]
 pub enum Command {
+    /// Emit the composed environment for the in-scope toolchain.
+    ///
+    /// Reads `ocx.toml` + `ocx.lock` (project tier) or `$OCX_HOME/ocx.toml`
+    /// (when `--global` is set).  Default output: JSON (backend-first, §3).
+    /// Use `--format plain` for human inspection (NOT sourceable).
+    /// Use `--shell[=NAME]` for the ONLY eval-safe form.
+    Env(toolchain_env::ToolchainEnv),
     /// Add a tool binding to ocx.toml.
     Add(add::Add),
-    /// CI-specific commands (e.g. exporting environment variables to CI systems).
-    #[command(subcommand)]
-    Ci(ci::Ci),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
     /// Show the dependency tree for one or more packages.
     Deps(deps::Deps),
-    /// Remove the current-version symlink for one or more packages.
-    Deselect(deselect::Deselect),
     /// Resolve packages and print their content directory paths.
     Which(which::Which),
     /// direnv integration (init writes .envrc; export emits the env block).
@@ -73,22 +79,14 @@ pub enum Command {
     About(about::About),
     /// Create a minimal ocx.toml in the current directory.
     Init(init::Init),
-    /// Install packages from a local or remote index.
-    Install(install::Install),
     /// Resolve tool tags to digests and write ocx.lock.
     Lock(lock::Lock),
     /// Authenticate to a registry and persist credentials.
     Login(login::Login),
     /// Remove credentials for a registry.
     Logout(logout::Logout),
-    /// Remove an installed candidate for one or more packages.
-    Uninstall(uninstall::Uninstall),
     /// Re-resolve advisory tags and rewrite ocx.lock for one or more tools.
     Upgrade(upgrade::Upgrade),
-    /// Runs installed packages.
-    Exec(exec::Exec),
-    /// Print resolved environment variables for one or more packages.
-    Env(env::Env),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]
     Launcher(launcher::Launcher),
@@ -101,8 +99,6 @@ pub enum Command {
     Remove(remove::Remove),
     /// Run a command with the composed environment from the project toolchain.
     Run(run::Run),
-    /// Set the current version of one or more packages.
-    Select(select::Select),
     #[command(subcommand)]
     Shell(shell::Shell),
     /// Print the version of ocx
@@ -112,30 +108,24 @@ pub enum Command {
 impl Command {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
+            Command::Env(env) => env.execute(context).await,
             Command::Add(add) => add.execute(context).await,
-            Command::Ci(ci) => ci.execute(context).await,
             Command::Clean(clean) => clean.execute(context).await,
             Command::Deps(deps) => deps.execute(context).await,
-            Command::Deselect(deselect) => deselect.execute(context).await,
             Command::Which(which) => which.execute(context).await,
             Command::Direnv(direnv) => direnv.execute(context).await,
             Command::Index(index) => index.execute(context).await,
             Command::About(about) => about.execute(context).await,
             Command::Init(init) => init.execute(context).await,
-            Command::Install(install) => install.execute(context).await,
             Command::Lock(lock) => lock.execute(context).await,
             Command::Login(login) => login.execute(context).await,
             Command::Logout(logout) => logout.execute(context).await,
-            Command::Uninstall(uninstall) => uninstall.execute(context).await,
             Command::Upgrade(upgrade) => upgrade.execute(context).await,
-            Command::Exec(exec) => exec.execute(context).await,
-            Command::Env(env) => env.execute(context).await,
             Command::Launcher(launcher) => launcher.execute(context).await,
             Command::Package(package) => package.execute(context).await,
             Command::Pull(pull) => pull.execute(context).await,
             Command::Remove(remove) => remove.execute(context).await,
             Command::Run(r) => r.execute(context).await,
-            Command::Select(select) => select.execute(context).await,
             Command::Shell(shell) => shell.execute(context).await,
             Command::Version(version) => version.execute().await,
         }

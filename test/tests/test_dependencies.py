@@ -84,7 +84,7 @@ def test_install_with_one_dep_pulls_both(ocx: OcxRunner, unique_repo: str, tmp_p
     dep = _dep_entry(ocx, leaf)
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
 
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
     # Both objects should be in the store (app + leaf = 2 content dirs)
     assert _count_object_dirs(ocx) == 2
@@ -99,7 +99,7 @@ def test_install_deps_no_symlinks_for_deps(ocx: OcxRunner, unique_repo: str, tmp
     dep = _dep_entry(ocx, leaf)
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
 
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
     # App should have candidate symlink
     reg_slug = registry_dir(ocx.registry)
@@ -125,7 +125,7 @@ def test_clean_does_not_collect_dependency(ocx: OcxRunner, unique_repo: str, tmp
     dep = _dep_entry(ocx, leaf)
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
 
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
     # Run clean — should not remove anything (all objects are referenced)
     ocx.json("clean")
@@ -143,10 +143,10 @@ def test_clean_collects_chain_after_uninstall(ocx: OcxRunner, unique_repo: str, 
     dep = _dep_entry(ocx, leaf)
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
 
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
     assert _count_object_dirs(ocx) == 2
 
-    ocx.plain("uninstall", "--purge", "-d", app.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", app.short)
     ocx.json("clean")
 
     # After clean, both objects should be gone
@@ -168,7 +168,7 @@ def test_transitive_chain_pulls_all_three(ocx: OcxRunner, unique_repo: str, tmp_
     b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, c)])
     a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, b)])
 
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
     assert _count_object_dirs(ocx) == 3
 
@@ -187,9 +187,9 @@ def test_env_includes_dependency_vars(ocx: OcxRunner, unique_repo: str, tmp_path
     dep = _dep_entry(ocx, leaf, visibility="public")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
 
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
-    env_result = ocx.json("env", app.short)
+    env_result = ocx.json("package", "env", app.short)
     assert env_result is not None
 
     # The leaf sets a {REPO_UPPER}_HOME constant. Check that key is present.
@@ -218,7 +218,7 @@ def test_diamond_dep_deduplicates(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     c = _push_with_deps(ocx, c_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d)])
     a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, b), _dep_entry(ocx, c)])
 
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
     assert _count_object_dirs(ocx) == 4
 
@@ -238,7 +238,7 @@ def test_install_with_missing_dep_reports_error(ocx: OcxRunner, unique_repo: str
     bad_dep = {"identifier": f"{fake_fq}@{fake_digest}"}
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[bad_dep])
 
-    result = ocx.run("install", app.short, check=False)
+    result = ocx.run("package", "install", app.short, check=False)
     assert result.returncode != 0, "expected non-zero exit for missing dependency"
 
     stderr = result.stderr.lower()
@@ -254,7 +254,7 @@ def test_install_with_missing_dep_reports_error(ocx: OcxRunner, unique_repo: str
 
 def test_package_without_deps_works(published_package: PackageInfo, ocx: OcxRunner):
     """Packages without dependencies should continue to work unchanged."""
-    result = ocx.json("install", "--select", published_package.short)
+    result = ocx.json("package", "install", "--select", published_package.short)
     assert result is not None
 
     find_result = ocx.json("which", published_package.short)
@@ -279,7 +279,7 @@ def _setup_leaf_and_app(ocx, unique_repo, tmp_path):
     leaf = _push_leaf(ocx, leaf_repo, tmp_path)
     dep = _dep_entry(ocx, leaf)
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
     return leaf, app
 
 
@@ -290,7 +290,7 @@ def _setup_leaf_and_app_public(ocx, unique_repo, tmp_path):
     leaf = _push_leaf(ocx, leaf_repo, tmp_path)
     dep = _dep_entry(ocx, leaf, visibility="public")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
     return leaf, app
 
 
@@ -302,7 +302,7 @@ def _setup_chain(ocx, unique_repo, tmp_path):
     c = _push_leaf(ocx, c_repo, tmp_path)
     b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, c)])
     a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, b)])
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
     return c, b, a
 
 
@@ -319,7 +319,7 @@ def _setup_diamond(ocx, unique_repo, tmp_path):
         ocx, a_repo, "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b), _dep_entry(ocx, c)],
     )
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
     return d, b, c, a
 
 
@@ -336,7 +336,7 @@ def _setup_diamond_public(ocx, unique_repo, tmp_path):
         ocx, a_repo, "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b, visibility="public"), _dep_entry(ocx, c, visibility="public")],
     )
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
     return d, b, c, a
 
 
@@ -362,7 +362,7 @@ def test_deps_tree_shows_hierarchy(ocx: OcxRunner, unique_repo: str, tmp_path: P
 
 def test_deps_tree_leaf_has_empty_deps(published_package: PackageInfo, ocx: OcxRunner):
     """Package with no deps shows single node with empty dependencies."""
-    ocx.json("install", "--select", published_package.short)
+    ocx.json("package", "install", "--select", published_package.short)
     result = ocx.json("deps", published_package.short)
     roots = result["roots"]
     assert len(roots) == 1
@@ -434,7 +434,7 @@ def _setup_chain_public(ocx, unique_repo, tmp_path):
     c = _push_leaf(ocx, c_repo, tmp_path)
     b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, c, visibility="public")])
     a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, b, visibility="public")])
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
     return c, b, a
 
 
@@ -523,12 +523,12 @@ def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tm
     leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
     # Purge everything
-    ocx.plain("uninstall", "--purge", "-d", app.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", app.short)
     ocx.json("clean")
     assert _count_object_dirs(ocx) == 0
 
     # Reinstall
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
     assert _count_object_dirs(ocx) == 2
 
     # Verify forward refs restored on app
@@ -547,7 +547,7 @@ def test_clean_dry_run_reports_without_removing(ocx: OcxRunner, unique_repo: str
     """clean --dry-run after uninstall lists collectible objects without removing."""
     leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
     # Uninstall without --purge to leave orphaned objects for clean to find.
-    ocx.plain("uninstall", "-d", app.short)
+    ocx.plain("package", "uninstall", "-d", app.short)
 
     before_count = _count_object_dirs(ocx)
     result = ocx.json("clean", "--dry-run")
@@ -568,12 +568,12 @@ def test_clean_preserves_shared_dependency(ocx: OcxRunner, unique_repo: str, tmp
     a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[d_dep])
     b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[d_dep])
 
-    ocx.json("install", "--select", a.short)
-    ocx.json("install", "--select", b.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.json("package", "install", "--select", b.short)
     assert _count_object_dirs(ocx) == 3  # A, B, D
 
     # Uninstall+purge only A
-    ocx.plain("uninstall", "--purge", "-d", a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", a.short)
     ocx.json("clean")
 
     # D should still be present (B depends on it), A should be gone
@@ -589,7 +589,7 @@ def test_exec_with_deps_includes_dep_env(ocx: OcxRunner, unique_repo: str, tmp_p
     """exec app -- env output includes env var from exported leaf dependency."""
     leaf, app = _setup_leaf_and_app_public(ocx, unique_repo, tmp_path)
 
-    result = ocx.plain("exec", app.short, "--", "env")
+    result = ocx.plain("package", "exec", app.short, "--", "env")
     leaf_home_key = leaf.repo.upper().replace("-", "_") + "_HOME"
     assert leaf_home_key in result.stdout, (
         f"expected {leaf_home_key!r} in exec env output"
@@ -604,9 +604,9 @@ def test_env_dependency_order_deps_first(ocx: OcxRunner, unique_repo: str, tmp_p
     leaf = _push_leaf(ocx, leaf_repo, tmp_path)
     dep = _dep_entry(ocx, leaf, visibility="public")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
-    env_result = ocx.json("env", app.short)
+    env_result = ocx.json("package", "env", app.short)
     keys = [e["key"] for e in env_result["entries"]]
 
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
@@ -671,8 +671,8 @@ def test_deps_flat_conflicting_digests_reports_error(
     a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, visibility="public")])
     b = _push_with_deps(ocx, b_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v2, visibility="public")])
 
-    ocx.json("install", "--select", a.short)
-    ocx.json("install", "--select", b.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.json("package", "install", "--select", b.short)
 
     result = ocx.run("deps", "--flat", a.short, b.short, check=False)
     assert result.returncode == 0, (
@@ -696,9 +696,9 @@ def test_shell_env_includes_transitive_dep_vars(
     app = _push_with_deps(
         ocx, f"{unique_repo}_app", "1.0.0", tmp_path, deps=[_dep_entry(ocx, leaf, visibility="public")]
     )
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
-    result = ocx.plain("shell", "env", app.short)
+    result = ocx.plain("package", "env", app.short)
     assert result.returncode == 0
 
     leaf_home_key = f"{unique_repo}_leaf".upper().replace("-", "_") + "_HOME"
@@ -713,7 +713,7 @@ def test_exec_diamond_transitive_dep_env(
     """exec on A->{B,C}->D (all exported) sees D's env vars through the diamond."""
     d, b, c, a = _setup_diamond_public(ocx, unique_repo, tmp_path)
 
-    result = ocx.plain("exec", a.short, "--", "env")
+    result = ocx.plain("package", "exec", a.short, "--", "env")
     assert result.returncode == 0
 
     d_home_key = f"{unique_repo}_d".upper().replace("-", "_") + "_HOME"
@@ -766,7 +766,7 @@ def test_deep_conflict_at_depth_two(
         deps=[_dep_entry(ocx, b, visibility="public"), _dep_entry(ocx, c, visibility="public")],
     )
 
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
     result = ocx.run("deps", "--flat", a.short, check=False)
     assert result.returncode == 0, (
@@ -784,7 +784,7 @@ def test_clean_cascades_transitive_chain(
     c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
     assert _count_object_dirs(ocx) == 3
 
-    ocx.json("uninstall", "--purge", "-d", a.short)
+    ocx.json("package", "uninstall", "--purge", "-d", a.short)
     ocx.json("clean")
 
     assert _count_object_dirs(ocx) == 0, (
@@ -807,11 +807,11 @@ def test_clean_preserves_shared_transitive_dep(
         ocx, f"{unique_repo}_c", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d)]
     )
 
-    ocx.json("install", "--select", a.short)
-    ocx.json("install", "--select", c.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.json("package", "install", "--select", c.short)
     assert _count_object_dirs(ocx) == 4  # A, B, C, D
 
-    ocx.json("uninstall", "--purge", "-d", a.short)
+    ocx.json("package", "uninstall", "--purge", "-d", a.short)
     ocx.json("clean")
 
     # D and C should survive; A and B should be cleaned.
@@ -835,8 +835,8 @@ def test_deps_multi_root_shared_transitive(
         ocx, f"{unique_repo}_c", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b, visibility="public")]
     )
 
-    ocx.json("install", "--select", a.short)
-    ocx.json("install", "--select", c.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.json("package", "install", "--select", c.short)
 
     result = ocx.json("deps", "--flat", a.short, c.short)
     ids = [e["identifier"] for e in result["entries"]]
@@ -874,7 +874,7 @@ def test_clean_diamond_cascade_removes_all(
     d, b, c, a = _setup_diamond(ocx, unique_repo, tmp_path)
     assert _count_object_dirs(ocx) == 4
 
-    ocx.plain("uninstall", "--purge", "-d", a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", a.short)
     ocx.json("clean")
 
     assert _count_object_dirs(ocx) == 0, (
@@ -889,7 +889,7 @@ def test_clean_dry_run_transitive_chain(
     c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
     # Uninstall without --purge to leave all three objects as orphans.
-    ocx.plain("uninstall", "-d", a.short)
+    ocx.plain("package", "uninstall", "-d", a.short)
 
     before = _count_object_dirs(ocx)
     result = ocx.json("clean", "--dry-run")
@@ -925,11 +925,11 @@ def test_clean_partial_diamond_preserves_shared_leaf(
     )
     e = _push_with_deps(ocx, f"{unique_repo}_e", "1.0.0", tmp_path, deps=[d_dep])
 
-    ocx.json("install", "--select", a.short)
-    ocx.json("install", "--select", e.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.json("package", "install", "--select", e.short)
     assert _count_object_dirs(ocx) == 5  # A, B, C, D, E
 
-    ocx.plain("uninstall", "--purge", "-d", a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", a.short)
     ocx.json("clean")
 
     # D survives (E still depends on it); A, B, C removed; E stays.
@@ -945,12 +945,12 @@ def test_reinstall_after_clean_restores_transitive_chain(
     c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
     assert _count_object_dirs(ocx) == 3
 
-    ocx.plain("uninstall", "--purge", "-d", a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", a.short)
     ocx.json("clean")
     assert _count_object_dirs(ocx) == 0
 
     # Reinstall — should pull the full transitive chain again.
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
     assert _count_object_dirs(ocx) == 3, (
         "reinstall should restore all three objects in the chain"
     )
@@ -970,7 +970,7 @@ def test_object_store_counts_at_each_step(
     assert _count_object_dirs(ocx) == 3, "after clean (all still referenced)"
 
     # Uninstall without purge: candidate symlink removed, objects + refs stay
-    ocx.json("uninstall", a.short)
+    ocx.json("package", "uninstall", a.short)
     assert _count_object_dirs(ocx) == 3, "after uninstall without purge"
 
     # Clean after non-purge uninstall: refs still intact, nothing collected
@@ -978,8 +978,8 @@ def test_object_store_counts_at_each_step(
     assert _count_object_dirs(ocx) == 3, "after clean (refs still intact)"
 
     # Reinstall, then purge+clean: full cascade
-    ocx.json("install", "--select", a.short)
-    ocx.plain("uninstall", "--purge", "-d", a.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", a.short)
     ocx.json("clean")
     assert _count_object_dirs(ocx) == 0, "after purge + clean"
 
@@ -1007,12 +1007,12 @@ def test_env_candidate_deduplicates_root_that_is_also_dependency(
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
 
     # Install both — app gets candidate symlink, lib gets candidate symlink.
-    ocx.json("install", app.short)
-    ocx.json("install", lib.short)
+    ocx.json("package", "install", app.short)
+    ocx.json("package", "install", lib.short)
 
     # Request env for both via --candidate. lib is both a root (via symlink)
     # and an exported transitive dependency of app (via real digest).
-    env_result = ocx.json("env", "--candidate", app.short, lib.short)
+    env_result = ocx.json("package", "env", "--candidate", app.short, lib.short)
 
     lib_home_key = lib_repo.upper().replace("-", "_") + "_HOME"
     occurrences = [e for e in env_result["entries"] if e["key"] == lib_home_key]
@@ -1035,9 +1035,9 @@ def test_sealed_suppresses_dep_env(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b, visibility="sealed")],
     )
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
-    env_result = ocx.json("env", a.short)
+    env_result = ocx.json("package", "env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
     env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key not in env_keys, (
@@ -1054,9 +1054,9 @@ def test_public_includes_dep_env(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b, visibility="public")],
     )
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
-    env_result = ocx.json("env", a.short)
+    env_result = ocx.json("package", "env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
     env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
@@ -1081,11 +1081,11 @@ def test_sealed_conflicting_deps_coexist(
         deps=[_dep_entry(ocx, d_v2, visibility="sealed")],
     )
 
-    ocx.json("install", "--select", a.short)
-    ocx.json("install", "--select", b.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.json("package", "install", "--select", b.short)
 
     # Should succeed — non-exported conflicting deps don't trigger errors.
-    result = ocx.run("env", a.short, b.short, check=False)
+    result = ocx.run("package", "env", a.short, b.short, check=False)
     assert result.returncode == 0, (
         f"non-exported conflicting deps should not error; stderr: {result.stderr!r}"
     )
@@ -1114,10 +1114,10 @@ def test_public_conflicting_deps_error(
         deps=[_dep_entry(ocx, d_v2, visibility="public")],
     )
 
-    ocx.json("install", "--select", a.short)
-    ocx.json("install", "--select", b.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.json("package", "install", "--select", b.short)
 
-    result = ocx.run("env", a.short, b.short, check=False)
+    result = ocx.run("package", "env", a.short, b.short, check=False)
     assert result.returncode == 0, (
         f"conflicting digests should warn, not error; got rc={result.returncode}: {result.stderr!r}"
     )
@@ -1139,9 +1139,9 @@ def test_transitive_public_propagates(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b, visibility="public")],
     )
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
-    env_result = ocx.json("env", a.short)
+    env_result = ocx.json("package", "env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
     env_keys = [e["key"] for e in env_result["entries"]]
     assert c_home_key in env_keys, (
@@ -1162,9 +1162,9 @@ def test_sealed_blocks_transitive_chain(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b, visibility="sealed")],
     )
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
-    env_result = ocx.json("env", a.short)
+    env_result = ocx.json("package", "env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
     env_keys = [e["key"] for e in env_result["entries"]]
     assert c_home_key not in env_keys, (
@@ -1181,7 +1181,7 @@ def test_gc_protects_sealed_dep(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b, visibility="sealed")],
     )
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
     assert _count_object_dirs(ocx) == 2  # A + B
 
     ocx.json("clean")
@@ -1215,9 +1215,9 @@ def test_private_includes_dep_env_for_direct_target(
         ocx, f"{unique_repo}_app", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b, visibility="private")],
     )
-    ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
+    ocx.json("package", "install", "--select", f"{unique_repo}_app:1.0.0")
 
-    env_result = ocx.json("env", "--self", f"{unique_repo}_app:1.0.0")
+    env_result = ocx.json("package", "env", "--self", f"{unique_repo}_app:1.0.0")
     env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"private dep key {b_home_key!r} MUST appear in env --mode=self for direct target; got keys: {env_keys}"
@@ -1244,9 +1244,9 @@ def test_private_suppresses_dep_env_for_consumer(
         ocx, f"{unique_repo}_root", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, a, visibility="public")],
     )
-    ocx.json("install", "--select", f"{unique_repo}_root:1.0.0")
+    ocx.json("package", "install", "--select", f"{unique_repo}_root:1.0.0")
 
-    env_result = ocx.json("env", f"{unique_repo}_root:1.0.0")
+    env_result = ocx.json("package", "env", f"{unique_repo}_root:1.0.0")
     env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key not in env_keys, (
         f"private transitive dep key {b_home_key!r} should NOT appear for consumer; got keys: {env_keys}"
@@ -1272,9 +1272,9 @@ def test_interface_includes_dep_env(
         ocx, f"{unique_repo}_app", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, b, visibility="interface")],
     )
-    ocx.json("install", "--select", f"{unique_repo}_app:1.0.0")
+    ocx.json("package", "install", "--select", f"{unique_repo}_app:1.0.0")
 
-    env_result = ocx.json("env", f"{unique_repo}_app:1.0.0")
+    env_result = ocx.json("package", "env", f"{unique_repo}_app:1.0.0")
     env_keys = [e["key"] for e in env_result["entries"]]
     assert b_home_key in env_keys, (
         f"interface dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
@@ -1290,7 +1290,7 @@ def test_deps_flat_shows_visibility_column(
         ocx, f"{unique_repo}_app", "1.0.0", tmp_path,
         deps=[_dep_entry(ocx, leaf, visibility="public")],
     )
-    ocx.run("install", "--select", f"{unique_repo}_app:1.0.0")
+    ocx.run("package", "install", "--select", f"{unique_repo}_app:1.0.0")
 
     result = ocx.json("deps", "--flat", f"{unique_repo}_app:1.0.0")
     entries = result["entries"]
@@ -1391,9 +1391,9 @@ def test_public_dep_entrypoints_appear_in_consumer_path(
         "visibility": "public",
     }
     pkg_a = make_package(ocx, a_repo, "1.0.0", tmp_path, dependencies=[dep_entry])
-    ocx.plain("install", "--select", pkg_a.short)
+    ocx.plain("package", "install", "--select", pkg_a.short)
 
-    env_result = ocx.json("env", pkg_a.short)
+    env_result = ocx.json("package", "env", pkg_a.short)
     path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
 
     assert any("entrypoints" in v for v in path_values), (
@@ -1428,9 +1428,9 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
         "visibility": "sealed",
     }
     pkg_a = make_package(ocx, a_repo, "1.0.0", tmp_path, dependencies=[dep_entry])
-    ocx.plain("install", "--select", pkg_a.short)
+    ocx.plain("package", "install", "--select", pkg_a.short)
 
-    env_result = ocx.json("env", pkg_a.short)
+    env_result = ocx.json("package", "env", pkg_a.short)
     path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
 
     # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
@@ -1467,7 +1467,7 @@ def test_deps_flat_surface_gating_without_self(
     # Sealed edge: leaf is internal to app, not visible on the interface surface.
     dep = _dep_entry(ocx, leaf, visibility="sealed")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
     result = ocx.json("deps", "--flat", app.short)
     identifiers = [e["identifier"] for e in result["entries"]]
@@ -1501,7 +1501,7 @@ def test_deps_flat_surface_gating_with_self(
     # app's consumers (interface surface).
     dep = _dep_entry(ocx, leaf, visibility="private")
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
     # Interface surface (no --self): private dep must not appear.
     result_consumer = ocx.json("deps", "--flat", app.short)

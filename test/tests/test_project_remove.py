@@ -75,7 +75,7 @@ def _setup_project_with_tool(
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
     install_r = subprocess.run(
-        [str(ocx.binary), "install", f"{ocx.registry}/{repo}:{tag}"],
+        [str(ocx.binary), "package", "install", f"{ocx.registry}/{repo}:{tag}"],
         capture_output=True,
         text=True,
         env=ocx.env,

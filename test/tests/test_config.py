@@ -87,7 +87,7 @@ def test_config_default_registry_takes_effect(ocx: OcxRunner) -> None:
     # Remove OCX_DEFAULT_REGISTRY so config file is the only source
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -111,7 +111,7 @@ def test_env_var_overrides_config_file(ocx: OcxRunner) -> None:
     # Set OCX_DEFAULT_REGISTRY to override config
     env = {**ocx.env, "OCX_DEFAULT_REGISTRY": "envvar-wins.example"}
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -138,7 +138,7 @@ def test_no_config_kills_file_loading(ocx: OcxRunner) -> None:
     env = {**ocx.env, "OCX_NO_CONFIG": "1"}
     # OCX_DEFAULT_REGISTRY in env already points to the test registry (localhost:5000)
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -270,8 +270,8 @@ def test_help_survives_invalid_ambient_config(ocx: OcxRunner) -> None:
     for args in (
         ("--help",),
         ("help",),
-        ("help", "install"),
-        ("install", "--help"),
+        ("help", "package"),
+        ("package", "--help"),
         ("shell", "--help"),
         ("shell", "completion", "--help"),
         ("about", "--help"),
@@ -334,7 +334,7 @@ def test_explicit_config_flag_loads_file(ocx: OcxRunner, tmp_path: Path) -> None
 
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
     result = subprocess.run(
-        [str(ocx.binary), "--config", str(custom_config), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "--config", str(custom_config), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -358,7 +358,7 @@ def test_ocx_config_file_env_loads_file(ocx: OcxRunner, tmp_path: Path) -> None:
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
     env["OCX_CONFIG"] = str(ci_config)
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -393,7 +393,7 @@ def test_no_config_with_explicit_flag_loads_only_explicit(ocx: OcxRunner, tmp_pa
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
     env["OCX_NO_CONFIG"] = "1"
     result = subprocess.run(
-        [str(ocx.binary), "--config", str(hermetic), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "--config", str(hermetic), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -426,7 +426,7 @@ def test_named_registry_table_resolves_default(ocx: OcxRunner) -> None:
     # Remove OCX_DEFAULT_REGISTRY so the resolved value is observable.
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -456,7 +456,7 @@ def test_named_registry_with_no_url_falls_back_to_literal_name(ocx: OcxRunner) -
     # Remove OCX_DEFAULT_REGISTRY so the resolved value is observable.
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -482,7 +482,7 @@ def test_empty_ocx_config_file_is_escape_hatch(ocx: OcxRunner) -> None:
     env = {k: v for k, v in ocx.env.items() if k != "OCX_DEFAULT_REGISTRY"}
     env["OCX_CONFIG"] = ""
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -588,7 +588,7 @@ def test_file_too_large_errors_with_helpful_message(ocx: OcxRunner) -> None:
     write_home_config(ocx, oversized_content)
 
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=ocx.env,
@@ -623,7 +623,7 @@ def test_explicit_config_overrides_env_var_config_file(ocx: OcxRunner, tmp_path:
     env["OCX_CONFIG"] = str(env_config)
 
     result = subprocess.run(
-        [str(ocx.binary), "--config", str(cli_config), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "--config", str(cli_config), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,
@@ -698,7 +698,7 @@ def test_exit_code_on_config_parse_error(ocx: OcxRunner) -> None:
     write_home_config(ocx, "this is not valid toml =[[[")
 
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=ocx.env,
@@ -742,7 +742,7 @@ def test_no_config_env_var_suppresses_discovery(ocx: OcxRunner) -> None:
 
     env = {**ocx.env, "OCX_NO_CONFIG": "1"}
     result = subprocess.run(
-        [str(ocx.binary), "install", "nonexistent_pkg_ocx_test:0"],
+        [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
         env=env,

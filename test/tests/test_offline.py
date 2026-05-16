@@ -48,10 +48,10 @@ def test_env_offline_includes_transitive_dep_vars(
     b = _push_with_deps(ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, c, visibility="public")])
     a = _push_with_deps(ocx, f"{unique_repo}_a", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b, visibility="public")])
 
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
     # Go offline — env should still resolve transitive dep vars from filesystem.
-    env_result = ocx.run("--offline", "env", a.short)
+    env_result = ocx.run("--offline", "package", "env", a.short)
     assert env_result.returncode == 0
 
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
@@ -69,10 +69,10 @@ def test_exec_offline_with_transitive_deps(
         ocx, f"{unique_repo}_app", "1.0.0", tmp_path, deps=[_dep_entry(ocx, leaf, visibility="public")]
     )
 
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
 
     # Offline exec — dependency env vars should be in the subprocess environment.
-    result = ocx.plain("--offline", "exec", app.short, "--", "env")
+    result = ocx.plain("--offline", "package", "exec", app.short, "--", "env")
     assert result.returncode == 0
 
     leaf_home_key = f"{unique_repo}_leaf".upper().replace("-", "_") + "_HOME"
@@ -89,7 +89,7 @@ def test_deps_offline_shows_transitive_tree(
     b = _push_with_deps(ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, c)])
     a = _push_with_deps(ocx, f"{unique_repo}_a", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b)])
 
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
     # Offline deps — graph is built from filesystem, not index.
     result = ocx.run("--offline", "deps", a.short)
@@ -115,7 +115,7 @@ def test_deps_flat_offline_shows_topological_order(
         deps=[_dep_entry(ocx, b, visibility="public")],
     )
 
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
 
     result = ocx.run("--offline", "deps", "--flat", a.short)
     assert result.returncode == 0
@@ -154,7 +154,7 @@ def test_exit_code_on_offline_blocks_fetch(ocx: OcxRunner) -> None:
     which signals a network fault rather than a deliberate policy block).
     """
     result = subprocess.run(
-        [str(ocx.binary), "--offline", "install", "nonexistent_spec_test_pkg:0"],
+        [str(ocx.binary), "--offline", "package", "install", "nonexistent_spec_test_pkg:0"],
         capture_output=True,
         text=True,
         env=ocx.env,

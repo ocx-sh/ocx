@@ -18,7 +18,7 @@ def test_install_variant_package(
         platform="linux/amd64", new=True,
     )
 
-    ocx.plain("install", f"{unique_repo}:debug-1.0.0")
+    ocx.plain("package", "install", f"{unique_repo}:debug-1.0.0")
     candidate = (
         Path(ocx.ocx_home)
         / "symlinks"
@@ -40,7 +40,7 @@ def test_install_variant_rolling_tag(
     )
 
     # debug-1 is a rolling tag created by cascade
-    ocx.plain("install", f"{unique_repo}:debug-1")
+    ocx.plain("package", "install", f"{unique_repo}:debug-1")
     candidate = (
         Path(ocx.ocx_home)
         / "symlinks"
@@ -61,7 +61,7 @@ def test_select_variant_package(
         platform="linux/amd64", new=True,
     )
 
-    ocx.plain("install", "--select", f"{unique_repo}:debug-1.0.0")
+    ocx.plain("package", "install", "--select", f"{unique_repo}:debug-1.0.0")
     current = (
         Path(ocx.ocx_home)
         / "symlinks"
@@ -85,8 +85,8 @@ def test_variant_and_default_coexist(
         platform="linux/amd64", new=False, cascade=False,
     )
 
-    ocx.plain("install", f"{unique_repo}:debug-1.0.0")
-    ocx.plain("install", f"{unique_repo}:1.0.0")
+    ocx.plain("package", "install", f"{unique_repo}:debug-1.0.0")
+    ocx.plain("package", "install", f"{unique_repo}:1.0.0")
 
     installs = (
         Path(ocx.ocx_home)

@@ -189,7 +189,7 @@ def test_round_trip_zero_layers(
     ocx.plain("package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq)
     ocx.plain("index", "update", short)
 
-    result = ocx.json("install", short)
+    result = ocx.json("package", "install", short)
     content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)
@@ -210,7 +210,7 @@ def test_round_trip_multi_layer(
     short = f"{unique_repo}:1.0.0"
     _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a), str(bundle_b)], tmp_path)
     ocx.plain("index", "update", short)
-    result = ocx.json("install", short)
+    result = ocx.json("package", "install", short)
     content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)
@@ -231,7 +231,7 @@ def test_round_trip_shared_directory(
     short = f"{unique_repo}:1.0.0"
     _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a), str(bundle_b)], tmp_path)
     ocx.plain("index", "update", short)
-    result = ocx.json("install", short)
+    result = ocx.json("package", "install", short)
     content = Path(result[short]["path"]) / "content"
 
     assert (content / "bin" / "tool_a").exists(), "File from layer A missing in shared dir"
@@ -251,7 +251,7 @@ def test_round_trip_layer_overlap_fails(
     _push_multi_layer(ocx, unique_repo, "1.0.0", [str(bundle_a), str(bundle_b)], tmp_path)
     ocx.plain("index", "update", short)
 
-    result = ocx.run("install", short, check=False)
+    result = ocx.run("package", "install", short, check=False)
     assert result.returncode != 0
     assert "overlap" in result.stderr.lower() or "conflict" in result.stderr.lower()
 
@@ -298,7 +298,7 @@ def test_push_digest_layer_reuse(
     )
     ocx.plain("index", "update", f"{unique_repo}:2.0.0")
 
-    result = ocx.json("install", f"{unique_repo}:2.0.0")
+    result = ocx.json("package", "install", f"{unique_repo}:2.0.0")
     content = Path(result[f"{unique_repo}:2.0.0"]["path"]) / "content"
     assert (content / "lib" / "shared.so").exists(), "Digest-referenced layer A missing"
     assert (content / "bin" / "new_tool").exists(), "File layer B missing"
@@ -349,7 +349,7 @@ def test_push_digest_layer_reuse_tar_xz(
         f"reused layer A should declare tar+xz, got {reused['mediaType']}"
     )
 
-    result = ocx.json("install", f"{unique_repo}:2.0.0")
+    result = ocx.json("package", "install", f"{unique_repo}:2.0.0")
     content = Path(result[f"{unique_repo}:2.0.0"]["path"]) / "content"
     assert (content / "lib" / "liba.so").exists(), "xz layer A not extracted on consumer"
     assert (content / "lib" / "liba.so").read_text() == "xz-shared"

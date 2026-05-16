@@ -89,6 +89,7 @@ def test_pinned_id_exec_offline_succeeds(ocx: OcxRunner, tmp_path: Path) -> None
     # succeed using only the persisted manifest blobs from `ocx pull`.
     exec_result = _run(
         ocx,
+        "package",
         "exec",
         pinned_id,
         "--",

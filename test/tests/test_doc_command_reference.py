@@ -36,14 +36,37 @@ ENV_COMPOSITION = (
 )
 
 
-# Each entry: (anchor, human-readable command name used in error messages)
+# Live commands: each must have a ``**Usage**`` and ``**Options**`` block.
+# Updated to the new taxonomy (handshake_toolchain_cli.md §2):
+#   - ``{#shell-hook}`` and ``{#shell-init}`` are TOMBSTONES (> **REMOVED**),
+#     not live commands — moved to TOMBSTONE_ANCHORS below.
+#   - New live commands added: ``{#env-root}`` (toolchain-tier ocx env),
+#     ``{#env}`` (ocx package env), ``{#package-env}`` (full package-tier entry).
 NEW_COMMAND_ANCHORS = [
     ("{#lock}", "lock"),
-    ("{#shell-hook}", "shell hook"),
-    ("{#shell-init}", "shell init"),
     ("{#direnv}", "direnv"),
     ("{#direnv-init}", "direnv init"),
     ("{#direnv-export}", "direnv export"),
+    ("{#env-root}", "env (toolchain-tier)"),
+    ("{#env}", "env (package-tier alias)"),
+    ("{#package-env}", "package env"),
+]
+
+# Removed/tombstone anchors: these commands were deleted in the
+# handshake_toolchain_cli.md taxonomy refactor (plan_toolchain_cli.md C4).
+# They must have a ``> **REMOVED**`` or ``> **Moved to ...`` tombstone marker
+# (NOT a ``**Usage**`` block — they no longer exist as live commands).
+TOMBSTONE_ANCHORS = [
+    ("{#shell-hook}", "shell hook", "REMOVED"),
+    ("{#shell-init}", "shell init", "REMOVED"),
+    ("{#shell-env}", "shell env", "REMOVED"),
+    ("{#ci}", "ci", "REMOVED"),
+    ("{#ci-export}", "ci export", "REMOVED"),
+    ("{#install}", "install", "Moved to"),
+    ("{#select}", "select", "Moved to"),
+    ("{#exec}", "exec", "Moved to"),
+    ("{#deselect}", "deselect", "Moved to"),
+    ("{#uninstall}", "uninstall", "Moved to"),
 ]
 
 
@@ -127,6 +150,58 @@ def test_new_command_has_options_block(
     assert "**Options**" in section, (
         f"`{name}` section ({anchor}) must contain an `**Options**` block "
         "(catches truncated doc bodies)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tombstone anchors — removed commands must NOT have a Usage block;
+# they must have the tombstone marker (REMOVED / Moved to)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("anchor,name,marker", TOMBSTONE_ANCHORS)
+def test_tombstone_anchor_present(
+    cli_ref_text: str, anchor: str, name: str, marker: str
+) -> None:
+    """Every tombstone anchor must still be declared in the doc (for stable links
+    from external content). The anchor must exist even though the command is gone."""
+    assert anchor in cli_ref_text, (
+        f"tombstone anchor `{anchor}` ({name}) must still exist in command-line.md "
+        f"for link stability — even removed commands keep their anchor as a tombstone"
+    )
+
+
+@pytest.mark.parametrize("anchor,name,marker", TOMBSTONE_ANCHORS)
+def test_tombstone_has_removed_marker(
+    cli_ref_text: str, anchor: str, name: str, marker: str
+) -> None:
+    """Every tombstone section must contain the expected removal marker
+    (``> **REMOVED**`` or ``> **Moved to``), proving the section is a tombstone,
+    not a live command with a missing Usage block."""
+    section = _slice_section_by_anchor(cli_ref_text, anchor)
+    assert marker in section, (
+        f"tombstone section `{name}` ({anchor}) must contain '{marker}' marker; "
+        f"got section:\n{section[:200]!r}"
+    )
+
+
+@pytest.mark.parametrize("anchor,name,marker", [
+    (a, n, m) for a, n, m in TOMBSTONE_ANCHORS if m == "REMOVED"
+])
+def test_removed_tombstone_has_no_usage_block(
+    cli_ref_text: str, anchor: str, name: str, marker: str
+) -> None:
+    """Pure-REMOVED tombstone sections must NOT have a ``**Usage**`` block.
+
+    Commands with ``> **REMOVED**`` are fully deleted and must not document
+    any usage form (there is no new location to redirect to). This is distinct
+    from ``> **Moved to ...`` tombstones, which legitimately show the new
+    ``ocx package ...`` usage form at the redirect target.
+    """
+    section = _slice_section_by_anchor(cli_ref_text, anchor)
+    assert "**Usage**" not in section, (
+        f"REMOVED tombstone `{name}` ({anchor}) must NOT have a **Usage** block; "
+        f"fully-deleted commands must only show the '> **REMOVED**' marker"
     )
 
 

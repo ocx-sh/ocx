@@ -58,7 +58,7 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     ocx.plain("index", "update", short)
 
     # --- Install ---
-    result = ocx.json("install", short)
+    result = ocx.json("package", "install", short)
     candidate = Path(result[short]["path"])
     assert candidate.is_dir()
 

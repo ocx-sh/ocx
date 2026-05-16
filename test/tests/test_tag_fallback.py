@@ -70,7 +70,7 @@ def test_ac1_fresh_install_empty_index_succeeds(
     _wipe_local_index(ocx)
 
     # The install must succeed — ChainedIndex fetches from remote on cache miss.
-    result = ocx.json("install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)
 
     # Basic smoke check: install returned data for this package.
     assert pkg.short in result, f"install result missing package key {pkg.short!r}"
@@ -97,7 +97,7 @@ def test_ac2_tag_persisted_offline_install_succeeds(
     _wipe_local_index(ocx)
 
     # Step 1: online install triggers fallback, persists tag.
-    ocx.json("install", pkg.short)
+    ocx.json("package", "install", pkg.short)
 
     # Step 2: verify the tag file was persisted.
     tag_file = _tag_file_path(ocx, pkg)
@@ -107,7 +107,7 @@ def test_ac2_tag_persisted_offline_install_succeeds(
     )
 
     # Step 3: offline install of the same tag must succeed from cached data.
-    result = ocx.plain("--offline", "install", pkg.short)
+    result = ocx.plain("--offline", "package", "install", pkg.short)
     assert result.returncode == 0, (
         f"AC2: --offline install failed (rc={result.returncode})\n"
         f"stderr: {result.stderr.strip()}"
@@ -132,7 +132,7 @@ def test_ac3_offline_empty_index_returns_not_found(
     # Ensure the local index is empty.
     _wipe_local_index(ocx)
 
-    result = ocx.plain("--offline", "install", pkg.short, check=False)
+    result = ocx.plain("--offline", "package", "install", pkg.short, check=False)
     assert result.returncode != 0, (
         "AC3: --offline install on empty index must fail, but it succeeded"
     )
@@ -161,7 +161,7 @@ def test_ac4_stale_cached_tag_uses_cached_digest(
     v1_dir = tmp_path / "v1"
     v1_dir.mkdir()
     pkg_v1 = make_package(ocx, unique_repo, "1.0.0", v1_dir, new=True, cascade=False)
-    ocx.json("install", pkg_v1.short)
+    ocx.json("package", "install", pkg_v1.short)
 
     # Record the digest that was installed (digest A).
     tag_file = _tag_file_path(ocx, pkg_v1)
@@ -194,7 +194,7 @@ def test_ac4_stale_cached_tag_uses_cached_digest(
     tag_file.write_text(v1_tag_snapshot)
 
     # Install again — ChainedIndex must hit the cache (digest A) and NOT refresh.
-    result = ocx.json("install", pkg_v1.short)
+    result = ocx.json("package", "install", pkg_v1.short)
     assert pkg_v1.short in result, "second install must succeed"
 
     # The local index must still contain digest A (not updated to B).
@@ -226,7 +226,7 @@ def test_ac5_batch_install_empty_index_both_succeed(
     # Wipe the local index so both packages must fall through to remote.
     _wipe_local_index(ocx)
 
-    result = ocx.json("install", pkg1.short, pkg2.short)
+    result = ocx.json("package", "install", pkg1.short, pkg2.short)
 
     assert pkg1.short in result, f"AC5: pkg1 {pkg1.short!r} missing from install result"
     assert pkg2.short in result, f"AC5: pkg2 {pkg2.short!r} missing from install result"
@@ -253,7 +253,7 @@ def test_ac6a_nonexistent_tag_fails_with_diagnostic(
 
     _wipe_local_index(ocx)
 
-    result = ocx.plain("install", nonexistent, check=False)
+    result = ocx.plain("package", "install", nonexistent, check=False)
     assert result.returncode != 0, (
         "AC6a: installing a non-existent tag must fail with non-zero exit"
     )
@@ -295,7 +295,7 @@ def test_parallel_install_races_preserve_both_tags(
 
     def run_install(pkg_short: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(ocx_binary), "--format", "json", "install", pkg_short],
+            [str(ocx_binary), "--format", "json", "package", "install", pkg_short],
             capture_output=True,
             text=True,
             env=ocx.env,
@@ -356,7 +356,7 @@ def test_ac6b_unreachable_registry_fails_with_network_error(
             env[key] = os.environ[key]
 
     result = subprocess.run(
-        [str(ocx_binary), "--format", "json", "install", "cmake:3.28"],
+        [str(ocx_binary), "--format", "json", "package", "install", "cmake:3.28"],
         capture_output=True,
         text=True,
         env=env,

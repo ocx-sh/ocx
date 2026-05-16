@@ -49,6 +49,8 @@ OCX is a **backend tool** (`product-context.md`: automation-first). Output is sp
 
 **Known exception:** `direnv export` emits `# ocx: …` shell-comment lines into the shell-eval stream by design. Keep the `# ocx:` prefix so they are inert when sourced.
 
+**Known exception:** `emit_lines` in `conventions.rs` emits eval-safe shell-export lines to stdout and `# ocx:` prefixed diagnostics to stderr using raw `println!` / `eprintln!`. This is deliberate: `emit_lines` produces the eval-safe channel consumed by `ocx env --shell`, `ocx package env --shell`, and `ocx direnv export`; routing through `DataInterface` would break the eval-safe contract (DataInterface is not guaranteed to produce sourceable output). Same class as the `direnv export` exception.
+
 **Deleted exception:** `shell hook` / `shell env` emit paths are deleted. `ocx env --shell[=NAME]` and `ocx package env --shell[=NAME]` use the shared `emit_lines(shell, &[Entry])` helper in `conventions.rs` — the single emit path for all eval-safe shell output.
 
 ## `emit_lines` helper

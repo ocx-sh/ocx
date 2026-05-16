@@ -59,7 +59,7 @@ CLI command (clap parse)
 | **Candidate** | Symlink at `symlinks/{registry}/{repo}/candidates/{tag}` — pinned at install time |
 | **Current** | Floating symlink at `symlinks/{registry}/{repo}/current` — set by `ocx select` |
 | **Project ledger** | Flat symlink store at `$OCX_HOME/projects/` — one symlink per registered project, name = 16-hex SHA-256 of canonical project dir, target = project dir. GC roots for multi-project clean. Self-link for the global toolchain is prohibited (global file's project dir is `$OCX_HOME`). ADR: `adr_project_gc_symlink_ledger.md`. |
-| **Global toolchain** | `$OCX_HOME/ocx.toml` + `$OCX_HOME/ocx.lock`, reachable only via explicit `--global`/`OCX_GLOBAL`. Strict isolation: never composes into project resolution; `run`/`exec` are always hermetic. Shell-exposed via `ocx shell init` static entrypoint + per-prompt hook. ADR: `adr_global_toolchain_tier.md`. |
+| **Global toolchain** | `$OCX_HOME/ocx.toml` + `$OCX_HOME/ocx.lock`, reachable only via explicit `--global`/`OCX_GLOBAL`. Strict isolation: never composes into project resolution; `run`/`exec` are always hermetic. Shell-exposed via `$OCX_HOME/env.sh` sourced from the login profile (block-marker idempotent line written by the in-repo installer; runs `eval "$(ocx env --global --shell=sh)"`). No static `$OCX_HOME/init.<shell>`, no per-prompt hook, no PATH strip — isolation by PATH precedence. ADRs: `adr_global_toolchain_tier.md`, `handshake_toolchain_cli.md`. |
 | **Digest** | SHA-256 content hash — immutable identity of package version |
 | **Tag** | Mutable alias to digest (e.g., `3.28`, `latest`) |
 | **Cascade** | Publisher convention: push `3.28.1` and auto-update `3.28`, `3`, `latest` tags |
@@ -89,6 +89,7 @@ CLI command (clap parse)
 | `adr_windows_exe_shim.md` | Native Windows `.exe` shim + `.shim` sidecar replaces the `.cmd` launcher (no `.cmd` emitted; PATHEXT inject/warn machinery removed); fully eliminates BatBadBut `%*`; committed-blob embed (A1 + B1 + C2 + D1) |
 | `adr_project_gc_symlink_ledger.md` | Flat symlink store `$OCX_HOME/projects/` as project GC ledger (supersedes `adr_clean_project_backlinks.md`) |
 | `adr_global_toolchain_tier.md` | Explicit `--global` toolchain tier, strict isolation, no implicit home fallback (supersedes Amendment C of `adr_project_toolchain_config.md`) |
+| `handshake_toolchain_cli.md` | **AUTHORITY for current CLI model** — `ocx package` group (OCI tier), root `ocx env [--global] [--shell]`, `ocx shell` reduced to `{completion}`, root `install/uninstall/select/exec/deselect/ci/shell hook/init/env` removed (exit 64), activation via `$OCX_HOME/env.sh` block-marker, no PATH strip. Decisions 3/4/6/7 of `adr_global_toolchain_tier.md` superseded here. |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 
@@ -108,6 +109,9 @@ Project-wide conventions enforced by reviewer:
 |--------------|----------|-------|
 | New CLI command | `crates/ocx_cli/src/command/` | One file per command, follow command pattern |
 | Project-tier env-composition command | `crates/ocx_cli/src/command/run.rs` | Project-tier mirror of OCI-tier `exec.rs`; calls `load_project_with_lock` from `app/project_context.rs`, then `compose_tool_set` + `expand_all_keyword`, then `child_process::exec` |
+| Toolchain env exporter (project + global) | `crates/ocx_cli/src/command/env.rs` (root) | New root `ocx env [--global] [--shell[=NAME]]`; default output JSON; `--shell` is the eval-safe channel; reuses `resolve_env` → `composer::compose` |
+| OCI-tier package primitives group | `crates/ocx_cli/src/command/package.rs` | `ocx package {install,uninstall,select,deselect,exec,env}` — moved from root; root forms removed (exit 64) |
+| Shared shell emit helper | `crates/ocx_cli/src/app/conventions.rs` | `emit_lines(shell, &[Entry])` consumed by `ocx env`, `ocx package env`, `ocx direnv export` |
 | Shared project-resolve prologue | `crates/ocx_cli/src/app/project_context.rs` | `load_project_with_lock` helper consumed by `pull.rs` and `run.rs`; returns `ProjectContext` (owned — no borrow on `Context`) |
 | New task method | `crates/ocx_lib/src/package_manager/tasks/` | Add error variant to `error.rs` if needed |
 | New output format | `crates/ocx_cli/src/api/data/` | Impl `Printable` trait |
@@ -125,8 +129,8 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 |--------|---------|---------|
 | `archive/` | Tar/zip extraction + bundling with pluggable backends | Mirror pipeline, package creation |
 | `auth/` | `AuthType` enum with env var + docker cred fallback | OCI Client |
-| `ci/` | CI flavor dispatch (GitHub Actions export) | `ci export` command |
-| `shell/` | `ShellProfileBuilder` — shell-specific export gen | Shell commands |
+| `ci/` | CI flavor dispatch (GitHub Actions export) | **Removed** — `ocx ci` command deleted; CI export is a deferred extension point (`handshake_toolchain_cli.md` §6). Module kept in `ocx_lib` as a library; CLI surface gone. |
+| `shell/` | `ShellProfileBuilder` / `emit_lines` — shell-specific export gen | `ocx env`, `ocx package env`, `ocx direnv export`; `shell hook`/`init`/`env` commands removed |
 | `utility/` | Extension traits + async + fs helpers — see [Utility Catalog](#utility-catalog) below | Everywhere (prelude for extension traits) |
 | `compression/` | Compression level config | Archive, OCI push |
 | `codesign/` | macOS ad-hoc code signing for Mach-O binaries | Package extraction |

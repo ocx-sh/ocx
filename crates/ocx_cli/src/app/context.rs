@@ -13,7 +13,7 @@ use ocx_lib::{
     package_manager,
 };
 
-use crate::api;
+use crate::{api, options};
 
 use super::ContextOptions;
 
@@ -77,7 +77,11 @@ impl Context {
         let printer = Printer::new(color_config.stdout, color_config.stderr);
         let data = DataInterface::new(printer);
         let ui = UserInterface::new(printer, console::Term::stderr().is_term(), options.quiet);
-        let api = api::Api::new(options.format, data, options.quiet);
+        // B1 precondition (plan_toolchain_cli.md Phase 1): `format` is now
+        // `Option<Format>`. Legacy commands keep their `Plain` default via
+        // `.unwrap_or`; only `ocx env` / `ocx package env` will resolve
+        // `None → Json` internally (in their own execute bodies, Phase 2).
+        let api = api::Api::new(options.format.unwrap_or(options::Format::Plain), data, options.quiet);
 
         let (remote_client, remote_index) = if options.offline {
             (None, None)
@@ -388,7 +392,7 @@ impl Context {
             "ocx.sh",
         );
         let printer = Printer::new(false, false);
-        let api = api::Api::new(crate::options::Format::default(), DataInterface::new(printer), true);
+        let api = api::Api::new(options::Format::default(), DataInterface::new(printer), true);
         let ui = UserInterface::new(printer, false, true);
         Self {
             offline: true,

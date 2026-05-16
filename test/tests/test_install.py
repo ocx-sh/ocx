@@ -8,7 +8,7 @@ def test_install_creates_candidate_symlink(
 ):
     """ocx install <pkg>"""
     pkg = published_package
-    ocx.json("install", pkg.short)
+    ocx.json("package", "install", pkg.short)
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
@@ -26,7 +26,7 @@ def test_install_creates_content_directory(
 ):
     """ocx install <pkg>"""
     pkg = published_package
-    result = ocx.json("install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)
     content = Path(result[pkg.short]["path"])
     assert_dir_exists(content)
 
@@ -36,7 +36,7 @@ def test_install_select_creates_current_symlink(
 ):
     """ocx install -s <pkg>"""
     pkg = published_package
-    ocx.json("install", "-s", pkg.short)
+    ocx.json("package", "install", "-s", pkg.short)
 
     current = (
         Path(ocx.env["OCX_HOME"])
@@ -53,7 +53,7 @@ def test_install_cleans_temp_directory(
 ):
     """ocx install <pkg> should not leave temp directories behind."""
     pkg = published_package
-    ocx.json("install", pkg.short)
+    ocx.json("package", "install", pkg.short)
 
     temp_dir = Path(ocx.env["OCX_HOME"]) / "temp"
     if temp_dir.exists():
@@ -68,11 +68,11 @@ def test_install_without_select_preserves_current(
     v1, v2 = published_two_versions
 
     # Install v1 with select
-    result_v1 = ocx.json("install", "-s", v1.short)
+    result_v1 = ocx.json("package", "install", "-s", v1.short)
     content_v1 = Path(result_v1[v1.short]["path"])
 
     # Install v2 without select
-    ocx.json("install", v2.short)
+    ocx.json("package", "install", v2.short)
 
     current = (
         Path(ocx.env["OCX_HOME"])

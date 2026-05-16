@@ -3,9 +3,9 @@
 # title: diamond app reaches shared leaf exactly once via either branch
 set -euo pipefail
 
-ocx install --select "$PKG_APP"
+ocx package install --select "$PKG_APP"
 
-env_out="$(ocx exec "$PKG_APP" -- env)"
+env_out="$(ocx package exec "$PKG_APP" -- env)"
 
 # Leaf's HOME var must be present and appear exactly once (cross-root dedup).
 count="$(grep -c "^${HOME_KEY_LEAF}=" <<<"$env_out" || true)"

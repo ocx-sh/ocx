@@ -141,6 +141,19 @@ impl Remove {
                 .manager()
                 .uninstall_all(std::slice::from_ref(ident), false, false)
                 .await;
+
+            // Global-tier symmetry: `ocx add --global` sets the `current`
+            // selection so the offline login exporter (`ocx env --global`)
+            // sees the tool; `ocx remove --global` must clear it so the
+            // exporter stops showing a tool that left the global toolchain.
+            // `current` is keyed by registry/repository only — strip the
+            // tag/digest (matches `resolve_global_current_env`'s lookup and
+            // `deselect`'s tag-less requirement). Project tier never touches
+            // `current` (resolves via the lock), so this is `--global`-only.
+            if self.global {
+                let current_key = ident.without_specifiers();
+                let _ = context.manager().deselect_all(std::slice::from_ref(&current_key)).await;
+            }
         }
 
         let entries: Vec<LockEntry> = new_lock

@@ -8,13 +8,13 @@ def test_select_switches_current_symlink(
 ):
     """ocx install -s <v1>; ocx install <v2>; ocx select <v2>"""
     v1, v2 = published_two_versions
-    ocx.json("install", "-s", v1.short)
-    ocx.json("install", v2.short)
+    ocx.json("package", "install", "-s", v1.short)
+    ocx.json("package", "install", v2.short)
 
-    install_v2 = ocx.json("install", v2.short)
+    install_v2 = ocx.json("package", "install", v2.short)
     content_v2 = Path(install_v2[v2.short]["path"])
 
-    ocx.plain("select", v2.short)
+    ocx.plain("package", "select", v2.short)
 
     current = (
         Path(ocx.env["OCX_HOME"])
@@ -31,7 +31,7 @@ def test_deselect_removes_current_symlink(
 ):
     """ocx install -s <pkg>; ocx deselect <pkg>"""
     pkg = published_package
-    ocx.json("install", "-s", pkg.short)
+    ocx.json("package", "install", "-s", pkg.short)
 
     current = (
         Path(ocx.env["OCX_HOME"])
@@ -42,7 +42,7 @@ def test_deselect_removes_current_symlink(
     )
     assert_symlink_exists(current)
 
-    ocx.plain("deselect", pkg.short)
+    ocx.plain("package", "deselect", pkg.short)
     assert_not_exists(current)
 
 
@@ -51,9 +51,9 @@ def test_reselect_after_deselect(
 ):
     """ocx install -s <pkg>; ocx deselect <pkg>; ocx select <pkg>"""
     pkg = published_package
-    ocx.json("install", "-s", pkg.short)
-    ocx.plain("deselect", pkg.short)
-    ocx.plain("select", pkg.short)
+    ocx.json("package", "install", "-s", pkg.short)
+    ocx.plain("package", "deselect", pkg.short)
+    ocx.plain("package", "select", pkg.short)
 
     current = (
         Path(ocx.env["OCX_HOME"])

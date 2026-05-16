@@ -37,7 +37,7 @@ def _exec_capture(
     stdin: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `ocx [outer_flags] exec pkg -- cmd...` capturing stdout/stderr."""
-    full = [str(ocx.binary), *outer_flags, "exec", pkg_short, "--", *cmd]
+    full = [str(ocx.binary), *outer_flags, "package", "exec", pkg_short, "--", *cmd]
     env = dict(ocx.env)
     if extra_env:
         env.update(extra_env)
@@ -56,7 +56,7 @@ def test_ocx_binary_set_on_child_env(
     ocx: OcxRunner, published_package
 ) -> None:
     """`ocx exec` writes `OCX_BINARY_PIN=<absolute-path-to-running-ocx>` onto the child."""
-    ocx.plain("install", published_package.short)
+    ocx.plain("package", "install", published_package.short)
     result = _exec_capture(
         ocx, published_package.short, ["sh", "-c", 'printf "%s" "$OCX_BINARY_PIN"']
     )
@@ -70,7 +70,7 @@ def test_offline_flag_propagates_via_env(
     ocx: OcxRunner, published_package
 ) -> None:
     """`ocx --offline exec pkg -- ...` sets `OCX_OFFLINE=1` on the child env."""
-    ocx.plain("install", published_package.short)
+    ocx.plain("package", "install", published_package.short)
     result = _exec_capture(
         ocx,
         published_package.short,
@@ -89,7 +89,7 @@ def test_clean_env_writes_ocx_config_explicitly(
     """Under `--clean`, the child env starts empty but still receives explicit
     `OCX_BINARY_PIN` + `OCX_OFFLINE` written from the outer ocx's parsed state.
     No ambient parent-shell export can leak in or override this."""
-    ocx.plain("install", published_package.short)
+    ocx.plain("package", "install", published_package.short)
     # `sh` resolution requires PATH lookup, but `--clean` drops the inherited
     # PATH and only the package's bin/ is exposed, so we hand `Command::new`
     # an absolute interpreter path. The contract under test is what `OCX_*`
@@ -98,6 +98,7 @@ def test_clean_env_writes_ocx_config_explicitly(
     full = [
         str(ocx.binary),
         "--offline",
+        "package",
         "exec",
         "--clean",
         published_package.short,
@@ -134,12 +135,13 @@ def test_clean_encapsulates_parent_env(
     `Command::env_clear()` on the spawn/exec helper — without it,
     `Command::envs()` merges into the inherited parent env and `--clean`
     becomes a no-op for arbitrary `STRAY_VAR` exports."""
-    ocx.plain("install", published_package.short)
+    ocx.plain("package", "install", published_package.short)
     # `--clean` drops PATH; hand `Command::new` an absolute interpreter path
     # for the same reason as `test_clean_env_writes_ocx_config_explicitly`.
     sh_path = "/bin/sh"
     full = [
         str(ocx.binary),
+        "package",
         "exec",
         "--clean",
         published_package.short,
@@ -170,7 +172,7 @@ def test_exec_inherits_stdin_by_default(
     """Stdin is inherited by `ocx exec`'s child unconditionally; the
     `--interactive` flag was removed because the new default matches shell
     exec semantics."""
-    ocx.plain("install", published_package.short)
+    ocx.plain("package", "install", published_package.short)
     payload = "hello-from-stdin"
     result = _exec_capture(
         ocx, published_package.short, ["cat"], stdin=payload
@@ -186,9 +188,10 @@ def test_interactive_flag_rejected(
 ) -> None:
     """The `--interactive` / `-i` flag was removed; clap rejects it as a
     usage error (sysexits.h `EX_USAGE = 64`)."""
-    ocx.plain("install", published_package.short)
+    ocx.plain("package", "install", published_package.short)
     full = [
         str(ocx.binary),
+        "package",
         "exec",
         "--interactive",
         published_package.short,
@@ -226,7 +229,7 @@ def test_generated_launcher_uses_ocx_binary_and_silences_presentation(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
     from src.runner import registry_dir
     reg = registry_dir(ocx.registry)
@@ -268,7 +271,7 @@ def test_exec_child_exit_code_propagates(
     path is covered by the `utility::child_process` unit tests; this module is
     Unix-only per the module-level `pytestmark`.
     """
-    ocx.plain("install", published_package.short)
+    ocx.plain("package", "install", published_package.short)
     result = _exec_capture(
         ocx, published_package.short, ["sh", "-c", "exit 42"]
     )
@@ -298,11 +301,12 @@ def test_launcher_chain_offline_propagates(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
     full = [
         str(ocx.binary),
         "--offline",
+        "package",
         "exec",
         pkg.short,
         "--",

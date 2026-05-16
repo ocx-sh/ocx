@@ -137,13 +137,27 @@ impl Add {
         // Best-effort install AFTER the commit lands. A failure here
         // does not roll back the manifest/lock — the binding is
         // declaratively present even if the install retry is needed.
+        //
+        // In the **global tier only**, also set the `current` selection
+        // for the added tool. The offline login exporter
+        // (`ocx env --global`, ADR `adr_global_toolchain_tier.md` D5)
+        // resolves the global toolchain through `find_symlink(Current)`,
+        // so without this the tool stays invisible until a manual
+        // `ocx package select`. The signed handshake §1 contract is
+        // "global IS the project toolchain — the only difference is the
+        // load site"; project-tier `add` needs no separate select, so
+        // global-tier `add` must not either. This reuses the exact
+        // `wire_selection` path `ocx package select` uses (the `select`
+        // flag on `install_all`) — no hand-rolled symlink writes.
+        // Project tier (no `--global`) keeps `select=false`: project
+        // resolution goes through the lock, never `current`.
         context
             .manager()
             .install_all(
                 vec![identifier],
                 platforms_or_default(&[]),
                 true,
-                false,
+                self.global,
                 context.concurrency(),
             )
             .await?;
