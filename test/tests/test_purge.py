@@ -53,12 +53,12 @@ def test_purge_removes_object_directory(
 ):
     """ocx install <pkg>; ocx uninstall --purge <pkg>"""
     pkg = published_package
-    result = ocx.json("install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)
     candidate = Path(result[pkg.short]["path"])
     content = candidate.resolve()
     assert_dir_exists(content)
 
-    ocx.plain("uninstall", "--purge", pkg.short)
+    ocx.plain("package", "uninstall", "--purge", pkg.short)
     assert_not_exists(content)
 
 
@@ -75,10 +75,10 @@ def test_purge_cascades_to_transitive_deps(
     app = _push_with_deps(
         ocx, f"{unique_repo}_app", "1.0.0", tmp_path, deps=[_dep_entry(ocx, leaf)]
     )
-    ocx.json("install", "--select", app.short)
+    ocx.json("package", "install", "--select", app.short)
     assert _count_object_dirs(ocx) == 2
 
-    ocx.plain("uninstall", "--purge", "-d", app.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", app.short)
     assert _count_object_dirs(ocx) == 0, "both app and leaf should be purged"
 
 
@@ -93,10 +93,10 @@ def test_purge_cascades_through_chain(
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path, deps=[_dep_entry(ocx, b)]
     )
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
     assert _count_object_dirs(ocx) == 3
 
-    ocx.plain("uninstall", "--purge", "-d", a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", a.short)
     assert _count_object_dirs(ocx) == 0, "entire A->B->C chain should be purged"
 
 
@@ -113,15 +113,15 @@ def test_purge_does_not_collect_unrelated_orphan(
     pkg_a = _push_leaf(ocx, f"{unique_repo}_a", tmp_path)
     pkg_x = _push_leaf(ocx, f"{unique_repo}_x", tmp_path)
 
-    ocx.json("install", "--select", pkg_a.short)
-    ocx.json("install", "--select", pkg_x.short)
+    ocx.json("package", "install", "--select", pkg_a.short)
+    ocx.json("package", "install", "--select", pkg_x.short)
     assert _count_object_dirs(ocx) == 2
 
     # Make X an orphan by removing its symlinks (but not purging)
-    ocx.plain("uninstall", "-d", pkg_x.short)
+    ocx.plain("package", "uninstall", "-d", pkg_x.short)
 
     # Now purge A — X should NOT be collected
-    ocx.plain("uninstall", "--purge", "-d", pkg_a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", pkg_a.short)
     assert _count_object_dirs(ocx) == 1, "orphaned X should survive A's purge"
 
 
@@ -138,15 +138,15 @@ def test_purge_does_not_collect_unrelated_orphan_with_deps(
         ocx, f"{unique_repo}_x", "1.0.0", tmp_path, deps=[_dep_entry(ocx, leaf_y)]
     )
 
-    ocx.json("install", "--select", pkg_a.short)
-    ocx.json("install", "--select", pkg_x.short)
+    ocx.json("package", "install", "--select", pkg_a.short)
+    ocx.json("package", "install", "--select", pkg_x.short)
     assert _count_object_dirs(ocx) == 4
 
     # Make X an orphan
-    ocx.plain("uninstall", "-d", pkg_x.short)
+    ocx.plain("package", "uninstall", "-d", pkg_x.short)
 
     # Purge A — only A and B should be removed, X and Y survive
-    ocx.plain("uninstall", "--purge", "-d", pkg_a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", pkg_a.short)
     assert _count_object_dirs(ocx) == 2, "orphaned X and Y should survive A's purge"
 
 
@@ -169,12 +169,12 @@ def test_purge_preserves_shared_dep_when_one_pkg_uninstalled(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[dep_c]
     )
 
-    ocx.json("install", "--select", pkg_a.short)
-    ocx.json("install", "--select", pkg_b.short)
+    ocx.json("package", "install", "--select", pkg_a.short)
+    ocx.json("package", "install", "--select", pkg_b.short)
     assert _count_object_dirs(ocx) == 3  # A, B, C
 
     # Purge A — C should survive because B still depends on it
-    ocx.plain("uninstall", "--purge", "-d", pkg_a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", pkg_a.short)
     assert _count_object_dirs(ocx) == 2, "B and C should survive"
 
 
@@ -192,12 +192,12 @@ def test_purge_collects_shared_dep_when_both_pkgs_uninstalled(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[dep_c]
     )
 
-    ocx.json("install", "--select", pkg_a.short)
-    ocx.json("install", "--select", pkg_b.short)
+    ocx.json("package", "install", "--select", pkg_a.short)
+    ocx.json("package", "install", "--select", pkg_b.short)
     assert _count_object_dirs(ocx) == 3  # A, B, C
 
     # Purge both in one command — C should now be collected
-    ocx.plain("uninstall", "--purge", "-d", pkg_a.short, pkg_b.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", pkg_a.short, pkg_b.short)
     assert _count_object_dirs(ocx) == 0, "all three should be purged"
 
 
@@ -215,16 +215,16 @@ def test_purge_collects_shared_dep_sequential_uninstall(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[dep_c]
     )
 
-    ocx.json("install", "--select", pkg_a.short)
-    ocx.json("install", "--select", pkg_b.short)
+    ocx.json("package", "install", "--select", pkg_a.short)
+    ocx.json("package", "install", "--select", pkg_b.short)
     assert _count_object_dirs(ocx) == 3
 
     # Purge A — C survives
-    ocx.plain("uninstall", "--purge", "-d", pkg_a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", pkg_a.short)
     assert _count_object_dirs(ocx) == 2
 
     # Purge B — C now collected
-    ocx.plain("uninstall", "--purge", "-d", pkg_b.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", pkg_b.short)
     assert _count_object_dirs(ocx) == 0
 
 
@@ -248,10 +248,10 @@ def test_purge_diamond_shared_leaf_survives_partial(
         deps=[_dep_entry(ocx, b), _dep_entry(ocx, c)]
     )
 
-    ocx.json("install", "--select", a.short)
+    ocx.json("package", "install", "--select", a.short)
     assert _count_object_dirs(ocx) == 4  # A, B, C, D
 
-    ocx.plain("uninstall", "--purge", "-d", a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", a.short)
     assert _count_object_dirs(ocx) == 0, "entire diamond should be purged"
 
 
@@ -272,12 +272,12 @@ def test_purge_protects_dep_still_reachable_from_other_root(
         ocx, f"{unique_repo}_r", "1.0.0", tmp_path, deps=[_dep_entry(ocx, a)]
     )
 
-    ocx.json("install", "--select", a.short)
-    ocx.json("install", "--select", r.short)
+    ocx.json("package", "install", "--select", a.short)
+    ocx.json("package", "install", "--select", r.short)
     assert _count_object_dirs(ocx) == 3  # R, A, B
 
     # Uninstall A with purge — A is still reachable as a dependency of R
-    ocx.plain("uninstall", "--purge", "-d", a.short)
+    ocx.plain("package", "uninstall", "--purge", "-d", a.short)
     assert _count_object_dirs(ocx) == 3, "R still depends on A, nothing should be purged"
 
 
@@ -309,8 +309,8 @@ def test_purge_preserves_shared_layer_inodes(
     )
 
     # Install both packages
-    ocx.json("install", "--select", short_a)
-    ocx.json("install", "--select", short_b)
+    ocx.json("package", "install", "--select", short_a)
+    ocx.json("package", "install", "--select", short_b)
 
     result_a = ocx.json("which", short_a)
     result_b = ocx.json("which", short_b)
@@ -331,7 +331,7 @@ def test_purge_preserves_shared_layer_inodes(
     )
 
     # Purge package A (removes its candidate symlink and content directory)
-    ocx.plain("uninstall", "--purge", "-d", short_a)
+    ocx.plain("package", "uninstall", "--purge", "-d", short_a)
 
     # Behaviour-centric assertions: A's package root must disappear, B's must
     # survive with its hardlink intact (same inode as before the purge).

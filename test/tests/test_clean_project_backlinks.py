@@ -455,7 +455,7 @@ def test_force_does_not_collect_actively_installed_packages(
     # Publish a package and install it (creates install symlinks → GC root).
     repo, tag = _published_tool(ocx, tmp_path, "installed")
     short = f"{ocx.registry}/{repo}:{tag}"
-    install_result = ocx.run("install", short)
+    install_result = ocx.run("package", "install", short)
     assert install_result.returncode == EXIT_SUCCESS, (
         f"ocx install failed: rc={install_result.returncode}\n"
         f"stderr:\n{install_result.stderr}"

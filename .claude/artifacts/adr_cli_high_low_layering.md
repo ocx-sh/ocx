@@ -179,10 +179,11 @@ The two-layer model is a clean split for **read-side** consumption (commands tha
 │   init (writes a fresh ocx.toml, reads neither),                     │
 │   info, version, shell completion                                    │
 ├─────────────────────────────────────────────────────────────────────┤
-│ SHELL ACTIVATION (project-aware, install-store-driven)               │
-│   Driven by:    nearest ocx.toml + actually-installed packages       │
-│   Contract:     never installs, never contacts registry              │
-│   Commands:     shell hook, shell direnv, shell init                 │
+│ SHELL ACTIVATION — [SUPERSEDED → handshake_toolchain_cli.md]         │
+│   shell hook / shell init / shell env REMOVED (exit 64 at runtime). │
+│   ocx env [--global] [--shell[=NAME]] is the new exporter.          │
+│   Activation: $OCX_HOME/env.sh sourced from login profile.          │
+│   (Kept for historical reference only — do not implement.)           │
 ├─────────────────────────────────────────────────────────────────────┤
 │ LOW-LEVEL — REGISTRY OPS                                             │
 │   Driven by:    OCI registries                                       │
@@ -194,9 +195,12 @@ The two-layer model is a clean split for **read-side** consumption (commands tha
 │ LOW-LEVEL — LOCAL-STORE QUERIES (OCI-id addressed, no registry)      │
 │   Driven by:    install/symlink store under $OCX_HOME/               │
 │   Symbols:      OCI identifiers                                      │
-│   Commands:     find, select, deselect, deps, env, exec,             │
-│                 shell env, clean (also reads project registry),      │
-│                 launcher exec, ci export                             │
+│   Commands:     which, deps, clean (also reads project registry),    │
+│                 launcher exec,                                       │
+│                 ocx package {install,uninstall,select,deselect,      │
+│                              exec,env}  [SUPERSEDED names removed:   │
+│                  root install/uninstall/select/exec/deselect → pkg;  │
+│                  ci export, shell env → REMOVED (exit 64)]           │
 └─────────────────────────────────────────────────────────────────────┘
 
          ┌───────────────────────┐         ┌───────────────────────┐
@@ -229,7 +233,7 @@ The two-layer model is a clean split for **read-side** consumption (commands tha
 
 **Project mutators** (`add`, `remove`, `lock`, `update`) accept OCI identifiers as input (when introducing a binding) but their effect is project-tier — they write `ocx.toml` and/or `ocx.lock`. Their identifier-input shape is part of the low-level promise (stable parsing, registry-aware); their output mutation is part of the high-level promise (lock semantics, declaration_hash discipline).
 
-**Shell activation commands** (`shell hook`, `shell direnv`, `shell init`) read the nearest `ocx.toml` and the actually-installed packages — they neither install nor contact the registry. They are project-aware but not lock-driven.
+**Shell activation commands** — [SUPERSEDED → handshake_toolchain_cli.md] `shell hook`, `shell direnv`, `shell init` have been **removed** (exit 64). The replacement is `ocx env [--global] [--shell[=NAME]]` (toolchain-tier env exporter) and `$OCX_HOME/env.sh` sourced from the login profile. Do not implement the commands below.
 
 **Bootstrap / mixed commands** (`init`, `info`, `version`, `shell completion`) make no claims about either tier. `init` writes a fresh `ocx.toml` from nothing; `info`/`version`/`shell completion` report tool-level state.
 
@@ -296,3 +300,4 @@ Implementation lives in [`plan_cli_run_layering.md`](../state/plans/plan_cli_run
 | 2026-05-08 | Architect (Round 2) | Layer table refined (project-mutators, shell-activation, local-store-queries split out); `default`/`all` asymmetry documented; `expand_all_keyword` moved to lib; Hidden One-Way Doors section added |
 | 2026-05-15 | Architect (Opus) | **Amended by `adr_global_toolchain_tier.md`.** New **GLOBAL TIER**: `--global` (global flag on `ContextOptions`, `conflicts_with` `--project`) re-targets project-tier/mutator commands (`add`/`remove`/`lock`/`upgrade`/`pull`/`run`; `install --global` = add+lock+install+select) to `$OCX_HOME/ocx.toml`. Implicit home discovery (`home_project_path`/Tier-4) removed — the global file is reachable *only* via `--global`. Strict isolation: the global tier never composes into project resolution; `ocx run`/`ocx exec` are hermetic and never read it. Shell activation emits the global `current` set only when no project is in effect (project output supersedes on entry; no merge). |
 | 2026-05-15 | Hardening pass | Pre-release CLI name stabilization (breaking, allowed in early phase): `update`→`upgrade` (reserves `update` for the data-refresh `index update`; `upgrade` is the project-toolchain version-bump verb); `find`→`which` (path-lookup intent); top-level `info`→`about` (removes the `info` vs `package info` clash; bare `version` kept). The single-child `generate` group was removed and `shell direnv` relocated: all direnv concerns now live under a dedicated top-level `direnv` group — `direnv init` (writes `.envrc`, bare `ocx direnv` ≡ this) + `direnv export` (the stateless eval target, formerly `shell direnv`). Rationale: direnv is its own ecosystem, not a shell, so `shell` now holds only true shell integration (`env`/`completion`/`hook`/`init`). |
+| 2026-05-16 | Gate B reconciliation | **[SUPERSEDED — see `handshake_toolchain_cli.md`]** The SHELL ACTIVATION tier row (commands `shell hook`, `shell init`, `shell env`) and the global-tier `install --global` sugar are **REMOVED** from the implemented CLI. `shell` is reduced to `{completion}` only. OCI-tier primitives (`install`, `uninstall`, `select`, `exec`, `deselect`) are **MOVED** to `ocx package <verb>`. A new root `ocx env [--global] [--shell[=NAME]]` replaces both `shell env` and the global prompt-hook output as the toolchain-tier env exporter. The SHELL ACTIVATION row in the layer table below is no longer live; it remains for historical reference only. Activation is now `$OCX_HOME/env.sh` (sourced from the user's login profile via a block-marker idempotent line written by the in-repo installer). No per-prompt hook, no static `$OCX_HOME/init.<shell>`, no PATH strip — isolation by PATH precedence only. Authority: `handshake_toolchain_cli.md` §2, §4, §5; plan `plan_toolchain_cli.md` C4, C6, C7. |

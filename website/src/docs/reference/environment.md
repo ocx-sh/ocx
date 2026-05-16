@@ -36,13 +36,9 @@ The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by 
 
 ### `_OCX_APPLIED` {#ocx-applied}
 
-Internal fingerprint set by [`ocx shell hook`][cmd-shell-hook] on each successful prompt-cycle invocation and read by the next one. The value is a `v1:<sha256-hex>` token — `v1:` is a forward-compatibility prefix so future hook revisions can rotate the fingerprint format without confusing older shells, and the hex segment hashes the resolved tool set (digests, env entries, lock metadata) `shell hook` computed on its previous run.
-
-When the next `shell hook` invocation recomputes the fingerprint and finds it identical to `$_OCX_APPLIED`, it exits zero with no output — the prompt stays cheap because no exports are re-emitted. When the fingerprint differs (lock changed, group selection changed, tool set drifted on disk), the command prints fresh export lines and updates the variable.
-
-This variable is machine-managed: never set it by hand. The only legitimate user touch is the **escape hatch** — `unset _OCX_APPLIED` forces a full re-export on the next prompt, useful when debugging hook output or after manually editing `ocx.lock`.
-
-The leading underscore signals that the variable is a private contract between `ocx shell hook` invocations, following the convention used by other tool-managed shell variables (e.g. direnv's `DIRENV_*` family).
+> **REMOVED** — this variable and the per-prompt shell hook that managed it (`ocx shell hook`) have been removed. Do not set or reference `_OCX_APPLIED` in shell profiles.
+>
+> Global toolchain activation is now handled by `$OCX_HOME/env.sh`, sourced from the login profile via a block-marker idempotent line written by the installer. The file runs `eval "$(ocx env --global --shell=sh)"`. Project toolchain activation uses [`ocx direnv`][cmd-direnv].
 
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 
@@ -112,7 +108,7 @@ If neither is set, OCX uses `ocx.sh`.
 
 Selects the global toolchain tier — equivalent to the [`--global`][arg-global] CLI flag, but injectable via environment for CI and container setups where the command line is not controlled.
 
-When set to a [truthy value](#truthy-values), project-tier commands (`add`, `remove`, `lock`, `upgrade`, `pull`, `run`) and `install` target `$OCX_HOME/ocx.toml` instead of a discovered project file.
+When set to a [truthy value](#truthy-values), project-tier commands (`add`, `remove`, `lock`, `upgrade`, `pull`, `run`) target `$OCX_HOME/ocx.toml` instead of a discovered project file. (`install --global` has been removed — use `ocx add --global` instead.)
 
 ```sh
 export OCX_GLOBAL=1
@@ -124,7 +120,7 @@ This variable is **resolution-affecting**: it is forwarded to every subprocess `
 
 `OCX_GLOBAL` and [`OCX_PROJECT`](#ocx-project) are mutually exclusive — setting both is a usage error (exit 64).
 
-**Strict isolation**: the global toolchain never composes into project-tier resolution. Inside a project directory, `ocx run` and `ocx exec` are hermetic and never see global tools — the shell hook removes global tools from `PATH` entirely when a project is in scope. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
+**Strict isolation**: the global toolchain never composes into project-tier resolution. `ocx run` and `ocx exec` are hermetic and never see global tools. Isolation is enforced by PATH precedence — project tools prepend before global tools when a project toolchain is active. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
 
 ::: warning
 This variable is mostly intended for testing.
@@ -301,23 +297,15 @@ Most CI systems (GitHub Actions, GitLab CI, Travis, etc.) set this automatically
 
 ### `GITHUB_ACTIONS` {#external-github-actions}
 
-Set to `true` by [GitHub Actions][github-actions-docs] runners. Used by
-[`ocx ci export`][cmd-ci-export] to auto-detect the CI flavor. When detected,
-the command writes environment variable exports to the files specified by
-[`GITHUB_PATH`](#external-github-path) and [`GITHUB_ENV`](#external-github-env).
+Set to `true` by [GitHub Actions][github-actions-docs] runners. OCX uses this variable to suppress the update check on startup. It was previously also used by the removed `ocx ci export` command — that command has been removed; see [`ocx ci`][cmd-ci] for the replacement pattern.
 
 ### `GITHUB_PATH` {#external-github-path}
 
-Set by [GitHub Actions][github-actions-docs] to a file path.
-[`ocx ci export`][cmd-ci-export] appends `PATH` entries to this file, making
-them available in subsequent workflow steps.
+Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps may append `PATH` entries to this file to make tools available in subsequent steps. The removed `ocx ci export` command previously wrote to this file automatically; use `ocx package env --format json` with `jq` or `ocx run` instead.
 
 ### `GITHUB_ENV` {#external-github-env}
 
-Set by [GitHub Actions][github-actions-docs] to a file path.
-[`ocx ci export`][cmd-ci-export] appends non-`PATH` environment variables to
-this file using `KEY=value` syntax (or [heredoc delimiters][github-multiline-env]
-for multiline values).
+Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps may append non-`PATH` environment variables to this file using `KEY=value` syntax (or [heredoc delimiters][github-multiline-env] for multiline values). The removed `ocx ci export` command previously wrote to this file automatically; use `ocx package env --format json` with `jq` instead.
 
 ### `DOCKER_CONFIG` {#external-docker-config}
 
@@ -367,8 +355,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- commands -->
 [cmd-ref]: command-line.md
-[cmd-ci-export]: command-line.md#ci-export
-[cmd-shell-hook]: command-line.md#shell-hook
+[cmd-ci]: command-line.md#ci
+[cmd-direnv]: command-line.md#direnv
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-global]: command-line.md#global-flag

@@ -55,7 +55,7 @@ def test_launcher_exec_success(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     pkg_root = _get_package_root(ocx, pkg.short)
 
@@ -82,7 +82,7 @@ def test_launcher_exec_forwards_args(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     pkg_root = _get_package_root(ocx, pkg.short)
     extra_arg = "extra-from-launcher-exec"

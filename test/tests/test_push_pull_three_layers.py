@@ -70,7 +70,7 @@ def test_push_pull_three_layers(ocx: OcxRunner, unique_repo: str, tmp_path: Path
     )
     ocx.plain("index", "update", short)
 
-    result = ocx.json("install", short)
+    result = ocx.json("package", "install", short)
     content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)

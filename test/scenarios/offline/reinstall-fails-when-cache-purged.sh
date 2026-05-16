@@ -5,11 +5,11 @@
 #   is incomplete — never silently fall back to a network fetch.
 set -euo pipefail
 
-ocx install --select "$PKG_HELLO"
+ocx package install --select "$PKG_HELLO"
 
 rm -rf "$OCX_HOME/packages" "$OCX_HOME/blobs" "$OCX_HOME/layers"
 
-if ocx --offline exec "$PKG_HELLO" -- hello; then
+if ocx --offline package exec "$PKG_HELLO" -- hello; then
     echo "expected --offline exec to fail with empty cache" >&2
     exit 1
 fi

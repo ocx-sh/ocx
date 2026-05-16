@@ -52,7 +52,7 @@ class TestExitCodes:
         surfaces clap parse errors as `UsageError`, classifying to exit 64.
         """
         result = subprocess.run(
-            [str(ocx.binary), "install", "--not-a-real-flag", "cmake:3.28"],
+            [str(ocx.binary), "package", "install", "--not-a-real-flag", "cmake:3.28"],
             capture_output=True,
             text=True,
             env=ocx.env,
@@ -70,7 +70,7 @@ class TestExitCodes:
     def test_exit_code_65_data_error_on_invalid_identifier(self, ocx: OcxRunner) -> None:
         """Malformed identifier → IdentifierError → exit 65 (EX_DATAERR)."""
         result = subprocess.run(
-            [str(ocx.binary), "install", "not:::valid:::identifier"],
+            [str(ocx.binary), "package", "install", "not:::valid:::identifier"],
             capture_output=True,
             text=True,
             env=ocx.env,

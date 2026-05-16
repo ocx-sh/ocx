@@ -42,11 +42,11 @@ The CLI surface splits into two tiers. The split is firm.
 
 Project-tier commands resolve their project file in strict precedence order: `--global` (explicit) → `--project`/`OCX_PROJECT` (explicit) → CWD walk → None.
 
-`--global` re-targets the project file to `$OCX_HOME/ocx.toml`. Mutually exclusive with `--project` — combining both is a clap conflict (exit 2). No implicit discovery of `$OCX_HOME/ocx.toml`.
+`--global` re-targets the project file to `$OCX_HOME/ocx.toml`. Mutually exclusive with `--project` — combining both is a clap conflict (exit 64 — ocx maps clap usage errors → EX_USAGE 64). No implicit discovery of `$OCX_HOME/ocx.toml`.
 
 `--global` accepted on: `add`, `remove`, `lock`, `upgrade`, `run`, `env`. `OCX_GLOBAL` is the env equivalent.
 
-**`ocx package install --global` → clap unknown-flag error (exit 2).** `--global` is NOT on any `ocx package` subcommand.
+**`ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64).** `--global` is NOT on any `ocx package` subcommand.
 
 ---
 
@@ -100,9 +100,9 @@ Project-tier commands resolve their project file in strict precedence order: `--
 | `version` | Print version | — |
 | `about` | Print version + registry + platform + shell + home | — |
 
-### Deleted Commands (exit 2 from clap if invoked)
+### Deleted Commands (exit 64 if invoked)
 
-These commands **do not exist** in the current model. Any invocation returns clap's unrecognised-subcommand error (exit 2):
+These commands **do not exist** in the current model. Any invocation returns exit 64 (ocx maps clap usage errors → EX_USAGE 64; see `app.rs:112-119`):
 
 | Deleted command | Replacement |
 |-----------------|-------------|
@@ -153,7 +153,7 @@ Rules:
 
 ## Semantics & Gotchas
 
-- **`ocx run` semantics** — `--` mandatory, clap exit 2 if missing; default scope = `[tools]` only; `--global` = compose global toolchain env for child only, never mutates parent; `run` without `--global` never reads `$OCX_HOME/ocx.toml`; missing `ocx.toml` → exit 64; missing `ocx.lock` → exit 78.
+- **`ocx run` semantics** — `--` mandatory, exit 64 if missing (ocx maps clap usage errors → EX_USAGE 64); default scope = `[tools]` only; `--global` = compose global toolchain env for child only, never mutates parent; `run` without `--global` never reads `$OCX_HOME/ocx.toml`; missing `ocx.toml` → exit 64; missing `ocx.lock` → exit 78.
 - **`ocx env` default is JSON** — backend-first (product principle #1, handshake §3). `--format plain` → human inspection, NOT sourceable. `--shell[=NAME]` only eval-safe channel.
 - **`package env` auto-installs** — `ocx package env` uses `find_or_install_all` (unlike the deleted `shell env` which used `find_all`). Do NOT assert no-download semantics against `ocx package env`.
 - **`login`/`logout` registry optional** — falls back to `OCX_DEFAULT_REGISTRY` (default `ocx.sh`).

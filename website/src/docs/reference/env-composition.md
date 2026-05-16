@@ -26,11 +26,13 @@ Both commands are hermetic: the environment they produce is determined entirely 
 
 :::
 
-### Shell hook behavior {#strict-isolation-shell-hook}
+### PATH precedence model {#strict-isolation-shell-hook}
 
-The prompt hook (`ocx shell hook`) enforces isolation at the PATH level. When a project `ocx.toml` is in scope, the hook **removes** global tools from `PATH` entirely — not shadows them, removes them. The comment `# ocx: global toolchain suppressed` appears in the hook's output when this strip fires.
+OCX enforces isolation by **PATH precedence**, not PATH stripping. The global toolchain's `current/entrypoints/` directory sits on `PATH` at login time (via `$OCX_HOME/env.sh` sourced from the login profile). When a project toolchain is activated — via `ocx run` or `ocx direnv` — the project tools are **prepended** to `PATH`, shadowing any global tools of the same name.
 
-When no project is in scope (the CWD walk finds no `ocx.toml`), the hook emits the global `current` set. Entering a project replaces it; there is no union or composition at any point.
+There is no PATH strip, no `# ocx: global toolchain suppressed` comment, and no `_OCX_APPLIED` fingerprint. The per-prompt shell hook (`ocx shell hook`) has been removed entirely. Isolation is a static consequence of PATH ordering: project tools appear earlier in `PATH` than global tools.
+
+For `ocx direnv`, the `.envrc` evaluates [`ocx direnv export`][cmd-direnv-export] on every directory entry. This emits only the project tools' PATH entries, which [direnv](https://direnv.net/) prepends before the ambient `PATH` — global tools remain reachable for tools not declared by the project, but project-declared tools take priority.
 
 ### What "hermetic" means for `ocx run` {#strict-isolation-run}
 
@@ -67,13 +69,13 @@ The following project-tier commands accept `--global` to target `$OCX_HOME/ocx.t
 | [`ocx upgrade`][cmd-upgrade] | Advances a binding in the global file |
 | [`ocx pull`][cmd-pull] | Pre-warms packages declared by the global file |
 | [`ocx run`][cmd-run] | Composes env from the global file + its lock |
-| [`ocx install --global`][cmd-install] | Install + record in global file + advance `current` symlink (implies `--select`) |
+| [`ocx env`][cmd-env-root] | Emits composed toolchain env for the global file |
 
 ## Visibility Surfaces {#visibility-surfaces}
 
 Each OCX package declares two environment surfaces: the **interface surface** (what consumers see) and the **private surface** (what the package's own launchers see).
 
-The `--self` flag on `exec`, `run`, `env`, `shell env`, `shell profile load`, `ci export`, and `deps` switches which surface is emitted:
+The `--self` flag on `exec`, `run`, `package env`, `package exec`, and `deps` switches which surface is emitted:
 
 | `--self` | Surface emitted | Use case |
 |----------|----------------|----------|
@@ -98,12 +100,13 @@ See [In Depth — Project Toolchain → Composition order rule][in-depth-project
 <!-- commands -->
 [cmd-add]: ./command-line.md#add
 [cmd-exec]: ./command-line.md#exec
-[cmd-install]: ./command-line.md#install
+[cmd-env-root]: ./command-line.md#env-root
 [cmd-lock]: ./command-line.md#lock
 [cmd-pull]: ./command-line.md#pull
 [cmd-remove]: ./command-line.md#remove
 [cmd-run]: ./command-line.md#run
 [cmd-upgrade]: ./command-line.md#upgrade
+[cmd-direnv-export]: ./command-line.md#direnv-export
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global

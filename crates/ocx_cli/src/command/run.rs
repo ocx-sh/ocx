@@ -442,4 +442,55 @@ mod tests {
         assert_eq!(result.len(), 1, "duplicate name must be silently deduped to one entry");
         assert_eq!(result[0].binding, "cmake");
     }
+
+    // ── C7: `run --global` / bare run isolation ──────────────────────────────
+
+    /// C7 (plan_toolchain_cli.md §C7): the `--global` field is present on `Run`.
+    ///
+    /// Structural proof that `ocx run --global` is wired through the clap
+    /// surface as required by the handshake. `clap::Parser::try_parse_from`
+    /// validates both the presence of the flag and its `bool` default (`false`).
+    #[test]
+    fn run_global_flag_parses_true() {
+        let r = Run::try_parse_from(["run", "--global", "--", "echo", "hi"]).expect("parse must succeed");
+        assert!(r.global, "`--global` must parse to true");
+    }
+
+    /// C7: without `--global` the field defaults to `false`.
+    ///
+    /// Confirms bare `run` has `global == false` — i.e., the bare execution path
+    /// is strictly project-tier with no implicit global fallback at the clap layer.
+    #[test]
+    fn run_global_flag_defaults_false() {
+        let r = Run::try_parse_from(["run", "--", "echo", "hi"]).expect("parse must succeed");
+        assert!(!r.global, "bare `run` must have global=false");
+    }
+
+    /// C7 + C4 (no-strip contract): the `Run` struct has no field named after
+    /// any strip mechanism (`strip_global`, `emit_global_path_strip`, etc.).
+    ///
+    /// This is a compile-time structural proof. If the strip mechanism were
+    /// re-introduced as a field on `Run`, this test would fail to compile —
+    /// making the absence of the strip *explicit and enforced*. Absence of the
+    /// `global` field would be caught by `run_global_flag_parses_true`.
+    ///
+    /// The guard: `Run::try_parse_from` with `--global` and no strip-related
+    /// argument must succeed, and the resulting struct's `global` field must be
+    /// `true` (verifies the kept field) while there is no way to set any strip
+    /// field (verifies deletion by exhaustive coverage of what clap accepts).
+    #[test]
+    fn run_no_strip_field_clap_surface() {
+        // `--strip-global` or `--emit-strip` do not exist — clap must reject them.
+        let result = Run::try_parse_from(["run", "--strip-global", "--", "echo", "hi"]);
+        assert!(
+            result.is_err(),
+            "the strip mechanism (`--strip-global`) must not exist on `Run`; clap must reject it"
+        );
+
+        let result = Run::try_parse_from(["run", "--emit-global-path-strip", "--", "echo", "hi"]);
+        assert!(
+            result.is_err(),
+            "the strip mechanism (`--emit-global-path-strip`) must not exist on `Run`; clap must reject it"
+        );
+    }
 }

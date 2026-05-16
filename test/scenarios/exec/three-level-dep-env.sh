@@ -3,9 +3,9 @@
 # title: exec on app surfaces transitive leaf via mid (all public)
 set -euo pipefail
 
-ocx install --select "$PKG_APP"
+ocx package install --select "$PKG_APP"
 
-env_out="$(ocx exec "$PKG_APP" -- env)"
+env_out="$(ocx package exec "$PKG_APP" -- env)"
 
 for key in "$HOME_KEY_MID" "$HOME_KEY_LEAF"; do
     if ! grep -q "^${key}=" <<<"$env_out"; then

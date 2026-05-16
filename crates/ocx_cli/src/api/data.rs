@@ -3,7 +3,7 @@
 
 pub mod about;
 pub mod catalog;
-pub mod ci_export;
+// ci_export deleted (C4 — handshake §6: ocx ci removed)
 pub mod clean;
 pub mod deps;
 pub mod env;

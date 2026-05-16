@@ -65,7 +65,7 @@ def test_entrypoint_launcher_files_created_after_select(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
     entrypoints_dir = current_entrypoints(ocx, pkg)
     assert entrypoints_dir.is_dir(), (
@@ -88,7 +88,7 @@ def test_entrypoint_unix_launcher_is_executable(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
     launcher = current_entrypoints(ocx, pkg) / "hello"
     assert launcher.exists(), f"unix launcher must be generated: {launcher}"
@@ -107,8 +107,8 @@ def test_deselect_removes_current_symlink(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", "--select", pkg.short)
-    ocx.plain("deselect", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
+    ocx.plain("package", "deselect", pkg.short)
 
     current = ocx_home_symlinks(ocx, pkg) / "current"
     assert not current.exists() and not current.is_symlink(), (
@@ -121,7 +121,7 @@ def test_install_without_entrypoints_leaves_current_entrypoints_absent(
 ) -> None:
     """A package without entrypoints must not produce a current/entrypoints dir."""
     pkg = published_package
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
     entrypoints_dir = current_entrypoints(ocx, pkg)
     assert not entrypoints_dir.exists(), (
         f"current/entrypoints/ must not exist for pkg without entrypoints: {entrypoints_dir}"
@@ -191,8 +191,8 @@ def test_install_without_select_does_not_trigger_collision_check(
         tag="1.0.0",
     )
 
-    ocx.plain("install", "--select", pkg_a.short)
-    result = ocx.run("install", pkg_b.short, check=False)
+    ocx.plain("package", "install", "--select", pkg_a.short)
+    result = ocx.run("package", "install", pkg_b.short, check=False)
     assert result.returncode == 0, (
         f"install without --select must succeed even when entrypoint names collide; "
         f"got rc={result.returncode}, stderr={result.stderr.strip()}"
@@ -216,13 +216,13 @@ def test_reselect_to_package_without_entrypoints_drops_entrypoints_dir(
     )
     pkg_without = make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False)
 
-    ocx.plain("install", "--select", pkg_with.short)
+    ocx.plain("package", "install", "--select", pkg_with.short)
     entrypoints_dir = current_entrypoints(ocx, pkg_with)
     assert entrypoints_dir.is_dir(), (
         f"precondition: pkg_with must materialize current/entrypoints/: {entrypoints_dir}"
     )
 
-    ocx.plain("install", "--select", pkg_without.short)
+    ocx.plain("package", "install", "--select", pkg_without.short)
     assert not entrypoints_dir.exists(), (
         f"re-selecting to a package without entrypoints must leave current/entrypoints/ unreachable; "
         f"still present at {entrypoints_dir}"
@@ -240,7 +240,7 @@ def test_launcher_invocation_runs_target_and_forwards_args(
         bins=["hello"],
         tag="1.0.0",
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
     launcher = current_entrypoints(ocx, pkg) / "hello"
     assert launcher.exists(), f"unix launcher must exist: {launcher}"
@@ -334,9 +334,9 @@ def test_root_package_entrypoints_appear_in_self_env(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
-    env_result = ocx.json("env", pkg.short)
+    env_result = ocx.json("package", "env", pkg.short)
     path_entries = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
 
     # At least one PATH entry must contain the entrypoints/ subdirectory.
@@ -383,9 +383,9 @@ def test_synthetic_entrypoints_path_emitted_after_declared_bin(
             },
         ],
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
-    env_result = ocx.json("env", pkg.short)
+    env_result = ocx.json("package", "env", pkg.short)
     path_entries = [(i, e["value"]) for i, e in enumerate(env_result["entries"]) if e["key"] == "PATH"]
     assert path_entries, f"expected PATH entries in env output: {env_result}"
 
@@ -455,9 +455,9 @@ def test_exec_dep_launcher_via_path(
         dependencies=[dep_entry],
     )
 
-    ocx.plain("install", "--select", pkg_a.short)
+    ocx.plain("package", "install", "--select", pkg_a.short)
 
-    result = ocx.plain("exec", pkg_a.short, "--", "cmake")
+    result = ocx.plain("package", "exec", pkg_a.short, "--", "cmake")
     assert result.returncode == 0, (
         f"exec dep launcher must succeed; rc={result.returncode} stderr={result.stderr.strip()!r}"
     )
@@ -492,14 +492,14 @@ def test_exec_resolves_native_exe_shim_on_windows(
         entrypoints=["hello"],
         bins=["hello"],
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
     # PATHEXT without .CMD — irrelevant now: the launcher is a `.exe`, and
     # `.EXE` is always in the default Windows PATHEXT.
     stripped_env = copy.copy(ocx.env)
     stripped_env["PATHEXT"] = ".EXE;.BAT;.COM"
 
-    cmd = [str(ocx.binary), "exec", pkg.short, "--", "hello"]
+    cmd = [str(ocx.binary), "package", "exec", pkg.short, "--", "hello"]
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -513,7 +513,51 @@ def test_exec_resolves_native_exe_shim_on_windows(
         f"(rc={result.returncode}, stderr={result.stderr.strip()!r})"
     )
     assert pkg.marker in result.stdout, (
+<<<<<<< HEAD
         f"exec must run the entrypoint via the `.exe` shim; stdout={result.stdout!r}"
+=======
+        f"exec with stripped PATHEXT must still run the entrypoint; stdout={result.stdout!r}"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PATHEXT warning test")
+def test_install_warns_when_pathext_missing_cmd_on_windows(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """ocx install emits a warning to stderr when PATHEXT lacks .CMD on Windows.
+
+    The warning fires because install is a consumer-boundary command — it emits
+    paths that include .cmd launchers in entrypoints/, and the external shell
+    needs .CMD in PATHEXT to find them.
+    """
+    import copy
+    pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints=["hello"],
+        bins=["hello"],
+    )
+
+    stripped_env = copy.copy(ocx.env)
+    stripped_env["PATHEXT"] = ".EXE;.BAT;.COM"  # .CMD intentionally absent
+
+    cmd = [str(ocx.binary), "package", "install", "--select", pkg.short]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=stripped_env,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"install must succeed even when PATHEXT lacks .CMD "
+        f"(rc={result.returncode}, stderr={result.stderr.strip()!r})"
+    )
+    assert "PATHEXT" in result.stderr, (
+        f"install must warn about missing .CMD in PATHEXT; stderr={result.stderr.strip()!r}"
+>>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
     )
 
 
@@ -552,10 +596,10 @@ def test_env_two_roots_with_same_entrypoint_name_errors(
         tag="1.0.0",
     )
 
-    ocx.plain("install", pkg_a.short)
-    ocx.plain("install", pkg_b.short)
+    ocx.plain("package", "install", pkg_a.short)
+    ocx.plain("package", "install", pkg_b.short)
 
-    result = ocx.run("env", pkg_a.short, pkg_b.short, check=False)
+    result = ocx.run("package", "env", pkg_a.short, pkg_b.short, check=False)
     assert result.returncode == 65, (
         f"ocx env across colliding roots must exit 65 (DataError); "
         f"got rc={result.returncode}, stderr={result.stderr.strip()!r}"
@@ -593,10 +637,10 @@ def test_exec_two_roots_with_same_entrypoint_name_errors(
         tag="1.0.0",
     )
 
-    ocx.plain("install", pkg_a.short)
-    ocx.plain("install", pkg_b.short)
+    ocx.plain("package", "install", pkg_a.short)
+    ocx.plain("package", "install", pkg_b.short)
 
-    result = ocx.run("exec", pkg_a.short, pkg_b.short, "--", "cmake", check=False)
+    result = ocx.run("package", "exec", pkg_a.short, pkg_b.short, "--", "cmake", check=False)
     assert result.returncode == 65, (
         f"ocx exec across colliding roots must exit 65 (DataError); "
         f"got rc={result.returncode}, stderr={result.stderr.strip()!r}"
@@ -646,7 +690,7 @@ def test_install_intra_closure_collision_aborts_before_candidate_symlink(
         dependencies=[dep_entry],
     )
 
-    result = ocx.run("install", "--select", pkg_b.short, check=False)
+    result = ocx.run("package", "install", "--select", pkg_b.short, check=False)
     assert result.returncode == 65, (
         f"install --select with intra-closure collision must exit 65 (DataError); "
         f"got rc={result.returncode}, stderr={result.stderr.strip()!r}"
@@ -746,7 +790,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
         dependencies=[a_dep_entry, b_dep_entry],
     )
 
-    result = ocx.run("install", "--select", pkg_root.short, check=False)
+    result = ocx.run("package", "install", "--select", pkg_root.short, check=False)
     assert result.returncode == 65, (
         f"install --select with transitive collision must exit 65 (DataError); "
         f"got rc={result.returncode}, stderr={result.stderr.strip()!r}"
@@ -836,7 +880,7 @@ def test_suite_a_entrypoint_collision_gated_on_interface_projection(
         dependencies=[dep_b],
     )
 
-    result = ocx.run("install", "--select", pkg_r.short, check=False)
+    result = ocx.run("package", "install", "--select", pkg_r.short, check=False)
 
     if expect_collision:
         assert result.returncode == 65, (
@@ -941,7 +985,7 @@ def test_suite_e_mixed_edge_private_seals_c_from_interface_no_collision(
     )
 
     # Install must succeed: C is sealed from interface projection, only D is visible.
-    result = ocx.run("install", "--select", pkg_root.short, check=False)
+    result = ocx.run("package", "install", "--select", pkg_root.short, check=False)
     assert result.returncode == 0, (
         "Mixed-edge suite E: A→C(private) seals C from interface projection; "
         "install must succeed (no collision in interface surface); "

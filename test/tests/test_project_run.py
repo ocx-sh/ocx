@@ -950,7 +950,7 @@ def test_exec_unaffected_by_project_presence(ocx: OcxRunner, tmp_path: Path) -> 
     assert lock.returncode == EXIT_SUCCESS, lock.stderr
 
     # ocx exec must still accept the OCI identifier form, not a binding name.
-    result = _run_cmd(ocx, project, "exec", f"{repo}:{tag}", "--", "hello")
+    result = _run_cmd(ocx, project, "package", "exec", f"{repo}:{tag}", "--", "hello")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx exec with OCI identifier in project dir failed: "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"

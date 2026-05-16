@@ -159,7 +159,7 @@ def test_remote_index_list_does_not_write_local_tags(
     # Populate the local tag store via install — this is the legitimate
     # writer; we want to assert the query commands below leave the result
     # byte-identical.
-    ocx.json("install", pkg.short)
+    ocx.json("package", "install", pkg.short)
 
     tags_root = Path(ocx.env["OCX_HOME"]) / "tags"
     before = sorted(

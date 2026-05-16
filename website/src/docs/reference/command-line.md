@@ -120,7 +120,7 @@ variable; the flag wins when both are set.
 ### `--jobs` {#arg-jobs}
 
 Caps the number of root packages pulled in parallel. Applies to every command
-that fans out through `pull_all` — `install`, `pull`, `package pull`, `exec`
+that fans out through `pull_all` — `package install`, `pull`, `package pull`, `package exec`
 (when it auto-installs missing tools), and the env-composition path of `env`.
 
 The cap acts on the **outer dispatch only**: transitive dependencies and OCI
@@ -176,17 +176,13 @@ The same override can be set persistently via the [`OCX_PROJECT`][env-project] e
 
 Selects `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) as the project file for project-tier and mutator commands.
 
-Accepted on: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, and `install`.
+Accepted on: `add`, `remove`, `lock`, `upgrade`, `pull`, and `run`.
 
 `--global` is mutually exclusive with `--project`. Passing both — whether as flags or via the `OCX_GLOBAL` / `OCX_PROJECT` environment variables — exits with code 64 (`UsageError`). The global toolchain never composes into project resolution; see [strict isolation][env-composition-strict-isolation] for the full hermetic contract.
 
 ::: warning No implicit home discovery
 There is no implicit fallback to `$OCX_HOME/ocx.toml` when no project is found in the CWD walk. You must pass `--global` explicitly to target the global file. The prior automatic home-tier discovery has been removed.
 :::
-
-**`install --global` implies `--select`**
-
-`ocx install --global <pkg>` is sugar for: add the binding to the global file → re-lock → install → select. Because a tool must be a `current` symlink to appear on the global PATH, `--global` implies `--select` and the flag cannot be omitted.
 
 **Strict isolation**
 
@@ -264,7 +260,7 @@ esac
 ### `--candidate` / `--current` {#path-resolution}
 
 The `--candidate` and `--current` flags are available on commands that resolve a package's
-location on disk, for example [`env`](#env), [`which`](#which), or [`shell env`](#shell-env).
+location on disk, for example [`package env`](#package-env), [`which`](#which), or [`exec`](#exec).
 
 Every mode returns a **package root** — the directory that contains the package's `content/` and
 `entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package
@@ -467,16 +463,18 @@ myapp:1.0 → ocx.sh/cmake:3.28 → ocx.sh/gcc:13
 
 ### `deselect` {#deselect}
 
+> **Moved to `ocx package deselect`** — exits 64 if invoked as bare `ocx deselect`. See [`package deselect`](#package-deselect) for the current form.
+
 Removes the current-version symlink for one or more packages.
 
-The package is deselected but not uninstalled: its [candidate symlink][fs-symlinks] and object-store content remain intact. To also remove the installed files, use [`uninstall`](#uninstall).
+The package is deselected but not uninstalled: its [candidate symlink][fs-symlinks] and object-store content remain intact. To also remove the installed files, use [`package uninstall`](#package-uninstall).
 
 When the deselected package declares [entry points][guide-entry-points], the launchers stop being reachable through `current/entrypoints/` as soon as the `current` symlink is removed. The symlink removal is idempotent — an already-absent link is not an error.
 
 **Usage**
 
 ```shell
-ocx deselect <PACKAGE>...
+ocx package deselect <PACKAGE>...
 ```
 
 **Arguments**
@@ -487,9 +485,63 @@ ocx deselect <PACKAGE>...
 
 - `-h`, `--help`: Print help information.
 
-### `env` {#env}
+### `env` (root — toolchain-tier) {#env-root}
 
-Print the resolved environment variables for one or more packages.
+Export the composed toolchain environment for the active project or global toolchain.
+
+This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved tool set. The default output is **JSON** (machine-readable envelope `{"entries": [...]}`). Use `--shell` to get eval-safe shell export lines instead — that is the only form safe to pass to `eval`.
+
+`--shell` requires the equals-form (`--shell=bash`, not `--shell bash`) to prevent shell injection through unquoted positional tokens.
+
+**Usage**
+
+```shell
+ocx env [OPTIONS]
+```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--global` | — | Target `$OCX_HOME/ocx.toml` (global toolchain). Without this flag, the nearest `ocx.toml` in the CWD walk is used. | off |
+| `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect instead of JSON. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) defaults to `sh`. | *(unset — JSON output)* |
+| `--format` | — | `json` (default for this command) or `plain` (aligned table). `plain` output is not eval-safe. | `json` |
+| `-h`, `--help` | | Print help information. | — |
+
+**Examples**
+
+```shell
+# JSON output (machine-readable, default):
+ocx env
+
+# Eval-safe export for the current project toolchain (bash):
+eval "$(ocx env --shell=bash)"
+
+# Eval-safe export for the global toolchain (POSIX sh):
+eval "$(ocx env --global --shell=sh)"
+
+# Sourced from $OCX_HOME/env.sh (written by the installer):
+eval "$(ocx env --global --shell=sh)"
+```
+
+::: warning Plain output is not sourceable
+`ocx env --format plain` (or `ocx env` without `--shell`) prints an aligned table or JSON document — neither form is eval-safe. The only eval-safe channel is `--shell[=NAME]`.
+:::
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success. |
+| 64 | `--shell NAME` passed as two tokens (use `--shell=NAME`); or `--global` combined with `--project`. |
+| 65 | `ocx.lock` is stale — run `ocx lock`. |
+| 78 | `ocx.toml` or `ocx.lock` parse error. |
+
+---
+
+### `env` (package-tier — `ocx package env`) {#env}
+
+Print the resolved environment variables for one or more OCI-tier packages.
 
 Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
 JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
@@ -499,10 +551,12 @@ If a package declares [dependencies][ug-dependencies], their environment variabl
 In the default mode, packages are auto-installed if not already available locally (including transitive dependencies).
 See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
 
+For the full `ocx package env` entry, see [`package env`](#package-env).
+
 **Usage**
 
 ```shell
-ocx env [OPTIONS] <PACKAGE>...
+ocx package env [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
@@ -517,6 +571,8 @@ ocx env [OPTIONS] <PACKAGE>...
 - `-h`, `--help`: Print help information.
 
 ### `exec` {#exec}
+
+> **Moved to `ocx package exec`** — exits 64 if invoked as bare `ocx exec`. See [`package exec`](#package-exec) for the current form.
 
 Executes a command within the environment of one or more packages.
 
@@ -637,7 +693,7 @@ ocx direnv init [OPTIONS]
 
 #### `export` {#direnv-export}
 
-Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints **bash** export lines for the resolved environment. Unlike [`shell hook`](#shell-hook), this command does not consult or update `_OCX_APPLIED` — it emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)). It is what the generated `.envrc` evaluates; you do not normally type it by hand.
+Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, looks up every default-group tool in the local object store, and prints **bash** export lines for the resolved environment. It emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)). It is what the generated `.envrc` evaluates; you do not normally type it by hand.
 
 Output is always bash. [direnv](https://direnv.net/) sources `.envrc` files in a bash sub-shell regardless of the user's interactive shell, then translates the resulting environment to the interactive shell internally via `direnv export <shell>`. Programs invoked via `eval` from `.envrc` therefore have to emit bash — there is no shell-dialect option on this command.
 
@@ -768,14 +824,16 @@ ocx init
 
 ### `install` {#install}
 
-Downloads and installs one or more packages into the local object store.
+> **Moved to `ocx package install`** — exits 64 if invoked as bare `ocx install`. See [`package install`](#package-install) for the current form.
+
+Downloads and installs one or more OCI-tier packages into the local object store.
 
 Installs packages into the [object store](../user-guide.md#file-structure-packages) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
 
 **Usage**
 
 ```shell
-ocx install [OPTIONS] <PACKAGE>...
+ocx package install [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
@@ -784,9 +842,8 @@ ocx install [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `--global`: Target `$OCX_HOME/ocx.toml` as the global toolchain file. Implies `--select` — the resolved package is also made `current` so it appears on the global PATH. Auto-creates `$OCX_HOME/ocx.toml` when absent. Mutually exclusive with `--project`.
 - `-p`, `--platform`: Target platforms to consider.
-- `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current` or `ocx shell env --current`.
+- `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current`.
 - `-h`, `--help`: Print help information.
 
 
@@ -1200,6 +1257,8 @@ ocx remove [OPTIONS] <IDENTIFIER>
 
 ### `select` {#select}
 
+> **Moved to `ocx package select`** — exits 64 if invoked as bare `ocx select`. See [`package select`](#package-select) for the current form.
+
 Selects one or more packages as the current version by updating the [current symlink](../user-guide.md#path-resolution).
 
 Each package is resolved using the [selected index](../user-guide.md#indices-selected).
@@ -1208,7 +1267,7 @@ No downloading is performed — the package must already be installed.
 **Usage**
 
 ```shell
-ocx select [OPTIONS] <PACKAGE>...
+ocx package select [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
@@ -1222,7 +1281,7 @@ ocx select [OPTIONS] <PACKAGE>...
 
 
 ::: tip
-`ocx install --select` installs and selects in one step.
+`ocx package install --select` installs and selects in one step.
 :::
 
 See [path resolution modes](../user-guide.md#path-resolution) for how the `current` symlink is used downstream.
@@ -1241,36 +1300,13 @@ The second gate is **at consumption time**, invoked whenever `ocx env` or `ocx e
 
 #### `hook` {#shell-hook}
 
-Stateful prompt-hook entry point for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, walks the actually-installed default-group tools, and emits shell export lines only when the resolved set has changed since the last invocation. The fingerprint that drives the fast path lives in the `_OCX_APPLIED` environment variable (a `v1:<sha256-hex>` token); when the fingerprint matches the previous invocation's value, the command exits 0 with no output.
-
-The command is invoked from the shell's prompt-hook mechanism — see [`ocx shell init`](#shell-init) for the per-shell wiring snippet. It never contacts the network and never installs missing tools; tools that are declared in the lock but not present in the object store produce a one-line stderr note ("# ocx: cmake not installed; run `ocx pull` to fetch") and are skipped.
-
-**Usage**
-
-```shell
-ocx shell hook [OPTIONS]
-```
-
-**Options**
-
-- `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
-- `-h`, `--help`: Print help information.
-
-**Exit codes**
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success (no project, fast path, or fresh export emitted). |
-| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
-| 74 | I/O error during resolution. |
-| 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
-
-Shell-specific export emission, completion script generation, and project-toolchain hooks.
-
-`shell env` prints export statements meant for `eval`. `shell completion` emits a completion script for sourcing into the running shell. `shell hook` emits exports for the resolved project toolchain. `shell init` prints the per-shell snippet that wires `shell hook` into the shell's prompt cycle. (direnv integration moved to the top-level [`direnv`](#direnv) command.)
+> **REMOVED** — exits 64. The per-prompt hook model has been replaced by the `$OCX_HOME/env.sh` activation model. See [handshake_toolchain_cli.md §4] for the current activation contract. The `_OCX_APPLIED` fingerprint variable and the per-prompt hook are both gone.
+>
+> Use [`ocx direnv`](#direnv) for project-toolchain activation, or `eval "$(ocx env --global --shell=sh)"` for global toolchain activation.
 
 #### `env` {#shell-env}
 
+<<<<<<< HEAD
 Generate shell export statements for the environment variables declared by one or more packages.
 Intended to be evaluated by the shell:
 
@@ -1298,6 +1334,11 @@ ocx shell env [OPTIONS] <PACKAGE>...
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
 
+=======
+> **REMOVED** — exits 64. The `ocx shell env` command has been removed.
+>
+> For eval-safe shell export of package env, use the root [`ocx env --shell=<SHELL>`](#env-root) command (toolchain-tier) or [`ocx package env`](#package-env) for OCI-tier packages.
+>>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 
 #### `completion` {#shell-completion}
 
@@ -1341,39 +1382,22 @@ ocx shell completion --shell powershell | Out-String | Invoke-Expression
 
 #### `init` {#shell-init}
 
-Prints a shell-specific init snippet that wires [`ocx shell hook`](#shell-hook) into the shell's prompt cycle. The snippet is a pure code generator — it never reads the project, never touches disk, and never contacts the network. Source the output once from your shell rc (or pipe directly via `>>`), and every subsequent prompt re-evaluates the project toolchain.
-
-The exact mechanism differs per shell: Bash inserts into `PROMPT_COMMAND`, Zsh registers a `precmd` hook via `add-zsh-hook`, Fish defines a function `--on-event fish_prompt`, and Nushell writes a closure into `$env.config.hooks.pre_prompt` (saved to `$env.NU_VENDOR_AUTOLOAD_DIR/ocx.nu`). All four are idempotent — sourcing the snippet repeatedly does not duplicate the hook.
-
-**Usage**
-
-```shell
-ocx shell init --shell <SHELL>
-```
-
-**Options**
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--shell <SHELL>` | `-s` | Target shell. Required. Accepts `bash`, `zsh`, `fish`, `nushell`. Other recognized shells (`ash`, `ksh`, `dash`, `elvish`, `powershell`, `batch`) print a `# ocx shell init does not yet ship a prompt-hook snippet for this shell` placeholder. |
-| `--help` | `-h` | Print help information. |
-
-**Exit codes**
-
-| Code | Meaning |
-|------|---------|
-| 0 | Snippet printed (or placeholder comment for unsupported shells — always 0; the command is pure code generation). |
+> **REMOVED** — exits 64. The `ocx shell init` command has been removed along with the per-prompt hook model.
+>
+> Global toolchain activation is now handled by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile. The file runs `eval "$(ocx env --global --shell=sh)"`. For project toolchain activation, use [`ocx direnv`](#direnv).
 
 ### `uninstall` {#uninstall}
 
+> **Moved to `ocx package uninstall`** — exits 64 if invoked as bare `ocx uninstall`. See [`package uninstall`](#package-uninstall) for the current form.
+
 Removes the installed candidate for one or more packages.
 
-Removes the [candidate symlink](../user-guide.md#path-resolution) and its back-reference. Object-store content is preserved unless `--purge` is given. To also remove the current symlink, pass `--deselect` or run [`deselect`](#deselect) separately. To remove all unreferenced objects at once, use [`clean`](#clean).
+Removes the [candidate symlink](../user-guide.md#path-resolution) and its back-reference. Object-store content is preserved unless `--purge` is given. To also remove the current symlink, pass `--deselect` or run [`package deselect`](#package-deselect) separately. To remove all unreferenced objects at once, use [`clean`](#clean).
 
 **Usage**
 
 ```shell
-ocx uninstall [OPTIONS] <PACKAGE>...
+ocx package uninstall [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
@@ -1382,7 +1406,7 @@ ocx uninstall [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution). Equivalent to running `ocx deselect` after uninstall — see [`deselect`](#deselect) for the full cleanup behavior.
+- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution). Equivalent to running `ocx package deselect` after uninstall — see [`package deselect`](#package-deselect) for the full cleanup behavior.
 - `--purge`: Delete the object from the store when no other references remain after uninstall.
 - `-h`, `--help`: Print help information.
 
@@ -1398,8 +1422,13 @@ ocx version
 
 ### `ci` {#ci}
 
+> **REMOVED** — exits 64. The `ocx ci` command group has been removed. `ocx ci export` is a deferred extension point; it is not available in the current release.
+>
+> For CI workflows, use [`ocx pull`](#pull) (project-tier) or [`ocx package pull`](#package-pull) (OCI-tier) to pre-warm the object store, then use [`ocx run`](#run) or [`ocx package env`](#package-env) to compose the environment. For [GitHub Actions][github-actions-docs], write the `ocx package env --format json` output through `jq` to `$GITHUB_PATH` and `$GITHUB_ENV` manually, or use `ocx run -- <cmd>` to execute within the composed env directly.
+
 #### `export` {#ci-export}
 
+<<<<<<< HEAD
 Exports the environment variables declared by one or more packages directly into a CI system's
 runtime files. For [GitHub Actions][github-actions-docs], this appends path entries to
 `$GITHUB_PATH` and other variables to `$GITHUB_ENV`.
@@ -1447,6 +1476,9 @@ ocx package pull cmake:3.28
 ocx ci export cmake:3.28
 ```
 :::
+=======
+> **REMOVED** — exits 64. See the [`ci`](#ci) section above.
+>>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 
 ### `package` {#package}
 
@@ -1752,6 +1784,169 @@ ocx package info [OPTIONS] <IDENTIFIER>
 - `--save-logo <PATH>`: Save the logo to a file or directory.
 - `-h`, `--help`: Print help information.
 
+#### `install` {#package-install}
+
+Downloads and installs one or more packages into the local object store.
+
+Installs packages into the [object store][fs-objects] and creates a [candidate symlink][fs-symlinks] for each package. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
+
+This is the OCI-tier install command. For project-tier installs driven by `ocx.toml`, use [`ocx add`](#add).
+
+**Usage**
+
+```shell
+ocx package install [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to install.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `-p`, `--platform` | | Target platforms to consider. Defaults to the current platform. |
+| `-s`, `--select` | | After installing, update the [current symlink][fs-symlinks] for each package to point to the newly installed version. |
+| `-h`, `--help` | | Print help information. |
+
+::: warning Windows: `PATHEXT` must include `.CMD`
+On Windows, `package install` prints a stderr warning when the host shell's `PATHEXT` is missing `.CMD`. Generated entrypoint launchers are `.cmd` files and require `PATHEXT` to advertise that extension before bare-name lookup (e.g. `cmake`) can find them.
+:::
+
+#### `uninstall` {#package-uninstall}
+
+Removes the installed candidate for one or more packages.
+
+Removes the [candidate symlink][fs-symlinks] and its back-reference. Object-store content is preserved unless `--purge` is given. To also remove the current symlink, pass `--deselect` or run [`package deselect`](#package-deselect) separately. To remove all unreferenced objects at once, use [`clean`](#clean).
+
+**Usage**
+
+```shell
+ocx package uninstall [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to uninstall.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `-d`, `--deselect` | | Also remove the [current symlink][fs-symlinks]. Equivalent to running `ocx package deselect` after uninstall. |
+| `--purge` | | Delete the object from the store when no other references remain after uninstall. |
+| `-h`, `--help` | | Print help information. |
+
+#### `select` {#package-select}
+
+Selects one or more packages as the current version by updating the [current symlink][fs-symlinks].
+
+No downloading is performed — the package must already be installed.
+
+**Usage**
+
+```shell
+ocx package select [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to select.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `-p`, `--platform` | | Target platforms to consider. |
+| `-h`, `--help` | | Print help information. |
+
+::: tip
+`ocx package install --select` installs and selects in one step.
+:::
+
+#### `deselect` {#package-deselect}
+
+Removes the current-version symlink for one or more packages.
+
+The package is deselected but not uninstalled: its [candidate symlink][fs-symlinks] and object-store content remain intact. The symlink removal is idempotent — an already-absent link is not an error.
+
+**Usage**
+
+```shell
+ocx package deselect <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to deselect.
+
+**Options**
+
+- `-h`, `--help`: Print help information.
+
+#### `exec` {#package-exec}
+
+Executes a command within the environment of one or more OCI-tier packages.
+
+This is the OCI-tier equivalent of the root [`exec`](#exec) command. Identifiers are OCI references (e.g. `cmake:3.28`), resolved through the index and auto-installed when missing. For project-tier execution driven by `ocx.toml`, use [`ocx run`](#run).
+
+**Usage**
+
+```shell
+ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
+```
+
+**Arguments**
+
+- `<PACKAGES>`: OCI identifiers to resolve (e.g. `cmake:3.28`).
+- `<COMMAND>`: The command to execute within the package environment.
+- `[ARGS...]`: Arguments to pass to the command.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `-p`, `--platform` | | Target platforms to consider. |
+| `--clean` | | Start with a clean environment; only package-declared variables and `OCX_*` config vars reach the child. |
+| `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
+| `-h`, `--help` | | Print help information. |
+
+#### `env` {#package-env}
+
+Print the resolved environment variables for one or more OCI-tier packages.
+
+Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
+JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
+
+If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
+
+In the default mode, packages are auto-installed if not already available locally (including transitive dependencies).
+See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
+
+**Usage**
+
+```shell
+ocx package env [OPTIONS] <PACKAGE>...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package identifiers to resolve the environment for.
+
+**Options**
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `-p`, `--platform` | | Target platforms to consider. |
+| `--candidate`, `--current` | | Path resolution mode — see [Path Resolution](#path-resolution). |
+| `--self` | | Self view: emits `private` + `public` entries. Default: consumer view (`public` + `interface`). |
+| `-h`, `--help` | | Print help information. |
+
+::: info Windows: synthetic `PATHEXT ⊳ .CMD`
+On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the host shell's `PATHEXT` does not already include it. Generated entrypoint launchers are `.cmd` files; this lets callers that adopt the printed env find launchers by bare name without further configuration.
+:::
+
 <!-- external -->
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
@@ -1805,10 +2000,23 @@ ocx package info [OPTIONS] <IDENTIFIER>
 [cmd-exec-self]: #exec
 [cmd-exec-clean]: #exec
 
+<<<<<<< HEAD
 <!-- global flags (package-inspect) -->
 [arg-offline]: #arg-offline
 [arg-remote]: #arg-remote
 [arg-format]: #arg-format
+=======
+<!-- commands (package group) -->
+[cmd-package-install]: #package-install
+[cmd-package-uninstall]: #package-uninstall
+[cmd-package-select]: #package-select
+[cmd-package-deselect]: #package-deselect
+[cmd-package-exec]: #package-exec
+[cmd-package-env]: #package-env
+
+<!-- commands (root env) -->
+[cmd-env-root]: #env-root
+>>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 
 <!-- authoring -->
 [authoring-testing]: ../authoring/testing.md

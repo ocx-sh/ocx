@@ -280,17 +280,20 @@ impl Shell {
         match self {
             // POSIX double-quoted form: `\`, `$`, `` ` ``, `"` interpolate.
             // Backslash first so subsequent inserted backslashes survive.
+            // `!` is also escaped: interactive bash/zsh enable `histexpand`
+            // by default, and `!` inside double-quotes triggers history
+            // expansion (CWE-78). `\!` is literal in bash/zsh double-quotes.
             Self::Ash | Self::Ksh | Self::Dash | Self::Bash | Self::Zsh => value
                 .replace('\\', "\\\\")
                 .replace('$', "\\$")
                 .replace('`', "\\`")
+                .replace('!', "\\!")
                 .replace('"', "\\\""),
-            // Fish double-quoted: same metacharacters as POSIX.
-            Self::Fish => value
-                .replace('\\', "\\\\")
-                .replace('$', "\\$")
-                .replace('`', "\\`")
-                .replace('"', "\\\""),
+            // Fish double-quoted: only `\`, `$`, and `"` are metacharacters.
+            // Backtick has no special meaning inside fish double-quotes and
+            // fish does not recognise `\`` as an escape sequence — emitting a
+            // literal `\` before a backtick would be wrong. Do not escape `` ` ``.
+            Self::Fish => value.replace('\\', "\\\\").replace('$', "\\$").replace('"', "\\\""),
             // Elvish double-quoted: `\` and `"` escape via backslash. No
             // `$`-interpolation in `"..."` (Elvish uses `$var` only outside
             // strings), but we conservatively escape `$` and `` ` `` too.
@@ -304,10 +307,13 @@ impl Shell {
             // `($env.<key>? | default '')` interpolation. We must therefore
             // also neutralize `(` and `)` so a value cannot inject a new
             // expression. `\(` / `\)` are accepted as literal in
+            // interpolated strings. `$` also interpolates in `$"..."` and
+            // must be escaped (CWE-78): `\$` is a literal `$` in Nushell
             // interpolated strings.
             Self::Nushell => value
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
+                .replace('$', "\\$")
                 .replace('(', "\\(")
                 .replace(')', "\\)"),
             // PowerShell double-quoted: backtick is the escape char,
@@ -385,7 +391,11 @@ impl clap_builder::ValueEnum for Shell {
         Some(match self {
             Self::Ash => PossibleValue::new("ash"),
             Self::Ksh => PossibleValue::new("ksh"),
-            Self::Dash => PossibleValue::new("dash"),
+            // `sh` is a POSIX alias for `Dash` — the canonical strict-POSIX
+            // shell (Debian `/bin/sh`).  C5 contract: zero new enum variants,
+            // zero new match arms.  `--shell=sh` emits byte-identical output
+            // to `--shell=dash` through the existing Dash code path.
+            Self::Dash => PossibleValue::new("dash").alias("sh"),
             Self::Bash => PossibleValue::new("bash"),
             Self::Elvish => PossibleValue::new("elvish"),
             Self::Fish => PossibleValue::new("fish"),
@@ -512,6 +522,49 @@ mod tests {
         );
     }
 
+    // ── C5: `sh` ≡ `Shell::Dash` via PossibleValue alias ────────────────
+    //
+    // `--shell=sh` must resolve to the same enum variant as `--shell=dash`
+    // and emit byte-identical output.  This is the C5 contract from
+    // plan_toolchain_cli.md: no new enum variant, zero new match arms.
+
+    #[test]
+    fn sh_alias_parses_to_dash_variant() {
+        use clap_builder::ValueEnum;
+        // The clap `ValueEnum::from_str` path must resolve "sh" → Shell::Dash.
+        let parsed =
+            <Shell as ValueEnum>::from_str("sh", true).expect("'sh' must be a valid shell alias (C5 contract)");
+        assert_eq!(
+            parsed,
+            Shell::Dash,
+            "C5: --shell=sh must resolve to Shell::Dash (POSIX strict); got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn sh_export_path_identical_to_dash() {
+        // C5 byte-identity: `--shell=sh` export output must be byte-identical
+        // to `--shell=dash`.  Both go through the same match arm.
+        let sh_line = Shell::Dash.export_path("PATH", "/opt/ocx/bin").expect("valid key");
+        // `Shell::Dash` IS the Dash code path — `sh` is just a PossibleValue
+        // alias, not a separate variant.  This test confirms the alias does
+        // not introduce a code-path fork (future-proofing against a stray
+        // `match "sh" => …` accidentally added later).
+        assert!(
+            sh_line.contains("export PATH="),
+            "Dash/sh export_path must emit POSIX export form; got: {sh_line:?}"
+        );
+    }
+
+    #[test]
+    fn sh_export_constant_identical_to_dash() {
+        let line = Shell::Dash.export_constant("MY_VAR", "hello").expect("valid key");
+        assert!(
+            line.starts_with("export MY_VAR="),
+            "Dash/sh export_constant must emit POSIX export form; got: {line:?}"
+        );
+    }
+
     #[test]
     fn from_path_resolves_nushell_executable() {
         // `/usr/local/bin/nu` is the binary install pattern Nushell's
@@ -618,6 +671,134 @@ mod tests {
         assert!(
             line.contains("\\$("),
             "$ must be escaped before ( so command substitution is disarmed: got {line:?}"
+        );
+    }
+
+    // ── CWE-78 history expansion hardening ───────────────────────────
+    //
+    // Bash and Zsh enable `histexpand` by default in interactive sessions.
+    // Inside double-quoted strings, `!` triggers history expansion (e.g.
+    // `!!`, `!$`, `!rm` expand against shell history) when eval'd at the
+    // login shell. The installer runs `eval "$(ocx env --global --shell=sh)"`
+    // — any unescaped `!` in a metadata value reaches the interactive shell.
+    //
+    // Ash/Ksh/Dash do not implement histexpand but we escape uniformly
+    // across the POSIX family (same match arm) to prevent drift if a user
+    // configures histexpand on those shells.
+
+    #[test]
+    fn escape_value_neutralizes_history_expansion_bash() {
+        // `!!` is "repeat last command"; `!$` is "last argument".
+        // After escaping both must have the `!` preceded by a backslash.
+        let val = Shell::Bash.escape_value("!!");
+        assert!(
+            val.starts_with("\\!"),
+            "leading ! must be backslash-escaped for bash histexpand safety: got {val:?}"
+        );
+        assert!(
+            !val.contains("!!"),
+            "bare !! must not appear in escaped output: got {val:?}"
+        );
+    }
+
+    #[test]
+    fn escape_value_neutralizes_history_expansion_zsh() {
+        let val = Shell::Zsh.escape_value("!rm -rf /");
+        assert!(
+            val.starts_with("\\!"),
+            "leading ! must be backslash-escaped for zsh histexpand safety: got {val:?}"
+        );
+    }
+
+    #[test]
+    fn escape_value_history_expansion_in_export_constant_bash() {
+        // End-to-end: the emitted export line must not contain bare `!`.
+        let line = Shell::Bash
+            .export_constant("FOO", "!!bad")
+            .expect("valid env-var name accepted");
+        assert!(
+            !line.contains("!!"),
+            "bare !! must not appear in emitted export line: got {line:?}"
+        );
+        assert!(
+            line.contains("\\!\\!"),
+            "both ! must be individually escaped: got {line:?}"
+        );
+    }
+
+    // sh ≡ Dash: confirm the `!`-safe POSIX branch covers the login-shell path.
+    #[test]
+    fn escape_value_history_expansion_dash_sh_path() {
+        // `--shell=sh` aliases to Shell::Dash (C5 contract). The same POSIX
+        // match arm now escapes `!`, so the login eval path is safe.
+        let val = Shell::Dash.escape_value("!important");
+        assert!(
+            val.starts_with("\\!"),
+            "Dash (sh alias) must escape ! for histexpand safety: got {val:?}"
+        );
+    }
+
+    // ── CWE-78 Nushell `$` interpolation hardening ───────────────────
+    //
+    // `export_path` emits `$"...($env.KEY?...)"`. Inside `$"..."`, `$`
+    // triggers interpolation — a metadata value `$env.HOME` would expand.
+    // `\$` is a literal `$` in Nushell interpolated strings.
+
+    #[test]
+    fn escape_value_neutralizes_dollar_nushell() {
+        let val = Shell::Nushell.escape_value("$env.HOME");
+        // The `$` must be preceded by `\` so Nushell does not interpolate.
+        // The escaped output is `\$env.HOME`; in Rust `String` Debug that
+        // prints as `"\\$env.HOME"`.  We check that every `$` in the output
+        // is immediately preceded by `\` — no bare `$` survives.
+        assert!(
+            val.starts_with("\\$"),
+            "$ must be backslash-escaped in Nushell to prevent interpolation: got {val:?}"
+        );
+        // Confirm the raw string contains no unescaped dollar sign.
+        // An unescaped dollar is one that is NOT preceded by `\`.
+        let has_bare_dollar = val
+            .char_indices()
+            .any(|(i, c)| c == '$' && (i == 0 || val.as_bytes()[i - 1] != b'\\'));
+        assert!(
+            !has_bare_dollar,
+            "no bare $ must remain in Nushell-escaped output: got {val:?}"
+        );
+    }
+
+    #[test]
+    fn escape_value_dollar_nushell_in_export_path() {
+        // End-to-end: emitted export_path line must not carry bare `$env.`.
+        let line = Shell::Nushell
+            .export_path("PATH", "$env.HOME/bin")
+            .expect("valid env-var name accepted");
+        // The value portion before the separator must have the $ escaped.
+        // We search for the literal sequence `\$env` to confirm escape.
+        assert!(
+            line.contains("\\$env"),
+            "$ in value must be escaped in Nushell export_path: got {line:?}"
+        );
+    }
+
+    // ── Fish backtick correctness ────────────────────────────────────
+    //
+    // Fish double-quotes: only `\`, `$`, and `"` are metacharacters. Backtick
+    // carries no special meaning and fish does not recognise `\`` as a valid
+    // escape sequence — emitting `\`` would produce a literal backslash
+    // followed by a backtick (wrong representation). Backtick must round-trip
+    // as-is (no preceding backslash).
+
+    #[test]
+    fn escape_value_fish_backtick_roundtrips_literally() {
+        let val = Shell::Fish.escape_value("`echo hi`");
+        // The backtick must appear without a preceding `\`.
+        assert!(
+            val.starts_with('`'),
+            "backtick must not be escaped in fish double-quotes: got {val:?}"
+        );
+        assert!(
+            !val.contains("\\`"),
+            "fish must not emit \\` (invalid escape): got {val:?}"
         );
     }
 

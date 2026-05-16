@@ -12,7 +12,7 @@ For first-time setup and a guided quick-start, see [Getting Started][getting-sta
 The basic flow is one command:
 
 ```shell
-ocx install cmake:3.28
+ocx package install cmake:3.28
 ```
 
 OCX downloads the package, verifies its [SHA-256 digest][in-depth-storage-packages], and stores it in the [content-addressed package store][in-depth-storage-packages] under `~/.ocx/packages/`. A [candidate symlink][in-depth-storage-symlinks] (`candidates/3.28`) is created so the version is reachable by name.
@@ -22,24 +22,24 @@ Multiple versions coexist — installing `cmake:3.30` next to `cmake:3.28` adds 
 To run a tool *once* without keeping it installed, skip the install step entirely:
 
 ```shell
-ocx exec cmake:3.28 -- cmake --version
+ocx package exec cmake:3.28 -- cmake --version
 ```
 
-[`ocx exec`][cmd-exec] downloads on demand, runs in a [clean environment][in-depth-environments], and leaves no candidate symlink behind — the binary stays in the package store but no version is selected. Useful for one-off invocations and CI where persistent state is not needed.
+[`ocx package exec`][cmd-package-exec] downloads on demand, runs in a [clean environment][in-depth-environments], and leaves no candidate symlink behind — the binary stays in the package store but no version is selected. Useful for one-off invocations and CI where persistent state is not needed.
 
 ::: tip Learn more
 [Storage In Depth][in-depth-storage] — content addressing, layer dedup, hardlink assembly.
 [Versioning In Depth → Tags][in-depth-versioning-tags] — what `:3.28` actually resolves to.
-[Entry Points In Depth][in-depth-entry-points] — what generated launchers do under `ocx exec`.
+[Entry Points In Depth][in-depth-entry-points] — what generated launchers do under `ocx package exec`.
 :::
 
 ## Choose between versions {#versions}
 
-Once two or more versions are installed, [`ocx select`][cmd-select] picks the one that becomes "current":
+Once two or more versions are installed, [`ocx package select`][cmd-package-select] picks the one that becomes "current":
 
 ```shell
-ocx install cmake:3.30
-ocx select cmake:3.30
+ocx package install cmake:3.30
+ocx package select cmake:3.30
 ```
 
 The `current` symlink is a [floating pointer][in-depth-storage-symlinks] — it only moves when *you* select a different version. Installing a newer version does not advance `current`; updating the [tag-store snapshot][in-depth-indices-local] does not advance it either. This is intentional: tools that reference `current` should only change behavior when you decide they should.
@@ -62,7 +62,7 @@ For *build flavor* — debug, PGO, slim — use a [variant prefix][in-depth-vers
 
 <Terminal src="/casts/variants.cast" title="Working with variants" collapsed />
 
-[`ocx deselect cmake`][cmd-deselect] clears `current` without uninstalling. [`ocx uninstall cmake:3.28`][cmd-uninstall] removes the candidate; pass `--purge` to remove the binary too if no other reference holds it.
+[`ocx package deselect cmake`][cmd-package-deselect] clears `current` without uninstalling. [`ocx package uninstall cmake:3.28`][cmd-package-uninstall] removes the candidate; pass `--purge` to remove the binary too if no other reference holds it.
 
 ::: tip Learn more
 [Versioning In Depth][in-depth-versioning] — full tag hierarchy, cascade mechanics, OCI tag char rules, `_build` suffix convention, OCI Image Index multi-platform spec.
@@ -99,7 +99,7 @@ Both symlink modes target the [package root][in-depth-storage-packages] directly
 export PATH="$HOME/.ocx/symlinks/ocx.sh/cmake/current/content/bin:$PATH"
 ```
 
-When `ocx install --select cmake:3.32` runs later, `current` is re-pointed and the IDE / shell pick up the new version with no config edits.
+When `ocx package install --select cmake:3.32` runs later, `current` is re-pointed and the IDE / shell pick up the new version with no config edits.
 
 For automation, [`ocx which`][cmd-which] prints the resolved package root directly:
 
@@ -110,6 +110,7 @@ ocx which --candidate cmake:3.28   # ~/.ocx/symlinks/ocx.sh/cmake/candidates/3.2
 
 Both `--candidate` and `--current` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.
 
+<<<<<<< HEAD
 ### Running an installed tool on Windows {#stable-paths-windows}
 
 On Windows, `ocx install` (and `ocx select`) generates two files per entrypoint in the package's `entrypoints/` directory:
@@ -135,16 +136,18 @@ The shim resolves `ocx` using `OCX_BINARY_PIN` if the variable is **defined** in
 :::
 
 ### Shell hook integration {#stable-paths-shell-hook}
+=======
+### direnv integration {#stable-paths-direnv}
+>>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 
-For interactive shells, [`ocx shell init`][cmd-shell-init] wires the project toolchain into your shell's prompt cycle. Run it once to install the hook, then every new prompt re-evaluates `ocx.toml` and updates the environment automatically:
+For [direnv][direnv]-driven projects, [`ocx direnv init`][cmd-direnv-init] writes an `.envrc` file that calls [`ocx direnv export`][cmd-direnv-export] on each `cd`. The stateless export block is re-evaluated by [direnv][direnv] whenever `ocx.toml` or `ocx.lock` changes.
 
 ```shell
-ocx shell init --shell bash >> ~/.bashrc
+ocx direnv init    # writes .envrc
+direnv allow       # activate for the current directory
 ```
 
-For [direnv][direnv]-driven projects, [`ocx direnv init`][cmd-direnv-init] writes an `.envrc` file that calls [`ocx direnv export`][cmd-direnv-export] on each `cd`. The stateless export block is re-evaluated by direnv whenever `ocx.toml` or `ocx.lock` changes.
-
-Both approaches route through the [project toolchain][in-depth-project], so the tools on `$PATH` match exactly the digests locked in `ocx.lock`. No ambient installs or manual `export` statements needed.
+This routes through the [project toolchain][in-depth-project], so the tools on `$PATH` match exactly the digests locked in `ocx.lock`. No ambient installs or manual `export` statements needed.
 
 ::: tip Learn more
 [Storage In Depth → Symlinks][in-depth-storage-symlinks] — candidate vs current design, package-root vs content traversal.
@@ -164,16 +167,16 @@ ocx package pull webapp:2.0
 
 If `webapp:2.0` declares dependencies on `nodejs:24` and `bun:1.3`, all three packages end up in the [package store][in-depth-storage-packages]. Only `webapp:2.0` is the explicit install — the dependencies are stored but not surfaced as top-level installs.
 
-To actually *run* the package with its dependency environments configured, use [`ocx exec`][cmd-exec]:
+To actually *run* the package with its dependency environments configured, use [`ocx package exec`][cmd-package-exec]:
 
 ```shell
-ocx exec webapp:2.0 -- serve --port 8080
+ocx package exec webapp:2.0 -- serve --port 8080
 ```
 
-[`ocx exec`][cmd-exec] [composes the environments][in-depth-environments-composition-order] of all dependencies in topological order before launching the command. [`ocx env`][cmd-env] exports the same composed environment for use in your own shell.
+[`ocx package exec`][cmd-package-exec] [composes the environments][in-depth-environments-composition-order] of all dependencies in topological order before launching the command. [`ocx package env`][cmd-package-env] exports the same composed environment for use in your own shell.
 
 ::: warning install + select does not set up dependency environments
-[`ocx install --select`][cmd-install] creates a [current symlink][in-depth-storage-symlinks] that points at the package's content directory. If you or another tool invokes a binary through that symlink directly, the dependency environments are **not** configured — only the package's own files are reachable. For packages with dependencies, always use [`ocx exec`][cmd-exec], or [`ocx env`][cmd-env] / [`ocx shell env`][cmd-shell-env] to export the full environment first.
+[`ocx package install --select`][cmd-package-install] creates a [current symlink][in-depth-storage-symlinks] that points at the package's content directory. If you or another tool invokes a binary through that symlink directly, the dependency environments are **not** configured — only the package's own files are reachable. For packages with dependencies, always use [`ocx package exec`][cmd-package-exec], or [`ocx package env`][cmd-package-env] / [`ocx env`][cmd-env] to export the full environment first.
 :::
 
 ### Inspecting the dependency tree
@@ -230,14 +233,16 @@ The global toolchain is that boundary. It gives you an `apt`-style "tools I alwa
 
 ### Adding tools to the global toolchain {#global-toolchain-add}
 
+Use the toolchain-tier mutators with `--global` to target `$OCX_HOME/ocx.toml`:
+
 ```shell
-ocx install --global ripgrep:14
-ocx install --global cmake:3.28
+ocx add --global ripgrep:14
+ocx add --global cmake:3.28
 ```
 
-`--global` makes `$OCX_HOME/ocx.toml` the target instead of the nearest project file. Because a tool must be on PATH to be useful globally, `install --global` also selects the package — it installs, records the binding, and advances the `current` symlink in one step. The `--select` flag is implied and cannot be omitted.
+`ocx add --global` records the binding in `$OCX_HOME/ocx.toml`, re-locks, installs, and selects the package in one step. Because a tool must be on PATH to be useful globally, select is always implied.
 
-Subsequent calls to `add`, `remove`, `lock`, `upgrade`, and `pull` also accept `--global`:
+Subsequent calls to `remove`, `lock`, `upgrade`, and `pull` also accept `--global`:
 
 ```shell
 ocx add --global fzf:0.62         # add binding + install + select
@@ -254,19 +259,43 @@ Both flags pick a project file. Passing them together exits with code 64 (`Usage
 
 ### Shell activation for global tools {#global-toolchain-shell}
 
-`ocx shell init` wires two things into your shell at once: the per-prompt project-switching hook and a static entrypoint file (`$OCX_HOME/init.<shell>`) that prepends the global `current` tools to `PATH`.
+The OCX installer writes one file and one login-profile line. The file — `$OCX_HOME/env.sh` — runs `ocx env --global --shell=sh` each time a new shell opens, placing the global toolchain on `PATH`. The login-profile line sources it, guarded by a block marker so re-running the installer is idempotent:
 
-```shell
-ocx shell init --shell bash >> ~/.bashrc
+```sh
+# written by the OCX installer in ~/.bashrc / ~/.zshrc / ~/.profile
+# BEGIN ocx
+[ -x "$HOME/.ocx/ocx" ] && eval "$("$HOME/.ocx/ocx" env --global --shell=sh 2>/dev/null)" || true
+# END ocx
 ```
 
-The static entrypoint is what makes global tools visible in non-interactive shells — CI `bash --norc`, editor-spawned terminals, `bash -c` scripts — without relying on the prompt hook. Source it from your CI environment alongside the hook snippet.
+You can also emit the current global env manually and inspect it:
 
-When the global toolchain changes (you ran `ocx install --global` or `ocx remove --global`), re-run `ocx shell init --shell bash` to regenerate the static entrypoint.
+```shell
+ocx env --global             # JSON (default — machine-readable)
+ocx env --global --format plain   # human-readable table
+ocx env --global --shell=bash     # POSIX export lines, eval-safe
+```
+
+`--shell` is the only eval-safe output channel. Do not `eval "$(ocx env --global)"` — the default JSON format is not sourceable.
+
+### OCI-tier package operations {#global-toolchain-oci}
+
+The individual package primitives that manage candidate and `current` symlinks are now grouped under `ocx package`:
+
+```shell
+ocx package install ripgrep:14   # fetch + materialise into object store
+ocx package select  ripgrep:14   # set current symlink
+ocx package deselect ripgrep     # clear current symlink
+ocx package uninstall ripgrep:14 # remove candidate
+ocx package exec ripgrep:14 -- rg --version   # run with clean env
+ocx package env ripgrep:14       # per-package env (JSON)
+```
+
+These are OCI-tier operations — they work on identifiers directly, never read `ocx.toml`.
 
 ### Strict isolation — the hard boundary {#global-toolchain-isolation}
 
-The global toolchain is a **shell convenience tier only**. Once you `cd` into a project, the project toolchain is authoritative and the global tools are entirely removed from PATH — not shadowed, removed. The breadcrumb `# ocx: global toolchain suppressed` appears in the hook's output when this strip fires.
+The global toolchain is a **shell convenience tier only**. Project builds are hermetic: the project toolchain wins by PATH precedence when you `cd` into a project, and `ocx run` never consults the global file without `--global`.
 
 :::info Why hard isolation, not gap-fill?
 [Volta][volta] pioneered this model for Node.js: "Volta covers its tracks … your npm/Yarn scripts never see what's in your toolchain." The alternative — filling in tools the project does not declare from the global set — is exactly what [mise][mise] and [asdf][asdf] do, and it produces the reproducibility hole that OCX is designed to avoid: a collaborator without the same `$OCX_HOME/ocx.toml` gets different resolved tools.
@@ -275,15 +304,16 @@ The global toolchain is a **shell convenience tier only**. Once you `cd` into a 
 Two commands that are always hermetic regardless of context:
 
 ```shell
-ocx run linter     # reads ocx.toml + ocx.lock; global tools not consulted
-ocx exec cmake:3   # OCI-tier; no ocx.toml read at all
+ocx run -- linter          # reads ocx.toml + ocx.lock; global tools not consulted
+ocx package exec cmake:3 -- cmake --version   # OCI-tier; no ocx.toml read at all
 ```
 
 A project's `ocx run` cannot resolve a tool that exists only in `$OCX_HOME/ocx.toml`. This is intentional and not a bug — the project declared its dependencies; anything else is ambient noise.
 
 ::: tip Learn more
-[Command-line reference → `--global`][cmd-add-global] — flag behavior on `add`, `remove`, `lock`, `upgrade`, `pull`, `install`.
+[Command-line reference → `--global`][cmd-add-global] — flag behavior on `add`, `remove`, `lock`, `upgrade`, `pull`.
 [Env-composition reference → Strict isolation][env-composition-strict-isolation] — reference-level statement of the no-composition rule.
+[Command-line reference → `ocx env`][cmd-env-root] — toolchain env exporter, format options, `--shell` safety rule.
 :::
 
 ## Pin a project's tools {#project}
@@ -350,13 +380,12 @@ The same binding name may appear in `[tools]` and any `[group.*]` table — iden
 
 ### Shell activation
 
-Project tools should land on `PATH` whenever you `cd` into the project — without `eval`-ing on every shell startup. Three entry points, each suited to a different workflow:
+Project tools should land on `PATH` whenever you `cd` into the project — without `eval`-ing on every shell startup. Two entry points, each suited to a different workflow:
 
-- [`ocx shell init --shell <shell>`][cmd-shell-init] — appends a prompt-hook snippet to `~/.bashrc`, `~/.zshrc`, or your fish/nushell config. A fingerprint over the installed tool set lives in `_OCX_APPLIED`, so unchanged prompts emit nothing.
-- [`ocx direnv export`][cmd-direnv-export] — stateless [direnv][direnv] backend; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc`.
-- [`ocx exec`][cmd-exec] — no hook at all, for CI and scripts.
+- [`ocx direnv export`][cmd-direnv-export] — stateless [direnv][direnv] backend; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc` that re-evaluates on each directory entry.
+- [`ocx run`][cmd-run] — no hook at all, for CI and scripts: runs a command directly in the locked project env.
 
-The hooks export only — they never install missing tools or contact the registry. Run [`ocx pull`][cmd-pull] first.
+The direnv backend exports only — it never installs missing tools or contacts the registry. Run [`ocx pull`][cmd-pull] first.
 
 ::: tip Learn more
 [Project Toolchain In Depth][in-depth-project] — schema details, declaration-hash canonicalization (RFC 8785 JCS), in-place flock concurrency, per-group binding semantics, multi-project GC retention, SLSA roadmap.
@@ -394,10 +423,10 @@ ocx run cmake -- cmake --version
 
 The name must resolve unambiguously in the selected scope; `ocx run` exits 64 if a name is unknown or matches entries in more than one selected group with conflicting identifiers.
 
-:::tip `ocx run` vs `ocx exec`
-`ocx run` is the project-tier command — it reads `ocx.toml` + `ocx.lock` and maps binding names to installed packages. `ocx exec` is the OCI-tier command — it accepts an OCI identifier directly, with no project file involved.
+:::tip `ocx run` vs `ocx package exec`
+`ocx run` is the project-tier command — it reads `ocx.toml` + `ocx.lock` and maps binding names to installed packages. `ocx package exec` is the OCI-tier command — it accepts an OCI identifier directly, with no project file involved.
 
-**Rule:** if you have an `ocx.toml`, use `ocx run`; otherwise use [`ocx exec`][cmd-exec].
+**Rule:** if you have an `ocx.toml`, use `ocx run`; otherwise use [`ocx package exec`][cmd-package-exec].
 :::
 
 ::: tip Learn more
@@ -407,27 +436,36 @@ The name must resolve unambiguously in the selected scope; `ocx run` exits 64 if
 
 ## Use OCX in CI {#ci}
 
-CI environments need tool binaries available with their environment variables exported — but they do not need [version switching][in-depth-storage-symlinks], candidate symlinks, or any of the install-store machinery that supports interactive use. OCX provides two CI-tailored commands:
+CI environments need tool binaries available with their environment variables exported — but they do not need [version switching][in-depth-storage-symlinks], candidate symlinks, or any of the install-store machinery that supports interactive use.
+
+For **project-toolchain CI**, the recommended flow is:
+
+```shell
+ocx pull          # pre-warm package store from ocx.lock (no symlinks)
+ocx run -- cmake --version   # run with locked env
+```
+
+For **OCI-tier CI** (no `ocx.toml`, direct identifier pinning):
 
 ```shell
 ocx package pull cmake:3.28
-ocx ci export cmake:3.28
+ocx package env cmake:3.28   # JSON env — pipe to your CI env-file writer
 ```
 
-[`package pull`][cmd-package-pull] downloads packages into the [content-addressed package store][in-depth-storage-packages] without creating any symlinks. [`ci export`][cmd-ci-export] writes the package-declared environment variables directly into the CI system's runtime files.
+[`ocx pull`][cmd-pull] (project-tier) and [`ocx package pull`][cmd-package-pull] (OCI-tier) download packages into the [content-addressed package store][in-depth-storage-packages] without creating any symlinks.
 
-On [GitHub Actions][github-actions-docs], `ci export` auto-detects the environment and appends `PATH` entries to `$GITHUB_PATH` and other variables to `$GITHUB_ENV`, making them available in all subsequent steps.
+To export environment variables into CI runtime files (e.g. `$GITHUB_PATH` / `$GITHUB_ENV` on [GitHub Actions][github-actions-docs]), consume the JSON output of `ocx package env` or `ocx env` in your workflow step and write entries to the appropriate CI sink. A dedicated CI export command is a deferred extension point — see the [env-composition reference][env-composition-ref] for the current JSON schema.
 
 ::: tip Concurrent matrix builds
 `package pull` only touches the package store — no symlinks, no symlink-store mutations. This makes it safe to run concurrently in matrix builds that share a cached [`OCX_HOME`][env-ocx-home]; [content-addressed writes][in-depth-storage-packages] are inherently idempotent.
 :::
 
-::: info Relationship to `install`
-[`install`][cmd-install] is `package pull` plus candidate-symlink creation (and optionally `--select` for the current symlink). In CI, the [content-addressed package-store path][in-depth-storage-packages] that `package pull` reports is fully reproducible and digest-derived — symlinks add no value.
+::: info Relationship to `ocx package install`
+[`ocx package install`][cmd-package-install] is `package pull` plus candidate-symlink creation (and optionally `--select` for the current symlink). In CI, the [content-addressed package-store path][in-depth-storage-packages] that `package pull` reports is fully reproducible and digest-derived — symlinks add no value.
 :::
 
 ::: tip Learn more
-[Indices In Depth → Bundled Snapshots][in-depth-indices-bundled] — pair `package pull` + `ci export` with a bundled snapshot for end-to-end determinism.
+[Indices In Depth → Bundled Snapshots][in-depth-indices-bundled] — pair `ocx pull` with a bundled snapshot for end-to-end determinism.
 [Storage In Depth → Packages][in-depth-storage-packages] — why concurrent CI writes are safe.
 :::
 
@@ -535,7 +573,7 @@ Once the [local snapshot][in-depth-indices-local] is populated and the [package 
 - **Bare identifier** (e.g., `cmake`) — downloads all tag-to-digest mappings.
 - **Tagged identifier** (e.g., `cmake:3.28`) — fetches only that single tag, ideal for lockfile workflows.
 
-On a fresh machine, [`ocx install cmake:3.28`][cmd-install] does not need an explicit `index update` first — when the local snapshot has no entry for the requested tag, OCX resolves it transparently against the registry, persists it, and proceeds with the install.
+On a fresh machine, [`ocx package install cmake:3.28`][cmd-package-install] does not need an explicit `index update` first — when the local snapshot has no entry for the requested tag, OCX resolves it transparently against the registry, persists it, and proceeds with the install.
 
 ::: tip Learn more
 [Indices In Depth][in-depth-indices] — remote query path, snapshot internals, blob write-through caching, fresh-machine fallback.
@@ -568,7 +606,7 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 
 ## Remove and clean up {#cleanup}
 
-[`ocx uninstall cmake:3.28`][cmd-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary if no [other reference][in-depth-storage-gc] remains.
+[`ocx package uninstall cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary if no [other reference][in-depth-storage-gc] remains.
 
 [`ocx clean`][cmd-clean] sweeps the entire store — packages with no live install symlink and no [forward-ref][in-depth-storage-gc] from a dependent package are removed in a single pass, along with any layers and blobs that become unreachable.
 
@@ -601,15 +639,34 @@ For the "verify a subset would not change without writing" flow, use [`ocx upgra
 
 This section covers the changes introduced in the `feat/project-toolchain` release that affect existing workflows.
 
-### Shell profile subcommands removed {#migration-shell-profile}
+### Shell integration removed — re-run the installer {#migration-shell-profile}
 
-`ocx shell profile add`, `shell profile remove`, `shell profile list`, and `shell profile load` are deprecated and will be removed in v2. The replacement is the project-tier toolchain:
+`ocx shell hook`, `ocx shell init`, `ocx shell env`, and root `ocx install / select / deselect / uninstall / exec` have been removed — they exit 64 if invoked. `ocx ci export` is also removed.
 
-1. Create `ocx.toml` in your repository (or home directory): `ocx init`
-2. Add each tool: `ocx add cmake:3.28 nodejs:24`
-3. Wire the hook into your shell once: `ocx shell init bash >> ~/.bashrc`
+**Global toolchain activation** is now handled by the installer. Re-run the OCX install script to write `$OCX_HOME/env.sh` and the block-marker source line in your login profile:
 
-After that, every new shell picks up the locked tools automatically. No `shell profile load` line needed in `~/.bashrc`. For [direnv][direnv]-driven repos, use `ocx direnv init` instead of the hook.
+```sh
+# Idempotent — safe to re-run; existing block marker is overwritten in-place.
+curl -fsSL https://ocx.sh/install.sh | sh
+```
+
+After installation, every new login shell sources `$OCX_HOME/env.sh`, which runs `eval "$(ocx env --global --shell=sh)"`. No `ocx shell init` call is needed — the installer owns profile wiring.
+
+**OCI-tier operations** that moved under `ocx package`:
+
+| Old command | New command |
+|---|---|
+| `ocx install <pkg>` | `ocx package install <pkg>` |
+| `ocx select <pkg>` | `ocx package select <pkg>` |
+| `ocx deselect <pkg>` | `ocx package deselect <pkg>` |
+| `ocx uninstall <pkg>` | `ocx package uninstall <pkg>` |
+| `ocx exec <pkg> -- cmd` | `ocx package exec <pkg> -- cmd` |
+
+For [direnv][direnv]-driven repos, use [`ocx direnv init`][cmd-direnv-init] to write `.envrc` — the project toolchain activation model is unchanged.
+
+::: info Linux + zsh — GUI terminals may not read `.zprofile`
+**Known limitation:** On Linux, GUI terminal emulators (GNOME Terminal, Alacritty, Kitty, etc.) typically open non-login shells and do not read `~/.zprofile`. If `ocx` is not found after re-running the installer, add `source ~/.zprofile` (or `. ~/.zprofile`) to your `~/.zshrc`.
+:::
 
 ### Project mutators are atomic {#migration-atomic-mutators}
 
@@ -657,25 +714,29 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-run]: ./reference/command-line.md#run
 [arg-config]: ./reference/command-line.md#arg-config
 [cmd-clean]: ./reference/command-line.md#clean
-[cmd-deselect]: ./reference/command-line.md#deselect
 [cmd-which]: ./reference/command-line.md#which
-[cmd-exec]: ./reference/command-line.md#exec
+[cmd-exec]: ./reference/command-line.md#package-exec
 [cmd-launcher-exec]: ./reference/command-line.md#exec
-[cmd-install]: ./reference/command-line.md#install
-[cmd-select]: ./reference/command-line.md#select
-[cmd-uninstall]: ./reference/command-line.md#uninstall
+[cmd-package-install]: ./reference/command-line.md#package-install
+[cmd-package-select]: ./reference/command-line.md#package-select
+[cmd-package-deselect]: ./reference/command-line.md#package-deselect
+[cmd-package-uninstall]: ./reference/command-line.md#package-uninstall
+[cmd-package-exec]: ./reference/command-line.md#package-exec
+[cmd-package-env]: ./reference/command-line.md#package-env
+[cmd-install]: ./reference/command-line.md#package-install
+[cmd-select]: ./reference/command-line.md#package-select
+[cmd-deselect]: ./reference/command-line.md#package-deselect
+[cmd-uninstall]: ./reference/command-line.md#package-uninstall
 [cmd-index-update]: ./reference/command-line.md#index-update
 [cmd-package-pull]: ./reference/command-line.md#package-pull
-[cmd-ci-export]: ./reference/command-line.md#ci-export
 [cmd-deps]: ./reference/command-line.md#deps
 [cmd-env]: ./reference/command-line.md#env
-[cmd-shell-env]: ./reference/command-line.md#shell-env
+[cmd-env-root]: ./reference/command-line.md#env-root
 [cmd-add]: ./reference/command-line.md#add
 [cmd-remove]: ./reference/command-line.md#remove
 [cmd-lock]: ./reference/command-line.md#lock
 [cmd-upgrade]: ./reference/command-line.md#upgrade
 [cmd-pull]: ./reference/command-line.md#pull
-[cmd-shell-init]: ./reference/command-line.md#shell-init
 [cmd-direnv-export]: ./reference/command-line.md#direnv-export
 [cmd-direnv-init]: ./reference/command-line.md#direnv-init
 [arg-remote]: ./reference/command-line.md#arg-remote

@@ -1,57 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for Phase 7 — shell hook trio.
+"""Acceptance tests for shell activation — rewritten to plan_toolchain_cli.md
+Phase 5 contract (handshake_toolchain_cli.md §2/§5/§7).
 
-Covers ``ocx direnv export``, ``ocx shell hook``, ``ocx shell init`` per
-``.claude/state/plans/plan_project_toolchain.md`` lines 755–798 and ADR §5B
-(decision 5B contracts at lines 320–365 of
-``.claude/artifacts/adr_project_toolchain_config.md``).
+Covers:
+- ``ocx direnv export`` (unchanged, kept in full)
+- Deleted commands (``ocx shell hook``, ``ocx shell init``) → exit 64
+- Remote-flag safety for direnv export (shell hook gone → test direnv path only)
+- Global toolchain activation via ``ocx env --global --shell=sh``
+- B1: ``--global`` ⟂ ``--project`` conflict seam (clap exit 2 / UsageError)
+- No-self-link GC invariant for global file
+- W7: byte-stability characterisation test (written Phase 2 Specify)
 
-Specification mode (contract-first TDD)
----------------------------------------
-The Phase 7 stubs at ``crates/ocx_cli/src/command/{direnv_export,shell_hook,shell_init}.rs``
-return ``unimplemented!()``. Every test in this file is therefore expected to
-FAIL against today's binary — the contract they encode is the Phase 7
-implementation target. Tests assert on:
+Deleted behaviour that IS gone (no assertions):
+- ``ocx shell hook`` per-prompt fingerprint/sentinel pattern
+- ``ocx shell init`` static-file render
+- ``_OCX_APPLIED`` sentinel
+- PATH strip (``emit_global_path_strip``)
 
-- exit codes (sysexits-aligned via ``crates/ocx_lib/src/cli/exit_code.rs``)
-- shell-syntax validity (``bash -n`` / ``shellcheck`` of generated output)
-- stdout shape (presence/absence of ``export`` lines, ``unset`` lines, the
-  ``_OCX_APPLIED`` sentinel)
-- stderr substrings for missing-tool / stale-lock notes
-- security-boundary invariants (no network when ``--remote`` is set)
-
-Test inventory
---------------
-1.  ``test_direnv_export_emits_bash_exports``
-2.  ``test_direnv_export_skips_uninstalled_tool_with_stderr_note``
-3.  ``test_direnv_export_warns_on_stale_lock``
-4.  ``test_direnv_export_no_project_emits_nothing``
-5.  ``test_shell_hook_unchanged_fingerprint_emits_empty``
-6.  ``test_shell_hook_changed_fingerprint_emits_unset_and_reexport``
-7.  ``test_shell_hook_no_prior_applied_emits_full_set``
-8.  ``test_shell_hook_v2_payload_treated_as_changed`` (architect-mandated)
-9.  ``test_shell_init_bash_outputs_prompt_command_snippet``
-10. ``test_shell_init_zsh_uses_add_zsh_hook``
-11. ``test_shell_init_fish_uses_prompt_event_hook``
-12. ``test_shell_init_nushell_writes_autoload_path``
-13. ``test_remote_flag_does_not_force_network_for_direnv_export``
-14. ``test_remote_flag_does_not_force_network_for_shell_hook``
-15. ``test_shell_hook_empty_applied_treated_as_no_prior_state`` (Round 2)
-16. ``test_direnv_export_missing_lock_present_toml_emits_stderr_and_exits_zero`` (Round 2)
-17. ``test_top_level_hook_env_removed``
-18. ``test_top_level_shell_hook_removed``
+Tests 1-4: direnv export (kept verbatim from Phase 7 — still live)
+Tests 5-12: shell hook / shell init → assert exit 64 (deleted commands)
+Test 13: remote flag direnv export (kept)
+Test 14: remote flag for shell hook → rewritten: assert shell hook exits 64
+Test 15: shell hook empty applied → rewritten: assert exit 64
+Test 16: direnv no lock (kept)
+Test 17-18: top-level removed commands (kept)
+Test 19: global departed → rewritten to new activation model
+Test 20: shell init non-POSIX → rewritten: assert exit 64
+W7: direnv byte-stability (kept, written Phase 2)
 """
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 from pathlib import Path
 from uuid import uuid4
 
 from src.helpers import make_package
 from src.runner import OcxRunner
+from src.shell_eval import run_after_sourcing
 
 
 # ---------------------------------------------------------------------------
@@ -59,11 +46,11 @@ from src.runner import OcxRunner
 # ---------------------------------------------------------------------------
 
 EXIT_SUCCESS = 0
+EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE); also used for clap errors
 
 
 # ---------------------------------------------------------------------------
 # Helpers — co-located with tests (DAMP > DRY for acceptance tests).
-# Mirror shapes in ``test_project_pull.py`` and ``test_exec_compose.py``.
 # ---------------------------------------------------------------------------
 
 
@@ -120,15 +107,6 @@ def _published_tool(
     return repo, tag
 
 
-_APPLIED_RE = re.compile(r'_OCX_APPLIED\s*=\s*"(v1:[0-9a-f]{64})"')
-
-
-def _extract_applied(stdout: str) -> str | None:
-    """Pull the ``v1:<64-hex>`` value from an ``export _OCX_APPLIED=...`` line."""
-    m = _APPLIED_RE.search(stdout)
-    return m.group(1) if m else None
-
-
 def _bash_syntax_ok(script: str) -> tuple[bool, str]:
     """Return ``(ok, stderr)`` after running ``bash -n -c <script>``."""
     proc = subprocess.run(
@@ -145,7 +123,7 @@ def _bash_syntax_ok(script: str) -> tuple[bool, str]:
 
 
 def test_direnv_export_emits_bash_exports(ocx: OcxRunner, tmp_path: Path) -> None:
-    """Plan §7 line 787: project with installed tool → valid bash exports."""
+    """Project with installed tool → valid bash exports."""
     repo, tag = _published_tool(ocx, tmp_path, "bash_export")
     project = tmp_path / "proj"
     project.mkdir()
@@ -179,7 +157,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
 def test_direnv_export_skips_uninstalled_tool_with_stderr_note(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Plan §7 line 768: missing tool → stderr ``# ocx: <name> not installed``.
+    """Missing tool → stderr ``# ocx: <name> not installed``.
 
     Two tools, only one pulled — the other gets a one-line stderr note and
     is silently dropped from stdout exports.
@@ -197,9 +175,6 @@ beta = "{ocx.registry}/{repo_missing}:{tag_missing}"
 """,
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-    # Pull only the first one. `--group default` would pull both; we want
-    # exactly one in the store, so we drive `package pull` directly with the
-    # fully-qualified identifier.
     assert (
         _run(ocx, project, "package", "pull", f"{ocx.registry}/{repo_installed}:{tag_installed}").returncode
         == EXIT_SUCCESS
@@ -208,7 +183,6 @@ beta = "{ocx.registry}/{repo_missing}:{tag_missing}"
     result = _run(ocx, project, "direnv", "export")
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
-    # The missing tool's stderr note format from plan §7 line 768.
     assert "beta" in result.stderr, (
         f"missing-tool note must reference 'beta'; stderr:\n{result.stderr}"
     )
@@ -223,7 +197,7 @@ beta = "{ocx.registry}/{repo_missing}:{tag_missing}"
 
 
 def test_direnv_export_warns_on_stale_lock(ocx: OcxRunner, tmp_path: Path) -> None:
-    """Plan §7 line 770: stale lock → stderr warning, continue with stale digests.
+    """Stale lock → stderr warning, continue with stale digests.
 
     Distinct from ``ocx exec`` which exits 65 on stale lock. `direnv export`
     must NOT fail — interactive shells should keep working with the last
@@ -263,24 +237,18 @@ beta = "{ocx.registry}/{repo_b}:{tag_b}"
     assert "stale" in stderr_lower or "ocx.toml changed" in stderr_lower, (
         f"stale-lock warning expected on stderr; got:\n{result.stderr}"
     )
-    # Even with the stale lock, exports for the originally-locked tool stay.
     assert "export" in result.stdout, (
         f"stale lock still emits exports based on locked digests; got:\n{result.stdout}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 4. No project, no output (Phase 7 line 762, 795)
+# 4. No project, no output
 # ---------------------------------------------------------------------------
 
 
 def test_direnv_export_no_project_emits_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
-    """Plan §7 line 762/795: no ocx.toml in tree → exit 0, nothing written.
-
-    Phase 9 introduces home-tier fallback; Phase 7 must no-op. Set
-    ``OCX_NO_PROJECT=1`` so the home-tier fallback (when added in Phase 9)
-    cannot mask a missing project file.
-    """
+    """No ocx.toml in tree → exit 0, nothing written."""
     empty = tmp_path / "no_project"
     empty.mkdir()
 
@@ -298,325 +266,153 @@ def test_direnv_export_no_project_emits_nothing(ocx: OcxRunner, tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# 5. shell hook fast path: unchanged fingerprint → empty output
+# 5-8. shell hook → DELETED — assert exit 64 (unrecognised subcommand)
+#
+# Contract (handshake §2 / plan C4): ocx shell hook is removed. Clap
+# unrecognised subcommand error → exit 64 (ocx maps clap errors to UsageError).
 # ---------------------------------------------------------------------------
 
 
-def test_shell_hook_unchanged_fingerprint_emits_empty(
+def test_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx shell hook`` is deleted → exit 64 + clap unrecognised-subcommand."""
+    result = _run(ocx, tmp_path, "shell", "hook", "--shell", "bash")
+
+    assert result.returncode != EXIT_SUCCESS, (
+        "ocx shell hook must fail (deleted); got exit 0"
+    )
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell hook must exit {EXIT_USAGE} (UsageError/clap); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert "unrecognized" in result.stderr.lower() or "hook" in result.stderr.lower(), (
+        f"expected clap unrecognized-subcommand stderr; got:\n{result.stderr}"
+    )
+
+
+def test_shell_hook_unchanged_fingerprint_emits_empty_removed(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Plan §7 line 775: unchanged ``_OCX_APPLIED`` → empty stdout."""
-    repo, tag = _published_tool(ocx, tmp_path, "fp_same")
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-hello = "{ocx.registry}/{repo}:{tag}"
-""",
-    )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-    assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
+    """``ocx shell hook`` with any ``_OCX_APPLIED`` value → exit 64 (deleted).
 
-    first = _run(ocx, project, "shell", "hook", "--shell", "bash")
-    assert first.returncode == EXIT_SUCCESS, first.stderr
-    applied = _extract_applied(first.stdout)
-    assert applied is not None, (
-        f"first shell hook must export _OCX_APPLIED; got:\n{first.stdout}"
+    The per-prompt fingerprint/sentinel mechanism (``_OCX_APPLIED``) is removed
+    along with the command. No shell activation happens via this path.
+    """
+    result = _run(
+        ocx, tmp_path, "shell", "hook", "--shell", "bash",
+        extra_env={"_OCX_APPLIED": "v1:" + "ab" * 32},
     )
-
-    second = _run(
-        ocx, project, "shell", "hook", "--shell", "bash",
-        extra_env={"_OCX_APPLIED": applied},
-    )
-
-    assert second.returncode == EXIT_SUCCESS, second.stderr
-    # Tightened (Round 2 W4): plain `==` against `""` so a spurious
-    # newline in the fast path is caught — `.strip()` would mask it.
-    assert second.stdout == "", (
-        f"unchanged fingerprint must emit empty stdout; got:\n{second.stdout!r}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell hook must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
-# ---------------------------------------------------------------------------
-# 6. shell hook diff path: change → unset old + new export + new applied
-# ---------------------------------------------------------------------------
-
-
-def test_shell_hook_changed_fingerprint_emits_unset_and_reexport(
+def test_shell_hook_changed_fingerprint_removed(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Plan §7 line 776: fingerprint change → unset + new exports + new sentinel."""
-    repo_a, tag_a = _published_tool(ocx, tmp_path, "diff_a", bin_name="alpha")
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-alpha = "{ocx.registry}/{repo_a}:{tag_a}"
-""",
-    )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-    assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
-
-    first = _run(ocx, project, "shell", "hook", "--shell", "bash")
-    old_applied = _extract_applied(first.stdout)
-    assert old_applied is not None, first.stdout
-
-    # Add a second tool; re-lock + re-pull.
-    repo_b, tag_b = _published_tool(ocx, tmp_path, "diff_b", bin_name="beta")
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-alpha = "{ocx.registry}/{repo_a}:{tag_a}"
-beta = "{ocx.registry}/{repo_b}:{tag_b}"
-""",
-    )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-    assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
-
-    second = _run(
-        ocx, project, "shell", "hook", "--shell", "bash",
-        extra_env={"_OCX_APPLIED": old_applied},
-    )
-
-    assert second.returncode == EXIT_SUCCESS, second.stderr
-    assert "unset" in second.stdout, (
-        f"changed fingerprint must emit unset for previously-applied vars; "
-        f"got stdout:\n{second.stdout}"
-    )
-    assert "export" in second.stdout, (
-        f"changed fingerprint must emit new exports; got stdout:\n{second.stdout}"
-    )
-    new_applied = _extract_applied(second.stdout)
-    assert new_applied is not None and new_applied != old_applied, (
-        f"new _OCX_APPLIED must be exported and differ from old; "
-        f"old={old_applied!r}, found={new_applied!r}"
+    """``ocx shell hook`` (any fingerprint change path) → exit 64 (deleted)."""
+    result = _run(ocx, tmp_path, "shell", "hook", "--shell", "bash")
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell hook must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
-# ---------------------------------------------------------------------------
-# 7. shell hook with no prior applied → full export set, no unset
-# ---------------------------------------------------------------------------
-
-
-def test_shell_hook_no_prior_applied_emits_full_set(
+def test_shell_hook_no_prior_applied_removed(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """No ``_OCX_APPLIED`` set → emit full export set + sentinel; nothing to unset."""
-    repo, tag = _published_tool(ocx, tmp_path, "fp_none")
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-hello = "{ocx.registry}/{repo}:{tag}"
-""",
-    )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-    assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
-
-    # Drop _OCX_APPLIED from the runner's env if present (it isn't by default).
+    """``ocx shell hook`` with no ``_OCX_APPLIED`` → exit 64 (deleted)."""
     env_no_applied = {k: v for k, v in ocx.env.items() if k != "_OCX_APPLIED"}
     cmd = _ocx_cmd(ocx, "shell", "hook", "--shell", "bash")
     result = subprocess.run(
         cmd,
-        cwd=project,
+        cwd=tmp_path,
         capture_output=True,
         text=True,
         env=env_no_applied,
     )
-
-    assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert "export" in result.stdout, (
-        f"first shell hook run must emit exports; got stdout:\n{result.stdout}"
-    )
-    assert _extract_applied(result.stdout) is not None, (
-        f"first shell hook run must set _OCX_APPLIED; got stdout:\n{result.stdout}"
-    )
-    assert "unset" not in result.stdout, (
-        f"no prior applied state → nothing to unset; got stdout:\n{result.stdout}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell hook must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
-# ---------------------------------------------------------------------------
-# 8. (architect-mandated) v2 payload must NOT silently match v1
-# ---------------------------------------------------------------------------
-
-
-def test_shell_hook_v2_payload_treated_as_changed(
+def test_shell_hook_v2_payload_removed(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Forged ``_OCX_APPLIED=v2:...`` must NOT be treated as fingerprint match.
-
-    Architect Phase 4 finding: a future v2 wire format must trigger a full
-    re-export (parse rejects v2 → unknown prior state → full export). The
-    output must include a fresh ``v1:<hex>`` sentinel — never re-exporting
-    the v2 payload that was forged in.
-    """
-    repo, tag = _published_tool(ocx, tmp_path, "v2_payload")
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-hello = "{ocx.registry}/{repo}:{tag}"
-""",
-    )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-    assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
-
-    forged = "v2:" + ("de" * 32)  # 64-hex body, future-version prefix
+    """``ocx shell hook`` with forged ``v2:`` payload → exit 64 (deleted)."""
+    forged = "v2:" + ("de" * 32)
     result = _run(
-        ocx, project, "shell", "hook", "--shell", "bash",
+        ocx, tmp_path, "shell", "hook", "--shell", "bash",
         extra_env={"_OCX_APPLIED": forged},
     )
-
-    assert result.returncode == EXIT_SUCCESS, result.stderr
-    new_applied = _extract_applied(result.stdout)
-    assert new_applied is not None, (
-        f"v2 payload must be treated as unknown → emit fresh v1: sentinel; "
-        f"got stdout:\n{result.stdout}"
-    )
-    assert new_applied.startswith("v1:"), (
-        f"sentinel must always be v1: in this wire-version; got {new_applied!r}"
-    )
-    assert "export" in result.stdout, (
-        f"v2 payload must trigger full re-export; got stdout:\n{result.stdout}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell hook must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 9. shell init bash → PROMPT_COMMAND, syntactically valid
+# 9-12. shell init → DELETED — assert exit 64
+#
+# Contract (handshake §2 / plan C4): ocx shell init is removed. The OCX
+# installer now owns profile modification via $OCX_HOME/env.sh + block-marker.
 # ---------------------------------------------------------------------------
 
 
-def test_shell_init_bash_outputs_prompt_command_snippet(ocx: OcxRunner) -> None:
-    """Plan §7 line 781: Bash init wires into ``PROMPT_COMMAND``.
-
-    Living Design — invocation form changed by
-    ``adr_global_toolchain_tier.md`` §Decision 6 / plan C2.7 W2-P4 LDR
-    ("``shell init`` flag form"): the shell argument moved from a
-    positional to ``-s/--shell`` for consistency with the sibling
-    ``ocx shell hook --shell`` and the W2-P3 spec contract. The
-    per-prompt hook snippet (``PROMPT_COMMAND`` wiring) is unchanged and
-    still emitted; only the CLI invocation is updated here.
-    """
+def test_shell_init_bash_removed(ocx: OcxRunner) -> None:
+    """``ocx shell init --shell bash`` → exit 64 (deleted)."""
     cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "bash")
     result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
 
-    assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert "PROMPT_COMMAND" in result.stdout, (
-        f"bash init must reference PROMPT_COMMAND; got:\n{result.stdout}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell init must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
-
-    if shutil.which("shellcheck") is None:
-        # Fall back to bash -n if shellcheck isn't installed.
-        ok, syn_err = _bash_syntax_ok(result.stdout)
-        assert ok, f"shell init bash failed bash -n: {syn_err}\n{result.stdout}"
-        return
-
-    sc = subprocess.run(
-        ["shellcheck", "-s", "bash", "-"],
-        input=result.stdout,
-        capture_output=True,
-        text=True,
-    )
-    assert sc.returncode == 0, (
-        f"shellcheck must accept shell init bash output; "
-        f"rc={sc.returncode}\nstderr:\n{sc.stderr}\nstdout:\n{sc.stdout}\n"
-        f"snippet:\n{result.stdout}"
+    assert "unrecognized" in result.stderr.lower() or "init" in result.stderr.lower(), (
+        f"expected clap unrecognized-subcommand stderr; got:\n{result.stderr}"
     )
 
 
-# ---------------------------------------------------------------------------
-# 10. shell init zsh → add-zsh-hook precmd
-# ---------------------------------------------------------------------------
-
-
-def test_shell_init_zsh_uses_add_zsh_hook(ocx: OcxRunner) -> None:
-    """Plan §7 line 782: Zsh init uses ``add-zsh-hook precmd``.
-
-    Living Design — ``shell init`` shell arg is now ``-s/--shell``
-    (adr_global_toolchain_tier.md §Decision 6 / plan C2.7 W2-P4 LDR).
-    The ``add-zsh-hook precmd`` per-prompt snippet is unchanged.
-    """
+def test_shell_init_zsh_removed(ocx: OcxRunner) -> None:
+    """``ocx shell init --shell zsh`` → exit 64 (deleted)."""
     cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "zsh")
     result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
-
-    assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert "add-zsh-hook precmd" in result.stdout, (
-        f"zsh init must use 'add-zsh-hook precmd'; got:\n{result.stdout}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell init must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
-# ---------------------------------------------------------------------------
-# 11. shell init fish → on-variable PWD
-# ---------------------------------------------------------------------------
-
-
-def test_shell_init_fish_uses_prompt_event_hook(ocx: OcxRunner) -> None:
-    """Plan §7 line 783 (Round 2 W2): Fish init fires on every prompt.
-
-    The original ``--on-variable PWD`` choice fired only on ``cd``; the
-    correct cadence for re-evaluating the project toolchain is
-    ``--on-event fish_prompt``, which matches mise/direnv. The substring
-    we assert on is the function definition prefix so the test stays
-    lenient if the snippet's body wording shifts.
-
-    Living Design — ``shell init`` shell arg is now ``-s/--shell``
-    (adr_global_toolchain_tier.md §Decision 6 / plan C2.7 W2-P4 LDR).
-    The ``--on-event fish_prompt`` per-prompt snippet is unchanged.
-    """
+def test_shell_init_fish_removed(ocx: OcxRunner) -> None:
+    """``ocx shell init --shell fish`` → exit 64 (deleted)."""
     cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "fish")
     result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
-
-    assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert "--on-event fish_prompt" in result.stdout, (
-        f"fish init must use '--on-event fish_prompt'; got:\n{result.stdout}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell init must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
-# ---------------------------------------------------------------------------
-# 12. shell init nushell → autoload path, no eval
-# ---------------------------------------------------------------------------
-
-
-def test_shell_init_nushell_writes_autoload_path(ocx: OcxRunner) -> None:
-    """Plan §7 line 784: Nushell init references ``NU_VENDOR_AUTOLOAD_DIR`` (file-based, no eval).
-
-    Living Design — ``shell init`` shell arg is now ``-s/--shell``
-    (adr_global_toolchain_tier.md §Decision 6 / plan C2.7 W2-P4 LDR).
-    The file-based ``NU_VENDOR_AUTOLOAD_DIR`` snippet is unchanged.
-    """
+def test_shell_init_nushell_removed(ocx: OcxRunner) -> None:
+    """``ocx shell init --shell nushell`` → exit 64 (deleted)."""
     cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "nushell")
     result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
-
-    assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert "NU_VENDOR_AUTOLOAD_DIR" in result.stdout, (
-        f"nushell init must reference NU_VENDOR_AUTOLOAD_DIR (file-based init); "
-        f"got:\n{result.stdout}"
-    )
-    # Plan line 784: "no stdout eval".
-    assert "eval" not in result.stdout.lower(), (
-        f"nushell init must NOT use eval (file-based init); got:\n{result.stdout}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell init must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 13/14. (architect-mandated boundary) --remote must NOT force network
+# 13. --remote flag does NOT force network for direnv export (security boundary)
 # ---------------------------------------------------------------------------
 
 
 def test_remote_flag_does_not_force_network_for_direnv_export(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Architect: ``--remote direnv export` with ``OCX_OFFLINE=1`` → still succeeds.
+    """``--remote direnv export`` with ``OCX_OFFLINE=1`` → still succeeds.
 
     The hook never contacts the registry regardless of ``--remote``;
     setting ``OCX_OFFLINE=1`` is the harness assertion that no network
@@ -649,82 +445,55 @@ hello = "{ocx.registry}/{repo}:{tag}"
     )
 
 
-def test_remote_flag_does_not_force_network_for_shell_hook(
+# ---------------------------------------------------------------------------
+# 14. --remote flag for shell hook → DELETED (assert exit 64)
+# ---------------------------------------------------------------------------
+
+
+def test_remote_flag_does_not_force_network_for_shell_hook_removed(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Architect: ``--remote shell hook`` with ``OCX_OFFLINE=1`` → still succeeds."""
-    repo, tag = _published_tool(ocx, tmp_path, "remote_hookenv")
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-hello = "{ocx.registry}/{repo}:{tag}"
-""",
-    )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-    assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
+    """``ocx shell hook`` (even with ``--remote``) → exit 64 (deleted).
 
+    The shell hook command is removed. This test replaces the prior
+    'remote-does-not-force-network-for-shell-hook' contract by asserting the
+    command no longer exists.
+    """
     result = _run(
-        ocx, project, "--remote", "shell", "hook", "--shell", "bash",
+        ocx, tmp_path, "--remote", "shell", "hook", "--shell", "bash",
         extra_env={"OCX_OFFLINE": "1"},
     )
-
-    assert result.returncode == EXIT_SUCCESS, (
-        f"--remote + OCX_OFFLINE=1 must still succeed for shell hook; "
-        f"rc={result.returncode}\nstderr:\n{result.stderr}"
-    )
-    assert _extract_applied(result.stdout) is not None, (
-        f"shell hook must still emit _OCX_APPLIED under --remote; "
-        f"got stdout:\n{result.stdout}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell hook (even with --remote) must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 15. (Round 2 W4) Empty `_OCX_APPLIED` env var → treated as no prior state
+# 15. Empty _OCX_APPLIED → deleted command exits 64
 # ---------------------------------------------------------------------------
 
 
-def test_shell_hook_empty_applied_treated_as_no_prior_state(
+def test_shell_hook_empty_applied_treated_as_no_prior_state_removed(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """An empty ``_OCX_APPLIED=""`` value behaves like the env var being unset.
+    """``ocx shell hook`` with empty ``_OCX_APPLIED`` → exit 64 (deleted).
 
-    Edge case the strict v1 parser must handle gracefully: ``parse_applied``
-    rejects an empty string (not `v1:` prefixed), so the hook must take the
-    no-prior-state branch (full export set, fresh sentinel) without error.
+    The _OCX_APPLIED sentinel mechanism is removed along with the shell hook
+    command. Any invocation exits 64.
     """
-    repo, tag = _published_tool(ocx, tmp_path, "fp_empty")
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-hello = "{ocx.registry}/{repo}:{tag}"
-""",
-    )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
-    assert _run_pull(ocx, project).returncode == EXIT_SUCCESS
-
     result = _run(
-        ocx, project, "shell", "hook", "--shell", "bash",
+        ocx, tmp_path, "shell", "hook", "--shell", "bash",
         extra_env={"_OCX_APPLIED": ""},
     )
-
-    assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert _extract_applied(result.stdout) is not None, (
-        f"empty _OCX_APPLIED must trigger full re-export with fresh sentinel; "
-        f"got stdout:\n{result.stdout}"
-    )
-    assert "export" in result.stdout, (
-        f"empty _OCX_APPLIED must emit exports; got stdout:\n{result.stdout}"
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx shell hook must exit {EXIT_USAGE} (deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 16. (Round 2 W4) direnv export with ocx.toml but no ocx.lock
+# 16. direnv export with ocx.toml but no ocx.lock
 # ---------------------------------------------------------------------------
 
 
@@ -733,10 +502,9 @@ def test_direnv_export_missing_lock_present_toml_emits_stderr_and_exits_zero(
 ) -> None:
     """Project has ``ocx.toml`` but no ``ocx.lock`` → exit 0, stderr mentions lock.
 
-    Mirrors the prompt-hook contract from plan §7 line 770: direnv export
-    must NEVER fail the prompt cycle. A freshly cloned project (toml without
-    lock) emits a one-line stderr note pointing at ``ocx lock`` and produces
-    no stdout exports.
+    direnv export must NEVER fail the prompt cycle. A freshly cloned project
+    (toml without lock) emits a one-line stderr note pointing at ``ocx lock``
+    and produces no stdout exports.
     """
     repo, tag = _published_tool(ocx, tmp_path, "no_lock")
     project = tmp_path / "proj"
@@ -771,20 +539,15 @@ hello = "{ocx.registry}/{repo}:{tag}"
 
 
 def test_top_level_hook_env_removed(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx hook-env`` must exit non-zero (clap unrecognized-subcommand error).
-
-    The command was moved to ``ocx shell hook``. No deprecation shim — the
-    old top-level name must hard-fail per the breaking-compat memo.
-    """
+    """``ocx hook-env`` must exit non-zero (clap unrecognized-subcommand error)."""
     result = _run(ocx, tmp_path, "hook-env")
 
     assert result.returncode != 0, (
         f"ocx hook-env must fail with non-zero exit; rc={result.returncode}\n"
         f"stderr:\n{result.stderr}"
     )
-    # ocx classifies clap usage errors as ExitCode::UsageError (64, sysexits).
-    assert result.returncode == 64, (
-        f"expected UsageError exit code 64; got {result.returncode}\n"
+    assert result.returncode == EXIT_USAGE, (
+        f"expected UsageError exit code {EXIT_USAGE}; got {result.returncode}\n"
         f"stderr:\n{result.stderr}"
     )
     assert "unrecognized" in result.stderr.lower() or "hook-env" in result.stderr, (
@@ -794,20 +557,15 @@ def test_top_level_hook_env_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx shell-hook`` must exit non-zero (clap unrecognized-subcommand error).
-
-    The command was moved to ``ocx direnv export``. No deprecation shim — the
-    old top-level name must hard-fail per the breaking-compat memo.
-    """
+    """``ocx shell-hook`` must exit non-zero (clap unrecognized-subcommand error)."""
     result = _run(ocx, tmp_path, "shell-hook")
 
     assert result.returncode != 0, (
         f"ocx shell-hook must fail with non-zero exit; rc={result.returncode}\n"
         f"stderr:\n{result.stderr}"
     )
-    # ocx classifies clap usage errors as ExitCode::UsageError (64, sysexits).
-    assert result.returncode == 64, (
-        f"expected UsageError exit code 64; got {result.returncode}\n"
+    assert result.returncode == EXIT_USAGE, (
+        f"expected UsageError exit code {EXIT_USAGE}; got {result.returncode}\n"
         f"stderr:\n{result.stderr}"
     )
     assert "unrecognized" in result.stderr.lower() or "shell-hook" in result.stderr, (
@@ -817,146 +575,207 @@ def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 19. (Codex finding #2) Departed global set must clear stale shell state
+# 19. Global activation via `ocx env --global --shell=sh` (replaces departed
+#     shell hook test — plan Phase 5 / handshake §4 / C6)
+#
+# Contract: `add --global` records into global tier; `ocx env --global --shell=sh`
+# emits POSIX export lines; eval them in a subshell → tool is on PATH.
 # ---------------------------------------------------------------------------
 
 
-def test_shell_hook_global_departed_clears_stale_state(
+def test_global_env_sh_activation_replaces_departed_hook(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """`ocx shell hook` outside a project must clear stale global state.
+    """Global activation via ``ocx env --global --shell=sh`` (handshake §4 / C6).
 
-    Codex cross-model gate finding #2: when the global set resolves EMPTY
-    (e.g. after the last global tool was ``ocx remove --global``'d) but the
-    shell previously had a global set applied (``_OCX_APPLIED`` carries the
-    prior non-empty fingerprint), the hook must NOT short-circuit to empty
-    stdout and leave the departed global PATH/env in place forever. It must
-    take the diff/clear path: emit the global-bin-dir PATH cleanup and
-    reset ``_OCX_APPLIED`` to the empty-set sentinel.
+    Replaces the prior ``test_shell_hook_global_departed_clears_stale_state``
+    which tested the deleted shell-hook command. The new contract:
+
+    1. ``ocx add --global <pkg>`` records the tool in the global toolchain.
+    2. ``ocx env --global --shell=sh`` emits POSIX ``export …`` lines.
+    3. Eval the output in a subshell → the tool's bin dir is on PATH.
+    4. Remove the tool (``ocx remove --global``).
+    5. ``ocx env --global --shell=sh`` with no global toolchain → exit 64.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_gdepart"
     make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["gtool"])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
-    # Install the tool into the global tier (add + lock + install + select).
-    assert (
-        _run(ocx, tmp_path, "install", "--global", fq).returncode == EXIT_SUCCESS
+    # Add into the global tier.
+    add = _run(ocx, tmp_path, "add", "--global", fq)
+    assert add.returncode == EXIT_SUCCESS, (
+        f"add --global must succeed; stderr:\n{add.stderr}"
     )
 
-    # No project in scope: the hook emits the global `current` set and a
-    # fresh `_OCX_APPLIED` sentinel.
+    # `add --global` installs (creates candidate symlink) but does NOT set the
+    # `current` symlink.  `resolve_global_current_env` requires `current` symlinks.
+    # Select the package so it appears in `ocx env --global` output.
+    sel = _run(ocx, tmp_path, "package", "select", fq)
+    assert sel.returncode == EXIT_SUCCESS, (
+        f"package select must succeed after add --global; rc={sel.returncode}\nstderr:\n{sel.stderr}"
+    )
+
+    # `ocx env --global --shell=sh` must emit sourceable POSIX export lines.
     empty = tmp_path / "no_project"
     empty.mkdir()
-    first = _run(
-        ocx, empty, "shell", "hook", "--shell", "bash",
+    env_result = _run(
+        ocx, empty, "env", "--global", "--shell=sh",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
-    assert first.returncode == EXIT_SUCCESS, first.stderr
-    applied = _extract_applied(first.stdout)
-    assert applied is not None, (
-        f"first shell hook (global set applied) must export _OCX_APPLIED; "
-        f"got stdout:\n{first.stdout}"
+    assert env_result.returncode == EXIT_SUCCESS, (
+        f"ocx env --global --shell=sh must succeed; "
+        f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
     )
-    assert "export" in first.stdout, (
-        f"first shell hook must export the global set; got:\n{first.stdout}"
+    assert "export PATH=" in env_result.stdout or "export" in env_result.stdout, (
+        f"env --global --shell=sh must emit export lines; got:\n{env_result.stdout}"
     )
 
-    # Remove the last global tool — the global set is now empty.
-    assert (
-        _run(ocx, tmp_path, "remove", "--global", fq).returncode == EXIT_SUCCESS
+    # Source the output in a subshell → gtool bin dir on PATH.
+    # Block A1 fix: use run_after_sourcing (temp-file + dot-operator) instead of
+    # eval "..." to handle paths with spaces, $, ", !, and \ correctly.
+    check_result = run_after_sourcing(
+        env_result.stdout,
+        'command -v gtool || echo "NOT_FOUND"',
+        cwd=empty,
+        env=dict(ocx.env),
+    )
+    assert "NOT_FOUND" not in check_result.stdout, (
+        f"after sourcing env --global --shell=sh output, gtool must be on PATH; "
+        f"stdout:\n{check_result.stdout}\nstderr:\n{check_result.stderr}"
     )
 
-    # Re-run the hook carrying the prior `_OCX_APPLIED`. The global set is
-    # empty but a prior global set was applied → the clear path must fire.
-    second = _run(
-        ocx, empty, "shell", "hook", "--shell", "bash",
-        extra_env={"OCX_NO_PROJECT": "1", "_OCX_APPLIED": applied},
+    # Remove the tool — global toolchain is now empty (no tools, no current symlinks).
+    remove = _run(ocx, tmp_path, "remove", "--global", fq)
+    assert remove.returncode == EXIT_SUCCESS, (
+        f"remove --global must succeed; stderr:\n{remove.stderr}"
     )
 
-    assert second.returncode == EXIT_SUCCESS, second.stderr
-    # NOT empty stdout (the bug): the stale state must be cleared.
-    assert second.stdout != "", (
-        "departed global set with prior applied state must NOT short-circuit "
-        "to empty stdout — stale PATH/env would persist forever"
+    # After removal, all tools are gone and no `current` symlinks exist.
+    # `resolve_global_current_env` returns None when no current-selected tools
+    # exist (same code path as "no global toolchain configured") → exit 64.
+    # This matches the docstring step 5: "no global toolchain → exit 64".
+    # The runtime maps "empty current-symlink set" to "no global toolchain
+    # configured" because the global tier is only meaningful when tools are
+    # installed AND selected.
+    env_empty = _run(
+        ocx, empty, "env", "--global", "--shell=sh",
+        extra_env={"OCX_NO_PROJECT": "1"},
     )
-    # The global bin dir PATH cleanup must be emitted (existing
-    # `filter_path_excluding` mechanism), so the departed global bin dir is
-    # removed from PATH rather than left dangling.
-    assert "PATH=" in second.stdout, (
-        f"departed global set must emit the global-bin-dir PATH cleanup; "
-        f"got stdout:\n{second.stdout}"
-    )
-    # `_OCX_APPLIED` must be reset to the empty-set sentinel (differs from
-    # the prior non-empty one) so the next prompt's fast-path comparison has
-    # a fresh value and a later re-selection diffs correctly.
-    new_applied = _extract_applied(second.stdout)
-    assert new_applied is not None and new_applied != applied, (
-        f"departed global set must reset _OCX_APPLIED to the empty-set "
-        f"sentinel (≠ prior); prior={applied!r} new={new_applied!r}\n"
-        f"stdout:\n{second.stdout}"
+    assert env_empty.returncode == EXIT_USAGE, (
+        f"env --global --shell=sh after removing all tools must exit {EXIT_USAGE} "
+        f"(no current-selected tools = 'no global toolchain configured'); "
+        f"got {env_empty.returncode}\nstderr:\n{env_empty.stderr}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 20. (Codex finding #3) Non-POSIX static init must NOT prepend global PATH
+# 20. shell init non-POSIX → DELETED (assert exit 64)
 # ---------------------------------------------------------------------------
 
 
-def test_shell_init_non_posix_static_file_omits_global_prepend(
+def test_shell_init_non_posix_static_file_omits_global_prepend_removed(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Non-POSIX ``$OCX_HOME/init.<shell>`` must omit the global-PATH prepend.
+    """``ocx shell init --shell {fish,nushell,powershell,elvish}`` → exit 64 (deleted).
 
-    Codex cross-model gate finding #3 (Living Design): for Fish / Nushell /
-    PowerShell / Elvish the project-aware upward-walk guard is NOT
-    implemented, so a static unconditional global-PATH prepend would leak
-    global tools into a project for any non-interactive sourced invocation —
-    violating the strict-isolation contract
-    (``adr_global_toolchain_tier.md`` §Decision 4/6). The safe variant
-    (Codex-recommended): omit the static prepend entirely and emit only an
-    explanatory comment. Global tools are still provided outside a project
-    by the interactive ``ocx shell hook`` prompt hook (unchanged). This
-    test asserts the OMISSION + comment, replacing the prior (now-rejected)
-    unguarded-prepend behaviour per this Codex finding and the ADR
-    strict-isolation decision.
+    The static per-shell init file model (Fish / Nushell / PowerShell / Elvish)
+    is removed along with ``ocx shell init``. The replacement activation model
+    is ``ocx env --global --shell=<family>`` (C5 / handshake §4).
     """
-    short = uuid4().hex[:8]
-    repo = f"t_{short}_nposix"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["gtool"])
+    for shell in ("fish", "nushell", "powershell", "elvish"):
+        result = _run(ocx, tmp_path, "shell", "init", "--shell", shell)
+        assert result.returncode == EXIT_USAGE, (
+            f"ocx shell init --shell {shell} must exit {EXIT_USAGE} (deleted); "
+            f"got {result.returncode}\nstderr:\n{result.stderr}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# W7 — Run-to-run determinism guard: `ocx direnv export` byte-stability
+#
+# Proves that `ocx direnv export` produces byte-identical output on
+# consecutive invocations against the same locked project (no non-determinism
+# from ordering, timestamps, random UUIDs, etc.).  This guard is independent
+# of any particular refactor — it remains a permanent regression fence.
+# ---------------------------------------------------------------------------
+
+
+def test_direnv_export_byte_stability_after_emit_lines_extraction(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx direnv export`` output is byte-identical across consecutive runs.
+
+    This test proves run-to-run determinism: given the same locked project,
+    two back-to-back ``ocx direnv export`` invocations must produce exactly
+    the same bytes.  Any non-determinism (output ordering, stray timestamps,
+    random IDs, non-reproducible quoting) is caught here.
+
+    The name retains the historical ``emit_lines_extraction`` suffix for
+    traceability to plan_toolchain_cli.md Phase 2 where it was authored;
+    the assertion itself is a permanent determinism fence, not a pre/post-
+    refactor identity check.
+
+    Setup:
+    1. Publish a package with one PATH-modifier and one CONSTANT-modifier
+       env entry so both modifier paths are exercised in a single run.
+    2. Lock + pull the project.
+    3. Run ``ocx direnv export`` twice and assert byte-identical stdout.
+
+    Shell is always ``Bash`` (``direnv_export.rs`` hardcodes ``Shell::Bash``
+    and does not expose ``--shell``; that is part of the characterised
+    contract — do not add a ``--shell`` flag to ``direnv export``).
+    """
+    from uuid import uuid4 as _uuid4
+    from src.helpers import make_package as _make_package
+
+    short = _uuid4().hex[:8]
+    repo = f"t_{short}_w7stab"
+
+    # Publish a package with explicit PATH + CONSTANT env entries so both
+    # modifier kinds are exercised (full coverage of the emit loop).
+    pkg_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin", "visibility": "public"},
+        {
+            "key": repo.upper().replace("-", "_") + "_HOME",
+            "type": "constant",
+            "value": "${installPath}",
+            "visibility": "public",
+        },
+    ]
+    _make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, env=pkg_env)
     fq = f"{ocx.registry}/{repo}:1.0.0"
-    # A real global tool so the global `current` set is non-empty — proving
-    # the omission is a deliberate isolation choice, not just an empty set.
-    assert (
-        _run(ocx, tmp_path, "install", "--global", fq).returncode == EXIT_SUCCESS
+
+    project = tmp_path / "proj_w7"
+    project.mkdir()
+    (project / "ocx.toml").write_text(
+        f"[tools]\ntool = \"{fq}\"\n"
     )
 
-    ocx_home = Path(ocx.env["OCX_HOME"])
-    symlinks_root = str(ocx_home / "symlinks")
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS, (
+        "ocx lock must succeed for the W7 characterization fixture"
+    )
+    assert _run_pull(ocx, project).returncode == EXIT_SUCCESS, (
+        "ocx pull must succeed for the W7 characterization fixture"
+    )
 
-    for shell, init_name in (
-        ("fish", "init.fish"),
-        ("nushell", "init.nu"),
-        ("powershell", "init.ps1"),
-        ("elvish", "init.elv"),
-    ):
-        init = _run(ocx, tmp_path, "shell", "init", "--shell", shell)
-        assert init.returncode == EXIT_SUCCESS, (
-            f"shell init --shell {shell} must succeed; stderr:\n{init.stderr}"
-        )
-        init_file = ocx_home / init_name
-        assert init_file.exists(), (
-            f"shell init --shell {shell} must write {init_name}"
-        )
-        body = init_file.read_text()
-        # The departed/omitted-prepend explanatory comment must be present.
-        assert "static global PATH prepend omitted" in body, (
-            f"{init_name} must carry the omission comment; got:\n{body}"
-        )
-        # And the global `current` bin dir must NOT be prepended in the
-        # static file (no unconditional global PATH leak).
-        assert symlinks_root not in body, (
-            f"{init_name} must NOT statically prepend the global bin dir "
-            f"(strict isolation — Codex finding #3 + "
-            f"adr_global_toolchain_tier.md §Decision 4/6); got:\n{body}"
-        )
+    # First run: capture baseline output.
+    first = _run(ocx, project, "direnv", "export")
+    assert first.returncode == EXIT_SUCCESS, (
+        f"W7 baseline: direnv export must exit 0; stderr:\n{first.stderr}"
+    )
+    baseline = first.stdout
+    assert "export" in baseline, (
+        f"W7 baseline: expected at least one export line; got:\n{baseline!r}"
+    )
+
+    # Second run: output must be byte-identical (characterisation contract).
+    second = _run(ocx, project, "direnv", "export")
+    assert second.returncode == EXIT_SUCCESS, (
+        f"W7 second run: direnv export must exit 0; stderr:\n{second.stderr}"
+    )
+    assert second.stdout == baseline, (
+        "W7 byte-stability: direnv export output is not deterministic across runs; "
+        "output changed between the first and second invocation.\n"
+        f"Expected:\n{baseline!r}\nGot:\n{second.stdout!r}"
+    )

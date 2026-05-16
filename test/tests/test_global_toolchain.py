@@ -1,15 +1,27 @@
 """Acceptance tests for the explicit `--global` toolchain tier.
 
-Encodes plan_project_toolchain_hardening.md W2-P3 + adr_global_toolchain_tier.md:
-the global tier is reachable only via an explicit `--global` flag (no implicit
-`$OCX_HOME/ocx.toml` discovery), strictly isolated from project resolution
-(`run`/`exec` are hermetic and never consult the global file), and surfaced to
-a sourced non-interactive shell via the static `$OCX_HOME/init.<shell>`
-PATH-prepend entrypoint.
+Encodes adr_global_toolchain_tier.md + handshake_toolchain_cli.md (signed
+2026-05-16, handshake §5 / plan C7):
 
-The `--global` implementation (`Context::with_command_global`,
-`ProjectConfig::resolve` global branch, the static `init.<shell>` writer) is
-fully wired; these tests assert real success against the compiled binary.
+- The global tier is reachable only via an explicit ``--global`` flag (no
+  implicit ``$OCX_HOME/ocx.toml`` discovery).
+- ``run``/``exec`` are hermetic and never consult the global file without
+  ``--global``.
+- ``ocx run --global`` composes the global toolchain env for the child process
+  only — it never mutates the parent shell.
+- Isolation is by PATH precedence only (no PATH strip).
+
+Phase 5 rewrites (plan_toolchain_cli.md Phase 5 / handshake §2):
+- Test 1: ``install --global`` (deleted) replaced with ``add --global``;
+  ``shell init`` (deleted) replaced with ``ocx env --global --shell=sh`` activation.
+- Tests 3, 5: ``install --global`` replaced with ``add --global``.
+- Test 4: already uses ``add --global`` (previously rewritten for the new
+  PATH-precedence model — no PATH strip).
+
+Test 4 (``test_project_strict_isolation_global_bin_absent``) previously asserted
+the OLD PATH-strip model (CODEX-WARN-5 / adr_global_toolchain_tier.md Decision 6,
+now SUPERSEDED by handshake §5 / C7). It has been REWRITTEN to the new contract:
+isolation is by PATH precedence via ``ocx run``, not by subshell PATH strip.
 """
 
 from __future__ import annotations
@@ -19,6 +31,7 @@ from pathlib import Path
 
 from src import OcxRunner
 from src.helpers import make_package
+from src.shell_eval import run_after_sourcing
 
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
@@ -57,32 +70,25 @@ def _run_cmd(
     )
 
 
-def _source_init_script(
+def _source_env_sh_script(
     ocx: OcxRunner,
     cwd: Path,
+    env_sh_content: str,
     body: str,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``body`` in a NON-INTERACTIVE ``bash --norc -c`` shell that sources
-    ``$OCX_HOME/init.bash`` first.
+    """Run ``body`` in a NON-INTERACTIVE ``bash --norc`` shell that sources
+    ``ocx env --global --shell=sh`` output first (new activation model).
 
-    Deliberately NOT an interactive prompt-hook session: the per-prompt hook
-    never fires in ``bash --norc`` / ``bash -c`` / CI shells, so this is the
-    surface that catches the CI-invisible-global regression (SOTA-2a). The
-    static ``init.bash`` entrypoint must prepend the global ``current`` bin
-    dir to PATH without invoking the hook.
+    Uses ``run_after_sourcing`` which writes the export lines to a temp file
+    and uses the POSIX dot-operator (``.``) instead of ``eval "..."`` to avoid
+    quoting fragility (Block A1 fix: paths with spaces / $ / " / ! all handled
+    correctly — the eval form breaks on all of those).
     """
-    ocx_home = Path(ocx.env["OCX_HOME"])
-    init_file = ocx_home / "init.bash"
-    # POSIX `.` (dot), not bash `source`, for dash/sh CI compatibility
-    # (SOTA-2b) — bash accepts `.` too.
-    script = f'. "{init_file}"\n{body}\n'
-    env = dict(ocx.env)
-    return subprocess.run(
-        ["bash", "--norc", "-c", script],
+    return run_after_sourcing(
+        env_sh_content,
+        body,
         cwd=cwd,
-        capture_output=True,
-        text=True,
-        env=env,
+        env=dict(ocx.env),
     )
 
 
@@ -100,27 +106,44 @@ def _write_ocx_toml(project_dir: Path, body: str) -> Path:
 def test_global_add_install_select_then_fresh_shell_sees_tool(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`ocx install --global <pkg>` records into + selects the global tier;
-    a sourced non-interactive shell (CI shape) then resolves the tool's binary
-    on PATH via the static ``$OCX_HOME/init.bash`` entrypoint (SOTA-2a)."""
+    """`ocx add --global <pkg>` records into + selects the global tier;
+    a non-interactive shell that evals ``ocx env --global --shell=sh`` output
+    then resolves the tool's binary on PATH (handshake §4 activation model).
+
+    Rewritten Phase 5: replaces the deleted ``install --global`` + ``shell init``
+    + static ``$OCX_HOME/init.bash`` activation. The new model uses
+    ``ocx add --global`` and ``ocx env --global --shell=sh``.
+    """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
-    add = _run_cmd(ocx, tmp_path, "install", "--global", fq)
+    add = _run_cmd(ocx, tmp_path, "add", "--global", fq)
     assert add.returncode == EXIT_SUCCESS, (
-        f"install --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
+        f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
     )
 
-    # Materialize the static entrypoint, then a non-interactive shell that
-    # sources it must find `gtool` on PATH.
-    init = _run_cmd(ocx, tmp_path, "shell", "init", "--shell", "bash")
-    assert init.returncode == EXIT_SUCCESS, (
-        f"shell init must succeed; stderr:\n{init.stderr}"
+    # `add --global` installs AND auto-sets the `current` selection in the
+    # global tier (signed handshake §1: "global IS the project toolchain — the
+    # only difference is the load site"). No manual `ocx package select` —
+    # `resolve_global_current_env` reads exactly the `current` symlink that
+    # `add --global` just created.
+
+    # Get the activation export lines via `ocx env --global --shell=sh`.
+    env_result = _run_cmd(ocx, tmp_path, "env", "--global", "--shell=sh")
+    assert env_result.returncode == EXIT_SUCCESS, (
+        f"ocx env --global --shell=sh must succeed; stderr:\n{env_result.stderr}"
+    )
+    assert "export" in env_result.stdout, (
+        f"env --global --shell=sh must emit export lines; got:\n{env_result.stdout}"
     )
 
-    result = _source_init_script(ocx, tmp_path, "command -v gtool && gtool")
+    # Eval the output in a non-interactive shell → gtool must be on PATH.
+    result = _source_env_sh_script(
+        ocx, tmp_path, env_result.stdout, "command -v gtool && gtool"
+    )
     assert result.returncode == EXIT_SUCCESS, (
-        f"sourced non-interactive shell must resolve the global tool; "
+        f"sourced non-interactive shell must resolve the global tool via "
+        f"eval of env --global --shell=sh output; "
         f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
@@ -170,7 +193,7 @@ def test_project_tool_shadows_global_in_project(
     make_package(ocx, p_repo, "1.0.0", tmp_path, new=True, bins=["tool"])
 
     # Global tier carries `tool` → g_repo.
-    _run_cmd(ocx, tmp_path, "install", "--global", f"{ocx.registry}/{g_repo}:1.0.0")
+    _run_cmd(ocx, tmp_path, "add", "--global", f"{ocx.registry}/{g_repo}:1.0.0")
 
     # Project declares `tool` → p_repo.
     project = tmp_path / "proj"
@@ -196,55 +219,70 @@ def test_project_tool_shadows_global_in_project(
 
 
 # ---------------------------------------------------------------------------
-# 4. Strict isolation: inside a project the global bin dir is absent from PATH
+# 4. Strict isolation (PATH-precedence model — REWRITTEN for handshake §5 / C7)
 # ---------------------------------------------------------------------------
 
 
 def test_project_strict_isolation_global_bin_absent(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """CODEX-WARN-5: source ``init.bash``, enter a project, and assert a tool
-    present ONLY in the global tier is NOT on PATH AND the global ``current``
-    bin dir itself is absent from PATH — proving isolation (the global bin dir
-    is *removed*, not merely shadowed), not mere precedence."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
-    _run_cmd(
-        ocx, tmp_path, "install", "--global", f"{ocx.registry}/{unique_repo}:1.0.0"
+    """Isolation is by PATH precedence, not by subshell PATH strip (C7).
+
+    REWRITTEN from the OLD model (CODEX-WARN-5 / adr_global_toolchain_tier.md
+    Decision 6, SUPERSEDED by handshake §5): the previous test asserted that the
+    global bin dir was *removed* from PATH via a ``filter_path_excluding``
+    subshell — the strip mechanism deleted in Phase 1 (C4).
+
+    NEW CONTRACT (handshake §5 / C7): ``ocx run`` inside a project composes
+    the project toolchain env for the child process only. A tool present ONLY in
+    the global toolchain is inaccessible via bare ``ocx run`` (no implicit merge,
+    binding not found → exit 64). The parent shell's PATH is never mutated.
+    Isolation is by exclusive project-tier scope, not by PATH strip.
+
+    The companion tests in ``test_run_global_isolation.py`` cover the full C7
+    matrix (bare run → 64, run --global → resolves, no strip output, parent
+    env unmutated). This test focuses on the in-project binding isolation.
+    """
+    g_repo = unique_repo
+    p_repo = f"{unique_repo}_proj"
+
+    make_package(ocx, g_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
+    # Use the live `add --global` (not the deleted `install --global`).
+    add = _run_cmd(ocx, tmp_path, "add", "--global", f"{ocx.registry}/{g_repo}:1.0.0")
+    assert add.returncode == EXIT_SUCCESS, (
+        f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
     )
 
     # A project that does NOT declare `gonly`.
-    other_repo = f"{unique_repo}_other"
-    make_package(ocx, other_repo, "1.0.0", tmp_path, new=True, bins=["ptool"])
+    make_package(ocx, p_repo, "1.0.0", tmp_path, new=True, bins=["ptool"])
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(
         project,
-        f'[tools]\nptool = "{ocx.registry}/{other_repo}:1.0.0"\n',
+        f'[tools]\nptool = "{ocx.registry}/{p_repo}:1.0.0"\n',
     )
     assert _run_cmd(ocx, project, "lock").returncode == EXIT_SUCCESS
     assert _run_cmd(ocx, project, "pull").returncode == EXIT_SUCCESS
 
-    _run_cmd(ocx, tmp_path, "shell", "init", "--shell", "bash")
+    # Bare `ocx run gonly` inside the project must fail (binding not in project).
+    # This verifies project-tier exclusivity — the global tier is never consulted
+    # by bare `run`, so `gonly` is genuinely out of scope.
+    result = _run_cmd(ocx, project, "run", "gonly", "--", "gonly")
+    assert result.returncode != EXIT_SUCCESS, (
+        f"bare `ocx run gonly` inside a project must NOT resolve a global-only "
+        f"tool (strict project-tier isolation — no PATH strip needed, scope is "
+        f"exclusive); rc={result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == EXIT_USAGE, (
+        f"binding-not-found must exit {EXIT_USAGE} (UsageError); "
+        f"got rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
 
-    # Inside the project (the prompt hook would rebuild PATH from the saved
-    # baseline and explicitly strip the global bin dir), a global-only tool
-    # must not resolve, and `$PATH` must not contain the global current bin
-    # dir at all.
-    probe = 'command -v gonly && echo FOUND || echo ABSENT; echo "PATH=$PATH"'
-    result = _source_init_script(ocx, project, probe)
-    assert "ABSENT" in result.stdout, (
-        f"global-only tool must NOT be on PATH inside a project (strict "
-        f"isolation); stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    # The global current bin dir itself must be gone from PATH (replace, not
-    # shadow). The dir lives under $OCX_HOME/symlinks/.../current/bin.
-    ocx_home = str(Path(ocx.env["OCX_HOME"]) / "symlinks")
-    path_line = next(
-        (ln for ln in result.stdout.splitlines() if ln.startswith("PATH=")), ""
-    )
-    assert ocx_home not in path_line, (
-        f"the global install bin dir must be removed from PATH inside a "
-        f"project, not merely shadowed; PATH line:\n{path_line}"
+    # Project's own tool is still reachable via bare `run` (regression guard).
+    project_result = _run_cmd(ocx, project, "run", "--", "ptool")
+    assert project_result.returncode == EXIT_SUCCESS, (
+        f"project-tier tool must still be reachable via bare `ocx run`; "
+        f"rc={project_result.returncode}\nstderr:\n{project_result.stderr}"
     )
 
 
@@ -261,7 +299,7 @@ def test_run_is_hermetic_ignores_global(
     only the in-effect project file, never the global one."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
     _run_cmd(
-        ocx, tmp_path, "install", "--global", f"{ocx.registry}/{unique_repo}:1.0.0"
+        ocx, tmp_path, "add", "--global", f"{ocx.registry}/{unique_repo}:1.0.0"
     )
 
     # A project that declares a *different* tool, never `gonly`.
@@ -298,7 +336,7 @@ def test_home_ocx_toml_not_discovered_without_global(
     no ``--global`` is given — the implicit home fallback was removed."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
     _run_cmd(
-        ocx, tmp_path, "install", "--global", f"{ocx.registry}/{unique_repo}:1.0.0"
+        ocx, tmp_path, "add", "--global", f"{ocx.registry}/{unique_repo}:1.0.0"
     )
 
     # Empty dir, no project ocx.toml anywhere up the tree, NO --global.

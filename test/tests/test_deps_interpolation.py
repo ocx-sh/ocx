@@ -80,9 +80,9 @@ def test_dep_install_path_resolves_to_content_dir(
         env_token=f"${{deps.{leaf_repo}.installPath}}",
     )
 
-    ocx.plain("install", "--select", app.short)
+    ocx.plain("package", "install", "--select", app.short)
 
-    env_result = ocx.json("env", app.short)
+    env_result = ocx.json("package", "env", app.short)
     dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
     assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
 
@@ -153,9 +153,9 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
         dependencies=[b_dep],
     )
 
-    ocx.plain("install", "--select", a.short)
+    ocx.plain("package", "install", "--select", a.short)
 
-    env_result = ocx.json("env", a.short)
+    env_result = ocx.json("package", "env", a.short)
     c_path_entry = next((e for e in env_result["entries"] if e["key"] == "C_PATH"), None)
     keys = [e["key"] for e in env_result["entries"]]
     assert c_path_entry is not None, (
@@ -190,9 +190,9 @@ def test_dep_install_path_with_explicit_name(
         env_token="${deps.my-dep.installPath}",
     )
 
-    ocx.plain("install", "--select", app.short)
+    ocx.plain("package", "install", "--select", app.short)
 
-    env_result = ocx.json("env", app.short)
+    env_result = ocx.json("package", "env", app.short)
     dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
     assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
 
@@ -213,9 +213,9 @@ def test_dep_install_path_mixed_with_install_path(
         env_token=f"${{installPath}}:${{deps.{leaf_repo}.installPath}}/bin",
     )
 
-    ocx.plain("install", "--select", app.short)
+    ocx.plain("package", "install", "--select", app.short)
 
-    env_result = ocx.json("env", app.short)
+    env_result = ocx.json("package", "env", app.short)
     dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
     assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
 
@@ -271,7 +271,7 @@ def test_launcher_exec_validates_metadata_via_validmetadata(
     surface a ``DataError`` (exit 65) naming the undeclared dep.
     """
     pkg = published_package
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     install_dir = ocx.json("which", pkg.short)
     pkg_root_str = install_dir.get(pkg.short) if isinstance(install_dir, dict) else None
@@ -396,7 +396,7 @@ def test_uppercase_dep_name_token_rejected_at_consumption(
     the exact token.
     """
     pkg = published_package
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     install_dir = ocx.json("which", pkg.short)
     pkg_root_str = install_dir.get(pkg.short) if isinstance(install_dir, dict) else None
@@ -482,7 +482,7 @@ def test_transitive_dep_token_rejected_at_exec_resolve_time(
     )
 
     # Install R (which transitively installs D and T).
-    ocx.plain("install", "--select", r_pkg.short)
+    ocx.plain("package", "install", "--select", r_pkg.short)
 
     # Locate R's installed package root.
     find_result = ocx.json("which", r_pkg.short)

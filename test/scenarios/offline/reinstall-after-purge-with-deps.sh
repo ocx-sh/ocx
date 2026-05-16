@@ -5,11 +5,11 @@
 #   from cached blobs/layers, not just the root.
 set -euo pipefail
 
-ocx install --select "$PKG_APP"
+ocx package install --select "$PKG_APP"
 
 rm -rf "$OCX_HOME/packages"
 
-env_out="$(ocx --offline exec "$PKG_APP" -- env)"
+env_out="$(ocx --offline package exec "$PKG_APP" -- env)"
 if ! grep -q "^${HOME_KEY_LEAF}=" <<<"$env_out"; then
     echo "expected leaf's home env key '$HOME_KEY_LEAF' after offline reinstall" >&2
     echo "$env_out" >&2

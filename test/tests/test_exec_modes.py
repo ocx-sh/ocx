@@ -98,10 +98,10 @@ def test_consumer_mode_excludes_private_dep_env(
         ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path,
         new=True, dependencies=[dep],
     )
-    ocx.json("install", "--select", cmake.short)
+    ocx.json("package", "install", "--select", cmake.short)
 
     cuda_home_key = f"{unique_repo}_cuda".upper().replace("-", "_") + "_HOME"
-    env_result = ocx.json("env", cmake.short)
+    env_result = ocx.json("package", "env", cmake.short)
     assert cuda_home_key not in _env_keys(env_result), (
         f"Consumer mode must hide Private dep env key {cuda_home_key!r}; "
         f"got: {_env_keys(env_result)}"
@@ -118,10 +118,10 @@ def test_self_mode_includes_private_dep_env(
         ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path,
         new=True, dependencies=[dep],
     )
-    ocx.json("install", "--select", cmake.short)
+    ocx.json("package", "install", "--select", cmake.short)
 
     cuda_home_key = f"{unique_repo}_cuda".upper().replace("-", "_") + "_HOME"
-    env_result = ocx.json("env", "--self", cmake.short)
+    env_result = ocx.json("package", "env", "--self", cmake.short)
     assert cuda_home_key in _env_keys(env_result), (
         f"Self mode MUST include Private dep env key {cuda_home_key!r}; "
         f"got: {_env_keys(env_result)}"
@@ -145,9 +145,9 @@ def test_consumer_mode_includes_interface_deps(
         ocx, f"{unique_repo}_toolchain", "1.0.0", tmp_path,
         new=True, dependencies=deps,
     )
-    ocx.json("install", "--select", toolchain.short)
+    ocx.json("package", "install", "--select", toolchain.short)
 
-    env_result = ocx.json("env", toolchain.short)
+    env_result = ocx.json("package", "env", toolchain.short)
     keys = _env_keys(env_result)
     jdk_key = f"{unique_repo}_jdk".upper().replace("-", "_") + "_HOME"
     maven_key = f"{unique_repo}_maven".upper().replace("-", "_") + "_HOME"
@@ -180,9 +180,9 @@ def test_env_self_mode_excludes_interface_only_deps(
         ocx, f"{unique_repo}_toolchain", "1.0.0", tmp_path,
         new=True, dependencies=deps,
     )
-    ocx.json("install", "--select", toolchain.short)
+    ocx.json("package", "install", "--select", toolchain.short)
 
-    env_result = ocx.json("env", "--self", toolchain.short)
+    env_result = ocx.json("package", "env", "--self", toolchain.short)
     keys = _env_keys(env_result)
     jdk_key = f"{unique_repo}_jdk".upper().replace("-", "_") + "_HOME"
     maven_key = f"{unique_repo}_maven".upper().replace("-", "_") + "_HOME"
@@ -228,10 +228,10 @@ def test_diamond_merge_self_mode_preserves_public_path(
             _dep_entry(ocx, middle_b, visibility="public"),
         ],
     )
-    ocx.json("install", "--select", root.short)
+    ocx.json("package", "install", "--select", root.short)
 
     leaf_key = f"{unique_repo}_leaf".upper().replace("-", "_") + "_HOME"
-    env_result = ocx.json("env", "--self", root.short)
+    env_result = ocx.json("package", "env", "--self", root.short)
     keys = _env_keys(env_result)
     assert leaf_key in keys, (
         f"Diamond-merged Public path must keep leaf visible under Self_ "
@@ -250,9 +250,8 @@ def test_mode_flag_rejected_with_usage_error(
     """`ocx exec --mode=…` exits 64. The `--mode` flag was replaced by `--self`
     when `ExecMode`/`ExecModeFlag` were deleted; clap rejects unknown args."""
     pkg = published_package
-    ocx.plain("install", pkg.short)
-    result = ocx.run(
-        "exec", "--mode=self", pkg.short, "--", "hello",
+    ocx.plain("package", "install", pkg.short)
+    result = ocx.run("package", "exec", "--mode=self", pkg.short, "--", "hello",
         check=False, format=None,
     )
     assert result.returncode == 64, (
@@ -270,10 +269,8 @@ def test_mode_flag_rejected_with_usage_error(
 @pytest.mark.parametrize(
     "surface",
     [
-        ("env",),
-        ("exec", "--", "hello"),
-        ("shell", "env"),
-        ("ci", "export"),
+        ("package", "env"),
+        ("package", "exec", "--", "hello"),
         ("deps",),
     ],
 )
@@ -283,20 +280,28 @@ def test_all_surfaces_carry_self_flag(
     surface: tuple[str, ...],
     self_flag: str | None,
 ):
-    """Each env-resolution surface accepts `--self` (or runs with the default
-    consumer view when `--self` is absent).
+    """Each live env-resolution surface accepts `--self` (or runs with the
+    default consumer view when `--self` is absent).
+
+    Rewritten Phase 5: ``shell env`` and ``ci export`` are deleted (plan C4).
+    Remaining live surfaces: ``package env``, ``package exec``, ``deps``.
 
     Smoke-test only — the surface returns a non-error exit code with the flag
     accepted. Detailed semantics are exercised by the matrix tests above.
     """
     pkg = published_package
-    ocx.plain("install", pkg.short)
+    ocx.plain("package", "install", pkg.short)
 
     extra: list[str] = [self_flag] if self_flag else []
 
     if "--" in surface:
-        args = ["exec", *extra, pkg.short, "--", "hello"]
+        # ("package", "exec", "--", "hello") → package exec [--self] <pkg> -- hello
+        args = ["package", "exec", *extra, pkg.short, "--", "hello"]
+    elif surface[0] == "package":
+        # ("package", "env") → package env [--self] <pkg>
+        args = [*surface, *extra, pkg.short]
     else:
+        # ("deps",) → deps [--self] <pkg>
         args = [*surface, *extra, pkg.short]
 
     result = ocx.run(*args, check=False, format=None)
@@ -326,9 +331,9 @@ def test_bare_binary_consumer_default_hides_path_without_stamp(
         new=True,
         env=[{"key": "PATH", "type": "path", "value": "${installPath}/bin"}],
     )
-    ocx.json("install", "--select", pkg_default.short)
+    ocx.json("package", "install", "--select", pkg_default.short)
 
-    env_default = ocx.json("env", pkg_default.short)
+    env_default = ocx.json("package", "env", pkg_default.short)
     path_entries_default = [
         e for e in env_default.get("entries", [])
         if e["key"] == "PATH"
@@ -347,9 +352,9 @@ def test_bare_binary_consumer_default_hides_path_without_stamp(
             "visibility": "public",
         }],
     )
-    ocx.json("install", "--select", pkg_public.short)
+    ocx.json("package", "install", "--select", pkg_public.short)
 
-    env_public = ocx.json("env", pkg_public.short)
+    env_public = ocx.json("package", "env", pkg_public.short)
     path_entries_public = [
         e for e in env_public.get("entries", [])
         if e["key"] == "PATH"
@@ -374,10 +379,10 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
         entrypoints=["tool"],
         bins=["tool"], tag="1.0.0",
     )
-    ocx.json("install", "--select", pkg.short)
+    ocx.json("package", "install", "--select", pkg.short)
 
     # Consumer: raw bin/ not in PATH (default-private hides declared PATH).
-    env_consumer = ocx.json("env", pkg.short)
+    env_consumer = ocx.json("package", "env", pkg.short)
     consumer_path_values = [
         e["value"] for e in env_consumer.get("entries", []) if e["key"] == "PATH"
     ]
@@ -394,7 +399,7 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
     )
 
     # Self: raw bin/ present (recursion-safe).
-    env_self = ocx.json("env", "--self", pkg.short)
+    env_self = ocx.json("package", "env", "--self", pkg.short)
     self_path_values = [
         e["value"] for e in env_self.get("entries", []) if e["key"] == "PATH"
     ]
@@ -425,12 +430,12 @@ def test_default_exec_mode_is_consumer(
         ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path,
         new=True, dependencies=[dep],
     )
-    ocx.json("install", "--select", cmake.short)
+    ocx.json("package", "install", "--select", cmake.short)
 
     cuda_home_key = f"{unique_repo}_cuda".upper().replace("-", "_") + "_HOME"
 
-    no_flag = ocx.json("env", cmake.short)
-    with_consumer = ocx.json("env", cmake.short)
+    no_flag = ocx.json("package", "env", cmake.short)
+    with_consumer = ocx.json("package", "env", cmake.short)
     assert _env_keys(no_flag) == _env_keys(with_consumer), (
         "Default mode must equal `--mode=consumer` (One-Way Door commitment); "
         f"no-flag keys: {_env_keys(no_flag)}; "
@@ -457,9 +462,8 @@ def test_invalid_mode_returns_clap_usage_error(
     aligned with BSD `sysexits.h`).
     """
     pkg = published_package
-    ocx.plain("install", pkg.short)
-    result = ocx.run(
-        "exec", "--mode=garbage", pkg.short, "--", "/bin/true",
+    ocx.plain("package", "install", pkg.short)
+    result = ocx.run("package", "exec", "--mode=garbage", pkg.short, "--", "/bin/true",
         check=False, format=None,
     )
     assert result.returncode == 64, (
@@ -539,10 +543,10 @@ def test_suite_b_dep_interface_entry_visibility_matrix(
         dependencies=[dep_a],
         env=[],
     )
-    ocx.json("install", "--select", pkg_r.short)
+    ocx.json("package", "install", "--select", pkg_r.short)
 
     extra_args: list[str] = ["--self"] if self_flag else []
-    env_result = ocx.json("env", *extra_args, pkg_r.short)
+    env_result = ocx.json("package", "env", *extra_args, pkg_r.short)
     keys = _env_keys(env_result)
 
     if expect_foo:
@@ -617,10 +621,10 @@ def test_suite_c_dep_private_entry_never_crosses_edges(
         dependencies=[dep_a],
         env=[],
     )
-    ocx.json("install", "--select", pkg_r.short)
+    ocx.json("package", "install", "--select", pkg_r.short)
 
     extra_args: list[str] = ["--self"] if self_flag else []
-    env_result = ocx.json("env", *extra_args, pkg_r.short)
+    env_result = ocx.json("package", "env", *extra_args, pkg_r.short)
     keys = _env_keys(env_result)
 
     assert "FOO" not in keys, (
@@ -692,10 +696,10 @@ def test_suite_d_dep_public_entry_visibility_matrix(
         dependencies=[dep_a],
         env=[],
     )
-    ocx.json("install", "--select", pkg_r.short)
+    ocx.json("package", "install", "--select", pkg_r.short)
 
     extra_args: list[str] = ["--self"] if self_flag else []
-    env_result = ocx.json("env", *extra_args, pkg_r.short)
+    env_result = ocx.json("package", "env", *extra_args, pkg_r.short)
     keys = _env_keys(env_result)
 
     if expect_foo:

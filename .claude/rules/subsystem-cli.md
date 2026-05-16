@@ -36,8 +36,8 @@ Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx
 - `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)
 - `ocx shell hook`, `ocx shell init`, `ocx shell env` — **DELETED** (handshake §7)
 
-### Removed root commands (handshake §7 — exit 2 from clap if invoked)
-- `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect` → moved to `ocx package`
+### Removed root commands (handshake §7 — exit 64 if invoked)
+- `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect` → moved to `ocx package`; ocx maps clap usage errors → EX_USAGE 64 (see `app.rs:112-119`)
 - `ocx ci` → removed
 
 ## Design Rationale
@@ -109,12 +109,12 @@ Every command same flow:
 `--global` selects `$OCX_HOME/ocx.toml` as the project file for toolchain-tier commands (`add`, `remove`, `lock`, `upgrade`, `run`, `env`). Defined in `ContextOptions` as `pub global: bool` with `conflicts_with = "project"`.
 
 Strict isolation rules:
-- `--global` and `--project` together → clap `conflicts_with` conflict (exit 2). No precedence guessing.
+- `--global` and `--project` together → clap `conflicts_with` conflict (exit 64 — ocx maps clap usage errors → EX_USAGE 64). No precedence guessing.
 - `ocx run` is hermetic: without `--global`, reads only the in-effect project file; global file never consulted.
 - `ocx run --global -- cmd` composes global toolchain env for child process only; never mutates parent shell.
 - `OCX_GLOBAL` is the env-var equivalent (resolution-affecting; forwarded to child ocx via `apply_ocx_config`).
 - No implicit `$OCX_HOME/ocx.toml` discovery: project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
-- `ocx package install --global` → clap unknown-flag error (exit 2). `--global` is NOT on `ocx package install`.
+- `ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64). `--global` is NOT on `ocx package install`.
 
 Activation (new model): the OCX install script writes `$OCX_HOME/env.sh` containing `eval "$(ocx env --global --shell=sh)"` and appends a block-marker idempotent line to the user's login profile. No `$OCX_HOME/init.<shell>` static files. No `ocx shell hook`/`shell init`.
 

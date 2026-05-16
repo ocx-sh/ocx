@@ -777,7 +777,7 @@ export OCX_CEILING_PATH="$CI_PROJECT_DIR"
 
 Phase 10 docs MUST include the explicit-export pattern above and a one-line note that OCX deliberately does not auto-detect.
 
-**Interaction with home-tier:** The walk never discovers `$OCX_HOME/ocx.toml` via the CWD walk. Home-tier `ocx.toml` is only loaded when the CWD walk finds no project file. They are separate lookup paths.
+**Interaction with home-tier:** [SUPERSEDED → `adr_global_toolchain_tier.md` + `handshake_toolchain_cli.md`] The home-tier implicit fallback has been removed. `$OCX_HOME/ocx.toml` is never loaded automatically — it is only reachable via an explicit `--global` flag or `OCX_GLOBAL=1`. A CWD walk that finds no `ocx.toml` means no project tier is active; the command runs without a project context. The original text below is kept for historical reference.
 
 ---
 

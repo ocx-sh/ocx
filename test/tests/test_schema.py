@@ -188,7 +188,7 @@ def test_old_metadata_without_entrypoints_parses_successfully(
 
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
     # install must succeed (backward compat — no entrypoints in old metadata).
-    result = ocx.run("install", pkg.short, check=False)
+    result = ocx.run("package", "install", pkg.short, check=False)
     assert result.returncode == 0, (
         f"Old metadata without entrypoints must install successfully; "
         f"rc={result.returncode}, stderr={result.stderr.strip()}"
@@ -239,7 +239,7 @@ def test_metadata_with_empty_entrypoints_object_installs(
 
     short = f"{unique_repo}:1.0.0"
     ocx.plain("index", "update", unique_repo)
-    install_result = ocx.run("install", short, check=False)
+    install_result = ocx.run("package", "install", short, check=False)
     assert install_result.returncode == 0, (
         f"install with empty entrypoints must succeed; "
         f"rc={install_result.returncode}, stderr={install_result.stderr.strip()}"

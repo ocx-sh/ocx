@@ -8,7 +8,7 @@ def test_find_returns_package_root(
 ):
     """ocx install <pkg>; ocx which <pkg>"""
     pkg = published_package
-    install_result = ocx.json("install", pkg.short)
+    install_result = ocx.json("package", "install", pkg.short)
     candidate = Path(install_result[pkg.short]["path"])
 
     find_result = ocx.json("which", pkg.short)
@@ -26,7 +26,7 @@ def test_find_candidate_returns_candidate_symlink(
 ):
     """ocx install <pkg>; ocx which --candidate <pkg>"""
     pkg = published_package
-    ocx.json("install", pkg.short)
+    ocx.json("package", "install", pkg.short)
 
     find_result = ocx.json("which", "--candidate", pkg.short)
     candidate = Path(find_result[pkg.short])
@@ -47,7 +47,7 @@ def test_find_current_returns_current_symlink(
 ):
     """ocx install -s <pkg>; ocx which --current <pkg>"""
     pkg = published_package
-    ocx.json("install", "-s", pkg.short)
+    ocx.json("package", "install", "-s", pkg.short)
 
     find_result = ocx.json("which", "--current", pkg.short)
     current = Path(find_result[pkg.short])
@@ -85,7 +85,7 @@ def test_find_returns_package_path_not_layer(
     layers/.
     """
     pkg = published_package
-    ocx.json("install", pkg.short)
+    ocx.json("package", "install", pkg.short)
 
     find_result = ocx.json("which", pkg.short)
     find_path = Path(find_result[pkg.short])

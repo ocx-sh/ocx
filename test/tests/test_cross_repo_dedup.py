@@ -79,9 +79,9 @@ def test_cross_repo_dedup_preserves_query_repository(
     mirrors_short = f"{mirrors_repo}:{tag}"
 
     # --- First installer wins cross-repo dedup ---------------------------
-    ocx.json("install", tools_short)
+    ocx.json("package", "install", tools_short)
     # Second installer reuses the shared content-addressed package dir.
-    ocx.json("install", mirrors_short)
+    ocx.json("package", "install", mirrors_short)
 
     # --- find should report the repository the user queried --------------
     find_result = ocx.json("which", mirrors_short)

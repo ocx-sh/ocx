@@ -1,135 +1,178 @@
-"""Tests for ``ocx ci export``."""
+"""Tests for the removed ``ocx ci`` command (handshake §6 / plan C4).
+
+``ocx ci`` is REMOVED. CI export is a deferred extension point, not a command.
+All tests assert that ``ocx ci ...`` exits non-zero with a clap
+unrecognised-subcommand error (exit 64, UsageError).
+
+The old behavioural tests (GitHub Actions file writes, auto-detect, path
+accumulation) are REWRITTEN here to assert the new surface contract:
+the ``ci`` subcommand does not exist.
+"""
 from __future__ import annotations
+
+import subprocess
+from pathlib import Path
 
 from src.runner import OcxRunner, PackageInfo
 
-
-def test_ci_export_github_actions(ocx: OcxRunner, published_package: PackageInfo, tmp_path) -> None:
-    """``ocx ci export --flavor github-actions`` writes to GITHUB_PATH and GITHUB_ENV files."""
-    ocx.plain("install", published_package.short)
-
-    github_path = tmp_path / "github_path"
-    github_env = tmp_path / "github_env"
-    github_path.write_text("")
-    github_env.write_text("")
-
-    ocx.env["GITHUB_ACTIONS"] = "true"
-    ocx.env["GITHUB_PATH"] = str(github_path)
-    ocx.env["GITHUB_ENV"] = str(github_env)
-
-    ocx.plain("ci", "export", "--flavor", "github-actions", published_package.short)
-
-    path_content = github_path.read_text()
-    env_content = github_env.read_text()
-
-    # The test package declares PATH (path type) and {REPO}_HOME (constant type).
-    # PATH should be appended to GITHUB_PATH file, the constant to GITHUB_ENV file.
-    home_key = published_package.repo.upper().replace("-", "_") + "_HOME"
-    assert "bin" in path_content, f"PATH export should contain 'bin': {path_content}"
-    assert f"{home_key}=" in env_content, f"{home_key} constant should be exported: {env_content}"
+# Exit code: ocx maps clap parse errors (unrecognised subcommand) to UsageError
+EXIT_USAGE = 64
 
 
-def test_ci_export_auto_detect(ocx: OcxRunner, published_package: PackageInfo, tmp_path) -> None:
-    """Auto-detection works when GITHUB_ACTIONS=true is set."""
-    ocx.plain("install", published_package.short)
-
-    github_path = tmp_path / "github_path"
-    github_env = tmp_path / "github_env"
-    github_path.write_text("")
-    github_env.write_text("")
-
-    ocx.env["GITHUB_ACTIONS"] = "true"
-    ocx.env["GITHUB_PATH"] = str(github_path)
-    ocx.env["GITHUB_ENV"] = str(github_env)
-
-    ocx.plain("ci", "export", published_package.short)
-
-    # Should have written to at least one of the files
-    path_content = github_path.read_text()
-    env_content = github_env.read_text()
-    assert path_content or env_content, "Expected output in GITHUB_PATH or GITHUB_ENV"
-
-
-def test_ci_export_no_ci_env_fails(ocx: OcxRunner, published_package: PackageInfo) -> None:
-    """Error when no --flavor and no CI environment detected."""
-    ocx.plain("install", published_package.short)
-
-    # Ensure no CI env vars are set
-    ocx.env.pop("GITHUB_ACTIONS", None)
-
-    result = ocx.plain("ci", "export", published_package.short, check=False)
-    assert result.returncode != 0
-    assert "could not detect CI environment" in result.stderr
-
-
-def test_ci_export_path_accumulation(ocx: OcxRunner, unique_repo: str, tmp_path) -> None:
-    """Two packages with overlapping path-type LD_LIBRARY_PATH produce a single accumulated line."""
-    from src.helpers import make_package
-
-    pkg1 = make_package(
-        ocx,
-        unique_repo + "a",
-        "1.0.0",
-        tmp_path,
-        new=True,
-        env=[
-            # Tagged ``public`` so the v2 default-private + Consumer-mode
-            # filter admits these entries when the CI export pipeline reads
-            # them. See ADR `adr_visibility_two_axis_and_exec_modes.md`.
-            {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
-             "visibility": "public"},
-            {"key": "LD_LIBRARY_PATH", "type": "path", "required": False, "value": "${installPath}/lib",
-             "visibility": "public"},
-        ],
-    )
-    pkg2 = make_package(
-        ocx,
-        unique_repo + "b",
-        "1.0.0",
-        tmp_path,
-        new=True,
-        env=[
-            {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
-             "visibility": "public"},
-            {"key": "LD_LIBRARY_PATH", "type": "path", "required": False, "value": "${installPath}/lib64",
-             "visibility": "public"},
-        ],
+def _run_ci(ocx: OcxRunner, tmp_path: Path, *extra_args: str) -> subprocess.CompletedProcess[str]:
+    """Run ``ocx ci <extra_args>`` and return the result without checking exit code."""
+    cmd = [str(ocx.binary), "ci", *extra_args]
+    return subprocess.run(
+        cmd,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=ocx.env,
     )
 
-    ocx.plain("install", pkg1.short)
-    ocx.plain("install", pkg2.short)
 
+def test_ci_command_does_not_exist(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """``ocx ci`` → clap unrecognised-subcommand error, exit 64.
+
+    The ``ci`` subcommand was removed per handshake §6.
+    CI export is a deferred extension point, not a live command.
+    """
+    result = _run_ci(ocx, tmp_path, "export", "--flavor", "github-actions", published_package.short)
+    assert result.returncode != 0, (
+        f"ocx ci must fail (removed); got exit 0\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx ci must exit {EXIT_USAGE} (UsageError / clap unrecognised subcommand); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert "unrecognized" in result.stderr.lower() or "ci" in result.stderr.lower(), (
+        f"expected clap unrecognized-subcommand stderr; got:\n{result.stderr}"
+    )
+
+
+def test_ci_export_github_actions_removed(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """``ocx ci export --flavor github-actions`` → exit 64 (removed).
+
+    Previously tested GitHub Actions file writes. Now asserts the surface
+    is gone per handshake §6 deferred scope.
+    """
     github_path = tmp_path / "github_path"
     github_env = tmp_path / "github_env"
     github_path.write_text("")
     github_env.write_text("")
 
-    ocx.env["GITHUB_ACTIONS"] = "true"
-    ocx.env["GITHUB_PATH"] = str(github_path)
-    ocx.env["GITHUB_ENV"] = str(github_env)
+    env = dict(ocx.env)
+    env["GITHUB_ACTIONS"] = "true"
+    env["GITHUB_PATH"] = str(github_path)
+    env["GITHUB_ENV"] = str(github_env)
 
-    ocx.plain("ci", "export", "--flavor", "github-actions", pkg1.short, pkg2.short)
+    result = subprocess.run(
+        [str(ocx.binary), "ci", "export", "--flavor", "github-actions", published_package.short],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx ci export must exit {EXIT_USAGE} (removed); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
 
-    env_content = github_env.read_text()
-    # There should be exactly one LD_LIBRARY_PATH line containing both paths
-    ld_lines = [line for line in env_content.splitlines() if line.startswith("LD_LIBRARY_PATH=")]
-    assert len(ld_lines) == 1, f"Expected 1 LD_LIBRARY_PATH line, got {len(ld_lines)}: {env_content}"
-    ld_value = ld_lines[0].split("=", 1)[1]
-    assert "/lib" in ld_value, f"Missing /lib in: {ld_value}"
-    assert "/lib64" in ld_value, f"Missing /lib64 in: {ld_value}"
+
+def test_ci_export_auto_detect_removed(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """``ocx ci export`` (auto-detect) → exit 64 (removed)."""
+    env = dict(ocx.env)
+    env["GITHUB_ACTIONS"] = "true"
+
+    result = subprocess.run(
+        [str(ocx.binary), "ci", "export", published_package.short],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx ci export must exit {EXIT_USAGE} (removed); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
 
 
-def test_ci_export_missing_github_path_fails(ocx: OcxRunner, published_package: PackageInfo, tmp_path) -> None:
-    """Error when GITHUB_PATH env var is not set."""
-    ocx.plain("install", published_package.short)
+def test_ci_export_no_ci_env_removed(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """``ocx ci export`` with no CI env → exit 64 (removed).
 
-    github_env = tmp_path / "github_env"
-    github_env.write_text("")
+    Previously tested that this would fail with 'could not detect CI environment'.
+    Now both the no-env case and all other ci invocations fail with exit 64
+    because the ``ci`` subcommand does not exist.
+    """
+    env = dict(ocx.env)
+    env.pop("GITHUB_ACTIONS", None)
 
-    ocx.env["GITHUB_ACTIONS"] = "true"
-    ocx.env.pop("GITHUB_PATH", None)
-    ocx.env["GITHUB_ENV"] = str(github_env)
+    result = subprocess.run(
+        [str(ocx.binary), "ci", "export", published_package.short],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode != 0, (
+        "ocx ci must fail with non-zero exit (removed)"
+    )
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx ci must exit {EXIT_USAGE} (removed); got {result.returncode}"
+    )
 
-    result = ocx.plain("ci", "export", "--flavor", "github-actions", published_package.short, check=False)
-    assert result.returncode != 0
-    assert "GITHUB_PATH" in result.stderr
+
+def test_ci_export_path_accumulation_removed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """``ocx ci export`` (multi-package) → exit 64 (removed).
+
+    Previously tested that two packages with overlapping LD_LIBRARY_PATH
+    produced a single accumulated line. Now asserts the surface is gone.
+    """
+    result = subprocess.run(
+        [str(ocx.binary), "ci", "export", "--flavor", "github-actions",
+         f"{unique_repo}a:1.0.0", f"{unique_repo}b:1.0.0"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx ci export must exit {EXIT_USAGE} (removed); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_ci_export_missing_github_path_removed(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """``ocx ci export --flavor github-actions`` without GITHUB_PATH → exit 64 (removed).
+
+    Previously tested that missing GITHUB_PATH caused a specific error.
+    Now the entire subcommand is gone.
+    """
+    env = dict(ocx.env)
+    env["GITHUB_ACTIONS"] = "true"
+    env.pop("GITHUB_PATH", None)
+    env["GITHUB_ENV"] = str(tmp_path / "github_env")
+
+    result = subprocess.run(
+        [str(ocx.binary), "ci", "export", "--flavor", "github-actions", published_package.short],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx ci export must exit {EXIT_USAGE} (removed); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )

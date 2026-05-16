@@ -6,13 +6,12 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::{
     env,
-    package::metadata::env::modifier::ModifierKind,
     package_manager::collect_applied,
     project::{MissingState, load_project_state},
     shell,
 };
 
-use crate::conventions::supported_platforms;
+use crate::conventions::{emit_lines, supported_platforms};
 
 /// Prints stateless shell export statements for the project toolchain.
 ///
@@ -85,19 +84,11 @@ impl DirenvExport {
         }
 
         let entries = manager.resolve_env(&applied.infos, false).await?;
-        for entry in &entries {
-            // `export_path` / `export_constant` return `None` when the
-            // env-var key fails POSIX validation. Skip silently with a
-            // stderr note rather than abort the whole hook output.
-            let line = match entry.kind {
-                ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
-                ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
-            };
-            match line {
-                Some(line) => println!("{line}"),
-                None => eprintln!("# ocx: skipping invalid env-var key {:?}", entry.key),
-            }
-        }
+        // Delegate to the shared emit helper (C5 / conventions.rs).
+        // `Shell::Bash` is fixed: direnv always evaluates `.envrc` in a bash
+        // sub-shell regardless of the user's interactive shell.  There is no
+        // `--shell` flag on `direnv export` for this reason.
+        emit_lines(shell, &entries);
 
         Ok(ExitCode::SUCCESS)
     }

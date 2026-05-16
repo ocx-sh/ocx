@@ -8,7 +8,7 @@ def test_uninstall_removes_candidate_symlink(
 ):
     """ocx install <pkg>; ocx uninstall <pkg>"""
     pkg = published_package
-    ocx.json("install", pkg.short)
+    ocx.json("package", "install", pkg.short)
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
@@ -20,7 +20,7 @@ def test_uninstall_removes_candidate_symlink(
     )
     assert_symlink_exists(candidate)
 
-    ocx.plain("uninstall", pkg.short)
+    ocx.plain("package", "uninstall", pkg.short)
     assert_not_exists(candidate)
 
 
@@ -29,10 +29,10 @@ def test_uninstall_preserves_current_symlink(
 ):
     """ocx install -s <v1>; ocx install <v2>; ocx uninstall <v2>"""
     v1, v2 = published_two_versions
-    ocx.json("install", "-s", v1.short)
-    ocx.json("install", v2.short)
+    ocx.json("package", "install", "-s", v1.short)
+    ocx.json("package", "install", v2.short)
 
-    ocx.plain("uninstall", v2.short)
+    ocx.plain("package", "uninstall", v2.short)
 
     current = (
         Path(ocx.env["OCX_HOME"])
@@ -49,9 +49,9 @@ def test_uninstall_deselect_removes_both(
 ):
     """ocx install -s <pkg>; ocx uninstall -d <pkg>"""
     pkg = published_package
-    ocx.json("install", "-s", pkg.short)
+    ocx.json("package", "install", "-s", pkg.short)
 
-    ocx.plain("uninstall", "-d", pkg.short)
+    ocx.plain("package", "uninstall", "-d", pkg.short)
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
