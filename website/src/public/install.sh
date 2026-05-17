@@ -383,7 +383,7 @@ create_env_ps1() {
         printf '$env:OCX_HOME = "%s"\n' "$_ocx_home"
         printf '$_ocxBin = "%s/symlinks/ocx.sh/ocx/cli/current/bin/ocx"\n' "$_ocx_home"
         printf 'if (Test-Path $_ocxBin -PathType Leaf) {\n'
-        printf '    Invoke-Expression (& $_ocxBin env --global --shell=pwsh 2>$null)\n'
+        printf '    Invoke-Expression ((& $_ocxBin env --global --shell=pwsh 2>$null) | Out-String)\n'
         printf '}\n'
     } >"$_ocx_home/env.ps1"
 }
