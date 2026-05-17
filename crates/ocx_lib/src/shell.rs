@@ -400,7 +400,12 @@ impl clap_builder::ValueEnum for Shell {
             Self::Elvish => PossibleValue::new("elvish"),
             Self::Fish => PossibleValue::new("fish"),
             Self::Batch => PossibleValue::new("batch"),
-            Self::PowerShell => PossibleValue::new("powershell"),
+            // `pwsh` is an alias for `powershell` — same C5 zero-new-variant
+            // contract as the `sh`→Dash alias above.  The installer-generated
+            // `env.ps1`/`env.sh` emit `--shell=pwsh`; without the alias that
+            // would fail clap parsing (exit 64) and silently no-op global
+            // toolchain activation on Windows.
+            Self::PowerShell => PossibleValue::new("powershell").alias("pwsh"),
             Self::Zsh => PossibleValue::new("zsh"),
             Self::Nushell => PossibleValue::new("nushell"),
         })
@@ -562,6 +567,26 @@ mod tests {
         assert!(
             line.starts_with("export MY_VAR="),
             "Dash/sh export_constant must emit POSIX export form; got: {line:?}"
+        );
+    }
+
+    #[test]
+    fn pwsh_alias_parses_to_powershell_variant() {
+        use clap_builder::ValueEnum;
+        // The installer-generated env.ps1/env.sh emit `--shell=pwsh`.  Without
+        // the PossibleValue alias clap rejects it (exit 64) and the global
+        // toolchain silently fails to activate on Windows.
+        let parsed = <Shell as ValueEnum>::from_str("pwsh", true)
+            .expect("'pwsh' must be a valid shell alias (installer contract)");
+        assert_eq!(
+            parsed,
+            Shell::PowerShell,
+            "--shell=pwsh must resolve to Shell::PowerShell; got {parsed:?}"
+        );
+        // `powershell` must keep working too — alias adds, never replaces.
+        assert_eq!(
+            <Shell as ValueEnum>::from_str("powershell", true).expect("'powershell' canonical value"),
+            Shell::PowerShell,
         );
     }
 
