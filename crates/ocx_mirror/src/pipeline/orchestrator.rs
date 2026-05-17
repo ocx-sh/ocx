@@ -410,8 +410,16 @@ pub(crate) async fn prepare_task(
         None => anyhow::bail!("no metadata configuration provided in spec"),
     };
 
+    // Write the resolved per-platform metadata alongside the bundle so the
+    // generated CI workflow's `cp` step copies the correct per-platform file
+    // (not the spec-level default metadata.json from the working directory).
+    // Written before the early-exit check so resume runs also refresh the file.
+    let metadata_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| anyhow::anyhow!("failed to serialize metadata for {}: {e}", task.platform))?;
+    tokio::fs::write(task_dir.join("metadata.json"), metadata_json).await?;
+
     if bundle_path.exists() {
-        // Resume: nothing to do, bundle already exists
+        // Resume: bundle already exists, metadata.json already written above.
         return Ok((bundle_path, metadata));
     }
 

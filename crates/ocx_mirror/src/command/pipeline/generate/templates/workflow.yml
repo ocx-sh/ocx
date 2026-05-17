@@ -79,8 +79,11 @@ jobs:
           set -euo pipefail
           ocx-mirror pipeline prepare --version "${{ matrix.version.version }}"
           # Flatten .ocx-mirror/{V}/{P}/bundle.tar.xz → bundles/bundle-{V}-{P_slug}.tar.xz
-          # and copy spec-level metadata.json as sibling so `ocx package test`
-          # auto-discovers it via its bundle→metadata sibling convention.
+          # and copy the per-platform metadata.json written by `pipeline prepare`
+          # as sibling so `ocx package test` auto-discovers the correct override
+          # (e.g. metadata-darwin.json baked content) via its bundle→metadata
+          # sibling convention. Do NOT copy the spec-level metadata.json from CWD
+          # — that always contains the default path, not the platform override.
           V="${{ matrix.version.version }}"
           mkdir -p bundles
           shopt -s nullglob
@@ -88,7 +91,7 @@ jobs:
             [ -d "${platform_dir}" ] || continue
             P_SLUG=$(basename "${platform_dir}")
             cp "${platform_dir}bundle.tar.xz" "bundles/bundle-${V}-${P_SLUG}.tar.xz"
-            cp metadata.json "bundles/bundle-${V}-${P_SLUG}-metadata.json"
+            cp "${platform_dir}metadata.json" "bundles/bundle-${V}-${P_SLUG}-metadata.json"
           done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
