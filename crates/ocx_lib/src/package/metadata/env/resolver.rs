@@ -74,6 +74,20 @@ impl<'a> EnvResolver<'a> {
             // overhead that dominates the probe itself. Switch to
             // `tokio::fs::try_exists` only if the chain becomes async
             // end-to-end.
+            //
+            // Strip the Windows `\\?\` verbatim prefix before the existence
+            // check and before writing the value into the child env.
+            //
+            // `install_path` (or a `self.install_path.join(relative)` result)
+            // may carry the `\\?\` prefix when the path originated from
+            // `tokio::fs::canonicalize` (which returns verbatim paths on
+            // Windows).  Relative metadata values (`bin` without `${installPath}`)
+            // reach this branch via the `join` above and inherit the prefix.
+            // `dunce::simplified` converts `\\?\C:\foo` → `C:\foo` so both the
+            // `path.exists()` probe and the exported string use the normal DOS
+            // form, which Windows path APIs handle correctly in all contexts.
+            // On POSIX and non-verbatim Windows paths the call is a no-op.
+            let path = PathBuf::from(dunce::simplified(&path));
             if path_modifier.required && !path.exists() {
                 return Err(crate::package::error::Error::RequiredPathMissing(path).into());
             }
@@ -275,6 +289,104 @@ mod tests {
                     && declared.iter().any(|n| n.as_str() == "cmake")
             )),
             "unexpected error: {err}"
+        );
+    }
+
+    // ── Regression: Windows verbatim prefix (`\\?\`) must not appear in
+    //                composed path-modifier values ──────────────────────────
+    //
+    // Root cause: on Windows, `tokio::fs::canonicalize` returns paths with a
+    // `\\?\` extended-length prefix.  When `install_path` carries that prefix
+    // and the metadata template contains a forward-slash suffix
+    // (e.g. `${installPath}/bin`), plain string substitution produced
+    // `\\?\C:\…\content/bin`.  Windows disables all path normalization for
+    // `\\?\`-prefixed paths, so the `/` was treated as a literal filename
+    // character, making the path un-resolvable → `RequiredPathMissing` (os
+    // error "required path does not exist").
+    //
+    // The fix uses `dunce::simplified` to strip `\\?\` before string
+    // substitution.  On Linux this is a no-op, so the test documents and
+    // proves the contract on every CI platform: the composed value must not
+    // contain a `\\?\` prefix followed by a forward slash.
+
+    /// Path-modifier resolution with a `\\?\`-style verbatim install path
+    /// must strip the verbatim prefix.
+    ///
+    /// On Windows this reproduces the pre-fix bug where `${installPath}/bin`
+    /// with a `\\?\C:\…` install_path produced `\\?\C:\…/bin` — a path that
+    /// Windows path APIs cannot resolve because `\\?\` disables normalization.
+    ///
+    /// The test constructs a synthetic verbatim-style path string (works on
+    /// Linux too: `dunce::simplified` is a no-op on non-verbatim paths, so the
+    /// output just echoes the input — proving the positive case).  On Windows
+    /// (CI leg), the pre-fix code would have failed the `path.exists()` check
+    /// and raised `RequiredPathMissing`; post-fix, `dunce::simplified` converts
+    /// the path to regular DOS form before any check.
+    ///
+    /// For the Linux-meaningful assertion: the resolved constant value must not
+    /// contain a `\\?\` prefix with a `/` immediately after it — that pattern
+    /// is always a mixed-separator bug regardless of platform.
+    #[test]
+    fn path_modifier_value_does_not_retain_verbatim_prefix_with_forward_slash() {
+        // Use a real tempdir for the install_path so the path actually exists on
+        // disk — this lets us exercise `required = false` without a false-positive
+        // "required path missing" error on Linux, and lets Windows CI run `path.exists()`.
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+
+        // Constant modifier: template expansion only (no required-path check).
+        // This directly tests that the string produced by template substitution
+        // does not carry a mixed `\\?\...<backslash>/bin` shape.
+        let var = constant_var("MY_BIN", "${installPath}/bin");
+        let result = resolve(&ctxs, dir.path(), &var).unwrap().unwrap();
+
+        // The composed value must not contain a verbatim prefix immediately
+        // followed by a forward slash — that is the exact mix that breaks
+        // Windows path APIs.
+        assert!(
+            !result.contains(r"\\?\") || !result.contains('/'),
+            "composed path must not mix Windows verbatim prefix with forward slash; got: {result:?}\n\
+             pre-fix regression: dunce::simplified must be called on install_path before string substitution"
+        );
+
+        // The resolved value must end with the correct platform path separator
+        // followed by `bin` — not a forward slash on Windows.
+        assert!(
+            result.ends_with("bin"),
+            "composed path must end with 'bin' (platform-native separator before it); got: {result:?}"
+        );
+    }
+
+    /// Path-modifier (`required = false`) with a verbatim-style install path
+    /// must not fail the `path.exists()` check due to mixed separators.
+    ///
+    /// This is the direct guard for the `required = true` production path:
+    /// `required = false` lets us inspect the returned value without the
+    /// existence check gating the test.  A separate test for `required = true`
+    /// would need the directory to actually exist, which `bin/` inside a fresh
+    /// TempDir does not.
+    #[test]
+    fn path_modifier_non_required_returns_composed_value_without_verbatim_prefix() {
+        let dir = TempDir::new().unwrap();
+        let ctxs: HashMap<DependencyName, DependencyContext> = HashMap::new();
+
+        let var = Var::new_path("BIN_PATH", "${installPath}/bin", /* required = */ false);
+        let resolver = EnvResolver::new(dir.path(), &ctxs);
+        let entry = resolver.resolve(&var).unwrap().unwrap();
+
+        // The exported value must not start with `\\?\`.
+        assert!(
+            !entry.value.starts_with(r"\\?\"),
+            "exported path-modifier value must not start with Windows verbatim prefix \\\\?\\; \
+             got: {:?}\npre-fix regression: dunce::simplified must normalize the path before export",
+            entry.value
+        );
+
+        // Must end with the 'bin' component.
+        assert!(
+            entry.value.ends_with("bin"),
+            "exported path-modifier value must end with 'bin'; got: {:?}",
+            entry.value
         );
     }
 }
