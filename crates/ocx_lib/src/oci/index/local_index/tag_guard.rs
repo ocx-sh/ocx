@@ -156,6 +156,13 @@ impl TagGuard {
             .await
             .map_err(|e| file_error(&self.target_path, e))?;
         file.sync_all().await.map_err(|e| file_error(&self.target_path, e))?;
+        // Explicitly close the write handle before returning (Windows safety).
+        // See `BlobGuard::write_bytes` for the full explanation: on Windows,
+        // tokio::fs::File drop is async, leaving the handle open until a
+        // background thread processes the close. A subsequent reader on the
+        // same path hitting that open handle gets ERROR_LOCK_VIOLATION (os
+        // error 33). `shutdown()` forces a synchronous close before return.
+        file.shutdown().await.map_err(|e| file_error(&self.target_path, e))?;
         Ok(())
     }
 }

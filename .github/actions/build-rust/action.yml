@@ -1,14 +1,10 @@
 name: Build Rust Binary
-description: Build an ocx binary for a given target (native builds or zig cross-compile)
+description: Build an ocx binary for a given target (native builds only)
 
 inputs:
   target:
     description: Rust target triple
     required: true
-  use_zigbuild:
-    description: Use cargo-zigbuild instead of cargo build (required for cross-compiling aarch64-linux and musl from x86 runners)
-    required: false
-    default: "false"
 
 runs:
   using: composite
@@ -18,38 +14,15 @@ runs:
       with:
         toolchain: stable
         targets: ${{ inputs.target }}
-    - name: Install target on rust-toolchain.toml channel
-      # rust-toolchain.toml pins an explicit channel; dtolnay's `targets:` only
-      # adds the target to the `stable` alias toolchain. Re-add against the
-      # pinned channel resolved from the workspace root so cargo finds std/core.
-      shell: bash
-      env:
-        TARGET: ${{ inputs.target }}
-      run: rustup target add "$TARGET"
     - name: Rust Cache
       uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       with:
         save-if: ${{ github.ref == 'refs/heads/main' }}
-    - name: Install Zig
-      if: ${{ inputs.use_zigbuild == 'true' }}
-      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-    - name: Install cargo-zigbuild
-      if: ${{ inputs.use_zigbuild == 'true' }}
-      uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
-      with:
-        tool: cargo-zigbuild
-    - name: Build (cargo)
-      if: ${{ inputs.use_zigbuild != 'true' }}
+    - name: Build
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
       run: cargo build --release --target="$TARGET" --locked
-    - name: Build (zigbuild)
-      if: ${{ inputs.use_zigbuild == 'true' }}
-      shell: bash
-      env:
-        TARGET: ${{ inputs.target }}
-      run: cargo zigbuild --release --target="$TARGET" --locked
     - name: Prepare Binaries
       shell: bash
       env:

@@ -87,7 +87,14 @@ impl DependencyContext {
     /// time, no synthetic-empty fallbacks.
     pub fn resolve_field(&self, field: &str) -> Option<String> {
         match field {
-            "installPath" => Some(self.install_path().to_string_lossy().into_owned()),
+            // Strip the Windows `\\?\` verbatim prefix before converting to a
+            // string.  See the matching comment in `template::resolve_inner` for
+            // the full rationale.  `dunce::simplified` is a no-op on all
+            // non-verbatim paths (Linux, macOS, regular Windows paths).
+            "installPath" => {
+                let path = self.install_path();
+                Some(dunce::simplified(&path).to_string_lossy().into_owned())
+            }
             _ => None,
         }
     }

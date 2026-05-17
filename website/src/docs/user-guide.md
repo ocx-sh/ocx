@@ -501,6 +501,62 @@ Why this asymmetry? OCX is [backend-first][product-context]: read paths refuse s
 
 For the `update --locked` flow — "verify a subset would not change without writing" — use [`ocx update --check`][cmd-update]. It mirrors [`ocx lock --check`][cmd-lock] but evaluates the partial-resolve candidate against the predecessor.
 
+## Mirror a tool to your registry {#mirroring}
+
+OCX can mirror upstream tool releases — binaries published to [GitHub Releases][github-releases] or any URL-addressable index — into an OCI registry you control. The `ocx-mirror` binary handles download, verification, bundling, and push. Each tool is described by a `mirror.yml` file.
+
+The basic publish loop runs manually or on a schedule:
+
+```shell
+ocx-mirror sync --spec ./mirrors/cmake/mirror.yml
+```
+
+`sync` discovers new versions, downloads and bundles each binary for each declared platform, and pushes the result to the target registry. Tags cascade automatically when `cascade: true` is set in `mirror.yml`.
+
+### Per-mirror CI pipeline {#mirroring-ci-pipeline}
+
+Running `sync` unconditionally and publishing whatever compiles is insufficient for a public registry. A version that installs correctly on the build host may fail inside a container or on a different architecture. The question is: how do you know a `(version, platform)` pair actually works before users install it?
+
+The answer is a dedicated test pipeline. Before any push happens, the pipeline materializes each bundle with [`ocx package test`][cmd-package-test] inside the target execution environment — the exact container image or native runner where the binary will be used — and only pushes if every declared test passes.
+
+`ocx-mirror pipeline generate ci` reads your `mirror.yml` and writes a [GitHub Actions][github-actions-docs] workflow that orchestrates this automatically. The generated workflow has five sequential stages:
+
+<Steps>
+  <Step title="Discover" status="complete">
+    <Description>Find which versions need work</Description>
+    Runs <code>ocx-mirror pipeline plan</code>, compares upstream releases to what is already in the registry, and emits a JSON version list as a workflow output. Downstream jobs only proceed when there is new work.
+  </Step>
+  <Step title="Prepare" status="current">
+    <Description>Bundle every (version, platform) pair</Description>
+    Runs <code>ocx-mirror pipeline prepare --version V</code> for each new version. Downloads the upstream release, verifies its checksum, and bundles it as a <code>.tar.xz</code> for each declared platform. The bundles are uploaded as workflow artifacts shared by the test and push jobs.
+  </Step>
+  <Step title="Test">
+    <Description>Smoke-test each bundle before publishing</Description>
+    Runs <code>ocx package test</code> for each <code>(version, platform, container)</code> combination declared in <code>mirror.yml</code>. Each test leg emits a JUnit XML result. Container legs use a per-leg Dockerfile so <code>ocx</code> is installed via <code>ADD</code> — matching how real users install it into Docker images. Native legs (macOS, Windows) run directly on the GHA runner.
+  </Step>
+  <Step title="Push">
+    <Description>Publish greens, skip reds</Description>
+    Runs <code>ocx-mirror pipeline push</code>. Reads the JUnit results, ANDs all containers for each <code>(version, platform)</code> pair, and calls <code>ocx package push --cascade --format json</code> only for pairs that passed all tests. Results are written to <code>run-summary.json</code>.
+  </Step>
+  <Step title="Notify">
+    <Description>Report outcomes to Discord</Description>
+    Runs <code>ocx-mirror pipeline notify</code>. Reads <code>run-summary.json</code> and posts a Discord webhook message summarising what was published, what failed, and which cascade tags were written. Silent when nothing changed.
+  </Step>
+</Steps>
+
+To generate the workflow for a mirror, run:
+
+```shell
+ocx-mirror pipeline generate ci --spec ./mirrors/cmake/mirror.yml
+```
+
+This writes `.github/workflows/mirror.yml` (sync pipeline) and `.github/workflows/describe.yml` (catalog publisher). Re-run after every `mirror.yml` change to keep both workflows in sync. Use `--check` to verify the generated files are current without overwriting them (exit 65 on drift).
+
+::: tip Learn more
+[mirror.yml reference][ref-mirror-yml] — all schema keys including `tests`, `platforms`, `ocx_mirror`, and `notify`.
+[`ocx-mirror pipeline` command reference][cmd-mirror-pipeline] — flags, exit codes, and JSON output schemas for each subcommand.
+:::
+
 ## Migration {#project-toolchain-migration}
 
 This section covers the changes introduced in the `feat/project-toolchain` release that affect existing workflows.
@@ -524,6 +580,8 @@ After that, every new shell picks up the locked tools automatically. No `shell p
 The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable now accept any path, not just files named `ocx.toml`. The CWD walk still only looks for files named exactly `ocx.toml`.
 
 <!-- external -->
+[github-releases]: https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [toml]: https://toml.io/
 [uv]: https://docs.astral.sh/uv/
 [uv-lock]: https://docs.astral.sh/uv/reference/cli/#uv-lock
@@ -544,6 +602,11 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [direnv]: https://direnv.net/
 [gitattributes]: https://git-scm.com/docs/gitattributes
 [schema-project]: https://ocx.sh/schemas/project/v1.json
+
+<!-- mirror -->
+[ref-mirror-yml]: ./reference/mirror-yml.md
+[cmd-mirror-pipeline]: ./reference/command-line.md#ocx-mirror-pipeline
+[cmd-package-test]: ./reference/command-line.md#package-test
 
 <!-- commands -->
 [cmd-logout]: ./reference/command-line.md#logout

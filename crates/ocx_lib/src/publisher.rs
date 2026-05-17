@@ -54,32 +54,30 @@ impl Publisher {
     /// is verified to exist via HEAD. The manifest contains one descriptor per
     /// layer in the order provided.
     ///
-    /// When `build_meta` is `Some`, the identifier's tag is parsed as a
-    /// [`Version`] and the build segment is attached before push. Errors if
-    /// the tag does not parse, lacks `X.Y.Z` form, or already carries build
-    /// metadata.
-    pub async fn push(&self, info: Info, layers: &[LayerRef], build_meta: Option<&str>) -> Result<()> {
-        let info = apply_build_meta(info, build_meta)?;
-        log::info!("pushing package with identifier {}", info.identifier);
-        self.client.push_package(info, layers).await?;
-        Ok(())
+    /// Returns the OCI manifest digest of the pushed image index
+    /// (e.g. `sha256:abc…`) so callers can include it in push reports.
+    pub async fn push(&self, info: Info, layers: &[LayerRef]) -> Result<String> {
+        log::debug!("Pushing package with identifier {}", info.identifier);
+        let (digest, _manifest) = self.client.push_package(info, layers).await?;
+        Ok(digest.to_string())
     }
 
     /// Push a package with cascade tag management.
     ///
     /// `existing_versions` is the set of versions already in the registry,
-    /// used to compute which rolling tags this push should update. The same
-    /// `build_meta` semantics as [`Self::push`] apply; cascade derived tags
-    /// always operate on the version core regardless of build segment.
+    /// used to compute which rolling tags this push should update.
+    ///
+    /// Returns `(manifest_digest, cascade_tags_written)` where
+    /// `cascade_tags_written` includes every rolling tag updated beyond the
+    /// primary version tag. The CLI layer wraps these into [`PushReport`].
+    ///
+    /// [`PushReport`]: crate (defined in ocx_cli::api::data::package_push)
     pub async fn push_cascade(
         &self,
         info: Info,
         layers: &[LayerRef],
         existing_versions: BTreeSet<Version>,
-        build_meta: Option<&str>,
-    ) -> Result<()> {
-        let info = apply_build_meta(info, build_meta)?;
-        log::info!("pushing package with identifier {} (cascade)", info.identifier);
+    ) -> Result<(String, Vec<String>)> {
         let version = Version::parse(info.identifier.tag_or_latest())
             .ok_or_else(|| crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string()))?;
 
@@ -112,88 +110,5 @@ impl Publisher {
     /// skipping tags that are not valid versions.
     pub fn parse_versions(tags: &[String]) -> BTreeSet<Version> {
         tags.iter().filter_map(|t| Version::parse(t)).collect()
-    }
-}
-
-/// If `build_meta` is `Some`, parse the identifier's tag, attach the build
-/// segment, and return an [`Info`] whose identifier carries the new tag.
-fn apply_build_meta(mut info: Info, build_meta: Option<&str>) -> Result<Info> {
-    let Some(build) = build_meta else { return Ok(info) };
-    let tag = info.identifier.tag_or_latest();
-    let version = Version::parse(tag).ok_or_else(|| crate::package::error::Error::VersionInvalid(tag.to_string()))?;
-    let with_build = version.with_build(build).map_err(crate::package::error::Error::from)?;
-    info.identifier = info.identifier.clone_with_tag(with_build.to_string());
-    Ok(info)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::package::metadata::{
-        Entrypoints, Metadata,
-        bundle::{self, Bundle},
-        dependency, env as metadata_env,
-    };
-
-    fn test_info(tag: &str) -> Info {
-        let identifier = oci::Identifier::new_registry("ocx", "ocx.sh").clone_with_tag(tag);
-        let metadata = Metadata::Bundle(Bundle {
-            version: bundle::Version::V1,
-            strip_components: None,
-            env: metadata_env::Env::default(),
-            dependencies: dependency::Dependencies::default(),
-            entrypoints: Entrypoints::default(),
-        });
-        Info {
-            identifier,
-            metadata,
-            platform: "linux/amd64".parse().expect("platform parses"),
-        }
-    }
-
-    #[test]
-    fn none_returns_info_unchanged() {
-        let info = test_info("mirror-0.3.0-dev");
-        let out = apply_build_meta(info.clone(), None).expect("no-op succeeds");
-        assert_eq!(out.identifier.tag_or_latest(), "mirror-0.3.0-dev");
-    }
-
-    #[test]
-    fn attaches_build_meta_to_variant_prerelease() {
-        let info = test_info("mirror-0.3.0-dev");
-        let out = apply_build_meta(info, Some("20260514120000")).expect("attach succeeds");
-        // Display normalizes `+` to `_` per OCI tag rules; clone_with_tag does the same.
-        assert_eq!(out.identifier.tag_or_latest(), "mirror-0.3.0-dev_20260514120000");
-    }
-
-    #[test]
-    fn attaches_build_meta_to_bare_patch_version() {
-        let info = test_info("0.3.0");
-        let out = apply_build_meta(info, Some("20260514120000")).expect("attach succeeds");
-        assert_eq!(out.identifier.tag_or_latest(), "0.3.0_20260514120000");
-    }
-
-    #[test]
-    fn rejects_tag_that_already_carries_build_meta() {
-        let info = test_info("0.3.0-dev_alreadyhere");
-        let err = apply_build_meta(info, Some("20260514120000")).expect_err("must reject double build meta");
-        let msg = err.to_string();
-        assert!(msg.contains("already has build metadata"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn rejects_tag_that_is_not_a_valid_version() {
-        let info = test_info("latest");
-        let err = apply_build_meta(info, Some("20260514120000")).expect_err("must reject non-version tag");
-        let msg = err.to_string();
-        assert!(msg.contains("invalid package version"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn rejects_tag_that_lacks_patch_segment() {
-        let info = test_info("1.2");
-        let err = apply_build_meta(info, Some("20260514120000")).expect_err("must reject X.Y tag");
-        let msg = err.to_string();
-        assert!(msg.contains("X.Y.Z"), "unexpected error: {msg}");
     }
 }

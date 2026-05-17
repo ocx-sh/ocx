@@ -35,7 +35,7 @@ pub async fn push_and_cascade(
 
     if cascade {
         publisher
-            .push_cascade(info.clone(), &layers, cascade_versions.clone(), None)
+            .push_cascade(info.clone(), &layers, cascade_versions.clone())
             .await?;
 
         // Default variant aliasing: generate unadorned tags for the default variant.
@@ -54,7 +54,7 @@ pub async fn push_and_cascade(
                 platform: info.platform,
             };
             publisher
-                .push_cascade(bare_info, &layers, cascade_versions.clone(), None)
+                .push_cascade(bare_info, &layers, cascade_versions.clone())
                 .await?;
         }
 
@@ -65,7 +65,7 @@ pub async fn push_and_cascade(
         });
     }
 
-    publisher.push(info, &layers, None).await?;
+    publisher.push(info, &layers).await?;
 
     Ok(MirrorResult::Pushed {
         version: version_str,

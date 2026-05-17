@@ -13,8 +13,22 @@ allow = [
   "EPL-2.0",
   # Required transitively by dirs-sys → option-ext.
   "MPL-2.0",
+  # Permissive (OSI-approved, FSF Free/Libre). Required transitively via the
+  # starlark family: starlark → rustyline → clipboard-win → error-code.
+  # REMOVE when 'cargo tree -i error-code' is empty after a starlark family bump.
+  "BSL-1.0",
+  # Permissive (OSI-approved, FSF Free/Libre). Required transitively via the
+  # starlark family: starlark → debugserver-types → schemafy → Inflector.
+  # REMOVE when 'cargo tree -i inflector' is empty after a starlark family bump.
+  "BSD-2-Clause",
 ]
 confidence-threshold = 0.8
+
+[advisories]
+ignore = [
+  # REMOVE when 'cargo tree -i derivative' is empty after a starlark family bump — transitive via starlark_lsp, RUSTSEC-2024-0388 informational-only.
+  "RUSTSEC-2024-0388",
+]
 
 [bans]
 multiple-versions = "warn"

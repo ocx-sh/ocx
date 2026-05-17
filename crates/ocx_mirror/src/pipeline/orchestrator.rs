@@ -11,6 +11,7 @@ use ocx_lib::log;
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
+use serde::Serialize;
 use tokio::sync::Semaphore;
 use tracing::{Instrument, info_span};
 
@@ -21,6 +22,7 @@ use super::package;
 use super::progress;
 use super::push;
 use super::verify;
+use crate::error::MirrorError;
 use crate::version_platform_map::VersionPlatformMap;
 
 /// A task that completed the prepare phase (download + verify + bundle).
@@ -42,6 +44,139 @@ pub struct ConcurrencyParams {
     pub max_downloads: usize,
     pub max_bundles: usize,
     pub compression_threads: u32,
+}
+
+/// Per-bundle entry in a version manifest.
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleEntry {
+    /// Platform slug (e.g. `linux_amd64`).
+    pub platform_slug: String,
+    /// Absolute path to `bundle.tar.xz`.
+    pub bundle_path: PathBuf,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// SHA-256 hex digest of the bundle file.
+    pub sha256: String,
+}
+
+/// Output of `prepare_version`: per-version manifest listing all prepared bundles.
+///
+/// Written to `{work_dir}/{version}/manifest.json` on success.
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionManifest {
+    pub version: String,
+    pub bundles: Vec<BundleEntry>,
+}
+
+/// Prepare all platforms for a single version: download, verify, and bundle.
+///
+/// Runs platform tasks concurrently with `max_downloads` and `max_bundles`
+/// semaphore slots. On success, writes `{work_dir}/{version}/manifest.json`
+/// and returns the populated manifest.
+///
+/// Call sites:
+/// - `execute_mirror` — drives the existing sync pipeline
+/// - `command::pipeline::prepare` — standalone `ocx-mirror pipeline prepare` subcommand
+pub(crate) async fn prepare_version(
+    version: &str,
+    tasks: &[MirrorTask],
+    work_dir: &Path,
+    http_client: &reqwest::Client,
+    concurrency: &ConcurrencyParams,
+) -> Result<VersionManifest, MirrorError> {
+    let download_sem = Arc::new(Semaphore::new(concurrency.max_downloads));
+    let bundle_sem = Arc::new(Semaphore::new(concurrency.max_bundles));
+    let compression_threads = concurrency.compression_threads;
+
+    let mut join_set = tokio::task::JoinSet::<(usize, Result<(PathBuf, Metadata)>)>::new();
+
+    for (i, task) in tasks.iter().enumerate() {
+        let task = task.clone();
+        let task_dir = task_dir(work_dir, &task.normalized_version, &task.platform);
+        let dl_sem = download_sem.clone();
+        let bd_sem = bundle_sem.clone();
+        let client = http_client.clone();
+
+        join_set.spawn(async move {
+            let span = info_span!("mirror_task");
+            let result = prepare_task(&task, &task_dir, &client, &span, &dl_sem, &bd_sem, compression_threads)
+                .instrument(span.clone())
+                .await;
+            (i, result)
+        });
+    }
+
+    // Collect in completion order, then sort by index for deterministic output.
+    let mut outcomes: Vec<(usize, Result<(PathBuf, Metadata)>)> = Vec::with_capacity(tasks.len());
+    while let Some(join_result) = join_set.join_next().await {
+        match join_result {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(e) => {
+                return Err(MirrorError::ExecutionFailed(vec![format!(
+                    "prepare task panicked: {e}"
+                )]));
+            }
+        }
+    }
+    outcomes.sort_by_key(|(i, _)| *i);
+
+    // Convert outcomes to bundle entries; propagate the first failure.
+    let mut bundles = Vec::with_capacity(tasks.len());
+    for (i, result) in outcomes {
+        let (bundle_path, _metadata) = result.map_err(|e| {
+            MirrorError::ExecutionFailed(vec![format!("prepare failed for {}: {e:#}", tasks[i].platform)])
+        })?;
+
+        let size_bytes = tokio::fs::metadata(&bundle_path).await.map(|m| m.len()).unwrap_or(0);
+
+        let sha256 = compute_sha256(&bundle_path).await?;
+        let platform_slug = tasks[i].platform.ascii_segments().join("_");
+
+        bundles.push(BundleEntry {
+            platform_slug,
+            bundle_path,
+            size_bytes,
+            sha256,
+        });
+    }
+
+    let manifest = VersionManifest {
+        version: version.to_owned(),
+        bundles,
+    };
+
+    // Write manifest.json to {work_dir}/{version}/
+    let version_dir = work_dir.join(version);
+    tokio::fs::create_dir_all(&version_dir)
+        .await
+        .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create version dir: {e}")]))?;
+
+    let manifest_path = version_dir.join("manifest.json");
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to serialize manifest: {e}")]))?;
+    tokio::fs::write(&manifest_path, json)
+        .await
+        .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to write manifest.json: {e}")]))?;
+
+    log::debug!("Wrote manifest to {}", manifest_path.display());
+    Ok(manifest)
+}
+
+/// Compute the SHA-256 hex digest of a file.
+async fn compute_sha256(path: &Path) -> Result<String, MirrorError> {
+    use sha2::{Digest, Sha256};
+
+    let data = tokio::fs::read(path).await.map_err(|e| {
+        MirrorError::ExecutionFailed(vec![format!(
+            "failed to read bundle for sha256 {}: {e}",
+            path.display()
+        )])
+    })?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    let hash = hasher.finalize();
+    Ok(hex::encode(hash))
 }
 
 /// Execute all mirror tasks with concurrent preparation and sequential pushing.
@@ -243,7 +378,7 @@ pub async fn execute_mirror(
 }
 
 /// Build the task directory path: `{work_dir}/{version}/{platform_slug}/`
-fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::Platform) -> PathBuf {
+pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::Platform) -> PathBuf {
     let platform_slug = platform.ascii_segments().join("_");
     work_dir.join(version).join(platform_slug)
 }
@@ -253,7 +388,7 @@ fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::Platform) -
 /// Acquires `download_sem` for the download+verify phase, then releases it and
 /// acquires `bundle_sem` for the CPU-bound bundling phase. This lets downloads
 /// and compression run independently.
-async fn prepare_task(
+pub(crate) async fn prepare_task(
     task: &MirrorTask,
     task_dir: &Path,
     http_client: &reqwest::Client,
@@ -275,8 +410,16 @@ async fn prepare_task(
         None => anyhow::bail!("no metadata configuration provided in spec"),
     };
 
+    // Write the resolved per-platform metadata alongside the bundle so the
+    // generated CI workflow's `cp` step copies the correct per-platform file
+    // (not the spec-level default metadata.json from the working directory).
+    // Written before the early-exit check so resume runs also refresh the file.
+    let metadata_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| anyhow::anyhow!("failed to serialize metadata for {}: {e}", task.platform))?;
+    tokio::fs::write(task_dir.join("metadata.json"), metadata_json).await?;
+
     if bundle_path.exists() {
-        // Resume: nothing to do, bundle already exists
+        // Resume: bundle already exists, metadata.json already written above.
         return Ok((bundle_path, metadata));
     }
 

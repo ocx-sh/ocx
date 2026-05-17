@@ -59,7 +59,26 @@ impl<'a> TemplateResolver<'a> {
         // when the token isn't present — most templates contain only one of the two
         // forms (`${installPath}` xor `${deps.*}`) so the fast-path covers many calls.
         let value = if template.contains("${installPath}") {
-            let install_lossy = self.install_path.to_string_lossy();
+            // Strip the Windows extended-length `\\?\` verbatim prefix via
+            // `dunce::simplified` before converting to a string.
+            //
+            // Background: on Windows, `tokio::fs::canonicalize` returns a
+            // `\\?\`-prefixed verbatim path.  When `install_path` carries that
+            // prefix and the publisher-authored template contains a forward-slash
+            // suffix (e.g. `${installPath}/bin`), plain string substitution
+            // produces `\\?\C:\…\content/bin` — a mixed-separator string whose
+            // leading `\\?\` disables all Windows path normalization.  Windows
+            // then treats `/bin` as a *literal filename component* (the entire
+            // string `content/bin` is one path element), so the path never
+            // resolves on disk → `RequiredPathMissing` error.
+            //
+            // `dunce::simplified` converts `\\?\C:\foo` → `C:\foo` (a no-op on
+            // paths that are not verbatim, and a no-op on all POSIX paths).
+            // After simplification the separator in the substituted string is the
+            // native backslash, so a subsequent `PathBuf::from(value)` or OS-level
+            // path lookup works correctly on every platform.
+            let simplified = dunce::simplified(self.install_path);
+            let install_lossy = simplified.to_string_lossy();
             // Defense-in-depth: if the install path itself contains a `${` sequence it
             // would inject a syntactically-valid-looking (but semantically wrong) token
             // into the substituted string, causing the dep-token regex in step 2 to

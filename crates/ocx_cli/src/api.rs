@@ -57,6 +57,13 @@ impl Api {
         Ok(())
     }
 
+    /// Report the result of a `package push` invocation.
+    ///
+    /// Delegates to [`Self::report`] using the configured output format.
+    pub fn report_package_push(&self, report: &data::package_push::PushReport) -> anyhow::Result<()> {
+        self.report(report)
+    }
+
     pub fn is_json(&self) -> bool {
         matches!(self.format, options::Format::Json)
     }

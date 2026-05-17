@@ -117,6 +117,7 @@ fn wide_to_upper(c: u16) -> u16 {
     }
 }
 
+#[derive(Clone)]
 pub struct Env {
     vars: HashMap<EnvKey, OsString>,
 }
@@ -160,6 +161,15 @@ impl Env {
                 self.vars.insert(key, value);
             }
         }
+    }
+
+    /// Borrowing iterator over `(key, value)` pairs.
+    ///
+    /// Lets a caller feed this env to `Command::envs` without consuming or
+    /// cloning the whole map (`IntoIterator` is by-value). Order is
+    /// unspecified (backed by a `HashMap`).
+    pub fn iter(&self) -> impl Iterator<Item = (&OsStr, &OsStr)> {
+        self.vars.iter().map(|(k, v)| (k.0.as_os_str(), v.as_os_str()))
     }
 
     /// Removes the named key from this environment. No-op if absent.

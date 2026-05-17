@@ -5,9 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
 
-pub mod build_meta;
-pub use build_meta::{BuildTimestampFormat, build_timestamp};
-
 type PatchRest = (Option<String>, Option<String>);
 type MinorRest = Option<(u32, PatchRest)>;
 
@@ -188,29 +185,6 @@ impl Version {
     pub fn with_variant(mut self, variant: impl Into<String>) -> Self {
         self.variant = Some(variant.into());
         self
-    }
-
-    /// Returns a copy of this version with the given build-metadata segment.
-    ///
-    /// The build segment is rendered with `_` per OCI tag rules
-    /// (see the underscore-build-separator ADR). Errors if the version has
-    /// no `X.Y.Z` core or already carries build metadata.
-    pub fn with_build(self, build: impl Into<String>) -> std::result::Result<Self, build_meta::BuildMetaError> {
-        if !self.has_patch() {
-            return Err(build_meta::BuildMetaError::NoPatch(self.to_string()));
-        }
-        if self.has_build() {
-            return Err(build_meta::BuildMetaError::AlreadyPresent(self.to_string()));
-        }
-        let variant = self.variant;
-        let major = self.major;
-        let (minor, patch_rest) = self.rest.expect("has_patch ensures rest is Some");
-        let (patch, (_, prerelease)) = patch_rest.expect("has_patch ensures patch tuple is Some");
-        Ok(Self {
-            variant,
-            major,
-            rest: Some((minor, Some((patch, (Some(build.into()), prerelease))))),
-        })
     }
 
     /// Returns a copy of this version with the variant stripped.
@@ -466,41 +440,6 @@ impl<'de> Deserialize<'de> for Version {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn with_build_attaches_to_variant_prerelease() {
-        let v = Version::parse("mirror-0.3.0-dev").expect("parses");
-        let with = v.with_build("20260514120000").expect("attach succeeds");
-        assert_eq!(with.variant(), Some("mirror"));
-        assert_eq!(with.prerelease().as_deref(), Some("dev"));
-        assert_eq!(with.build().as_deref(), Some("20260514120000"));
-        // Display always uses `_` per OCI tag rules (ADR adr_version_build_separator).
-        assert_eq!(with.to_string(), "mirror-0.3.0-dev_20260514120000");
-    }
-
-    #[test]
-    fn with_build_attaches_to_bare_patch() {
-        let v = Version::parse("0.3.0").expect("parses");
-        let with = v.with_build("20260514120000").expect("attach succeeds");
-        assert_eq!(with.to_string(), "0.3.0_20260514120000");
-    }
-
-    #[test]
-    fn with_build_rejects_when_build_already_present() {
-        let v = Version::parse("0.3.0+already").expect("parses");
-        let err = v.with_build("20260514120000").expect_err("must reject");
-        assert!(
-            matches!(err, build_meta::BuildMetaError::AlreadyPresent(_)),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn with_build_rejects_when_no_patch() {
-        let v = Version::parse("1.2").expect("parses");
-        let err = v.with_build("20260514120000").expect_err("must reject");
-        assert!(matches!(err, build_meta::BuildMetaError::NoPatch(_)), "got {err:?}");
-    }
 
     #[test]
     fn test_version_parsing() {

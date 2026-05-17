@@ -1517,8 +1517,30 @@ ocx package push [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> <LAYE
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`cmake:3.28.1`, `cmake:3.28`, `cmake:3`, and `cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
-- `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
+- `--format <FORMAT>`: Output format. `plain` (default) prints a human-readable summary. `json` emits a structured [JSON report](#package-push-json) suitable for machine consumption.
 - `-h`, `--help`: Print help information.
+
+**JSON output schema** (`--format json`) {#package-push-json}
+
+`ocx package push --format json` emits a single object:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `manifest_digest` | string | `sha256:<hex>` digest of the pushed OCI image manifest |
+| `cascade_tags_written` | array of strings | Tags written by cascade (e.g. `["3.29.0", "3.29", "3", "latest"]`). Empty when `--cascade` is not set or no tags were updated. |
+| `status` | string | `"pushed"` when the manifest was newly written; `"skipped_existing"` when the identical digest was already present at that tag. |
+
+```json
+{
+  "manifest_digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "cascade_tags_written": ["3.29.0", "3.29", "3", "latest"],
+  "status": "pushed"
+}
+```
+
+::: tip Machine consumers
+`ocx-mirror pipeline push` calls `ocx package push --cascade --format json` for each `(version, platform)` pair that passes testing and aggregates these objects into `run-summary.json`. The `manifest_digest` and `cascade_tags_written` fields are stable across releases.
+:::
 
 ::: tip Layer reuse
 Digest-referenced layers are not re-uploaded — ocx only HEADs the registry to verify they exist. This is the foundation of the [layer dedup model](../user-guide.md#file-structure-layers): a base layer pushed once can be referenced from any number of subsequent packages by digest.
@@ -1540,35 +1562,49 @@ ocx package push -p linux/amd64 -i mytool:1.0.1 sha256:<hex>.tar.gz newtool.tar.
 
 #### `test` {#package-test}
 
-Materializes a package locally without a registry round-trip and runs a command in its composed env. Mirrors the argument shape of [`package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`. The trailing `-- CMD [ARGS...]` is required.
+Materializes a package locally without a registry round-trip and runs a command or script in its composed env. Mirrors the argument shape of [`package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`. Either a trailing `-- CMD [ARGS...]` or a `--script PATH` is required; the two forms are mutually exclusive.
 
 **Usage**
 
 ```shell
+# Trailing-command form
 ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYERS]... -- <CMD> [ARGS]...
+
+# Script form
+ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYERS]... --script <PATH|->
 ```
 
 **Arguments**
 
 - `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`: a path to a `.tar.gz`/`.tar.xz` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs in `--offline` mode produce exit code 81 (`OfflineBlocked`).
-- `-- <CMD> [ARGS]...`: Command to run inside the composed env. Required.
+- `-- <CMD> [ARGS]...`: Command to run inside the composed env. Required unless `--script` is given.
 
 **Options**
 
-- `-i`, `--identifier <IDENTIFIER>`: Package identifier in tag form (`repo:tag`) — required. An explicit `@digest` suffix is rejected (the digest is computed locally from the supplied layers).
-- `-p`, `--platform <PLATFORM>`: Target platform (required).
-- `-m`, `--metadata <PATH>`: Path to the metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided.
-- `--keep`: Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/`. Mutually exclusive with `--output`.
-- `-o`, `--output <DIR>`: Materialize into `DIR` instead of an auto-managed temp dir. `DIR` must not exist or must be empty. Implies keep — the directory is never deleted by ocx. Must reside on the same filesystem as `$OCX_HOME/layers/`; hardlink assembly does not fall back to copy. Mutually exclusive with `--keep`. On Windows, `--output` must point under `$OCX_HOME/` — cross-volume support is deferred.
-- `--self`: Compose the package's private env surface (default: interface surface). Same semantics as [`ocx exec --self`][cmd-exec-self].
-- `--clean`: Strip ambient parent env before composing — only `OCX_*` config and composed package vars reach the child. Mirrors [`ocx exec --clean`][cmd-exec-clean].
-- `-h`, `--help`: Print help information.
+| Name | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--identifier <IDENTIFIER>` | `-i` | Package identifier in tag form (`repo:tag`) — required. An explicit `@digest` suffix is rejected (the digest is computed locally from the supplied layers). | — |
+| `--platform <PLATFORM>` | `-p` | Target platform — required. | — |
+| `--script <PATH\|->` | — | Path to a [Starlark][starlark-lang] test script, or `-` to read the script source from stdin. Mutually exclusive with the trailing `-- CMD` form. | — |
+| `--metadata <PATH>` | `-m` | Path to the metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided. | auto-detected |
+| `--keep` | — | Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/`. Mutually exclusive with `--output`. | false |
+| `--output <DIR>` | `-o` | Materialize into `DIR` instead of an auto-managed temp dir. `DIR` must not exist or must be empty. Implies keep. Must reside on the same filesystem as `$OCX_HOME/layers/`. On Windows, must point under `$OCX_HOME/`. Mutually exclusive with `--keep`. | — |
+| `--self` | — | Compose the package's private env surface (default: interface surface). Same semantics as [`ocx exec --self`][cmd-exec-self]. | false |
+| `--clean` | — | Strip ambient parent env before composing — only `OCX_*` config and composed package vars reach the child. Mirrors [`ocx exec --clean`][cmd-exec-clean]. | false |
+| `--help` | `-h` | Print help information. | — |
 
 **Examples**
 
 ```shell
-# Run the binary in its composed env.
+# Run the binary in its composed env (trailing-command form).
 ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz -- mytool --version
+
+# Run a Starlark test script against the package.
+ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz --script smoke.star
+
+# Read a Starlark script from stdin.
+printf 'r = ocx.run("mytool", "--version")\nexpect.ok(r)\n' \
+  | ocx package test -p linux/amd64 -i mytool:1.0.0 mytool.tar.xz --script -
 
 # Keep the temp dir for inspection on failure.
 ocx package test -p linux/amd64 --keep -i mytool:1.0.0 mytool.tar.xz -- mytool --version
@@ -1585,7 +1621,31 @@ ocx package test -p linux/amd64 -m metadata.json -i mytool:1.0.1 \
 Without `--keep` or `--output`, the temp directory is deleted on any exit — success or failure. Use `--keep` to opt in to preservation on failure. Re-run with `--keep` to inspect.
 :::
 
-See the [testing locally guide][authoring-testing] for a full pre-push workflow example.
+**Exit codes — `--script` branch**
+
+| Code | Meaning |
+|------|---------|
+| 0 | All expectations passed |
+| 1 | An expectation failed; `expect.fail` or `fail()` was called; or a host API returned a failure |
+| 64 | Usage error — both `--script` and `-- CMD` supplied; neither supplied; script file not found or unreadable |
+| 65 | Script syntax, type, or arity error |
+| 74 | I/O error — stdin read failure (`--script -`) or scratch directory creation failure |
+
+Exit code is the primary machine signal. When `--format json` is passed, a structured `ScriptRunReport` envelope is written to stdout alongside the exit code:
+
+```json
+{
+  "status": "passed|failed|usage|script_error|io|timeout",
+  "assertion": { "kind": "ok|eq|ne|…|unknown", "message": "…" },
+  "run":       { "exit_code": 0, "stdout": "…", "stderr": "…", "duration_ms": 12, "truncated": false }
+}
+```
+
+`assertion` and `run` are `null` when not applicable. `assertion.kind` reflects the failing `expect.*` function and is the stable machine field; `assertion.message` prose is not stable. The three top-level keys and their sub-field shapes are stable v1 contract.
+
+The `--script` command returns `Ok(ExitCode)` directly — it bypasses `classify_error` so exit codes always match this table regardless of upstream error state.
+
+See the [testing locally guide][authoring-testing] for a full pre-push workflow example including the scripted form.
 
 #### `describe` {#package-describe}
 
@@ -1632,12 +1692,244 @@ ocx package info [OPTIONS] <IDENTIFIER>
 - `--save-logo <PATH>`: Save the logo to a file or directory.
 - `-h`, `--help`: Print help information.
 
+---
+
+## `ocx-mirror` {#ocx-mirror}
+
+`ocx-mirror` is a companion binary for mirroring upstream tool releases into OCI registries. It reads a `mirror.yml` file that declares the source, target, platform matrix, test commands, and notification settings.
+
+### `pipeline` {#ocx-mirror-pipeline}
+
+`ocx-mirror pipeline` groups the five subcommands that together implement per-mirror CI pipelines. The generated [GitHub Actions][github-actions-docs] workflow calls them in sequence.
+
+#### `pipeline generate ci` {#ocx-mirror-pipeline-generate-ci}
+
+Reads `mirror.yml` and writes the [GitHub Actions][github-actions-docs] workflow files for the mirror repo: the sync pipeline and the catalog publisher.
+
+**Usage**
+
+```shell
+ocx-mirror pipeline generate ci [--check] [--spec <PATH>]
+```
+
+**Options**
+
+| Name | Description | Default |
+|------|-------------|---------|
+| `--spec <PATH>` | Path to `mirror.yml` | `./mirror.yml` |
+| `--check` | Verify generated files match current spec without writing. Exit 65 on drift. Stderr emits path-only diff hints. | false |
+
+**Outputs (write mode):**
+
+- `.github/workflows/mirror.yml` — sync pipeline (overwritten)
+- `.github/workflows/describe.yml` — catalog publisher triggered on `CATALOG.md` / `logo.*` / `mirror.yml` edits (overwritten)
+
+**Generated file header:**
+
+```yaml
+# DO NOT EDIT — generated by ocx-mirror generate ci
+# Source: mirror.yml
+# Renderer version: ocx-mirror {VERSION} ({GIT_SHA_SHORT})
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Files written (or verified clean in `--check` mode) |
+| 64 | `mirror.yml` not found, webhook URL hardcoded, empty `tests:`, ambiguous shell, or bad runner label |
+| 65 | Drift detected in `--check` mode, or schema invalid |
+| 74 | Write failure |
+
+#### `pipeline plan` {#ocx-mirror-pipeline-plan}
+
+Compares upstream releases to the target registry and emits the set of `(version, platform)` pairs that need work, without making any changes.
+
+**Usage**
+
+```shell
+ocx-mirror pipeline plan [--spec <PATH>] [--format json|plain]
+```
+
+**Options**
+
+| Name | Description | Default |
+|------|-------------|---------|
+| `--spec <PATH>` | Path to `mirror.yml` | `./mirror.yml` |
+| `--format` | Output format (`json` or `plain`) | `plain` |
+
+**JSON output schema** (`--format json`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema_version` | integer | Always `1` |
+| `has_new` | boolean | `true` when at least one `(version, platform)` needs work |
+| `versions` | array | Versions requiring action (see below) |
+| `target` | string | OCI repository identifier |
+| `ocx_mirror_rev` | string | Git SHA of the running `ocx-mirror` binary |
+
+Each entry in `versions`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Version string (e.g., `3.29.0`) |
+| `platforms` | array of strings | Platform slugs needing work for this version |
+| `kind` | string | `"new"` (version absent from registry) or `"backfill-partial"` (version present but some platforms missing) |
+
+```json
+{
+  "schema_version": 1,
+  "has_new": true,
+  "versions": [
+    { "version": "3.29.0", "platforms": ["linux/amd64", "darwin/arm64"], "kind": "new" }
+  ],
+  "target": "ocx.sh/cmake",
+  "ocx_mirror_rev": "abc123def0..."
+}
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Plan computed (including `has_new: false`) |
+| 69 | Source or registry unreachable |
+
+#### `pipeline prepare` {#ocx-mirror-pipeline-prepare}
+
+Downloads, verifies, and bundles a single version across all declared platforms.
+
+**Usage**
+
+```shell
+ocx-mirror pipeline prepare --version <V> [--spec <PATH>] [--work-dir <DIR>]
+```
+
+**Options**
+
+| Name | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--version <V>` | — | Version string to prepare (required) | — |
+| `--spec <PATH>` | — | Path to `mirror.yml` | `./mirror.yml` |
+| `--work-dir <DIR>` | — | Output directory for bundles | Current directory |
+
+**Outputs (filesystem):**
+
+- `{work_dir}/{V}/{platform_slug}/bundle.tar.xz` — one bundle per declared platform
+- `{work_dir}/{V}/manifest.json` — bundle sizes and digests
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | All platforms prepared |
+| 65 | Checksum mismatch on any platform |
+| 69 | Source unreachable |
+| 74 | Disk failure |
+
+#### `pipeline push` {#ocx-mirror-pipeline-push}
+
+Reads JUnit XML results, determines which `(version, platform)` pairs passed all tests, calls `ocx package push --cascade --format json` for each green pair (oldest version first), and writes `run-summary.json`.
+
+**Usage**
+
+```shell
+ocx-mirror pipeline push \
+  --bundles-dir <DIR> \
+  --junit-dir <DIR> \
+  --write-summary <PATH> \
+  [--spec <PATH>]
+```
+
+**Options**
+
+| Name | Description | Default |
+|------|-------------|---------|
+| `--bundles-dir <DIR>` | Directory containing `bundle-{V}-{platform_slug}.tar.xz` files | — |
+| `--junit-dir <DIR>` | Directory containing `junit-{V}-{platform_slug}-{container_id}.xml` files | — |
+| `--write-summary <PATH>` | Path to write `run-summary.json` | — |
+| `--spec <PATH>` | Path to `mirror.yml` | `./mirror.yml` |
+
+**Go/no-go rule:** For each `(version, platform)`, all declared containers must pass all `tests[]` entries (zero failures, zero errors, every `tests[].name` present). Native platforms use `_native_` as the container ID. Any missing or failed result blocks the push for that pair.
+
+`ocx-mirror pipeline push` is the sole writer of cascade tags in the pipeline. It serializes pushes across versions and platforms to ensure `latest` always points to the newest published version.
+
+**`run-summary.json` schema:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema_version` | integer | Always `1` |
+| `mirror` | string | Tool name from `mirror.yml` |
+| `target` | string | OCI repository identifier |
+| `run_url` | string | URL of the GitHub Actions run |
+| `versions` | array | Per-version outcome objects |
+| `any_red` | boolean | `true` when any version had failures |
+| `any_new_green` | boolean | `true` when at least one version was newly published |
+
+Each entry in `versions`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Version string |
+| `status` | string | `"published"`, `"partial"`, `"failed"`, `"skipped_existing"`, or `"skipped_executor"` |
+| `platforms_pushed` | array of strings | Platforms successfully published |
+| `platforms_failed` | array of objects | Platforms that failed (each has `platform`, `reason`, `failed_tests`) |
+| `cascade_tags_written` | array of strings | Tags written by cascade for this version |
+| `test_failures` | array of objects | Individual test failures across all platforms |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Push job completed and summary written (includes cases where all versions failed tests) |
+| 69 | Registry unreachable mid-push |
+| 74 | Cannot read bundles or JUnit files, or cannot write summary |
+
+#### `pipeline notify` {#ocx-mirror-pipeline-notify}
+
+Reads `run-summary.json` and posts a [Discord][discord] webhook message summarising results.
+
+**Usage**
+
+```shell
+ocx-mirror pipeline notify \
+  --run-summary <PATH> \
+  --webhook-env-var <NAME>
+```
+
+**Options**
+
+| Name | Description | Default |
+|------|-------------|---------|
+| `--run-summary <PATH>` | Path to `run-summary.json` written by `pipeline push` | — |
+| `--webhook-env-var <NAME>` | Name of the environment variable holding the Discord webhook URL | — |
+
+The webhook URL is read from the named environment variable at runtime. It is never read from `mirror.yml` directly — the `mirror.yml` `notify.discord.webhook_secret` field holds the secret name, which the generated workflow passes as an env var.
+
+**Notification behaviour:**
+
+| Condition | Action |
+|-----------|--------|
+| All versions `skipped_existing`, no failures | Silent (exit 0, no POST) |
+| `any_new_green` and no `any_red` | POST green summary: published versions, cascade tags |
+| `any_new_green` and `any_red` | POST yellow summary: published and failed platforms |
+| `!any_new_green` and `any_red` | POST red summary: all-platform failures with run URL |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Posted (or intentionally silent) |
+| 69 | Discord 5xx or timeout |
+| 77 | Webhook URL rejected by Discord (401/403) — secret likely rotated |
+
 <!-- external -->
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
 [gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
+[starlark-lang]: https://github.com/bazelbuild/starlark
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views
@@ -1684,3 +1976,7 @@ ocx package info [OPTIONS] <IDENTIFIER>
 
 <!-- authoring -->
 [authoring-testing]: ../authoring/testing.md
+
+<!-- mirror -->
+[discord]: https://discord.com/developers/docs/resources/webhook
+[mirror-yml-ref]: ./mirror-yml.md

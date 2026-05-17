@@ -8,7 +8,7 @@ on:
     types: [published]
 
   workflow_run:
-    workflows: ["Basic Verification", "License Compliance", "Deploy Canary", "Deploy Website", "Deploy Dev"]
+    workflows: ["Basic Verification", "License Compliance", "Deploy Canary", "Deploy Website"]
     types: [completed]
 
   deployment_status:
