@@ -5,7 +5,7 @@ paths:
 
 # OCX CLI Commands — Quick Reference
 
-> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The taxonomy below reflects the signed handshake. Commands listed in the **Deleted (exit 2)** section do NOT exist; any description of them in older ADRs or rules is superseded. Do not implement deleted commands.
+> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The taxonomy below reflects the signed handshake. Commands listed in the **Deleted Commands (exit 64)** section do NOT exist; any description of them in older ADRs or rules is superseded. Do not implement deleted commands.
 
 Concise index of all `ocx` CLI commands. User-facing per-command docs live in `website/src/docs/reference/command-line.md`. Implementation under `crates/ocx_cli/src/command/`.
 
@@ -18,10 +18,10 @@ The CLI surface splits into two tiers. The split is firm.
 | Tier | Commands | Input | Consults `ocx.toml`? |
 |------|----------|-------|----------------------|
 | **Toolchain-tier** | `add`, `remove`, `lock`, `upgrade`, `run`, `env` | Binding names / OCI id (add) | **Yes** (or `$OCX_HOME/ocx.toml` under `--global`) |
-| **OCI-tier** (`ocx package`) | `install`, `uninstall`, `select`, `deselect`, `exec`, `env` | OCI identifiers | **Never** |
+| **OCI-tier** (`ocx package`) | `install`, `uninstall`, `select`, `deselect`, `exec`, `env`, `which` | OCI identifiers | **Never** |
 | **Bootstrap / mixed** | `init`, `direnv init`, `direnv export`, `about`, `version`, `shell completion` | Varies | — |
 | **Low-level registry** | `package pull`, `package push`, `package describe`, `package info`, `package create`, `index update/list/catalog`, `login`, `logout` | OCI identifiers | Never |
-| **Low-level local store** | `which`, `deps`, `clean`, `launcher exec` | OCI identifiers | Never |
+| **Low-level local store** | `deps`, `clean`, `launcher exec` | OCI identifiers | Never |
 
 **Layer-purity rule:** `ocx run` is toolchain-tier (binding-name semantics); `ocx package exec` is OCI-tier (identifier semantics). `ocx env` is toolchain-tier; `ocx package env` is OCI-tier. No command silently switches contract based on CWD.
 
@@ -81,6 +81,7 @@ Project-tier commands resolve their project file in strict precedence order: `--
 | `package describe ID` | Push description metadata | `--readme`, `--logo`, `--title` |
 | `package info ID` | Display description metadata | `--save-readme`, `--save-logo` |
 | `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean` |
+| `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
 
 ### Other Commands
 
@@ -88,7 +89,6 @@ Project-tier commands resolve their project file in strict precedence order: `--
 |---------|---------|-----------|
 | `login [REGISTRY]` | Authenticate to a registry | `-u/--username`, `--password-stdin`, `--insecure` |
 | `logout [REGISTRY]` | Remove stored credentials | — |
-| `which PKGS...` | Resolve installed packages to paths | `--candidate`, `--current`, `-p` |
 | `deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `-p`, `--mode` |
 | `clean` | GC unreferenced objects | `--dry-run`, `--force` |
 | `shell completion` | Generate shell completions | `--shell` |
@@ -111,6 +111,7 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | `ocx select` | `ocx package select` |
 | `ocx deselect` | `ocx package deselect` |
 | `ocx exec` | `ocx package exec` |
+| `ocx which` | `ocx package which` |
 | `ocx ci` | Removed (deferred extension point) |
 | `ocx shell hook` | Removed (activation via `$OCX_HOME/env.sh` + `ocx env --global --shell=sh`) |
 | `ocx shell init` | Removed (OCX install script owns profile modification) |
@@ -139,9 +140,9 @@ Rules:
 
 | Manager Method | Auto-Install | Symlink | Use In |
 |----------------|-------------|---------|--------|
-| `find_all()` | No | No | `which`, `deps` |
+| `find_all()` | No | No | `package which`, `deps` |
 | `resolver().build_graph()` | No | No | `deps` |
-| `find_symlink_all(kind)` | No | Yes (candidate/current) | `which --candidate` |
+| `find_symlink_all(kind)` | No | Yes (candidate/current) | `package which --candidate` |
 | `find_or_install_all()` | **Yes** | No | `package env`, `package exec` |
 | `install_all(candidate=true)` | N/A | Creates candidate | `package install` |
 | `install_all(candidate=false)` | N/A | No | `package pull` |

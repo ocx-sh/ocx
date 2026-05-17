@@ -42,7 +42,7 @@ Refreshing a cached tag or discovering every tag for a repository is still the j
 
 ## Active Index {#active}
 
-Every command that resolves a package identifier — [`ocx install`][cmd-install], [`ocx which`][cmd-which], [`ocx exec`][cmd-exec], [`ocx index list`][cmd-index-list] — uses one working index for that invocation. By default, this is the local index. Two flags change which index is used:
+Every command that resolves a package identifier — [`ocx install`][cmd-install], [`ocx package which`][cmd-which], [`ocx exec`][cmd-exec], [`ocx index list`][cmd-index-list] — uses one working index for that invocation. By default, this is the local index. Two flags change which index is used:
 
 | Mode | Flag | Source | Network? |
 |---|---|---|---|

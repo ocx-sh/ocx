@@ -32,9 +32,9 @@ from src.runner import OcxRunner
 
 def _get_package_root(ocx: OcxRunner, pkg_short: str) -> Path:
     """Return the on-disk package root for an installed package."""
-    result = ocx.json("which", pkg_short)
+    result = ocx.json("package", "which", pkg_short)
     path = result.get(pkg_short) if isinstance(result, dict) else None
-    assert path is not None, f"ocx which must report a path for {pkg_short!r}"
+    assert path is not None, f"ocx package which must report a path for {pkg_short!r}"
     return Path(path)
 
 

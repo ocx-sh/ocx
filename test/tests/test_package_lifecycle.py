@@ -10,7 +10,7 @@ from src import OcxRunner, current_platform
 
 
 def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """ocx package create; ocx package push; ocx index update; ocx install; ocx which"""
+    """ocx package create; ocx package push; ocx index update; ocx install; ocx package which"""
     tag = "0.1.0"
     plat = current_platform()
     marker = f"lifecycle-{uuid4().hex[:8]}"
@@ -66,5 +66,5 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     # `find` (default) returns the package root; `install` reports the
     # candidate symlink which also targets the package root, so resolving
     # the symlink lands on the same directory.
-    find_result = ocx.json("which", short)
+    find_result = ocx.json("package", "which", short)
     assert Path(find_result[short]) == candidate.resolve()

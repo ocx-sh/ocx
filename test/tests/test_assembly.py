@@ -64,12 +64,12 @@ from src.runner import OcxRunner, current_platform
 
 
 def _find_content_path(ocx: OcxRunner, short: str) -> Path:
-    """Return the content/ path for an installed package via `ocx which`.
+    """Return the content/ path for an installed package via `ocx package which`.
 
-    `ocx which` reports the package root; this helper traverses into `content/`
+    `ocx package which` reports the package root; this helper traverses into `content/`
     so call sites that exercise installed files keep their natural shape.
     """
-    result = ocx.json("which", short)
+    result = ocx.json("package", "which", short)
     return Path(result[short]) / "content"
 
 
