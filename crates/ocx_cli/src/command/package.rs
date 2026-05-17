@@ -40,6 +40,9 @@ pub enum Package {
     Exec(super::exec::Exec),
     /// Remove an installed candidate for one or more packages.
     Uninstall(super::uninstall::Uninstall),
+    /// Resolve installed packages and print their package-root (or, with
+    /// `--candidate`/`--current`, install-symlink) paths.
+    Which(super::which::Which),
 }
 
 impl Package {
@@ -58,6 +61,7 @@ impl Package {
             Package::Test(test) => test.execute(context).await,
             Package::Exec(exec) => exec.execute(context).await,
             Package::Uninstall(uninstall) => uninstall.execute(context).await,
+            Package::Which(which) => which.execute(context).await,
         }
     }
 }

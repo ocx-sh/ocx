@@ -156,11 +156,11 @@ def test_install_creates_full_chain_refs(
 def test_find_via_different_tag_appends_refs(
     ocx: OcxRunner, published_two_versions: tuple[PackageInfo, PackageInfo]
 ) -> None:
-    """AC2 (idempotency half): repeated ocx which against an installed package
+    """AC2 (idempotency half): repeated ocx package which against an installed package
     neither removes, duplicates, nor corrupts refs/blobs/ — the chain-link
     pass is a safe upsert.
 
-    Design record AC2: "After ocx which <pkg> via a tag path ... those blobs
+    Design record AC2: "After ocx package which <pkg> via a tag path ... those blobs
     are appended to refs/blobs/ — no duplicate entries, no changed targets,
     idempotent on re-run."
 
@@ -184,8 +184,8 @@ def test_find_via_different_tag_appends_refs(
 
     # Two successive finds must leave refs/blobs/ stable — no new duplicates,
     # no targets mutated, no existing refs removed.
-    ocx.plain("which", v1.short)
-    ocx.plain("which", v1.short)
+    ocx.plain("package", "which", v1.short)
+    ocx.plain("package", "which", v1.short)
 
     after = (
         {e.name: os.readlink(e) for e in refs_blobs.iterdir() if e.is_symlink()}
@@ -290,13 +290,13 @@ def test_offline_reresolve_survives_clean_after_full_chain_capture(
     ocx.plain("package", "install", pkg.short)
 
     # Offline find must succeed before clean.
-    result = ocx.plain("--offline", "which", pkg.short, check=False)
+    result = ocx.plain("--offline", "package", "which", pkg.short, check=False)
     assert result.returncode == 0, "prerequisite: offline find must succeed after install"
 
     ocx.plain("clean")
 
     # Offline find must still succeed after clean (reachable blobs must survive).
-    result = ocx.plain("--offline", "which", pkg.short, check=False)
+    result = ocx.plain("--offline", "package", "which", pkg.short, check=False)
     assert result.returncode == 0, (
         "AC5: offline find must still succeed after clean when blobs are in refs/blobs/"
     )
@@ -593,7 +593,7 @@ def test_find_read_only_against_matching_chain_makes_no_writes(
     blobs_before = _count_blobs(_blobs_dir(ocx))
 
     # Run find — chain is already fully linked, so no writes should occur.
-    ocx.plain("which", pkg.short)
+    ocx.plain("package", "which", pkg.short)
 
     after_refs = set(refs_blobs.iterdir()) if refs_blobs.is_dir() else set()
     blobs_after = _count_blobs(_blobs_dir(ocx))

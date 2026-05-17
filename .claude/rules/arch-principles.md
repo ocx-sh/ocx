@@ -89,7 +89,7 @@ CLI command (clap parse)
 | `adr_windows_exe_shim.md` | Native Windows `.exe` shim + `.shim` sidecar replaces the `.cmd` launcher (no `.cmd` emitted; PATHEXT inject/warn machinery removed); fully eliminates BatBadBut `%*`; committed-blob embed (A1 + B1 + C2 + D1) |
 | `adr_project_gc_symlink_ledger.md` | Flat symlink store `$OCX_HOME/projects/` as project GC ledger (supersedes `adr_clean_project_backlinks.md`) |
 | `adr_global_toolchain_tier.md` | Explicit `--global` toolchain tier, strict isolation, no implicit home fallback (supersedes Amendment C of `adr_project_toolchain_config.md`) |
-| `handshake_toolchain_cli.md` | **AUTHORITY for current CLI model** — `ocx package` group (OCI tier), root `ocx env [--global] [--shell]`, `ocx shell` reduced to `{completion}`, root `install/uninstall/select/exec/deselect/ci/shell hook/init/env` removed (exit 64), activation via `$OCX_HOME/env.sh` block-marker, no PATH strip. Decisions 3/4/6/7 of `adr_global_toolchain_tier.md` superseded here. |
+| `handshake_toolchain_cli.md` | **AUTHORITY for current CLI model** — `ocx package` group (OCI tier), root `ocx env [--global] [--shell]`, `ocx shell` reduced to `{completion}`, root `install/uninstall/select/exec/deselect/which/ci/shell hook/init/env` removed (exit 64), activation via `$OCX_HOME/env.sh` block-marker, no PATH strip. Decisions 3/4/6/7 of `adr_global_toolchain_tier.md` superseded here. |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 
@@ -110,7 +110,7 @@ Project-wide conventions enforced by reviewer:
 | New CLI command | `crates/ocx_cli/src/command/` | One file per command, follow command pattern |
 | Project-tier env-composition command | `crates/ocx_cli/src/command/run.rs` | Project-tier mirror of OCI-tier `exec.rs`; calls `load_project_with_lock` from `app/project_context.rs`, then `compose_tool_set` + `expand_all_keyword`, then `child_process::exec` |
 | Toolchain env exporter (project + global) | `crates/ocx_cli/src/command/env.rs` (root) | New root `ocx env [--global] [--shell[=NAME]]`; default output JSON; `--shell` is the eval-safe channel; reuses `resolve_env` → `composer::compose` |
-| OCI-tier package primitives group | `crates/ocx_cli/src/command/package.rs` | `ocx package {install,uninstall,select,deselect,exec,env}` — moved from root; root forms removed (exit 64) |
+| OCI-tier package primitives group | `crates/ocx_cli/src/command/package.rs` | `ocx package {install,uninstall,select,deselect,exec,env,which}` — moved from root; root forms removed (exit 64) |
 | Shared shell emit helper | `crates/ocx_cli/src/app/conventions.rs` | `emit_lines(shell, &[Entry])` consumed by `ocx env`, `ocx package env`, `ocx direnv export` |
 | Shared project-resolve prologue | `crates/ocx_cli/src/app/project_context.rs` | `load_project_with_lock` helper consumed by `pull.rs` and `run.rs`; returns `ProjectContext` (owned — no borrow on `Context`) |
 | New task method | `crates/ocx_lib/src/package_manager/tasks/` | Add error variant to `error.rs` if needed |

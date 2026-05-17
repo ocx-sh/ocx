@@ -67,7 +67,7 @@ def test_dep_install_path_resolves_to_content_dir(
     """${deps.NAME.installPath} resolves to the dep's content directory after install.
 
     S4: pins the EXACT resolved path against the canonical content directory
-    surfaced by `ocx which <leaf>`. The two paths must agree byte-for-byte —
+    surfaced by `ocx package which <leaf>`. The two paths must agree byte-for-byte —
     a regression that resolved the dep token to anything other than the
     leaf's installed content path (e.g. the consumer's content path, a
     layer dir, or a stale snapshot) is caught here.
@@ -94,14 +94,14 @@ def test_dep_install_path_resolves_to_content_dir(
     # Must point into the packages/ CAS tree
     assert "packages" in resolved, f"expected CAS packages path, got: {resolved!r}"
 
-    # S4: pin EXACT path equality against `ocx which <leaf>`. `ocx which`
+    # S4: pin EXACT path equality against `ocx package which <leaf>`. `ocx package which`
     # reports the package root; ${deps.NAME.installPath} resolves to the
     # dep's content tree (`<root>/content`), so the resolved value must
     # equal the leaf's package root joined with `content`.
-    leaf_paths = ocx.json("which", leaf.short)
+    leaf_paths = ocx.json("package", "which", leaf.short)
     expected_leaf_root = leaf_paths.get(leaf.short) if isinstance(leaf_paths, dict) else leaf_paths
     assert expected_leaf_root, (
-        f"`ocx which {leaf.short}` must return the leaf's package root; got: {leaf_paths!r}"
+        f"`ocx package which {leaf.short}` must return the leaf's package root; got: {leaf_paths!r}"
     )
     expected_leaf_content = str(Path(expected_leaf_root) / "content")
     assert resolved == expected_leaf_content, (
@@ -167,11 +167,11 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
     assert Path(resolved).exists(), f"resolved transitive path missing: {resolved!r}"
     # The resolved path must equal C's content path (not B's), proving the
     # template was expanded against C and not silently against the consumer.
-    # `ocx which` returns the package root, so we join `content/` to compare
+    # `ocx package which` returns the package root, so we join `content/` to compare
     # against the runtime ${installPath} value.
-    c_paths = ocx.json("which", c.short)
+    c_paths = ocx.json("package", "which", c.short)
     expected_c_root = c_paths.get(c.short) if isinstance(c_paths, dict) else c_paths
-    assert expected_c_root, f"`ocx which {c.short}` returned no package root: {c_paths!r}"
+    assert expected_c_root, f"`ocx package which {c.short}` returned no package root: {c_paths!r}"
     expected_c_content = str(Path(expected_c_root) / "content")
     assert resolved == expected_c_content, (
         f"C_PATH must equal C's content path; got {resolved!r}, expected {expected_c_content!r}"
@@ -273,7 +273,7 @@ def test_launcher_exec_validates_metadata_via_validmetadata(
     pkg = published_package
     ocx.plain("package", "install", pkg.short)
 
-    install_dir = ocx.json("which", pkg.short)
+    install_dir = ocx.json("package", "which", pkg.short)
     pkg_root_str = install_dir.get(pkg.short) if isinstance(install_dir, dict) else None
     assert pkg_root_str, "find must return a package root for the installed package"
     pkg_root = Path(pkg_root_str)
@@ -398,7 +398,7 @@ def test_uppercase_dep_name_token_rejected_at_consumption(
     pkg = published_package
     ocx.plain("package", "install", pkg.short)
 
-    install_dir = ocx.json("which", pkg.short)
+    install_dir = ocx.json("package", "which", pkg.short)
     pkg_root_str = install_dir.get(pkg.short) if isinstance(install_dir, dict) else None
     assert pkg_root_str, "find must return a package root for the installed package"
     pkg_root = Path(pkg_root_str)
@@ -485,9 +485,9 @@ def test_transitive_dep_token_rejected_at_exec_resolve_time(
     ocx.plain("package", "install", "--select", r_pkg.short)
 
     # Locate R's installed package root.
-    find_result = ocx.json("which", r_pkg.short)
+    find_result = ocx.json("package", "which", r_pkg.short)
     r_root_str = find_result.get(r_pkg.short) if isinstance(find_result, dict) else None
-    assert r_root_str, f"`ocx which {r_pkg.short}` must return R's package root"
+    assert r_root_str, f"`ocx package which {r_pkg.short}` must return R's package root"
     r_root = Path(r_root_str)
     metadata_path = r_root / "metadata.json"
     assert metadata_path.exists(), f"metadata.json must exist at {metadata_path}"

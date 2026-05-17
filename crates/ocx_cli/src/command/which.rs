@@ -25,7 +25,7 @@ use crate::{api, conventions::platforms_or_default, options};
 ///
 /// Useful for scripting (use `--format json` for machine-readable output):
 ///
-///   cmake_root=$(ocx which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
+///   cmake_root=$(ocx package which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 #[derive(Parser)]
 pub struct Which {
     #[clap(flatten)]

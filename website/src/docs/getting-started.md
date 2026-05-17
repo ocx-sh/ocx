@@ -51,10 +51,10 @@ ocx --remote install uv:0.10
 
 <Terminal src="/casts/install.cast" title="Installing a package" collapsed />
 
-Once installed, [`ocx which --candidate`][cmd-which] returns the stable candidate path without re-resolving the package — useful for embedding in build scripts, IDE configs, or CI pipelines that need a fixed path pinned to a specific version:
+Once installed, [`ocx package which --candidate`][cmd-which] returns the stable candidate path without re-resolving the package — useful for embedding in build scripts, IDE configs, or CI pipelines that need a fixed path pinned to a specific version:
 
 ```sh
-ocx which --candidate uv:0.10
+ocx package which --candidate uv:0.10
 ```
 
 <Terminal src="/casts/find-candidate.cast" title="Finding an installed package" collapsed />
@@ -84,7 +84,7 @@ Installing a package creates a candidate path that includes the tag: `candidates
 
 ```sh
 ocx --remote install --select corretto:21
-ocx which --current corretto
+ocx package which --current corretto
 ```
 
 <Terminal src="/casts/install-select.cast" title="Installing and selecting a version" collapsed />

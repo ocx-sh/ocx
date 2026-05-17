@@ -101,11 +101,11 @@ export PATH="$HOME/.ocx/symlinks/ocx.sh/cmake/current/content/bin:$PATH"
 
 When `ocx package install --select cmake:3.32` runs later, `current` is re-pointed and the IDE / shell pick up the new version with no config edits.
 
-For automation, [`ocx which`][cmd-which] prints the resolved package root directly:
+For automation, [`ocx package which`][cmd-which] prints the resolved package root directly:
 
 ```shell
-ocx which --current cmake          # ~/.ocx/symlinks/ocx.sh/cmake/current
-ocx which --candidate cmake:3.28   # ~/.ocx/symlinks/ocx.sh/cmake/candidates/3.28
+ocx package which --current cmake          # ~/.ocx/symlinks/ocx.sh/cmake/current
+ocx package which --candidate cmake:3.28   # ~/.ocx/symlinks/ocx.sh/cmake/candidates/3.28
 ```
 
 Both `--candidate` and `--current` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.

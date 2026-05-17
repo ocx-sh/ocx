@@ -2,4 +2,4 @@
 # title: Installing and selecting a version
 # setup: multi-version
 ocx install --select corretto:21
-ocx which --current corretto
+ocx package which --current corretto

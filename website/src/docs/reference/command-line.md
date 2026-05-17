@@ -260,7 +260,7 @@ esac
 ### `--candidate` / `--current` {#path-resolution}
 
 The `--candidate` and `--current` flags are available on commands that resolve a package's
-location on disk, for example [`package env`](#package-env), [`which`](#which), or [`exec`](#exec).
+location on disk, for example [`package env`](#package-env), [`package which`](#which), or [`exec`](#exec).
 
 Every mode returns a **package root** — the directory that contains the package's `content/` and
 `entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package
@@ -620,9 +620,9 @@ On Unix, `ocx exec` hands the current process image off to the target via `execv
 | 0 | Command exited successfully (`exec` propagates the wrapped command's exit code). |
 | _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
 
-### `which` {#which}
+### `which` (package-tier — `ocx package which`) {#which}
 
-Resolves one or more packages and prints their package root paths.
+Resolves one or more packages and prints their package root paths. This is an OCI-tier command under the [`ocx package`](#package) group — it operates on OCI identifiers and never consults `ocx.toml`. The former root form `ocx which` is removed; invoking it exits `64` (usage error).
 
 The package root is the directory containing the package's `content/` and `entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package files. Consumers traverse into `<root>/content/` for installed files or `<root>/entrypoints/` for generated launchers — both stay one path join away.
 
@@ -633,7 +633,7 @@ No downloading is performed — the package must already be installed.
 **Usage**
 
 ```shell
-ocx which [OPTIONS] <PACKAGE>...
+ocx package which [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
@@ -650,7 +650,7 @@ ocx which [OPTIONS] <PACKAGE>...
 Use `--format json` with `jq` to embed the path in a script:
 
 ```shell
-cmake_root=$(ocx which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
+cmake_root=$(ocx package which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"]')
 ```
 :::
 
@@ -1534,7 +1534,7 @@ ocx package pull [OPTIONS] <PACKAGE>...
 
 ::: tip
 `package pull` reports the package root for each package — the same
-digest-derived directory that [`which`](#which) and [`exec`](#exec) resolve to.
+digest-derived directory that [`package which`](#which) and [`exec`](#exec) resolve to.
 The package root contains `content/` and `entrypoints/` as siblings; consumers
 traverse one level in. Two pulls of the same digest are safe to run concurrently.
 
