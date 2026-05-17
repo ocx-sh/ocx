@@ -179,10 +179,10 @@ function Create-EnvFile {
     $envFile = Join-Path $OcxHome 'env.ps1'
 
     # Mirror of install.sh `create_env_ps1`: the file sources only the global
-    # toolchain env (`ocx env --global`). PATH is produced entirely by that
+    # toolchain env (`ocx --global env`). PATH is produced entirely by that
     # command — no separate ocx-bin injection (the old `shell profile load`
     # model is deleted). The install root is embedded literally so the file
-    # works in fresh shells where $env:OCX_HOME is not set. `ocx env --global`
+    # works in fresh shells where $env:OCX_HOME is not set. `ocx --global env`
     # resolves offline via the current symlinks, so no network at login.
     $ocxBin = Join-Path $OcxHome 'symlinks\ocx.sh\ocx\cli\current\bin\ocx.exe'
     $envContent = @"
@@ -190,7 +190,7 @@ function Create-EnvFile {
 `$env:OCX_HOME = "$OcxHome"
 `$_ocxBin = "$ocxBin"
 if (Test-Path `$_ocxBin -PathType Leaf) {
-    Invoke-Expression ((& `$_ocxBin env --global --shell=pwsh 2>`$null) | Out-String)
+    Invoke-Expression ((& `$_ocxBin --global env --shell=pwsh 2>`$null) | Out-String)
 }
 Remove-Variable _ocxBin -ErrorAction SilentlyContinue
 "@

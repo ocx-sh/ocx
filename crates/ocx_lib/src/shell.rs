@@ -704,7 +704,7 @@ mod tests {
     // Bash and Zsh enable `histexpand` by default in interactive sessions.
     // Inside double-quoted strings, `!` triggers history expansion (e.g.
     // `!!`, `!$`, `!rm` expand against shell history) when eval'd at the
-    // login shell. The installer runs `eval "$(ocx env --global --shell=sh)"`
+    // login shell. The installer runs `eval "$(ocx --global env --shell=sh)"`
     // — any unescaped `!` in a metadata value reaches the interactive shell.
     //
     // Ash/Ksh/Dash do not implement histexpand but we escape uniformly

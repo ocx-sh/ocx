@@ -61,14 +61,19 @@ Devcontainer-of-a-tool stays: `ocx package install X && ocx package select X
 Operate on the in-scope `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`),
 or `$OCX_HOME/ocx.toml` under `--global`.
 
+> **`--global` is a root flag** — it must appear before the subcommand, not after it.
+> Canonical form: `ocx --global <verb>`, e.g. `ocx --global add ripgrep:14`.
+> The flag is defined once on `ContextOptions` (peer of `--project`); it is **not** accepted
+> on any individual subcommand. `ocx add --global` → clap unknown-flag error (exit 64).
+
 | Command | Meaning |
 |---|---|
-| `ocx add [--global] <id>` | record + resolve + install into the toolchain |
-| `ocx remove [--global] <name>` | drop from the toolchain |
-| `ocx lock [--global]` | resolve only |
-| `ocx upgrade [--global] [-g grp]` | re-resolve advisory tags |
-| `ocx run [--global] -- cmd` | run a command with the toolchain env |
-| `ocx env [--global]` | **composed env of the in-scope toolchain** |
+| `ocx [--global] add <id>` | record + resolve + install into the toolchain |
+| `ocx [--global] remove <name>` | drop from the toolchain |
+| `ocx [--global] lock` | resolve only |
+| `ocx [--global] upgrade [-g grp]` | re-resolve advisory tags |
+| `ocx [--global] run -- cmd` | run a command with the toolchain env |
+| `ocx [--global] env` | **composed env of the in-scope toolchain** |
 
 ### `ocx shell` — reduced to one survivor
 
@@ -105,8 +110,8 @@ Two orthogonal axes. Scope = command location. Format = flag. There is no
 
 | Want | Invocation |
 |---|---|
-| Toolchain env, machine-readable | `ocx env [--global]` (default: global `--format`, JSON or plain) |
-| Toolchain env, sourceable | `ocx env [--global] --shell[=NAME]` |
+| Toolchain env, machine-readable | `ocx [--global] env` (default: global `--format`, JSON or plain) |
+| Toolchain env, sourceable | `ocx [--global] env --shell[=NAME]` |
 | Per-package env, machine-readable | `ocx package env <ids...>` |
 | Per-package env, sourceable | `ocx package env <ids...> --shell[=NAME]` |
 
@@ -128,8 +133,8 @@ Rules:
   plain no-entrypoint packages that declare a `Modifier::Path` into
   `content/`. No new resolution machinery.
 
-`ocx env --global --shell=bash` is the single command the login exporter
-runs (§4). `--global` and `--shell` are independent and combine freely.
+`ocx --global env --shell=bash` is the single command the login exporter
+runs (§4). `--global` (root flag) and `--shell` are independent and combine freely.
 
 ---
 
@@ -143,7 +148,7 @@ runs (§4). `--global` and `--shell` are independent and combine freely.
 
    ```sh
    # $OCX_HOME/env.sh   (POSIX: bash / zsh / sh / dash)
-   eval "$(ocx env --global --shell=sh)"
+   eval "$(ocx --global env --shell=sh)"
    ```
 
 2. The **in-repo OCX install script** appends one `source`/`.` line to the
@@ -153,7 +158,7 @@ runs (§4). `--global` and `--shell` are independent and combine freely.
    exist and is not planned now; the install script in this repo owns the
    profile modification.
 
-3. Every new login shell sources it → `ocx env --global --shell=sh` runs
+3. Every new login shell sources it → `ocx --global env --shell=sh` runs
    fresh → the global toolchain is on `PATH`.
 
 4. **rc/profile content is single-sourced through `ocx`, not hand-written
@@ -177,7 +182,7 @@ no `project_guarded` shell-script `ocx.toml` walk. Those are deleted (§7).
   direnv prepends the project toolchain ahead of the ambient global. Normal
   precedence. `emit_global_path_strip` / `strip_global` are deleted.
 - **`ocx run` (bare)** = project tier; error if no project/lock.
-- **`ocx run --global -- cmd`** = compose the global toolchain env for that
+- **`ocx --global run -- cmd`** = compose the global toolchain env for that
   child process only; never mutates the parent shell. Explicit tier
   selection, single tier, no implicit merge — not a leak.
 - Builds stay reproducible because `run` / `package exec` compose exactly
@@ -243,9 +248,14 @@ grammar break.
 
 **Keep unchanged from `a4211591`:**
 
-- `--global` plumbing on the toolchain-tier mutators (`add`/`remove`/`lock`/
-  `upgrade`/`run`), `with_command_global` seam, `ProjectConfig::resolve`
-  global arm, `--global` ⟂ `--project` = exit 64
+- **[Updated 2026-05-17]** `--global` is a single root flag on `ContextOptions`
+  (peer of `--project`), enforced by clap `conflicts_with = "project"`.
+  `ProjectConfig::resolve` global arm and `--global` ⟂ `--project` = exit 64
+  survive. Per-command `--global` flags and the `with_command_global` reconcile
+  seam are **deleted**; `check_global_project_exclusivity` (in
+  `app/context.rs`, called from `Context::try_init`) closes the env-sourced
+  gaps (`OCX_GLOBAL` default value, `OCX_PROJECT` env) that clap
+  `conflicts_with` cannot see.
 - `resolve_global_current_env`, the GC / no-self-link / conflict seam
 - `candidate`/`current` floating symlinks and their commands (now under
   `ocx package`)
@@ -283,7 +293,7 @@ This list is part of the handshake scope, gated in §9.
 
 Add a test fixture for a package with **no entrypoints** that exports a
 `Modifier::Path` into `content/bin/`, exercised end-to-end through
-`ocx env --global --shell=bash` (install via `add --global`, source the
+`ocx --global env --shell=bash` (install via `ocx --global add`, source the
 exporter, resolve the binary). This closes the `make_package`-always-emits-
 entrypoints blind spot that hid the detour's entrypoint-only bug.
 
@@ -299,7 +309,7 @@ entrypoints blind spot that hid the detour's entrypoint-only bug.
 - [x] §4 activation correct (one POSIX env file + per-family only where
       syntax differs; in-repo installer owns profile mod, no website repo;
       rc content single-sourced via `ocx`, generator may defer)
-- [x] §5 isolation/`run` correct (precedence not strip; `run --global`
+- [x] §5 isolation/`run` correct (precedence not strip; `--global run`
       child-only)
 - [x] §6 deferred scope acceptable (CI/file export designed-for, not built;
       GitLab not now)

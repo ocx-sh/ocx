@@ -57,9 +57,9 @@ The two flags are mutually exclusive — combining `--global` with `--project` e
 
 **No implicit home-tier discovery.** Earlier versions of OCX fell back to `$OCX_HOME/ocx.toml` when the CWD walk found nothing. That behavior has been removed. The global toolchain is only active when explicitly requested. A CWD walk that finds nothing means no project tier is active — the command operates without a project context.
 
-### Commands that accept `--global` {#tier-selection-commands}
+### Root `--global` affects these toolchain-tier commands {#tier-selection-commands}
 
-The following project-tier commands accept `--global` to target `$OCX_HOME/ocx.toml`:
+`--global` is a root flag — it must appear before the subcommand (e.g. `ocx --global add ripgrep:14`). The following toolchain-tier commands are affected when `--global` is set:
 
 | Command | With `--global` |
 |---------|----------------|

@@ -7,7 +7,7 @@ Covers:
 - ``ocx direnv export`` (unchanged, kept in full)
 - Deleted commands (``ocx shell hook``, ``ocx shell init``) → exit 64
 - Remote-flag safety for direnv export (shell hook gone → test direnv path only)
-- Global toolchain activation via ``ocx env --global --shell=sh``
+- Global toolchain activation via ``ocx --global env --shell=sh``
 - B1: ``--global`` ⟂ ``--project`` conflict seam (clap exit 2 / UsageError)
 - No-self-link GC invariant for global file
 - W7: byte-stability characterisation test (written Phase 2 Specify)
@@ -575,10 +575,10 @@ def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 19. Global activation via `ocx env --global --shell=sh` (replaces departed
+# 19. Global activation via `ocx --global env --shell=sh` (replaces departed
 #     shell hook test — plan Phase 5 / handshake §4 / C6)
 #
-# Contract: `add --global` records into global tier; `ocx env --global --shell=sh`
+# Contract: `ocx --global add` records into global tier; `ocx --global env --shell=sh`
 # emits POSIX export lines; eval them in a subshell → tool is on PATH.
 # ---------------------------------------------------------------------------
 
@@ -586,16 +586,16 @@ def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 def test_global_env_sh_activation_replaces_departed_hook(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Global activation via ``ocx env --global --shell=sh`` (handshake §4 / C6).
+    """Global activation via ``ocx --global env --shell=sh`` (handshake §4 / C6).
 
     Replaces the prior ``test_shell_hook_global_departed_clears_stale_state``
     which tested the deleted shell-hook command. The new contract:
 
-    1. ``ocx add --global <pkg>`` records the tool in the global toolchain.
-    2. ``ocx env --global --shell=sh`` emits POSIX ``export …`` lines.
+    1. ``ocx --global add <pkg>`` records the tool in the global toolchain.
+    2. ``ocx --global env --shell=sh`` emits POSIX ``export …`` lines.
     3. Eval the output in a subshell → the tool's bin dir is on PATH.
-    4. Remove the tool (``ocx remove --global``).
-    5. ``ocx env --global --shell=sh`` with no global toolchain → exit 64.
+    4. Remove the tool (``ocx --global remove``).
+    5. ``ocx --global env --shell=sh`` with no global toolchain → exit 64.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_gdepart"
@@ -603,7 +603,7 @@ def test_global_env_sh_activation_replaces_departed_hook(
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     # Add into the global tier.
-    add = _run(ocx, tmp_path, "add", "--global", fq)
+    add = _run(ocx, tmp_path, "--global", "add", fq)
     assert add.returncode == EXIT_SUCCESS, (
         f"add --global must succeed; stderr:\n{add.stderr}"
     )
@@ -616,19 +616,19 @@ def test_global_env_sh_activation_replaces_departed_hook(
         f"package select must succeed after add --global; rc={sel.returncode}\nstderr:\n{sel.stderr}"
     )
 
-    # `ocx env --global --shell=sh` must emit sourceable POSIX export lines.
+    # `ocx --global env --shell=sh` must emit sourceable POSIX export lines.
     empty = tmp_path / "no_project"
     empty.mkdir()
     env_result = _run(
-        ocx, empty, "env", "--global", "--shell=sh",
+        ocx, empty, "--global", "env", "--shell=sh",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
     assert env_result.returncode == EXIT_SUCCESS, (
-        f"ocx env --global --shell=sh must succeed; "
+        f"ocx --global env --shell=sh must succeed; "
         f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
     )
     assert "export PATH=" in env_result.stdout or "export" in env_result.stdout, (
-        f"env --global --shell=sh must emit export lines; got:\n{env_result.stdout}"
+        f"--global env --shell=sh must emit export lines; got:\n{env_result.stdout}"
     )
 
     # Source the output in a subshell → gtool bin dir on PATH.
@@ -641,12 +641,12 @@ def test_global_env_sh_activation_replaces_departed_hook(
         env=dict(ocx.env),
     )
     assert "NOT_FOUND" not in check_result.stdout, (
-        f"after sourcing env --global --shell=sh output, gtool must be on PATH; "
+        f"after sourcing --global env --shell=sh output, gtool must be on PATH; "
         f"stdout:\n{check_result.stdout}\nstderr:\n{check_result.stderr}"
     )
 
     # Remove the tool — global toolchain is now empty (no tools, no current symlinks).
-    remove = _run(ocx, tmp_path, "remove", "--global", fq)
+    remove = _run(ocx, tmp_path, "--global", "remove", fq)
     assert remove.returncode == EXIT_SUCCESS, (
         f"remove --global must succeed; stderr:\n{remove.stderr}"
     )
@@ -659,11 +659,11 @@ def test_global_env_sh_activation_replaces_departed_hook(
     # configured" because the global tier is only meaningful when tools are
     # installed AND selected.
     env_empty = _run(
-        ocx, empty, "env", "--global", "--shell=sh",
+        ocx, empty, "--global", "env", "--shell=sh",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
     assert env_empty.returncode == EXIT_USAGE, (
-        f"env --global --shell=sh after removing all tools must exit {EXIT_USAGE} "
+        f"--global env --shell=sh after removing all tools must exit {EXIT_USAGE} "
         f"(no current-selected tools = 'no global toolchain configured'); "
         f"got {env_empty.returncode}\nstderr:\n{env_empty.stderr}"
     )
@@ -681,7 +681,7 @@ def test_shell_init_non_posix_static_file_omits_global_prepend_removed(
 
     The static per-shell init file model (Fish / Nushell / PowerShell / Elvish)
     is removed along with ``ocx shell init``. The replacement activation model
-    is ``ocx env --global --shell=<family>`` (C5 / handshake §4).
+    is ``ocx --global env --shell=<family>`` (C5 / handshake §4).
     """
     for shell in ("fish", "nushell", "powershell", "elvish"):
         result = _run(ocx, tmp_path, "shell", "init", "--shell", shell)

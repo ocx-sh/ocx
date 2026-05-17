@@ -28,10 +28,12 @@ Per-package, identifier-driven, no `ocx.toml` at any tier:
 - `ocx package which <ids...>` — resolve installed packages to paths (`--candidate`/`--current` for stable symlink anchor)
 
 ### Toolchain-tier — root commands
-Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx.toml` under `--global`:
-- `ocx add [--global] <id>`, `ocx remove [--global] <name>`, `ocx lock [--global]`, `ocx upgrade [--global]`
-- `ocx run [--global] -- cmd` — compose toolchain env for child process only; never mutates parent shell
-- `ocx env [--global] [--shell[=NAME]]` — compose toolchain env: **JSON by default** (backend-first, handshake §3); `--format plain` for human inspection (NOT sourceable); `--shell[=NAME]` is the ONLY eval-safe channel
+Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx.toml` under `--global`.
+`--global` is a **root flag** (before the subcommand), peer of `--project`, defined once on `ContextOptions`.
+Canonical form: `ocx --global <subcommand>`.
+- `ocx [--global] add <id>`, `ocx [--global] remove <name>`, `ocx [--global] lock`, `ocx [--global] upgrade`
+- `ocx [--global] run -- cmd` — compose toolchain env for child process only; never mutates parent shell
+- `ocx [--global] env [--shell[=NAME]]` — compose toolchain env: **JSON by default** (backend-first, handshake §3); `--format plain` for human inspection (NOT sourceable); `--shell[=NAME]` is the ONLY eval-safe channel
 
 ### `ocx shell` — reduced to one survivor
 - `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)
@@ -107,17 +109,24 @@ Every command same flow:
 
 ## Cross-Cutting: `--global` Toolchain Tier
 
-`--global` selects `$OCX_HOME/ocx.toml` as the project file for toolchain-tier commands (`add`, `remove`, `lock`, `upgrade`, `run`, `env`). Defined in `ContextOptions` as `pub global: bool` with `conflicts_with = "project"`.
+`--global` is a **ROOT flag** (must appear before the subcommand), peer of `--project`, defined
+**once** on `ContextOptions` as `pub global: bool` with `conflicts_with = "project"`. It selects
+`$OCX_HOME/ocx.toml` as the project file for toolchain-tier commands. Per-command `--global` flags
+and the `with_command_global` seam no longer exist.
+
+Canonical invocation: `ocx --global <subcommand>` — e.g. `ocx --global add ripgrep:14`.
+Toolchain-tier commands affected: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, `env`.
 
 Strict isolation rules:
 - `--global` and `--project` together → clap `conflicts_with` conflict (exit 64 — ocx maps clap usage errors → EX_USAGE 64). No precedence guessing.
+- `check_global_project_exclusivity` (in `app/context.rs`, called from `Context::try_init`) closes env-sourced gaps (`OCX_GLOBAL` default value, `OCX_PROJECT` env) that clap `conflicts_with` cannot see.
 - `ocx run` is hermetic: without `--global`, reads only the in-effect project file; global file never consulted.
-- `ocx run --global -- cmd` composes global toolchain env for child process only; never mutates parent shell.
+- `ocx --global run -- cmd` composes global toolchain env for child process only; never mutates parent shell.
 - `OCX_GLOBAL` is the env-var equivalent (resolution-affecting; forwarded to child ocx via `apply_ocx_config`).
 - No implicit `$OCX_HOME/ocx.toml` discovery: project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
-- `ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64). `--global` is NOT on `ocx package install`.
+- `ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64). `--global` is NOT on any `ocx package` subcommand.
 
-Activation (new model): the OCX install script writes `$OCX_HOME/env.sh` containing `eval "$(ocx env --global --shell=sh)"` and appends a block-marker idempotent line to the user's login profile. No `$OCX_HOME/init.<shell>` static files. No `ocx shell hook`/`shell init`.
+Activation (new model): the OCX install script writes `$OCX_HOME/env.sh` containing `eval "$(ocx --global env --shell=sh)"` and appends a block-marker idempotent line to the user's login profile. No `$OCX_HOME/init.<shell>` static files. No `ocx shell hook`/`shell init`.
 
 ADR: `adr_global_toolchain_tier.md`.
 

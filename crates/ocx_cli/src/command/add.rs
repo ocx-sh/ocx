@@ -30,13 +30,6 @@ pub struct Add {
     #[arg(long = "group", short = 'g', value_name = "GROUP")]
     pub group: Option<String>,
 
-    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of
-    /// a discovered project. Auto-creates the global file when absent
-    /// (mirrors project `add` on a fresh project). Mutually exclusive
-    /// with `--project`.
-    #[arg(long)]
-    pub global: bool,
-
     /// Fully-qualified tool identifier to add (e.g. `ocx.sh/cmake:3.28`).
     #[arg(value_name = "IDENTIFIER")]
     pub identifier: String,
@@ -44,10 +37,6 @@ pub struct Add {
 
 impl Add {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Fold a post-subcommand `--global` into the resolution view so
-        // the project-tier prologue selects `$OCX_HOME/ocx.toml`.
-        let context = context.with_command_global(self.global)?;
-
         // F7: a `--global` mutator on an absent global file auto-creates
         // it (mirrors project `add` on a fresh project; the global tier is
         // the one sanctioned auto-scaffold site). No-op when not `--global`
@@ -140,7 +129,7 @@ impl Add {
         //
         // In the **global tier only**, also set the `current` selection
         // for the added tool. The offline login exporter
-        // (`ocx env --global`, ADR `adr_global_toolchain_tier.md` D5)
+        // (`ocx --global env`, ADR `adr_global_toolchain_tier.md` D5)
         // resolves the global toolchain through `find_symlink(Current)`,
         // so without this the tool stays invisible until a manual
         // `ocx package select`. The signed handshake §1 contract is
@@ -157,7 +146,7 @@ impl Add {
                 vec![identifier],
                 platforms_or_default(&[]),
                 true,
-                self.global,
+                context.global(),
                 context.concurrency(),
             )
             .await?;

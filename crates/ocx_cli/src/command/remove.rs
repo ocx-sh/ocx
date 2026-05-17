@@ -26,11 +26,6 @@ use crate::app::project_context::load_project_for_mutate;
 /// group when `--group` is absent).
 #[derive(Parser, Clone)]
 pub struct Remove {
-    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of
-    /// a discovered project. Mutually exclusive with `--project`.
-    #[arg(long)]
-    pub global: bool,
-
     /// Identifier of the tool to remove (binding name or fully-qualified
     /// identifier, e.g. `cmake` or `ocx.sh/cmake:3.28`).
     #[arg(value_name = "IDENTIFIER")]
@@ -46,8 +41,6 @@ pub struct Remove {
 
 impl Remove {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let context = context.with_command_global(self.global)?;
-
         // Validate the group name early — before flock acquisition — so a
         // typo doesn't lock out other writers waiting on `ocx.toml`.
         if let Some(ref g) = self.group
@@ -142,15 +135,15 @@ impl Remove {
                 .uninstall_all(std::slice::from_ref(ident), false, false)
                 .await;
 
-            // Global-tier symmetry: `ocx add --global` sets the `current`
-            // selection so the offline login exporter (`ocx env --global`)
-            // sees the tool; `ocx remove --global` must clear it so the
+            // Global-tier symmetry: `ocx --global add` sets the `current`
+            // selection so the offline login exporter (`ocx --global env`)
+            // sees the tool; `ocx --global remove` must clear it so the
             // exporter stops showing a tool that left the global toolchain.
             // `current` is keyed by registry/repository only — strip the
             // tag/digest (matches `resolve_global_current_env`'s lookup and
             // `deselect`'s tag-less requirement). Project tier never touches
             // `current` (resolves via the lock), so this is `--global`-only.
-            if self.global {
+            if context.global() {
                 let current_key = ident.without_specifiers();
                 let _ = context.manager().deselect_all(std::slice::from_ref(&current_key)).await;
             }

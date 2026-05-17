@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-16
 **Context:** Grounds handshake_toolchain_cli.md §4 — in-repo installer writes a thin
-`$OCX_HOME/env.sh` (`eval "$(ocx env --global --shell=sh)"`) and appends a `.` line
+`$OCX_HOME/env.sh` (`eval "$(ocx --global env --shell=sh)"`) and appends a `.` line
 to the login profile, idempotently.
 
 ## Prior-art idempotency mechanisms (ranked)
@@ -23,7 +23,7 @@ conda is the only surveyed tool supporting install + in-place update (path chang
 # Managed by ocx installer — do not edit.
 _ocx_bin="${OCX_HOME:-$HOME/.ocx}/installs/ocx.sh/ocx/current/bin/ocx"
 if [ -x "$_ocx_bin" ]; then
-    eval "$("$_ocx_bin" env --global --shell=sh 2>/dev/null)" || true
+    eval "$("$_ocx_bin" --global env --shell=sh 2>/dev/null)" || true
 fi
 unset _ocx_bin
 ```
@@ -71,9 +71,9 @@ Need separate syntax:
 
 | Shell | file | profile line | constraint |
 |---|---|---|---|
-| fish | `env.fish` | `ocx env --global --shell=fish \| source` | pipe-to-source (fish 4.x) |
-| PowerShell | `env.ps1` | `Invoke-Expression (& ocx env --global --shell=pwsh)` | resolve `$PROFILE` at runtime, never hardcode |
-| nushell | `env.nu` (STATIC) | `source /abs/path/env.nu` | `source` is parse-time — CANNOT eval dynamically; **regenerate static file on every `ocx add --global`** |
+| fish | `env.fish` | `ocx --global env --shell=fish \| source` | pipe-to-source (fish 4.x) |
+| PowerShell | `env.ps1` | `Invoke-Expression (& ocx --global env --shell=pwsh)` | resolve `$PROFILE` at runtime, never hardcode |
+| nushell | `env.nu` (STATIC) | `source /abs/path/env.nu` | `source` is parse-time — CANNOT eval dynamically; **regenerate static file on every `ocx --global add`** |
 
 Nushell is the one shell the live-eval model cannot serve — plan a static
 regenerated file explicitly before claiming nu support. (For OCX scope now,

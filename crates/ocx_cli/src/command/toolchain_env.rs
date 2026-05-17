@@ -17,7 +17,7 @@
 //!   **offline** `$OCX_HOME/ocx.lock` → `find_symlink(Current)` →
 //!   `resolve_env` composition (ADR `adr_global_toolchain_tier.md` Decision 5,
 //!   handshake §1/§4). The §4 login exporter
-//!   `eval "$(ocx env --global --shell=sh)"` runs on every shell start — it
+//!   `eval "$(ocx --global env --shell=sh)"` runs on every shell start — it
 //!   MUST NOT contact the registry, install, or hang. No global tool has its
 //!   `current` symlink yet ⇒ silently skipped; no global lock at all ⇒ exit 64
 //!   ("no global toolchain configured"), never exit 74.
@@ -29,7 +29,7 @@
 //! [`resolve_global_current_env`] is relocated here from `shell_hook.rs`.
 //! Rationale: it performs toolchain-tier `$OCX_HOME → lock →
 //! find_symlink(Current) → resolve_env` composition specific to the
-//! `ocx env --global` code path — it belongs with the command that consumes
+//! `ocx --global env` code path — it belongs with the command that consumes
 //! it, not in generic CLI helpers (`conventions.rs` holds stateless helpers
 //! with no toolchain-tier awareness).
 
@@ -78,11 +78,6 @@ use crate::{
 /// - 65 (`DataError`): `ocx.lock` stale (project tier).
 #[derive(Parser)]
 pub struct ToolchainEnv {
-    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of a
-    /// discovered project.  Mutually exclusive with `--project`.
-    #[arg(long)]
-    global: bool,
-
     /// Output format for machine-readable output.
     ///
     /// When omitted alongside a missing `--shell`, defaults to `json`
@@ -110,22 +105,21 @@ pub struct ToolchainEnv {
 
 impl ToolchainEnv {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Fold per-command `--global` into the context (seam reconciliation).
-        // `--global` ⟂ `--project` surfaces here as a usage error → exit 64.
-        let context = context.with_command_global(self.global)?;
-
         // `None` → default-format path; `Some(s)` → eval-safe emit.
         let shell = resolve_shell_arg(self.shell)?;
 
         // ── Resolve entries: one global path, one project path ───────────────
-        let entries = if self.global {
+        // Root `--global` / `OCX_GLOBAL` (already folded into the context via
+        // `ContextOptions`) re-targets resolution to `$OCX_HOME/ocx.toml`;
+        // `--global` ⟂ `--project` is rejected at `Context::try_init`.
+        let entries = if context.global() {
             // OFFLINE current-symlink resolution (ADR D5, handshake §1/§4).
             // The login exporter runs this every shell — never network/install.
             match resolve_global_current_env(&context).await? {
                 Some(entries) => entries,
                 None => {
                     return Err(UsageError::new(
-                        "no global toolchain configured; run `ocx add --global <id>` to create one",
+                        "no global toolchain configured; run `ocx --global add <id>` to create one",
                     )
                     .into());
                 }
@@ -197,7 +191,7 @@ impl ToolchainEnv {
 ///
 /// Source = `$OCX_HOME/ocx.lock` default group ∩ installed `current` symlinks.
 /// Each global-lock tool is resolved through its **stable** `current` symlink
-/// (`find_symlink(Current)`); a tool that was `ocx add --global`'d but never
+/// (`find_symlink(Current)`); a tool that was added via `ocx --global add` but never
 /// selected has no `current` symlink and is silently skipped.
 ///
 /// Returns `Ok(None)` when there is no global `ocx.lock`, or no selected
@@ -208,7 +202,7 @@ impl ToolchainEnv {
 ///
 /// Resolution goes through `manager().offline_view(...)` — it MUST NOT contact
 /// the registry regardless of `--remote`. This is the §4 login-exporter
-/// guarantee: `eval "$(ocx env --global --shell=sh)"` runs on every shell
+/// guarantee: `eval "$(ocx --global env --shell=sh)"` runs on every shell
 /// start and must never hit the network, install, or hang.
 ///
 /// # Errors
