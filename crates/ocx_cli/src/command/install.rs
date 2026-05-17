@@ -7,7 +7,7 @@
 //
 // `ocx install --global <pkg>` no longer exists (handshake §7 — this was the
 // ONE `--global` site from a4211591 that does NOT survive).  The toolchain-tier
-// equivalent is `ocx add --global <pkg>` (which auto-initialises the global
+// equivalent is `ocx --global add <pkg>` (which auto-initialises the global
 // file, re-locks, installs, and selects).
 //
 // `install` itself is moved from root `Command` to `Package::Install` (C1).

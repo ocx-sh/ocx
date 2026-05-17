@@ -233,22 +233,22 @@ The global toolchain is that boundary. It gives you an `apt`-style "tools I alwa
 
 ### Adding tools to the global toolchain {#global-toolchain-add}
 
-Use the toolchain-tier mutators with `--global` to target `$OCX_HOME/ocx.toml`:
+Use the root `--global` flag (before the subcommand) to target `$OCX_HOME/ocx.toml`:
 
 ```shell
-ocx add --global ripgrep:14
-ocx add --global cmake:3.28
+ocx --global add ripgrep:14
+ocx --global add cmake:3.28
 ```
 
-`ocx add --global` records the binding in `$OCX_HOME/ocx.toml`, re-locks, installs, and selects the package in one step. Because a tool must be on PATH to be useful globally, select is always implied.
+`ocx --global add` records the binding in `$OCX_HOME/ocx.toml`, re-locks, installs, and selects the package in one step. Because a tool must be on PATH to be useful globally, select is always implied.
 
-Subsequent calls to `remove`, `lock`, `upgrade`, and `pull` also accept `--global`:
+The same root `--global` flag works with `remove`, `lock`, `upgrade`, and `pull`:
 
 ```shell
-ocx add --global fzf:0.62         # add binding + install + select
-ocx remove --global ripgrep       # drop binding + uninstall
-ocx lock --global                 # re-resolve all tags to digests
-ocx upgrade --global ripgrep      # advance ripgrep to the latest resolved tag
+ocx --global add fzf:0.62         # add binding + install + select
+ocx --global remove ripgrep       # drop binding + uninstall
+ocx --global lock                 # re-resolve all tags to digests
+ocx --global upgrade ripgrep      # advance ripgrep to the latest resolved tag
 ```
 
 The global file lives at `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`). Mutators create it automatically on first use — no `ocx init` step required.
@@ -259,24 +259,24 @@ Both flags pick a project file. Passing them together exits with code 64 (`Usage
 
 ### Shell activation for global tools {#global-toolchain-shell}
 
-The OCX installer writes one file and one login-profile line. The file — `$OCX_HOME/env.sh` — runs `ocx env --global --shell=sh` each time a new shell opens, placing the global toolchain on `PATH`. The login-profile line sources it, guarded by a block marker so re-running the installer is idempotent:
+The OCX installer writes one file and one login-profile line. The file — `$OCX_HOME/env.sh` — runs `ocx --global env --shell=sh` each time a new shell opens, placing the global toolchain on `PATH`. The login-profile line sources it, guarded by a block marker so re-running the installer is idempotent:
 
 ```sh
 # written by the OCX installer in ~/.bashrc / ~/.zshrc / ~/.profile
 # BEGIN ocx
-[ -x "$HOME/.ocx/ocx" ] && eval "$("$HOME/.ocx/ocx" env --global --shell=sh 2>/dev/null)" || true
+[ -x "$HOME/.ocx/ocx" ] && eval "$("$HOME/.ocx/ocx" --global env --shell=sh 2>/dev/null)" || true
 # END ocx
 ```
 
 You can also emit the current global env manually and inspect it:
 
 ```shell
-ocx env --global             # JSON (default — machine-readable)
-ocx env --global --format plain   # human-readable table
-ocx env --global --shell=bash     # POSIX export lines, eval-safe
+ocx --global env                       # JSON (default — machine-readable)
+ocx --global env --format plain        # human-readable table
+ocx --global env --shell=bash          # POSIX export lines, eval-safe
 ```
 
-`--shell` is the only eval-safe output channel. Do not `eval "$(ocx env --global)"` — the default JSON format is not sourceable.
+`--shell` is the only eval-safe output channel. Do not `eval "$(ocx --global env)"` — the default JSON format is not sourceable.
 
 ### OCI-tier package operations {#global-toolchain-oci}
 
@@ -311,7 +311,7 @@ ocx package exec cmake:3 -- cmake --version   # OCI-tier; no ocx.toml read at al
 A project's `ocx run` cannot resolve a tool that exists only in `$OCX_HOME/ocx.toml`. This is intentional and not a bug — the project declared its dependencies; anything else is ambient noise.
 
 ::: tip Learn more
-[Command-line reference → `--global`][cmd-add-global] — flag behavior on `add`, `remove`, `lock`, `upgrade`, `pull`.
+[Command-line reference → root `--global` flag][cmd-add-global] — root flag before the subcommand; affects toolchain-tier commands `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, `env`.
 [Env-composition reference → Strict isolation][env-composition-strict-isolation] — reference-level statement of the no-composition rule.
 [Command-line reference → `ocx env`][cmd-env-root] — toolchain env exporter, format options, `--shell` safety rule.
 :::
@@ -650,7 +650,7 @@ This section covers the changes introduced in the `feat/project-toolchain` relea
 curl -fsSL https://ocx.sh/install.sh | sh
 ```
 
-After installation, every new login shell sources `$OCX_HOME/env.sh`, which runs `eval "$(ocx env --global --shell=sh)"`. No `ocx shell init` call is needed — the installer owns profile wiring.
+After installation, every new login shell sources `$OCX_HOME/env.sh`, which runs `eval "$(ocx --global env --shell=sh)"`. No `ocx shell init` call is needed — the installer owns profile wiring.
 
 **OCI-tier operations** that moved under `ocx package`:
 

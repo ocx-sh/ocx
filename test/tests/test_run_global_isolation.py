@@ -6,7 +6,7 @@ Encodes the Phase 3 contracts from handshake §5 + plan C7:
 
 - ``ocx run -- <cmd>`` (bare) = PROJECT tier only; exit 64 when no project/lock
   in scope. Must NOT fall back to the global toolchain.
-- ``ocx run --global -- <cmd>`` = compose the GLOBAL toolchain
+- ``ocx --global run -- <cmd>`` = compose the GLOBAL toolchain
   (``$OCX_HOME/ocx.toml``/``.lock``) env for THAT child process only; never
   mutates the parent shell.
 - Isolation is by PATH precedence only — there is NO in-shell PATH strip.
@@ -22,8 +22,8 @@ Test inventory
     exists and carries a binding.
 
 2.  ``test_run_global_composes_global_toolchain_for_child``
-    ``ocx run --global -- <gtool>`` resolves a tool present only in
-    ``$OCX_HOME/ocx.toml`` (added via ``ocx add --global``). Proves
+    ``ocx --global run -- <gtool>`` resolves a tool present only in
+    ``$OCX_HOME/ocx.toml`` (added via ``ocx --global add``). Proves
     ``--global`` re-targets ``load_project_with_lock`` to the global file.
 
 3.  ``test_bare_run_in_project_cannot_resolve_global_only_tool``
@@ -32,13 +32,13 @@ Test inventory
     isolation — no implicit merge with the global toolchain.
 
 4.  ``test_run_global_does_not_mutate_parent_env``
-    ``ocx run --global`` spawns the child with the global toolchain env; the
+    ``ocx --global run`` spawns the child with the global toolchain env; the
     *parent* shell process's ``PATH`` and env remain untouched. Verified by
-    checking that the parent's ``PATH`` before and after ``run --global``
+    checking that the parent's ``PATH`` before and after ``--global run``
     contains no reference to the child's isolated OCX bin dir.
 
 5.  ``test_run_produces_no_strip_subshell_output``
-    ``ocx run`` (bare) and ``ocx run --global`` must not emit any
+    ``ocx run`` (bare) and ``ocx --global run`` must not emit any
     ``filter_path_excluding`` shell construct, ``_OCX_APPLIED`` sentinel, or
     PATH-strip subshell to stdout/stderr. Isolation is by PATH *prepend* in the
     child env only — the parent shell is never touched.
@@ -109,7 +109,7 @@ def test_bare_run_no_project_exits_64(
     # global file.
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
-    assert _run_cmd(ocx, tmp_path, "add", "--global", fq).returncode == EXIT_SUCCESS
+    assert _run_cmd(ocx, tmp_path, "--global", "add", fq).returncode == EXIT_SUCCESS
 
     empty = tmp_path / "no_project_dir"
     empty.mkdir()
@@ -137,8 +137,8 @@ def test_bare_run_no_project_exits_64(
 def test_run_global_composes_global_toolchain_for_child(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C7: ``ocx run --global -- gtool`` resolves a tool present only in
-    ``$OCX_HOME/ocx.toml`` (added via ``ocx add --global``).
+    """C7: ``ocx --global run -- gtool`` resolves a tool present only in
+    ``$OCX_HOME/ocx.toml`` (added via ``ocx --global add``).
 
     Proves that ``--global`` re-targets ``load_project_with_lock`` to the
     global file and composes its toolchain env for the child process.
@@ -147,19 +147,19 @@ def test_run_global_composes_global_toolchain_for_child(
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
-    assert _run_cmd(ocx, tmp_path, "add", "--global", fq).returncode == EXIT_SUCCESS
+    assert _run_cmd(ocx, tmp_path, "--global", "add", fq).returncode == EXIT_SUCCESS
 
     # Run from a directory with NO project ocx.toml.
     empty = tmp_path / "no_project_here"
     empty.mkdir()
 
     result = _run_cmd(
-        ocx, empty, "run", "--global", "--", "gtool",
+        ocx, empty, "--global", "run", "--", "gtool",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
 
     assert result.returncode == EXIT_SUCCESS, (
-        f"`ocx run --global -- gtool` must succeed when the global toolchain "
+        f"`ocx --global run -- gtool` must succeed when the global toolchain "
         f"carries 'gtool'; rc={result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
@@ -185,7 +185,7 @@ def test_bare_run_in_project_cannot_resolve_global_only_tool(
 
     make_package(ocx, g_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
     assert (
-        _run_cmd(ocx, tmp_path, "add", "--global", f"{ocx.registry}/{g_repo}:1.0.0").returncode
+        _run_cmd(ocx, tmp_path, "--global", "add", f"{ocx.registry}/{g_repo}:1.0.0").returncode
         == EXIT_SUCCESS
     )
 
@@ -218,11 +218,11 @@ def test_bare_run_in_project_cannot_resolve_global_only_tool(
 def test_run_global_does_not_mutate_parent_env(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C7: ``ocx run --global`` is hermetic — only the spawned child process
+    """C7: ``ocx --global run`` is hermetic — only the spawned child process
     gets the global toolchain env.
 
     Verified by capturing PATH from the test's Python process *before* and
-    *after* running ``ocx run --global``, then asserting they are identical.
+    *after* running ``ocx --global run``, then asserting they are identical.
     The child subprocess runs in its own process; ``ocx run`` must not modify
     the current process's environment.
 
@@ -232,27 +232,27 @@ def test_run_global_does_not_mutate_parent_env(
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
-    assert _run_cmd(ocx, tmp_path, "add", "--global", fq).returncode == EXIT_SUCCESS
+    assert _run_cmd(ocx, tmp_path, "--global", "add", fq).returncode == EXIT_SUCCESS
 
     empty = tmp_path / "no_project"
     empty.mkdir()
 
-    # Capture parent's PATH before running ocx run --global.
+    # Capture parent's PATH before running ocx --global run.
     parent_path_before = os.environ.get("PATH", "")
 
     # Run the child (gtool prints its binary path to stdout).
     result = _run_cmd(
-        ocx, empty, "run", "--global", "--", "gtool",
+        ocx, empty, "--global", "run", "--", "gtool",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
     assert result.returncode == EXIT_SUCCESS, (
-        f"run --global must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+        f"--global run must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
 
     # Parent's PATH must be untouched — ocx run never mutates the current process.
     parent_path_after = os.environ.get("PATH", "")
     assert parent_path_before == parent_path_after, (
-        "ocx run --global must not mutate the parent process's PATH;\n"
+        "ocx --global run must not mutate the parent process's PATH;\n"
         f"before: {parent_path_before!r}\n"
         f"after:  {parent_path_after!r}"
     )
@@ -274,7 +274,7 @@ def test_run_global_does_not_mutate_parent_env(
 def test_run_produces_no_strip_subshell_output(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C7 + C4: ``ocx run`` and ``ocx run --global`` must not emit any
+    """C7 + C4: ``ocx run`` and ``ocx --global run`` must not emit any
     PATH-strip shell construct or ``_OCX_APPLIED`` sentinel.
 
     The deleted strip mechanism (``emit_global_path_strip``, ``strip_global``,
@@ -286,7 +286,7 @@ def test_run_produces_no_strip_subshell_output(
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
-    assert _run_cmd(ocx, tmp_path, "add", "--global", fq).returncode == EXIT_SUCCESS
+    assert _run_cmd(ocx, tmp_path, "--global", "add", fq).returncode == EXIT_SUCCESS
 
     empty = tmp_path / "empty_for_strip_check"
     empty.mkdir()
@@ -314,17 +314,17 @@ def test_run_produces_no_strip_subshell_output(
             f"stdout:\n{bare_result.stdout}\nstderr:\n{bare_result.stderr}"
         )
 
-    # Path 2: run --global (success path).
+    # Path 2: --global run (success path).
     global_result = _run_cmd(
-        ocx, empty, "run", "--global", "--", "gtool",
+        ocx, empty, "--global", "run", "--", "gtool",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
     assert global_result.returncode == EXIT_SUCCESS, (
-        f"run --global must succeed; rc={global_result.returncode}\nstderr:\n{global_result.stderr}"
+        f"--global run must succeed; rc={global_result.returncode}\nstderr:\n{global_result.stderr}"
     )
     combined_global = global_result.stdout + global_result.stderr
     for marker in strip_markers:
         assert marker not in combined_global, (
-            f"`ocx run --global` must not emit strip marker '{marker}' to stdout/stderr;\n"
+            f"`ocx --global run` must not emit strip marker '{marker}' to stdout/stderr;\n"
             f"stdout:\n{global_result.stdout}\nstderr:\n{global_result.stderr}"
         )

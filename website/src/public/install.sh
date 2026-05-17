@@ -336,7 +336,7 @@ create_env_sh() {
         printf 'export OCX_HOME="%s"\n' "$_ocx_home"
         printf '_ocx_bin="%s/symlinks/ocx.sh/ocx/cli/current/bin/ocx"\n' "$_ocx_home"
         printf 'if [ -x "$_ocx_bin" ]; then\n'
-        printf '    eval "$("$_ocx_bin" env --global --shell=sh 2>/dev/null)" || true\n'
+        printf '    eval "$("$_ocx_bin" --global env --shell=sh 2>/dev/null)" || true\n'
         printf 'fi\n'
         printf 'unset _ocx_bin\n'
     } >"$_ocx_home/env.sh"
@@ -360,7 +360,7 @@ create_env_fish() {
         printf 'set -l _ocx_bin "%s/symlinks/ocx.sh/ocx/cli/current/bin/ocx"\n' "$_ocx_home"
         printf 'if test -x "$_ocx_bin"\n'
         printf '    set -x OCX_HOME "%s"\n' "$_ocx_home"
-        printf '    "$_ocx_bin" env --global --shell=fish 2>/dev/null | source\n'
+        printf '    "$_ocx_bin" --global env --shell=fish 2>/dev/null | source\n'
         printf 'end\n'
     } >"$_ocx_home/env.fish"
 }
@@ -383,7 +383,7 @@ create_env_ps1() {
         printf '$env:OCX_HOME = "%s"\n' "$_ocx_home"
         printf '$_ocxBin = "%s/symlinks/ocx.sh/ocx/cli/current/bin/ocx"\n' "$_ocx_home"
         printf 'if (Test-Path $_ocxBin -PathType Leaf) {\n'
-        printf '    Invoke-Expression ((& $_ocxBin env --global --shell=pwsh 2>$null) | Out-String)\n'
+        printf '    Invoke-Expression ((& $_ocxBin --global env --shell=pwsh 2>$null) | Out-String)\n'
         printf '}\n'
     } >"$_ocx_home/env.ps1"
 }

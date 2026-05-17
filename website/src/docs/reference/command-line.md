@@ -174,9 +174,14 @@ The same override can be set persistently via the [`OCX_PROJECT`][env-project] e
 
 ### `--global` {#global-flag}
 
-Selects `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) as the project file for project-tier and mutator commands.
+Selects `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`) as the project file. This is a **root flag** — it must appear before the subcommand name (like `--project` or `--offline`), not after it.
 
-Accepted on: `add`, `remove`, `lock`, `upgrade`, `pull`, and `run`.
+```sh
+ocx --global add ripgrep:14      # correct
+ocx add --global ripgrep:14      # error: unknown flag
+```
+
+When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, and `env`.
 
 `--global` is mutually exclusive with `--project`. Passing both — whether as flags or via the `OCX_GLOBAL` / `OCX_PROJECT` environment variables — exits with code 64 (`UsageError`). The global toolchain never composes into project resolution; see [strict isolation][env-composition-strict-isolation] for the full hermetic contract.
 
@@ -320,9 +325,13 @@ ocx add [OPTIONS] <IDENTIFIER>
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--global` | — | Target `$OCX_HOME/ocx.toml` instead of the nearest project file. Mutually exclusive with `--project`. Auto-creates `$OCX_HOME/ocx.toml` when absent. |
 | `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
 | `--help` | `-h` | Print help information. |
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand to target `$OCX_HOME/ocx.toml`: `ocx --global add ripgrep:14`.
+See [`--global`][global-flag] for the full root-flag reference.
+:::
 
 **Exit codes**
 
@@ -503,10 +512,14 @@ ocx env [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--global` | — | Target `$OCX_HOME/ocx.toml` (global toolchain). Without this flag, the nearest `ocx.toml` in the CWD walk is used. | off |
 | `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect instead of JSON. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) defaults to `sh`. | *(unset — JSON output)* |
 | `--format` | — | `json` (default for this command) or `plain` (aligned table). `plain` output is not eval-safe. | `json` |
 | `-h`, `--help` | | Print help information. | — |
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand to target `$OCX_HOME/ocx.toml`: `ocx --global env --shell=sh`.
+See [`--global`][global-flag] for the full root-flag reference.
+:::
 
 **Examples**
 
@@ -518,10 +531,10 @@ ocx env
 eval "$(ocx env --shell=bash)"
 
 # Eval-safe export for the global toolchain (POSIX sh):
-eval "$(ocx env --global --shell=sh)"
+eval "$(ocx --global env --shell=sh)"
 
 # Sourced from $OCX_HOME/env.sh (written by the installer):
-eval "$(ocx env --global --shell=sh)"
+eval "$(ocx --global env --shell=sh)"
 ```
 
 ::: warning Plain output is not sourceable
@@ -998,10 +1011,13 @@ ocx lock [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. | off |
 | `--group <NAME>` | `-g` | Restrict resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every `[tools]` and `[group.*]` entry is resolved. | *(all groups)* |
 | `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
 | `--help` | `-h` | Print help information. | — |
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`][global-flag].
+:::
 
 **Exit codes**
 
@@ -1040,13 +1056,16 @@ ocx upgrade [OPTIONS] [BINDING...]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. | off |
 | `--group <NAME>` | `-g` | Restrict re-resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. Combinable with positional binding names (intersection). | *(all groups)* |
 | `--check` | — | Verify the candidate lock would match the predecessor and exit. Mirrors `lock --check`: re-resolves the requested subset (or the full toolchain when no positional names and no `-g` are supplied), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, candidate would change). When the predecessor lock is absent, exits 78. No writes, no commit. | off |
 | `--project <PATH>` | | Path to `ocx.toml`. Bypasses the CWD walk. | CWD walk |
 | `--config <PATH>` | | Extra config file layered on top of the discovered chain. | *(none)* |
 | `--remote` | | Route tag resolution to the remote registry instead of the local index. | false |
 | `-h`, `--help` | | Print help information. | |
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand: `ocx --global upgrade ripgrep`. See [`--global`][global-flag].
+:::
 
 **Exit codes**
 
@@ -1101,10 +1120,13 @@ ocx pull [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. | off |
 | `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every entry from the lock is pulled. | *(all groups)* |
 | `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
 | `--help` | `-h` | Print help information. | — |
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`][global-flag].
+:::
 
 **Exit codes**
 
@@ -1154,11 +1176,14 @@ ocx run [OPTIONS] [NAME...] -- ARGV...
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. The global file must exist (no auto-init for read commands). | off |
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
 | `--self` | — | Expose each package's private-visibility env entries (same semantics as `ocx exec --self`). | off |
 | `--help` | `-h` | Print help information. | — |
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand: `ocx --global run -- cmake --version`. The global file must exist (no auto-init for read commands). See [`--global`][global-flag].
+:::
 
 **Composition order**
 
@@ -1240,9 +1265,12 @@ ocx remove [OPTIONS] <IDENTIFIER>
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--global` | — | Target `$OCX_HOME/ocx.toml` as the global toolchain file. Mutually exclusive with `--project`. |
 | `--group <NAME>` | `-g` | Remove the binding from this named group only. Use when the same name exists in multiple groups. |
 | `--help` | `-h` | Print help information. |
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand: `ocx --global remove ripgrep`. See [`--global`][global-flag].
+:::
 
 **Exit codes**
 
@@ -1302,7 +1330,7 @@ The second gate is **at consumption time**, invoked whenever `ocx env` or `ocx e
 
 > **REMOVED** — exits 64. The per-prompt hook model has been replaced by the `$OCX_HOME/env.sh` activation model. See [handshake_toolchain_cli.md §4] for the current activation contract. The `_OCX_APPLIED` fingerprint variable and the per-prompt hook are both gone.
 >
-> Use [`ocx direnv`](#direnv) for project-toolchain activation, or `eval "$(ocx env --global --shell=sh)"` for global toolchain activation.
+> Use [`ocx direnv`](#direnv) for project-toolchain activation, or `eval "$(ocx --global env --shell=sh)"` for global toolchain activation.
 
 #### `env` {#shell-env}
 
@@ -1384,7 +1412,7 @@ ocx shell completion --shell powershell | Out-String | Invoke-Expression
 
 > **REMOVED** — exits 64. The `ocx shell init` command has been removed along with the per-prompt hook model.
 >
-> Global toolchain activation is now handled by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile. The file runs `eval "$(ocx env --global --shell=sh)"`. For project toolchain activation, use [`ocx direnv`](#direnv).
+> Global toolchain activation is now handled by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile. The file runs `eval "$(ocx --global env --shell=sh)"`. For project toolchain activation, use [`ocx direnv`](#direnv).
 
 ### `uninstall` {#uninstall}
 
@@ -2013,6 +2041,9 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [cmd-package-deselect]: #package-deselect
 [cmd-package-exec]: #package-exec
 [cmd-package-env]: #package-env
+
+<!-- global flag -->
+[global-flag]: #global-flag
 
 <!-- commands (root env) -->
 [cmd-env-root]: #env-root

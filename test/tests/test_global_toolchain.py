@@ -7,15 +7,15 @@ Encodes adr_global_toolchain_tier.md + handshake_toolchain_cli.md (signed
   implicit ``$OCX_HOME/ocx.toml`` discovery).
 - ``run``/``exec`` are hermetic and never consult the global file without
   ``--global``.
-- ``ocx run --global`` composes the global toolchain env for the child process
+- ``ocx --global run`` composes the global toolchain env for the child process
   only — it never mutates the parent shell.
 - Isolation is by PATH precedence only (no PATH strip).
 
 Phase 5 rewrites (plan_toolchain_cli.md Phase 5 / handshake §2):
-- Test 1: ``install --global`` (deleted) replaced with ``add --global``;
-  ``shell init`` (deleted) replaced with ``ocx env --global --shell=sh`` activation.
-- Tests 3, 5: ``install --global`` replaced with ``add --global``.
-- Test 4: already uses ``add --global`` (previously rewritten for the new
+- Test 1: ``install --global`` (deleted) replaced with ``ocx --global add``;
+  ``shell init`` (deleted) replaced with ``ocx --global env --shell=sh`` activation.
+- Tests 3, 5: ``install --global`` replaced with ``ocx --global add``.
+- Test 4: already uses ``ocx --global add`` (previously rewritten for the new
   PATH-precedence model — no PATH strip).
 
 Test 4 (``test_project_strict_isolation_global_bin_absent``) previously asserted
@@ -77,12 +77,14 @@ def _source_env_sh_script(
     body: str,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``body`` in a NON-INTERACTIVE ``bash --norc`` shell that sources
-    ``ocx env --global --shell=sh`` output first (new activation model).
+    ``ocx --global env --shell=sh`` output first (new activation model).
 
     Uses ``run_after_sourcing`` which writes the export lines to a temp file
     and uses the POSIX dot-operator (``.``) instead of ``eval "..."`` to avoid
     quoting fragility (Block A1 fix: paths with spaces / $ / " / ! all handled
     correctly — the eval form breaks on all of those).
+
+    Caller obtains ``env_sh_content`` via ``ocx --global env --shell=sh``.
     """
     return run_after_sourcing(
         env_sh_content,
@@ -106,18 +108,18 @@ def _write_ocx_toml(project_dir: Path, body: str) -> Path:
 def test_global_add_install_select_then_fresh_shell_sees_tool(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`ocx add --global <pkg>` records into + selects the global tier;
-    a non-interactive shell that evals ``ocx env --global --shell=sh`` output
+    """`ocx --global add <pkg>` records into + selects the global tier;
+    a non-interactive shell that evals ``ocx --global env --shell=sh`` output
     then resolves the tool's binary on PATH (handshake §4 activation model).
 
     Rewritten Phase 5: replaces the deleted ``install --global`` + ``shell init``
     + static ``$OCX_HOME/init.bash`` activation. The new model uses
-    ``ocx add --global`` and ``ocx env --global --shell=sh``.
+    ``ocx --global add`` and ``ocx --global env --shell=sh``.
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
-    add = _run_cmd(ocx, tmp_path, "add", "--global", fq)
+    add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
     assert add.returncode == EXIT_SUCCESS, (
         f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
     )
@@ -128,8 +130,8 @@ def test_global_add_install_select_then_fresh_shell_sees_tool(
     # `resolve_global_current_env` reads exactly the `current` symlink that
     # `add --global` just created.
 
-    # Get the activation export lines via `ocx env --global --shell=sh`.
-    env_result = _run_cmd(ocx, tmp_path, "env", "--global", "--shell=sh")
+    # Get the activation export lines via `ocx --global env --shell=sh`.
+    env_result = _run_cmd(ocx, tmp_path, "--global", "env", "--shell=sh")
     assert env_result.returncode == EXIT_SUCCESS, (
         f"ocx env --global --shell=sh must succeed; stderr:\n{env_result.stderr}"
     )
@@ -156,7 +158,7 @@ def test_global_add_install_select_then_fresh_shell_sees_tool(
 def test_global_add_when_global_file_absent(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """F7 decision: `ocx add --global` auto-creates ``$OCX_HOME/ocx.toml`` (and
+    """F7 decision: `ocx --global add` auto-creates ``$OCX_HOME/ocx.toml`` (and
     its ``ocx.lock``) when absent, mirroring project ``add`` on a fresh
     project — no pre-existing global file required."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
@@ -165,7 +167,7 @@ def test_global_add_when_global_file_absent(
     global_toml = ocx_home / "ocx.toml"
     assert not global_toml.exists(), "precondition: no global ocx.toml yet"
 
-    add = _run_cmd(ocx, tmp_path, "add", "--global", fq)
+    add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
     assert add.returncode == EXIT_SUCCESS, (
         f"add --global on absent global file must auto-init; "
         f"rc={add.returncode}\nstderr:\n{add.stderr}"
@@ -193,7 +195,7 @@ def test_project_tool_shadows_global_in_project(
     make_package(ocx, p_repo, "1.0.0", tmp_path, new=True, bins=["tool"])
 
     # Global tier carries `tool` → g_repo.
-    _run_cmd(ocx, tmp_path, "add", "--global", f"{ocx.registry}/{g_repo}:1.0.0")
+    _run_cmd(ocx, tmp_path, "--global", "add", f"{ocx.registry}/{g_repo}:1.0.0")
 
     # Project declares `tool` → p_repo.
     project = tmp_path / "proj"
@@ -247,8 +249,8 @@ def test_project_strict_isolation_global_bin_absent(
     p_repo = f"{unique_repo}_proj"
 
     make_package(ocx, g_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
-    # Use the live `add --global` (not the deleted `install --global`).
-    add = _run_cmd(ocx, tmp_path, "add", "--global", f"{ocx.registry}/{g_repo}:1.0.0")
+    # Use the live `ocx --global add` (not the deleted `install --global`).
+    add = _run_cmd(ocx, tmp_path, "--global", "add", f"{ocx.registry}/{g_repo}:1.0.0")
     assert add.returncode == EXIT_SUCCESS, (
         f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
     )
@@ -299,7 +301,7 @@ def test_run_is_hermetic_ignores_global(
     only the in-effect project file, never the global one."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
     _run_cmd(
-        ocx, tmp_path, "add", "--global", f"{ocx.registry}/{unique_repo}:1.0.0"
+        ocx, tmp_path, "--global", "add", f"{ocx.registry}/{unique_repo}:1.0.0"
     )
 
     # A project that declares a *different* tool, never `gonly`.
@@ -336,7 +338,7 @@ def test_home_ocx_toml_not_discovered_without_global(
     no ``--global`` is given — the implicit home fallback was removed."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
     _run_cmd(
-        ocx, tmp_path, "add", "--global", f"{ocx.registry}/{unique_repo}:1.0.0"
+        ocx, tmp_path, "--global", "add", f"{ocx.registry}/{unique_repo}:1.0.0"
     )
 
     # Empty dir, no project ocx.toml anywhere up the tree, NO --global.
@@ -372,7 +374,7 @@ def test_global_and_project_flags_conflict(
     explicit = tmp_path / "explicit.toml"
     explicit.write_text("[tools]\n")
 
-    result = _run_cmd(ocx, tmp_path, "--project", str(explicit), "add", "--global", fq)
+    result = _run_cmd(ocx, tmp_path, "--project", str(explicit), "--global", "add", fq)
     assert result.returncode == EXIT_USAGE, (
         f"--global + --project must exit {EXIT_USAGE} (UsageError); "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
@@ -467,7 +469,7 @@ def test_no_self_link_for_global_file(
     ``current`` install symlinks."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
-    add = _run_cmd(ocx, tmp_path, "add", "--global", fq)
+    add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
     assert add.returncode == EXIT_SUCCESS, (
         f"add --global must succeed; stderr:\n{add.stderr}"
     )

@@ -32,11 +32,6 @@ pub struct Upgrade {
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
     pub groups: Vec<String>,
 
-    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of
-    /// a discovered project. Mutually exclusive with `--project`.
-    #[arg(long)]
-    pub global: bool,
-
     /// Binding names from `ocx.toml` to re-resolve.
     ///
     /// Each value is the local TOML key (e.g. `cmake`, not
@@ -59,8 +54,6 @@ pub struct Upgrade {
 
 impl Upgrade {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let context = context.with_command_global(self.global)?;
-
         // Pre-validate empty `--group` segments before any I/O.
         for raw in &self.groups {
             if raw.is_empty() {

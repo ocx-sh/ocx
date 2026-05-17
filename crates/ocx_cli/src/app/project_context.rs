@@ -152,9 +152,9 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
 /// the lock's declaration hash does not match the current config. Returns
 /// `Err(ProjectContextError::Project)` or `Err(ProjectContextError::Config)`
 /// for lower-level parse or I/O errors.
-/// Auto-create `$OCX_HOME/ocx.toml` when a `--global` mutator
-/// (`ocx add --global`, the `ocx install --global` add-step) runs against
-/// an absent global file (F7, adr_global_toolchain_tier.md §Decision 3).
+/// Auto-create `$OCX_HOME/ocx.toml` when `context.global()` is true
+/// (set by root `--global` / `OCX_GLOBAL`) and a mutator (e.g. `ocx --global add`)
+/// runs against an absent global file (F7, adr_global_toolchain_tier.md §Decision 3).
 ///
 /// Mirrors what project `add` would do on a fresh project, except project
 /// `add` deliberately refuses to scaffold (exit 64) — the global tier is

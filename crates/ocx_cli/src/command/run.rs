@@ -63,14 +63,6 @@ pub struct Run {
     #[arg(long = "self", default_value_t = false)]
     pub self_view: bool,
 
-    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of
-    /// a discovered project. Read-only: an absent global file yields the
-    /// existing `NoProject` semantics. `run` stays hermetic — it composes
-    /// exactly the in-effect project file (here the global one), never a
-    /// union with a project. Mutually exclusive with `--project`.
-    #[arg(long)]
-    pub global: bool,
-
     /// Binding names to compose into the child env. Each name must
     /// resolve unambiguously inside the selected scope. Empty list means
     /// "every binding in scope."
@@ -123,10 +115,9 @@ impl Run {
         use ocx_lib::cli;
 
         // Strict isolation (C2.6): `run` composes exactly the in-effect
-        // project file. `--global` only re-targets which single file that
-        // is (the global one) — `compose_tool_set` below is still fed one
-        // tier (`&ctx.config`/`&ctx.lock`), never a union with a project.
-        let context = context.with_command_global(self.global)?;
+        // project file. Root `--global` only re-targets which single file
+        // that is (the global one) — `compose_tool_set` below is still fed
+        // one tier (`&ctx.config`/`&ctx.lock`), never a union with a project.
 
         // ── Phase A: parse-time validation ───────────────────────────────
 
@@ -443,41 +434,21 @@ mod tests {
         assert_eq!(result[0].binding, "cmake");
     }
 
-    // ── C7: `run --global` / bare run isolation ──────────────────────────────
+    // ── C4: no-strip clap surface ────────────────────────────────────────────
+    //
+    // `--global` is no longer a per-command flag — it is a single root-level
+    // selector on `ContextOptions` (peer of `--project`), so `Run` carries no
+    // `global` field and `ocx run --global` parses as `ocx --global run`.
+    // Root-flag parsing is clap-derived; the `--global` ⟂ `--project`
+    // exclusivity is covered by `app::context` unit tests and the acceptance
+    // suite (`test/tests/test_run_global_isolation.py`).
 
-    /// C7 (plan_toolchain_cli.md §C7): the `--global` field is present on `Run`.
+    /// C4 (no-strip contract): the `Run` struct exposes no strip mechanism
+    /// (`--strip-global`, `--emit-global-path-strip`).
     ///
-    /// Structural proof that `ocx run --global` is wired through the clap
-    /// surface as required by the handshake. `clap::Parser::try_parse_from`
-    /// validates both the presence of the flag and its `bool` default (`false`).
-    #[test]
-    fn run_global_flag_parses_true() {
-        let r = Run::try_parse_from(["run", "--global", "--", "echo", "hi"]).expect("parse must succeed");
-        assert!(r.global, "`--global` must parse to true");
-    }
-
-    /// C7: without `--global` the field defaults to `false`.
-    ///
-    /// Confirms bare `run` has `global == false` — i.e., the bare execution path
-    /// is strictly project-tier with no implicit global fallback at the clap layer.
-    #[test]
-    fn run_global_flag_defaults_false() {
-        let r = Run::try_parse_from(["run", "--", "echo", "hi"]).expect("parse must succeed");
-        assert!(!r.global, "bare `run` must have global=false");
-    }
-
-    /// C7 + C4 (no-strip contract): the `Run` struct has no field named after
-    /// any strip mechanism (`strip_global`, `emit_global_path_strip`, etc.).
-    ///
-    /// This is a compile-time structural proof. If the strip mechanism were
-    /// re-introduced as a field on `Run`, this test would fail to compile —
-    /// making the absence of the strip *explicit and enforced*. Absence of the
-    /// `global` field would be caught by `run_global_flag_parses_true`.
-    ///
-    /// The guard: `Run::try_parse_from` with `--global` and no strip-related
-    /// argument must succeed, and the resulting struct's `global` field must be
-    /// `true` (verifies the kept field) while there is no way to set any strip
-    /// field (verifies deletion by exhaustive coverage of what clap accepts).
+    /// Compile-and-parse structural proof: if a strip flag were re-introduced
+    /// on `Run`, clap would accept it and these assertions would fail —
+    /// keeping the deletion explicit and enforced.
     #[test]
     fn run_no_strip_field_clap_surface() {
         // `--strip-global` or `--emit-strip` do not exist — clap must reject them.

@@ -76,7 +76,7 @@ pub struct OcxConfigView {
     /// entrypoint launcher (`ocx launcher exec`), an OCI-tier primitive that
     /// reads `metadata.json` and never consults `ocx.toml`/global project
     /// resolution. There is therefore no observable child-side resolution
-    /// difference to assert; fabricating a recursive `ocx run --global`
+    /// difference to assert; fabricating a recursive `ocx --global run`
     /// child to create one would test a contrived path strict isolation
     /// forbids by design. The block-tier "resolution flag forwarded"
     /// contract is fully pinned at the unit layer.

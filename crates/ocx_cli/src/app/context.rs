@@ -150,6 +150,7 @@ impl Context {
             std::path::PathBuf::from("ocx")
         });
         let config_view = options.as_view(self_exe);
+        check_global_project_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);
 
         Ok(Context {
@@ -181,100 +182,15 @@ impl Context {
         self.project_path.as_deref()
     }
 
-    /// Whether the global toolchain (`$OCX_HOME/ocx.toml`) was explicitly
-    /// selected via `--global` / `OCX_GLOBAL`. Passed to
+    /// Whether the global toolchain (`$OCX_HOME/ocx.toml`) was selected
+    /// via the root `--global` flag or `OCX_GLOBAL`. Passed to
     /// `ProjectConfig::resolve` so project-tier prologues select the
     /// global file instead of walking the CWD. Mutually exclusive with an
-    /// explicit `--project` (enforced by clap `conflicts_with`).
+    /// explicit `--project` / `OCX_PROJECT` (enforced by clap
+    /// `conflicts_with` for the flag pair and by
+    /// [`check_global_project_exclusivity`] for the env-sourced gaps).
     pub fn global(&self) -> bool {
         self.config_view.global
-    }
-
-    /// Fold a subcommand-level `--global` flag into this context's
-    /// resolution view, enforcing mutual exclusion with an explicit
-    /// project selection.
-    ///
-    /// `--global` is exposed both at the top level (flattened
-    /// `ContextOptions`, before the subcommand) and per project-tier
-    /// command (after the subcommand, before positionals — project CLI
-    /// convention). Both surfaces denote the *same* logical selector;
-    /// this is the single reconciliation seam so the two never diverge
-    /// into a parallel pipeline (feedback_extend_dont_duplicate). The
-    /// effective selector is the logical OR of the two surfaces.
-    ///
-    /// # Exclusivity enforcement
-    ///
-    /// The top-level `--global` + top-level `--project` pair is rejected
-    /// by clap (`conflicts_with = "project"` on
-    /// [`ContextOptions::global`]) and that path is left untouched. clap
-    /// cannot relate a *per-subcommand* `--global` bool to the flattened
-    /// top-level `project` arg, so the per-command surface is reconciled
-    /// here instead of via a duplicated `conflicts_with` on every command
-    /// (extend-don't-duplicate; one enforcement seam).
-    ///
-    /// When the **effective** `--global` selector is set — either the
-    /// per-command `--global` flag *or* the already-folded
-    /// `OCX_GLOBAL`/top-level surface (`config_view.global`) — and an
-    /// **explicit** project selection is in effect (the `--project` flag
-    /// or the `OCX_PROJECT` env var, NOT a project merely discovered via
-    /// the CWD walk; `--global` while standing inside a project directory
-    /// is legal and global wins by precedence per
-    /// adr_global_toolchain_tier.md §Decision 2) — this returns a
-    /// [`UsageError`] that classifies to [`ExitCode::UsageError`] (`64`),
-    /// mirroring what clap's top-level `conflicts_with` already does for
-    /// the top-level `--global`/`--project` flag pair. The flag pair stays
-    /// clap's responsibility; checking the *effective* selector here also
-    /// closes the `OCX_GLOBAL=1` + `--project`/`OCX_PROJECT` bypass clap
-    /// cannot see (the env-sourced global selector would otherwise evade
-    /// the seam and the explicit project be silently ignored).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UsageError`] (exit `64`) when the effective `--global`
-    /// selector (`config_view.global || command_global`) is set alongside
-    /// an explicit `--project` / `OCX_PROJECT` selection.
-    pub fn with_command_global(self, command_global: bool) -> Result<Self, ocx_lib::cli::UsageError> {
-        if (self.config_view.global || command_global) && self.has_explicit_project_selection() {
-            return Err(ocx_lib::cli::UsageError::new(
-                "--global cannot be combined with an explicit --project / OCX_PROJECT selection",
-            ));
-        }
-        // Reconcile `command_global` into `config_view.global` (logical
-        // OR): the top-level and per-command surfaces denote the *same*
-        // logical selector, so the effective selector is true when either
-        // is set. Folding it here (not a parallel pipeline) keeps the two
-        // surfaces from diverging (feedback_extend_dont_duplicate). Both
-        // `context.global()` (drives `ProjectConfig::resolve`) and the
-        // forwarded `OCX_GLOBAL` read from `config_view.global`, so this
-        // single mutation propagates to resolution and subprocess spawn.
-        let mut ctx = self;
-        ctx.config_view.global = ctx.config_view.global || command_global;
-        Ok(ctx)
-    }
-
-    /// Whether an *explicit* project file was selected — via the
-    /// `--project` flag or the `OCX_PROJECT` env var. A project merely
-    /// discovered through the CWD walk is NOT explicit: `--global` from
-    /// inside a project tree is legal and the global tier wins by
-    /// precedence (adr_global_toolchain_tier.md §Decision 2). This is the
-    /// detection half of the exclusivity guard in
-    /// [`Self::with_command_global`].
-    fn has_explicit_project_selection(&self) -> bool {
-        // The discriminator between an *explicit* project selection and a
-        // CWD-walk-discovered one is which surface carried the path. The
-        // `--project` flag is captured into `config_view.project` (via
-        // `ContextOptions::as_view`); `OCX_PROJECT` is the env-var peer.
-        // A project found by the CWD walk sets *neither* — so standing
-        // inside a project tree and passing `--global` reads as
-        // non-explicit and global wins by precedence
-        // (adr_global_toolchain_tier.md §Decision 2).
-        if self.config_view.project.is_some() {
-            return true;
-        }
-        // `OCX_PROJECT=""` is the loader's escape hatch (treated as
-        // unset); mirror that here so an explicitly-cleared env var is
-        // not misread as an explicit selection.
-        env::var(env::keys::OCX_PROJECT).is_some_and(|v| !v.is_empty())
     }
 
     pub fn remote_client(&self) -> ocx_lib::Result<&oci::Client> {
@@ -353,106 +269,67 @@ fn resolve_concurrency(jobs: Option<usize>) -> package_manager::Concurrency {
     }
 }
 
-#[cfg(test)]
-impl Context {
-    /// Assemble a [`Context`] from cheap, no-I/O subsystems for unit tests.
-    ///
-    /// Only the per-command `--global` reconciliation path
-    /// ([`Self::with_command_global`] → [`Self::has_explicit_project_selection`])
-    /// is exercised through this constructor; that path reads only
-    /// `config_view` and `project_path` and never touches the index,
-    /// package manager, client, or filesystem. The heavy fields are
-    /// constructed with their cheapest stubs (no network, no disk writes)
-    /// purely to satisfy the struct shape.
-    fn for_seam_test(project_path: Option<PathBuf>, config_view: env::OcxConfigView) -> Self {
-        let fs = file_structure::FileStructure::default();
-        let local_index = oci::index::LocalIndex::new(oci::index::LocalConfig {
-            tag_store: TagStore::new(fs.tags.root().to_path_buf()),
-            blob_store: BlobStore::new(fs.blobs.root().to_path_buf()),
-        });
-        let default_index = oci::index::Index::from_chained(
-            oci::index::LocalIndex::new(oci::index::LocalConfig {
-                tag_store: TagStore::new(fs.tags.root().to_path_buf()),
-                blob_store: BlobStore::new(fs.blobs.root().to_path_buf()),
-            }),
-            Vec::new(),
-            oci::index::ChainMode::Offline,
-        );
-        let manager = package_manager::PackageManager::new(
-            file_structure::FileStructure::default(),
-            oci::index::Index::from_chained(
-                oci::index::LocalIndex::new(oci::index::LocalConfig {
-                    tag_store: TagStore::new(fs.tags.root().to_path_buf()),
-                    blob_store: BlobStore::new(fs.blobs.root().to_path_buf()),
-                }),
-                Vec::new(),
-                oci::index::ChainMode::Offline,
-            ),
-            None,
-            "ocx.sh",
-        );
-        let printer = Printer::new(false, false);
-        let api = api::Api::new(options::Format::default(), DataInterface::new(printer), true);
-        let ui = UserInterface::new(printer, false, true);
-        Self {
-            offline: true,
-            project_path,
-            remote_client: None,
-            remote_index: None,
-            local_index,
-            file_structure: fs,
-            api,
-            ui,
-            default_index,
-            manager,
-            default_registry: "ocx.sh".to_string(),
-            config_view,
-            concurrency: package_manager::Concurrency::Unbounded,
-        }
+/// Enforce mutual exclusion of the global toolchain selector and an
+/// explicit project selection.
+///
+/// `--global` / `OCX_GLOBAL` and an explicit project (`--project` flag or
+/// `OCX_PROJECT` env) both pick a project file. clap's
+/// `conflicts_with = "project"` on [`ContextOptions::global`] already
+/// rejects the explicit `--global` + `--project` *flag* pair at parse
+/// time. This guard closes the gaps clap cannot see: `OCX_GLOBAL` reaches
+/// `view.global` through the arg default (not a CLI-provided value, so
+/// clap's conflict does not fire), and `OCX_PROJECT` is not a clap arg at
+/// all. A project merely discovered by the CWD walk is *not* explicit —
+/// `--global` from inside a project tree is legal and the global tier
+/// wins by precedence (adr_global_toolchain_tier.md §Decision 2), so the
+/// CWD walk deliberately sets neither `view.project` nor `OCX_PROJECT`.
+///
+/// # Errors
+///
+/// Returns [`UsageError`](ocx_lib::cli::UsageError) (exit `64`) when the
+/// global selector is set alongside an explicit `--project` / `OCX_PROJECT`
+/// selection.
+fn check_global_project_exclusivity(view: &env::OcxConfigView) -> Result<(), ocx_lib::cli::UsageError> {
+    // `OCX_PROJECT=""` is the loader's escape hatch (treated as unset);
+    // mirror that here so an explicitly-cleared env var is not misread as
+    // an explicit selection.
+    let explicit_project = view.project.is_some() || env::var(env::keys::OCX_PROJECT).is_some_and(|v| !v.is_empty());
+    if view.global && explicit_project {
+        return Err(ocx_lib::cli::UsageError::new(
+            "--global cannot be combined with an explicit --project / OCX_PROJECT selection",
+        ));
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    //! Contract-first spec for the per-command `--global` reconciliation seam.
+    //! Spec for the `--global` ⟂ explicit-project exclusivity guard.
     //!
-    //! Encodes plan_project_toolchain_hardening.md W2-P3 + C2.5 +
-    //! adr_global_toolchain_tier.md §Decision 2: a per-subcommand `--global`
-    //! combined with an explicit `--project` / `OCX_PROJECT` selection is a
-    //! hard usage error (exit 64), mirroring clap's top-level
-    //! `conflicts_with` on the flattened pair.
-    //!
-    //! The spec binds directly to the fallible seam
-    //! [`Context::with_command_global`], whose inner
-    //! `has_explicit_project_selection` is fully implemented: an explicit
-    //! `--project` (carried on `config_view.project`) or a non-empty
-    //! `OCX_PROJECT` env var counts as an explicit selection, while a
-    //! CWD-walk-discovered project does not. The test pins the contract
-    //! that combining a per-command `--global` with such an explicit
-    //! selection surfaces as a [`ocx_lib::cli::UsageError`] classifying to
-    //! [`ocx_lib::cli::ExitCode::UsageError`] (`64`) and naming `--global`.
+    //! `--global` is a single root-level flag (peer of `--project`); the
+    //! `--global` + `--project` *flag* pair is rejected by clap
+    //! (`conflicts_with`). [`check_global_project_exclusivity`] closes the
+    //! env-sourced gaps clap cannot see (`OCX_GLOBAL` via the arg default,
+    //! or `OCX_PROJECT` which is not a clap arg). The `OCX_PROJECT` gap is
+    //! exercised end-to-end by `test/tests/test_global_toolchain.py`
+    //! (`test_env_global_with_env_project_conflict`); it is not unit-tested
+    //! here because `ocx_lib::env::var`'s test-override seam is inert when
+    //! `ocx_lib` is consumed as a (non-`cfg(test)`) dependency, and real
+    //! env mutation is `unsafe` on edition 2024. This test pins the
+    //! `--project`-flag path, whose `||` short-circuits before any env read
+    //! and is therefore deterministic.
 
     use super::*;
     use ocx_lib::cli::{ClassifyExitCode, ExitCode};
 
     #[test]
-    fn global_conflicts_with_project_is_usage_error() {
-        // An explicit `--project` selection is in effect (carried on the
-        // context's `project_path`, the seam's explicit-selection signal).
+    fn global_with_explicit_project_flag_is_usage_error() {
         let mut view = ocx_lib::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        view.global = true;
         view.project = Some(std::path::PathBuf::from("/abs/explicit/ocx.toml"));
-        let ctx = Context::for_seam_test(Some(std::path::PathBuf::from("/abs/explicit/ocx.toml")), view);
 
-        // Per-command `--global = true` while an explicit project selection
-        // is in effect → the seam must reject with a UsageError (exit 64).
-        // `Context` is not `Debug`, so match instead of `expect_err`.
-        let err = match ctx.with_command_global(true) {
-            Ok(_) => panic!(
-                "--global + explicit --project must be rejected by with_command_global \
-                 (adr_global_toolchain_tier.md §Decision 2)"
-            ),
-            Err(e) => e,
-        };
+        let err = check_global_project_exclusivity(&view)
+            .expect_err("--global + explicit --project must be rejected (ADR §Decision 2)");
         assert_eq!(
             err.classify(),
             Some(ExitCode::UsageError),

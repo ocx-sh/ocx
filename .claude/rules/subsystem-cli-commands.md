@@ -29,6 +29,8 @@ The CLI surface splits into two tiers. The split is firm.
 
 ## Global Flags (all commands)
 
+`--global` is a root flag — it must appear **before** the subcommand name (peer of `--project`), not after it.
+
 | Flag | Env Var | Default | Purpose |
 |------|---------|---------|---------|
 | `--color auto\|always\|never` | `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE` | auto | ANSI color output control |
@@ -37,14 +39,18 @@ The CLI surface splits into two tiers. The split is firm.
 | `--format plain\|json` | — | plain (legacy commands); JSON (ocx env / ocx package env) | Output format |
 | `--index PATH` | `OCX_INDEX` | — | Override local index directory |
 | `-l/--log-level` | — | — | Tracing level |
+| `--global` | `OCX_GLOBAL` | false | Select `$OCX_HOME/ocx.toml` toolchain tier; affects toolchain-tier commands `add`/`remove`/`lock`/`upgrade`/`pull`/`run`/`env`; mutually exclusive with `--project` |
 
 ## Toolchain-Tier: `--global` vs Project
 
+`--global` is a **root flag** (before the subcommand), defined once on `ContextOptions` (peer of
+`--project`). It re-targets the project file to `$OCX_HOME/ocx.toml` for the toolchain-tier
+commands: `add`, `remove`, `lock`, `upgrade`, `pull`, `run`, `env`. Canonical form:
+`ocx --global <subcommand>` — e.g. `ocx --global add ripgrep:14`.
+
 Project-tier commands resolve their project file in strict precedence order: `--global` (explicit) → `--project`/`OCX_PROJECT` (explicit) → CWD walk → None.
 
-`--global` re-targets the project file to `$OCX_HOME/ocx.toml`. Mutually exclusive with `--project` — combining both is a clap conflict (exit 64 — ocx maps clap usage errors → EX_USAGE 64). No implicit discovery of `$OCX_HOME/ocx.toml`.
-
-`--global` accepted on: `add`, `remove`, `lock`, `upgrade`, `run`, `env`. `OCX_GLOBAL` is the env equivalent.
+Mutually exclusive with `--project` — combining both is a clap conflict (exit 64 — ocx maps clap usage errors → EX_USAGE 64). No implicit discovery of `$OCX_HOME/ocx.toml`. `OCX_GLOBAL` is the env equivalent.
 
 **`ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64).** `--global` is NOT on any `ocx package` subcommand.
 
@@ -56,14 +62,14 @@ Project-tier commands resolve their project file in strict precedence order: `--
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `add IDENTIFIER` | Append binding to `ocx.toml`, update lock, install | `-g/--group`, `--global` |
+| `add IDENTIFIER` | Append binding to `ocx.toml`, update lock, install | `-g/--group` |
 | `init` | Create minimal `ocx.toml` in current directory | — |
-| `remove IDENTIFIER` | Drop binding from `ocx.toml`, rewrite lock | `--global` |
-| `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--global` |
-| `upgrade PKGS...` | Re-resolve advisory tags in lock | `-g/--group`, `--global` |
-| `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self`, `--global` |
-| `env [--global] [--shell[=NAME]]` | Composed toolchain env: **JSON default**; `--shell[=NAME]` = eval-safe | `--global`, `--shell[=NAME]`, `--format` |
-| `pull` | Pre-warm package store from `ocx.lock` | `--global` |
+| `remove IDENTIFIER` | Drop binding from `ocx.toml`, rewrite lock | — |
+| `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group` |
+| `upgrade PKGS...` | Re-resolve advisory tags in lock | `-g/--group` |
+| `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self` |
+| `env [--shell[=NAME]]` | Composed toolchain env: **JSON default**; `--shell[=NAME]` = eval-safe | `--shell[=NAME]`, `--format` |
+| `pull` | Pre-warm package store from `ocx.lock` | — |
 
 ### OCI-Tier Commands (`ocx package`)
 
@@ -113,7 +119,7 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | `ocx exec` | `ocx package exec` |
 | `ocx which` | `ocx package which` |
 | `ocx ci` | Removed (deferred extension point) |
-| `ocx shell hook` | Removed (activation via `$OCX_HOME/env.sh` + `ocx env --global --shell=sh`) |
+| `ocx shell hook` | Removed (activation via `$OCX_HOME/env.sh` + `ocx --global env --shell=sh`) |
 | `ocx shell init` | Removed (OCX install script owns profile modification) |
 | `ocx shell env` | `ocx env` (toolchain) or `ocx package env` (per-package) |
 
@@ -123,8 +129,8 @@ These commands **do not exist** in the current model. Any invocation returns exi
 
 | Want | Invocation | Default output |
 |------|------------|----------------|
-| Toolchain env, machine-readable | `ocx env [--global]` | **JSON** |
-| Toolchain env, eval-safe | `ocx env [--global] --shell[=NAME]` | Shell export lines |
+| Toolchain env, machine-readable | `ocx [--global] env` | **JSON** |
+| Toolchain env, eval-safe | `ocx [--global] env --shell[=NAME]` | Shell export lines |
 | Per-package env, machine-readable | `ocx package env <ids...>` | **JSON** |
 | Per-package env, eval-safe | `ocx package env <ids...> --shell[=NAME]` | Shell export lines |
 
@@ -154,7 +160,7 @@ Rules:
 
 ## Semantics & Gotchas
 
-- **`ocx run` semantics** — `--` mandatory, exit 64 if missing (ocx maps clap usage errors → EX_USAGE 64); default scope = `[tools]` only; `--global` = compose global toolchain env for child only, never mutates parent; `run` without `--global` never reads `$OCX_HOME/ocx.toml`; missing `ocx.toml` → exit 64; missing `ocx.lock` → exit 78.
+- **`ocx run` semantics** — `--` mandatory, exit 64 if missing (ocx maps clap usage errors → EX_USAGE 64); default scope = `[tools]` only; `ocx --global run` = compose global toolchain env for child only, never mutates parent; `ocx run` (no `--global`) never reads `$OCX_HOME/ocx.toml`; missing `ocx.toml` → exit 64; missing `ocx.lock` → exit 78.
 - **`ocx env` default is JSON** — backend-first (product principle #1, handshake §3). `--format plain` → human inspection, NOT sourceable. `--shell[=NAME]` only eval-safe channel.
 - **`package env` auto-installs** — `ocx package env` uses `find_or_install_all` (unlike the deleted `shell env` which used `find_all`). Do NOT assert no-download semantics against `ocx package env`.
 - **`login`/`logout` registry optional** — falls back to `OCX_DEFAULT_REGISTRY` (default `ocx.sh`).

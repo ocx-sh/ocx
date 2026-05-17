@@ -38,7 +38,7 @@ The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by 
 
 > **REMOVED** — this variable and the per-prompt shell hook that managed it (`ocx shell hook`) have been removed. Do not set or reference `_OCX_APPLIED` in shell profiles.
 >
-> Global toolchain activation is now handled by `$OCX_HOME/env.sh`, sourced from the login profile via a block-marker idempotent line written by the installer. The file runs `eval "$(ocx env --global --shell=sh)"`. Project toolchain activation uses [`ocx direnv`][cmd-direnv].
+> Global toolchain activation is now handled by `$OCX_HOME/env.sh`, sourced from the login profile via a block-marker idempotent line written by the installer. The file runs `eval "$(ocx --global env --shell=sh)"`. Project toolchain activation uses [`ocx direnv`][cmd-direnv].
 
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 
@@ -108,7 +108,7 @@ If neither is set, OCX uses `ocx.sh`.
 
 Selects the global toolchain tier — equivalent to the [`--global`][arg-global] CLI flag, but injectable via environment for CI and container setups where the command line is not controlled.
 
-When set to a [truthy value](#truthy-values), project-tier commands (`add`, `remove`, `lock`, `upgrade`, `pull`, `run`) target `$OCX_HOME/ocx.toml` instead of a discovered project file. (`install --global` has been removed — use `ocx add --global` instead.)
+When set to a [truthy value](#truthy-values), toolchain-tier commands (`add`, `remove`, `lock`, `upgrade`, `pull`, `run`, `env`) target `$OCX_HOME/ocx.toml` instead of a discovered project file. Equivalent to passing the root flag `--global` (before the subcommand): `ocx --global add ripgrep:14`.
 
 ```sh
 export OCX_GLOBAL=1

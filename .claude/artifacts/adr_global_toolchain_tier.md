@@ -168,6 +168,17 @@ shell-only exposure.**
    `ocx install --global` sugar described here is **rejected**: `install`
    is OCI-tier, moves under `ocx package`, and never touches any
    `ocx.toml`. Do not implement the sugar.
+
+   **[Amendment 2026-05-17 — root-only collapse]** The per-command
+   `--global` surface has been further collapsed: `--global` is now a
+   **single root flag** on `ContextOptions`, peer of `--project`, declared
+   once via clap `long, conflicts_with = "project"`. Per-command `--global`
+   flags and the `with_command_global` reconcile seam are **deleted**.
+   `check_global_project_exclusivity` (in `crates/ocx_cli/src/app/context.rs`,
+   called from `Context::try_init`) closes the env-sourced gaps (`OCX_GLOBAL`
+   default value, `OCX_PROJECT` env) that clap `conflicts_with` cannot see.
+   `ProjectConfig::resolve` global arm survives unchanged. Canonical CLI
+   form is now `ocx --global <subcommand>` — e.g. `ocx --global add ripgrep:14`.
    ~~`--global` is accepted on project-tier and mutator commands: `add`,
    `remove`, `lock`, `upgrade`, `pull`, `run`. `ocx install --global <pkg>`
    is defined as sugar = `ocx add --global <pkg>` + re-lock + install and
@@ -320,8 +331,8 @@ noting the global tier + removal of implicit home discovery.
 
 - [ ] `$OCX_HOME/ocx.toml` is **not** discovered without `--global` (unit:
       `project_path` returns `None`; regression for deleted `home_project_path`).
-- [ ] `--global add/lock/install` writes `$OCX_HOME/ocx.toml` + `ocx.lock`,
-      installs and selects (`current` symlink present).
+- [ ] `ocx --global add` / `ocx --global lock` writes `$OCX_HOME/ocx.toml` + `ocx.lock`,
+      installs and selects (`current` symlink present). (`install --global` no longer exists.)
 - [ ] Fresh shell sees the global `current` tool; entering a project shadows
       it with the project's tool; leaving restores global.
 - [ ] Project `ocx run` cannot resolve a tool present only in

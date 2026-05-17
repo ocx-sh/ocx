@@ -212,7 +212,7 @@ def test_env_shell_sh_identical_to_dash(ocx: OcxRunner, tmp_path: Path) -> None:
 
     C5 contract: ``sh`` is a PossibleValue alias on ``Shell::Dash`` — no new
     enum variant, same code path, same bytes.  The POSIX login exporter runs
-    ``ocx env --global --shell=sh`` and must get the same output as
+    ``ocx --global env --shell=sh`` and must get the same output as
     ``--shell=dash``.
     """
     project, _ = _make_project(ocx, tmp_path, "sh_eq_dash")
@@ -499,12 +499,12 @@ def test_root_exec_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 def test_env_global_no_toml_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx env --global`` with no ``$OCX_HOME/ocx.toml`` → exit 64.
+    """``ocx --global env`` with no ``$OCX_HOME/ocx.toml`` → exit 64.
 
     Block A2 / review-fix fix: the old code exited 74 (IoError) when the
     global toml was absent. The corrected behaviour is exit 64 (UsageError /
-    EX_USAGE): a missing global toolchain is a usage error (``ocx add
-    --global`` must be run first), not an I/O error.
+    EX_USAGE): a missing global toolchain is a usage error (``ocx --global add``
+    must be run first), not an I/O error.
     """
     ocx_home = Path(ocx.env["OCX_HOME"])
     global_toml = ocx_home / "ocx.toml"
@@ -513,11 +513,11 @@ def test_env_global_no_toml_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
     empty = tmp_path / "no_project"
     empty.mkdir()
     result = _run(
-        ocx, empty, "env", "--global",
+        ocx, empty, "--global", "env",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
     assert result.returncode == EXIT_USAGE, (
-        f"ocx env --global with no global toml must exit {EXIT_USAGE} (UsageError); "
+        f"ocx --global env with no global toml must exit {EXIT_USAGE} (UsageError); "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
@@ -561,7 +561,7 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """End-to-end: a package with NO entrypoints field but a PATH modifier is
-    reachable after eval-ing ``ocx env --global --shell=sh`` output.
+    reachable after eval-ing ``ocx --global env --shell=sh`` output.
 
     §8 DELIVERABLE (handshake §8 / plan C9): closes the
     ``make_package``-always-emits-entrypoints blind spot.  This test
@@ -573,10 +573,10 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
 
     Flow:
     1. Publish a package with bins but NO ``entrypoints`` metadata field.
-    2. ``ocx add --global`` records it in the global tier and installs+selects
+    2. ``ocx --global add`` records it in the global tier and installs+selects
        (global-tier ``add`` auto-sets the ``current`` selection; the signed
        handshake §1 contract — no manual ``ocx package select`` needed).
-    3. ``ocx env --global --shell=sh`` emits POSIX export lines that prepend the
+    3. ``ocx --global env --shell=sh`` emits POSIX export lines that prepend the
        package's ``content/bin/`` directory to PATH.
     4. Eval those lines in a non-interactive subshell → the no-entrypoint binary
        is resolvable via PATH (no launcher symlink required).
@@ -608,8 +608,8 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
     )
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
-    # Step 2: add --global records + installs the package into the global tier.
-    add_result = _run(ocx, tmp_path, "add", "--global", fq)
+    # Step 2: ocx --global add records + installs the package into the global tier.
+    add_result = _run(ocx, tmp_path, "--global", "add", fq)
     assert add_result.returncode == EXIT_SUCCESS, (
         f"add --global must succeed for no-entrypoint package; "
         f"rc={add_result.returncode}\nstderr:\n{add_result.stderr}"
@@ -621,7 +621,7 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
     # `resolve_global_current_env` reads exactly this `current` symlink.
 
     # Step 3: get activation output.
-    env_result = _run(ocx, tmp_path, "env", "--global", "--shell=sh")
+    env_result = _run(ocx, tmp_path, "--global", "env", "--shell=sh")
     assert env_result.returncode == EXIT_SUCCESS, (
         f"env --global --shell=sh must succeed after add; "
         f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
@@ -648,7 +648,7 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
     )
     assert shell_result.returncode == EXIT_SUCCESS, (
         f"no-entrypoint binary '{bin_name}' must be on PATH after eval of "
-        f"'ocx env --global --shell=sh'; "
+        f"'ocx --global env --shell=sh'; "
         f"rc={shell_result.returncode}\n"
         f"stdout:\n{shell_result.stdout}\nstderr:\n{shell_result.stderr}"
     )

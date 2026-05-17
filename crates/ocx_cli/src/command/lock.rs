@@ -27,11 +27,6 @@ pub struct Lock {
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
     pub groups: Vec<String>,
 
-    /// Operate on the global toolchain (`$OCX_HOME/ocx.toml`) instead of
-    /// a discovered project. Mutually exclusive with `--project`.
-    #[arg(long)]
-    pub global: bool,
-
     /// Verify `ocx.lock` is current relative to `ocx.toml` and exit.
     ///
     /// Reads `ocx.toml` and `ocx.lock` from disk, compares the lock's
@@ -47,8 +42,6 @@ pub struct Lock {
 
 impl Lock {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let context = context.with_command_global(self.global)?;
-
         // Pre-validate empty comma segments before any I/O.
         for raw in &self.groups {
             if raw.is_empty() {
