@@ -161,7 +161,7 @@ The local index snapshot plus the content-addressed object store is everything `
       <span>Browse available packages on the public registry.</span>
     </div>
   </a>
-  <a href="https://discord.gg/BuRhhAYy9r" target="_blank" rel="noreferrer" class="cta-card">
+  <a href="https://discord.gg/mT2UCF8CVe" target="_blank" rel="noreferrer" class="cta-card">
     <img src="/licensed/icons/cta-discord.svg" alt="" class="cta-card-icon cta-icon-discord" />
     <div class="cta-card-text">
       <strong>Discord</strong>

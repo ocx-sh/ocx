@@ -83,7 +83,7 @@ OCX is licensed under the [Apache License, Version 2.0][license].
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
 [website]: https://ocx.sh
 [website-badge]: https://img.shields.io/badge/docs-ocx.sh-B70032
-[discord]: https://discord.gg/BuRhhAYy9r
+[discord]: https://discord.gg/mT2UCF8CVe
 [discord-badge]: https://img.shields.io/badge/chat-discord-5865F2?logo=discord&logoColor=white
 
 <!-- docs -->

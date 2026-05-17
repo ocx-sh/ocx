@@ -22,7 +22,7 @@ title: Package Catalog
           <span>Open an issue to request a new package.</span>
         </div>
       </a>
-      <a href="https://discord.gg/BuRhhAYy9r" target="_blank" rel="noreferrer" class="catalog-cta-card">
+      <a href="https://discord.gg/mT2UCF8CVe" target="_blank" rel="noreferrer" class="catalog-cta-card">
         <img src="/licensed/icons/cta-discord.svg" alt="" class="catalog-cta-icon catalog-icon-discord" />
         <div class="catalog-cta-text">
           <strong>Discord</strong>

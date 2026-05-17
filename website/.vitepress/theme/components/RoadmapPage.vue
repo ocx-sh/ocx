@@ -143,7 +143,7 @@ onUnmounted(() => {
         we'd love to hear from you.
       </p>
       <div class="roadmap-cta-cards">
-        <a href="https://discord.gg/BuRhhAYy9r" target="_blank" rel="noreferrer" class="cta-card">
+        <a href="https://discord.gg/mT2UCF8CVe" target="_blank" rel="noreferrer" class="cta-card">
           <img src="/licensed/icons/cta-discord.svg" alt="" class="cta-card-icon cta-icon-discord" />
           <div class="cta-card-text">
             <strong>Discord</strong>

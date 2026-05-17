@@ -115,7 +115,7 @@ export default defineConfig({
 
     socialLinks: [
       { icon: 'github', link: 'https://github.com/ocx-sh/ocx' },
-      { icon: 'discord', link: 'https://discord.gg/BuRhhAYy9r' }
+      { icon: 'discord', link: 'https://discord.gg/mT2UCF8CVe' }
     ],
 
     search: {
