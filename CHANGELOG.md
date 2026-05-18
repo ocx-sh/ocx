@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Windows entrypoint launchers are now a native `.exe` shim only — the `.cmd` launcher is no longer generated. The shim invokes `ocx launcher exec` through `CreateProcessW` directly, never routing through `cmd.exe`, which fully closes the `%*` caller-argv re-parse surface (`BatBadBut` / [CVE-2024-24576][ghsa-q455]). Because no `.cmd` is emitted, there is no orphan path that could re-open the injection class — the vector is eliminated, not merely shadowed. *(package)*
+
 ### Added
 
+- Windows entrypoint launchers are two files per entry: `<name>.exe` (native shim) and `<name>.shim` (one-line `pkg_root` sidecar). No `.cmd` is generated. The `.exe` shim reads `<name>.shim` at invocation time to locate the package root, then spawns `ocx launcher exec` via `CreateProcessW` without routing through `cmd.exe`. `.EXE` is unconditionally in the default Windows `PATHEXT`, so bare-name resolution finds the shim with no `PATHEXT` configuration needed. `OCX_BINARY_PIN` is honored with Windows `IF DEFINED` semantics (defined-even-empty → use it; only completely unset → `PATH` `ocx`). Shim blobs are unsigned in this release (~138 KiB x86_64 / ~128 KiB aarch64; [Authenticode][authenticode-ref] signing via [SignPath Foundation][signpath-ref] is the documented follow-on step). Both architecture blobs are committed in-tree and selected via `#[cfg(target_arch)]`. *(package)*
+- The Windows `PATHEXT` inject/warn machinery is removed: `ocx env` no longer emits a synthetic `PATHEXT` entry, `ocx exec` / `ocx run` / `launcher exec` / `package test` no longer manipulate the child `PATHEXT`, and `install` / `select` / `shell env` / `ci export` no longer print a `PATHEXT` warning. It is dead under the `.exe`-only launcher (`.EXE` is always in the default Windows `PATHEXT`). *(cli)*
 - `ocx package push --build-timestamp [datetime|date|none]` appends a UTC build-metadata segment to the published tag. `datetime` (default when the flag is passed bare) yields `_YYYYMMDDhhmmss`; `date` yields `_YYYYMMDD`; `none` is a no-op. Designed for continuous-deploy pipelines that publish rolling pre-release builds, e.g. `0.3.0-dev_20260514120000`. The identifier tag must be in `X.Y.Z` form (with optional variant or pre-release) and must not already carry build metadata. *(cli)*
 - `Error::BuildMeta` variant on the package error chain, wrapping `BuildMetaError::{NoPatch, AlreadyPresent}` from `crates/ocx_lib/src/package/version/build_meta.rs`. Classified as `ExitCode::DataError` (65). *(package)*
 - `ocx package test` for local pre-push validation: materializes a package without a registry round-trip and runs a command in its composed env. Temp directory is auto-cleaned on exit; `--keep` opts in to preservation for inspection. *(cli)*
@@ -18,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-layer package push and pull. `ocx package push` now accepts multiple layer arguments, each either a file path or a `sha256:<hex>.tar.gz` digest reference. *(package)*
 - Layered configuration from `/etc/ocx/config.toml`, `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml` with `--config` / `OCX_CONFIG` overrides and `OCX_NO_CONFIG` kill-switch. *(config)*
 - Typed `ExitCode` taxonomy aligned with BSD sysexits (64/65/69/74/75/77/78/79/80/81). Scripts can now `case $?` reliably. *(cli)*
-- `entrypoints` field in package metadata. Publishers declare named launchers (e.g. `cmake`, `ctest`) keyed by the invocable name; `ocx install` generates per-platform launchers under `<package>/entrypoints/<name>` (POSIX) and `<package>/entrypoints/<name>.cmd` (Windows) that delegate to `ocx launcher exec` against a baked package root, resolving the binary against the composed `PATH` from the package's `env` block at exec time. *(package)*
+- `entrypoints` field in package metadata. Publishers declare named launchers (e.g. `cmake`, `ctest`) keyed by the invocable name; `ocx install` generates per-platform launchers under `<package>/entrypoints/<name>` (POSIX) and `<package>/entrypoints/<name>.exe` + `<name>.shim` (Windows native shim) that delegate to `ocx launcher exec` against a baked package root, resolving the binary against the composed `PATH` from the package's `env` block at exec time. *(package)*
 - Optional `command` field on an `entrypoint` value object. Lets the invocable launcher name differ from the binary it dispatches (e.g. expose `fmt` while running `cargo-fmt`); omitted means the invocable name is dispatched directly. `command` follows the same slug constraint as the entrypoint name (`[a-z0-9][a-z0-9_-]*`, at most 64 bytes). `ocx launcher exec` resolves the dispatch target via `Entrypoints::dispatch_command`. *(package)*
 - `ocx package inspect ID` — read-only, ref-shape-adaptive package inspection. An image-index reference lists the platform candidates (no metadata, no platform select); a single-manifest reference (flat tag or `@digest`) emits the declared metadata; `--resolve` platform-selects and emits metadata plus the OCI resolution chain. Accepts `@digest`. Plain output is a tree; an entrypoint whose dispatch `command` diverges from its name is annotated `→ <command>`. Exit codes: 79 not found, 81 offline blob miss, 65 malformed metadata. *(cli)*
 - `${deps.NAME.installPath}` template interpolation in env-var values. Env modifier values can now reference dependency install paths. Unrecognized `${...}` tokens are rejected at publish time. *(package)*
@@ -28,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ValidMetadata` typestate on package metadata. Publish-time validation rejects bundles with malformed entry points, undeclared dep references, or duplicate launcher names; downstream code consumes only validated metadata. *(package)*
 - `EntrypointNameCollision` structured error at `install --select` / `select` and at consumption time (`ocx env`, `ocx exec`) when two packages in the same visible closure declare the same entrypoint `name`. Surfaces with exit code 65 (`DataError`); recovery: deselect one package before selecting the other. *(package-manager)*
 - Synthetic `PATH ⊳ <pkg-root>/entrypoints` entry emitted per visible package with a non-empty `entrypoints` array, so generated launchers are reachable through `ocx env` / `ocx exec` / `ocx shell env` without manual PATH wiring. *(env)*
-- Windows-only synthetic `PATHEXT ⊳ .CMD` prepend on `ocx env` and auto-injected by `ocx exec` so generated `.cmd` launchers are discoverable when the host shell's `PATHEXT` does not already include `.CMD`. Consumer-boundary commands (`install`, `select`, `shell env`, `ci export`, `shell profile load`) emit a stderr warning when `PATHEXT` is missing `.CMD`. *(cli)*
 - Project-tier toolchain: declare a repository's tools in `ocx.toml` and lock them to digests in `ocx.lock`. The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 8785][rfc-8785]) so downstream commands refuse to run with stale digests. *(project)*
 - `ocx lock` resolves every advisory tag in `ocx.toml` to an immutable digest and writes `ocx.lock`. Repeatable `--group` flag scopes resolution to one or more named groups (`ci`, `release`, …). *(cli)*
 - `ocx update [PKG]` re-resolves tags in the lock — opt-in upgrade flow distinct from `ocx lock`'s "freeze whatever the registry surfaces today" semantics. *(cli)*
@@ -256,6 +261,9 @@ The project registry on-disk format (`$OCX_HOME/projects.json`) is at schema v1;
 <!-- Links -->
 [rfc-8785]: https://www.rfc-editor.org/rfc/rfc8785
 [taplo]: https://taplo.tamasfe.dev/
+[ghsa-q455]: https://github.com/rust-lang/rust/security/advisories/GHSA-q455-m56c-85mh
+[authenticode-ref]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/authenticode
+[signpath-ref]: https://about.signpath.io/
 [0.2.1]: https://github.com/ocx-sh/ocx/compare/v0.2.0..v0.2.1
 [0.2.0]: https://github.com/ocx-sh/ocx/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/ocx-sh/ocx/tree/v0.1.0

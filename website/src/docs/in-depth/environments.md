@@ -187,19 +187,16 @@ Unix (POSIX sh):
 exec "${OCX_BINARY_PIN:-ocx}" launcher exec '/home/alice/.ocx/packages/ocx.sh/sha256/ab/c123…' -- "$(basename "$0")" "$@"
 ```
 
-Windows (cmd.exe batch):
+Windows (native `.exe` shim + `.shim` sidecar):
 
-```bat
-@ECHO off
-SETLOCAL DisableDelayedExpansion
-IF DEFINED OCX_BINARY_PIN (
-    "%OCX_BINARY_PIN%" launcher exec "C:\Users\alice\.ocx\packages\ocx.sh\sha256\ab\c123…" -- "%~n0" %*
-) ELSE (
-    ocx launcher exec "C:\Users\alice\.ocx\packages\ocx.sh\sha256\ab\c123…" -- "%~n0" %*
-)
+```text
+# entrypoints/cmake.shim — one UTF-8 line, the absolute package root
+C:\Users\alice\.ocx\packages\ocx.sh\sha256\ab\c123…
 ```
 
-`ocx launcher exec` forces the self view internally — no flag needs to be baked into the script. The stable wire ABI is the `launcher exec` subcommand name pair and positional shape.
+The companion `cmake.exe` is a compiled shim: it derives its entry-point name from its own filename, reads `cmake.shim` for the package root, and spawns `ocx launcher exec "<pkg-root>" -- "cmake" <args…>` directly through `CreateProcessW` — never `cmd.exe`.
+
+`ocx launcher exec` forces the self view internally — no flag needs to be baked into the launcher. The stable wire ABI is the `launcher exec` subcommand name pair and positional shape.
 
 See the [Entry Points][entry-points] in-depth page for the full launcher generation pipeline, character rejection rules, and cross-platform launcher behavior.
 

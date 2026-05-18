@@ -72,11 +72,21 @@ This value is ignored if the `OCX_AUTH_<REGISTRY>_TYPE` is not set to `bearer` o
 
 Absolute path to an `ocx` executable. Set automatically by the running ocx on every subprocess it spawns so child ocx invocations — most importantly, the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref] — pin to the same binary that installed the package, instead of falling back to whatever `$PATH` happens to resolve at the launcher site.
 
-```sh
+::: code-group
+
+```sh [Unix]
 export OCX_BINARY_PIN=/usr/local/bin/ocx
 ```
 
+```powershell [PowerShell]
+$env:OCX_BINARY_PIN = "C:\Users\ci\.ocx\bin\ocx.exe"
+```
+
+:::
+
 When `OCX_BINARY_PIN` is unset, generated launchers fall back to `$PATH`-resolved `ocx`. Set it manually only when running a launcher outside an outer ocx invocation and you want to pin a specific binary (typical use: a wrapper that records arguments, or a release-candidate binary tested side-by-side with the installed one).
+
+**Windows `.exe` shim behavior.** The native Windows [`.exe` shim][windows-shim-ref] — the sole Windows launcher — honors this variable with Windows `IF DEFINED` semantics: if `OCX_BINARY_PIN` is **defined** in the environment, even as an empty string, the shim uses its value as the program path. Only when the variable is completely **unset** does the shim fall back to `ocx` via `PATH`. This differs from the Unix launcher's `${OCX_BINARY_PIN:-ocx}` form, which treats an empty value as unset.
 
 ### `OCX_CONFIG` {#ocx-config}
 
@@ -357,6 +367,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- in-depth -->
 [exec-modes-ref]: ../in-depth/environments.md#visibility-views
 [entrypoints-ref]: ../in-depth/entry-points.md
+[windows-shim-ref]: ../user-guide.md#stable-paths-windows
 
 <!-- reference -->
 [config-ref]: ./configuration.md

@@ -139,6 +139,13 @@ Generated entrypoint launchers re-enter ocx via `ocx launcher exec '<pkg-root>' 
 
 The stable wire ABI is the `launcher` + `exec` subcommand name pair and positional shape. Byte-exact golden tests at `body.rs::tests` act as canaries — any template change that changes the launcher body must update the golden strings there.
 
+**Wire-ABI canary rule — two producers, both must agree.** After the Windows `.cmd` cutover (`adr_windows_exe_shim.md` Axis C → C2: no `.cmd` is emitted), the `launcher exec "<pkg_root>" -- "<stem>"` wire string has exactly two independent producers that must stay in sync:
+
+1. `body.rs::unix_launcher_body` — `.sh` template body (golden test `launcher_wire_token_is_bound_to_shim_producer`, sh-branch assertion)
+2. `crates/ocx_shim/src/core.rs` `WIRE_SUBCOMMAND` — the native Windows `.exe` shim (golden test `shim_wire_token_matches_sh_body` in `ocx_shim`)
+
+`ocx_lib` cannot depend on the `ocx_shim` binary crate, so the binding is a **paired golden**: `body.rs::tests::launcher_wire_token_is_bound_to_shim_producer` restates `WIRE_SUBCOMMAND = "launcher exec"` from the `ocx_lib` (`.sh`) side; `ocx_shim::tests::shim_wire_token_matches_sh_body` restates it from the shim side. A change to the wire vocabulary must touch **both** canaries or one fails loudly at test time. (The former third producer — `body.rs::windows_launcher_body`, the `.cmd` body — was removed with the cutover.)
+
 ## Quality Gate
 
 During review-fix loops, run `task rust:verify` — not full `task verify`.

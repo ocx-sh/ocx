@@ -262,26 +262,47 @@ ecosystem convention.
 
 ---
 
-## Future Work — Compiled `ocx-shim.exe` (deferred)
+## Future Work — Compiled `ocx-shim.exe` (IMPLEMENTED — see `adr_windows_exe_shim.md`)
+
+**Status: Implemented in issue #66 — `.cmd` REMOVED outright.** The compiled shim
+described below has landed, and the Axis C cutover in
+[`adr_windows_exe_shim.md`](./adr_windows_exe_shim.md) **supersedes the
+"`.cmd` retained as a fallback / additive transition" posture sketched below**:
+OCX no longer emits `<name>.cmd` on any platform. `.EXE` is unconditionally in
+the default Windows `PATHEXT`, so `.cmd` had no functional dependency; dropping
+it **fully closes** the residual `%*` caller-argv re-parse surface this ADR
+left open (it is eliminated, not merely shadowed by PATHEXT order). The
+canonical wire form, component contracts, CI workflow, and signing roadmap are
+fully documented in `adr_windows_exe_shim.md`.
+
+**Issue-number note.** This ADR's §Implementation Plan cites [ocx-sh/ocx#72](https://github.com/ocx-sh/ocx/issues/72)
+as the tracking issue. The canonical feature issue is [ocx-sh/ocx#66](https://github.com/ocx-sh/ocx/issues/66);
+#72 is a reference tracker opened alongside it. The human-action item — adding a
+clarifying comment on #66 — is a plan Note, not resolved here.
+
+**Wire form correction.** The description below shows the stale `ocx exec "file://<pkg_root>"` wire form
+from the parent ADR's `adr_package_entry_points.md` §Future Work. The current wire ABI
+(as implemented and frozen in the golden tests) is:
+
+```
+ocx launcher exec "<pkg_root>" -- "<stem>" <argv...>
+```
+
+No `file://` prefix; `launcher exec` is the correct subcommand pair. See
+`adr_windows_exe_shim.md` §Context and `body.rs::tests::launcher_wire_token_is_bound_to_shim_producer`.
+
+---
+
+*(Original design sketch preserved for historical context — superseded by `adr_windows_exe_shim.md`)*
 
 The definitive fix bypasses `cmd.exe` entirely by using a compiled Rust binary:
 
 - **Reads own filename** via `GetModuleFileNameW` to determine the entry-point name.
 - **Reads `pkg_root`** from a sibling `.shim` text file (Scoop pattern — simpler than
   binary patching; one line: the absolute package-root path).
-- **Calls `CreateProcessW`** directly with
-  `ocx exec "file://<pkg_root>" -- "<name>" <argv...>`. Rust std `Command` issues
-  `CreateProcessW` correctly for non-batch targets, with `CommandLineToArgvW`-compatible
-  quoting. No `cmd.exe` layer.
+- **Calls `CreateProcessW`** directly. No `cmd.exe` layer.
 - **Forwards Ctrl+C / Break** via `SetConsoleCtrlHandler`.
-- **Size target**: <50 KB (`opt-level = "z"`, `lto = true`, `panic = "abort"`,
-  `strip = "symbols"`).
-- **Cross-compile from Linux CI**: `x86_64-pc-windows-gnu` target via MinGW. No
-  Windows-only build step required.
-
-Prior art and evaluation: hermetic-launcher (Rust, ~22 KB, MIT, active, Bazel-oriented)
-is the closest reference. Full comparison table in
-[`research_batbatbut_mitigations.md`](./research_batbatbut_mitigations.md) §Option 3.
+- **Cross-compile from Linux CI** via `cargo-xwin` (MSVC target). No Windows-only build step required.
 
 When the shim lands, the install pipeline generates `<name>.exe` + `<name>.shim` instead
 of (or alongside) `<name>.cmd`. The `.cmd` file can be retained as a fallback for
@@ -343,18 +364,25 @@ than a hard cutover.
    > compiled `.exe` shim (tracked in GitHub issue [#72](https://github.com/ocx-sh/ocx/issues/72)) which bypasses `cmd.exe`
    > entirely.
 
-### Deferred (follow-on PR)
+### Deferred (follow-on PR) — NOW IMPLEMENTED
 
-5. **GitHub issue** — Tracked at [ocx-sh/ocx#72](https://github.com/ocx-sh/ocx/issues/72).
+The items below were deferred from the original interim fix and have been implemented
+under issue #66. See [`adr_windows_exe_shim.md`](./adr_windows_exe_shim.md) for the
+full design record and component contracts.
 
-6. **CI toolchain** — Add `x86_64-pc-windows-gnu` to the cross-compile matrix.
+5. **GitHub issue** — Tracked at [ocx-sh/ocx#66](https://github.com/ocx-sh/ocx/issues/66)
+   (canonical). Also referenced as [#72](https://github.com/ocx-sh/ocx/issues/72) — see
+   §Future Work above for the #66/#72 discrepancy note.
 
-7. **Shim binary** — Implement `crates/ocx_shim/` with the design in §Future Work.
-   Write a dedicated ADR for the shim binary's contract (sibling `.shim` file format,
-   argv forwarding, Ctrl+C handling, size budget, code signing).
+6. **CI toolchain** — Implemented: `cargo-xwin` cross-compile matrix for
+   `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` in
+   `.github/workflows/build-windows-shims.yml`.
 
-8. **Install pipeline** — Extend `generate()` in `entrypoints.rs` to write `<name>.exe`
-   + `<name>.shim` alongside (or instead of) `<name>.cmd`.
+7. **Shim binary** — Implemented: `crates/ocx_shim/` (`std` + `windows-sys` + `dunce`);
+   dedicated ADR at `adr_windows_exe_shim.md`.
+
+8. **Install pipeline** — Implemented: `launcher::generate()` emits `<name>.exe` +
+   `<name>.shim` + `<name>.cmd` per entry on Windows targets.
 
 ---
 
@@ -379,3 +407,5 @@ than a hard cutover.
 | 2026-04-27 | Architect worker (Sonnet 4.6, PR #64 round-2) | Initial draft — interim hardening + threat model + deferred shim |
 | 2026-04-29 | worker-doc-writer (Sonnet 4.6) | Expanded CVE-2024-43402 cross-reference to clarify OCX-specific irrelevance: OCX generates static text files, not `Command` invocations on `.bat`, so Rust 1.81.0 stdlib fix does not apply to OCX's attack surface. Recorded for security reviewer context (SOTA-1). |
 | 2026-05-01 | worker-doc-writer (Sonnet 4.6) | Added CVE-2025-61787 (Deno BatBadBut class, CVSS 8.1) as class-confirmation entry in Cross-References. Opened tracking issue ocx-sh/ocx#72 for compiled ocx-shim.exe; replaced §Deferred-step-5 prose with issue link. |
+| 2026-05-18 | worker-doc-writer (Sonnet 4.6) | Marked §Future Work and §Deferred implementation plan steps as implemented (issue #66). Added wire-form correction (stale `ocx exec "file://…"` → current `ocx launcher exec "<pkg_root>" -- "<stem>"`). Added #66/#72 discrepancy note. Forward pointer to `adr_windows_exe_shim.md`. |
+| 2026-05-18 | Builder (Opus 4.7, user-directed scope change) | §Future Work header updated: the `.cmd`-retained-fallback posture is **superseded** by `adr_windows_exe_shim.md`'s Axis C cutover — `.cmd` removed outright on all platforms, residual `%*` surface fully closed (not merely shadowed). |

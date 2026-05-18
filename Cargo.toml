@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_mirror", "crates/ocx_schema"]
+members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_mirror", "crates/ocx_schema", "crates/ocx_shim"]
 # The submodule is pulled in via [patch.crates-io] below; excluding it here
 # lets `cargo` commands run directly inside `external/rust-oci-client/` (for
 # the fork's own test suite) without the outer workspace claiming ownership.
@@ -21,6 +21,22 @@ docker_credential = { path = "external/docker_credential" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Size-tuned profile for the committed Windows shim blob (crates/ocx_shim,
+# issue #66). A dedicated profile (not a per-crate `release` override, which
+# Cargo does not support) keeps every other crate's `release`/`dist` build
+# untouched. Build the blob with:
+#   cargo xwin build -p ocx_shim --profile shim --target x86_64-pc-windows-msvc
+#   cargo xwin build -p ocx_shim --profile shim --target aarch64-pc-windows-msvc
+# then commit the stripped bytes + record the SHA-256 (see crates/ocx_lib/
+# src/shim.rs refresh-PR comment).
+[profile.shim]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
 
 [workspace.dependencies]
 ocx_lib = { path = "crates/ocx_lib" }

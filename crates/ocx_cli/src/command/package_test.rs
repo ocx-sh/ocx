@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::package_manager::launcher;
 use ocx_lib::utility::child_process;
 use ocx_lib::utility::fs as ocx_fs;
 use ocx_lib::{cli::UsageError, env, oci, package, prelude::*, publisher::LayerRef};
@@ -194,8 +193,8 @@ impl PackageTest {
         process_env.apply_entries(&entries);
         // Block-tier: forward running ocx's resolution-affecting config to child.
         process_env.apply_ocx_config(context.config_view());
-        // Windows PATHEXT: ensure launcher extension is discoverable.
-        launcher::emplace_pathext(&mut process_env);
+        // No PATHEXT manipulation: the Windows launcher is now a native
+        // `<name>.exe` shim resolved via the default Windows PATHEXT.
 
         // Step 7: Resolve command and exec.
         let (command, args) = self

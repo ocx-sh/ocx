@@ -99,3 +99,33 @@ tasks:
     deps:
       - install:cargo-deny
     cmd: cargo deny check licenses
+
+  install:cargo-xwin:
+    internal: true
+    cmds:
+      - task: :.ensure-cargo-tool
+        vars: { TOOL: cargo-xwin, CRATE: cargo-xwin }
+
+  shim:build:
+    desc: Cross-build the stripped Windows shim blob (issue #66)
+    summary: |
+      Cross-builds crates/ocx_shim with the size-tuned `shim` profile for one
+      windows-msvc target via cargo-xwin and writes the stripped binary to
+      OUT (default: target/<TARGET>/shim/ocx-shim.exe). The committed blobs
+      under crates/ocx_lib/src/shims/ and the SHIM_SHA256 constants are
+      refreshed from this output in a dedicated PR (see shim.rs module docs).
+      Required var: TARGET (x86_64-pc-windows-msvc | aarch64-pc-windows-msvc).
+    requires:
+      vars: [TARGET]
+    deps:
+      - install:cargo-xwin
+    # Deterministic PE: `/Brepro` zeroes the COFF `TimeDateStamp` and
+    # `/PDBALTPATH:%_PDB%` strips the absolute PDB path from the debug
+    # directory. Without these, msvc PE nondeterminism makes the CI
+    # `cmp -s` byte-equality gate (build-windows-shims.yml) ALWAYS fail.
+    # RUSTFLAGS (not `.cargo/config.toml` rustflags) because cargo-xwin
+    # ignores config-file rustflags in some invocations (cargo-xwin#36);
+    # CI must keep calling this task, never raw cargo.
+    env:
+      RUSTFLAGS: '-C link-arg=/Brepro -C link-arg=/PDBALTPATH:%_PDB%'
+    cmd: cargo xwin build -p ocx_shim --profile shim --locked --target {{.TARGET}}

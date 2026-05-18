@@ -22,8 +22,8 @@ impl EntrypointName {
     ///
     /// Caps publisher-supplied names so generated launcher filenames stay
     /// well under platform path limits (Windows `MAX_PATH = 260`, including
-    /// the `.cmd` suffix and the surrounding install directory). 64 chars is
-    /// generous for human-readable command names while leaving headroom.
+    /// the `.exe`/`.shim` suffix and the surrounding install directory). 64
+    /// chars is generous for human-readable command names while leaving headroom.
     ///
     /// Mirrors [`slug::SLUG_MAX_LEN`] — both newtypes share the same upper bound.
     pub const MAX_LEN: usize = SLUG_MAX_LEN;

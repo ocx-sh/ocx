@@ -46,6 +46,8 @@ Distributing pre-built binaries across platforms and teams fragmented:
 - **Multi-platform manifests** — OCI image indexes give native OS/arch resolution
 - **Standards-based** — stable, widely adopted, vendor-neutral
 
+**Security positioning note (Windows launchers).** OCX's Windows entrypoint launchers use a native `.exe` shim that spawns `ocx launcher exec` via `CreateProcessW` directly, bypassing `cmd.exe`. This closes the BatBadBut / CVE-2024-24576 `%*` argument-injection class for default resolution — a surface that tools like Scoop and Chocolatey still expose. Directly reinforces Differentiator #5 (backend-first) and Principle #3 (keep it safe): OCX is designed for CI pipelines and automation that may interpolate untrusted strings into tool invocations. See `adr_windows_exe_shim.md`.
+
 ## Target Users
 
 - **Primary**: Automation tools — GitHub Actions, Bazel rules, devcontainer features, CI scripts

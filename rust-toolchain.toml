@@ -2,3 +2,8 @@
 channel = "1.95.0"
 profile = "default"
 components = ["rustfmt", "clippy"]
+# Windows shim cross-compile targets (crates/ocx_shim, issue #66). Default to
+# msvc since dist-workspace.toml already lists the windows-msvc targets;
+# gnu-vs-msvc final call is an architecture-review item — see the
+# TODO(arch-review) note in crates/ocx_shim/src/main.rs.
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]

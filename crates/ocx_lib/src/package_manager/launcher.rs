@@ -6,8 +6,6 @@
 
 mod body;
 mod generate;
-mod pathext;
 mod safety;
 
 pub use generate::generate;
-pub use pathext::{LAUNCHER_EXT, emplace_pathext, includes_launcher};

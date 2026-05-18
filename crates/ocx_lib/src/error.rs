@@ -80,9 +80,9 @@ pub enum Error {
     PinnedIdentifier(#[from] crate::oci::pinned_identifier::PinnedIdentifierError),
 
     /// A string baked into an install-time launcher contains a character that
-    /// cannot be safely embedded in either the Unix `.sh` or Windows `.cmd`
-    /// template (single-quote, percent, double-quote, NUL, CR, LF). The unsafe
-    /// set is owned by `crate::package_manager::launcher`.
+    /// cannot be safely embedded in the Unix `.sh` template or the Windows
+    /// `.shim` sidecar (single-quote, percent, double-quote, NUL, CR, LF).
+    /// The unsafe set is owned by `crate::package_manager::launcher`.
     #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
     LauncherUnsafeCharacter { value: String, character: char },
 }

@@ -51,7 +51,7 @@ The full collision-detection mechanic, error format, and the cross-platform laun
 
 ## Name = Dispatch Key {#dispatch}
 
-`entrypoints` is a JSON object keyed by command name. The value object holds per-entry fields and is reserved for future additions (currently always `{}`) — there is no `target` template. At install time OCX writes one launcher per key; at exec time the launcher re-enters `ocx launcher exec`, which composes the package's env, and the entry's name is resolved against the composed `PATH` using the standard PATH search (`PATHEXT` on Windows). Declare the binary's location once via `env`, and every entry name picks it up from there.
+`entrypoints` is a JSON object keyed by command name. The value object holds per-entry fields and is reserved for future additions (currently always `{}`) — there is no `target` template. At install time OCX writes one launcher per key; at exec time the launcher re-enters `ocx launcher exec`, which composes the package's env, then resolves the entry's name against the composed `PATH`. That inner resolution is a standard PATH search, `PATHEXT`-aware on Windows so a packaged tool shipped as `tool.bat`/`tool.cmd` is found by bare name. Declare the binary's location once via `env`, and every entry name picks it up from there.
 
 A simple wrapper around a single bundled binary — declare `bin/` on the PATH, declare the entry points:
 
@@ -135,7 +135,7 @@ A statically-linked [Go][go] or [Rust][rust] binary has no interpreter to pin. `
 :::
 
 ::: info Multi-platform launchers
-A single `entrypoints` declaration covers every platform of the package. OCX generates `.sh` launchers for Unix shells and `.cmd` launchers for Windows from the same metadata. The Git Bash and PowerShell caveats live in [entry points in depth][in-depth-entry-points]; the [PATHEXT][cmd-exec-pathext] note on `ocx exec` covers the Windows command-line lookup.
+A single `entrypoints` declaration covers every platform of the package. OCX generates `.sh` launchers for Unix shells and, on Windows, a native `<name>.exe` shim with a one-line `<name>.shim` sidecar, all from the same metadata. The Git Bash and PowerShell caveats live in [entry points in depth][in-depth-entry-points]. Launcher discovery never needs `PATHEXT` (`.EXE` is always in the default Windows `PATHEXT`); `PATHEXT` only matters inside [`ocx exec`][cmd-exec-pathext] when it resolves a packaged tool that ships as a `.bat`/`.cmd` child binary.
 :::
 
 ## See Also {#see-also}

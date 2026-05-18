@@ -183,6 +183,34 @@ Creating, modifying, auditing GitHub Actions workflow → follow sequence:
 - To Builder — Taskfile changes needed by CI (Taskfile = source of truth)
 - To Security Auditor — supply chain or permission review on new workflows
 
+## Windows Shim Build Workflow (`build-windows-shims.yml`)
+
+The `build-windows-shims.yml` workflow cross-compiles the `ocx_shim` binary for `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` on Linux runners using `cargo-xwin`. No Windows runner is needed for the build.
+
+### Structure
+
+| Job | Runner | Purpose |
+|-----|--------|---------|
+| `gate` | `ubuntu-latest` | Runs host-runnable shim + launcher spec tests (`cargo nextest run -p ocx_shim -p ocx_lib --locked`). Cheap Linux gate; matrix legs only proceed if this passes. |
+| `build` (matrix) | `ubuntu-latest` | Cross-compiles both arches via `task rust:shim:build TARGET=<arch>-pc-windows-msvc`. Byte-equality check + SLSA attestation per arch. |
+
+### Key design points
+
+- **Byte-equality = real drift control.** The "Verify committed blob is byte-identical to a fresh rebuild" step is the authoritative guard against `crates/ocx_shim` source drifting from the committed blob in `crates/ocx_lib/src/shims/`. The in-tree `SHIM_SHA256` constant is only a corruption canary (self-consistent include_bytes! check), not a provenance control.
+- **SLSA attestation** via `actions/attest-build-provenance` provides build provenance on the committed blob (Sigstore/Rekor). Refresh-PR flow: `gh attestation verify` is part of the contributor checklist when re-cutting the blob.
+- **Reproducibility flags.** The `shim` Cargo profile uses `opt-level="z"`, `lto=true`, `codegen-units=1`, `panic="abort"`, `strip="symbols"`. The `rust-toolchain.toml` pins the exact toolchain version for the build; both are required for byte-identical output across machines.
+- **Gate-before-matrix pattern** matches `subsystem-ci.md` §"Never let lint block test results" — the spec-test gate is cheap Linux, the expensive cross-build jobs are gated behind it.
+- **No Windows runner.** The cross-compile is hermetic (`cargo-xwin` + MSVC CRT headers); a Windows runner is required only for acceptance testing (`test_windows_shim.py`), which is a separate CI concern.
+- **Signing is Phase 2.** The workflow explicitly does NOT sign. Authenticode signing via SignPath Foundation is a documented follow-on (see ADR §Out of Implementation Scope and the inline workflow comment). Do not add a signing step without the Phase-2 prerequisites.
+
+### Refresh flow (updating the committed blob)
+
+When `crates/ocx_shim` source changes:
+1. Run `task rust:shim:build TARGET=x86_64-pc-windows-msvc` (and `aarch64-pc-windows-msvc`).
+2. Copy the stripped output to `crates/ocx_lib/src/shims/ocx-shim-{x86_64,aarch64}.exe`.
+3. Record the new SHA-256 in `crates/ocx_lib/src/shim.rs` `SHIM_SHA256` constant.
+4. Open a dedicated refresh PR so the byte-equality CI gate passes.
+
 ## Anti-Patterns
 
 | Anti-Pattern | Fix |

@@ -19,8 +19,19 @@ from src.runner import OcxRunner
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Start the registry once before xdist workers spawn."""
+    """Start the registry once before xdist workers spawn.
+
+    Registry-independent opt-out (``OCX_TESTS_NO_REGISTRY=1``): the Windows
+    native-shim acceptance suite (``tests/test_windows_shim.py``) builds a
+    fake ``pkg_root`` on disk and never touches a registry — and the
+    ``registry:2`` Docker Compose fixture does not start on ``windows-latest``
+    (system_design §8). Selecting only that module on a runner without Docker
+    sets this flag so ``pytest_sessionstart`` does not hard-fail trying to
+    ``docker compose up`` a registry no collected test needs.
+    """
     if os.environ.get("PYTEST_XDIST_WORKER") is not None:
+        return
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
         return
     registry = os.environ.get("REGISTRY", "localhost:5000")
     start_registry(registry)

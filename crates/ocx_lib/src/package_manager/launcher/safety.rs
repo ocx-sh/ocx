@@ -3,9 +3,9 @@
 
 //! Launcher-safe string newtype for characters that cannot appear in generated launchers.
 //!
-//! Both Unix `.sh` and Windows `.cmd` launchers are generated on every platform
-//! (cross-platform packages), so the unsafe-character set is unified rather than
-//! per-platform. Lives alongside [`super::generate`] (the launcher generator)
+//! The Unix `.sh` launcher and the Windows `.shim` sidecar are generated on
+//! every platform (cross-platform packages), so the unsafe-character set is
+//! unified rather than per-platform. Lives alongside [`super::generate`] (the launcher generator)
 //! because the unsafe-character set encodes a *consumer-layer* shell template
 //! constraint — not a metadata invariant. The publish-time validator
 //! ([`crate::package::metadata::validation`]) still calls into this module via
@@ -14,26 +14,37 @@
 
 /// Characters that cannot appear in any string baked into a generated launcher.
 ///
-/// The set is the union of constraints from both supported platforms:
+/// The set is unified across the `.sh` launcher body and the `.shim` sidecar:
 /// - `'` breaks Unix single-quoted shell literals (cannot be escaped inside one).
-/// - `%` triggers `cmd.exe` variable expansion (`%X%`) inside the `.cmd` body.
-/// - `"` would close the `SET "var=value"` statement on Windows.
-/// - `\n`, `\r`, `\0` would inject newlines/control bytes into either script
-///   body — a code-injection vector.
+/// - `\n`, `\r`, `\0` would inject newlines/control bytes into the `.sh` body
+///   or break the frozen one-line `.shim` sidecar — a code-injection vector.
+/// - `"` is retained because it must be quoted/escaped for `CreateProcessW`
+///   command-line assembly and for the `.sh` body's quoting.
 ///
-/// Both launchers are generated on every platform (cross-platform packages),
+/// `%` is **not** unsafe: post-cutover no consumer treats it specially — the
+/// `.sh` body single-quotes the package-root literal, the `.shim` sidecar
+/// carries it as a verbatim one-line value, and the native shim spawns via
+/// `CreateProcessW` with no `cmd.exe` (so no `%VAR%` expansion). A Windows
+/// install path containing `%` (e.g. a user folder `100%real`) must succeed.
+///
+/// All generated bodies exist on every platform (cross-platform packages),
 /// so the character set is unified rather than per-platform.
+///
+/// **Reused by the `.shim` sidecar.** The Windows `.shim` sidecar written by
+/// [`super::body::shim_sidecar_body`] carries the `pkg_root` as its sole content.
+/// Because the `pkg_root` is already wrapped in a [`LauncherSafeString`] at the
+/// `generate()` entry boundary, the sidecar body function receives a
+/// pre-validated value and performs no second validation — this set is the
+/// single enforcement point for both the `.sh` launcher body and the `.shim`
+/// sidecar. See `adr_windows_exe_shim.md` §`.shim` Sidecar Format Contract.
 ///
 /// **Why backslash (`\`) is intentionally NOT in the set.** Windows package
 /// roots normally contain `\` (e.g. `C:\Users\…\.ocx\packages\…`), and the
-/// `.cmd` template embeds the package root inside a double-quoted path
-/// on the `ocx launcher exec` line. Inside `cmd.exe` double quotes, `\` is a
-/// literal byte — not an escape character — so a `\`-bearing path cannot
-/// terminate the string or change the parse. Forbidding `\` would block
-/// every realistic Windows install path; allowing it does not introduce a
-/// new injection surface beyond the residual `%*` argv risk documented in
-/// `.claude/artifacts/adr_windows_cmd_argv_injection.md`.
-const LAUNCHER_UNSAFE_CHARS: &[char] = &['\'', '%', '"', '\n', '\r', '\0'];
+/// native `.exe` shim reads that path verbatim from the single-line `.shim`
+/// sidecar. `\` is an ordinary path byte there — it cannot terminate the
+/// line or change parsing. Forbidding `\` would block every realistic
+/// Windows install path; allowing it introduces no injection surface.
+const LAUNCHER_UNSAFE_CHARS: &[char] = &['\'', '"', '\n', '\r', '\0'];
 
 /// A `String` proven free of characters that would corrupt a generated launcher.
 ///
@@ -69,7 +80,9 @@ mod tests {
 
     #[test]
     fn launcher_safe_string_rejects_all_unsafe_characters() {
-        for unsafe_char in ['\'', '%', '"', '\n', '\r', '\0'] {
+        // Amendment §2: `%` REMOVED from the unsafe set (post-cutover no
+        // consumer treats it specially). The retained set is `' " \n \r \0`.
+        for unsafe_char in ['\'', '"', '\n', '\r', '\0'] {
             let input = format!("prefix{unsafe_char}suffix");
             let err = super::LauncherSafeString::new(input.clone())
                 .expect_err(&format!("must reject {unsafe_char:?} (input {input:?})"));
@@ -80,6 +93,40 @@ mod tests {
                 }
                 other => panic!("expected LauncherUnsafeCharacter, got {other:?}"),
             }
+        }
+    }
+
+    /// Amendment §2: `%` is admissible in package roots. Post-cutover the
+    /// `.sh` body single-quotes it, the `.shim` sidecar carries it as a
+    /// verbatim line, and `CreateProcessW` does no cmd.exe expansion — no
+    /// consumer treats `%` specially. A Windows install path containing `%`
+    /// (e.g. a user folder `100%real`) must construct successfully. RED
+    /// against current code: `%` is still in `LAUNCHER_UNSAFE_CHARS`.
+    #[test]
+    fn launcher_safe_string_accepts_percent_in_windows_package_root() {
+        let p = "C:\\Users\\100%real\\.ocx\\packages\\x";
+        let s = super::LauncherSafeString::new(p)
+            .expect("`%` must be admissible in package roots (amendment §2 removed it from the unsafe set)");
+        assert_eq!(
+            s.as_str(),
+            p,
+            "value must round-trip verbatim — no normalization, `%` preserved"
+        );
+    }
+
+    /// `%` is now accepted while the genuinely dangerous bytes stay rejected:
+    /// the amendment narrowed the set to `' " \n \r \0` only.
+    #[test]
+    fn launcher_safe_string_accepts_percent_but_still_rejects_quote_and_control_bytes() {
+        assert!(
+            super::LauncherSafeString::new("path/with%percent").is_ok(),
+            "`%` is admissible post-cutover (amendment §2)"
+        );
+        for still_unsafe in ['\'', '"', '\n', '\r', '\0'] {
+            assert!(
+                super::LauncherSafeString::new(format!("path{still_unsafe}x")).is_err(),
+                "{still_unsafe:?} must still be rejected (retained unsafe set)"
+            );
         }
     }
 

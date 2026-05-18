@@ -467,21 +467,24 @@ def test_exec_dep_launcher_via_path(
 
 
 # ---------------------------------------------------------------------------
-# Windows: PATHEXT auto-inject (ocx exec) and warning (ocx install)
+# Windows: native `.exe` shim resolves via the default PATHEXT (no `.cmd`)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows PATHEXT test")
-def test_exec_auto_injects_cmd_into_pathext_on_windows(
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher test")
+def test_exec_resolves_native_exe_shim_on_windows(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """ocx exec auto-injects .CMD into PATHEXT so .cmd launchers are found
-    even when the host shell's PATHEXT does not include .cmd.
+    """ocx exec resolves the native `<name>.exe` shim — no PATHEXT inject.
 
-    Builds a package with an entrypoint, installs + selects it, then invokes
-    `ocx exec` with a custom env that strips .CMD from PATHEXT. The command
-    must still succeed — proving that exec's auto-inject bridged the gap.
+    Post-cutover (`adr_windows_exe_shim.md` Axis C → C2) the Windows launcher
+    is `<name>.exe` + `<name>.shim` only; no `.cmd` is emitted and OCX no
+    longer injects `.CMD` into the child PATHEXT. `.EXE` is unconditionally in
+    the default Windows PATHEXT, so even an env whose PATHEXT lacks `.CMD`
+    entirely resolves the shim and runs the entrypoint.
     """
+    import copy
+
     pkg = make_package_with_entrypoints(
         ocx,
         unique_repo,
@@ -491,10 +494,10 @@ def test_exec_auto_injects_cmd_into_pathext_on_windows(
     )
     ocx.plain("install", "--select", pkg.short)
 
-    # Build an env that deliberately has no .CMD in PATHEXT.
-    import copy
+    # PATHEXT without .CMD — irrelevant now: the launcher is a `.exe`, and
+    # `.EXE` is always in the default Windows PATHEXT.
     stripped_env = copy.copy(ocx.env)
-    stripped_env["PATHEXT"] = ".EXE;.BAT;.COM"  # .CMD intentionally absent
+    stripped_env["PATHEXT"] = ".EXE;.BAT;.COM"
 
     cmd = [str(ocx.binary), "exec", pkg.short, "--", "hello"]
     result = subprocess.run(
@@ -506,51 +509,11 @@ def test_exec_auto_injects_cmd_into_pathext_on_windows(
         check=False,
     )
     assert result.returncode == 0, (
-        "ocx exec must succeed even when host PATHEXT lacks .CMD "
+        "ocx exec must resolve the native `.exe` shim with no PATHEXT inject "
         f"(rc={result.returncode}, stderr={result.stderr.strip()!r})"
     )
     assert pkg.marker in result.stdout, (
-        f"exec with stripped PATHEXT must still run the entrypoint; stdout={result.stdout!r}"
-    )
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows PATHEXT warning test")
-def test_install_warns_when_pathext_missing_cmd_on_windows(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-) -> None:
-    """ocx install emits a warning to stderr when PATHEXT lacks .CMD on Windows.
-
-    The warning fires because install is a consumer-boundary command — it emits
-    paths that include .cmd launchers in entrypoints/, and the external shell
-    needs .CMD in PATHEXT to find them.
-    """
-    import copy
-    pkg = make_package_with_entrypoints(
-        ocx,
-        unique_repo,
-        tmp_path,
-        entrypoints=["hello"],
-        bins=["hello"],
-    )
-
-    stripped_env = copy.copy(ocx.env)
-    stripped_env["PATHEXT"] = ".EXE;.BAT;.COM"  # .CMD intentionally absent
-
-    cmd = [str(ocx.binary), "install", "--select", pkg.short]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        env=stripped_env,
-        timeout=30,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"install must succeed even when PATHEXT lacks .CMD "
-        f"(rc={result.returncode}, stderr={result.stderr.strip()!r})"
-    )
-    assert "PATHEXT" in result.stderr, (
-        f"install must warn about missing .CMD in PATHEXT; stderr={result.stderr.strip()!r}"
+        f"exec must run the entrypoint via the `.exe` shim; stdout={result.stdout!r}"
     )
 
 

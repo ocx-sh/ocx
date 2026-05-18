@@ -1650,6 +1650,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocx_shim"
+version = "0.2.1"
+dependencies = [
+ "dunce",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "olpc-cjson"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

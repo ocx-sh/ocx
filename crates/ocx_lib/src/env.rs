@@ -224,9 +224,9 @@ impl Env {
     /// (and PATHEXT on Windows).
     ///
     /// On Windows, `PATHEXT` is read from *this* environment rather than from
-    /// the running process, so a clean child env that has had
-    /// [`super::package_manager::launcher::emplace_pathext`] applied still
-    /// resolves `.cmd` launchers correctly before the child is spawned.
+    /// the running process, so a clean child env still resolves the native
+    /// `<name>.exe` launcher shim correctly before the child is spawned (the
+    /// fallback default `.COM;.EXE;.BAT;.CMD` always advertises `.EXE`).
     ///
     /// Falls back to the bare command name if resolution fails, letting
     /// the OS handle it — `CreateProcessW` can still find `.exe` files.
@@ -244,8 +244,8 @@ impl Env {
             // On Windows, `which_in` internally reads PATHEXT from the real
             // process environment via `RealSys::env_windows_path_ext()`, not
             // from our child `Env`. We therefore probe the child's PATHEXT
-            // ourselves so `.cmd` launchers emplaced by `emplace_pathext` are
-            // found even when the running process has a different PATHEXT.
+            // ourselves so the native `<name>.exe` launcher shim is found
+            // even when the running process has a different PATHEXT.
             if let Some(found) = self.resolve_command_windows(command, &cwd) {
                 return found;
             }
@@ -281,11 +281,22 @@ impl Env {
             .unwrap_or(".COM;.EXE;.BAT;.CMD")
             .to_string();
 
-        let extensions: Vec<&str> = pathext_str
+        let mut extensions: Vec<&str> = pathext_str
             .split(';')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
+
+        // The OCX launcher shim is always `<name>.exe` post-`.cmd` cutover
+        // (adr_windows_exe_shim.md). A hardened or customized child PATHEXT may
+        // omit `.EXE` entirely (e.g. `PATHEXT=.BAT;.CMD`); the cutover removed
+        // the PATHEXT inject/warn safety net on the premise that `.EXE` is
+        // unconditionally resolvable, so guarantee it is probed here regardless
+        // of the child PATHEXT. Probe order still respects the user's listed
+        // extensions; `.exe` is appended only when absent (case-insensitive).
+        if !extensions.iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")) {
+            extensions.push(".EXE");
+        }
 
         // For each extension, ask `which_in` if `command + ext` is found.
         // `which_in` on a name-with-extension will not try to append further
@@ -681,28 +692,58 @@ mod tests {
     }
 
     /// On Windows, `resolve_command_windows` must consult PATHEXT from this
-    /// env, not from the running process. We simulate the scenario by placing a
-    /// `.cmd`-named file in a temp directory and pointing PATH at it with a
-    /// PATHEXT that includes `.CMD`.
+    /// env, not from the running process. We simulate the scenario by placing
+    /// a `.exe`-named file (the native launcher shim's on-disk shape) in a
+    /// temp directory and pointing PATH at it with a PATHEXT that includes
+    /// `.EXE`.
     #[cfg(windows)]
     #[test]
     fn resolve_command_windows_uses_child_env_pathext() {
         use std::fs;
 
         let dir = tempfile::tempdir().unwrap();
-        let launcher = dir.path().join("my_tool.cmd");
-        fs::write(&launcher, "@echo off\r\necho hello\r\n").unwrap();
+        let launcher = dir.path().join("my_tool.exe");
+        fs::write(&launcher, b"MZ").unwrap();
 
         let mut env = Env::clean();
         env.set("PATH", dir.path().to_str().unwrap());
-        // PATHEXT lists .CMD — must resolve `my_tool` → `my_tool.cmd`.
+        // PATHEXT lists .EXE — must resolve `my_tool` → `my_tool.exe`.
         env.set("PATHEXT", ".EXE;.CMD");
 
         let resolved = env.resolve_command("my_tool");
         assert_eq!(
             resolved.file_name().unwrap().to_str().unwrap().to_ascii_lowercase(),
-            "my_tool.cmd",
-            "resolve_command must find my_tool.cmd via child env PATHEXT"
+            "my_tool.exe",
+            "resolve_command must find my_tool.exe via child env PATHEXT"
+        );
+    }
+
+    /// Regression: a hardened or customized child PATHEXT may omit `.EXE`
+    /// entirely (e.g. `PATHEXT=.BAT;.CMD`). The native launcher shim is always
+    /// `<name>.exe`, so `resolve_command_windows` must still probe `.exe` even
+    /// when the child PATHEXT does not list it — otherwise an installed `.exe`
+    /// entrypoint silently becomes "command not found" (the cutover removed the
+    /// PATHEXT inject/warn net that previously masked this).
+    #[cfg(windows)]
+    #[test]
+    fn resolve_command_windows_probes_exe_when_pathext_omits_it() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = dir.path().join("my_tool.exe");
+        fs::write(&launcher, b"MZ").unwrap();
+
+        let mut env = Env::clean();
+        env.set("PATH", dir.path().to_str().unwrap());
+        // PATHEXT deliberately omits .EXE — `my_tool` must still resolve to
+        // `my_tool.exe` via the always-probed `.exe` fallback.
+        env.set("PATHEXT", ".BAT;.CMD");
+
+        let resolved = env.resolve_command("my_tool");
+        assert_eq!(
+            resolved.file_name().unwrap().to_str().unwrap().to_ascii_lowercase(),
+            "my_tool.exe",
+            "resolve_command must probe .exe even when child PATHEXT omits it"
         );
     }
 }

@@ -18,7 +18,6 @@ use clap::Parser;
 use ocx_lib::cli::UsageError;
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::metadata::env::entry::Entry as EnvEntry;
-use ocx_lib::package_manager::launcher;
 use ocx_lib::prelude::SerdeExt;
 use ocx_lib::utility::child_process;
 use ocx_lib::{env, env::OcxConfigView};
@@ -93,8 +92,8 @@ impl LauncherExec {
         process_env.apply_entries(&entries);
         // Forward resolution-affecting OCX config to any grandchild ocx processes.
         process_env.apply_ocx_config(config_view);
-        // Ensure the child PATHEXT lists the OCX launcher extension on Windows.
-        launcher::emplace_pathext(&mut process_env);
+        // No PATHEXT manipulation: the Windows launcher is now a native
+        // `<name>.exe` shim resolved via the default Windows PATHEXT.
 
         let resolved = process_env.resolve_command(command);
 
