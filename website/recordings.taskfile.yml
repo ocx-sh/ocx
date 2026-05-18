@@ -35,7 +35,7 @@ tasks:
     dir: "{{.ROOT_DIR}}/test"
     sources:
       - recordings/**/*.py
-      - recordings/**/*.sh
+      - doc_scripts/**/*.sh
       - conftest.py
       - src/**/*.py
       - pyproject.toml
@@ -47,13 +47,14 @@ tasks:
       - uv run pytest recordings/ {{.CLI_ARGS | default "-v"}}
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
+      OCX_DOC_CASTS_DIR: "{{.CASTS_DIR}}"
 
   parallel:
     desc: Generate all .cast recordings in parallel
     dir: "{{.ROOT_DIR}}/test"
     sources:
       - recordings/**/*.py
-      - recordings/**/*.sh
+      - doc_scripts/**/*.sh
       - conftest.py
       - src/**/*.py
       - pyproject.toml
@@ -65,6 +66,7 @@ tasks:
       - uv run pytest recordings/ -n auto {{.CLI_ARGS | default "-v"}}
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
+      OCX_DOC_CASTS_DIR: "{{.CASTS_DIR}}"
 
   gifs:
     desc: Convert all .cast files to animated GIFs (requires agg)

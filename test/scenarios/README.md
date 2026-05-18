@@ -55,12 +55,17 @@ Drop a `.sh` under `test/scenarios/<topic>/`. No registration needed —
 cd test && uv run pytest tests/test_scenarios_smoke.py -v --no-build
 ```
 
-## Distinction from `test/recordings/scripts/`
+## Distinction from `test/doc_scripts/`
 
-`test/recordings/scripts/*.sh` produces `.cast` files for the website
-(asciinema). The recording infrastructure asserts on sanitised PTY
-output. `test/scenarios/*.sh` produces no artifacts; assertion happens
-**inside the script** (assert via `[[ … ]]` + `exit 1`). When a single
-shell flow is useful for both, write it twice — different goals, different
-constraints (recordings need stable wall-clock pacing, sanitised paths;
-scenarios need exit-code assertions).
+`test/doc_scripts/*.sh` is the single source of truth for both doc snippets
+and website recordings. Scripts with `# cast: true` in their header produce
+`.cast` files (asciinema recordings) during `task recordings:build`; scripts
+without it run as plain doc-correctness checks. The `# region cast` /
+`# endregion cast` markers delimit the snippet embedded in website pages via
+`<<< @/_scripts/…` includes.
+
+`test/scenarios/*.sh` produces no website artifacts; assertions happen
+**inside the script** (assert via `[[ … ]]` + `exit 1`). Use scenarios when
+you need exit-code branches or marker-grep assertions that do not belong in a
+doc snippet. Each harness has a distinct purpose — do not duplicate the same
+flow across both.

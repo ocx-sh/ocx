@@ -3,11 +3,11 @@ outline: deep
 ---
 # Entry Points
 
-Most installed packages end up driven through one or two commands — `cmake`, `ctest`, `node`, `go` — but OCX's clean-env execution model normally routes every invocation through [`ocx exec <package> -- <command>`][cmd-exec]. That is the right default for reproducibility, but it adds friction when humans sit in front of a shell and want to type `cmake --build .` without remembering which package owns `cmake`.
+Most installed packages end up driven through one or two commands — `cmake`, `ctest`, `node`, `go` — but OCX's clean-env execution model normally routes every invocation through [`ocx package exec <package> -- <command>`][cmd-exec]. That is the right default for reproducibility, but it adds friction when humans sit in front of a shell and want to type `cmake --build .` without remembering which package owns `cmake`.
 
-Entry points close that gap. A publisher declares named launchers in [`metadata.json`][metadata-ref]; at install time OCX generates a small script per launcher that re-enters the package through the internal `ocx launcher exec` subcommand. Users add one directory to `$PATH` and every declared name becomes a top-level command, with the same clean-env guarantees as a direct `ocx exec` call.
+Entry points close that gap. A publisher declares named launchers in [`metadata.json`][metadata-ref]; at install time OCX generates a small script per launcher that re-enters the package through the internal `ocx launcher exec` subcommand. Users add one directory to `$PATH` and every declared name becomes a top-level command, with the same clean-env guarantees as a direct `ocx package exec` call.
 
-This page explains the inner workings of entry points — how launchers are generated, how they integrate with [env composition][env-composition], how collisions are detected, and how transitive dependencies contribute their launchers via the synth-PATH mechanism. For the field-level schema see the [metadata reference][metadata-entry-points]; for the command-line flags that wrap launchers at runtime see [`ocx exec`][cmd-exec] and [`ocx shell hook`][cmd-shell-hook].
+This page explains the inner workings of entry points — how launchers are generated, how they integrate with [env composition][env-composition], how collisions are detected, and how transitive dependencies contribute their launchers via the synth-PATH mechanism. For the field-level schema see the [metadata reference][metadata-entry-points]; for the command-line flags that wrap launchers at runtime see [`ocx package exec`][cmd-exec] and [`ocx package select`][cmd-select].
 
 ## Declaring Entry Points {#declaring}
 
@@ -32,12 +32,12 @@ Entry points live as a sibling object on the bundle metadata, keyed by the comma
 At install time OCX writes the launchers for every declared name into a sibling [`entrypoints/` directory][fs-packages] inside the content-addressed package directory, regardless of which platform is currently installing. POSIX hosts get a `.sh` launcher (mode `0755`); Windows hosts get a native `<name>.exe` shim plus a one-line `<name>.shim` sidecar that carries the absolute package root. Generating every shape on every platform keeps publishers from having to fork metadata per host OS.
 
 ::: tip Declare the commands users will actually type
-Only promote user-facing commands to entry points. Internal helpers, wrapper scripts, and build-time binaries belong in `${installPath}/bin` (discoverable through `ocx exec` or explicit path lookup) rather than on `$PATH`. Every launcher consumes a global name across every package a user has selected — be deliberate about the ones you spend.
+Only promote user-facing commands to entry points. Internal helpers, wrapper scripts, and build-time binaries belong in `${installPath}/bin` (discoverable through `ocx package exec` or explicit path lookup) rather than on `$PATH`. Every launcher consumes a global name across every package a user has selected — be deliberate about the ones you spend.
 :::
 
 ## Interface-Only Surface {#interface-only}
 
-Entry points are **always on the interface surface** — they represent the commands a package exposes to consumers. A package's launchers appear on `PATH` only under the consumer view (default `ocx exec`, `--self` off).
+Entry points are **always on the interface surface** — they represent the commands a package exposes to consumers. A package's launchers appear on `PATH` only under the consumer view (default `ocx package exec`, `--self` off).
 
 Under `--self`, the root's own launchers are **suppressed** from its `PATH` to prevent a launcher from finding itself on `PATH` and recursing infinitely. The private surface is for a package's internal runtime env (compilers, runtimes, shared libraries), not its own CLI commands.
 
@@ -50,8 +50,8 @@ Names are validated at metadata deserialization time. The regex is `^[a-z0-9][a-
 Uniqueness is enforced at three layers:
 
 - **Within a package** — the map shape gives intra-package uniqueness via JSON object key semantics, and duplicate keys in the on-wire JSON are rejected at deserialization (rather than silently last-wins, the `serde_json` default). A bundle that lists `"cmake"` twice fails to parse and never reaches the registry.
-- **Across the interface surface (install time)** — when [`ocx install`][cmd-install] generates launchers, it iterates the transitive closure in topological order and reports all owners when an entry-point name collides on the composed interface surface. Two packages with the same entrypoint name on the interface surface produce an install error. See [Multi-Owner Collision Reporting](#multi-owner) below for the exact error shape.
-- **Across selected packages (select time)** — two different installed packages that both declare `cmake` coexist on disk, but only one can contribute `cmake` to `$PATH` at a time. Collisions are detected when the user runs [`ocx select`][cmd-select] (or `ocx install --select`) — the command reports the conflict and refuses to flip `current` until the user deselects the competing package.
+- **Across the interface surface (install time)** — when [`ocx package install`][cmd-install] generates launchers, it iterates the transitive closure in topological order and reports all owners when an entry-point name collides on the composed interface surface. Two packages with the same entrypoint name on the interface surface produce an install error. See [Multi-Owner Collision Reporting](#multi-owner) below for the exact error shape.
+- **Across selected packages (select time)** — two different installed packages that both declare `cmake` coexist on disk, but only one can contribute `cmake` to `$PATH` at a time. Collisions are detected when the user runs [`ocx package select`][cmd-select] (or `ocx package install --select`) — the command reports the conflict and refuses to flip `current` until the user deselects the competing package.
 
 A name that appears as an entrypoint in a `private`-edge dep is **not an install error**. Private-surface duplicates do not collide at install time — they resolve at runtime by topological PATH order. The dep whose `entrypoints/` directory appears first in the composed `PATH` wins the lookup. This is intentional: `private`-edge deps are invisible to consumers and their launchers never appear on the consumer's `PATH`. Launcher naming conflicts among private deps are the package's internal concern.
 
@@ -105,18 +105,15 @@ This mechanism lets a top-level package depend on a runtime that ships its own c
 
 Launchers are harmless files until something puts them on `$PATH`. OCX does that through the per-repo `current` symlink (which targets the package root) plus the `entrypoints/` subdirectory inside it:
 
-- [`ocx select <package>`][cmd-select] flips `current` to the selected package root. Tools that need launchers reach them via `{registry}/{repo}/current/entrypoints` — there is no separate symlink for entry points; the same anchor exposes content (`current/content`), launchers (`current/entrypoints`), and metadata (`current/metadata.json`).
-- [`ocx deselect <package>`][cmd-deselect] and [`ocx uninstall <package>`][cmd-uninstall] remove `current` as part of their cleanup. Both operations are idempotent — an already-absent symlink is not an error.
-- [`ocx shell hook`][cmd-shell-hook] emits shell export statements for every selected package whose `current` symlink exists *and* whose metadata has a non-empty `entrypoints` map; the exported `PATH` entry is `{registry}/{repo}/current/entrypoints`. Packages that haven't been `ocx select`ed yet are silently skipped, so the hook never points `$PATH` at a missing directory.
+- [`ocx package select <package>`][cmd-select] flips `current` to the selected package root. Tools that need launchers reach them via `{registry}/{repo}/current/entrypoints` — there is no separate symlink for entry points; the same anchor exposes content (`current/content`), launchers (`current/entrypoints`), and metadata (`current/metadata.json`).
+- [`ocx package deselect <package>`][cmd-deselect] and [`ocx package uninstall <package>`][cmd-uninstall] remove `current` as part of their cleanup. Both operations are idempotent — an already-absent symlink is not an error.
+- [`ocx package env --shell=bash <package>`][cmd-package-env] emits eval-safe export lines for the named package, including a `PATH ⊳ current/entrypoints` entry for every selected package that declares entry points. The global form `eval "$(ocx --global env --shell=bash)"` activates the full toolchain when packages are managed via `ocx.toml`.
 
-The typical shell wire-up is a single line in a dotfile:
+The typical shell wire-up adds one of these to a login dotfile:
 
-```sh
-# ~/.bashrc — evaluated on every shell start
-eval "$(ocx --offline shell hook bash)"
-```
+<<< @/_scripts/entry-points/path-integration.sh{sh}
 
-The `--offline` flag is essential here: the hook runs on every shell startup and must never touch the network. From the user's perspective, once the shell is open, `cmake --build .` resolves to your launcher, which resolves to your binary, all inside a clean environment.
+From the user's perspective, once the shell is open, `cmake --build .` resolves to your launcher, which resolves to your binary, all inside a clean environment.
 
 ::: info Similar to SDKMAN and asdf shims
 [SDKMAN][sdkman] generates shim scripts at `~/.sdkman/candidates/{tool}/current/bin/` and relies on a fixed PATH entry per tool; [asdf][asdf] takes the same approach with a single `~/.asdf/shims/` directory. OCX uses the same idea: one PATH entry per package, anchored on the per-repo `current` symlink, with launchers living under `current/entrypoints`.
@@ -200,23 +197,13 @@ Publishing a CMake package with two launchers looks like this on the publisher s
 
 And on the consumer side:
 
-```shell
-ocx install --select cmake:3.28
-eval "$(ocx --offline shell hook bash)"   # already in ~/.bashrc in practice
+<<< @/_scripts/entry-points/example-install.sh{sh}
 
-# Both are now top-level commands, running under ocx exec's clean environment.
-cmake --version
-ctest --output-on-failure
-```
+Switching to a different version is a single `ocx package select`:
 
-Switching to a different version is a single `ocx select`:
+<<< @/_scripts/entry-points/example-select.sh{sh}
 
-```shell
-ocx install cmake:3.30
-ocx select cmake:3.30     # current flips; next shell command uses 3.30
-```
-
-No re-sourcing dotfiles. The `ocx shell hook` output is stable — it emits exports for whichever packages are currently selected. The stable `current/entrypoints` path was already on `$PATH`; the select just re-points the `current` symlink at the new package root, and the next shell open picks up the updated hook output automatically.
+No re-sourcing dotfiles. The `ocx package env --shell` output is stable — it emits exports for whichever packages are currently selected. The stable `current/entrypoints` path was already on `$PATH`; the select just re-points the `current` symlink at the new package root, and the next shell open picks up the updated env output automatically.
 
 <!-- in-depth -->
 [env-composition]: ./environments.md
@@ -232,12 +219,12 @@ No re-sourcing dotfiles. The `ocx shell hook` output is stable — it emits expo
 [sysexits]: https://man.freebsd.org/cgi/man.cgi?sysexits
 
 <!-- commands -->
-[cmd-exec]: ../reference/command-line.md#exec
-[cmd-install]: ../reference/command-line.md#install
-[cmd-select]: ../reference/command-line.md#select
-[cmd-deselect]: ../reference/command-line.md#deselect
-[cmd-uninstall]: ../reference/command-line.md#uninstall
-[cmd-shell-hook]: ../reference/command-line.md#shell-hook
+[cmd-exec]: ../reference/command-line.md#package-exec
+[cmd-install]: ../reference/command-line.md#package-install
+[cmd-select]: ../reference/command-line.md#package-select
+[cmd-deselect]: ../reference/command-line.md#package-deselect
+[cmd-uninstall]: ../reference/command-line.md#package-uninstall
+[cmd-package-env]: ../reference/command-line.md#package-env
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home

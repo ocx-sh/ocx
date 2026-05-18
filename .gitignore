@@ -12,6 +12,7 @@ target/
 lcov.info
 test/.venv/
 test/.pytest_cache/
+test/.out/
 .fonts/
 .mirror-work/
 mirrors/*/out.json

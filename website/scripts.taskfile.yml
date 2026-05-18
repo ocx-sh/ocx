@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  SCRIPTS_OUT: "{{.ROOT_DIR}}/website/src/_scripts"
+  MANIFEST: "{{.ROOT_DIR}}/website/src/_scripts/.published.json"
+
+tasks:
+  publish:
+    desc: Publish doc scripts to website/src/_scripts/ (PT1–PT7 contract)
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      SCRIPTS_OUT: "{{.SCRIPTS_OUT}}"
+      MANIFEST: "{{.MANIFEST}}"
+    cmds:
+      - uv run --project test python website/scripts/publish_doc_scripts.py "{{.SCRIPTS_OUT}}" "{{.MANIFEST}}"
+    env:
+      OCX_DOC_SCRIPTS_ROOT: '{{.OCX_DOC_SCRIPTS_ROOT | default ""}}'

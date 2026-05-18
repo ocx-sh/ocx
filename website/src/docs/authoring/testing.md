@@ -28,7 +28,7 @@ OCX will:
 1. Read `metadata.json` (inferred from the layer filename or supplied via `-m`).
 2. Auto-install any declared dependencies into the regular package store.
 3. Assemble the package in a temp directory under `$OCX_HOME/temp/test/`.
-4. Compose the env exactly as [`ocx exec`][cmd-exec] would.
+4. Compose the env exactly as [`ocx package exec`][cmd-exec] would.
 5. Exec the trailing command in that env.
 6. Delete the temp directory on exit — whether the command succeeds or fails.
 
@@ -84,7 +84,7 @@ ocx package test -p linux/amd64 --self -i mytool:1.0.0 mytool.tar.xz \
   -- sh -c 'echo $MY_PRIVATE_VAR'
 ```
 
-The `--self` flag mirrors the same flag on [`ocx exec`][cmd-exec] and [`ocx env`][cmd-env].
+The `--self` flag mirrors the same flag on [`ocx package exec`][cmd-exec] and [`ocx package env`][cmd-env].
 
 ## Stripping the parent env {#clean}
 
@@ -131,7 +131,7 @@ ocx package push -n -p linux/amd64 -m metadata.json \
   -i mytool:1.0.0 mytool-1.0.0.tar.xz
 ```
 
-<Terminal src="/casts/package-test.cast" title="Testing a package locally before pushing" collapsed />
+<Terminal src="/casts/authoring/package-test.cast" title="Testing a package locally before pushing" collapsed />
 
 ## Exit codes {#exit-codes}
 
@@ -147,7 +147,7 @@ ocx package push -n -p linux/amd64 -m metadata.json \
 
 - [`ocx package test` reference][cmd-package-test] — full flag table
 - [Building and pushing][authoring-building-pushing] — push workflow
-- [`ocx exec` reference][cmd-exec] — same env composition, different trigger
+- [`ocx package exec` reference][cmd-exec] — same env composition, different trigger
 - [Env surface][authoring-env-surface] — visibility levels: `private`, `public`, `interface`
 
 <!-- external -->
@@ -157,8 +157,8 @@ ocx package push -n -p linux/amd64 -m metadata.json \
 <!-- commands -->
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-test]: ../reference/command-line.md#package-test
-[cmd-exec]: ../reference/command-line.md#exec
-[cmd-env]: ../reference/command-line.md#env
+[cmd-exec]: ../reference/command-line.md#package-exec
+[cmd-env]: ../reference/command-line.md#package-env
 
 <!-- authoring -->
 [authoring-building-pushing]: ./building-pushing.md

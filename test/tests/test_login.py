@@ -154,6 +154,16 @@ def _write_helper(
 # ---------------------------------------------------------------------------
 
 
+# Python 3.14 warns on forkpty() in a multi-threaded process.  Under
+# ``pytest -n auto`` each xdist worker carries an execnet receiver thread,
+# so pexpect.spawn() -> ptyprocess -> pty.fork() forks from a multi-threaded
+# process.  The pattern is fork -> immediate exec with the only sibling
+# thread blocked on a socket recv, so the documented deadlock cannot be
+# realized here.  Scope the suppression to this exact message so genuine
+# forkpty misuse elsewhere still surfaces.
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded, use of forkpty\\(\\):DeprecationWarning"
+)
 def test_login_interactive_tty_stores_credential(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

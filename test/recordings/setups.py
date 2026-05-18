@@ -319,7 +319,7 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
     )
 
     # Pre-install so recordings don't need `ocx install` on screen.
-    ocx.run("install", "--select", webapp.short)
+    ocx.run("package", "install", "--select", webapp.short)
 
     return {
         "nodejs": [nodejs],

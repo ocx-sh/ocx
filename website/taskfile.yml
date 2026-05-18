@@ -15,6 +15,8 @@ includes:
   recordings:
     taskfile: ./recordings.taskfile.yml
     internal: true
+  scripts:
+    taskfile: ./scripts.taskfile.yml
 
 tasks:
   install:
@@ -40,6 +42,7 @@ tasks:
       # `project` and `project-lock` schemas back IDE auto-completion via
       # the `#:schema` directive emitted by `ocx init`.
       - task: schema:default
+      - task: scripts:publish
       - task: recordings:parallel
       - task: sbom:generate:page
       - task: catalog:generate

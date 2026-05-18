@@ -161,9 +161,66 @@ jobs:
           name: website-catalog-pages
           path: website/src/docs/catalog/
 
+  doc-scripts-drift:
+    name: Doc Scripts Drift Gate
+    needs: build-binary
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Download Binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ocx-binary
+          path: test/bin
+      - name: Make Binary Executable
+        run: chmod +x test/bin/ocx
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Setup Task
+        uses: go-task/setup-task@3be4020d41929789a01026e0e427a4321ce0ad44 # v2.0.0
+      # Registry-backed drift gate for ALL `# doc:` scripts (not just
+      # cast:true).  Deploy-CI only — the ADR cost-lever keeps this out of
+      # the per-commit `task verify`; gating publish on it here closes the
+      # fail-open seam (Codex D1) before any artifact is uploaded.
+      - name: Run doc-script drift gate
+        run: task test:doc-scripts:drift
+        env:
+          SKIP_BUILD: "true"
+
+  doc-scripts:
+    name: Generate Doc Scripts
+    needs: doc-scripts-drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Setup Task
+        uses: go-task/setup-task@3be4020d41929789a01026e0e427a4321ce0ad44 # v2.0.0
+      - name: Generate Doc Scripts
+        run: task website:scripts:publish
+      - name: Upload Doc Scripts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: website-doc-scripts
+          path: website/src/_scripts/
+
   website:
     name: Build Website
-    needs: [build-binary, recordings, sbom, catalog]
+    needs: [build-binary, recordings, sbom, catalog, doc-scripts]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -198,6 +255,11 @@ jobs:
         with:
           name: website-catalog-pages
           path: website/src/docs/catalog/
+      - name: Download Doc Scripts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: website-doc-scripts
+          path: website/src/_scripts/
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Setup Node
