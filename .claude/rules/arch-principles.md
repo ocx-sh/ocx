@@ -84,6 +84,7 @@ CLI command (clap parse)
 | `adr_three_tier_cas_storage.md` | Three-tier content-addressed storage (blobs + layers + packages) |
 | `adr_index_routing_semantics.md` | `IndexOperation::{Query, Resolve}` enum; pinned-id pulls skip tag commit |
 | `adr_cli_high_low_layering.md` | Formalize high-level (project-tier) vs OCI-tier CLI split; add `ocx run`; reserve `all` keyword |
+| `adr_windows_exe_shim.md` | Native Windows `.exe` shim + `.shim` sidecar replaces the `.cmd` launcher (no `.cmd` emitted; PATHEXT inject/warn machinery removed); fully eliminates BatBadBut `%*`; committed-blob embed (A1 + B1 + C2 + D1) |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 
@@ -125,6 +126,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | `utility/` | Extension traits + async + fs helpers — see [Utility Catalog](#utility-catalog) below | Everywhere (prelude for extension traits) |
 | `compression/` | Compression level config | Archive, OCI push |
 | `codesign/` | macOS ad-hoc code signing for Mach-O binaries | Package extraction |
+| `shim.rs` | Arch-gated `include_bytes!` embed of committed Windows `.exe` shim blobs + `SHIM_SHA256` corruption canary; `SHIM_BYTES = &[]` on non-Windows. See `adr_windows_exe_shim.md`. | Launcher generation (`launcher::generate`) |
 
 ## Utility Catalog
 
@@ -153,7 +155,6 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Assemble layer's content tree into package (hardlinks + symlinks) | `utility::fs::assemble_from_layer(s)` | `utility/fs/assemble.rs` |
 | Boolean-like env string (`true/1/yes/on`) | `utility::boolean_string::BooleanString` | `utility/boolean_string.rs` |
 | Forward child `ExitStatus` to process `ExitCode` (Unix passthrough, Windows saturate) | `utility::child_process::propagate_exit_code` | `utility/child_process.rs` |
-| Inject launcher extension into child env `PATHEXT` (Windows; no-op elsewhere) | `package_manager::launcher::emplace_pathext` | `package_manager/launcher/pathext.rs` |
 | File error with path context | `error::file_error(path, io_err)` | `crates/ocx_lib/src/error.rs` |
 
 **Check std first, then this catalog, then invent.** Most "small helper" needs already covered by `std::path`, `tokio::fs`, or existing entry above. If add new entry here, keep row to one line and put impl details in target module's doc comment, not this table.

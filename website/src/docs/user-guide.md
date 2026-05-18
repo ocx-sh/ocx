@@ -102,6 +102,30 @@ ocx find --candidate cmake:3.28   # ~/.ocx/symlinks/ocx.sh/cmake/candidates/3.28
 
 Both `--candidate` and `--current` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.
 
+### Running an installed tool on Windows {#stable-paths-windows}
+
+On Windows, `ocx install` (and `ocx select`) generates two files per entrypoint in the package's `entrypoints/` directory:
+
+| File | Role |
+|------|------|
+| `<name>.exe` | Native launcher — the sole Windows entry point for all callers |
+| `<name>.shim` | One-line sidecar carrying the absolute package root |
+
+There is no `.cmd` launcher. `.EXE` is unconditionally present in the default Windows [`PATHEXT`][windows-pathext], so bare-name resolution in `cmd.exe`, [PowerShell][powershell-docs], and [Git Bash][git-bash] all find `<name>.exe` with no `PATHEXT` configuration ever needed.
+
+The `.exe` shim reads `<name>.shim` at invocation time, then calls `CreateProcessW` directly to spawn `ocx launcher exec`. It does not route through `cmd.exe`. This is the definitive fix for the [BatBadBut / CVE-2024-24576][batbadbut-advisory] class of argument-injection vulnerability — caller arguments never pass through a second `cmd.exe` parse.
+
+:::info How the shim reaches `ocx`
+The shim resolves `ocx` using `OCX_BINARY_PIN` if the variable is **defined** in the environment (even if empty), and falls back to `PATH`-resolved `ocx` only when the variable is completely unset — see [`OCX_BINARY_PIN`][env-ocx-binary-pin] for details.
+:::
+
+**Unsigned shim note.** The committed shim blobs (~138 KiB x86_64 / ~128 KiB aarch64) are unsigned in this release. [Authenticode][authenticode] signing via [SignPath Foundation][signpath] is a documented follow-on step. For backend-automation use (CI, Bazel, devcontainers), the unsigned shim is fully functional; SmartScreen friction applies only to interactive end-user downloads.
+
+::: tip Learn more
+[Entry Points In Depth][in-depth-entry-points] — launcher ABI, `launcher exec` wire protocol, clean-env execution.
+[`OCX_BINARY_PIN` reference][env-ocx-binary-pin] — pin a specific `ocx` binary for nested invocations.
+:::
+
 ### Shell hook integration {#stable-paths-shell-hook}
 
 For interactive shells, [`ocx shell init`][cmd-shell-init] wires the project toolchain into your shell's prompt cycle. Run it once to install the hook, then every new prompt re-evaluates `ocx.toml` and updates the environment automatically:
@@ -525,6 +549,12 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 
 <!-- external -->
 [toml]: https://toml.io/
+[windows-pathext]: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/set
+[powershell-docs]: https://learn.microsoft.com/en-us/powershell/
+[git-bash]: https://git-scm.com/downloads
+[batbadbut-advisory]: https://github.com/rust-lang/rust/security/advisories/GHSA-q455-m56c-85mh
+[authenticode]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/authenticode
+[signpath]: https://about.signpath.io/
 [uv]: https://docs.astral.sh/uv/
 [uv-lock]: https://docs.astral.sh/uv/reference/cli/#uv-lock
 [uv-sync]: https://docs.astral.sh/uv/reference/cli/#uv-sync
@@ -577,6 +607,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [arg-index]: ./reference/command-line.md#arg-index
 
 <!-- environment -->
+[env-ocx-binary-pin]: ./reference/environment.md#ocx-binary-pin
 [env-ocx-home]: ./reference/environment.md#ocx-home
 [env-ocx-index]: ./reference/environment.md#ocx-index
 [env-config]: ./reference/environment.md#ocx-config

@@ -5,11 +5,7 @@ use std::{collections::HashMap, process::ExitCode};
 
 use clap::Parser;
 
-use crate::{
-    api,
-    conventions::{platforms_or_default, warn_if_pathext_missing_launcher},
-    options,
-};
+use crate::{api, conventions::platforms_or_default, options};
 
 /// Set the current version of one or more packages.
 ///
@@ -32,7 +28,6 @@ pub struct Select {
 
 impl Select {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        warn_if_pathext_missing_launcher();
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
         let platforms = platforms_or_default(self.platforms.as_slice());

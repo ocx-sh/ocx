@@ -29,7 +29,7 @@ Entry points live as a sibling object on the bundle metadata, keyed by the comma
 
 `entrypoints` is a JSON object keyed by command name; the value object holds per-entry fields and is reserved for future additions (currently always `{}`). The map shape mirrors Cargo's `[dependencies.X]`, Compose's `services:`, and GitHub Actions's `jobs:` — uniqueness within a package follows from JSON object key semantics. At runtime the launcher resolves the entry's name against the composed `PATH` from the package's [`env`][metadata-env] block, so the publisher declares the binary's location once via `env` and the launcher exec resolver picks it up from there. The complete field reference lives at [Entry Points in the metadata reference][metadata-entry-points].
 
-At install time OCX writes one script per entry into a sibling [`entrypoints/` directory][fs-packages] inside the content-addressed package directory — a POSIX `.sh` launcher (mode `0755`) and a Windows `.cmd` launcher for every declared name, regardless of which platform is currently installing. Generating both shapes on every platform keeps publishers from having to fork metadata per host OS.
+At install time OCX writes the launchers for every declared name into a sibling [`entrypoints/` directory][fs-packages] inside the content-addressed package directory, regardless of which platform is currently installing. POSIX hosts get a `.sh` launcher (mode `0755`); Windows hosts get a native `<name>.exe` shim plus a one-line `<name>.shim` sidecar that carries the absolute package root. Generating every shape on every platform keeps publishers from having to fork metadata per host OS.
 
 ::: tip Declare the commands users will actually type
 Only promote user-facing commands to entry points. Internal helpers, wrapper scripts, and build-time binaries belong in `${installPath}/bin` (discoverable through `ocx exec` or explicit path lookup) rather than on `$PATH`. Every launcher consumes a global name across every package a user has selected — be deliberate about the ones you spend.
@@ -61,7 +61,7 @@ Short, common names (`ls`, `gcc`, `tar`) create more cross-package collisions th
 
 ## How Launchers Work at Runtime {#runtime}
 
-A generated launcher is deliberately small. On Unix it is exactly:
+On Unix a generated launcher is a deliberately small `sh` script. It is exactly:
 
 ```sh
 #!/bin/sh
@@ -69,23 +69,19 @@ A generated launcher is deliberately small. On Unix it is exactly:
 exec "${OCX_BINARY_PIN:-ocx}" launcher exec '/home/alice/.ocx/packages/ocx.sh/sha256/ab/c123…' -- "$(basename "$0")" "$@"
 ```
 
-On Windows the equivalent `.cmd` file is:
+On Windows the launcher is a native compiled `<name>.exe` shim accompanied by a `<name>.shim` sidecar. The sidecar is one UTF-8 line — the absolute package root, the same string the `.sh` body inlines:
 
-```bat
-@ECHO off
-SETLOCAL DisableDelayedExpansion
-IF DEFINED OCX_BINARY_PIN (
-    "%OCX_BINARY_PIN%" launcher exec "C:\Users\alice\.ocx\packages\ocx.sh\sha256\ab\c123…" -- "%~n0" %*
-) ELSE (
-    ocx launcher exec "C:\Users\alice\.ocx\packages\ocx.sh\sha256\ab\c123…" -- "%~n0" %*
-)
+```text
+C:\Users\alice\.ocx\packages\ocx.sh\sha256\ab\c123…
 ```
 
-Only the absolute package-root path is baked. The `ocx launcher exec` subcommand (hidden from `ocx --help`) forces the [self view][visibility-views] internally — private + public + interface entries all visible to the launched binary — so internal helpers (compilers, runtimes, shared libraries) are available without any flag baked into the script.
+The shim derives its own entry-point name from its filename (the file stem, minus the final `.exe`), reads the sibling `<stem>.shim` to learn the package root, and spawns `ocx launcher exec "<pkg-root>" -- "<stem>" <args…>` directly via the Win32 [`CreateProcessW`][createprocessw] API. It never routes through `cmd.exe`, so caller arguments are forwarded verbatim with no second command-line parse.
 
-The launcher injects its own filename — `$(basename "$0")` on Unix, `%~n0` on Windows — as the first positional after `--`. `launcher exec` reads that argv0, composes the runtime env (including `PATH`), and uses the standard PATH search — `Env::resolve_command` — to locate the executable. There is no separate `target` field to dispatch on; the entry-point name *is* the dispatch key, and the composed `PATH` from the package's [`env`][metadata-env] block is the authoritative source of where each entry point's binary lives.
+Only the absolute package-root path is baked (into the `.sh` body on Unix, into the `.shim` sidecar on Windows). The `ocx launcher exec` subcommand (hidden from `ocx --help`) forces the [self view][visibility-views] internally — private + public + interface entries all visible to the launched binary — so internal helpers (compilers, runtimes, shared libraries) are available without any flag baked into the launcher.
 
-Both flavors use `OCX_BINARY_PIN` when the variable is set, falling back to plain `ocx` on `$PATH` otherwise. The variable is propagated from the parent `ocx` process to all child processes via `env::Env::apply_ocx_config`, so a user-level OCX upgrade that sets `OCX_BINARY_PIN` takes effect for every launcher without touching the launcher bodies on disk.
+The launcher injects its own entry-point name — `$(basename "$0")` on Unix, the `.exe` file stem on Windows — as the first positional after `--`. `launcher exec` reads that argv0, composes the runtime env (including `PATH`), and uses the standard PATH search — `Env::resolve_command` — to locate the executable. There is no separate `target` field to dispatch on; the entry-point name *is* the dispatch key, and the composed `PATH` from the package's [`env`][metadata-env] block is the authoritative source of where each entry point's binary lives.
+
+Both flavors use `OCX_BINARY_PIN` when the variable is set, falling back to plain `ocx` on `$PATH` otherwise. The Unix `${OCX_BINARY_PIN:-ocx}` form treats an empty value as unset; the Windows shim follows `cmd`-style `IF DEFINED` semantics, so a variable that is present but empty still takes the pinned branch. The variable is propagated from the parent `ocx` process to all child processes via `env::Env::apply_ocx_config`, so a user-level OCX upgrade that sets `OCX_BINARY_PIN` takes effect for every launcher without touching the launchers on disk.
 
 The stable wire ABI is the `launcher exec` subcommand name pair and the positional shape (`<pkg-root> -- <argv0> [args...]`). Both are frozen so launchers generated by older OCX releases keep working after the tool is upgraded.
 
@@ -94,7 +90,7 @@ A launcher whose body expanded `current` on every invocation would drift the mom
 :::
 
 ::: warning Characters that fail launcher generation
-The same character set is rejected for every launcher OCX writes, regardless of which platform is doing the install — both `.sh` and `.cmd` shapes are generated on every host. The forbidden characters in the package-root path are: single quote (`'`), double quote (`"`), percent (`%`), newline (`\n`), carriage return (`\r`), and NUL (`\0`). The double quote is rejected even on Unix because Windows `cmd.exe` shares the rule. The check fires at launcher generation time so packages installed into a path containing any of these never produce a corrupt launcher — install fails loudly first.
+The same character set is rejected for every launcher OCX writes, regardless of which platform is doing the install — every shape is generated on every host. The forbidden characters in the package-root path are: single quote (`'`), double quote (`"`), newline (`\n`), carriage return (`\r`), and NUL (`\0`). The set protects two written-to-disk artifacts: the single-quoted package-root literal in the Unix `.sh` body — `'` cannot be escaped inside a single-quoted `sh` string — and the one-line `.shim` sidecar the Windows shim reads, where `\n`, `\r`, and `\0` would corrupt the single-line contract. Double quote stays forbidden because it has to be quoted for both the `.sh` body and the native shim's `CreateProcessW` command line. Backslash and percent are both *allowed*: ordinary Windows paths (`C:\Users\…`) and folders containing `%` (e.g. `100%real`) must work. The Windows shim reads the sidecar verbatim and spawns via `CreateProcessW` with no `cmd.exe`, so neither `\` nor `%` carries special meaning. The check fires at launcher generation time so packages installed into a path containing any of these never produce a corrupt launcher — install fails loudly first.
 :::
 
 ## Synth-PATH Mechanism {#synth-path}
@@ -150,59 +146,38 @@ Launchers are the first OCX artifact whose correctness depends on the user's she
 
 The Unix launcher is a POSIX `sh` script with the package-root path inlined as a single-quoted literal. The unsafe-character set rejected at generation time (described in the runtime section above) keeps that literal trivially safe — there is no safe way to escape single quotes inside single-quoted strings in `sh`, so OCX refuses to ship a launcher whose package-root path contains one. In practice this only bites packages whose [`OCX_HOME`][env-ocx-home] contains a literal apostrophe, which is vanishingly rare. The launcher is chmod-ed to `0755` as part of the write, so the install is complete with no follow-up `chmod` step.
 
-### Windows (`cmd.exe`) {#windows}
+### Windows {#windows}
 
-The Windows launcher is a `cmd.exe` batch file. The package-root path is double-quoted on the `ocx launcher exec` line, so a literal `%` in the path would terminate the variable expansion early and change the semantics. The same unified rejection list described above forbids `%` in the package-root path; the rule fires at publish, install, and launcher-generation time so the batch file always parses cleanly.
+The Windows launcher is a native compiled `.exe` shim, not a script. When a shell resolves `cmake` it finds `cmake.exe` (`.EXE` is unconditionally in the default Windows `PATHEXT`, so no `PATHEXT` configuration is ever needed for launcher discovery). The shim reads its `cmake.shim` sidecar for the package root and spawns `ocx launcher exec` through [`CreateProcessW`][createprocessw], passing caller arguments straight through with Win32 [`CommandLineToArgvW`][cmdlinetoargv]-compatible quoting. Because nothing re-parses the command line through `cmd.exe`, arguments survive verbatim — spaces, Unicode, shell metacharacters (`&`, `|`, `^`, `<`, `>`), and literal empty strings (`cmake "" --version`) all reach the tool exactly as written. This closes the `BatBadBut` / [CVE-2024-24576][batbadbut] `%*` argument-injection class for default resolution; automation that interpolates untrusted strings (a CI branch name, a build label) into launcher arguments is not exposed through OCX's own launchers.
 
-`cmd.exe`'s `%*` argument expansion silently drops empty arguments. A caller who invokes `cmake "" --version` will see the launcher forward `cmake --version` to `ocx exec`. This is a native `cmd.exe` limitation rather than an OCX design choice; tools that genuinely need empty positional arguments on Windows should call [`ocx exec`][cmd-exec] directly instead of going through a launcher.
+The shim is transparent: it propagates the child's exit code unchanged (full 32-bit passthrough), forwards stdin/stdout/stderr to the real console, and uses a Win32 job object so a force-killed launcher reaps its child tree rather than orphaning it. Errors before the child starts go to stderr as a single `ocx-shim:` line with a [sysexits][sysexits]-aligned exit code. A missing sidecar is recoverable: re-running [`ocx install`][cmd-install] or [`ocx select`][cmd-select] regenerates the entrypoint, and that hint is printed on the stderr line itself.
 
-::: warning Residual argument-injection risk on Windows
-OCX launchers use `SETLOCAL DisableDelayedExpansion`, which closes the registry-level `!VAR!` expansion vector (the narrower `BatBadBut`-class path that requires a prior registry write). However, the `%*` parameter that forwards caller arguments is still re-parsed by `cmd.exe`. Arguments containing metacharacters (`&`, `|`, `^`, `<`, `>`, `(`, `)`) outside double-quoted regions can be interpreted as shell commands. If your automation passes user-controlled strings — for example a CI pipeline interpolating a branch name or a build label — as arguments to an OCX launcher without quoting, those strings are exploitable. Shell-quote all arguments before passing them to OCX launchers. See [`.claude/artifacts/adr_windows_cmd_argv_injection.md`][adr-argv] for the full threat model; a compiled `.exe` shim that bypasses `cmd.exe` entirely is tracked as the definitive follow-up.
-:::
+When `ocx` cannot be resolved, the message depends on how resolution was attempted. With no [`OCX_BINARY_PIN`][env-ocx-binary-pin] set and `ocx` not on `$PATH`, the shim prints `ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)`. When `OCX_BINARY_PIN` *is* set but points at a path that does not exist, the shim names that path instead — `ocx-shim: pinned ocx not found: C:\path\to\ocx.exe (OCX_BINARY_PIN points at a missing path)` — because the generic "add ocx to PATH" hint would be misleading there.
+
+The shim's pre-child exit codes are stable and scriptable:
+
+| Code | Meaning | Operator action |
+|------|---------|-----------------|
+| `69` | `ocx` unavailable (not pinned and not on `$PATH`, or the pinned path is missing) | Put `ocx` on `$PATH` or fix [`OCX_BINARY_PIN`][env-ocx-binary-pin] before any launcher runs |
+| `74` | `CreateProcessW` failed — the Win32 error code is on the stderr line | Inspect the reported Win32 code; usually a corrupt binary or a transient OS condition — re-run, then re-`ocx install` |
+| `77` | Permission denied (`ERROR_ACCESS_DENIED`) starting the child | Check execution policy / AppLocker / antivirus blocking the launcher; grant execute on the package root |
+| `78` | Bad or missing `.shim` sidecar (absent, empty, oversized, not absolute, or corrupt) | Re-run [`ocx install`][cmd-install] or [`ocx select`][cmd-select] to regenerate the entrypoint |
+
+The child's own exit code passes through untouched on the success path, so a non-zero value above is unambiguously a launcher-stage failure, not the tool's.
 
 ### PowerShell {#powershell}
 
-PowerShell invokes `.cmd` files natively — `cmake --version` in a PowerShell prompt resolves to `cmake.cmd` on `$PATH`, runs it under `cmd.exe`, and returns the combined exit code. OCX does **not** generate a `.ps1` variant: a native PowerShell script ran into argument-forwarding quirks around `--` and quoted empty strings during prototyping, and the `.cmd` path avoids every known issue while covering the entire PowerShell user base.
+PowerShell resolves `cmake` to `cmake.exe` on `$PATH` and runs it directly — there is no intervening `cmd.exe`, so PowerShell's own `%VAR%`-in-double-quotes expansion quirk does not apply to OCX launchers. OCX does not generate a `.ps1` variant: the native `.exe` shim already covers the entire PowerShell user base with no script-language argument-forwarding caveats.
 
-The practical rule is: PowerShell users should add `ocx --offline shell hook powershell | Invoke-Expression` to their `$PROFILE`. The resulting `$PATH` entries pick up the `.cmd` launchers automatically.
-
-::: warning PowerShell `%`-style variable references in arguments
-When you call a `.cmd` launcher from a PowerShell prompt, PowerShell expands `%SystemRoot%`-style references inside double-quoted argument strings **before** the argument reaches `cmd.exe`. For example, `cmake "--install=%SystemRoot%\tools"` will have `%SystemRoot%` replaced by PowerShell with the value of `$env:SystemRoot` before the launcher ever runs. Use the PowerShell `--%-` stop-parsing operator to pass arguments verbatim to the cmd.exe layer:
-
-```powershell
-cmake --% --install=%SystemRoot%\tools
-```
-
-Everything after `--%-` is forwarded to the underlying process without PowerShell variable or expression expansion. This applies to any argument containing `%VAR%` sequences you want `cmd.exe` (or the tool itself) to expand rather than PowerShell.
-:::
+The practical rule is: PowerShell users should add `ocx --offline shell hook powershell | Invoke-Expression` to their `$PROFILE`. The resulting `$PATH` entries pick up the `.exe` launchers automatically.
 
 ### Git Bash and MSYS2 {#git-bash}
 
-On Windows, POSIX-emulation shells (Git Bash, MSYS2, Cygwin) can invoke `.cmd` files directly using the native Windows path baked into the launcher body. Users running these shells do not need an extra `.sh` launcher — the `.cmd` script works from both `cmd.exe` and Git Bash prompts, because both ultimately route the call through `cmd.exe`.
+On Windows, POSIX-emulation shells (Git Bash, MSYS2, Cygwin) resolve `cmake.exe` directly by its explicit extension — these shells do not consult `PATHEXT`, so the native `.exe` is exactly what they need with no extra `.sh` launcher. The same shim runs identically from `cmd.exe`, PowerShell, and a Git Bash prompt because none of them route the call through `cmd.exe`.
 
-::: warning `ocx` must be on `$PATH`
-Every launcher delegates to `ocx launcher exec`. If the user's shell cannot find `ocx` (and `OCX_BINARY_PIN` is not set), the launcher cannot resolve the underlying binary. Installation flows that put OCX itself on `$PATH` (for example, an `ocx` package installed with `--select`, or a system-level install) must be in place *before* any launcher is invoked. The [installation guide][install] covers the supported bootstrap paths.
+::: warning `ocx` must be resolvable
+Every launcher delegates to `ocx launcher exec`. If the shim cannot find `ocx` it exits with code `69` and one of two messages: with no [`OCX_BINARY_PIN`][env-ocx-binary-pin] set and `ocx` off `$PATH`, `ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)`; with `OCX_BINARY_PIN` set to a path that does not exist, `ocx-shim: pinned ocx not found: <path> (OCX_BINARY_PIN points at a missing path)`. Installation flows that put OCX itself on `$PATH` (for example, an `ocx` package installed with `--select`, or a system-level install) must be in place *before* any launcher is invoked. The [installation guide][install] covers the supported bootstrap paths.
 :::
-
-## Known Limitations {#known-limitations}
-
-### `cmd.exe` drops empty positional arguments {#cmd-empty-args}
-
-`cmd.exe`'s `%*` parameter expansion silently discards empty positional arguments. A caller who passes `cmake "" --verbose` will have the launcher forward `cmake --verbose` to `ocx exec` — the empty string disappears. This is a `cmd.exe` limitation, not an OCX design choice.
-
-Callers that must pass literal empty strings as positional arguments on Windows should bypass the launcher and call [`ocx exec`][cmd-exec] directly:
-
-```bat
-ocx exec cmake:3.28 -- cmake "" --verbose
-```
-
-Alternatively, pass the empty argument in a PowerShell session using explicit quoting with the `--%-` stop-parsing operator, which lets you control exactly what `cmd.exe` sees:
-
-```powershell
-cmake --% "" --verbose
-```
-
-Neither workaround applies on Unix: the POSIX `sh` launcher uses `"$@"` which preserves empty arguments verbatim.
 
 ## End-to-End Example {#example}
 
@@ -243,9 +218,6 @@ ocx select cmake:3.30     # current flips; next shell command uses 3.30
 
 No re-sourcing dotfiles. The `ocx shell hook` output is stable — it emits exports for whichever packages are currently selected. The stable `current/entrypoints` path was already on `$PATH`; the select just re-points the `current` symlink at the new package root, and the next shell open picks up the updated hook output automatically.
 
-<!-- security -->
-[adr-argv]: https://github.com/ocx-sh/ocx/blob/main/.claude/artifacts/adr_windows_cmd_argv_injection.md
-
 <!-- in-depth -->
 [env-composition]: ./environments.md
 [edge-filter]: ./environments.md#edge-filter
@@ -254,6 +226,10 @@ No re-sourcing dotfiles. The `ocx shell hook` output is stable — it emits expo
 <!-- external -->
 [sdkman]: https://sdkman.io/
 [asdf]: https://asdf-vm.com/
+[createprocessw]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+[cmdlinetoargv]: https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-commandlinetoargvw
+[batbadbut]: https://github.com/rust-lang/rust/security/advisories/GHSA-q455-m56c-85mh
+[sysexits]: https://man.freebsd.org/cgi/man.cgi?sysexits
 
 <!-- commands -->
 [cmd-exec]: ../reference/command-line.md#exec
@@ -265,6 +241,7 @@ No re-sourcing dotfiles. The `ocx shell hook` output is stable — it emits expo
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home
+[env-ocx-binary-pin]: ../reference/environment.md#ocx-binary-pin
 
 <!-- reference pages -->
 [metadata-ref]: ../reference/metadata.md

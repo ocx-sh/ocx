@@ -22,10 +22,6 @@
 //! Both [`propagate_exit_status`] and [`propagate_exit_code`] delegate to the
 //! private `exit_code_from_status` helper, which is the single source of truth
 //! for the `128 + signum` (Unix) and full-i32 passthrough (Windows) mapping.
-//!
-//! Launcher-specific spawn helpers (e.g. `PATHEXT` injection) live in
-//! [`crate::package_manager::launcher::pathext`] — they belong with the
-//! launcher concept, not with this generic helper.
 
 use std::path::Path;
 use std::process::ExitStatus;

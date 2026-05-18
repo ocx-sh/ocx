@@ -20,7 +20,6 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::env;
-use ocx_lib::package_manager::launcher;
 use ocx_lib::project::{ALL_GROUP, DEFAULT_GROUP, Origin, ResolvedTool, compose_tool_set, expand_all_keyword};
 use ocx_lib::utility::child_process;
 
@@ -197,9 +196,9 @@ impl Run {
         // for `OCX_*` keys on the child env — no ambient parent-shell export
         // can override it.
         process_env.apply_ocx_config(context.config_view());
-        // Ensure the child PATHEXT lists the OCX launcher extension so generated
-        // `.cmd` shims are resolvable. No-op on non-Windows.
-        launcher::emplace_pathext(&mut process_env);
+        // No PATHEXT manipulation: the Windows launcher is now a native
+        // `<name>.exe` shim and `.EXE` is unconditionally in the default
+        // Windows PATHEXT, so the child resolves it via the OS default.
 
         // clap enforces `last = true, num_args = 1.., required = true` on the
         // `argv` field — `self.argv` is always non-empty at this point.

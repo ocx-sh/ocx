@@ -58,8 +58,7 @@ impl Env {
         let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             info.into_iter().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&info, self.self_view).await?;
-        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-        let mut all_entries: Vec<api::data::env::EnvEntry> = entries
+        let all_entries: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
             .map(|e| api::data::env::EnvEntry {
                 key: e.key,
@@ -68,76 +67,12 @@ impl Env {
             })
             .collect();
 
-        // On Windows, append a synthetic `PATHEXT ⊳ .CMD` entry to the env
-        // output when the host shell's PATHEXT lacks `.cmd`. `ocx env` is the
-        // shell-eval boundary — what we emit becomes the consumer's effective
-        // env after `eval`. The host PATHEXT we read here drives the gate, not
-        // whether the resolved env actually contains a launcher PATH entry:
-        // false-positive cost (one extra exported segment) is lower than the
-        // metadata-inspection cost we would pay to gate on launcher presence,
-        // and a benign duplicate is collapsed by `launcher::includes_launcher`
-        // on the consumer side.
-        #[cfg(target_os = "windows")]
-        {
-            let current_pathext = std::env::var("PATHEXT").unwrap_or_default();
-            if let Some(entry) = synthetic_pathext_entry(&current_pathext) {
-                all_entries.push(entry);
-            }
-        }
+        // No synthetic PATHEXT entry: the Windows launcher is now a native
+        // `<name>.exe` shim, and `.EXE` is unconditionally in the default
+        // Windows PATHEXT — nothing to inject for bare-name resolution.
 
         context.api().report(&api::data::env::EnvVars::new(all_entries))?;
 
         Ok(ExitCode::SUCCESS)
-    }
-}
-
-/// Returns a synthetic `PATHEXT ⊳ .CMD` env entry when the host PATHEXT does
-/// not already list the launcher extension. Returns `None` otherwise so
-/// `ocx env` does not emit a redundant entry for shells that already include
-/// `.CMD`.
-#[cfg(target_os = "windows")]
-fn synthetic_pathext_entry(host_pathext: &str) -> Option<api::data::env::EnvEntry> {
-    if ocx_lib::package_manager::launcher::includes_launcher(host_pathext) {
-        return None;
-    }
-    Some(api::data::env::EnvEntry {
-        key: "PATHEXT".to_string(),
-        value: ocx_lib::package_manager::launcher::LAUNCHER_EXT.to_string(),
-        kind: ocx_lib::package::metadata::env::modifier::ModifierKind::Path,
-    })
-}
-
-#[cfg(all(test, target_os = "windows"))]
-mod synthetic_pathext_tests {
-    use super::synthetic_pathext_entry;
-
-    #[test]
-    fn returns_none_when_host_pathext_includes_cmd() {
-        assert!(synthetic_pathext_entry(".EXE;.CMD;.BAT").is_none());
-    }
-
-    #[test]
-    fn returns_none_for_lowercase_cmd() {
-        assert!(synthetic_pathext_entry(".exe;.cmd").is_none());
-    }
-
-    #[test]
-    fn returns_synthetic_entry_when_cmd_absent() {
-        let entry = synthetic_pathext_entry(".EXE;.BAT").expect("synthetic entry expected");
-        assert_eq!(entry.key, "PATHEXT");
-        assert_eq!(entry.value, ".CMD");
-    }
-
-    #[test]
-    fn returns_synthetic_entry_when_pathext_empty() {
-        let entry = synthetic_pathext_entry("").expect("synthetic entry expected");
-        assert_eq!(entry.key, "PATHEXT");
-        assert_eq!(entry.value, ".CMD");
-    }
-
-    #[test]
-    fn partial_match_still_emits_synthetic() {
-        // ".cmdextra" must not silence the gate.
-        assert!(synthetic_pathext_entry(".cmdextra;.EXE").is_some());
     }
 }

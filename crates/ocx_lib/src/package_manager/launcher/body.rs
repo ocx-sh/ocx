@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Launcher body templates (Unix `.sh` and Windows `.cmd`).
+//! Launcher body templates (Unix `.sh`) and the Windows `.shim` sidecar body.
 //!
 //! Body output is byte-stable per `adr_package_entry_points.md` — every
 //! literal substring is a One-Way Door commitment covered by the golden tests
@@ -12,6 +12,12 @@
 //! All presentation flags, self-view selection, and OCX binary pinning are
 //! hidden inside the `launcher exec` subcommand — launchers on disk are
 //! decoupled from future evolutions of those internals.
+//!
+//! Windows no longer emits a `.cmd` launcher: the native `.exe` shim
+//! (`crates/ocx_shim`) is the sole Windows launcher and reads the one-line
+//! [`shim_sidecar_body`] sidecar to learn `pkg_root`. The shim is the second
+//! producer of the frozen `launcher exec` wire string (the `.sh` body is the
+//! first); see `subsystem-package-manager.md` "Wire-ABI canary rule".
 
 use super::safety::LauncherSafeString;
 
@@ -56,57 +62,23 @@ pub(super) fn unix_launcher_body(pkg_root: &LauncherSafeString) -> String {
     )
 }
 
-/// Produces the body of a Windows `.cmd` launcher.
+/// Produces the body of a Windows `.shim` sidecar.
 ///
-/// The launcher bakes only `<pkg_root>` and calls
-/// `ocx launcher exec "<pkg_root>" -- "%~n0" %*`, which reads `metadata.json`
-/// from that root, composes the runtime env, and resolves the entrypoint name
-/// against the composed `PATH` (with `PATHEXT` probing) at invocation time. No
-/// binary path is baked into the launcher body itself.
-///
-/// `SETLOCAL DisableDelayedExpansion` closes the registry-level `!VAR!`
-/// expansion vector (BatBadBut interim mitigation, ADR
-/// `adr_windows_cmd_argv_injection.md`). Residual risk: caller-supplied
-/// arguments forwarded via `%*` are still re-parsed by `cmd.exe`; callers
-/// passing user-controlled argument strings must shell-quote them.
-///
-/// `EXIT /B %ERRORLEVEL%` after the IF/ELSE block is load-bearing: cmd.exe
-/// has no `exec` equivalent, so the inner ocx exit code must be propagated
-/// explicitly. Without it, propagation depends on cmd.exe's implicit
-/// end-of-script behaviour, which interacts subtly with `SETLOCAL` and
-/// parenthesised `IF/ELSE` blocks. The Unix template gets the same property
-/// for free via `exec`.
-///
+/// Contract: exactly the absolute `pkg_root` followed by a single `\n`
+/// (LF), UTF-8 with no BOM. This is the One-Way-Door on-disk artifact the
+/// native `ocx-shim.exe` reads to learn `pkg_root`; its byte/encoding spec is
+/// frozen (see `adr_windows_exe_shim.md` §`.shim` Sidecar Format Contract).
 /// Inputs are pre-validated [`LauncherSafeString`]s — see [`unix_launcher_body`].
-pub(super) fn windows_launcher_body(pkg_root: &LauncherSafeString) -> String {
-    let pkg_root = pkg_root.as_str();
-    // `%~n0` expands to the script's filename without path or extension —
-    // identical role to Unix `$(basename "$0")`. The launcher forwards the
-    // entrypoint name to `ocx launcher exec`, which resolves the binary
-    // against the composed `PATH` (`PATHEXT`-aware) at invocation time.
-    // `DisableDelayedExpansion`: closes the `!VAR!` expansion vector that is
-    // active when the Windows registry key
-    // `HKCU\Software\Microsoft\Command Processor\DelayedExpansion` is set to
-    // `1`. See ADR `adr_windows_cmd_argv_injection.md` for threat model.
-    //
-    // `IF DEFINED OCX_BINARY_PIN` mirrors the Unix `${OCX_BINARY_PIN:-ocx}` form:
-    // when set by an outer ocx (via `Env::apply_ocx_config`), the launcher
-    // pins the inner ocx to the same binary; otherwise it falls through to
-    // a `$PATH` lookup.
-    //
-    // `EXIT /B %ERRORLEVEL%` makes inner-ocx exit-code propagation explicit
-    // (no cmd.exe `exec` equivalent — without this, propagation through the
-    // `SETLOCAL` + parenthesised `IF/ELSE` block is interpreter-dependent).
-    format!(
-        "@ECHO off\n\
-         SETLOCAL DisableDelayedExpansion\n\
-         IF DEFINED OCX_BINARY_PIN (\n\
-         \x20\x20\"%OCX_BINARY_PIN%\" launcher exec \"{pkg_root}\" -- \"%~n0\" %*\n\
-         ) ELSE (\n\
-         \x20\x20ocx launcher exec \"{pkg_root}\" -- \"%~n0\" %*\n\
-         )\n\
-         EXIT /B %ERRORLEVEL%\n"
-    )
+// Only called from the cfg(windows) branch of `generate`; allow the dead_code
+// lint so non-Windows builds stay clean (same pattern as
+// `child_process::propagate_exit_status`).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn shim_sidecar_body(pkg_root: &LauncherSafeString) -> String {
+    // Exactly `<pkg_root>\n` — LF only, no BOM, no CRLF, pkg_root and nothing
+    // else. `pkg_root` is the already-validated `LauncherSafeString` (the
+    // `LAUNCHER_UNSAFE_CHARS` guard ran at the `generate` entry boundary);
+    // there is no second validator here (ADR Contract 2 / §`.shim` format).
+    format!("{}\n", pkg_root.as_str())
 }
 
 #[cfg(test)]
@@ -156,57 +128,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn windows_launcher_body_golden_match() {
-        let body = super::windows_launcher_body(&safe("C:\\pkg\\root"));
-        assert!(
-            body.contains("@ECHO off") || body.contains("@echo off"),
-            "must have ECHO off: {body}"
-        );
-        assert!(
-            body.contains("SETLOCAL DisableDelayedExpansion"),
-            "must have SETLOCAL DisableDelayedExpansion (BatBadBut interim mitigation): {body}"
-        );
-        assert!(
-            body.contains("IF DEFINED OCX_BINARY_PIN"),
-            "must branch on `IF DEFINED OCX_BINARY_PIN` to honour outer-ocx pin: {body}"
-        );
-        assert!(
-            body.contains("\"%OCX_BINARY_PIN%\""),
-            "must invoke inner ocx via `\"%OCX_BINARY_PIN%\"` when set: {body}"
-        );
-        assert!(
-            body.contains("launcher exec \"C:\\pkg\\root\""),
-            "must inline `launcher exec \"<pkg_root>\"`: {body}"
-        );
-        assert!(
-            body.contains("\"%~n0\""),
-            "must inject launcher's own filename via %~n0: {body}"
-        );
-        assert!(body.contains("%*"), "must forward all args via %*: {body}");
-        assert!(
-            body.contains("EXIT /B %ERRORLEVEL%"),
-            "must propagate inner-ocx exit code via `EXIT /B %ERRORLEVEL%` (no cmd.exe exec equivalent): {body}"
-        );
-        assert!(
-            !body.contains("_target"),
-            "ADR §6: launcher must not bake `_target` (target resolved by `ocx exec` at invocation time): {body}"
-        );
-        assert!(
-            !body.contains("file://"),
-            "new launcher must not use file:// URI scheme (removed in favour of launcher exec): {body}"
-        );
-        // Presentation flags are no longer baked — hidden inside `launcher exec`.
-        assert!(
-            !body.contains("--log-level=off"),
-            "presentation flags must not be baked into launcher template: {body}"
-        );
-        assert!(
-            !body.contains("--self"),
-            "launcher must not bake --self directly; launcher exec handles self-view internally: {body}"
-        );
-    }
-
     // ── Path with spaces is handled correctly ─────────────────────────────
 
     #[test]
@@ -236,97 +157,6 @@ mod tests {
         );
     }
 
-    /// Windows launcher mirrors ADR §6 — no `_target` SET. `%~n0` injects
-    /// the script's name without extension as argv0, then `%*` forwards user
-    /// args. `DisableDelayedExpansion` closes the `!VAR!` vector (BatBadBut
-    /// interim mitigation — ADR `adr_windows_cmd_argv_injection.md`).
-    #[test]
-    fn windows_launcher_body_byte_exact_match_adr_form() {
-        let body = super::windows_launcher_body(&safe("C:\\pkg\\root"));
-        // The stable wire surface is: `launcher exec "<pkg_root>" --` pair.
-        // `OCX_BINARY_PIN` (renamed from `OCX_BINARY`) is the pin variable.
-        let expected = "@ECHO off\n\
-                        SETLOCAL DisableDelayedExpansion\n\
-                        IF DEFINED OCX_BINARY_PIN (\n  \
-                        \"%OCX_BINARY_PIN%\" launcher exec \"C:\\pkg\\root\" -- \"%~n0\" %*\n\
-                        ) ELSE (\n  \
-                        ocx launcher exec \"C:\\pkg\\root\" -- \"%~n0\" %*\n\
-                        )\n\
-                        EXIT /B %ERRORLEVEL%\n";
-        assert_eq!(
-            body, expected,
-            "Windows launcher must match the byte-exact form (launcher exec subcommand; OCX_BINARY_PIN pin via IF DEFINED; explicit EXIT /B %ERRORLEVEL%; no file://; no --self baked; no presentation flags baked)",
-        );
-        assert!(
-            body.contains("SETLOCAL DisableDelayedExpansion"),
-            "launcher must use SETLOCAL DisableDelayedExpansion (BatBadBut interim mitigation): {body}"
-        );
-        assert!(
-            !body.contains("EnableDelayedExpansion"),
-            "template must not enable delayed expansion: {body}"
-        );
-    }
-
-    /// Regression — `.cmd` launcher must terminate with `EXIT /B %ERRORLEVEL%`
-    /// so the inner `ocx launcher exec` exit code propagates verbatim.
-    /// cmd.exe has no `exec` equivalent (the Unix template gets this for free
-    /// via `exec`); without explicit `EXIT /B` propagation through the
-    /// `SETLOCAL` + parenthesised `IF/ELSE` block is interpreter-dependent.
-    #[test]
-    fn windows_launcher_body_propagates_exit_code() {
-        let body = super::windows_launcher_body(&safe("C:\\pkg\\root"));
-        assert!(
-            body.contains("EXIT /B %ERRORLEVEL%"),
-            "Windows launcher must end with explicit `EXIT /B %ERRORLEVEL%` to propagate inner-ocx exit code: {body}"
-        );
-        // Final non-empty line must be the EXIT — no commands after it that
-        // could reset ERRORLEVEL before it is captured.
-        let last = body.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
-        assert_eq!(
-            last.trim(),
-            "EXIT /B %ERRORLEVEL%",
-            "EXIT /B %ERRORLEVEL% must be the final command in the script (nothing else can run after it that could overwrite ERRORLEVEL): last line was {last:?}",
-        );
-    }
-
-    /// `.cmd` quoting property test — the Windows launcher body must not
-    /// expand any cmd.exe metachars (`& ^ < > ! |`) outside double-quoted
-    /// regions. The launcher's `LauncherSafeString` rejects unsafe characters
-    /// at the entry boundary (via `LAUNCHER_UNSAFE_CHARS`), and the ADR §6
-    /// form removes the resolved-target SET surface entirely — there must be
-    /// no `_target=` SET line at all.
-    ///
-    /// `(` and `)` are intentionally NOT in the metachar list: the
-    /// `IF DEFINED OCX_BINARY_PIN (` / `) ELSE (` / `)` structural block
-    /// delimiters are template-baked, never derived from `pkg_root`.
-    #[test]
-    fn windows_launcher_body_no_unescaped_cmd_metachars() {
-        let body = super::windows_launcher_body(&safe("C:\\pkg\\root"));
-        // ADR §6 form: launcher must not bake _target at all (no SET _target line).
-        assert!(
-            !body.contains("_target"),
-            "ADR §6 launcher must not bake `_target` SET — present in:\n{body}"
-        );
-        // Defensive check: nothing outside double-quoted regions should contain
-        // cmd.exe metachars. We scan the body line-by-line and assert that each
-        // metachar instance, if present, appears between a `"` pair.
-        for (lineno, line) in body.lines().enumerate() {
-            for &meta in &['&', '^', '<', '>', '!', '|'] {
-                if let Some(idx) = line.find(meta) {
-                    let before = &line[..idx];
-                    let after = &line[idx + 1..];
-                    let opens_before = before.matches('"').count();
-                    let closes_after = after.matches('"').count();
-                    let is_quoted = opens_before % 2 == 1 && closes_after >= 1;
-                    assert!(
-                        is_quoted,
-                        "line {lineno}: unquoted cmd.exe metachar {meta:?} in launcher body:\n{line}",
-                    );
-                }
-            }
-        }
-    }
-
     // ── One-Way Door wire-vocabulary commitments ───────────────────────────
     //
     // The `launcher exec` subcommand name pair is the stable wire surface.
@@ -341,12 +171,100 @@ mod tests {
         );
     }
 
+    /// Wire-ABI canary — TWO producers, both must agree. After the `.cmd`
+    /// cutover the frozen `launcher exec` wire string has exactly two
+    /// producers: the `.sh` body (`unix_launcher_body`, here) and the native
+    /// Windows `.exe` shim (`crates/ocx_shim/src/core.rs`,
+    /// `core::WIRE_SUBCOMMAND`) (`subsystem-package-manager.md` canary rule;
+    /// `adr_windows_exe_shim.md` §"Wire-ABI Parity"). `ocx_lib` cannot depend
+    /// on the `ocx_shim` binary crate, so the binding is a PAIRED GOLDEN:
+    /// this restates the exact subcommand token the shim's
+    /// `core::WIRE_SUBCOMMAND` must equal from the `.sh` side, and the shim's
+    /// `tests::shim_wire_token_matches_sh_body` restates it from the shim
+    /// side. A change to the wire vocabulary must touch BOTH this constant
+    /// and `crates/ocx_shim/src/core.rs` `WIRE_SUBCOMMAND`, or one of the two
+    /// canaries fails loudly.
     #[test]
-    fn launcher_windows_byte_format_locks_launcher_exec() {
-        let body = super::windows_launcher_body(&safe("C:\\x"));
+    fn launcher_wire_token_is_bound_to_shim_producer() {
+        // The exact `<launcher exec> '<pkg_root>'` shape the `.sh` body emits
+        // — the shim's `core::WIRE_SUBCOMMAND` (= "launcher exec") must
+        // reproduce this same token (see the cross-ref above).
+        const SHARED_WIRE_SUBCOMMAND: &str = "launcher exec";
+        let sh_body = super::unix_launcher_body(&safe("/pkg/root"));
         assert!(
-            body.contains("launcher exec"),
-            "Windows launcher must contain literal `launcher exec` (One-Way Door wire-vocabulary): {body}"
+            sh_body.contains(&format!("{SHARED_WIRE_SUBCOMMAND} '/pkg/root'")),
+            "the `.sh` body must carry the shared `launcher exec '<pkg_root>'` token \
+             (must stay in sync with `crates/ocx_shim/src/core.rs` WIRE_SUBCOMMAND): {sh_body}"
+        );
+    }
+
+    // ── `.shim` sidecar body golden ───────────────────────────────────────
+    //
+    // The `.shim` sidecar is the One-Way-Door on-disk artifact the native
+    // `ocx-shim.exe` reads to learn `pkg_root`. Its byte/encoding spec is
+    // frozen (`adr_windows_exe_shim.md` §`.shim` Sidecar Format Contract;
+    // `system_design_windows_exe_shim.md` §6): exactly
+    // `format!("{pkg_root}\n")` — UTF-8, no BOM, a single trailing LF, the
+    // body is `pkg_root` and nothing else, never CRLF. These tests are
+    // DAMP/self-contained peers of the `.sh` golden above and pin the exact
+    // bytes so any drift fails loudly. They run on all hosts
+    // (`shim_sidecar_body` is not Win32-gated).
+
+    #[test]
+    fn shim_sidecar_body_byte_exact_golden() {
+        let body = super::shim_sidecar_body(&safe("C:\\Users\\ci\\.ocx\\packages\\ocx.sh\\sha256\\ab\\cd"));
+        assert_eq!(
+            body, "C:\\Users\\ci\\.ocx\\packages\\ocx.sh\\sha256\\ab\\cd\n",
+            "sidecar must be exactly `format!(\"{{pkg_root}}\\n\")` — pkg_root then a single LF"
+        );
+    }
+
+    #[test]
+    fn shim_sidecar_body_is_utf8_without_bom() {
+        let body = super::shim_sidecar_body(&safe("C:\\pkg\\root"));
+        assert!(
+            !body.starts_with('\u{feff}') && !body.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]),
+            "sidecar must not be prefixed with a UTF-8 BOM (EF BB BF): {body:?}"
+        );
+    }
+
+    #[test]
+    fn shim_sidecar_body_has_single_trailing_lf_no_crlf() {
+        let body = super::shim_sidecar_body(&safe("C:\\pkg\\root"));
+        assert!(body.ends_with('\n'), "sidecar must end with a single LF: {body:?}");
+        assert!(
+            !body.ends_with("\r\n"),
+            "sidecar terminator must be LF only, never CRLF: {body:?}"
+        );
+        assert!(
+            !body.ends_with("\n\n"),
+            "sidecar must have exactly one trailing LF, not two: {body:?}"
+        );
+        assert_eq!(
+            body.matches('\n').count(),
+            1,
+            "sidecar must contain exactly one LF (the terminator): {body:?}"
+        );
+    }
+
+    #[test]
+    fn shim_sidecar_body_is_pkg_root_only() {
+        // Body == pkg_root + LF and nothing else (no comment, no shebang, no
+        // wire vocabulary — unlike the `.sh` launcher, the sidecar carries
+        // ONLY the package root; the shim re-invokes `launcher exec`).
+        let body = super::shim_sidecar_body(&safe("C:\\pkg\\root"));
+        assert_eq!(
+            body.strip_suffix('\n'),
+            Some("C:\\pkg\\root"),
+            "stripping the single LF must leave exactly pkg_root: {body:?}"
+        );
+        assert!(
+            !body.contains("launcher exec"),
+            "sidecar must NOT carry wire vocabulary — only pkg_root: {body:?}"
+        );
+        assert!(
+            !body.contains('\r') && !body.contains('\0'),
+            "sidecar body must not contain CR or NUL: {body:?}"
         );
     }
 }

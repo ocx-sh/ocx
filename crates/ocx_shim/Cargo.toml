@@ -1,0 +1,40 @@
+[package]
+name = "ocx_shim"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+repository = "https://github.com/ocx-sh/ocx"
+
+[[bin]]
+name = "ocx-shim"
+path = "src/main.rs"
+
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    # CreateProcessW's signature references Security::SECURITY_ATTRIBUTES;
+    # windows-sys gates each function behind the features of every type it
+    # mentions, so the Security feature is required to import CreateProcessW.
+    "Win32_Security",
+] }
+dunce = "1"
+
+[lints]
+workspace = true
+
+# size profile
+#
+# The binary-size budget for the shim (opt-level="z", lto=true,
+# codegen-units=1, panic="abort", strip="symbols") is NOT declared here:
+# Cargo only honours `[profile.*]` tables at the workspace root, and adding
+# a size-tuned release profile to the root `Cargo.toml` would change the
+# release build of every workspace crate. The release-size budget for the
+# committed shim blob is therefore governed by a dedicated build profile /
+# CI job introduced in Phase 4 (see plan_windows_exe_shim.md §4.3-4.4).
+# This crate carries only its package metadata in Phase 1 (stub).

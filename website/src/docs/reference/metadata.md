@@ -311,7 +311,8 @@ installation, environment composition, and garbage collection from a user's pers
 ## Entry Points {#entry-points}
 
 The `entrypoints` object declares named launchers that `ocx install` generates at install time.
-Each launcher is a small shell script (or `.cmd` on Windows) placed in an `entrypoints/` directory
+Each launcher is a small `.sh` shell script on Unix, or a native `<name>.exe` shim plus a
+one-line `<name>.shim` sidecar on Windows, placed in an `entrypoints/` directory
 inside the package directory. When the package is selected with `--select`, the per-repo `current`
 symlink is flipped to the package root and consumers traverse `current/entrypoints` from the same
 anchor to add the launchers to `PATH`.

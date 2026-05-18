@@ -1,0 +1,203 @@
+# Builds + attests the committed Windows native launcher shims (issue #66,
+# adr_windows_exe_shim.md). The shim is cross-compiled on Linux via cargo-xwin
+# (no Windows runner needed for the build), so the per-arch matrix legs are
+# gated behind a cheap Linux gate job rather than a Windows runner.
+#
+# This workflow does NOT sign the blob. Authenticode signing (SignPath
+# Foundation) is a documented Phase-2 step gated on operations work owned by
+# the maintainer (ADR §Out of Implementation Scope) and lands in a separate PR
+# that refreshes the committed blob with the signed bytes. Do not add a
+# signing step here without the Phase-2 prerequisites.
+name: Build Windows Shims
+
+on:
+  push:
+    branches: [main]
+    # Also watch the build inputs that change the emitted PE bytes — a
+    # toolchain / dependency / profile / build-flag change must not bypass
+    # the byte-equality drift gate (Codex finding 2).
+    paths:
+      - 'crates/ocx_shim/**'
+      - 'crates/ocx_lib/src/shims/**'
+      - 'crates/ocx_lib/src/shim.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'taskfiles/rust.taskfile.yml'
+      - '.github/workflows/build-windows-shims.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/ocx_shim/**'
+      - 'crates/ocx_lib/src/shims/**'
+      - 'crates/ocx_lib/src/shim.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'taskfiles/rust.taskfile.yml'
+      - '.github/workflows/build-windows-shims.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  # Cheap Linux gate: the per-arch matrix only runs if the host-runnable
+  # ocx_shim/launcher specification suite is green (cost: gate Windows-class
+  # work behind Linux passing — subsystem-ci.md cost table).
+  gate:
+    name: Linux Gate (shim spec tests)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Task
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+      # actions-rust-lang/setup-rust-toolchain does NOT ship cargo-nextest;
+      # the repo provisions it via taiki-e/install-action everywhere it runs
+      # nextest in CI (verify-basic.yml, verify-deep.yml). Without this the
+      # gate step fails `no such command: nextest`, so `build` and
+      # `acceptance-windows` (both `needs: gate`) never run and the committed
+      # shim blobs / Win32 behaviours are unprotected.
+      - name: Install nextest
+        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        with:
+          tool: cargo-nextest
+      - name: Shim + launcher spec tests (host-runnable)
+        run: cargo nextest run -p ocx_shim -p ocx_lib --locked
+
+  build:
+    name: Cross-build ${{ matrix.target }}
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # SLSA provenance (Sigstore/Rekor OIDC)
+      attestations: write   # actions/attest-build-provenance
+    strategy:
+      fail-fast: true
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Task
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+        with:
+          target: ${{ matrix.target }}
+
+      # First reproducible build → the artifact we attest + compare.
+      - name: Cross-build shim (cargo-xwin, stripped `shim` profile)
+        run: task rust:shim:build TARGET=${{ matrix.target }}
+
+      - name: Resolve blob paths
+        id: paths
+        run: |
+          arch="$(echo '${{ matrix.target }}' | cut -d- -f1)"
+          built="target/${{ matrix.target }}/shim/ocx-shim.exe"
+          committed="crates/ocx_lib/src/shims/ocx-shim-${arch}.exe"
+          echo "built=${built}" >> "$GITHUB_OUTPUT"
+          echo "committed=${committed}" >> "$GITHUB_OUTPUT"
+
+      # Reproducible-rebuild byte-equality: the actual drift control (the
+      # SHIM_SHA256 unit test is only a corruption canary). The freshly built
+      # blob must be byte-identical to the committed one — a stale committed
+      # blob (refresh-PR skipped) fails the PR loudly here.
+      - name: Verify committed blob is byte-identical to a fresh rebuild
+        run: |
+          built='${{ steps.paths.outputs.built }}'
+          committed='${{ steps.paths.outputs.committed }}'
+          if ! cmp -s "$built" "$committed"; then
+            echo "::error::Committed ${committed} differs from a fresh reproducible rebuild."
+            echo "::error::Refresh it: task rust:shim:build TARGET=${{ matrix.target }} then copy + record SHIM_SHA256 (see crates/ocx_lib/src/shim.rs)."
+            sha256sum "$built" "$committed"
+            exit 1
+          fi
+          echo "OK: $(sha256sum "$committed")"
+
+      # SLSA Build provenance on the committed blob (real provenance leg; the
+      # in-tree SHA is only a corruption canary — ADR §"SHA256 = corruption
+      # canary"). Refresh-PR checklist adds `gh attestation verify`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@bd77c077858b8d561b7a36cbe48ef4cc642ca39d # v2.2.3
+        with:
+          subject-path: ${{ steps.paths.outputs.committed }}
+
+      - name: Upload shim blob
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocx-shim-${{ matrix.target }}
+          path: ${{ steps.paths.outputs.committed }}
+          compression-level: 0
+          retention-days: 7
+
+  # Windows acceptance: the genuinely Win32-dependent shim behaviours
+  # (PATHEXT resolution, CreateProcessW argv passthrough, the BatBadBut
+  # `& whoami` regression, exit-code propagation, missing/malformed sidecar,
+  # OCX_BINARY_PIN honouring) that the host-runnable unit tests cannot cover.
+  # Without this job `test_windows_shim.py` is green-by-skip (no runner ever
+  # supplies an `ocx-shim.exe`), so those regressions never gate (Codex
+  # finding 3). Registry-independent: the fixture builds a fake pkg_root on
+  # disk; the `registry:2` Docker fixture is Linux-only and is NOT used here
+  # (system_design §8). Gated behind the cheap Linux `gate` job per
+  # subsystem-ci.md cost rules (Windows runner = ~1.7x Linux).
+  acceptance-windows:
+    name: Windows Acceptance (shim)
+    needs: gate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      # Native windows-latest build (debug — acceptance, not a published
+      # binary; subsystem-ci.md "no --release for tests"). This is the shim
+      # the Python acceptance suite drives via OCX_SHIM_BINARY.
+      - name: Build ocx-shim (native windows)
+        run: cargo build -p ocx_shim --locked
+
+      # Run ONLY the Windows shim acceptance module. The general acceptance
+      # suite needs the `registry:2` Docker fixture which does not start on
+      # windows-latest; this module is registry-independent by design and is
+      # invoked directly (not via `task test`, which would start the registry
+      # and rebuild `ocx`).
+      - name: Windows shim acceptance tests
+        working-directory: test
+        shell: bash
+        env:
+          # The live gate: point the suite at the freshly built shim so the
+          # tests run instead of skipping (the false-green condition).
+          OCX_SHIM_BINARY: ${{ github.workspace }}/target/debug/ocx-shim.exe
+          # Registry-independent: skip the `docker compose up registry:2`
+          # session hook (Docker registry is Linux-only — system_design §8).
+          OCX_TESTS_NO_REGISTRY: "1"
+        run: uv run pytest tests/test_windows_shim.py -v
+
+  # Phase-2 placeholder (NOT implemented): Authenticode signing via SignPath
+  # Foundation. Prerequisites (ocx.sh /code-signing-policy page, maintainer
+  # MFA, RFC3161 timestamping, strip-before-sign) are operations work owned by
+  # the maintainer (ADR §Out of Implementation Scope). The signing step
+  # (~15 lines, no Windows runner) lands in a separate PR that also refreshes
+  # the committed blob with the signed bytes. Do not implement it here.
