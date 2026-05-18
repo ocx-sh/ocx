@@ -33,7 +33,7 @@ ocx package push -p linux/amd64 -m metadata.json mytool:1.0.1 sha256:${BASE_DIGE
 
 The `sha256:<hex>.<ext>` form on [`ocx package push`][cmd-package-push] is the supported way to point a new manifest at a layer that already lives in the target registry. See [Reusing layers across packages][authoring-layer-reuse] for the full pattern, including multi-layer packages with a stable base and a per-release top layer.
 
-<Terminal src="/casts/package-create.cast" title="Bundling a package with ocx package create" collapsed />
+<Terminal src="/casts/authoring/package-create.cast" title="Bundling a package with ocx package create" collapsed />
 
 ## Choosing the Compression {#compression}
 

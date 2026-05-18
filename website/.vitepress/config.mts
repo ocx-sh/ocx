@@ -13,6 +13,7 @@ const devBannerStyle: [string, Record<string, string>, string] = [
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
   srcDir: "src",
+  cleanUrls: true,
 
   title: "ocx",
   description: "the simple package manager",

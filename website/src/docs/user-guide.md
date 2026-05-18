@@ -11,9 +11,7 @@ For first-time setup and a guided quick-start, see [Getting Started][getting-sta
 
 The basic flow is one command:
 
-```shell
-ocx package install cmake:3.28
-```
+<<< @/_scripts/user-guide/install.sh{sh}
 
 OCX downloads the package, verifies its [SHA-256 digest][in-depth-storage-packages], and stores it in the [content-addressed package store][in-depth-storage-packages] under `~/.ocx/packages/`. A [candidate symlink][in-depth-storage-symlinks] (`candidates/3.28`) is created so the version is reachable by name.
 
@@ -21,9 +19,7 @@ Multiple versions coexist — installing `cmake:3.30` next to `cmake:3.28` adds 
 
 To run a tool *once* without keeping it installed, skip the install step entirely:
 
-```shell
-ocx package exec cmake:3.28 -- cmake --version
-```
+<<< @/_scripts/user-guide/exec-once.sh{sh}
 
 [`ocx package exec`][cmd-package-exec] downloads on demand, runs in a [clean environment][in-depth-environments], and leaves no candidate symlink behind — the binary stays in the package store but no version is selected. Useful for one-off invocations and CI where persistent state is not needed.
 
@@ -37,10 +33,7 @@ ocx package exec cmake:3.28 -- cmake --version
 
 Once two or more versions are installed, [`ocx package select`][cmd-package-select] picks the one that becomes "current":
 
-```shell
-ocx package install cmake:3.30
-ocx package select cmake:3.30
-```
+<<< @/_scripts/user-guide/versions-select.sh{sh}
 
 The `current` symlink is a [floating pointer][in-depth-storage-symlinks] — it only moves when *you* select a different version. Installing a newer version does not advance `current`; updating the [tag-store snapshot][in-depth-indices-local] does not advance it either. This is intentional: tools that reference `current` should only change behavior when you decide they should.
 
@@ -60,7 +53,7 @@ For *build flavor* — debug, PGO, slim — use a [variant prefix][in-depth-vers
 
 `ocx index list cmake --variants` shows available variants without downloading anything.
 
-<Terminal src="/casts/variants.cast" title="Working with variants" collapsed />
+<Terminal src="/casts/user-guide/variants.cast" title="Working with variants" collapsed />
 
 [`ocx package deselect cmake`][cmd-package-deselect] clears `current` without uninstalling. [`ocx package uninstall cmake:3.28`][cmd-package-uninstall] removes the candidate; pass `--purge` to remove the binary too if no other reference holds it.
 
@@ -103,10 +96,7 @@ When `ocx package install --select cmake:3.32` runs later, `current` is re-point
 
 For automation, [`ocx package which`][cmd-which] prints the resolved package root directly:
 
-```shell
-ocx package which --current cmake          # ~/.ocx/symlinks/ocx.sh/cmake/current
-ocx package which --candidate cmake:3.28   # ~/.ocx/symlinks/ocx.sh/cmake/candidates/3.28
-```
+<<< @/_scripts/user-guide/stable-paths-which.sh{sh}
 
 Both `--candidate` and `--current` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.
 
@@ -142,10 +132,7 @@ The shim resolves `ocx` using `OCX_BINARY_PIN` if the variable is **defined** in
 
 For [direnv][direnv]-driven projects, [`ocx direnv init`][cmd-direnv-init] writes an `.envrc` file that calls [`ocx direnv export`][cmd-direnv-export] on each `cd`. The stateless export block is re-evaluated by [direnv][direnv] whenever `ocx.toml` or `ocx.lock` changes.
 
-```shell
-ocx direnv init    # writes .envrc
-direnv allow       # activate for the current directory
-```
+<<< @/_scripts/user-guide/direnv.sh{sh}
 
 This routes through the [project toolchain][in-depth-project], so the tools on `$PATH` match exactly the digests locked in `ocx.lock`. No ambient installs or manual `export` statements needed.
 
@@ -161,17 +148,13 @@ Package publishers can declare that their package needs other packages to functi
 
 Pull the package; OCX [resolves the closure transitively][in-depth-dependencies-resolution]:
 
-```shell
-ocx package pull webapp:2.0
-```
+<<< @/_scripts/user-guide/deps-pull.sh{sh}
 
 If `webapp:2.0` declares dependencies on `nodejs:24` and `bun:1.3`, all three packages end up in the [package store][in-depth-storage-packages]. Only `webapp:2.0` is the explicit install — the dependencies are stored but not surfaced as top-level installs.
 
 To actually *run* the package with its dependency environments configured, use [`ocx package exec`][cmd-package-exec]:
 
-```shell
-ocx package exec webapp:2.0 -- serve --port 8080
-```
+<<< @/_scripts/user-guide/deps-exec.sh{sh}
 
 [`ocx package exec`][cmd-package-exec] [composes the environments][in-depth-environments-composition-order] of all dependencies in topological order before launching the command. [`ocx package env`][cmd-package-env] exports the same composed environment for use in your own shell.
 
@@ -183,15 +166,15 @@ ocx package exec webapp:2.0 -- serve --port 8080
 
 [`ocx deps`][cmd-deps] shows the declared relationships. The default tree view annotates [non-public dependencies][in-depth-environments-visibility] so you can see at a glance which deps cross the [interface surface][in-depth-environments-two-surfaces]:
 
-<Terminal src="/casts/deps.cast" title="Inspecting the dependency tree" collapsed />
+<Terminal src="/casts/user-guide/deps.cast" title="Inspecting the dependency tree" collapsed />
 
 `--flat` shows the resolved evaluation order — the exact sequence OCX uses when composing environments. This is the primary debugging tool when env vars are not what you expect:
 
-<Terminal src="/casts/deps-flat.cast" title="Resolved dependency order" collapsed />
+<Terminal src="/casts/user-guide/deps-flat.cast" title="Resolved dependency order" collapsed />
 
 `--why` traces the path from a root package to a transitive dependency:
 
-<Terminal src="/casts/deps-why.cast" title="Tracing why a dependency is pulled in" collapsed />
+<Terminal src="/casts/user-guide/deps-why.cast" title="Tracing why a dependency is pulled in" collapsed />
 
 ### Conflict warnings
 
@@ -235,21 +218,13 @@ The global toolchain is that boundary. It gives you an `apt`-style "tools I alwa
 
 Use the root `--global` flag (before the subcommand) to target `$OCX_HOME/ocx.toml`:
 
-```shell
-ocx --global add ripgrep:14
-ocx --global add cmake:3.28
-```
+<<< @/_scripts/user-guide/global-add.sh{sh}
 
 `ocx --global add` records the binding in `$OCX_HOME/ocx.toml`, re-locks, installs, and selects the package in one step. Because a tool must be on PATH to be useful globally, select is always implied.
 
 The same root `--global` flag works with `remove`, `lock`, `upgrade`, and `pull`:
 
-```shell
-ocx --global add fzf:0.62         # add binding + install + select
-ocx --global remove ripgrep       # drop binding + uninstall
-ocx --global lock                 # re-resolve all tags to digests
-ocx --global upgrade ripgrep      # advance ripgrep to the latest resolved tag
-```
+<<< @/_scripts/user-guide/global-manage.sh{sh}
 
 The global file lives at `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`). Mutators create it automatically on first use — no `ocx init` step required.
 
@@ -270,11 +245,7 @@ The OCX installer writes one file and one login-profile line. The file — `$OCX
 
 You can also emit the current global env manually and inspect it:
 
-```shell
-ocx --global env                       # JSON (default — machine-readable)
-ocx --global env --format plain        # human-readable table
-ocx --global env --shell=bash          # POSIX export lines, eval-safe
-```
+<<< @/_scripts/user-guide/global-env.sh{sh}
 
 `--shell` is the only eval-safe output channel. Do not `eval "$(ocx --global env)"` — the default JSON format is not sourceable.
 
@@ -282,14 +253,7 @@ ocx --global env --shell=bash          # POSIX export lines, eval-safe
 
 The individual package primitives that manage candidate and `current` symlinks are now grouped under `ocx package`:
 
-```shell
-ocx package install ripgrep:14   # fetch + materialise into object store
-ocx package select  ripgrep:14   # set current symlink
-ocx package deselect ripgrep     # clear current symlink
-ocx package uninstall ripgrep:14 # remove candidate
-ocx package exec ripgrep:14 -- rg --version   # run with clean env
-ocx package env ripgrep:14       # per-package env (JSON)
-```
+<<< @/_scripts/user-guide/oci-primitives.sh{sh}
 
 These are OCI-tier operations — they work on identifiers directly, never read `ocx.toml`.
 
@@ -303,10 +267,7 @@ The global toolchain is a **shell convenience tier only**. Project builds are he
 
 Two commands that are always hermetic regardless of context:
 
-```shell
-ocx run -- linter          # reads ocx.toml + ocx.lock; global tools not consulted
-ocx package exec cmake:3 -- cmake --version   # OCI-tier; no ocx.toml read at all
-```
+<<< @/_scripts/user-guide/isolation.sh{sh}
 
 A project's `ocx run` cannot resolve a tool that exists only in `$OCX_HOME/ocx.toml`. This is intentional and not a bug — the project declared its dependencies; anything else is ambient noise.
 
@@ -333,14 +294,7 @@ Each value is a fully-qualified [OCI identifier][oci-identifier] — `registry/r
 
 ### Lifecycle commands
 
-```shell
-ocx init                              # one-time: scaffold ocx.toml
-ocx add ocx.sh/cmake:3.28             # append to ocx.toml + lock + install
-ocx lock                              # re-resolve every tag to a digest
-ocx pull                              # pre-warm the package store from ocx.lock
-ocx run -- cmake --version            # run with the locked digest (project-tier)
-ocx remove cmake                      # drop the binding + uninstall
-```
+<<< @/_scripts/user-guide/project-lifecycle.sh{sh}
 
 [`ocx lock`][cmd-lock] resolves every tag to an immutable digest and writes `ocx.lock`. Subsequent [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] runs read the lock, never the registry, so two machines on the same commit get the same bytes. The lock carries a hash of the canonicalized `ocx.toml`; if you edit `ocx.toml` and forget to re-run `ocx lock`, dependent commands refuse to run with stale digests.
 
@@ -371,10 +325,7 @@ shellcheck = "ocx.sh/shellcheck:0.11"
 goreleaser = "ocx.sh/goreleaser:2.0"
 ```
 
-```shell
-ocx pull -g ci          # CI runner — only what it needs
-ocx lock                # workstation — every group resolved
-```
+<<< @/_scripts/user-guide/project-groups.sh{sh}
 
 The same binding name may appear in `[tools]` and any `[group.*]` table — identity is `(group, name)`. This lets a project pin one `shfmt` for daily use and a different one in `ci` without conflict.
 
@@ -397,29 +348,21 @@ You have an `ocx.toml`, the lock is current, and you want to invoke a tool from 
 
 The simplest form runs a command in the default group (`[tools]`) environment:
 
-```shell
-ocx run -- task build
-```
+<<< @/_scripts/user-guide/run-basic.sh{sh}
 
 `--` is mandatory. Every token after `--` is forwarded unchanged to the child. Pass `-g` to scope to a named group:
 
-```shell
-ocx run -g ci -- shellcheck path/to/file.sh
-```
+<<< @/_scripts/user-guide/run-group.sh{sh}
 
 To compose the environment from every group at once, use the `all` keyword:
 
-```shell
-ocx run -g all -- env
-```
+<<< @/_scripts/user-guide/run-all.sh{sh}
 
 `-g all` expands to `[tools]` + every declared `[group.*]` before env composition. The expansion order determines PATH precedence — groups listed earlier win over later ones (see [Project Toolchain In Depth → Running tools][in-depth-project-running]).
 
 When you only need a specific binding from the composed set, name it:
 
-```shell
-ocx run cmake -- cmake --version
-```
+<<< @/_scripts/user-guide/run-named.sh{sh}
 
 The name must resolve unambiguously in the selected scope; `ocx run` exits 64 if a name is unknown or matches entries in more than one selected group with conflicting identifiers.
 
@@ -440,17 +383,11 @@ CI environments need tool binaries available with their environment variables ex
 
 For **project-toolchain CI**, the recommended flow is:
 
-```shell
-ocx pull          # pre-warm package store from ocx.lock (no symlinks)
-ocx run -- cmake --version   # run with locked env
-```
+<<< @/_scripts/user-guide/ci-project.sh{sh}
 
 For **OCI-tier CI** (no `ocx.toml`, direct identifier pinning):
 
-```shell
-ocx package pull cmake:3.28
-ocx package env cmake:3.28   # JSON env — pipe to your CI env-file writer
-```
+<<< @/_scripts/user-guide/ci-oci.sh{sh}
 
 [`ocx pull`][cmd-pull] (project-tier) and [`ocx package pull`][cmd-package-pull] (OCI-tier) download packages into the [content-addressed package store][in-depth-storage-packages] without creating any symlinks.
 
@@ -536,16 +473,7 @@ For headless CI without a native keychain daemon, pipe the token via `--password
 `--allow-insecure-store` to opt into the plaintext tier. `OCX_AUTH_*` environment variables still
 take precedence over any docker-config-stored credential at read time.
 
-```sh
-# Developer workstation (interactive)
-ocx login ghcr.io
-
-# Non-interactive CI
-echo "$GHCR_TOKEN" | ocx login -u "$GHCR_USER" --password-stdin ghcr.io
-
-# Headless CI — no native keychain
-echo "$TOKEN" | ocx login -u ci --password-stdin --allow-insecure-store internal.registry.example.com
-```
+<<< @/_scripts/user-guide/login.sh{sh}
 
 Remove credentials with [`ocx logout`][cmd-logout]. Logout always exits 0, even when the registry
 was never logged in — CI cleanup scripts are safe to run unconditionally.

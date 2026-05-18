@@ -21,17 +21,17 @@ The grammar is fully unambiguous: `.` separates components, `-` introduces a pre
 [Helm][helm-oci] adopted the same `+` → `_` normalization when it moved chart distribution to OCI registries. See [helm/helm#10250][helm-issue] for the original discussion.
 :::
 
-**Tolerant input:** typing `+` works and auto-normalizes to `_`. For example, `ocx install cmake:3.28.1+20260216` installs the tag `3.28.1_20260216`. This normalization happens at the earliest boundary — the identifier parser — so all downstream code sees `_` only.
+**Tolerant input:** typing `+` works and auto-normalizes to `_`. For example, `ocx package install cmake:3.28.1+20260216` installs the tag `3.28.1_20260216`. This normalization happens at the earliest boundary — the identifier parser — so all downstream code sees `_` only.
 
 See [Versioning][ug-versioning] in the user guide for the full tag hierarchy and cascade behavior.
 
 ## Project Toolchain {#project}
 
-### When should I use `ocx exec` vs `ocx run`? {#exec-vs-run}
+### When should I use `ocx package exec` vs `ocx run`? {#exec-vs-run}
 
-**Short rule:** if you have an `ocx.toml`, use [`ocx run`][cmd-run]; if you do not, use [`ocx exec`][cmd-exec].
+**Short rule:** if you have an `ocx.toml`, use [`ocx run`][cmd-run]; if you do not, use [`ocx package exec`][cmd-package-exec].
 
-[`ocx exec`][cmd-exec] is the OCI-tier command — its first argument is an OCI identifier (`node:20`, `ocx.sh/cmake:3.28@sha256:…`). It never reads `ocx.toml` or `ocx.lock`, so it behaves identically regardless of the current directory and regardless of any project file nearby. This makes it the right primitive for embedding in [GitHub Actions][github-actions-docs], [Bazel rules][bazel-rules], and CI scripts that manage their own tool pins.
+[`ocx package exec`][cmd-package-exec] is the OCI-tier command — its first argument is an OCI identifier (`node:20`, `ocx.sh/cmake:3.28@sha256:…`). It never reads `ocx.toml` or `ocx.lock`, so it behaves identically regardless of the current directory and regardless of any project file nearby. This makes it the right primitive for embedding in [GitHub Actions][github-actions-docs], [Bazel rules][bazel-rules], and CI scripts that manage their own tool pins.
 
 [`ocx run`][cmd-run] is the project-tier command — its symbols are binding names declared in `ocx.toml` (e.g. `cmake`, `shellcheck`). It resolves those names through `ocx.lock`, auto-installs missing packages, composes the declared environment, and spawns the child. A missing `ocx.toml` is a usage error (exit 64), not a fallback to OCI-tier behavior.
 
@@ -43,7 +43,7 @@ Both commands:
 - Accept `--self` to expose private-visibility env entries
 - Forward the child's exit code byte-for-byte
 
-Neither command is deprecated. They cover complementary use cases — running a tool by its project-assigned name (`run`) vs running it by its registry identity (`exec`).
+Neither command is deprecated. They cover complementary use cases — running a tool by its project-assigned name (`run`) vs running it by its registry identity (`package exec`).
 
 See [Project Toolchain In Depth → Running tools][in-depth-project-running] for the full contract, composition order, and exit code table.
 
@@ -164,7 +164,7 @@ This caveat is about a packaged tool that ships as a `.bat`/`.cmd` script — *n
 
 <!-- commands -->
 [cmd-deps]: ./reference/command-line.md#deps
-[cmd-exec]: ./reference/command-line.md#exec
+[cmd-package-exec]: ./reference/command-line.md#package-exec
 [cmd-run]: ./reference/command-line.md#run
 
 <!-- in-depth -->
@@ -195,9 +195,6 @@ This caveat is about a packaged tool that ships as a `.bat`/`.cmd` script — *n
 [homebrew]: https://brew.sh/
 [homebrew-codesign]: https://github.com/Homebrew/brew/blob/master/Library/Homebrew/extend/os/mac/keg.rb
 [sip]: https://support.apple.com/en-us/102149
-
-<!-- commands -->
-[cmd-exec]: ./reference/command-line.md#exec
 
 <!-- environment -->
 [env-no-codesign]: ./reference/environment.md#ocx-no-codesign

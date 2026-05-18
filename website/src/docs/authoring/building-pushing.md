@@ -16,7 +16,7 @@ ocx package push -p linux/amd64 -m metadata.json -i mytool:1.0.0 mytool-1.0.0.ta
 
 `--new` (`-n`) is a `--cascade` modifier: it tells the cascade resolver to skip the existing-tag lookup on the first publish of a repository. Outside `--cascade` the flag is a no-op. Reach for it once you adopt rolling tags.
 
-<Terminal src="/casts/package-push.cast" title="Publishing a package for the first time" collapsed />
+<Terminal src="/casts/authoring/package-push.cast" title="Publishing a package for the first time" collapsed />
 
 ::: tip Test before you push
 Before pushing, verify the package works locally with [`ocx package test`][authoring-testing]. It runs the same install pipeline — dep resolution, extraction, env composition — in a temp directory with no registry round-trip. Exit code is forwarded from the command you run, so CI can gate on it. See [Testing locally][authoring-testing] for the full workflow.
@@ -36,7 +36,7 @@ Most publishers ship versioned releases (`1.0.0`, `1.0.1`) and want users to pin
 
 Cascade is a publisher convention, not a registry-enforced rule. The registry sees only tag-to-digest writes; OCX synthesises the alias semantics on top. Cascade decisions are evaluated per platform — a backport that is the latest for `linux/amd64` but trails the head on `darwin/arm64` will only re-point the rolling tags it actually leads on. The full alias model lives in [versioning in depth → cascades][in-depth-versioning-cascades].
 
-<Terminal src="/casts/package-cascade.cast" title="Cascading rolling tags across releases" collapsed />
+<Terminal src="/casts/authoring/package-cascade.cast" title="Cascading rolling tags across releases" collapsed />
 
 ## Reusing Layers Across Packages {#layer-reuse}
 
@@ -56,7 +56,7 @@ The hand-publishing pattern (the [`ocx_mirror`][mirror-pipeline] tool currently 
 2. **Push the first release with the file layer.** OCX uploads it under the digest captured in step 1.
 3. **Push later releases by digest.** Re-reference the same blob via `sha256:<hex>.<ext>` — no re-bundle, no re-upload, no extra storage, no consumer re-download.
 
-<Terminal src="/casts/package-layer-reuse.cast" title="Reusing a base layer across two releases" collapsed />
+<Terminal src="/casts/authoring/package-layer-reuse.cast" title="Reusing a base layer across two releases" collapsed />
 
 ::: warning Pathological filenames
 If a file in your working directory is literally named `sha256:abc….tar.gz`, prefix it with `./` to force file interpretation. Bare `<algo>:<hex>.<ext>` tokens are always parsed as digest references.

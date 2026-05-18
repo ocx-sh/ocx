@@ -3,7 +3,7 @@ outline: deep
 ---
 # Environments {#env-composition}
 
-Every package declares a flat list of environment variables in its [`metadata.json`][metadata-ref]. When you run [`ocx exec`][cmd-exec] or [`ocx env`][cmd-env] against one or more root packages, the composer reads those declarations and builds a single runtime environment. This page is the canonical reference for how that environment is assembled — and for the single boolean (`--self`) that selects which surface of that environment is emitted.
+Every package declares a flat list of environment variables in its [`metadata.json`][metadata-ref]. When you run [`ocx package exec`][cmd-package-exec] or [`ocx package env`][cmd-package-env] against one or more root packages, the composer reads those declarations and builds a single runtime environment. This page is the canonical reference for how that environment is assembled — and for the single boolean (`--self`) that selects which surface of that environment is emitted.
 
 ## Two Surfaces {#two-surfaces}
 
@@ -12,7 +12,7 @@ Every package has two distinct environment surfaces:
 - **Interface surface** — what the outside world sees. The variables a consumer needs when depending on or running this package. Contributed to `$PATH` lookups, `JAVA_HOME`, library hints, and anything that crosses the package boundary outward.
 - **Private surface** — what the package's own runtime needs. Internal compiler paths, runtime libraries, and shim infrastructure that a package's own [entry-point launchers][entry-points] use but should not leak to consumers.
 
-The default `ocx exec PKG -- cmd` selects the **interface surface** of PKG — the public contract. Passing `--self` selects the **private surface** — the full self-env including `private`-tagged entries.
+The default `ocx package exec PKG -- cmd` selects the **interface surface** of PKG — the public contract. Passing `--self` selects the **private surface** — the full self-env including `private`-tagged entries.
 
 Generated launchers always embed `--self` so the package's own binary runs with its complete internal environment. You should never need to pass `--self` directly for interactive use.
 
@@ -24,7 +24,7 @@ Use the CMake vocabulary as a memory aid — the directional intuition transfers
 
 ## Visibility Views {#visibility-views}
 
-A single boolean `--self` flag selects which environment surface is emitted by `ocx exec` and its sibling commands. The default is **off** — the consumer view a human or script sees when invoking a package from the outside. Generated [entry-point launchers][entry-points] embed `--self` so the launched binary sees the package's full self env.
+A single boolean `--self` flag selects which environment surface is emitted by `ocx package exec` and its sibling commands. The default is **off** — the consumer view a human or script sees when invoking a package from the outside. Generated [entry-point launchers][entry-points] embed `--self` so the launched binary sees the package's full self env.
 
 ::: tip Previously documented as "exec modes"
 Earlier OCX releases exposed a `--mode <consumer|self>` flag on these commands. The two-axis [`Visibility`][metadata-dep-visibility] struct now collapses both into a single boolean toggle — `--mode=consumer` → `--self` off (default); `--mode=self` → `--self` on. Passing `--mode=…` exits 64 (`UsageError`).
@@ -36,8 +36,8 @@ Selects the **interface surface**: only entries whose `visibility.has_interface(
 
 Use it for:
 
-- `ocx exec PKG -- cmd` direct invocations from a shell or CI script
-- `ocx env PKG` to inspect what a package exposes to consumers
+- `ocx package exec PKG -- cmd` direct invocations from a shell or CI script
+- `ocx package env PKG` to inspect what a package exposes to consumers
 - Any context where you are *using* a package's output, not *being* the package
 
 ### Self view (`--self` on, launcher-embedded) {#view-self}
@@ -47,7 +47,7 @@ Selects the **private surface**: only entries whose `visibility.has_private()` i
 `private` entries are visible in this mode. That is intentional: when a package's own launcher runs, it needs the internal paths — compilers, runtimes, shared libraries — that the publisher deliberately kept off the consumer surface.
 
 ::: tip Self view is automatic for launchers
-The `ocx launcher exec` subcommand — used by every generated launcher script — forces the self view internally. You do not need to pass `--self` to `ocx exec` yourself; rely on the default consumer view for direct invocations.
+The `ocx launcher exec` subcommand — used by every generated launcher script — forces the self view internally. You do not need to pass `--self` to `ocx package exec` yourself; rely on the default consumer view for direct invocations.
 :::
 
 ### Visibility Truth Table {#truth-table}
@@ -65,12 +65,10 @@ The `ocx launcher exec` subcommand — used by every generated launcher script �
 
 | Command | Default | Notes |
 |---|---|---|
-| [`ocx exec`][cmd-exec] | off | OCI-tier entry point; launchers embed `--self` |
-| [`ocx run`][cmd-run] | off | Project-tier counterpart to `exec`; binding names from `ocx.toml` |
-| [`ocx env`][cmd-env] | off | Inspect the resolved env for a package |
-| [`ocx shell env`][cmd-shell-env] | off | Generate shell export statements |
-| [`ocx shell hook`][cmd-shell-hook] | off | Emit per-profile PATH/env exports for shell eval |
-| [`ocx ci export`][cmd-ci-export] | off | Export env to CI system runtime files |
+| [`ocx package exec`][cmd-package-exec] | off | OCI-tier entry point; launchers embed `--self` |
+| [`ocx run`][cmd-run] | off | Project-tier counterpart to `package exec`; binding names from `ocx.toml` |
+| [`ocx package env`][cmd-package-env] | off | Inspect the resolved env for one or more packages |
+| [`ocx env`][cmd-env] | off | Toolchain-tier env exporter (reads `ocx.toml`); eval-safe via `--shell` |
 | [`ocx deps`][cmd-deps] | off | Show dependency tree with visibility annotations |
 
 ## Composition Order {#composition-order}
@@ -81,7 +79,7 @@ The composer iterates each root in the order supplied to the command. For each r
 2. **Root's own env-var declarations** — emitted after all TC contributions so the root's `PATH` entries prepend on top of its dependencies' contributions.
 3. **Root's own entrypoints synth-PATH** — if the package declares entrypoints, a synthetic `PATH ⊳ <pkg-root>/entrypoints` entry is appended last.
 
-When multiple root packages are composed (e.g. `ocx exec pkg1 pkg2 -- cmd`), a shared seen-set spans all roots. A package encountered as a transitive dep of both roots is emitted only once, the first time it is encountered.
+When multiple root packages are composed (e.g. `ocx package exec pkg1 pkg2 -- cmd`), a shared seen-set spans all roots. A package encountered as a transitive dep of both roots is emitted only once, the first time it is encountered.
 
 ## Edge Filter {#edge-filter}
 
@@ -138,7 +136,7 @@ At install time, `R`'s `resolve.json` contains the TC:
 
 B is listed first (dep before dependent, topological order). A's edge is `public`, and B's edge from A is `interface` — `public.through_edge(interface) = public` — so B's effective visibility from R is `public`.
 
-When you run `ocx exec R -- my-cmd` (default, interface surface):
+When you run `ocx package exec R -- my-cmd` (default, interface surface):
 
 1. **B** — `visibility.has_interface()` → true. Emit B's `public` and `interface` env entries. B declares `PATH += ${installPath}/bin` (`public`). Entry emitted: `PATH ⊳ ~/.ocx/packages/ocx.sh/b:1/.../content/bin`.
 2. **A** — `visibility.has_interface()` → true. Emit A's `public` and `interface` env entries. A declares `PATH += ${installPath}/bin` (`public`) and `MY_TOOL_HOME = ${installPath}` (`public`). Entries emitted.
@@ -177,7 +175,7 @@ No error is raised when two packages set the same constant key. The later packag
 
 ## Launcher Embedding {#launcher-embedding}
 
-When `ocx install` generates launchers for a package's declared [entrypoints][entry-points], each launcher delegates to the internal `ocx launcher exec` subcommand with the package-root path baked at install time.
+When `ocx package install` generates launchers for a package's declared [entrypoints][entry-points], each launcher delegates to the internal `ocx launcher exec` subcommand with the package-root path baked at install time.
 
 Unix (POSIX sh):
 
@@ -202,7 +200,7 @@ See the [Entry Points][entry-points] in-depth page for the full launcher generat
 
 ## OCX Configuration Forwarding {#ocx-forwarding}
 
-Whenever ocx spawns a subprocess (most commonly the child process under [`ocx exec`][cmd-exec], which may itself invoke a generated [entrypoint launcher][entry-points] that re-shells back into ocx), it materializes the running ocx's resolution-affecting policy as `OCX_*` env vars on the child. This is the chokepoint that keeps configuration coherent across the chain.
+Whenever ocx spawns a subprocess (most commonly the child process under [`ocx package exec`][cmd-package-exec], which may itself invoke a generated [entrypoint launcher][entry-points] that re-shells back into ocx), it materializes the running ocx's resolution-affecting policy as `OCX_*` env vars on the child. This is the chokepoint that keeps configuration coherent across the chain.
 
 | Variable | Source | Purpose |
 |---|---|---|
@@ -212,7 +210,7 @@ Whenever ocx spawns a subprocess (most commonly the child process under [`ocx ex
 | [`OCX_CONFIG`][env-ocx-config] | `--config` flag on the outer invocation | Child ocx loads the same explicit config file |
 | [`OCX_INDEX`][env-ocx-index] | `--index` flag on the outer invocation | Child ocx reads the same local index directory |
 
-The running ocx's parsed flags are authoritative — they overwrite any inherited value from the parent shell, so a stale exported `OCX_OFFLINE=1` cannot override an outer `ocx` invoked without `--offline`. The same rule holds under [`ocx exec --clean`][cmd-exec]: the child env starts empty, then `OCX_*` keys are written explicitly from the outer ocx's parsed state. No ambient shell export can bypass this.
+The running ocx's parsed flags are authoritative — they overwrite any inherited value from the parent shell, so a stale exported `OCX_OFFLINE=1` cannot override an outer `ocx` invoked without `--offline`. The same rule holds under [`ocx package exec --clean`][cmd-package-exec]: the child env starts empty, then `OCX_*` keys are written explicitly from the outer ocx's parsed state. No ambient shell export can bypass this.
 
 ::: warning Presentation flags do not propagate
 `--log-level`, `--format`, and `--color` are outer-presentation choices and never flow into a child ocx via env. This ensures that running `cmake --version` through a launcher produces only cmake's output, not ocx logs.
@@ -246,12 +244,10 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 [entry-points]: ./entry-points.md
 
 <!-- commands -->
-[cmd-exec]: ../reference/command-line.md#exec
+[cmd-package-exec]: ../reference/command-line.md#package-exec
 [cmd-run]: ../reference/command-line.md#run
-[cmd-env]: ../reference/command-line.md#env
-[cmd-shell-env]: ../reference/command-line.md#shell-env
-[cmd-shell-hook]: ../reference/command-line.md#shell-hook
-[cmd-ci-export]: ../reference/command-line.md#ci-export
+[cmd-package-env]: ../reference/command-line.md#package-env
+[cmd-env]: ../reference/command-line.md#env-root
 [cmd-deps]: ../reference/command-line.md#deps
 
 <!-- reference -->

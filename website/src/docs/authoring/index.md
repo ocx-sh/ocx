@@ -7,7 +7,7 @@ You publish to OCX in three layers: build a deterministic archive, attach metada
 
 ## TL;DR — Publish a Binary {#tldr}
 
-You have a compiled binary, a Python script, or any other executable, and you want consumers to fetch and run it with [`ocx install`][cmd-install]. The shortest path is three steps: lay the binary out under a `bin/` directory, drop a sibling `metadata.json` that adds `bin/` to `PATH`, then bundle and push.
+You have a compiled binary, a Python script, or any other executable, and you want consumers to fetch and run it with [`ocx package install`][cmd-install]. The shortest path is three steps: lay the binary out under a `bin/` directory, drop a sibling `metadata.json` that adds `bin/` to `PATH`, then bundle and push.
 
 Lay out the working directory so the bundle contents live under `build/` and the metadata sidecar sits next to it. The sidecar is not bundled into the archive — [`ocx package push`][cmd-package-push] uploads it as the [OCI manifest config blob][oci-manifest-config], and OCX restores it as a sibling of `content/` in the assembled package directory at install time:
 
@@ -54,9 +54,9 @@ ocx package push -n -p linux/amd64 -m metadata.json \
   ghcr.io/me/mytool:1.0.0 mytool-1.0.0.tar.xz
 ```
 
-<Terminal src="/casts/package-push.cast" title="Bundle and push mytool:1.0.0" collapsed />
+<Terminal src="/casts/authoring/package-push.cast" title="Bundle and push mytool:1.0.0" collapsed />
 
-Consumers now reach it with [`ocx install ghcr.io/me/mytool:1.0.0`][cmd-install] and the binary lands on their `PATH`. Everything below this section refines that flow: deterministic bundling, dependency edges, env visibility, named launchers, rolling tags, multi-platform manifests, and patterns for wrapping third-party tools you do not own.
+Consumers now reach it with [`ocx package install ghcr.io/me/mytool:1.0.0`][cmd-install] and the binary lands on their `PATH`. Everything below this section refines that flow: deterministic bundling, dependency edges, env visibility, named launchers, rolling tags, multi-platform manifests, and patterns for wrapping third-party tools you do not own.
 
 ::: tip Scripted runtimes
 If your "binary" is a Python script, a JAR, or anything that needs an interpreter, the script's shebang or wrapper still works — but the cleaner path is to declare the runtime as a [dependency][authoring-dependencies] and ship a [named entry point][authoring-entry-points] that resolves the interpreter from that dep. Skip the ambient `python3` lookup; pin the version your tool expects.
@@ -64,7 +64,7 @@ If your "binary" is a Python script, a JAR, or anything that needs an interprete
 
 ## The Publisher Journey {#journey}
 
-Most packages start as an upstream binary release on [GitHub][gh-releases] or a vendor's download page. The work between "I have a binary" and "consumers can `ocx install` it" splits into seven decisions:
+Most packages start as an upstream binary release on [GitHub][gh-releases] or a vendor's download page. The work between "I have a binary" and "consumers can `ocx package install` it" splits into seven decisions:
 
 - **[Bundle anatomy][authoring-bundle-anatomy]** — what goes in the archive, whether to repack the upstream layout, which compression to pick. Reach for this when you have a directory and need to turn it into a `.tar.xz` ready for [`ocx package push`][cmd-package-push].
 - **[Declaring dependencies][authoring-dependencies]** — when to depend on another OCX package instead of bundling its bytes, how to pin by digest, what visibility to choose for the dependency edge. Reach for this when your tool needs to find another tool on disk at runtime.
@@ -111,7 +111,7 @@ Common questions you will hit while authoring, and the page that answers each:
 [reference-cli-package]: ../reference/command-line.md#package
 
 <!-- commands -->
-[cmd-install]: ../reference/command-line.md#install
+[cmd-install]: ../reference/command-line.md#package-install
 [cmd-package-push]: ../reference/command-line.md#package-push
 
 <!-- in-depth -->

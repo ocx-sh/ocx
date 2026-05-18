@@ -76,7 +76,7 @@ ocx package describe \
 ocx package info mytool
 ```
 
-<Terminal src="/casts/package-describe.cast" title="Attaching package descriptions and reading them back" collapsed />
+<Terminal src="/casts/authoring/package-describe.cast" title="Attaching package descriptions and reading them back" collapsed />
 
 ::: tip Re-publish runs do not auto-refresh descriptions
 The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package describe` is a separate hand-driven step. Re-run it whenever your README or logo changes; otherwise the registry keeps the previously published `__ocx.desc` manifest.

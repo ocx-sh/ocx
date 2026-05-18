@@ -9,7 +9,7 @@ This page covers the publisher view: how to assemble a multi-platform package, h
 
 ## One Tag, Many Manifests {#concept}
 
-An [OCI Image Index][oci-image-index] is a manifest of manifests — a single descriptor that points at one image manifest per platform. When a consumer runs `ocx install mytool:1.0.0`, OCX fetches the index, finds the manifest matching the consumer's platform, and pulls only that manifest's layers. No conditional logic in install scripts, no platform-suffixed tags to keep in sync.
+An [OCI Image Index][oci-image-index] is a manifest of manifests — a single descriptor that points at one image manifest per platform. When a consumer runs `ocx package install mytool:1.0.0`, OCX fetches the index, finds the manifest matching the consumer's platform, and pulls only that manifest's layers. No conditional logic in install scripts, no platform-suffixed tags to keep in sync.
 
 The publisher equivalent of "build for amd64, then arm64, then push the index" collapses to: push each platform separately under the same tag, and OCX assembles the index for you. When [`ocx package push`][cmd-package-push] sees a tag that already has a manifest, it merges the new platform into the existing index rather than replacing it. (`--new` on the first push tells the cascade resolver to skip that lookup; everywhere else it is a no-op.)
 
@@ -31,9 +31,9 @@ ocx package push    -c -p linux/arm64 mytool:1.0.0 mytool-1.0.0-linux-arm64.tar.
 
 After both pushes, `mytool:1.0.0` resolves to an image index with two platform descriptors, and any rolling aliases (`1.0`, `1`, `latest`) point at the same index digest. A consumer on Linux/arm64 fetches only the Linux/arm64 manifest's layers; an amd64 Linux runner fetches only the amd64 manifest's layers. Add `-p darwin/arm64`, `-p darwin/amd64`, or `-p windows/amd64` the same way for the rest of the matrix.
 
-<Terminal src="/casts/package-multi-platform.cast" title="Publishing a multi-platform package" collapsed />
+<Terminal src="/casts/authoring/package-multi-platform.cast" title="Publishing a multi-platform package" collapsed />
 
-The recording also runs [`ocx index update`][cmd-index-update] and [`ocx install`][cmd-install] after the second push so you can see the consumer side: a single tag, the right platform's layers fetched, the binary on the candidate symlink ready for `ocx exec`.
+The recording also runs [`ocx index update`][cmd-index-update] and [`ocx package install`][cmd-install] after the second push so you can see the consumer side: a single tag, the right platform's layers fetched, the binary on the candidate symlink ready for `ocx package exec`.
 
 ## Use the Same Metadata Across Platforms {#metadata}
 
@@ -62,7 +62,7 @@ Each per-platform manifest's digest depends only on its own bytes. Push the *sam
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-index-update]: ../reference/command-line.md#index-update
-[cmd-install]: ../reference/command-line.md#install
+[cmd-install]: ../reference/command-line.md#package-install
 
 <!-- in-depth -->
 [in-depth-storage-multi-layer]: ../in-depth/storage.md#multi-layer

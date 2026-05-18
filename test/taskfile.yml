@@ -57,8 +57,44 @@ tasks:
       - conftest.py
       - tests/conftest.py
       - pyproject.toml
+      # Doc scripts are executed by the drift-gate collection inside this
+      # parallel run (test_doc_scripts.py), so editing a .sh fixture must
+      # invalidate the cache (Perf F3) — without this a doc-script change
+      # is silently treated as up-to-date and the gate is skipped.
+      - doc_scripts/**/*.sh
       - '{{.ROOT_DIR}}/target/release/ocx'
     cmds:
       - task: default
         vars:
           CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
+
+  doc-scripts:list:
+    desc: Print the doc-script discovery export as JSON (PT6 seam for website publish task)
+    dir: '{{.TASKFILE_DIR}}'
+    cmd: uv run python scripts/doc_scripts_list.py
+    env:
+      OCX_DOC_SCRIPTS_ROOT: '{{.OCX_DOC_SCRIPTS_ROOT | default ""}}'
+
+  doc-scripts:drift:
+    desc: >-
+      Run the full doc-script drift gate for ALL # doc: scripts (registry-backed
+      executor + static binding/parser/publish collections). Deploy-CI only —
+      NOT wired into `task verify` / `task` per the ADR cost-lever (registry
+      provisioning is too expensive for the per-commit loop).
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - >-
+        uv run pytest -n auto
+        tests/test_doc_scripts.py
+        tests/test_doc_binding.py
+        tests/test_doc_scripts_parser.py
+        tests/test_doc_scripts_publish.py
+        tests/test_doc_scripts_executor.py
+        tests/test_doc_scripts_cast.py
+        tests/test_doc_scripts_one_tree.py
+        {{.CLI_ARGS | default "-q"}}
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
+      OCX_MIRROR_COMMAND: "{{.OCX_MIRROR_BINARY}}"
