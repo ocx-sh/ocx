@@ -5,5 +5,5 @@
 # doc: user-guide/deps
 set -euo pipefail
 # region cast
-ocx deps "$PKG_WEBAPP"
+ocx package deps "$PKG_WEBAPP"
 # endregion cast

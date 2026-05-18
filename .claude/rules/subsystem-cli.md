@@ -7,7 +7,7 @@ paths:
 
 Thin CLI shell. Use clap at `crates/ocx_cli/src/`. One file per subcommand. Output format via `Printable` trait.
 
-> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The command taxonomy below reflects that signed handshake. Any description of `ocx shell hook`, `ocx shell init`, `ocx shell env`, root `ocx install/uninstall/select/exec/deselect/which`, or `ocx ci` describes the **deleted** model — do not implement it.
+> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The command taxonomy below reflects that signed handshake. Any description of `ocx shell hook`, `ocx shell init`, `ocx shell env`, root `ocx install/uninstall/select/exec/deselect/which/deps`, or `ocx ci` describes the **deleted** model — do not implement it.
 
 ## High-Level vs OCI-Tier Layering
 
@@ -26,6 +26,7 @@ Per-package, identifier-driven, no `ocx.toml` at any tier:
 - `ocx package exec <id> -- cmd` — run package binary, clean env
 - `ocx package env <ids...> [--shell[=NAME]]` — composed env for the named packages (reuses `env.rs`)
 - `ocx package which <ids...>` — resolve installed packages to paths (`--candidate`/`--current` for stable symlink anchor)
+- `ocx package deps <ids...>` — show dependency tree/flat/why for installed packages (`--flat`/`--why`/`--depth`/`--self`)
 
 ### Toolchain-tier — root commands
 Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx.toml` under `--global`.
@@ -40,7 +41,7 @@ Canonical form: `ocx --global <subcommand>`.
 - `ocx shell hook`, `ocx shell init`, `ocx shell env` — **DELETED** (handshake §7)
 
 ### Removed root commands (handshake §7 — exit 64 if invoked)
-- `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect`, `ocx which` → moved to `ocx package`; ocx maps clap usage errors → EX_USAGE 64 (see `app.rs:112-119`)
+- `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect`, `ocx which`, `ocx deps` → moved to `ocx package`; ocx maps clap usage errors → EX_USAGE 64 (see `app.rs:112-119`)
 - `ocx ci` → removed
 
 ## Design Rationale

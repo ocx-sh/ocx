@@ -208,18 +208,18 @@ rm -rf $OCX_HOME/packages $OCX_HOME/blobs $OCX_HOME/layers
 ocx --offline exec dojo/multi-layer-app:1.0.0 -- myapp   # exits non-zero
 ```
 
-### `ocx deps` — inspect the dep graph
+### `ocx package deps` — inspect the dep graph
 
 ```sh
 ocx install --select dojo/deps-app:1.0.0
 
-ocx deps dojo/deps-app:1.0.0                  # tree, interface surface only
-ocx deps --self dojo/deps-app:1.0.0           # tree incl. private (leaf-b)
-ocx deps --flat dojo/deps-app:1.0.0           # resolved evaluation order
-ocx deps --depth 1 dojo/deps-app:1.0.0        # one level (mid only)
+ocx package deps dojo/deps-app:1.0.0                  # tree, interface surface only
+ocx package deps --self dojo/deps-app:1.0.0           # tree incl. private (leaf-b)
+ocx package deps --flat dojo/deps-app:1.0.0           # resolved evaluation order
+ocx package deps --depth 1 dojo/deps-app:1.0.0        # one level (mid only)
 
 # "Why is leaf-a in the closure?" → because mid pulls it in.
-ocx deps --why dojo/deps-leaf-a dojo/deps-app:1.0.0
+ocx package deps --why dojo/deps-leaf-a dojo/deps-app:1.0.0
 ```
 The `--why` output lists every parent edge in the resolved graph. With
 `--self` the same query also surfaces `leaf-b` as a private dep of

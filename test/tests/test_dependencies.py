@@ -11,6 +11,8 @@ from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
+EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE); ocx maps clap errors here
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -341,7 +343,7 @@ def _setup_diamond_public(ocx, unique_repo, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Tests: ocx deps — tree view
+# Tests: ocx package deps — tree view
 # ---------------------------------------------------------------------------
 
 
@@ -349,7 +351,7 @@ def test_deps_tree_shows_hierarchy(ocx: OcxRunner, unique_repo: str, tmp_path: P
     """Default deps output (JSON) has root with nested dependency."""
     leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
-    result = ocx.json("deps", app.short)
+    result = ocx.json("package", "deps", app.short)
     roots = result["roots"]
     assert len(roots) == 1
 
@@ -363,7 +365,7 @@ def test_deps_tree_shows_hierarchy(ocx: OcxRunner, unique_repo: str, tmp_path: P
 def test_deps_tree_leaf_has_empty_deps(published_package: PackageInfo, ocx: OcxRunner):
     """Package with no deps shows single node with empty dependencies."""
     ocx.json("package", "install", "--select", published_package.short)
-    result = ocx.json("deps", published_package.short)
+    result = ocx.json("package", "deps", published_package.short)
     roots = result["roots"]
     assert len(roots) == 1
     assert roots[0].get("dependencies", []) == []
@@ -373,7 +375,7 @@ def test_deps_tree_transitive_chain(ocx: OcxRunner, unique_repo: str, tmp_path: 
     """A->B->C: tree nests correctly to depth 2."""
     c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
-    result = ocx.json("deps", a.short)
+    result = ocx.json("package", "deps", a.short)
     root = result["roots"][0]
     assert a.repo in root["identifier"]
 
@@ -393,7 +395,7 @@ def test_deps_tree_diamond_marks_repeated(ocx: OcxRunner, unique_repo: str, tmp_
     """A->{B,C}->D: second D occurrence has repeated: true."""
     d, b, c, a = _setup_diamond(ocx, unique_repo, tmp_path)
 
-    result = ocx.json("deps", a.short)
+    result = ocx.json("package", "deps", a.short)
     root = result["roots"][0]
 
     # Collect all D nodes across the tree
@@ -409,7 +411,7 @@ def test_deps_tree_diamond_marks_repeated(ocx: OcxRunner, unique_repo: str, tmp_
 
 
 # ---------------------------------------------------------------------------
-# Tests: ocx deps — flat view
+# Tests: ocx package deps — flat view
 # ---------------------------------------------------------------------------
 
 
@@ -417,7 +419,7 @@ def test_deps_flat_evaluation_order(ocx: OcxRunner, unique_repo: str, tmp_path: 
     """--flat shows leaf before root (dependency-first) on the interface surface."""
     leaf, app = _setup_leaf_and_app_public(ocx, unique_repo, tmp_path)
 
-    result = ocx.json("deps", "--flat", app.short)
+    result = ocx.json("package", "deps", "--flat", app.short)
     entries = result["entries"]
     identifiers = [e["identifier"] for e in entries]
 
@@ -442,7 +444,7 @@ def test_deps_flat_transitive_chain(ocx: OcxRunner, unique_repo: str, tmp_path: 
     """A->B->C --flat order is C, B, A on the interface surface."""
     c, b, a = _setup_chain_public(ocx, unique_repo, tmp_path)
 
-    result = ocx.json("deps", "--flat", a.short)
+    result = ocx.json("package", "deps", "--flat", a.short)
     identifiers = [e["identifier"] for e in result["entries"]]
 
     c_idx = next(i for i, ident in enumerate(identifiers) if c.repo in ident)
@@ -452,7 +454,7 @@ def test_deps_flat_transitive_chain(ocx: OcxRunner, unique_repo: str, tmp_path: 
 
 
 # ---------------------------------------------------------------------------
-# Tests: ocx deps — why view
+# Tests: ocx package deps — why view
 # ---------------------------------------------------------------------------
 
 
@@ -460,7 +462,7 @@ def test_deps_why_traces_path(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """--why leaf returns a path containing root and leaf."""
     leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
-    result = ocx.json("deps", "--why", leaf.fq, app.short)
+    result = ocx.json("package", "deps", "--why", leaf.fq, app.short)
     paths = result["paths"]
     assert len(paths) >= 1, "expected at least one path"
     # Each path is a list of identifier strings
@@ -473,7 +475,7 @@ def test_deps_why_diamond_multiple_paths(ocx: OcxRunner, unique_repo: str, tmp_p
     """A->{B,C}->D --why D returns 2 paths."""
     d, b, c, a = _setup_diamond(ocx, unique_repo, tmp_path)
 
-    result = ocx.json("deps", "--why", d.fq, a.short)
+    result = ocx.json("package", "deps", "--why", d.fq, a.short)
     paths = result["paths"]
     assert len(paths) == 2, f"expected 2 paths through diamond, got {len(paths)}"
 
@@ -483,19 +485,19 @@ def test_deps_why_not_found_returns_error(ocx: OcxRunner, unique_repo: str, tmp_
     leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
     fake_fq = f"{ocx.registry}/{unique_repo}_nonexistent:1.0.0"
-    result = ocx.run("deps", "--why", fake_fq, app.short, check=False)
+    result = ocx.run("package", "deps", "--why", fake_fq, app.short, check=False)
     assert result.returncode != 0
     assert "is not a dependency of" in result.stdout
 
 
 # ---------------------------------------------------------------------------
-# Tests: ocx deps — error cases
+# Tests: ocx package deps — error cases
 # ---------------------------------------------------------------------------
 
 
 def test_deps_not_installed_fails(ocx: OcxRunner, unique_repo: str):
     """deps on uninstalled package returns non-zero exit."""
-    result = ocx.run("deps", f"{unique_repo}_missing:1.0.0", check=False)
+    result = ocx.run("package", "deps", f"{unique_repo}_missing:1.0.0", check=False)
     assert result.returncode != 0
 
 
@@ -623,7 +625,7 @@ def test_env_dependency_order_deps_first(ocx: OcxRunner, unique_repo: str, tmp_p
 
 
 # ---------------------------------------------------------------------------
-# Tests: ocx deps — depth flag (W10)
+# Tests: ocx package deps — depth flag (W10)
 # ---------------------------------------------------------------------------
 
 
@@ -631,7 +633,7 @@ def test_deps_tree_depth_limits_nesting(ocx: OcxRunner, unique_repo: str, tmp_pa
     """--depth 1 shows direct deps (B) but not transitive deps (C) for A->B->C."""
     c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
-    result = ocx.json("deps", "--depth", "1", a.short)
+    result = ocx.json("package", "deps", "--depth", "1", a.short)
     root = result["roots"][0]
 
     # Root should show B as a direct dependency
@@ -651,7 +653,7 @@ def test_deps_tree_depth_limits_nesting(ocx: OcxRunner, unique_repo: str, tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# Tests: ocx deps --flat conflict detection (W11)
+# Tests: ocx package deps --flat conflict detection (W11)
 # ---------------------------------------------------------------------------
 
 
@@ -674,7 +676,7 @@ def test_deps_flat_conflicting_digests_reports_error(
     ocx.json("package", "install", "--select", a.short)
     ocx.json("package", "install", "--select", b.short)
 
-    result = ocx.run("deps", "--flat", a.short, b.short, check=False)
+    result = ocx.run("package", "deps", "--flat", a.short, b.short, check=False)
     assert result.returncode == 0, (
         f"conflicting digests should warn, not error; got rc={result.returncode}: {result.stderr!r}"
     )
@@ -768,7 +770,7 @@ def test_deep_conflict_at_depth_two(
 
     ocx.json("package", "install", "--select", a.short)
 
-    result = ocx.run("deps", "--flat", a.short, check=False)
+    result = ocx.run("package", "deps", "--flat", a.short, check=False)
     assert result.returncode == 0, (
         f"conflicting digests should warn, not error; got rc={result.returncode}: {result.stderr!r}"
     )
@@ -838,7 +840,7 @@ def test_deps_multi_root_shared_transitive(
     ocx.json("package", "install", "--select", a.short)
     ocx.json("package", "install", "--select", c.short)
 
-    result = ocx.json("deps", "--flat", a.short, c.short)
+    result = ocx.json("package", "deps", "--flat", a.short, c.short)
     ids = [e["identifier"] for e in result["entries"]]
 
     # D and B should appear exactly once each (deduped across roots).
@@ -1292,7 +1294,7 @@ def test_deps_flat_shows_visibility_column(
     )
     ocx.run("package", "install", "--select", f"{unique_repo}_app:1.0.0")
 
-    result = ocx.json("deps", "--flat", f"{unique_repo}_app:1.0.0")
+    result = ocx.json("package", "deps", "--flat", f"{unique_repo}_app:1.0.0")
     entries = result["entries"]
     leaf_entry = next(e for e in entries if f"{unique_repo}_leaf" in e["identifier"])
     app_entry = next(e for e in entries if f"{unique_repo}_app" in e["identifier"])
@@ -1443,7 +1445,7 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
 
 
 # ---------------------------------------------------------------------------
-# Tests: ocx deps --flat surface-gating consistency (#6)
+# Tests: ocx package deps --flat surface-gating consistency (#6)
 # ---------------------------------------------------------------------------
 
 
@@ -1469,7 +1471,7 @@ def test_deps_flat_surface_gating_without_self(
     app = _push_with_deps(ocx, app_repo, "1.0.0", tmp_path, deps=[dep])
     ocx.json("package", "install", "--select", app.short)
 
-    result = ocx.json("deps", "--flat", app.short)
+    result = ocx.json("package", "deps", "--flat", app.short)
     identifiers = [e["identifier"] for e in result["entries"]]
 
     # App root is always included (public sentinel).
@@ -1504,7 +1506,7 @@ def test_deps_flat_surface_gating_with_self(
     ocx.json("package", "install", "--select", app.short)
 
     # Interface surface (no --self): private dep must not appear.
-    result_consumer = ocx.json("deps", "--flat", app.short)
+    result_consumer = ocx.json("package", "deps", "--flat", app.short)
     ids_consumer = [e["identifier"] for e in result_consumer["entries"]]
     assert not any(leaf_repo in ident for ident in ids_consumer), (
         f"private dep {leaf_repo!r} must NOT appear in default --flat (interface surface); "
@@ -1512,9 +1514,30 @@ def test_deps_flat_surface_gating_with_self(
     )
 
     # Private surface (--self): private dep must appear.
-    result_self = ocx.json("deps", "--flat", "--self", app.short)
+    result_self = ocx.json("package", "deps", "--flat", "--self", app.short)
     ids_self = [e["identifier"] for e in result_self["entries"]]
     assert any(leaf_repo in ident for ident in ids_self), (
         f"private dep {leaf_repo!r} MUST appear in --flat --self (private surface); "
         f"got: {ids_self}"
+    )
+
+
+def test_root_deps_removed_exits_64(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """Root ``ocx deps`` is removed — moved under ``ocx package deps``.
+
+    Invoking the old root form is a clap unknown-subcommand error; ocx maps
+    all clap usage errors to exit 64 (EX_USAGE). Mirrors the removed-root
+    contract for ``ocx install``/``exec``/etc.
+    """
+    pkg = published_package
+    result = ocx.plain("deps", pkg.short, check=False)
+
+    assert result.returncode == EXIT_USAGE, (
+        f"root `ocx deps` must exit {EXIT_USAGE} (moved to `ocx package "
+        f"deps`); got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert "deps" in result.stderr.lower() or "unrecognized" in result.stderr.lower(), (
+        f"expected clap unrecognized-subcommand stderr; got:\n{result.stderr}"
     )

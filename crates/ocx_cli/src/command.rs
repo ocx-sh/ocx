@@ -50,10 +50,10 @@ pub mod which;
 // bodies are gone and `resolve_global_current_env` is relocated into
 // `command/toolchain_env.rs` (Phase 2 relocate, now wired into `ocx env`).
 // install.rs global field + execute_global are deleted (C4).
-// Root variants Install, Uninstall, Select, Exec, Deselect, Which are moved
-// to `Package` group (C1 — handshake §2). Deselect and Which are MOVEs (body
-// preserved); `which` is an OCI-tier identifier query that never reads
-// `ocx.toml`, so it belongs under `ocx package`.
+// Root variants Install, Uninstall, Select, Exec, Deselect, Which, Deps are
+// moved to `Package` group (C1 — handshake §2). Deselect, Which, and Deps are
+// MOVEs (body preserved); `which` and `deps` are OCI-tier identifier queries
+// that never read `ocx.toml`, so they belong under `ocx package`.
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -68,8 +68,6 @@ pub enum Command {
     Add(add::Add),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
-    /// Show the dependency tree for one or more packages.
-    Deps(deps::Deps),
     /// direnv integration (init writes .envrc; export emits the env block).
     Direnv(direnv::Direnv),
     /// Operations related to the package index
@@ -111,7 +109,6 @@ impl Command {
             Command::Env(env) => env.execute(context).await,
             Command::Add(add) => add.execute(context).await,
             Command::Clean(clean) => clean.execute(context).await,
-            Command::Deps(deps) => deps.execute(context).await,
             Command::Direnv(direnv) => direnv.execute(context).await,
             Command::Index(index) => index.execute(context).await,
             Command::About(about) => about.execute(context).await,

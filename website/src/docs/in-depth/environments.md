@@ -69,7 +69,7 @@ The `ocx launcher exec` subcommand — used by every generated launcher script �
 | [`ocx run`][cmd-run] | off | Project-tier counterpart to `package exec`; binding names from `ocx.toml` |
 | [`ocx package env`][cmd-package-env] | off | Inspect the resolved env for one or more packages |
 | [`ocx env`][cmd-env] | off | Toolchain-tier env exporter (reads `ocx.toml`); eval-safe via `--shell` |
-| [`ocx deps`][cmd-deps] | off | Show dependency tree with visibility annotations |
+| [`ocx package deps`][cmd-deps] | off | Show dependency tree with visibility annotations |
 
 ## Composition Order {#composition-order}
 
@@ -151,7 +151,7 @@ Final PATH (shown left-to-right in prepend order, last-prepended wins):
 R's `bin/` is found first in PATH lookup.
 
 ::: tip Visibility in deps
-Run [`ocx deps --flat PKG`][cmd-deps] to inspect the effective visibility for each entry in PKG's transitive closure. The flat view shows the exact evaluation order and effective visibility column — the primary debugging tool when environment variables are not what you expect.
+Run [`ocx package deps --flat PKG`][cmd-deps] to inspect the effective visibility for each entry in PKG's transitive closure. The flat view shows the exact evaluation order and effective visibility column — the primary debugging tool when environment variables are not what you expect.
 :::
 
 ## Conflicting Constant Variables {#conflicting-constants}

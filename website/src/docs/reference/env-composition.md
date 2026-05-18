@@ -75,7 +75,7 @@ The two flags are mutually exclusive — combining `--global` with `--project` e
 
 Each OCX package declares two environment surfaces: the **interface surface** (what consumers see) and the **private surface** (what the package's own launchers see).
 
-The `--self` flag on `exec`, `run`, `package env`, `package exec`, and `deps` switches which surface is emitted:
+The `--self` flag on `exec`, `run`, `package env`, `package exec`, and `package deps` switches which surface is emitted:
 
 | `--self` | Surface emitted | Use case |
 |----------|----------------|----------|

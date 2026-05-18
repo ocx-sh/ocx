@@ -413,16 +413,16 @@ A blank `Held By` cell means the entry is unreferenced and will be collected. A 
 
 Non-dry-run output is always 2-column (`Type | Path`): held entries are never collected and therefore never appear.
 
-### `deps` {#deps}
+### `deps` (package-tier — `ocx package deps`) {#deps}
 
 Shows the dependency tree for one or more installed packages. Operates on locally-present packages
-only — no auto-install. See [Dependencies][ug-dependencies] in the user guide for
+only — no auto-install. This is an OCI-tier command under the [`ocx package`](#package) group — it operates on OCI identifiers and never consults `ocx.toml`. See [Dependencies][ug-dependencies] in the user guide for
 background.
 
 **Usage**
 
 ```shell
-ocx deps [OPTIONS] <PACKAGE>...
+ocx package deps [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
@@ -635,7 +635,7 @@ On Unix, `ocx exec` hands the current process image off to the target via `execv
 
 ### `which` (package-tier — `ocx package which`) {#which}
 
-Resolves one or more packages and prints their package root paths. This is an OCI-tier command under the [`ocx package`](#package) group — it operates on OCI identifiers and never consults `ocx.toml`. The former root form `ocx which` is removed; invoking it exits `64` (usage error).
+Resolves one or more packages and prints their package root paths. This is an OCI-tier command under the [`ocx package`](#package) group — it operates on OCI identifiers and never consults `ocx.toml`.
 
 The package root is the directory containing the package's `content/` and `entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package files. Consumers traverse into `<root>/content/` for installed files or `<root>/entrypoints/` for generated launchers — both stay one path join away.
 

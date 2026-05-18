@@ -3,6 +3,8 @@
 **Status:** Signed off (2026-05-16, all §9 boxes checked by Michael Herwig)
 **Amendment 2026-05-17 (post-sign-off, user-approved):** `ocx which` moved
 under `ocx package which` for tier consistency — see §2 table + §7 removed list.
+**Amendment 2026-05-18 (post-sign-off, user-approved):** `ocx deps` moved
+under `ocx package deps` for tier consistency — see §2 table + §7 removed list.
 **Date:** 2026-05-16
 **Parties:** Michael Herwig, Claude (architect seat)
 **Base commit:** `a4211591` (`fix(project): fail-closed GC ledger + global/project conflict seam`)
@@ -52,6 +54,7 @@ Per-package, identifier-driven, no `ocx.toml` at any tier. Owns the
 | `ocx package exec <id> -- cmd` | run a package binary, clean env |
 | `ocx package env <ids...>` | composed env for the named packages |
 | `ocx package which <ids...>` | resolve installed packages to paths (package-root, or `--candidate`/`--current` symlink anchor) — OCI-tier query, never reads `ocx.toml` (amendment 2026-05-17) |
+| `ocx package deps <ids...>` | show dependency tree/flat/why for installed packages — OCI-tier query, never reads `ocx.toml` (amendment 2026-05-18) |
 
 Devcontainer-of-a-tool stays: `ocx package install X && ocx package select X
 && ocx package env --current X`. Untouched by this handshake.
@@ -95,6 +98,9 @@ Project-only direnv adapter. Out of scope for this handshake.
   (`project_breaking_compat_next_version.md`). This is the only real UX
   cost; accepted.
 - `ocx which` → moved under `ocx package` (amendment 2026-05-17). Same
+  rationale: identifier-driven OCI-tier query that never reads `ocx.toml`;
+  leaving it at root contradicted the tier split. Same clean-break terms.
+- `ocx deps` → moved under `ocx package` (amendment 2026-05-18). Same
   rationale: identifier-driven OCI-tier query that never reads `ocx.toml`;
   leaving it at root contradicted the tier split. Same clean-break terms.
 - `ocx ci` → removed. CI export is a deferred extension point (§6), not a
