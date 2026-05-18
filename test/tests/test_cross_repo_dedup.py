@@ -90,7 +90,7 @@ def test_cross_repo_dedup_preserves_query_repository(
     )
 
     # --- deps --flat entry for the root should carry the queried repo ---
-    flat = ocx.json("deps", "--flat", mirrors_short)
+    flat = ocx.json("package", "deps", "--flat", mirrors_short)
     entries = flat["entries"]
     assert entries, f"expected at least one entry in deps --flat output, got {flat!r}"
 

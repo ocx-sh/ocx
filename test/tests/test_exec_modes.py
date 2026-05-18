@@ -271,7 +271,7 @@ def test_mode_flag_rejected_with_usage_error(
     [
         ("package", "env"),
         ("package", "exec", "--", "hello"),
-        ("deps",),
+        ("package", "deps"),
     ],
 )
 def test_all_surfaces_carry_self_flag(
@@ -284,7 +284,7 @@ def test_all_surfaces_carry_self_flag(
     default consumer view when `--self` is absent).
 
     Rewritten Phase 5: ``shell env`` and ``ci export`` are deleted (plan C4).
-    Remaining live surfaces: ``package env``, ``package exec``, ``deps``.
+    Remaining live surfaces: ``package env``, ``package exec``, ``package deps``.
 
     Smoke-test only — the surface returns a non-error exit code with the flag
     accepted. Detailed semantics are exercised by the matrix tests above.
@@ -301,7 +301,7 @@ def test_all_surfaces_carry_self_flag(
         # ("package", "env") → package env [--self] <pkg>
         args = [*surface, *extra, pkg.short]
     else:
-        # ("deps",) → deps [--self] <pkg>
+        # ("package", "deps") → package deps [--self] <pkg>
         args = [*surface, *extra, pkg.short]
 
     result = ocx.run(*args, check=False, format=None)

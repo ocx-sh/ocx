@@ -92,7 +92,7 @@ def test_deps_offline_shows_transitive_tree(
     ocx.json("package", "install", "--select", a.short)
 
     # Offline deps — graph is built from filesystem, not index.
-    result = ocx.run("--offline", "deps", a.short)
+    result = ocx.run("--offline", "package", "deps", a.short)
     assert result.returncode == 0
 
     # Verify all three packages appear in output.
@@ -117,7 +117,7 @@ def test_deps_flat_offline_shows_topological_order(
 
     ocx.json("package", "install", "--select", a.short)
 
-    result = ocx.run("--offline", "deps", "--flat", a.short)
+    result = ocx.run("--offline", "package", "deps", "--flat", a.short)
     assert result.returncode == 0
 
     # Parse JSON — entries should be in topological order: C, B, A.

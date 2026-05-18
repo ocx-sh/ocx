@@ -18,10 +18,10 @@ The CLI surface splits into two tiers. The split is firm.
 | Tier | Commands | Input | Consults `ocx.toml`? |
 |------|----------|-------|----------------------|
 | **Toolchain-tier** | `add`, `remove`, `lock`, `upgrade`, `run`, `env` | Binding names / OCI id (add) | **Yes** (or `$OCX_HOME/ocx.toml` under `--global`) |
-| **OCI-tier** (`ocx package`) | `install`, `uninstall`, `select`, `deselect`, `exec`, `env`, `which` | OCI identifiers | **Never** |
+| **OCI-tier** (`ocx package`) | `install`, `uninstall`, `select`, `deselect`, `exec`, `env`, `which`, `deps` | OCI identifiers | **Never** |
 | **Bootstrap / mixed** | `init`, `direnv init`, `direnv export`, `about`, `version`, `shell completion` | Varies | — |
 | **Low-level registry** | `package pull`, `package push`, `package describe`, `package info`, `package create`, `index update/list/catalog`, `login`, `logout` | OCI identifiers | Never |
-| **Low-level local store** | `deps`, `clean`, `launcher exec` | OCI identifiers | Never |
+| **Low-level local store** | `clean`, `launcher exec` | OCI identifiers | Never |
 
 **Layer-purity rule:** `ocx run` is toolchain-tier (binding-name semantics); `ocx package exec` is OCI-tier (identifier semantics). `ocx env` is toolchain-tier; `ocx package env` is OCI-tier. No command silently switches contract based on CWD.
 
@@ -88,6 +88,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package info ID` | Display description metadata | `--save-readme`, `--save-logo` |
 | `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean` |
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
+| `package deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `--self`, `-p` |
 
 ### Other Commands
 
@@ -95,7 +96,6 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 |---------|---------|-----------|
 | `login [REGISTRY]` | Authenticate to a registry | `-u/--username`, `--password-stdin`, `--insecure` |
 | `logout [REGISTRY]` | Remove stored credentials | — |
-| `deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `-p`, `--mode` |
 | `clean` | GC unreferenced objects | `--dry-run`, `--force` |
 | `shell completion` | Generate shell completions | `--shell` |
 | `direnv init` | Write `.envrc` wiring `ocx direnv export` | `--force` |
@@ -118,6 +118,7 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | `ocx deselect` | `ocx package deselect` |
 | `ocx exec` | `ocx package exec` |
 | `ocx which` | `ocx package which` |
+| `ocx deps` | `ocx package deps` |
 | `ocx ci` | Removed (deferred extension point) |
 | `ocx shell hook` | Removed (activation via `$OCX_HOME/env.sh` + `ocx --global env --shell=sh`) |
 | `ocx shell init` | Removed (OCX install script owns profile modification) |
@@ -146,8 +147,8 @@ Rules:
 
 | Manager Method | Auto-Install | Symlink | Use In |
 |----------------|-------------|---------|--------|
-| `find_all()` | No | No | `package which`, `deps` |
-| `resolver().build_graph()` | No | No | `deps` |
+| `find_all()` | No | No | `package which`, `package deps` |
+| `resolver().build_graph()` | No | No | `package deps` |
 | `find_symlink_all(kind)` | No | Yes (candidate/current) | `package which --candidate` |
 | `find_or_install_all()` | **Yes** | No | `package env`, `package exec` |
 | `install_all(candidate=true)` | N/A | Creates candidate | `package install` |

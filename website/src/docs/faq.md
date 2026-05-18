@@ -69,7 +69,7 @@ This tradeoff matches the [Nix][nix] model: a security patch means rebuilding ev
 
 When multiple installed packages depend on the same package at the same digest, the dependency is stored once in the [object store][fs-objects] (content-addressed deduplication). Each dependent creates a back-reference, so the shared dependency is not garbage collected until all dependents are removed.
 
-When two packages depend on the same tool at *different* digests, both versions are installed as separate objects. If both contribute to the same environment, scalar variables follow last-writer-wins semantics and ocx emits a warning. Use [`ocx deps --flat`][cmd-deps] to see the evaluation order and [`ocx deps --why`][cmd-deps] to trace conflicting paths.
+When two packages depend on the same tool at *different* digests, both versions are installed as separate objects. If both contribute to the same environment, scalar variables follow last-writer-wins semantics and ocx emits a warning. Use [`ocx package deps --flat`][cmd-deps] to see the evaluation order and [`ocx package deps --why`][cmd-deps] to trace conflicting paths.
 
 See [Dependencies][ug-dependencies] in the user guide for the full picture: automatic installation, environment composition, garbage collection, and inspection commands.
 

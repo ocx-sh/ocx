@@ -19,6 +19,8 @@ pub enum Package {
     Create(super::package_create::PackageCreate),
     /// Push a description (README + optional logo) to a package repository.
     Describe(super::package_describe::PackageDescribe),
+    /// Show the dependency tree for one or more installed packages.
+    Deps(super::deps::Deps),
     /// Print the resolved environment variables for one or more installed packages.
     Env(super::env::Env),
     /// Show description metadata for a package repository.
@@ -50,6 +52,7 @@ impl Package {
         match self {
             Package::Create(create) => create.execute(context).await,
             Package::Describe(describe) => describe.execute(context).await,
+            Package::Deps(deps) => deps.execute(context).await,
             Package::Env(env) => env.execute(context).await,
             Package::Info(info) => info.execute(context).await,
             Package::Inspect(inspect) => inspect.execute(context).await,

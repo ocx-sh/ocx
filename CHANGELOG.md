@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 >>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 - `OCX_GLOBAL` env var — resolution-affecting equivalent of `--global`; forwarded to child ocx processes via `apply_ocx_config`. *(cli)*
 - `ocx env [--global] [--shell[=NAME]]` — new root toolchain-tier env exporter. Default output is JSON (`{"entries": [...]}`). `--shell=<NAME>` is the only eval-safe output channel. `--global` targets `$OCX_HOME/ocx.toml`. *(cli)*
-- `ocx package` command group with `install`, `uninstall`, `select`, `deselect`, `exec`, `env`, `which` — OCI-tier package primitives moved under this group. *(cli)*
+- `ocx package` command group with `install`, `uninstall`, `select`, `deselect`, `exec`, `env`, `which`, `deps` — OCI-tier package primitives moved under this group. *(cli)*
 - Global toolchain activation via `$OCX_HOME/env.sh`, written by the in-repo installer. The file runs `eval "$(ocx env --global --shell=sh)"` and is sourced from the login profile via a block-marker idempotent line. *(shell)*
 - `ocx package push --build-timestamp [datetime|date|none]` appends a UTC build-metadata segment to the published tag. `datetime` (default when the flag is passed bare) yields `_YYYYMMDDhhmmss`; `date` yields `_YYYYMMDD`; `none` is a no-op. Designed for continuous-deploy pipelines that publish rolling pre-release builds, e.g. `0.3.0-dev_20260514120000`. The identifier tag must be in `X.Y.Z` form (with optional variant or pre-release) and must not already carry build metadata. *(cli)*
 - `Error::BuildMeta` variant on the package error chain, wrapping `BuildMetaError::{NoPatch, AlreadyPresent}` from `crates/ocx_lib/src/package/version/build_meta.rs`. Classified as `ExitCode::DataError` (65). *(package)*
@@ -75,7 +75,7 @@ OCX is locked-by-default for read paths: `ocx pull` and `ocx run` already exit 6
 
 ### Breaking
 
-- **Breaking:** Root `ocx install`, `ocx select`, `ocx deselect`, `ocx uninstall`, `ocx exec`, and `ocx which` commands removed — they exit 64 (`UsageError`). Use the `ocx package` group instead: `ocx package install`, `ocx package select`, `ocx package deselect`, `ocx package uninstall`, `ocx package exec`, `ocx package which`. *(cli)*
+- **Breaking:** Root `ocx install`, `ocx select`, `ocx deselect`, `ocx uninstall`, `ocx exec`, `ocx which`, and `ocx deps` commands removed — they exit 64 (`UsageError`). Use the `ocx package` group instead: `ocx package install`, `ocx package select`, `ocx package deselect`, `ocx package uninstall`, `ocx package exec`, `ocx package which`, `ocx package deps`. *(cli)*
 - **Breaking:** `ocx shell hook`, `ocx shell init`, and `ocx shell env` removed — they exit 64. The per-prompt shell hook model is replaced by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile. The file runs `eval "$(ocx env --global --shell=sh)"`. The `_OCX_APPLIED` fingerprint variable is gone. *(shell)*
 - **Breaking:** `ocx ci export` removed — exits 64. CI workflows: use `ocx pull` (project-tier) or `ocx package pull` (OCI-tier) to pre-warm the store, then `ocx run` or `ocx package env` to compose the environment. *(cli)*
 - **Breaking:** `ocx install --global` removed. To add a tool to the global toolchain: `ocx add --global <pkg>`. *(cli)*
@@ -101,7 +101,7 @@ OCX is locked-by-default for read paths: `ocx pull` and `ocx run` already exit 6
 ### Breaking (v2 schema and exec-mode defaults)
 
 - **Breaking:** `Var.visibility` field added to package metadata `env` entries. Default is `"private"` — env entries declared without an explicit `visibility` field are now treated as private (self-mode only) in consumer-mode execution. Publishers must add `"visibility": "public"` to any env entry meant to be visible to direct consumers (`ocx package exec PKG -- cmd`, `ocx package env PKG`). *(package)*
-- **Breaking:** `ExecMode::Consumer` is now the default for `ocx package exec`, `ocx env`, `ocx package env`, and `ocx deps`. The previous behavior was a union of all non-sealed visibility levels (equivalent to `--mode=full`). Packages that relied on private dep env being visible at direct exec must either declare those binaries as entry points (which routes through `--mode=self` automatically) or elevate the relevant dep to `visibility: "public"`. *(cli)*
+- **Breaking:** `ExecMode::Consumer` is now the default for `ocx package exec`, `ocx env`, `ocx package env`, and `ocx package deps`. The previous behavior was a union of all non-sealed visibility levels (equivalent to `--mode=full`). Packages that relied on private dep env being visible at direct exec must either declare those binaries as entry points (which routes through `--mode=self` automatically) or elevate the relevant dep to `visibility: "public"`. *(cli)*
 
 ## [0.2.1] - 2026-03-24
 

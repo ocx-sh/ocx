@@ -164,7 +164,7 @@ To actually *run* the package with its dependency environments configured, use [
 
 ### Inspecting the dependency tree
 
-[`ocx deps`][cmd-deps] shows the declared relationships. The default tree view annotates [non-public dependencies][in-depth-environments-visibility] so you can see at a glance which deps cross the [interface surface][in-depth-environments-two-surfaces]:
+[`ocx package deps`][cmd-deps] shows the declared relationships. The default tree view annotates [non-public dependencies][in-depth-environments-visibility] so you can see at a glance which deps cross the [interface surface][in-depth-environments-two-surfaces]:
 
 <Terminal src="/casts/user-guide/deps.cast" title="Inspecting the dependency tree" collapsed />
 
@@ -178,7 +178,7 @@ To actually *run* the package with its dependency environments configured, use [
 
 ### Conflict warnings
 
-If two dependencies set the same scalar variable (e.g., both set `JAVA_HOME` to different paths), OCX applies [last-writer-wins][in-depth-environments-last-wins] semantics and emits a warning. Inspect the order with [`ocx deps --flat`][cmd-deps] and decide whether the conflict is real. The same situation arises with project toolchains: if you add a package with dependencies and also declare one of those dependencies as a top-level binding in `ocx.toml`, both contribute env vars — either remove the redundant binding (the transitive dependency provides it) or accept the top-level entry's value winning the conflict.
+If two dependencies set the same scalar variable (e.g., both set `JAVA_HOME` to different paths), OCX applies [last-writer-wins][in-depth-environments-last-wins] semantics and emits a warning. Inspect the order with [`ocx package deps --flat`][cmd-deps] and decide whether the conflict is real. The same situation arises with project toolchains: if you add a package with dependencies and also declare one of those dependencies as a top-level binding in `ocx.toml`, both contribute env vars — either remove the redundant binding (the transitive dependency provides it) or accept the top-level entry's value winning the conflict.
 
 ::: tip Learn more
 [Dependencies In Depth][in-depth-dependencies] — transitive resolution algorithm, scope philosophy (no version ranges, no auto-update).
