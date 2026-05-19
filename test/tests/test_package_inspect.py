@@ -74,7 +74,19 @@ def test_inspect_resolve_adds_metadata_and_chain(
     assert data["metadata"]["version"] == 1
     resolution = data["resolution"]
     assert resolution["pinned"]
-    assert len(resolution["chain"]) >= 2, resolution["chain"]
+    chain = resolution["chain"]
+    assert len(chain) >= 2, chain
+    # Every chain entry is a descriptor object, not a bare digest string:
+    # digest + role + media_type + raw integer size (machine surface keeps
+    # the integer; the plain tree humanises it).
+    for entry in chain:
+        assert entry["digest"].startswith("sha256:"), entry
+        assert entry["role"] in {"index", "manifest", "config"}, entry
+        assert entry["media_type"], entry
+        assert isinstance(entry["size"], int), entry
+    roles = [e["role"] for e in chain]
+    assert roles[-1] == "config", roles
+    assert "manifest" in roles, roles
     assert len(resolution["layers"]) >= 1
     layer = resolution["layers"][0]
     assert layer["digest"].startswith("sha256:")
@@ -310,3 +322,4 @@ def test_inspect_default_has_no_install_side_effects(
             assert unique_repo not in entry.read_text(), (
                 f"inspect must not assemble a package for {unique_repo}: {entry}"
             )
+

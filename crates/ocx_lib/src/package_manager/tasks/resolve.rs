@@ -14,9 +14,51 @@ use crate::{
 
 use super::super::PackageManager;
 
+/// What a [`ChainBlob`] is in OCI terms — disambiguates the otherwise
+/// opaque digest list so `inspect` can label each entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainRole {
+    /// The multi-platform image index (only present for multi-platform tags).
+    Index,
+    /// The platform-selected image manifest.
+    Manifest,
+    /// The OCX metadata config blob the manifest points at.
+    Config,
+}
+
+impl std::fmt::Display for ChainRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            ChainRole::Index => "index",
+            ChainRole::Manifest => "manifest",
+            ChainRole::Config => "config",
+        };
+        f.write_str(text)
+    }
+}
+
+/// One blob in the resolution chain, carrying enough descriptor context
+/// (role, media type, byte size) for callers to render it the same way
+/// layers are rendered. `size` is `-1` only when it could not be
+/// determined (a manifest blob whose on-disk file is unexpectedly absent
+/// despite the on-disk invariant); descriptor-backed entries always have a
+/// real size.
+#[derive(Debug, Clone)]
+pub struct ChainBlob {
+    /// The blob pinned by its own digest.
+    pub identifier: oci::PinnedIdentifier,
+    /// What this blob is in the OCI walk.
+    pub role: ChainRole,
+    /// The blob's media type (descriptor `mediaType`, or the spec default
+    /// for the role when the manifest omits it).
+    pub media_type: String,
+    /// Size in bytes, or `-1` when undeterminable.
+    pub size: i64,
+}
+
 /// The full resolution output for a single identifier.
 ///
-/// `chain` lists every digest the resolved package depends on as a raw
+/// `chain` lists every blob the resolved package depends on as a raw
 /// blob in `blobs/`: manifest entries (image-index where present,
 /// image-manifest) followed by the trailing OCX metadata config blob.
 /// Manifest entries land on disk via `ChainedIndex` write-through during
@@ -31,12 +73,20 @@ pub struct ResolvedChain {
     /// The platform-selected pinned identifier — same value the old
     /// `resolve` method returned.
     pub pinned: oci::PinnedIdentifier,
-    /// Walk-order pinned identifiers for every manifest blob the resolver
-    /// touched, backed by on-disk blob files.
-    pub chain: Vec<oci::PinnedIdentifier>,
+    /// Walk-order chain blobs the resolver touched, backed by on-disk blob
+    /// files (config blob materialized later by the pull pipeline).
+    pub chain: Vec<ChainBlob>,
     /// The platform-selected image manifest used by the pull pipeline for
     /// layer extraction. Never an image index.
     pub final_manifest: oci::ImageManifest,
+}
+
+impl ResolvedChain {
+    /// Walk-order pinned identifiers for every chain blob — the input
+    /// `ReferenceManager::link_blobs` consumes to populate `refs/blobs/`.
+    pub fn blobs(&self) -> impl Iterator<Item = &oci::PinnedIdentifier> {
+        self.chain.iter().map(|blob| &blob.identifier)
+    }
 }
 
 impl PackageManager {
@@ -66,18 +116,33 @@ impl PackageManager {
         } else {
             package.clone_with_tag(package.tag_or_latest())
         };
-        let mut chain = vec![top_pinned.clone()];
-
         match top_manifest {
             // Flat image manifest: the chain is a single entry and the
             // top-level digest IS the pinned identifier. Platform filtering
             // does not apply here — a single-platform package always matches.
             oci::Manifest::Image(img) => {
+                let top_size = blob_data_size(self.file_structure(), &top_pinned).await;
+                let top_media = img
+                    .media_type
+                    .clone()
+                    .unwrap_or_else(|| oci::OCI_IMAGE_MEDIA_TYPE.to_string());
+                let mut chain = vec![ChainBlob {
+                    identifier: top_pinned.clone(),
+                    role: ChainRole::Manifest,
+                    media_type: top_media,
+                    size: top_size,
+                }];
+
                 let config_digest =
                     oci::Digest::try_from(img.config.digest.as_str()).map_err(|_| PackageErrorKind::DigestMissing)?;
                 let config_pinned = oci::PinnedIdentifier::try_from(top_id.clone_with_digest(config_digest))
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
-                chain.push(config_pinned);
+                chain.push(ChainBlob {
+                    identifier: config_pinned,
+                    role: ChainRole::Config,
+                    media_type: img.config.media_type.clone(),
+                    size: img.config.size,
+                });
                 Ok(ResolvedChain {
                     pinned: top_pinned,
                     chain,
@@ -87,7 +152,19 @@ impl PackageManager {
             // Image index: defer platform selection to `Index::select`, then
             // fetch the selected child to append it to the chain and return
             // its manifest as `final_manifest`.
-            oci::Manifest::ImageIndex(_) => {
+            oci::Manifest::ImageIndex(index) => {
+                let top_size = blob_data_size(self.file_structure(), &top_pinned).await;
+                let top_media = index
+                    .media_type
+                    .clone()
+                    .unwrap_or_else(|| oci::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string());
+                let mut chain = vec![ChainBlob {
+                    identifier: top_pinned.clone(),
+                    role: ChainRole::Index,
+                    media_type: top_media,
+                    size: top_size,
+                }];
+
                 let pinned = match self.index().select(&top_id, platforms, IndexOperation::Resolve).await {
                     Ok(SelectResult::Found(id)) => {
                         oci::PinnedIdentifier::try_from(id).map_err(|_| PackageErrorKind::DigestMissing)?
@@ -128,13 +205,37 @@ impl PackageManager {
                 };
                 let child_pinned = oci::PinnedIdentifier::try_from(child_id.clone_with_digest(child_digest))
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
-                chain.push(child_pinned);
+                // The image-index entry that selected this child carries its
+                // authoritative descriptor (media type + size) — no extra
+                // blob stat needed.
+                let child_descriptor = index
+                    .manifests
+                    .iter()
+                    .find(|entry| entry.digest == child_pinned.digest().to_string());
+                let (child_media, child_size) = match child_descriptor {
+                    Some(entry) => (entry.media_type.clone(), entry.size),
+                    None => (
+                        oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                        blob_data_size(self.file_structure(), &child_pinned).await,
+                    ),
+                };
+                chain.push(ChainBlob {
+                    identifier: child_pinned,
+                    role: ChainRole::Manifest,
+                    media_type: child_media,
+                    size: child_size,
+                });
 
                 let config_digest = oci::Digest::try_from(final_manifest.config.digest.as_str())
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
                 let config_pinned = oci::PinnedIdentifier::try_from(top_id.clone_with_digest(config_digest))
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
-                chain.push(config_pinned);
+                chain.push(ChainBlob {
+                    identifier: config_pinned,
+                    role: ChainRole::Config,
+                    media_type: final_manifest.config.media_type.clone(),
+                    size: final_manifest.config.size,
+                });
 
                 Ok(ResolvedChain {
                     pinned,
@@ -193,6 +294,27 @@ impl PackageManager {
     }
 }
 
+/// Size of a chain blob's on-disk `data` file, or `-1` when it cannot be
+/// stat'd. Manifest entries are guaranteed on disk by the `ResolvedChain`
+/// invariant (`ChainedIndex` write-through), so this only meaningfully
+/// returns `-1` for the trailing config blob — which the callers above
+/// never pass here (config size comes from its descriptor).
+///
+/// A bare `metadata()` (not a `BlobGuard`-locked read) is deliberate: the
+/// value is cosmetic (inspect display only, never correctness-bearing) and
+/// the store is content-addressed, so a concurrent rewrite of the same
+/// digest writes byte-identical content — a race cannot yield a wrong size.
+async fn blob_data_size(file_structure: &crate::file_structure::FileStructure, pinned: &oci::PinnedIdentifier) -> i64 {
+    let path = file_structure.blobs.data(pinned.registry(), &pinned.digest());
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) => i64::try_from(meta.len()).unwrap_or(i64::MAX),
+        Err(error) => {
+            crate::log::debug!("Could not stat chain blob '{}': {error}.", path.display());
+            -1
+        }
+    }
+}
+
 // ── Specification tests — plan_resolution_chain_refs.md (revised) ────────
 //
 // These tests replace the deleted `chain_walk` module's tests 33-38. They
@@ -202,6 +324,7 @@ impl PackageManager {
 mod spec_tests {
     use tempfile::TempDir;
 
+    use super::ChainRole;
     use crate::{
         file_structure::{BlobStore, FileStructure, TagStore},
         oci::index::{Index, LocalConfig, LocalIndex},
@@ -301,10 +424,16 @@ mod spec_tests {
             "flat ImageManifest must produce manifest + config chain entries"
         );
         assert_eq!(result.pinned.digest(), digest_a());
+        assert_eq!(result.chain[0].role, ChainRole::Manifest);
         assert_eq!(
-            result.chain[1].digest().to_string(),
+            result.chain[1].identifier.digest().to_string(),
             "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "second entry must be the manifest's config-blob digest"
+        );
+        assert_eq!(result.chain[1].role, ChainRole::Config);
+        assert_eq!(
+            result.chain[1].size, 2,
+            "config size must come from the manifest's config descriptor"
         );
     }
 
@@ -323,17 +452,17 @@ mod spec_tests {
             "ImageIndex must produce 3 chain entries (top + selected platform + config)"
         );
         assert_eq!(
-            result.chain[0].digest(),
+            result.chain[0].identifier.digest(),
             digest_a(),
             "first entry must be the top-level index digest"
         );
         assert_eq!(
-            result.chain[1].digest(),
+            result.chain[1].identifier.digest(),
             digest_b(),
             "second entry must be the platform-selected child digest"
         );
         assert_eq!(
-            result.chain[2].digest().to_string(),
+            result.chain[2].identifier.digest().to_string(),
             "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "third entry must be the child manifest's config-blob digest"
         );
@@ -385,7 +514,8 @@ mod spec_tests {
         // The trailing config-blob entry is materialised later by
         // pull::setup_owned via common::fetch_or_get_blob, not by resolve.
         let manifest_entries = &result.chain[..result.chain.len() - 1];
-        for pinned in manifest_entries {
+        for blob in manifest_entries {
+            let pinned = &blob.identifier;
             let blob_path = blob_store.data(pinned.registry(), &pinned.digest());
             assert!(
                 blob_path.exists(),

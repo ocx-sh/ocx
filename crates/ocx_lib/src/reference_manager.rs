@@ -272,7 +272,12 @@ impl ReferenceManager {
     /// `ocx clean` raced the caller), a dangling symlink is written and
     /// the next GC pass collects it. Callers don't need to serialize
     /// against GC — the system converges on its own.
-    pub async fn link_blobs(&self, content_path: &Path, chain: &[crate::oci::PinnedIdentifier]) -> Result<()> {
+    pub async fn link_blobs<'a>(
+        &self,
+        content_path: &Path,
+        chain: impl IntoIterator<Item = &'a crate::oci::PinnedIdentifier>,
+    ) -> Result<()> {
+        let chain: Vec<&crate::oci::PinnedIdentifier> = chain.into_iter().collect();
         if chain.is_empty() {
             return Ok(());
         }
