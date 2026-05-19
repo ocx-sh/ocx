@@ -10,7 +10,7 @@ use crate::{
 
 use super::super::PackageManager;
 use super::pull::{SetupGroups, setup_owned};
-use super::resolve::ResolvedChain;
+use super::resolve::{ChainBlob, ChainRole, ResolvedChain};
 
 /// Maximum size (in bytes) for a file-layer archive that `pull_local` will load into memory.
 ///
@@ -96,9 +96,19 @@ impl PackageManager {
 
         // Step 6: Synthesize a ResolvedChain from the staged manifest.
         // All-pub fields — struct literal per plan §2.2 step 4.
+        let manifest_media = parts
+            .manifest
+            .media_type
+            .clone()
+            .unwrap_or_else(|| oci::OCI_IMAGE_MEDIA_TYPE.to_string());
         let chain = ResolvedChain {
             pinned: pinned.clone(),
-            chain: vec![pinned.clone()],
+            chain: vec![ChainBlob {
+                identifier: pinned.clone(),
+                role: ChainRole::Manifest,
+                media_type: manifest_media,
+                size: i64::try_from(parts.manifest_bytes.len()).unwrap_or(i64::MAX),
+            }],
             final_manifest: parts.manifest,
         };
 

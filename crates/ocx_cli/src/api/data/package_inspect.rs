@@ -4,7 +4,7 @@
 use serde::{Serialize, ser::SerializeStruct};
 
 use ocx_lib::{
-    cli::{Annotation, DataInterface, Theme, TreeItem},
+    cli::{Annotation, DataInterface, Theme, TreeItem, human_bytes},
     oci,
     package::metadata::{Metadata, env::modifier::ModifierKind, visibility::Visibility},
     package_manager::{InspectResult, ResolvedChain},
@@ -52,10 +52,13 @@ impl SemanticAnnotation {
 ///   metadata document — `{ identifier, pinned_digest, metadata }`.
 /// - **resolution** (`--resolve`): platform-selected metadata plus the OCI
 ///   resolution chain — `{ identifier, pinned_digest, platforms, metadata,
-///   resolution }`.
+///   resolution }`. Each `resolution.chain` entry carries `{ digest, role,
+///   media_type, size }` (role ∈ `index` | `manifest` | `config`).
 ///
-/// Plain format: a tree rooted at the pinned identifier with the
-/// shape-appropriate section(s).
+/// Plain format: a tree rooted at the pinned identifier (inked with the
+/// active theme like every other identifier) with the shape-appropriate
+/// section(s). Byte sizes render human-readable (binary units); JSON keeps
+/// the raw integer `size`.
 pub struct PackageInspect {
     identifier: oci::Identifier,
     pinned_digest: String,
@@ -64,15 +67,15 @@ pub struct PackageInspect {
 
 enum Body {
     Candidates {
-        pinned: String,
+        pinned: oci::PinnedIdentifier,
         candidates: Vec<CandidateOut>,
     },
     Manifest {
-        pinned: String,
+        pinned: oci::PinnedIdentifier,
         metadata: Metadata,
     },
     Resolved {
-        pinned: String,
+        pinned: oci::PinnedIdentifier,
         platforms: Vec<oci::Platform>,
         metadata: Metadata,
         resolution: Resolution,
@@ -92,8 +95,19 @@ struct CandidateOut {
 #[derive(Serialize)]
 struct Resolution {
     pinned: String,
-    chain: Vec<String>,
+    chain: Vec<ChainOut>,
     layers: Vec<Layer>,
+}
+
+/// One blob in the resolution chain. Same descriptor surface as a layer
+/// (digest, media type, size) plus the OCI `role` so a consumer can tell
+/// the index from the manifest from the config without decoding digests.
+#[derive(Serialize)]
+struct ChainOut {
+    digest: String,
+    role: String,
+    media_type: String,
+    size: i64,
 }
 
 /// A single layer descriptor from the platform-selected manifest.
@@ -115,7 +129,7 @@ impl PackageInspect {
                 identifier,
                 pinned_digest: pinned.digest().to_string(),
                 body: Body::Candidates {
-                    pinned: pinned.to_string(),
+                    pinned,
                     candidates: candidates
                         .into_iter()
                         .map(|c| CandidateOut {
@@ -131,7 +145,7 @@ impl PackageInspect {
                 identifier,
                 pinned_digest: pinned.digest().to_string(),
                 body: Body::Manifest {
-                    pinned: pinned.to_string(),
+                    pinned,
                     metadata: metadata.into(),
                 },
             },
@@ -143,7 +157,7 @@ impl PackageInspect {
                 identifier,
                 pinned_digest: pinned.digest().to_string(),
                 body: Body::Resolved {
-                    pinned: pinned.to_string(),
+                    pinned,
                     platforms,
                     metadata: metadata.into(),
                     resolution: Resolution::from_chain(&chain),
@@ -157,7 +171,16 @@ impl Resolution {
     fn from_chain(chain: &ResolvedChain) -> Self {
         Self {
             pinned: chain.pinned.to_string(),
-            chain: chain.chain.iter().map(|p| p.digest().to_string()).collect(),
+            chain: chain
+                .chain
+                .iter()
+                .map(|blob| ChainOut {
+                    digest: blob.identifier.digest().to_string(),
+                    role: blob.role.to_string(),
+                    media_type: blob.media_type.clone(),
+                    size: blob.size,
+                })
+                .collect(),
             layers: chain
                 .final_manifest
                 .layers
@@ -210,6 +233,10 @@ impl Serialize for PackageInspect {
 /// the `Serialize` impls above.
 struct Node {
     label: String,
+    /// When set, the label is an identifier inked with the active theme at
+    /// render time (so the root reads like every other identifier). Takes
+    /// precedence over `label`.
+    identifier: Option<oci::Identifier>,
     annotations: Vec<SemanticAnnotation>,
     children: Vec<Node>,
 }
@@ -218,6 +245,7 @@ impl Node {
     fn leaf(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            identifier: None,
             annotations: Vec::new(),
             children: Vec::new(),
         }
@@ -226,6 +254,19 @@ impl Node {
     fn branch(label: impl Into<String>, children: Vec<Node>) -> Self {
         Self {
             label: label.into(),
+            identifier: None,
+            annotations: Vec::new(),
+            children,
+        }
+    }
+
+    /// A branch whose label is an identifier — inked with the active theme
+    /// at render time so it matches digest/identifier colouring everywhere
+    /// else in the tree.
+    fn identifier_branch(identifier: oci::Identifier, children: Vec<Node>) -> Self {
+        Self {
+            label: String::new(),
+            identifier: Some(identifier),
             annotations: Vec::new(),
             children,
         }
@@ -253,8 +294,11 @@ impl Node {
 }
 
 impl TreeItem for Node {
-    fn label(&self, _theme: &Theme) -> String {
-        self.label.clone()
+    fn label(&self, theme: &Theme) -> String {
+        match &self.identifier {
+            Some(identifier) => theme.of(identifier),
+            None => self.label.clone(),
+        }
     }
 
     fn children(&self) -> &[Self] {
@@ -329,21 +373,26 @@ fn candidates_node(candidates: &[CandidateOut]) -> Node {
             Node::leaf(c.platform.clone())
                 .with_digest(c.digest.clone())
                 .with_note(c.media_type.clone())
-                .with_note(format!("{} bytes", c.size))
+                .with_note(human_bytes(c.size))
         })
         .collect();
     Node::branch("candidates", entries)
 }
 
 fn resolution_node(resolution: &Resolution) -> Node {
-    // Digests render as styled annotations everywhere (labels carry a fixed
-    // style and cannot be coloured); a positional `[i]` label preserves the
-    // walk order that used to be implicit in the bare-digest list.
+    // Chain entries render exactly like layers — role label, then digest /
+    // media type / size annotations — so the OCI walk (index → manifest →
+    // config) is legible instead of an opaque positional digest list. The
+    // role doubles as the walk-order marker the bare `[i]` used to carry.
     let chain = resolution
         .chain
         .iter()
-        .enumerate()
-        .map(|(i, d)| Node::leaf(format!("[{i}]")).with_digest(d.clone()))
+        .map(|c| {
+            Node::leaf(c.role.clone())
+                .with_digest(c.digest.clone())
+                .with_note(c.media_type.clone())
+                .with_note(human_bytes(c.size))
+        })
         .collect();
     let layers = resolution
         .layers
@@ -353,7 +402,7 @@ fn resolution_node(resolution: &Resolution) -> Node {
             Node::leaf(format!("[{i}]"))
                 .with_digest(l.digest.clone())
                 .with_note(l.media_type.clone())
-                .with_note(format!("{} bytes", l.size))
+                .with_note(human_bytes(l.size))
         })
         .collect();
     Node::branch(
@@ -380,7 +429,7 @@ impl Printable for PackageInspect {
                 ..
             } => (pinned, vec![metadata_node(metadata), resolution_node(resolution)]),
         };
-        let root = Node::branch(pinned.clone(), sections);
+        let root = Node::identifier_branch(pinned.as_identifier().clone(), sections);
         data.print_tree(&root);
     }
 }

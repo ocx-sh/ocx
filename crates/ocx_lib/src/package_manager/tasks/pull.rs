@@ -235,7 +235,7 @@ async fn setup_impl(
             // so overlapping entries are no-ops; only the unique entries
             // (e.g., the waiter's distinct image-index digest) get linked.
             super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.dir().content(), &resolved.chain)
+                .link_blobs(&info.dir().content(), resolved.blobs())
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
@@ -295,7 +295,7 @@ pub async fn setup_owned(
             // resolved via a different image-index path (alias tag). See
             // the waiter branch in `setup_impl` for the same invariant.
             super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.dir().content(), &resolved.chain)
+                .link_blobs(&info.dir().content(), resolved.blobs())
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
@@ -329,7 +329,7 @@ pub async fn setup_owned(
                 pinned
             );
             super::common::reference_manager(mgr.file_structure())
-                .link_blobs(&info.dir().content(), &resolved.chain)
+                .link_blobs(&info.dir().content(), resolved.blobs())
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
@@ -474,7 +474,7 @@ pub async fn setup_owned(
     // Forward-ref every blob the resolver touched into `refs/blobs/` so GC
     // can reach the full resolution chain from the installed package.
     super::common::reference_manager(fs)
-        .link_blobs(&pkg.content(), &resolved.chain)
+        .link_blobs(&pkg.content(), resolved.blobs())
         .await
         .map_err(PackageErrorKind::Internal)?;
 

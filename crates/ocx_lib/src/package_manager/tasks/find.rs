@@ -47,7 +47,7 @@ impl PackageManager {
         // — idempotent, covers legacy installs and alt-tag resolves that walked
         // through a different image index than the one originally pulled.
         super::common::reference_manager(self.file_structure())
-            .link_blobs(&info.dir().content(), &resolved.chain)
+            .link_blobs(&info.dir().content(), resolved.blobs())
             .await
             .map_err(PackageErrorKind::Internal)?;
 
