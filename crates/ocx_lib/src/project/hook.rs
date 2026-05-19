@@ -127,10 +127,14 @@ mod tests {
     /// `MissingState::NoProject`.
     #[tokio::test]
     async fn load_returns_no_project_when_cwd_walk_misses() {
+        let env = crate::test::env::lock();
+        // `home = None` disables this helper's own home probe, but
+        // `load_project_state` → `ConfigLoader::project_path` Tier 4 still
+        // reads `$OCX_HOME` (default `~/.ocx/ocx.toml`). Sandbox it so a
+        // developer's real `~/.ocx/ocx.toml` cannot turn this walk-miss
+        // into a spurious project hit (green on clean CI, red locally).
+        let _ocx_home = env.isolate_project_home();
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Override OCX_HOME so the home-tier fallback also misses; the
-        // helper passes `home = None` which already disables the home
-        // probe, but the kill switch is irrelevant here.
         let result = load_project_state(tmp.path(), None).await.expect("load ok");
         assert!(matches!(result, Err(MissingState::NoProject)));
     }

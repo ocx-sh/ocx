@@ -916,6 +916,7 @@ bad = "ocx.sh/CMAKE:3.28"
     #[tokio::test]
     async fn resolve_walk_miss_falls_back_to_home() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let workspace = tempfile::tempdir().expect("workspace tempdir");
@@ -936,6 +937,7 @@ bad = "ocx.sh/CMAKE:3.28"
     #[tokio::test]
     async fn resolve_walk_miss_no_home_returns_none() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let workspace = tempfile::tempdir().expect("tempdir");
@@ -1044,6 +1046,7 @@ bad = "ocx.sh/CMAKE:3.28"
     #[tokio::test]
     async fn resolve_home_follows_symlinks() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let home_dir = tempfile::tempdir().expect("home tempdir");
@@ -1067,6 +1070,7 @@ bad = "ocx.sh/CMAKE:3.28"
     #[tokio::test]
     async fn resolve_home_directory_returns_none() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let home_dir = tempfile::tempdir().expect("home tempdir");

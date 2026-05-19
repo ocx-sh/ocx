@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
+use tempfile::TempDir;
+
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static OVERRIDES: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -44,6 +46,20 @@ impl EnvLock {
     /// Marks `key` as removed.  [`crate::env::var`] will return `None` for it.
     pub fn remove(&self, key: impl Into<String>) {
         OVERRIDES.lock().unwrap().insert(key.into(), None);
+    }
+
+    /// Points `OCX_HOME` at a fresh empty directory and returns its
+    /// [`TempDir`] guard (bind it for the test's lifetime).
+    ///
+    /// `ConfigLoader::project_path` Tier 4 falls back to
+    /// `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`). Tests that assert
+    /// "no project source resolves" must sandbox that tier or they pick up
+    /// the developer's real `~/.ocx/ocx.toml` and fail only on machines
+    /// that happen to have one (green on clean CI, red locally).
+    pub fn isolate_project_home(&self) -> TempDir {
+        let home = TempDir::new().expect("create temp OCX_HOME");
+        self.set("OCX_HOME", home.path().to_str().expect("temp path is utf-8"));
+        home
     }
 }
 

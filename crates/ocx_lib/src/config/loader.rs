@@ -1107,6 +1107,7 @@ mod tests {
     #[tokio::test]
     async fn project_path_empty_env_var_treated_as_unset() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.set("OCX_PROJECT", "");
         env.remove("OCX_NO_PROJECT");
         let dir = TempDir::new().unwrap();
@@ -1290,6 +1291,7 @@ mod tests {
     #[tokio::test]
     async fn project_path_walk_rejects_symlink() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let dir = TempDir::new().unwrap();
@@ -1361,6 +1363,7 @@ mod tests {
     #[tokio::test]
     async fn project_path_walk_stops_at_git_boundary() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let dir = TempDir::new().unwrap();
@@ -1392,6 +1395,7 @@ mod tests {
     #[tokio::test]
     async fn project_path_walk_stops_at_git_worktree_linkfile() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let dir = TempDir::new().unwrap();
@@ -1477,6 +1481,7 @@ mod tests {
     #[tokio::test]
     async fn project_path_returns_none_when_no_source() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let dir = TempDir::new().unwrap();
@@ -1522,6 +1527,7 @@ mod tests {
     #[tokio::test]
     async fn project_path_walk_without_git_or_ceiling_returns_none() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         env.remove("OCX_CEILING_PATH");
@@ -1549,6 +1555,7 @@ mod tests {
     #[tokio::test]
     async fn project_path_walk_stops_at_ceiling() {
         let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_PROJECT");
         let dir = TempDir::new().unwrap();
