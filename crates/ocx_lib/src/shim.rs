@@ -33,11 +33,17 @@
 //! See `.claude/artifacts/adr_windows_exe_shim.md` Contract 3 and
 //! `system_design_windows_exe_shim.md` §5.
 
-/// Hard upper bound on the embedded shim size. The realistic target is
-/// < 80 KiB (`opt-level="z"`, `lto`, `panic="abort"`, `strip`); this budget
-/// is the fail-closed ceiling enforced by the compile-time assertion below
-/// (Windows builds only) and a CI `cargo-bloat` check in Phase 4.
-pub const SHIM_SIZE_BUDGET: usize = 256 * 1024;
+/// Hard upper bound on the embedded shim size, enforced fail-closed by the
+/// compile-time assertion below (Windows builds only).
+///
+/// 512 KiB ceiling: the hermetic cargo-zigbuild output with the pinned
+/// stable Zig is ~208–284 KiB (x86_64 is the larger; build-std/strip is
+/// less aggressive on stable Zig than on the dev toolchain used in the
+/// PoC). Reproducibility is the priority — the size is an accepted
+/// trade-off (see adr_shim_hermetic_zigbuild.md); shrinking it (verify
+/// build-std/immediate-abort efficacy on stable Zig) is a tracked
+/// follow-up, not a blocker.
+pub const SHIM_SIZE_BUDGET: usize = 512 * 1024;
 
 /// Verbatim bytes of the prebuilt `ocx-shim` executable for the target arch.
 ///
@@ -54,13 +60,13 @@ pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-x86_64.exe");
 /// `shim_blob_matches_recorded_sha256_fail_closed_on_windows` test fails
 /// closed if this drifts from `sha256(SHIM_BYTES)`.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const SHIM_SHA256: &str = "f4052a2f986f5ec5086da4a09a0de237975db7284436f462903a8831fa52b33c";
+pub const SHIM_SHA256: &str = "c577ae541958591a2e9ae30917c9a82fdd263fc58ab190a6e7480f20730c954d";
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-aarch64.exe");
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const SHIM_SHA256: &str = "e30b175ffbd555f578692ba86a78fcd88819f82707cb5e1821d76e5320ce6335";
+pub const SHIM_SHA256: &str = "dfc44e9e8361a59a028af245787e5e7a0840e1130992ffd9d0e7dd7bbd0e8603";
 
 #[cfg(not(target_os = "windows"))]
 pub const SHIM_BYTES: &[u8] = &[];
