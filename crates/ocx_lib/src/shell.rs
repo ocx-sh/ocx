@@ -3,9 +3,7 @@
 
 pub mod applied_set;
 pub mod error;
-mod profile_builder;
 pub use applied_set::{AppliedEntry, compute_fingerprint, parse_applied, render_applied};
-pub use profile_builder::ProfileBuilder;
 
 use crate::{Error, env, log};
 
@@ -107,34 +105,6 @@ impl Shell {
         None
     }
 
-    pub fn profile_builder(&self, content: impl Into<std::path::PathBuf>) -> ProfileBuilder {
-        ProfileBuilder::new(content.into(), *self)
-    }
-
-    /// Default basename for the per-shell init file under `$OCX_HOME`
-    /// (`init.bash`, `init.zsh`, `init.fish`, `init.nu`, …).
-    ///
-    /// POSIX-family shells (`ash`, `ksh`, `dash`, `bash`) all share
-    /// `init.bash` — they accept the same `export KEY="…"` syntax that
-    /// `export_constant` / `export_path` emit, so a single generated file
-    /// works for the whole family. Other shells get their own basename so
-    /// the generated file's syntax matches the shell that will source it.
-    ///
-    /// Used by [`crate::ConfigLoader::home_init_path`] to compute the
-    /// default `--output` target for `ocx shell profile generate` (see
-    /// [`crates/ocx_cli/src/command/shell_profile_generate.rs`]).
-    pub fn default_init_filename(self) -> &'static str {
-        match self {
-            Self::Bash | Self::Ash | Self::Ksh | Self::Dash => "init.bash",
-            Self::Zsh => "init.zsh",
-            Self::Fish => "init.fish",
-            Self::Nushell => "init.nu",
-            Self::PowerShell => "init.ps1",
-            Self::Batch => "init.bat",
-            Self::Elvish => "init.elv",
-        }
-    }
-
     /// Returns a shell comment line.
     pub fn comment(self, text: impl AsRef<str>) -> String {
         let text = text.as_ref();
@@ -210,54 +180,6 @@ impl Shell {
             Self::Batch => format!("SET {key}="),
             Self::Elvish => format!("unset-env {key}"),
             Self::Nushell => format!("hide-env {key}"),
-        })
-    }
-
-    /// Emit a shell line that rebuilds `PATH` dropping every element whose
-    /// path contains `needle` as a substring.
-    ///
-    /// Used by the prompt hook on project entry to strip the global
-    /// toolchain's `current` bin segments (rooted at
-    /// `$OCX_HOME/symlinks/…`) so a global-only tool is *removed* — not
-    /// merely shadowed — inside a project (strict isolation at the shell
-    /// layer, adr_global_toolchain_tier.md §Decision 6 / CODEX-BLOCK-4).
-    ///
-    /// Returns `None` for shells without a portable single-line PATH
-    /// filter (`Batch`); the caller surfaces a `# ocx:` note rather than
-    /// aborting. POSIX-family branches stay dash/sh-compatible (no bash
-    /// arrays, no `<<<`) so the static `init.bash` entrypoint sourced by
-    /// `bash --norc -c` / `dash` works unchanged (SOTA-2b).
-    ///
-    /// `needle` must not contain the shell's field separator or quoting
-    /// metacharacters; in practice it is an `$OCX_HOME`-rooted absolute
-    /// path, escaped here defensively.
-    pub fn filter_path_excluding(self, needle: impl AsRef<str>) -> Option<String> {
-        let needle = self.escape_value(needle.as_ref());
-        Some(match self {
-            // POSIX: split PATH on ':' with IFS, rebuild excluding any
-            // element containing $needle. `case` substring match is
-            // POSIX-portable (no bashisms) — works in dash/sh/ash/ksh too.
-            Self::Ash | Self::Ksh | Self::Dash | Self::Bash | Self::Zsh => format!(
-                "export PATH=\"$(_o=\"\"; _IFS=\"$IFS\"; IFS=':'; for _p in $PATH; do \
-                 case \"$_p\" in *\"{needle}\"*) ;; *) _o=\"${{_o:+$_o:}}$_p\";; esac; done; \
-                 IFS=\"$_IFS\"; printf '%s' \"$_o\")\""
-            ),
-            Self::Fish => format!("set -x PATH (string match -v -- \"*{needle}*\" $PATH)"),
-            Self::PowerShell => {
-                format!("$env:PATH = (($env:PATH -split ';') | Where-Object {{ $_ -notlike '*{needle}*' }}) -join ';'")
-            }
-            Self::Elvish => format!(
-                "set E:PATH = (str:join \":\" [(each [p]{{ if (not (str:contains $p \"{needle}\")) {{ put $p }} }} [(str:split \":\" $E:PATH)])])"
-            ),
-            Self::Nushell => format!(
-                "$env.PATH = ($env.PATH | split row (char esep) | where $it !~ \"{needle}\" | str join (char esep))"
-            ),
-            // No portable single-line PATH filter on cmd.exe; caller
-            // degrades to a `# ocx:` note (global tools may leak — Windows
-            // interactive prompt-hook isolation is a documented gap, not a
-            // correctness regression for the CI/non-interactive path the
-            // acceptance suite asserts).
-            Self::Batch => return None,
         })
     }
 
@@ -469,61 +391,6 @@ mod tests {
     fn test_from_parent_process() {
         let shell = Shell::from_process();
         println!("Detected shell from parent process: {:?}", shell);
-    }
-
-    // ── Nushell parity (Phase 7 — shell-hook trio) ───────────────────
-    //
-    // Brings Nushell coverage to parity with Bash/Zsh for the public surface
-    // touched by `ocx hook-env`, `ocx shell-hook`, and `ocx shell init`.
-
-    // ── default_init_filename (Round 2 B1) ───────────────────────────
-    //
-    // `default_init_filename` is the canonical shell-keyed basename for
-    // the `$OCX_HOME/init.<shell>` default that `ocx shell profile
-    // generate` writes. The mapping is a property of each shell, so the
-    // table lives on `Shell` rather than in the CLI command.
-
-    #[test]
-    fn default_init_filename_per_shell_basenames() {
-        // POSIX family share `init.bash` — they all accept the same
-        // `export KEY="…"` syntax.
-        assert_eq!(Shell::Bash.default_init_filename(), "init.bash");
-        assert_eq!(Shell::Ash.default_init_filename(), "init.bash");
-        assert_eq!(Shell::Ksh.default_init_filename(), "init.bash");
-        assert_eq!(Shell::Dash.default_init_filename(), "init.bash");
-        // Distinct shells get distinct basenames.
-        assert_eq!(Shell::Zsh.default_init_filename(), "init.zsh");
-        assert_eq!(Shell::Fish.default_init_filename(), "init.fish");
-        assert_eq!(Shell::Nushell.default_init_filename(), "init.nu");
-        assert_eq!(Shell::PowerShell.default_init_filename(), "init.ps1");
-        assert_eq!(Shell::Batch.default_init_filename(), "init.bat");
-        assert_eq!(Shell::Elvish.default_init_filename(), "init.elv");
-    }
-
-    #[test]
-    fn default_init_filename_distinct_across_shell_families() {
-        // Confirm the non-POSIX shells get distinct basenames so the
-        // generated file's syntax matches the shell that will source it.
-        // Skip the POSIX family (Ash/Ksh/Dash/Bash) which intentionally
-        // share `init.bash`.
-        let distinct_families = [
-            Shell::Bash,
-            Shell::Zsh,
-            Shell::Fish,
-            Shell::Nushell,
-            Shell::PowerShell,
-            Shell::Batch,
-            Shell::Elvish,
-        ];
-        let mut names: Vec<&'static str> = distinct_families.iter().map(|s| s.default_init_filename()).collect();
-        names.sort_unstable();
-        let len_before = names.len();
-        names.dedup();
-        assert_eq!(
-            names.len(),
-            len_before,
-            "non-POSIX shells must yield distinct basenames; got {names:?}"
-        );
     }
 
     // ── C5: `sh` ≡ `Shell::Dash` via PossibleValue alias ────────────────
