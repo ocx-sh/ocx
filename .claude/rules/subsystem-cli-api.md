@@ -6,7 +6,7 @@ paths:
 
 # CLI API Data Layer Patterns
 
-> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The new `ocx env` and `ocx package env` commands default to **JSON** output (backend-first). All legacy commands continue to default to **plain**. The mechanism is `ContextOptions.format: Option<Format>` + `Api::new` applying `.unwrap_or(Format::Plain)`.
+> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16; §3 format decision **amended 2026-05-19**). Output format is a **context-only concern**: every command — including `ocx env` and `ocx package env` — reports through the shared context `Api` whose format is `ContextOptions.format` with `.unwrap_or(Format::Plain)` applied at the single `Context::try_init` call site. No subcommand declares its own `--format` or builds its own `Api`. There is no env-specific JSON default (the former `None → Json` divergence was removed).
 
 Standards for `ocx_cli` API reporting layer (`api/data/`, `api.rs`). Rules ensure consistent output format across all commands.
 
@@ -62,12 +62,13 @@ OCX is a **backend tool** (`product-context.md`: automation-first). Output is sp
 
 `emit_lines` wraps `ocx_lib::shell::Shell::export_path` / `export_constant`. Do not inline the emit loop — delegate.
 
-## `ContextOptions.format` = `Option<Format>` (precondition for env commands)
+## `ContextOptions.format` = `Option<Format>` (single format authority)
 
-`ContextOptions.format` is `Option<options::Format>`. `Api::new` applies `.unwrap_or(Format::Plain)` at the single call site:
-- `None` → `Format::Plain` for all legacy commands (no behaviour change)
-- `ocx env` and `ocx package env` resolve `None → Format::Json` internally (backend-first)
-- Explicit `--format plain` → `Some(Format::Plain)` → human inspection (NOT sourceable)
+`ContextOptions.format` is `Option<options::Format>`. `Api::new` applies `.unwrap_or(Format::Plain)` at the single `Context::try_init` call site — the only place a format default is decided:
+- `None` → `Format::Plain` for **all** commands, with no exceptions (handshake §3 amended 2026-05-19)
+- Explicit root `--format json` → `Some(Format::Json)`
+- `ocx env` / `ocx package env` carry **no subcommand `--format`** and build **no local `Api`** — they report through `context.api()` like every command. The former env-specific `None → Json` divergence was removed.
+- `--shell[=NAME]` is orthogonal: the only eval-safe form, unaffected by `--format`
 
 ## Semantic intent, not display attributes (Block-tier)
 
@@ -111,15 +112,13 @@ Status values, category tags, bounded sets = enums with `Display` and `Serialize
 
 `command/run.rs` follows the same `struct + execute(&self, context)` pattern but diverges from the `Printable` / `api/data/` path: it never calls `context.api().report()` because execution diverges via `child_process::exec`. No structured output to emit from parent.
 
-## `ocx env` Command Pattern
+## `ocx env` / `ocx package env` Command Pattern
 
-`command/env.rs` is the new toolchain-tier composed-env command. It:
-1. Calls `load_project_with_lock` (from `app/project_context.rs`) or the global resolver
-2. Calls `compose_tool_set` / `resolve_env` → `composer::compose`
-3. For `--shell[=NAME]` output: calls `emit_lines(shell, &entries)` — eval-safe
-4. For default (no `--shell`): calls `context.api().report(&env_data)` → **JSON** (resolves `None → Json`)
-5. For `--format plain`: calls `context.api().report(&env_data)` → plain human inspection (NOT sourceable)
+`command/toolchain_env.rs` is the toolchain-tier composed-env command (`ocx [--global] env`); `command/env.rs` is the OCI-tier per-package one (`ocx package env`). Both:
+1. Resolve entries (toolchain: `load_project_with_lock` / global resolver → `compose_tool_set` / `resolve_env`; package: `find_or_install_all` → `resolve_env`)
+2. For `--shell[=NAME]` output: call `emit_lines(shell, &entries)` — eval-safe, the only sourceable form
+3. For default (no `--shell`): call `context.api().report(&env_data)` — format is the context concern (root `--format`, default plain). **No subcommand `--format`, no local `Api`, no JSON default.**
 
-`env.rs` never reads `ocx.toml` directly — it goes through the project resolution path via `Context`.
+`toolchain_env.rs` never reads `ocx.toml` directly — it goes through the project resolution path via `Context`.
 
 The `app/project_context.rs` module provides `load_project_with_lock` — the shared prologue consumed by `pull.rs`, `run.rs`, and `env.rs`.

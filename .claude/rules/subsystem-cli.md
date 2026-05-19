@@ -34,7 +34,7 @@ Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx
 Canonical form: `ocx --global <subcommand>`.
 - `ocx [--global] add <id>`, `ocx [--global] remove <name>`, `ocx [--global] lock`, `ocx [--global] upgrade`
 - `ocx [--global] run -- cmd` — compose toolchain env for child process only; never mutates parent shell
-- `ocx [--global] env [--shell[=NAME]]` — compose toolchain env: **JSON by default** (backend-first, handshake §3); `--format plain` for human inspection (NOT sourceable); `--shell[=NAME]` is the ONLY eval-safe channel
+- `ocx [--global] env [--shell[=NAME]]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel
 
 ### `ocx shell` — reduced to one survivor
 - `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)
@@ -70,7 +70,7 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 ## `--shell` Flag Convention
 
 `--shell` is declared as `Option<Option<Shell>>` with clap `num_args=0..=1, require_equals=true, default_missing_value=…` (pattern from `package_push.rs`):
-- `--shell` absent → default-format path (JSON for `ocx env` / `ocx package env`)
+- `--shell` absent → structured-report path through the context `Api` (format = root `--format`, default plain — same for `ocx env` / `ocx package env` as every command)
 - `--shell` bare (equals form, no value) → autodetect from `$SHELL`/parent; error (exit 64) if undetectable
 - `--shell=bash` → explicit shell
 
@@ -78,9 +78,9 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 
 `--shell=sh` resolves to `Shell::Dash` via a `PossibleValue::new("sh")` alias — **no new enum variant**, zero new match arms (handshake C5).
 
-## `ContextOptions.format` — `Option<Format>` Precondition
+## `ContextOptions.format` — `Option<Format>` (single format authority)
 
-`ContextOptions.format` is `Option<options::Format>`. The `Api::new` call site applies `.unwrap_or(Format::Plain)` so **all legacy commands keep Plain default unchanged**. `ocx env` and `ocx package env` resolve `None → Json` for their own output.
+`ContextOptions.format` is `Option<options::Format>`. The single `Api::new` call site in `Context::try_init` applies `.unwrap_or(Format::Plain)`. This is the **only** place a format default is decided. **No subcommand declares its own `--format` or builds its own `Api`** — `ocx env` and `ocx package env` report through `context.api()` exactly like every other command (handshake §3 amended 2026-05-19: format is a context-only concern; the former env-specific `None → Json` divergence was removed).
 
 ## Context Struct
 

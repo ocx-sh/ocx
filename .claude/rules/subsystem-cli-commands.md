@@ -36,7 +36,7 @@ The CLI surface splits into two tiers. The split is firm.
 | `--color auto\|always\|never` | `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE` | auto | ANSI color output control |
 | `--remote` | `OCX_REMOTE` | false | Route mutable lookups to remote registry |
 | `--offline` | `OCX_OFFLINE` | false | Disable all network access |
-| `--format plain\|json` | — | plain (legacy commands); JSON (ocx env / ocx package env) | Output format |
+| `--format plain\|json` | — | plain (all commands, no exceptions) | Root-only output format; no subcommand-level `--format` |
 | `--index PATH` | `OCX_INDEX` | — | Override local index directory |
 | `-l/--log-level` | — | — | Tracing level |
 | `--global` | `OCX_GLOBAL` | false | Select `$OCX_HOME/ocx.toml` toolchain tier; affects toolchain-tier commands `add`/`remove`/`lock`/`upgrade`/`pull`/`run`/`env`; mutually exclusive with `--project` |
@@ -68,7 +68,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group` |
 | `upgrade PKGS...` | Re-resolve advisory tags in lock | `-g/--group` |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self` |
-| `env [--shell[=NAME]]` | Composed toolchain env: **JSON default**; `--shell[=NAME]` = eval-safe | `--shell[=NAME]`, `--format` |
+| `env [--shell[=NAME]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe | `--shell[=NAME]` |
 | `pull` | Pre-warm package store from `ocx.lock` | — |
 
 ### OCI-Tier Commands (`ocx package`)
@@ -80,7 +80,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package select PKGS...` | Set `current` symlink | `-p` |
 | `package deselect PKGS...` | Remove `current` symlink | — |
 | `package exec PKGS... -- CMD` | Run command with package env (hermetic) | `--clean`, `-p`, `--self` |
-| `package env PKGS... [--shell[=NAME]]` | Per-package composed env: **JSON default**; `--shell[=NAME]` = eval-safe | `--shell[=NAME]`, `--self` |
+| `package env PKGS... [--shell[=NAME]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe | `--shell[=NAME]`, `--self` |
 | `package pull PKGS...` | Download to object store only | `-p` |
 | `package create PATH` | Bundle directory into archive | `-o`, `-m`, `-l`, `-j`, `--force` |
 | `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp` |
@@ -128,11 +128,13 @@ These commands **do not exist** in the current model. Any invocation returns exi
 
 ## `ocx env` vs `ocx package env`
 
-| Want | Invocation | Default output |
-|------|------------|----------------|
-| Toolchain env, machine-readable | `ocx [--global] env` | **JSON** |
+| Want | Invocation | Output |
+|------|------------|--------|
+| Toolchain env, default | `ocx [--global] env` | plain table (context default) |
+| Toolchain env, machine-readable | `ocx --format json [--global] env` | JSON |
 | Toolchain env, eval-safe | `ocx [--global] env --shell[=NAME]` | Shell export lines |
-| Per-package env, machine-readable | `ocx package env <ids...>` | **JSON** |
+| Per-package env, default | `ocx package env <ids...>` | plain table (context default) |
+| Per-package env, machine-readable | `ocx --format json package env <ids...>` | JSON |
 | Per-package env, eval-safe | `ocx package env <ids...> --shell[=NAME]` | Shell export lines |
 
 Rules:
@@ -162,7 +164,7 @@ Rules:
 ## Semantics & Gotchas
 
 - **`ocx run` semantics** — `--` mandatory, exit 64 if missing (ocx maps clap usage errors → EX_USAGE 64); default scope = `[tools]` only; `ocx --global run` = compose global toolchain env for child only, never mutates parent; `ocx run` (no `--global`) never reads `$OCX_HOME/ocx.toml`; missing `ocx.toml` → exit 64; missing `ocx.lock` → exit 78.
-- **`ocx env` default is JSON** — backend-first (product principle #1, handshake §3). `--format plain` → human inspection, NOT sourceable. `--shell[=NAME]` only eval-safe channel.
+- **`ocx env` output format is a context-only concern** — root `--format` (default plain, same as every command); no subcommand `--format`; no env-specific JSON default (handshake §3 amended 2026-05-19, reversing the original backend-first JSON default). JSON via `ocx --format json env`. Plain and JSON are both NOT sourceable; `--shell[=NAME]` only eval-safe channel.
 - **`package env` auto-installs** — `ocx package env` uses `find_or_install_all` (unlike the deleted `shell env` which used `find_all`). Do NOT assert no-download semantics against `ocx package env`.
 - **`login`/`logout` registry optional** — falls back to `OCX_DEFAULT_REGISTRY` (default `ocx.sh`).
 - **`logout` is always exit 0** — matches `docker`/`oras`/`helm`; CI cleanup must not fail.

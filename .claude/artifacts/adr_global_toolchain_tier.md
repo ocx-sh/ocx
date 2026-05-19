@@ -192,13 +192,40 @@ shell-only exposure.**
    ~~The global toolchain never composes into project resolution; `ocx run`
    and `ocx exec` never consult `$OCX_HOME/ocx.toml`.~~
 
-5. **Materialisation via existing install→`current` symlinks.** Global tools
+5. **Materialisation via existing install→`current` symlinks.**
+
+   > **AMENDMENT 2026-05-19 (supersedes D5's resolution + GC coupling).**
+   > The original D5 made `ocx --global env` resolve each tool through its
+   > `current` symlink and relied on `current` install back-refs as the *only*
+   > GC root for global packages. Both are reversed:
+   >
+   > - **Resolution = lock-pinned digest, offline.** `ocx --global env`
+   >   resolves each `$OCX_HOME/ocx.lock` tool by its **pinned digest**
+   >   against the local object store (`resolve_global_pinned_env`) — exactly
+   >   the project-tier model. The `current` symlink is a **separate
+   >   abstraction**, mutated only by install/uninstall/select, targeted at
+   >   devcontainer / IDE stable-anchor use. It is NOT consulted by env, so
+   >   `ocx --global upgrade` re-pins the lock and the exported env follows
+   >   immediately with no select step. A pinned tool not materialised
+   >   locally is silently skipped (login exporter must never block a shell).
+   > - **GC is not a global-tier exception.** Global lock-pinned packages are
+   >   kept reachable by an **implicit** `$OCX_HOME/ocx.lock` root added in
+   >   `tasks::clean::collect_project_roots` — the global tier is the project
+   >   tier with a different load site, and GC treats it identically. The
+   >   global file still gets **no `$OCX_HOME/projects/` self-link** (its
+   >   project dir is `$OCX_HOME`, barred by
+   >   `adr_project_gc_symlink_ledger.md`); reachability comes from the
+   >   implicit lock scan, not from `current` back-refs. No new storage.
+   >
+   > Original D5 text retained below for rationale history.
+
+   ~~Global tools
    become `current` selections through the unchanged install/select path
    (`SymlinkStore::current` + `ReferenceManager` `refs/symlinks/` back-ref).
    They are GC roots by the existing mechanism. The global file's own project
    directory is `$OCX_HOME`, so per `adr_project_gc_symlink_ledger.md` it gets
    **no `$OCX_HOME/projects/` self-link** — it is protected purely by its
-   `current` install symlinks. No new storage.
+   `current` install symlinks. No new storage.~~
 
 6. **[SUPERSEDED → handshake §4, §7] DO NOT IMPLEMENT.** The entire
    per-prompt-hook + static `$OCX_HOME/init.<shell>` activation model
@@ -331,10 +358,13 @@ noting the global tier + removal of implicit home discovery.
 
 - [ ] `$OCX_HOME/ocx.toml` is **not** discovered without `--global` (unit:
       `project_path` returns `None`; regression for deleted `home_project_path`).
-- [ ] `ocx --global add` / `ocx --global lock` writes `$OCX_HOME/ocx.toml` + `ocx.lock`,
-      installs and selects (`current` symlink present). (`install --global` no longer exists.)
-- [ ] Fresh shell sees the global `current` tool; entering a project shadows
-      it with the project's tool; leaving restores global.
+- [ ] `ocx --global add` / `ocx --global lock` writes `$OCX_HOME/ocx.toml` + `ocx.lock`
+      and materialises the pinned package locally. (`install --global` no longer
+      exists. Per D5 amendment 2026-05-19, env resolution is lock-pinned-digest,
+      not `current`-symlink; `ocx --global upgrade` takes effect with no select.)
+- [ ] Fresh shell sees the global lock-pinned tool; entering a project shadows
+      it with the project's tool; leaving restores global. `ocx clean` does not
+      reap a global lock-pinned package (implicit `$OCX_HOME/ocx.lock` root).
 - [ ] Project `ocx run` cannot resolve a tool present only in
       `$OCX_HOME/ocx.toml` (hermetic; strict isolation).
 - [ ] `--global` + `--project` ⇒ `UsageError` (64).
