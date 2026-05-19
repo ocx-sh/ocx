@@ -164,6 +164,16 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
     ep_dir = shim_entrypoint["ep_dir"]
     env = dict(shim_entrypoint["env"])
     env["PATH"] = f"{ep_dir}{os.pathsep}{env.get('PATH', '')}"
+    # Pin `ocx` to a guaranteed-absent absolute path. The earlier
+    # "no `ocx` on PATH" precondition was environment-dependent: under
+    # git-bash the inherited PATH *did* resolve some `ocx`, so the shim
+    # reached E8 (spawned a child, rc=1, no marker) instead of E5, and
+    # the test flaked there while cmd/pwsh passed. With OCX_BINARY_PIN
+    # set to a missing path the shim deterministically takes the
+    # `OcxNotFound { pinned: Some(_) }` branch on every shell, fully
+    # independent of PATH — while still being *reached* via PATH/PATHEXT
+    # resolution of `hello[.exe]`, which is what this test guards.
+    env["OCX_BINARY_PIN"] = str(ep_dir / "definitely-no-ocx-here.exe")
     # cmd/pwsh honour PATHEXT and resolve bare `hello` → `hello.exe`.
     # git-bash does NOT honour PATHEXT and cannot exec a single-quoted
     # Windows backslash abs-path; it resolves an explicit `hello.exe`
@@ -175,18 +185,15 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
         text=True,
         env=env,
     )
-    # No `ocx` is resolvable, so the shim must reach its own E5 path. The
-    # authoritative signal that the *shim* (not cmd.exe, not a loader
-    # crash) handled the call is its `ocx-shim:` stderr line and/or the
-    # native E5 code 69. pwsh `-Command` and git-bash do not reliably
-    # propagate a native child's exit code (pwsh remaps non-zero to 1
-    # unless `exit $LASTEXITCODE`), so the exit code alone is not a
-    # reliable cross-shell oracle — the stderr marker is.
-    reached_shim = "ocx-shim:" in proc.stderr or proc.returncode in (0, 69)
-    assert reached_shim, (
-        f"shim must resolve via PATH/PATHEXT and reach its own E5 path "
-        f"(not cmd.exe / loader error); rc={proc.returncode} "
-        f"stderr={proc.stderr!r}"
+    # The shim must be reached and hit its deterministic pinned-miss E5
+    # path. Its `ocx-shim:` stderr line is the authoritative cross-shell
+    # oracle (pwsh `-Command` / git-bash do not reliably propagate a
+    # native child's exit code), with the native E5 code 69 as a
+    # corroborating signal where it survives.
+    assert "ocx-shim: pinned ocx not found" in proc.stderr, (
+        f"shim must resolve via PATH/PATHEXT and reach its own pinned-miss "
+        f"E5 path (not cmd.exe / a stray ocx / loader error); "
+        f"rc={proc.returncode} stderr={proc.stderr!r}"
     )
 
 
