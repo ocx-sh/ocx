@@ -89,7 +89,9 @@ jobs:
       id-token: write       # SLSA provenance (Sigstore/Rekor OIDC)
       attestations: write   # actions/attest-build-provenance
     strategy:
-      fail-fast: true
+      # Both arches are independent and both must pass the byte-equality
+      # gate; fail-fast would mask one arch's status behind the other's.
+      fail-fast: false
       matrix:
         target:
           - x86_64-pc-windows-gnullvm
