@@ -115,13 +115,24 @@ jobs:
       # byte-reproducible only against a fixed (rustc, zig) pair, so the Zig
       # version is part of the reproducibility contract — bump deliberately
       # in a blob-refresh PR (see adr_shim_hermetic_zigbuild.md).
-      # Stable release, NOT a dev build: ziglang.org only hosts dev builds
-      # transiently (they 404 within weeks), which would break the
-      # reproducibility contract. Stable tarballs are permanent.
+      # Stable release fetched directly from the canonical permanent URL.
+      # Rationale: (1) ziglang.org dev builds 404 within weeks; only stable
+      # tarballs are permanent — required for the reproducibility contract.
+      # (2) mlugg/setup-zig's community-mirror index proved unreliable here
+      # (every mirror + official 404'd). A pinned ziglang.org/download URL is
+      # immutable for a stable release and removes the third-party + mirror
+      # dependency entirely. ZIG_VERSION is part of the reproducibility
+      # contract — bump deliberately in a blob-refresh PR.
       - name: Setup Zig
-        uses: mlugg/setup-zig@a67e68dc5c8281d9608136d3d7ca1b282213e4ac # v2.0.5
-        with:
-          version: 0.14.1
+        env:
+          ZIG_VERSION: 0.14.1
+        run: |
+          set -euo pipefail
+          tarball="zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${tarball}"
+          tar -xf "$tarball"
+          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
         with:
