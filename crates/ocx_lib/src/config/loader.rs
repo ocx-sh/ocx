@@ -442,8 +442,7 @@ impl ConfigLoader {
     /// `$OCX_HOME` directory, falling back to `~/.ocx`.
     ///
     /// Single resolver shared by [`Self::home_path`] (returns
-    /// `<dir>/config.toml`) and [`Self::home_init_path`] (returns the
-    /// per-shell init file). Returns `None` when `OCX_HOME` is unset and
+    /// `<dir>/config.toml`). Returns `None` when `OCX_HOME` is unset and
     /// `dirs::home_dir()` cannot resolve a home directory (e.g., a service
     /// account with no `$HOME`).
     ///
@@ -462,18 +461,6 @@ impl ConfigLoader {
     /// `$OCX_HOME/config.toml`, falling back to `~/.ocx/config.toml`.
     pub fn home_path() -> Option<PathBuf> {
         Self::home_dir().map(|d| d.join("config.toml"))
-    }
-
-    /// `$OCX_HOME/init.<shell>` — per-shell init file landing path.
-    ///
-    /// Composes [`Self::home_dir`] (kept private) with
-    /// [`crate::shell::Shell::default_init_filename`] so the per-shell
-    /// basename table lives on `Shell` itself.
-    ///
-    /// Returns `None` when `$OCX_HOME` cannot be resolved and there is no
-    /// home directory to fall back to.
-    pub fn home_init_path(shell: crate::shell::Shell) -> Option<PathBuf> {
-        Self::home_dir().map(|d| d.join(shell.default_init_filename()))
     }
 }
 
