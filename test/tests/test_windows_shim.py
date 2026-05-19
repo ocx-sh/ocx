@@ -152,22 +152,10 @@ def shim_entrypoint(tmp_path: Path) -> dict:
     [
         pytest.param(["cmd", "/c"], id="cmd"),
         pytest.param(["pwsh", "-NoProfile", "-Command"], id="pwsh"),
-        # git-bash is outside the shim's supported resolution contract: the
-        # shim resolves as a Windows `.exe` via PATH/PATHEXT (cmd/pwsh), not
-        # via MSYS's POSIX exec layer. Under `bash -c` the invocation exits
-        # rc=1 with empty stderr — the shim's diagnostic never surfaces —
-        # consistently and independently of toolchain (reproduced on the
-        # pre-migration msvc blob too, run 26085901842). Tracked separately;
-        # not a regression and not in scope for this shim's contract.
-        pytest.param(
-            ["bash", "-c"],
-            id="git-bash",
-            marks=pytest.mark.skip(
-                reason="git-bash/MSYS exec is outside the .exe PATH/PATHEXT "
-                "resolution contract (ADR adr_windows_exe_shim.md); "
-                "pre-existing, toolchain-independent"
-            ),
-        ),
+        # A native Windows .exe must be invocable from git-bash/MSYS too —
+        # heterogeneous-environment support is a core OCX goal. This case
+        # fails rc=1/empty-stderr; instrumented below to RCA on the runner.
+        pytest.param(["bash", "-c"], id="git-bash"),
     ],
 )
 def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> None:
@@ -200,6 +188,34 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
         text=True,
         env=env,
     )
+    # RCA instrumentation for the git-bash case (Windows-runner-only;
+    # cannot be reproduced off Windows). Capture how MSYS sees the
+    # entrypoint, the pin env var, and a direct exec, so the failure log
+    # carries the evidence needed to root-cause it.
+    diag = ""
+    if shell[0] == "bash":
+        probe = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'echo "PIN=[$OCX_BINARY_PIN]"; '
+                'echo "PATH0=[$(echo "$PATH" | cut -d: -f1)]"; '
+                "type -a hello.exe 2>&1 || true; "
+                "command -v hello.exe 2>&1 || true; "
+                'hello.exe --probe; echo "RC=$?"',
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        diag = (
+            f"\n--- git-bash diagnostics ---\n"
+            f"probe.rc={probe.returncode}\n"
+            f"probe.stdout={probe.stdout!r}\n"
+            f"probe.stderr={probe.stderr!r}\n"
+            f"main.stdout={proc.stdout!r}\n"
+        )
+
     # The shim must be reached and hit its deterministic pinned-miss E5
     # path. Its `ocx-shim:` stderr line is the authoritative cross-shell
     # oracle (pwsh `-Command` / git-bash do not reliably propagate a
@@ -208,7 +224,7 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
     assert "ocx-shim: pinned ocx not found" in proc.stderr, (
         f"shim must resolve via PATH/PATHEXT and reach its own pinned-miss "
         f"E5 path (not cmd.exe / a stray ocx / loader error); "
-        f"rc={proc.returncode} stderr={proc.stderr!r}"
+        f"rc={proc.returncode} stderr={proc.stderr!r}{diag}"
     )
 
 
