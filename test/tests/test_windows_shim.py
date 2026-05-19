@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -147,14 +148,39 @@ def shim_entrypoint(tmp_path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _git_bash() -> str | None:
+    """Resolve the *Git for Windows* bash, never the WSL launcher.
+
+    A bare `bash` on a Windows runner resolves to
+    `C:\\Windows\\System32\\bash.exe` (the WSL launcher), which on a
+    distro-less machine exits rc=1 with a "no installed distributions"
+    message and never execs its argument — it is NOT git-bash. Probe the
+    known Git install locations explicitly; fall back to a PATH lookup only
+    if it is not the System32 WSL shim.
+    """
+    candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
+    return None
+
+
 @pytest.mark.parametrize(
     "shell",
     [
         pytest.param(["cmd", "/c"], id="cmd"),
         pytest.param(["pwsh", "-NoProfile", "-Command"], id="pwsh"),
         # A native Windows .exe must be invocable from git-bash/MSYS too —
-        # heterogeneous-environment support is a core OCX goal. This case
-        # fails rc=1/empty-stderr; instrumented below to RCA on the runner.
+        # heterogeneous-environment support is a core OCX goal. The bash
+        # binary is resolved to Git-for-Windows bash in the body (a bare
+        # "bash" is the WSL launcher on the runner — see _git_bash).
         pytest.param(["bash", "-c"], id="git-bash"),
     ],
 )
@@ -164,58 +190,34 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
     cmd/pwsh honour PATHEXT (`.EXE` before `.CMD`); git-bash resolves an
     explicit `hello.exe` on PATH. All must reach the shim, not cmd.exe.
     """
+    cmd = list(shell)
+    if cmd[0] == "bash":
+        gb = _git_bash()
+        if gb is None:
+            pytest.skip("Git-for-Windows bash not found (bare bash = WSL launcher)")
+        cmd[0] = gb
     ep_dir = shim_entrypoint["ep_dir"]
     env = dict(shim_entrypoint["env"])
     env["PATH"] = f"{ep_dir}{os.pathsep}{env.get('PATH', '')}"
-    # Pin `ocx` to a guaranteed-absent absolute path. The earlier
-    # "no `ocx` on PATH" precondition was environment-dependent: under
-    # git-bash the inherited PATH *did* resolve some `ocx`, so the shim
-    # reached E8 (spawned a child, rc=1, no marker) instead of E5, and
-    # the test flaked there while cmd/pwsh passed. With OCX_BINARY_PIN
-    # set to a missing path the shim deterministically takes the
-    # `OcxNotFound { pinned: Some(_) }` branch on every shell, fully
-    # independent of PATH — while still being *reached* via PATH/PATHEXT
-    # resolution of `hello[.exe]`, which is what this test guards.
+    # Pin `ocx` to a guaranteed-absent absolute path so the shim
+    # deterministically takes the `OcxNotFound { pinned: Some(_) }` branch
+    # on every shell, independent of ambient PATH — while still being
+    # *reached* via PATH/PATHEXT resolution of `hello[.exe]`, which is
+    # what this test guards.
     env["OCX_BINARY_PIN"] = str(ep_dir / "definitely-no-ocx-here.exe")
     # cmd/pwsh honour PATHEXT and resolve bare `hello` → `hello.exe`.
     # git-bash does NOT honour PATHEXT and cannot exec a single-quoted
     # Windows backslash abs-path; it resolves an explicit `hello.exe`
     # against PATH (ep_dir is on PATH) — same target, bash-safe.
-    invocation = "hello --probe" if shell[0] != "bash" else "hello.exe --probe"
+    # cmd/pwsh resolve bare `hello` via PATHEXT; git-bash resolves an
+    # explicit `hello.exe` on PATH (ep_dir is on PATH) — same target.
+    invocation = "hello.exe --probe" if shell[0] == "bash" else "hello --probe"
     proc = subprocess.run(
-        [*shell, invocation],
+        [*cmd, invocation],
         capture_output=True,
         text=True,
         env=env,
     )
-    # RCA instrumentation for the git-bash case (Windows-runner-only;
-    # cannot be reproduced off Windows). Capture how MSYS sees the
-    # entrypoint, the pin env var, and a direct exec, so the failure log
-    # carries the evidence needed to root-cause it.
-    diag = ""
-    if shell[0] == "bash":
-        probe = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'echo "PIN=[$OCX_BINARY_PIN]"; '
-                'echo "PATH0=[$(echo "$PATH" | cut -d: -f1)]"; '
-                "type -a hello.exe 2>&1 || true; "
-                "command -v hello.exe 2>&1 || true; "
-                'hello.exe --probe; echo "RC=$?"',
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        diag = (
-            f"\n--- git-bash diagnostics ---\n"
-            f"probe.rc={probe.returncode}\n"
-            f"probe.stdout={probe.stdout!r}\n"
-            f"probe.stderr={probe.stderr!r}\n"
-            f"main.stdout={proc.stdout!r}\n"
-        )
-
     # The shim must be reached and hit its deterministic pinned-miss E5
     # path. Its `ocx-shim:` stderr line is the authoritative cross-shell
     # oracle (pwsh `-Command` / git-bash do not reliably propagate a
@@ -224,7 +226,8 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
     assert "ocx-shim: pinned ocx not found" in proc.stderr, (
         f"shim must resolve via PATH/PATHEXT and reach its own pinned-miss "
         f"E5 path (not cmd.exe / a stray ocx / loader error); "
-        f"rc={proc.returncode} stderr={proc.stderr!r}{diag}"
+        f"rc={proc.returncode} stderr={proc.stderr!r} "
+        f"stdout={proc.stdout!r}"
     )
 
 
