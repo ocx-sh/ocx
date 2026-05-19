@@ -498,7 +498,7 @@ ocx package deselect <PACKAGE>...
 
 Export the composed toolchain environment for the active project or global toolchain.
 
-This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved tool set. The default output is **JSON** (machine-readable envelope `{"entries": [...]}`). Use `--shell` to get eval-safe shell export lines instead — that is the only form safe to pass to `eval`.
+This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved tool set. Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain` table). Use `--shell` to get eval-safe shell export lines — that is the only form safe to pass to `eval`.
 
 `--shell` requires the equals-form (`--shell=bash`, not `--shell bash`) to prevent shell injection through unquoted positional tokens.
 
@@ -512,20 +512,22 @@ ocx env [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect instead of JSON. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`, `nushell`, `elvish`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) defaults to `sh`. | *(unset — JSON output)* |
-| `--format` | — | `json` (default for this command) or `plain` (aligned table). `plain` output is not eval-safe. | `json` |
+| `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`, `nushell`, `elvish`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) autodetects from `$SHELL`. | *(unset — uses `--format`)* |
 | `-h`, `--help` | | Print help information. | — |
 
 ::: tip Target the global toolchain
-Pass `--global` **before** the subcommand to target `$OCX_HOME/ocx.toml`: `ocx --global env --shell=sh`.
+Pass `--global` **before** the subcommand to target `$OCX_HOME/ocx.toml`: `ocx --global env --shell=bash`.
 See [`--global`][global-flag] for the full root-flag reference.
 :::
 
 **Examples**
 
 ```shell
-# JSON output (machine-readable, default):
+# Plain table output (default):
 ocx env
+
+# Machine-readable JSON via the root --format flag:
+ocx --format json env
 
 # Eval-safe export for the current project toolchain (bash):
 eval "$(ocx env --shell=bash)"
@@ -537,8 +539,8 @@ eval "$(ocx --global env --shell=sh)"
 eval "$(ocx --global env --shell=sh)"
 ```
 
-::: warning Plain output is not sourceable
-`ocx env --format plain` (or `ocx env` without `--shell`) prints an aligned table or JSON document — neither form is eval-safe. The only eval-safe channel is `--shell[=NAME]`.
+::: warning Plain and JSON output are not sourceable
+`ocx env` and `ocx --format json env` print an aligned table or JSON document — neither form is eval-safe. The only eval-safe channel is `--shell[=NAME]`.
 :::
 
 **Exit codes**
@@ -556,8 +558,9 @@ eval "$(ocx --global env --shell=sh)"
 
 Print the resolved environment variables for one or more OCI-tier packages.
 
-Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
-JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
+With the root `--format plain` (default), outputs an aligned table with `Key`, `Type` and `Value` columns.
+With `--format json`, outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
+Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
 
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
 
@@ -581,6 +584,7 @@ ocx package env [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
+- `--shell[=NAME]`: Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root).
 - `-h`, `--help`: Print help information.
 
 ### `exec` {#exec}
@@ -1422,7 +1426,7 @@ ocx version
 
 > **REMOVED** — exits 64. The `ocx ci` command group has been removed. `ocx ci export` is a deferred extension point; it is not available in the current release.
 >
-> For CI workflows, use [`ocx pull`](#pull) (project-tier) or [`ocx package pull`](#package-pull) (OCI-tier) to pre-warm the object store, then use [`ocx run`](#run) or [`ocx package env`](#package-env) to compose the environment. For [GitHub Actions][github-actions-docs], write the `ocx package env --format json` output through `jq` to `$GITHUB_PATH` and `$GITHUB_ENV` manually, or use `ocx run -- <cmd>` to execute within the composed env directly.
+> For CI workflows, use [`ocx pull`](#pull) (project-tier) or [`ocx package pull`](#package-pull) (OCI-tier) to pre-warm the object store, then use [`ocx run`](#run) or [`ocx package env`](#package-env) to compose the environment. For [GitHub Actions][github-actions-docs], write the `ocx --format json package env` output through `jq` to `$GITHUB_PATH` and `$GITHUB_ENV` manually, or use `ocx run -- <cmd>` to execute within the composed env directly.
 
 #### `export` {#ci-export}
 
@@ -1609,7 +1613,7 @@ ocx package inspect [OPTIONS] <IDENTIFIER>
 **Options**
 
 - `-p`, `--platform <PLATFORM>`: Platform to select. Applies **only** with `--resolve`; ignored in default mode (the candidate list always shows every platform).
-- `--resolve`: Platform-select through the index and emit metadata plus the resolution chain — the pinned identifier, the walk-order chain blob digests (index → platform manifest → config blob), and the platform-selected manifest's layer descriptors.
+- `--resolve`: Platform-select through the index and emit metadata plus the resolution chain — the pinned identifier, the walk-order chain blob descriptors (index → platform manifest → config blob, each with its `role`, media type, and size), and the platform-selected manifest's layer descriptors.
 - `-h`, `--help`: Print help information.
 
 Honors the global [`--offline`][arg-offline], [`--remote`][arg-remote], and [`--format`][arg-format] flags. JSON is the primary consumer surface.
@@ -1648,7 +1652,11 @@ Default, single manifest (`@digest` or flat tag) — metadata only:
   "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} },
   "resolution": {
     "pinned": "registry/repo:tag@sha256:…",
-    "chain": ["sha256:…", "sha256:…"],
+    "chain": [
+      { "digest": "sha256:…", "role": "index", "media_type": "…", "size": 429 },
+      { "digest": "sha256:…", "role": "manifest", "media_type": "…", "size": 448 },
+      { "digest": "sha256:…", "role": "config", "media_type": "…", "size": 244 }
+    ],
     "layers": [{ "digest": "sha256:…", "media_type": "…", "size": 123 }]
   }
 }
@@ -1680,6 +1688,20 @@ registry/repo:tag@sha256:…
 ```
 
 Here `fmt` dispatches to the `cargo-fmt` binary while `build` dispatches to a binary named `build`.
+
+With `--resolve`, the `resolution` branch lists each chain blob by its `role` (`index`, `manifest`, `config`) and each layer by index, both annotated with media type and a human-readable size:
+
+```text
+registry/repo:tag@sha256:…
+└─ resolution
+   ├─ pinned · registry/repo:tag@sha256:…
+   ├─ chain
+   │  ├─ index · sha256:… · application/vnd.oci.image.index.v1+json · 429 B
+   │  ├─ manifest · sha256:… · application/vnd.oci.image.manifest.v1+json · 448 B
+   │  └─ config · sha256:… · application/vnd.sh.ocx.package.v1+json · 244 B
+   └─ layers
+      └─ [0] · sha256:… · application/vnd.oci.image.layer.v1.tar+xz · 192 B
+```
 
 **Exit codes**
 
@@ -1864,8 +1886,7 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 
 Print the resolved environment variables for one or more OCI-tier packages.
 
-Plain format outputs an aligned table with `Key`, `Type` and `Value` columns.
-JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`.
+Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain`). Plain format outputs an aligned table with `Key`, `Type` and `Value` columns. JSON format (`ocx --format json package env`) outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}`. Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
 
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
 
@@ -1876,6 +1897,7 @@ See [Path Resolution](#path-resolution) for the `--candidate` and `--current` mo
 
 ```shell
 ocx package env [OPTIONS] <PACKAGE>...
+ocx --format json package env [OPTIONS] <PACKAGE>...
 ```
 
 **Arguments**
@@ -1889,6 +1911,7 @@ ocx package env [OPTIONS] <PACKAGE>...
 | `-p`, `--platform` | | Target platforms to consider. |
 | `--candidate`, `--current` | | Path resolution mode — see [Path Resolution](#path-resolution). |
 | `--self` | | Self view: emits `private` + `public` entries. Default: consumer view (`public` + `interface`). |
+| `--shell[=NAME]` | | Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). |
 | `-h`, `--help` | | Print help information. |
 
 ::: info Windows: synthetic `PATHEXT ⊳ .CMD`
