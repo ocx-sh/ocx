@@ -2,22 +2,21 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for `ocx env` (toolchain-tier composed-env command).
 
-Encodes plan_toolchain_cli.md Phase 2 contracts (C2, C3, C5):
+Encodes plan_toolchain_cli.md Phase 2 contracts (C2, C3, C5) — updated to the
+context-format model (format reversal, no longer "backend-first JSON default"):
 
 - ``ocx env`` (no project) → exit 64 (UsageError)
-- ``ocx env`` in a project → JSON by default (backend-first, handshake §3)
-- ``ocx env --format plain`` → plain table (NOT sourceable)
-- ``ocx env --shell=bash`` → bash eval-safe export lines
+- ``ocx env`` in a project → plain table by default (context-level format, same
+  as every other command; NOT JSON, NOT sourceable)
+- ``ocx --format json env`` → JSON (root flag, NOT a subcommand flag)
+- ``ocx env --format plain`` → clap usage error (exit 64, flag no longer exists)
+- ``ocx env --shell=bash`` → bash eval-safe export lines (``--shell`` unchanged)
 - ``ocx env --shell=sh`` → POSIX export lines byte-identical to ``--shell=dash``
 - Bare ``--shell`` (no value, undetectable SHELL) → exit 64
-- ``--global`` ⟂ ``--project`` → clap exit 2 (unchanged from a4211591)
+- ``--global`` ⟂ ``--project`` → clap exit 64 (UsageError)
 - ``ocx package env <ids> --shell=zsh`` → sourceable zsh lines (reuses env.rs)
 - ``--shell ripgrep`` is NOT swallowed (require_equals enforced)
-- Legacy commands (``ocx install``, ``ocx shell env``) → exit 2 (clap)
-
-These tests are written BEFORE implementation (Phase 2 Specify — contract-first
-TDD per plan_toolchain_cli.md §6 Constraints). They fail against the current
-binary (``ocx env`` does not exist yet) and must pass after Step C implementation.
+- Legacy commands (``ocx install``, ``ocx shell env``) → exit 64 (clap)
 """
 from __future__ import annotations
 
@@ -110,63 +109,99 @@ def test_env_no_project_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C2 — default output is JSON (backend-first, handshake §3)
+# C2 — default output is plain table (context-level format, NOT JSON)
 # ---------------------------------------------------------------------------
 
 
-def test_env_in_project_default_json(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx env`` in a project outputs JSON by default (no ``--shell`` / ``--format``).
+def test_env_in_project_default_plain(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env`` in a project outputs a plain table by default (no flags).
 
-    Backend-first per handshake §3 and product principle #1: the default
-    channel is JSON, not plain text.  JSON must be parseable.
+    Context-format model: output format is the root ``--format`` concern (same
+    as every other command).  The default is plain.  The subcommand ``--format``
+    flag was deleted from ``ToolchainEnv`` — format is no longer env-specific.
+    JSON requires the ROOT flag: ``ocx --format json env``.
     """
-    project, _ = _make_project(ocx, tmp_path, "json_default")
+    project, _ = _make_project(ocx, tmp_path, "plain_default")
     result = _run(ocx, project, "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx env must succeed in a project; rc={result.returncode}\n"
         f"stderr:\n{result.stderr}"
     )
-    # Default must be valid JSON (not plain text, not shell export lines).
+    # Default must be a plain table, NOT JSON.
+    try:
+        json.loads(result.stdout)
+        pytest.fail(
+            f"ocx env default output must NOT be JSON; got:\n{result.stdout!r}\n"
+            f"(subcommand --format deleted; plain is the context default)"
+        )
+    except json.JSONDecodeError:
+        pass  # expected: plain table is not valid JSON
+    # Plain output must not contain export statements (not sourceable).
+    assert "export " not in result.stdout, (
+        f"plain table output must NOT contain 'export' lines; got:\n{result.stdout!r}"
+    )
+    # Must contain at least one non-empty line (actual table content).
+    non_empty = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    assert non_empty, (
+        f"plain output must contain at least one data row; got:\n{result.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C2 — subcommand `--format` was deleted; JSON requires root `--format json`
+# ---------------------------------------------------------------------------
+
+
+def test_env_subcommand_format_flag_rejected(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx env --format plain`` → exit 64 (flag no longer exists on subcommand).
+
+    The subcommand ``--format`` flag was deleted from ``ToolchainEnv``.  Format
+    is now a ROOT flag concern (``ocx --format plain env``).  Passing
+    ``--format`` after the subcommand is a clap unrecognised-argument error →
+    exit 64 (OCX maps all clap usage errors to EX_USAGE 64).
+    """
+    project, _ = _make_project(ocx, tmp_path, "no_sub_format")
+    result = _run(ocx, project, "env", "--format", "plain")
+    assert result.returncode == EXIT_USAGE, (
+        f"ocx env --format plain must exit {EXIT_USAGE} (subcommand --format deleted); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert "unexpected argument" in result.stderr.lower() or "format" in result.stderr.lower(), (
+        f"expected clap unrecognised-argument message in stderr; got:\n{result.stderr}"
+    )
+
+
+def test_env_root_format_json_emits_json(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx --format json env`` emits JSON (context-level root flag).
+
+    JSON output requires the ROOT flag (before the subcommand).  This is the
+    machine-readable form for backend tools.  The JSON shape must be parseable
+    and contain an ``entries`` key.
+    """
+    project, _ = _make_project(ocx, tmp_path, "root_fmt_json")
+    # Root --format flag must come BEFORE the subcommand name.
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "env"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=dict(ocx.env),
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx --format json env must succeed in a project; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         pytest.fail(
-            f"ocx env default output must be valid JSON; got:\n{result.stdout!r}\n"
+            f"ocx --format json env output must be valid JSON; got:\n{result.stdout!r}\n"
             f"parse error: {exc}"
         )
-    # JSON shape: {"entries": [...]}
     assert "entries" in data, (
         f"JSON must have 'entries' key; got keys: {list(data.keys())}"
     )
     assert isinstance(data["entries"], list), "entries must be a list"
-
-
-# ---------------------------------------------------------------------------
-# C2 — `--format plain` is NOT sourceable (human inspection only)
-# ---------------------------------------------------------------------------
-
-
-def test_env_format_plain_not_sourceable(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx env --format plain`` emits a human-readable table (NOT sourceable).
-
-    C2 contract: plain output is for human inspection only.  It must NOT
-    contain ``export`` statements (that would make it eval-safe, which it
-    is not — paths with spaces break ``eval`` on plain output).
-    """
-    project, _ = _make_project(ocx, tmp_path, "plain_not_src")
-    result = _run(ocx, project, "env", "--format", "plain")
-    assert result.returncode == EXIT_SUCCESS, (
-        f"ocx env --format plain must succeed; rc={result.returncode}\n"
-        f"stderr:\n{result.stderr}"
-    )
-    # Plain output must NOT be parseable as JSON (it's a table, not JSON).
-    try:
-        json.loads(result.stdout)
-        pytest.fail(
-            f"--format plain must NOT produce JSON; got:\n{result.stdout!r}"
-        )
-    except json.JSONDecodeError:
-        pass  # expected
 
 
 # ---------------------------------------------------------------------------

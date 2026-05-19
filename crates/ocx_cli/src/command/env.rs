@@ -31,14 +31,6 @@ pub struct Env {
     #[clap(long = "self", default_value_t = false)]
     self_view: bool,
 
-    /// Output format for machine-readable output.
-    ///
-    /// When omitted alongside a missing `--shell`, defaults to `json`
-    /// (backend-first, handshake §3).  `plain` emits a human-readable table
-    /// that is NOT sourceable.
-    #[clap(long, value_enum, value_name = "FORMAT")]
-    format: Option<options::Format>,
-
     #[clap(flatten)]
     platforms: options::Platforms,
 
@@ -55,7 +47,8 @@ pub struct Env {
     /// triggers autodetection from `$SHELL`/parent process; exit 64 if
     /// undetectable.
     ///
-    /// When absent, output defaults to JSON (backend-first, handshake §3).
+    /// When absent, output uses the context-level format (root `--format` flag;
+    /// default plain). Use `ocx --format json package env` for JSON.
     /// `--shell=sh` ≡ `--shell=dash` (POSIX strict; C5 alias).
     #[arg(
         long,
@@ -107,18 +100,17 @@ impl Env {
         // Windows PATHEXT — nothing to inject for bare-name resolution.
 
         // Backend channel is stdout; if a human is watching a TTY, hint that
-        // the default JSON/plain output is not eval-safe (stderr only — stdout
+        // the default report output is not eval-safe (stderr only — stdout
         // stays a pure machine channel).
         if std::io::stdout().is_terminal() {
             context
                 .ui()
-                .warn("default output is JSON (not eval-safe); use --shell=bash to activate or --format plain to read");
+                .warn("default output is not eval-safe; use --shell=bash to activate");
         }
 
-        // Machine-readable: JSON by default (None → Json); plain if explicit.
-        let effective_format = self.format.unwrap_or(options::Format::Json);
-        let local_api = crate::api::Api::new(effective_format, *context.api().data(), false);
-        local_api.report(&api::data::env::EnvVars::new(all_entries))?;
+        // Structured report. Format is a context-level concern (root
+        // `--format`); this command does not override it.
+        context.api().report(&api::data::env::EnvVars::new(all_entries))?;
 
         Ok(ExitCode::SUCCESS)
     }
