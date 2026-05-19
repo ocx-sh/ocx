@@ -100,7 +100,6 @@ For automation, [`ocx package which`][cmd-which] prints the resolved package roo
 
 Both `--candidate` and `--current` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.
 
-<<<<<<< HEAD
 ### Running an installed tool on Windows {#stable-paths-windows}
 
 On Windows, `ocx install` (and `ocx select`) generates two files per entrypoint in the package's `entrypoints/` directory:
@@ -125,10 +124,7 @@ The shim resolves `ocx` using `OCX_BINARY_PIN` if the variable is **defined** in
 [`OCX_BINARY_PIN` reference][env-ocx-binary-pin] — pin a specific `ocx` binary for nested invocations.
 :::
 
-### Shell hook integration {#stable-paths-shell-hook}
-=======
 ### direnv integration {#stable-paths-direnv}
->>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 
 For [direnv][direnv]-driven projects, [`ocx direnv init`][cmd-direnv-init] writes an `.envrc` file that calls [`ocx direnv export`][cmd-direnv-export] on each `cd`. The stateless export block is re-evaluated by [direnv][direnv] whenever `ocx.toml` or `ocx.lock` changes.
 

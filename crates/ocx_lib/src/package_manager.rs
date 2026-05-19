@@ -258,14 +258,17 @@ use crate::{file_structure, oci};
 /// Environment variable resolution uses persisted `resolve.json` files
 /// written at install time — see [`resolve_env`](Self::resolve_env).
 ///
-/// Progress reporting is handled via `tracing` spans emitted by task code;
-/// the CLI wires up `tracing-indicatif` (or similar) to visualize them.
+/// Progress is rendered through a span-free [`ProgressManager`]
+/// (`crate::cli::progress`); task code creates RAII bar/spinner guards
+/// from it. See ADR adr_progress_architecture for why progress no longer
+/// rides the `tracing` span tree.
 #[derive(Clone)]
 pub struct PackageManager {
     file_structure: file_structure::FileStructure,
     index: oci::index::Index,
     client: Option<oci::Client>,
     default_registry: String,
+    progress: crate::cli::progress::ProgressManager,
 }
 
 impl PackageManager {
@@ -281,7 +284,23 @@ impl PackageManager {
             index,
             client,
             default_registry,
+            progress: crate::cli::progress::ProgressManager::disabled(),
         }
+    }
+
+    /// Sets the shared span-free progress manager. The CLI injects its
+    /// stderr manager here; library/test consumers keep the disabled
+    /// no-op default from [`new`](Self::new).
+    pub fn with_progress(mut self, progress: crate::cli::progress::ProgressManager) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    /// The shared progress manager. Task code calls
+    /// [`spinner`](crate::cli::progress::ProgressManager::spinner) /
+    /// [`bytes`](crate::cli::progress::ProgressManager::bytes) on it.
+    pub fn progress(&self) -> &crate::cli::progress::ProgressManager {
+        &self.progress
     }
 
     pub fn file_structure(&self) -> &file_structure::FileStructure {
@@ -446,6 +465,7 @@ impl PackageManager {
             index: offline_index,
             client: None,
             default_registry: self.default_registry.clone(),
+            progress: self.progress.clone(),
         }
     }
 }

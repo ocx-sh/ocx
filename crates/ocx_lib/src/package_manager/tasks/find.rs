@@ -2,7 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 use tokio::task::JoinSet;
-use tracing::{Instrument, info_span};
 
 use crate::{
     log, oci,
@@ -64,16 +63,10 @@ impl PackageManager {
             return Ok(Vec::new());
         }
         if packages.len() == 1 {
-            let info = self
-                .find(&packages[0], platforms)
-                .instrument(crate::cli::progress::spinner_span(
-                    info_span!("Finding", package = %packages[0]),
-                    &packages[0],
-                ))
-                .await
-                .map_err(|kind| {
-                    package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
-                })?;
+            let _spin = self.progress().spinner(format!("Finding '{}'", packages[0]));
+            let info = self.find(&packages[0], platforms).await.map_err(|kind| {
+                package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
+            })?;
             return Ok(vec![info]);
         }
 
@@ -82,14 +75,11 @@ impl PackageManager {
             let mgr = self.clone();
             let package = package.clone();
             let platforms = platforms.clone();
-            let span = crate::cli::progress::spinner_span(info_span!("Finding", package = %package), &package);
-            tasks.spawn(
-                async move {
-                    let result = mgr.find(&package, platforms).await;
-                    (package, result)
-                }
-                .instrument(span),
-            );
+            tasks.spawn(async move {
+                let _spin = mgr.progress().spinner(format!("Finding '{package}'"));
+                let result = mgr.find(&package, platforms).await;
+                (package, result)
+            });
         }
 
         super::common::drain_package_tasks(&packages, tasks, package_manager::error::Error::FindFailed).await

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use ocx_lib::cli::Cell;
 use ocx_lib::{oci, package::metadata::Metadata};
 use serde::Serialize;
 
@@ -40,12 +41,16 @@ impl Installs {
 
 impl Printable for Installs {
     fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+        let theme = printer.theme();
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (package, entry) in &self.packages {
             rows[0].push(package.clone());
-            rows[1].push(entry.identifier.to_string());
+            rows[1].push(theme.of(&entry.identifier));
             rows[2].push(entry.path.display().to_string());
         }
-        printer.print_table(&["Package", "Version", "Path"], &rows);
+        printer.print_table(
+            &["Package".into(), "Version".into(), "Path".into()],
+            &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+        );
     }
 }

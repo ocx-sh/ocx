@@ -4,14 +4,10 @@
 use ocx_lib::{
     cli::{MetadataResolutionError, UsageError},
     oci,
-    package::install_info::InstallInfo,
     package::metadata::env::entry::Entry,
-    package_manager::PackageManager,
     publisher::LayerRef,
     shell::Shell,
 };
-
-use crate::options;
 
 /// Infers a metadata file path based on the archive file path.
 /// For example, if the content path is `/path/to/package.tar.gz`, this function will return `/path/to/package-metadata.json`.
@@ -87,29 +83,6 @@ pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
     } else {
         platforms.to_vec()
     }
-}
-
-/// Resolves packages using either symlink-based or platform-based lookup.
-///
-/// When `content_path` specifies a symlink kind (candidate/current), packages
-/// are resolved via `find_symlink_all`. Otherwise falls back to `find_all`
-/// with platform matching.
-pub async fn resolve_packages(
-    packages: impl IntoIterator<Item = options::Identifier>,
-    platforms: &[oci::Platform],
-    content_path: &options::ContentPath,
-    manager: &PackageManager,
-    default_registry: &str,
-) -> anyhow::Result<Vec<InstallInfo>> {
-    let platforms = platforms_or_default(platforms);
-    let identifiers = options::Identifier::transform_all(packages, default_registry)?;
-
-    let package_infos = if let Some(kind) = content_path.symlink_kind() {
-        manager.find_symlink_all(identifiers, kind).await?
-    } else {
-        manager.find_all(identifiers, platforms).await?
-    };
-    Ok(package_infos)
 }
 
 /// Emit shell-sourceable export lines for a slice of env entries.

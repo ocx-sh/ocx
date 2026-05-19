@@ -3,8 +3,6 @@
 
 use std::path::PathBuf;
 
-use tracing::info_span;
-
 use crate::{
     log, oci,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
@@ -18,8 +16,7 @@ impl PackageManager {
     /// Returns `Some(current_path)` when the current symlink existed and was
     /// removed, or `None` when no current symlink was present (no-op).
     pub async fn deselect(&self, package: &oci::Identifier) -> Result<Option<PathBuf>, PackageErrorKind> {
-        let _span =
-            crate::cli::progress::spinner_span(info_span!("Deselecting", package = %package), package).entered();
+        let _spin = self.progress().spinner(format!("Deselecting '{package}'"));
         log::debug!("Deselecting package '{}'.", package);
 
         if package.digest().is_some() {

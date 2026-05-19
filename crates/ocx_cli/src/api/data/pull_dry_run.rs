@@ -4,6 +4,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use ocx_lib::cli::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -80,6 +81,9 @@ impl Printable for PullDryRun {
                     .unwrap_or("-".into()),
             );
         }
-        printer.print_table(&["Package", "Status", "Path"], &rows);
+        printer.print_table(
+            &["Package".into(), "Status".into(), "Path".into()],
+            &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+        );
     }
 }

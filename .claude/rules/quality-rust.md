@@ -81,6 +81,7 @@ pub enum Version { V1 = 1 }
 - **Missing `From`/`Into`** — if callers often write `String::from(x)` or `.into()`, add `impl From<T>`. `?` operator needs `From`.
 - **Unbounded channels** — `mpsc::channel()` (unbounded) = latent OOM. Prefer `mpsc::channel(N)` with documented bound.
 - **God structs** — 15+ fields spanning unrelated concerns. Decompose.
+- **Abbreviated identifiers** — full descriptive words for every name (types, enums, variants, fields, functions, locals, parameters): `annotation` not `ann`, `Architecture` not `Arch`, `text` not `t`, `index` not `idx`. Exceptions: established domain initialisms kept canonical (`OCI`, `URL`, `HTTP`, `id`), the conventional closure/iterator binding where the type is obvious from one line of context, and loop counters `i`/`j`. A reader must not have to expand an abbreviation to know what a name holds.
 
 ### Suggest (improvement)
 
@@ -186,6 +187,7 @@ See `quality-core.md` for universal checklist. Rust additions:
 - [ ] `Result` propagated via `?` with `From` impls; errors logged once at boundary
 - [ ] `#[non_exhaustive]` on public enums; `#[source]` on wrapping error variants
 - [ ] Builder for 4+ optional fields; no boolean flags where enum clearer
+- [ ] Full descriptive identifiers — no abbreviations (`annotation` not `ann`, `text` not `t`); domain initialisms and obvious closure bindings exempt
 - [ ] `JoinSet` consumers sort results by stable key; `spawn_blocking` handles awaited
 - [ ] Bounded channels; tasks observed; no `MutexGuard` across `.await`
 - [ ] Public APIs use `use<..>` bounds for RPIT in edition 2024

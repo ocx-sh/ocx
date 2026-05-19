@@ -51,7 +51,6 @@ which = "8"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 indicatif = { version = "0.18.3", features = ["tokio"] }
 thiserror = "2"
-tracing-indicatif = { version = "0.3.14" }
 rpassword = "7"
 
 [dev-dependencies]

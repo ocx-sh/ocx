@@ -10,7 +10,6 @@ use crate::{
 };
 
 use futures::stream::{self, StreamExt, TryStreamExt};
-use tracing::Instrument;
 
 use super::{Algorithm, Digest, Identifier, native};
 
@@ -86,6 +85,9 @@ pub struct Client {
     pub(super) lock_timeout: std::time::Duration,
     pub(super) tag_chunk_size: usize,
     pub(super) repository_chunk_size: usize,
+    /// Shared progress manager for download/upload bars. Cheap to clone
+    /// (an `Arc` handle or a disabled no-op).
+    progress: crate::cli::progress::ProgressManager,
 }
 
 impl Clone for Client {
@@ -95,6 +97,7 @@ impl Clone for Client {
             lock_timeout: self.lock_timeout,
             tag_chunk_size: self.tag_chunk_size,
             repository_chunk_size: self.repository_chunk_size,
+            progress: self.progress.clone(),
         }
     }
 }
@@ -111,6 +114,7 @@ impl Client {
             lock_timeout: std::time::Duration::from_secs(5),
             tag_chunk_size: 100,
             repository_chunk_size: 100,
+            progress: crate::cli::progress::ProgressManager::disabled(),
         }
     }
 
@@ -362,19 +366,15 @@ impl Client {
             output_dir.display()
         );
 
-        let bar = crate::cli::progress::ProgressBar::bytes(
-            tracing::info_span!("Downloading", package = %identifier),
-            blob_total_size,
-            identifier,
-        );
+        let bar = self
+            .progress
+            .bytes(format!("Downloading '{identifier}'"), blob_total_size);
         let on_progress = bar.callback();
 
-        {
-            let _guard = bar.enter();
-            self.transport
-                .pull_blob_to_file(&image, &layer_digest, &blob_path, blob_total_size, on_progress)
-                .await?;
-        }
+        self.transport
+            .pull_blob_to_file(&image, &layer_digest, &blob_path, blob_total_size, on_progress)
+            .await?;
+        drop(bar);
 
         verify_blob_digest(&blob_path, &layer_digest).await?;
 
@@ -406,22 +406,15 @@ impl Client {
                     temp_content_path.display()
                 );
 
-                let extract_span = crate::cli::progress::spinner_span(
-                    tracing::info_span!("Extracting", package = %identifier),
-                    identifier,
-                );
+                let _spin = self.progress.spinner(format!("Extracting '{identifier}'"));
 
                 let extract_options = archive::ExtractOptions {
                     algorithm: Some(blob_compression),
                     strip_components: bundle.strip_components.unwrap_or(0).into(),
                 };
-                async {
-                    archive::Archive::extract_with_options(&blob_path, &temp_content_path, Some(extract_options))
-                        .await
-                        .map_err(ClientError::internal)
-                }
-                .instrument(extract_span)
-                .await?;
+                archive::Archive::extract_with_options(&blob_path, &temp_content_path, Some(extract_options))
+                    .await
+                    .map_err(ClientError::internal)?;
             }
         }
 
@@ -528,7 +521,6 @@ impl Client {
                 // (a few short strings) and are outweighed by avoiding a
                 // lifetime gymnastics around the stream combinator.
                 let image = image.clone();
-                let identifier = package_info.identifier.clone();
                 async move {
                     let progress_label = format!("{}/{}", index + 1, total_layers);
                     match layer {
@@ -564,20 +556,15 @@ impl Client {
                                 package_data_len
                             );
 
-                            let bar = crate::cli::progress::ProgressBar::bytes(
-                                tracing::info_span!(
-                                    "Uploading",
-                                    layer = %format!("{progress_label} {}", path.display())
-                                ),
+                            let bar = self.progress.bytes(
+                                format!("Uploading {progress_label} {}", path.display()),
                                 package_data_len as u64,
-                                &identifier,
                             );
                             let on_progress = bar.callback();
-                            let span = bar.into_span();
                             self.transport
                                 .push_blob(&image, package_data, &digest, on_progress)
-                                .instrument(span)
                                 .await?;
+                            drop(bar);
 
                             let size = i64::try_from(package_data_len).map_err(|_| {
                                 ClientError::InvalidManifest(format!("blob size {package_data_len} exceeds i64::MAX"))

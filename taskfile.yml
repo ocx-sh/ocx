@@ -23,6 +23,7 @@ includes:
       PACKAGE: 'ocx.sh/shellcheck:0.11'
       TOOL: shellcheck
       GLOB: '*.sh'
+      EXCLUDE: "':(exclude)website/src/_scripts/'"
   shfmt:
     taskfile: ./taskfiles/ocx.taskfile.yml
     internal: true
@@ -30,6 +31,7 @@ includes:
       PACKAGE: 'ocx.sh/shfmt:3'
       TOOL: shfmt
       GLOB: '*.sh'
+      EXCLUDE: "':(exclude)website/src/_scripts/'"
   mirror-sdk:
     taskfile: ./mirror-sdk-py/taskfile.yml
     dir: ./mirror-sdk-py

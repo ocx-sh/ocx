@@ -66,10 +66,13 @@ impl PackageCreate {
             self.path.display(),
             self.compression_level
         );
-        package::bundle::BundleBuilder::from_path(&self.path)
-            .with_compression(compression_options)
-            .create(&output)
-            .await?;
+        {
+            let _spin = context.progress().spinner(format!("Bundling {}", self.path.display()));
+            package::bundle::BundleBuilder::from_path(&self.path)
+                .with_compression(compression_options)
+                .create(&output)
+                .await?;
+        }
         log::info!(
             "Created package bundle from {} at {}",
             self.path.display(),

@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
+use ocx_lib::cli::Cell;
+
 use crate::api::Printable;
 
 /// Repository catalog listing, optionally including tags per repository.
@@ -50,7 +52,10 @@ impl Printable for Catalog {
                 for repo in repos {
                     rows[0].push(repo.clone());
                 }
-                printer.print_table(&["Repository"], &rows);
+                printer.print_table(
+                    &["Repository".into()],
+                    &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+                );
             }
             CatalogData::WithTags(tags) => {
                 for (repo, repo_tags) in tags {
@@ -59,7 +64,10 @@ impl Printable for Catalog {
                         rows[1].push(tag.clone());
                     }
                 }
-                printer.print_table(&["Repository", "Tag"], &rows);
+                printer.print_table(
+                    &["Repository".into(), "Tag".into()],
+                    &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+                );
             }
         }
     }

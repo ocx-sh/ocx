@@ -120,32 +120,8 @@ def test_linux_install_emits_no_cmd_launcher(
     assert not (ep_dir / "hello.exe").exists(), (
         "no `.exe` shim off Windows (emission is cfg-gated to Windows targets)"
     )
-<<<<<<< HEAD
     assert not (ep_dir / "hello.shim").exists(), (
         "no `.shim` sidecar off Windows (emission is cfg-gated to Windows targets)"
-=======
-    ocx.plain("package", "install", "--select", pkg.short)
-
-    ep_dir = get_entrypoints_dir(ocx, pkg)
-    if ep_dir is None:
-        pytest.fail("current/entrypoints/ not reachable after install --select")
-
-    cmd_launcher = ep_dir / "hello.cmd"
-    assert cmd_launcher.exists(), f".cmd launcher must exist: {cmd_launcher}"
-    content = cmd_launcher.read_text()
-    assert "EXIT /B %ERRORLEVEL%" in content, (
-        f".cmd launcher must terminate with `EXIT /B %ERRORLEVEL%` to propagate "
-        f"inner-ocx exit code (no cmd.exe exec equivalent); got:\n{content!r}"
-    )
-    last_nonempty = next(
-        (line for line in reversed(content.splitlines()) if line.strip()),
-        "",
-    )
-    assert last_nonempty.strip() == "EXIT /B %ERRORLEVEL%", (
-        f".cmd launcher's final non-empty line must be `EXIT /B %ERRORLEVEL%` "
-        f"(nothing must run after it that could overwrite ERRORLEVEL); "
-        f"last non-empty line was {last_nonempty!r}"
->>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
     )
 
 
@@ -235,23 +211,9 @@ def test_windows_native_shim_launcher_exists_no_cmd(
     assert (ep_dir / "hello.exe").is_file(), (
         f"native `.exe` shim must exist on Windows: {ep_dir / 'hello.exe'}"
     )
-<<<<<<< HEAD
     assert (ep_dir / "hello.shim").is_file(), (
         f"`.shim` sidecar must exist on Windows: {ep_dir / 'hello.shim'}"
     )
     assert not (ep_dir / "hello.cmd").exists(), (
         f"no `.cmd` launcher may exist (cutover to `.exe`-only): {ep_dir / 'hello.cmd'}"
-=======
-    ocx.plain("package", "install", "--select", pkg.short)
-
-    from src.runner import registry_dir  # noqa: PLC0415
-    reg = registry_dir(ocx.registry)
-    current = Path(str(ocx.ocx_home)) / "symlinks" / reg / pkg.repo / "current"
-    hello_launcher = current / "entrypoints" / "hello"
-
-    # Invoke the launcher via Git Bash.
-    result = subprocess.run(
-        ["bash", "-c", str(hello_launcher)],
-        capture_output=True, text=True, env=ocx.env,
->>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
     )

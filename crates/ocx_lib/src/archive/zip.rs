@@ -9,8 +9,6 @@ use zip::write::SimpleFileOptions;
 
 use crate::{Result, compression};
 
-use tracing_indicatif::span_ext::IndicatifSpanExt;
-
 use super::backend::Backend;
 use super::error::Error;
 
@@ -101,9 +99,7 @@ impl Backend for ZipBackend {
 
     async fn add_dir_all(&mut self, archive_path: PathBuf, dir: PathBuf) -> Result<()> {
         let options = self.options;
-        let span = tracing::Span::current();
         self.run_blocking(move |writer| {
-            let _guard = span.entered();
             let mut count = 0u64;
             add_dir_recursive(writer, options, &archive_path, &dir, &mut count)?;
             tracing::debug!("Bundled {count} entries total");
@@ -202,8 +198,6 @@ fn add_dir_recursive(
         if (*count).is_multiple_of(LOG_INTERVAL) {
             tracing::debug!("Bundled {} entries", *count);
         }
-
-        tracing::Span::current().pb_inc(1);
     }
     Ok(())
 }
@@ -304,7 +298,6 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize) ->
         if count.is_multiple_of(LOG_INTERVAL) {
             tracing::debug!("Extracted {count} entries");
         }
-        tracing::Span::current().pb_inc(1);
     }
     tracing::debug!("Extracted {count} entries total");
 

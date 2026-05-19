@@ -4,7 +4,8 @@
 use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ocx_lib::cli::{self, ColorMode, DataInterface, LogLevel, LogSettings, Printer, indicatif::ProgressStyle};
+use ocx_lib::cli::progress::ProgressManager;
+use ocx_lib::cli::{self, ColorMode, DataInterface, LogLevel, LogSettings, Printer, ProgressMode};
 
 mod annotations;
 mod command;
@@ -54,18 +55,24 @@ async fn main() -> ExitCode {
     };
 
     let level = cli.log_level.or(Some(LogLevel::Info));
-    let style = ProgressStyle::with_template("{spinner:.blue} {msg}").expect("valid indicatif template");
+    // Span-free progress manager (ADR adr_progress_architecture), created
+    // before the subscriber so its MultiProgress backs the fmt log writer.
+    let progress = if ProgressMode::detect().stderr {
+        ProgressManager::stderr()
+    } else {
+        ProgressManager::disabled()
+    };
     if let Err(e) = LogSettings::default()
         .with_console_level(level)
         .with_stderr_color(color_config.stderr)
-        .init_progress(style)
+        .init_with_progress(&progress)
     {
         eprintln!("Failed to initialize logging: {e}");
         return ExitCode::FAILURE;
     }
 
     let printer = DataInterface::new(Printer::new(color_config.stdout, color_config.stderr));
-    match cli.command.execute(&printer).await {
+    match cli.command.execute(&printer, &progress).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             ocx_lib::log::error!("{err:#}");

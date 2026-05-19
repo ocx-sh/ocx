@@ -287,7 +287,7 @@ def test_launcher_dispatches_divergent_command(
         bins=["hello-bin"],
         tag="1.0.0",
     )
-    ocx.plain("install", "--select", pkg.short)
+    ocx.plain("package", "install", "--select", pkg.short)
 
     launcher = current_entrypoints(ocx, pkg) / "hello"
     assert launcher.exists(), f"launcher must be named after the invocable name: {launcher}"
@@ -513,51 +513,7 @@ def test_exec_resolves_native_exe_shim_on_windows(
         f"(rc={result.returncode}, stderr={result.stderr.strip()!r})"
     )
     assert pkg.marker in result.stdout, (
-<<<<<<< HEAD
         f"exec must run the entrypoint via the `.exe` shim; stdout={result.stdout!r}"
-=======
-        f"exec with stripped PATHEXT must still run the entrypoint; stdout={result.stdout!r}"
-    )
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows PATHEXT warning test")
-def test_install_warns_when_pathext_missing_cmd_on_windows(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-) -> None:
-    """ocx install emits a warning to stderr when PATHEXT lacks .CMD on Windows.
-
-    The warning fires because install is a consumer-boundary command — it emits
-    paths that include .cmd launchers in entrypoints/, and the external shell
-    needs .CMD in PATHEXT to find them.
-    """
-    import copy
-    pkg = make_package_with_entrypoints(
-        ocx,
-        unique_repo,
-        tmp_path,
-        entrypoints=["hello"],
-        bins=["hello"],
-    )
-
-    stripped_env = copy.copy(ocx.env)
-    stripped_env["PATHEXT"] = ".EXE;.BAT;.COM"  # .CMD intentionally absent
-
-    cmd = [str(ocx.binary), "package", "install", "--select", pkg.short]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        env=stripped_env,
-        timeout=30,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        f"install must succeed even when PATHEXT lacks .CMD "
-        f"(rc={result.returncode}, stderr={result.stderr.strip()!r})"
-    )
-    assert "PATHEXT" in result.stderr, (
-        f"install must warn about missing .CMD in PATHEXT; stderr={result.stderr.strip()!r}"
->>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
     )
 
 

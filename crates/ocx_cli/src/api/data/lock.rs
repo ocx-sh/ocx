@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_lib::cli::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -43,6 +44,9 @@ impl Printable for LockReport {
             rows[1].push(entry.group.clone());
             rows[2].push(entry.digest.clone());
         }
-        printer.print_table(&["Binding", "Group", "Digest"], &rows);
+        printer.print_table(
+            &["Binding".into(), "Group".into(), "Digest".into()],
+            &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+        );
     }
 }

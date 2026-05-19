@@ -127,11 +127,20 @@ TOCTOU `!target.exists()` pre-check intentionally absent — eventual consistenc
 
 ## Progress Pattern
 
-`tracing` `info_span!` in `_all` methods + `tracing-indicatif` `IndicatifLayer` in CLI subscriber.
+Span-free. Progress is rendered through `crate::cli::progress::ProgressManager`
+(owns one `indicatif::MultiProgress`), **not** `tracing` spans. ADR:
+`adr_progress_architecture.md`. `PackageManager` carries a `progress` field
+(`with_progress`, default `disabled()` for library/test consumers); CLI
+`Context` injects the shared stderr manager.
 
-- Parallel tasks (`JoinSet`): each task spawned with `.instrument(span)` carrying package name
-- Sequential tasks: `.entered()` guard inside loop
-- No custom progress abstraction
+- Parallel tasks (`JoinSet`): each spawned task creates its own
+  `progress.spinner(label)` guard inside the async block; the guard clears
+  on task completion. No `.instrument()`.
+- Sequential tasks: hold a `Spinner` guard for the loop body.
+- `ProgressManager`/guards are `indicatif`-backed (`Send + Sync + Clone`,
+  no span registry) so concurrent create/use/drop cannot hit the
+  `tracing_subscriber` sharded-registry clone-after-close panic.
+- Disabled manager (non-TTY) → guards are cheap no-ops.
 
 ## OCX Configuration Forwarding
 

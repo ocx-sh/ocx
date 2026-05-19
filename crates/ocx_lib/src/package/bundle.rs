@@ -60,48 +60,18 @@ impl BundleBuilder {
 
         let mut archive = archive::Archive::create_with_compression(&temp_path, self.compression).await?;
         if self.source.is_dir() {
-            let bar = match count_entries(&self.source) {
-                Ok(count) => crate::cli::progress::ProgressBar::files(tracing::info_span!("Bundling"), count),
-                Err(e) => {
-                    tracing::debug!("Could not count entries: {e}");
-                    crate::cli::progress::ProgressBar::from(tracing::info_span!("Bundling"))
-                }
-            };
-
-            let _guard = bar.enter();
             archive.add_dir_all("", &self.source).await?;
         } else {
             let name = self.source.file_name().unwrap_or(self.source.as_os_str());
             archive.add_file(name, &self.source).await?;
         }
 
-        {
-            let _span = tracing::info_span!("Finishing").entered();
-            archive.finish().await?;
-        }
+        archive.finish().await?;
 
         std::fs::rename(&temp_path, output).map_err(|e| crate::error::file_error(&temp_path, e))?;
         temp_guard.retain();
         Ok(())
     }
-}
-
-fn count_entries(dir: &Path) -> std::io::Result<u64> {
-    let mut count = 0u64;
-    count_entries_recursive(dir, &mut count)?;
-    Ok(count)
-}
-
-fn count_entries_recursive(dir: &Path, count: &mut u64) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        *count += 1;
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            count_entries_recursive(&entry.path(), count)?;
-        }
-    }
-    Ok(())
 }
 
 /// Returns a temporary path in the same directory as `output` with a `._tmp_`

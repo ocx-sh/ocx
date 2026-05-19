@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_lib::cli::Cell;
 use ocx_lib::package::metadata::env::var::ModifierKind;
 use serde::Serialize;
 
@@ -47,6 +48,9 @@ impl Printable for EnvVars {
             rows[1].push(entry.kind.to_string());
             rows[2].push(entry.value.clone());
         }
-        printer.print_table(&["Key", "Type", "Value"], &rows);
+        printer.print_table(
+            &["Key".into(), "Type".into(), "Value".into()],
+            &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+        );
     }
 }
