@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Proposed
+**Status:** Superseded
 **Date:** 2026-04-19
 **Deciders:** Architect worker (sion worktree), product owner
 **GitHub Issue:** #33 (project-tier config walk — hook already wired at `crates/ocx_lib/src/config/loader.rs:33`)
@@ -13,7 +13,21 @@
 - [x] Shell integration reuses existing `ProfileBuilder` (no new export generator)
 **Domain Tags:** infrastructure | cli | api
 **Supersedes:** none
-**Superseded By:** —
+**Superseded By:** [`handshake_toolchain_cli.md`](./handshake_toolchain_cli.md) (2026-05-16) — §4 (activation surface) + §7 (the prompt-hook + `ocx shell init` + `_OCX_APPLIED` model in Option 5B / Phase 7 / Decision 6B is rejected; handshake §7a names this file for reconciliation). Also superseded by [`adr_global_toolchain_tier.md`](./adr_global_toolchain_tier.md) (Amendment C — home-tier-as-implicit-fallback).
+
+> ## ⚠ SUPERSEDED — DO NOT IMPLEMENT FROM THIS FILE.
+>
+> The authoritative spec for shell activation, the toolchain command
+> taxonomy, and the global-env exporter is
+> **[`handshake_toolchain_cli.md`](./handshake_toolchain_cli.md)** (2026-05-16).
+> This ADR's shell-integration design — `ocx shell init`/`shell hook`,
+> static `$OCX_HOME/init.<shell>` files, the per-prompt hook with the
+> `_OCX_APPLIED` fingerprint, and `ProfileBuilder` — was **rejected**.
+> The shipped model is: the in-repo installer (`website/src/public/install.sh`
+> / `install.ps1`) writes thin shims `$OCX_HOME/env.{sh,fish,ps1}` that run
+> `eval "$(ocx --global env --shell=…)"` live each shell start. A reviewer
+> or cross-model adversary MUST treat this file as historical context, never
+> as an implementation target.
 
 **One-way-door severity.** `ocx.toml` and `ocx.lock` become VCS artifacts in every consumer's repository the moment this ships. A later format change requires a migration for thousands of checked-in files, so every decision below is made for v1 correctness, not compatibility.
 

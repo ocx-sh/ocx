@@ -195,10 +195,9 @@ impl Shell {
 
     /// Returns a shell line that unsets the given environment variable.
     ///
-    /// Used by `ocx hook-env` to clear previously-applied tool variables
-    /// before re-emitting the current set when the `_OCX_APPLIED`
-    /// fingerprint changes. Returns `None` when `key` is not a valid POSIX
-    /// environment-variable name.
+    /// Used by the env exporters (`ocx env`, `ocx package env`,
+    /// `ocx direnv export`) to clear a tool variable. Returns `None` when
+    /// `key` is not a valid POSIX environment-variable name.
     pub fn unset(self, key: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
         if !is_valid_env_key(key) {
@@ -337,8 +336,8 @@ impl Shell {
 /// shell syntax via the *key* slot of an `export KEY=VAL` line (e.g.
 /// `KEY="; rm -rf $HOME; X"`), which `escape_value` does not protect against.
 /// Validation lives at the emitter layer (`export_path`, `export_constant`,
-/// `unset`) so every consumer — shell-hook, hook-env, `shell env`,
-/// `ci export` — gets the protection automatically.
+/// `unset`) so every consumer — `ocx env`, `ocx package env`,
+/// `ocx direnv export` — gets the protection automatically.
 fn is_valid_env_key(key: &str) -> bool {
     if key.is_empty() {
         return false;

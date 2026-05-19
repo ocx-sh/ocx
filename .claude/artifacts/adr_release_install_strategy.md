@@ -1,8 +1,26 @@
 # ADR: Release and Install Strategy
 
-**Status:** Accepted
+**Status:** Superseded
 **Date:** 2026-03-12
 **Author:** Principal Architect
+**Superseded By:** [`handshake_toolchain_cli.md`](./handshake_toolchain_cli.md) (2026-05-16) — §4/§7 (shell-activation surface)
+
+---
+
+> ## ⚠ SUPERSEDED — DO NOT IMPLEMENT THE SHELL-ACTIVATION DESIGN FROM THIS FILE.
+>
+> The `~/.ocx/env` bootstrap file with **static `export PATH=…`** plus
+> `eval "$(ocx shell env …)"` only for completions (described under
+> "Implementation Constraints → Shell Startup" and elsewhere, §§197-265,
+> 675, 742, 1393) was **rejected**. The shipped model is: the in-repo
+> installer (`website/src/public/install.sh` / `install.ps1`) writes thin
+> shims `$OCX_HOME/env.{sh,fish,ps1}` that run
+> `eval "$(ocx --global env --shell=…)"` live each shell start (binary
+> resolved via the literal install root, `[ -x ]`-guarded, `|| true`
+> fail-safe); `ocx shell env` no longer exists. The authoritative spec is
+> **[`handshake_toolchain_cli.md`](./handshake_toolchain_cli.md)** §4/§7.
+> The release/packaging decisions in this ADR otherwise still hold; only
+> the shell-startup design is superseded.
 
 ---
 

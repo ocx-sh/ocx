@@ -48,9 +48,9 @@ All commits must follow [Conventional Commits](https://www.conventionalcommits.o
 
 When publishing OCX to own registry (`ocx.sh/ocx/cli`), archive must contain `bin/ocx` (or `bin/ocx.exe` on Windows) at root. `~/.ocx/env` bootstrap file resolves binary at `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/bin/ocx`. Different package layout = env file path breaks.
 
-### Shell Startup: Static PATH, Dynamic Completions
+### Shell Startup: Live env eval
 
-`~/.ocx/env` file uses **static `export PATH=...`** for OCX binary (zero exec cost) + **dynamic eval** only for shell completions (one-time-per-session, failure-tolerant). Do NOT use `eval "$(ocx shell env ...)"` for PATH — `current` symlink path stable, never changes, static export sufficient. Only completions need binary invocation, guarded with `2>/dev/null || true`.
+The in-repo installer (`website/src/public/install.sh` / `install.ps1`) writes thin shims `$OCX_HOME/env.{sh,fish,ps1}` and appends a `# BEGIN ocx`/`# END ocx` block to the login profile that sources the shim. Each shim runs `eval "$(ocx --global env --shell=<sh|fish|pwsh>)"` live on every shell start — the `ocx` binary is resolved via the literal install root embedded at install time, `[ -x ]`-guarded, with `|| true` so a broken/absent binary never breaks the shell. There is no static `~/.ocx/env` PATH export and no `ocx shell env` command (deleted — see `handshake_toolchain_cli.md` §4/§7).
 
 ### Existing Dependabot Config
 
