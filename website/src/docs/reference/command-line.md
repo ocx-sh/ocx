@@ -512,7 +512,7 @@ ocx env [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect instead of JSON. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) defaults to `sh`. | *(unset — JSON output)* |
+| `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect instead of JSON. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`, `nushell`, `elvish`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) defaults to `sh`. | *(unset — JSON output)* |
 | `--format` | — | `json` (default for this command) or `plain` (aligned table). `plain` output is not eval-safe. | `json` |
 | `-h`, `--help` | | Print help information. | — |
 
@@ -1350,7 +1350,7 @@ ocx shell completion [OPTIONS]
 
 **Options**
 
-- `--shell <SHELL>`: Shell to generate completions for. One of `bash`, `zsh`, `fish`, `elvish`, `powershell`. Auto-detected from the parent shell when omitted; ocx fails with an error if the detected shell is unsupported (e.g. `nushell`).
+- `--shell <SHELL>`: Shell to generate completions for. One of `bash`, `zsh`, `fish`, `elvish`, `powershell`. Auto-detected from the parent shell when omitted; ocx fails with an error if the detected shell is unsupported. `nushell` is not supported for completions (clap has no Nushell completion backend); this does not affect `ocx env --shell=nushell` activation, which works independently.
 
 **Install examples**
 

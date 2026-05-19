@@ -133,8 +133,10 @@ so that removing `~/.ocx/` alone no longer errors on shell startup, but any
 previously-added unguarded line should still be removed):
 
 - **bash**: remove the `.ocx/env` source line from `~/.bash_profile` or `~/.profile`
-- **zsh**: remove the `.ocx/env` source line from `~/.zshenv`
+- **zsh**: remove the `.ocx/env` source line from `~/.zprofile`
 - **fish**: delete `~/.config/fish/conf.d/ocx.fish`
+- **nushell**: delete `~/.local/share/nushell/vendor/autoload/ocx.nu`
+- **elvish**: remove the `# BEGIN ocx` / `# END ocx` block from `~/.config/elvish/rc.elv`
 - **PowerShell**: remove the `.ocx\env.ps1` source line from your `$PROFILE`
 
 ::: warning This deletes everything
