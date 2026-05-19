@@ -111,21 +111,36 @@ Project-only direnv adapter. Out of scope for this handshake.
 
 ## 3. The `env` command (both tiers)
 
-Two orthogonal axes. Scope = command location. Format = flag. There is no
-`--format shell`.
+> **AMENDMENT 2026-05-19 (supersedes the original §3 format decision).**
+> The original §3 made JSON the default `env` output channel ("backend-first")
+> via a per-subcommand `--format` flag on `ocx env` / `ocx package env`. The
+> project owner reversed this: **output format is a context-only concern.** No
+> subcommand may carry its own `--format` or diverge from the context default.
+> `ocx env` / `ocx package env` no longer declare a `--format` flag; they emit
+> through the shared context `Api`, whose format is the root `--format`
+> (`ContextOptions.format`) with the **same default as every other command
+> (plain)**. There is no env-specific JSON default. `--shell[=NAME]` is
+> unchanged — still the only eval-safe form. Body below reflects the amended
+> model; original wording retained struck-through where it aids the audit
+> trail.
+
+Two orthogonal axes. Scope = command location. Format = the **root**
+`--format` flag (context concern, default plain). There is no `--format shell`
+and no subcommand-level `--format`.
 
 | Want | Invocation |
 |---|---|
-| Toolchain env, machine-readable | `ocx [--global] env` (default: global `--format`, JSON or plain) |
+| Toolchain env, machine-readable | `ocx --format json [--global] env` |
+| Toolchain env, default (plain) | `ocx [--global] env` |
 | Toolchain env, sourceable | `ocx [--global] env --shell[=NAME]` |
-| Per-package env, machine-readable | `ocx package env <ids...>` |
+| Per-package env, machine-readable | `ocx --format json package env <ids...>` |
 | Per-package env, sourceable | `ocx package env <ids...> --shell[=NAME]` |
 
 Rules:
 
-- **Default output** = whatever the global `--format` selects (JSON default,
-  or plain). For inspection / tooling. **Backend-first: JSON is the default
-  channel.**
+- **Default output** = the context default selected by the root `--format`
+  flag — **plain**, identical to every other command. No env-specific JSON
+  default; no subcommand `--format`. JSON via `ocx --format json env`.
 - **`--shell` is the only eval-safe form.** Plain/JSON are *not* sourceable
   (no quoting/escaping → breaks on paths with spaces). Documented explicitly;
   `eval "$(ocx env)"` is a user error, `eval "$(ocx env --shell=bash)"` is
@@ -239,7 +254,10 @@ grammar break.
 **Add:**
 
 - `ocx env` (toolchain tier, root) — stateless; reuses
-  `resolve_global_current_env` + `resolve_env`/`composer::compose`
+  `resolve_global_pinned_env` + `resolve_env`/`composer::compose`
+  (renamed from `resolve_global_current_env`; **ADR D5 amended
+  2026-05-19** — resolves lock-pinned digests offline, not the `current`
+  symlink)
 - `ocx package` command group with `install`/`uninstall`/`select`/
   `deselect`/`exec`/`env` (move the four root commands in; add `deselect`)
 - one shared `emit_lines(shell, &[Entry])` helper, extracted from the
@@ -262,7 +280,10 @@ grammar break.
   `app/context.rs`, called from `Context::try_init`) closes the env-sourced
   gaps (`OCX_GLOBAL` default value, `OCX_PROJECT` env) that clap
   `conflicts_with` cannot see.
-- `resolve_global_current_env`, the GC / no-self-link / conflict seam
+- `resolve_global_pinned_env` (the no-self-link / conflict seam). **GC seam
+  amended 2026-05-19 (ADR D5):** global lock-pinned packages are reachable via
+  an implicit `$OCX_HOME/ocx.lock` root in `clean::collect_project_roots`, not
+  via `current` install back-refs
 - `candidate`/`current` floating symlinks and their commands (now under
   `ocx package`)
 
@@ -310,8 +331,10 @@ entrypoints blind spot that hid the detour's entrypoint-only bug.
 - [x] §1 principle correct (global = project toolchain; only diff = load site)
 - [x] §2 command map correct (`ocx package` group; `shell` → `completion`;
       deletions; `ocx env` at root)
-- [x] §3 `env` cut correct (scope=location, format=flag, `--shell=` equals,
-      JSON default, plain not sourceable)
+- [x] §3 `env` cut correct (scope=location, `--shell=` equals, plain not
+      sourceable) — **format decision amended 2026-05-19**: format is a
+      context-only concern (root `--format`, default plain), no subcommand
+      `--format`, no env-specific JSON default. See §3 amendment block.
 - [x] §4 activation correct (one POSIX env file + per-family only where
       syntax differs; in-repo installer owns profile mod, no website repo;
       rc content single-sourced via `ocx`, generator may defer)
