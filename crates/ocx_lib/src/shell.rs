@@ -3,7 +3,7 @@
 
 pub mod applied_set;
 pub mod error;
-pub use applied_set::{AppliedEntry, compute_fingerprint, parse_applied, render_applied};
+pub use applied_set::AppliedEntry;
 
 use crate::{Error, env, log};
 
@@ -732,11 +732,11 @@ mod tests {
 
     #[test]
     fn export_constant_accepts_underscore_prefixed_key() {
-        // `_OCX_APPLIED` is itself such a key — it must pass.
+        // Leading-underscore env-var names are valid POSIX identifiers.
         let line = Shell::Bash
-            .export_constant("_OCX_APPLIED", "v1:abc")
+            .export_constant("_OCX_INTERNAL", "value")
             .expect("underscore-prefixed key accepted");
-        assert!(line.contains("_OCX_APPLIED"));
+        assert!(line.contains("_OCX_INTERNAL"));
     }
 
     // ── Per-shell unset syntax matrix (Round 2 W4) ───────────────────
