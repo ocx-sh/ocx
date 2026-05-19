@@ -34,6 +34,20 @@ for disabling an option.
 The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by design — they have no `OCX_*` counterpart and never propagate from a parent ocx into a subprocess (such as a generated [entrypoint launcher][entrypoints-ref]). Carrying them through env would leak ocx's own logging, JSON output, or ANSI color choices into the launcher's child stream. Only resolution-affecting policy (binary path, offline, remote, config file, index) propagates.
 :::
 
+### Shell Activation Files {#shell-activation-files}
+
+The installer writes one activation file per supported shell family into `$OCX_HOME`. Each file re-queries `ocx` at shell start so the activated environment reflects the current selection without being a stale snapshot.
+
+| File | Shell | Mechanism | Wired by |
+|------|-------|-----------|----------|
+| `$OCX_HOME/env.sh` | bash, zsh, dash, ash, ksh | `. "$OCX_HOME/env.sh"` in login profile (block-marker) | Installer writes block-marker to `~/.bash_profile`, `~/.zprofile`, or `~/.profile` |
+| `$OCX_HOME/env.fish` | fish | `source "$OCX_HOME/env.fish"` from `conf.d` | Installer writes `~/.config/fish/conf.d/ocx.fish` |
+| `$OCX_HOME/env.nu` | nushell | JSON ingest (`ocx --global env \| from json`) at startup | Installer writes `~/.local/share/nushell/vendor/autoload/ocx.nu` (auto-sourced) |
+| `$OCX_HOME/env.elv` | elvish | `eval (e:ocx --global env --shell=elvish \| slurp)` | Installer writes `eval (slurp < "$OCX_HOME/env.elv")` block-marker to `~/.config/elvish/rc.elv` |
+| `$OCX_HOME/env.ps1` | PowerShell | `Invoke-Expression (& ocx --global env --shell=pwsh \| Out-String)` | Installer writes source line to `$PROFILE` |
+
+Every file embeds the **literal install root** resolved at install time — not a runtime `$OCX_HOME` reference — so activation works in fresh shells where `OCX_HOME` is not exported.
+
 ### `_OCX_APPLIED` {#ocx-applied}
 
 > **REMOVED** — this variable and the per-prompt shell hook that managed it (`ocx shell hook`) have been removed. Do not set or reference `_OCX_APPLIED` in shell profiles.

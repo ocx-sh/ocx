@@ -390,3 +390,335 @@ echo "_OCX_ENV_LOADED=${{_OCX_ENV_LOADED:-}}"
     assert "_OCX_ENV_LOADED=1" in result.stdout, (
         f"_OCX_ENV_LOADED must be '1' after double-source; stdout:\n{result.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Nushell — create_env_nu / create_nu_autoload / detect_profile / uninstall
+# ---------------------------------------------------------------------------
+
+
+def test_create_env_nu_writes_literal_root(tmp_path: Path) -> None:
+    """``create_env_nu`` writes $OCX_HOME/env.nu with the literal install root
+    embedded, not a runtime ``$env.OCX_HOME`` reference.
+
+    The file must contain the literal OCX_HOME path and the JSON-ingest body
+    (``from json``, ``load-env``) but must NOT use ``$env.OCX_HOME`` as the
+    source of the binary path.
+    """
+    ocx_home = tmp_path / "custom_ocx"
+    ocx_home.mkdir()
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "OCX_HOME": str(ocx_home),
+        "PATH": "/usr/bin:/bin",
+    }
+    result = _source_install_sh("create_env_nu", env)
+    assert result.returncode == 0, (
+        f"create_env_nu must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    env_nu = ocx_home / "env.nu"
+    assert env_nu.exists(), f"env.nu must be created at {env_nu}"
+
+    content = env_nu.read_text()
+    # Must embed the literal OCX_HOME path.
+    assert str(ocx_home) in content, (
+        f"env.nu must embed the literal OCX_HOME path ({ocx_home}); got:\n{content}"
+    )
+    # Must NOT use a runtime env variable as the binary root.
+    assert "$env.OCX_HOME" not in content, (
+        "env.nu must NOT use $env.OCX_HOME runtime var; literal path must be embedded"
+    )
+    # Must contain the JSON ingest body.
+    assert "from json" in content, (
+        f"env.nu must contain 'from json' for JSON ingest; got:\n{content}"
+    )
+    assert "load-env" in content, (
+        f"env.nu must contain 'load-env' for env application; got:\n{content}"
+    )
+
+
+def test_create_nu_autoload_writes_literal_source(tmp_path: Path) -> None:
+    """``create_nu_autoload`` writes the vendor/autoload/ocx.nu file with a
+    literal ``source`` line pointing at ``$OCX_HOME/env.nu``.
+
+    Nushell ``source`` is parse-time and cannot accept a runtime variable; the
+    path must be a literal resolved at install time.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    ocx_home = tmp_path / "ocx"
+    ocx_home.mkdir()
+    env = {
+        "HOME": str(home),
+        "OCX_HOME": str(ocx_home),
+        "PATH": "/usr/bin:/bin",
+    }
+    result = _source_install_sh("create_nu_autoload", env)
+    assert result.returncode == 0, (
+        f"create_nu_autoload must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    autoload_file = home / ".local" / "share" / "nushell" / "vendor" / "autoload" / "ocx.nu"
+    assert autoload_file.exists(), f"ocx.nu must be created at {autoload_file}"
+
+    content = autoload_file.read_text()
+    # Must contain a literal source line with the OCX_HOME path embedded.
+    assert f'source "{ocx_home}/env.nu"' in content, (
+        f"ocx.nu must contain literal source line with {ocx_home}/env.nu; got:\n{content}"
+    )
+    # Must NOT use a runtime variable as the source path.
+    assert "$env.OCX_HOME" not in content, (
+        "ocx.nu must NOT use $env.OCX_HOME in the source line — parse-time constraint"
+    )
+
+
+def test_detect_profile_nu_returns_empty(tmp_path: Path) -> None:
+    """``detect_profile`` must return an empty string when ``$SHELL`` is ``nu``.
+
+    Nushell uses vendor/autoload, not a block-marker profile edit.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "HOME": str(home),
+        "SHELL": "/usr/bin/nu",
+        "PATH": "/usr/bin:/bin",
+    }
+    result = _source_install_sh("detect_profile", env)
+    assert result.returncode == 0, (
+        f"detect_profile must succeed for nu; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert result.stdout.strip() == "", (
+        f"detect_profile must return empty for nu shell; got: '{result.stdout.strip()}'"
+    )
+
+
+def test_remove_nu_autoload(tmp_path: Path) -> None:
+    """``remove_shell_profile`` removes the vendor/autoload/ocx.nu file when
+    ``$SHELL`` is ``nu``.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    ocx_home = tmp_path / "ocx"
+    ocx_home.mkdir()
+
+    # Pre-create the autoload file so removal has something to remove.
+    autoload_dir = home / ".local" / "share" / "nushell" / "vendor" / "autoload"
+    autoload_dir.mkdir(parents=True)
+    autoload_file = autoload_dir / "ocx.nu"
+    autoload_file.write_text(f'source "{ocx_home}/env.nu"\n')
+
+    env = {
+        "HOME": str(home),
+        "OCX_HOME": str(ocx_home),
+        "SHELL": "/usr/bin/nu",
+        "PATH": "/usr/bin:/bin",
+    }
+    result = _source_install_sh("remove_shell_profile", env)
+    assert result.returncode == 0, (
+        f"remove_shell_profile must succeed for nu; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert not autoload_file.exists(), (
+        f"vendor/autoload/ocx.nu must be removed on uninstall; still exists at {autoload_file}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Elvish — create_env_elv / detect_profile / modify / remove profile
+# ---------------------------------------------------------------------------
+
+
+def test_create_env_elv_writes_literal_root(tmp_path: Path) -> None:
+    """``create_env_elv`` writes $OCX_HOME/env.elv with the literal install root
+    embedded, not a runtime ``$E:OCX_HOME`` reference.
+
+    The file must contain the literal OCX_HOME path and the eval-slurp body.
+    """
+    ocx_home = tmp_path / "custom_ocx"
+    ocx_home.mkdir()
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "OCX_HOME": str(ocx_home),
+        "PATH": "/usr/bin:/bin",
+    }
+    result = _source_install_sh("create_env_elv", env)
+    assert result.returncode == 0, (
+        f"create_env_elv must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    env_elv = ocx_home / "env.elv"
+    assert env_elv.exists(), f"env.elv must be created at {env_elv}"
+
+    content = env_elv.read_text()
+    # Must embed the literal OCX_HOME path.
+    assert str(ocx_home) in content, (
+        f"env.elv must embed the literal OCX_HOME path ({ocx_home}); got:\n{content}"
+    )
+    # Must NOT use a runtime env variable as the binary root.
+    assert "$E:OCX_HOME" not in content, (
+        "env.elv must NOT use $E:OCX_HOME runtime var; literal path must be embedded"
+    )
+    # Must contain the elvish eval-slurp activation pattern.
+    assert "--shell=elvish" in content, (
+        f"env.elv must invoke ocx with --shell=elvish; got:\n{content}"
+    )
+    assert "slurp" in content, (
+        f"env.elv must use slurp to read shell output; got:\n{content}"
+    )
+
+
+def test_detect_profile_elvish_returns_rc_elv(tmp_path: Path) -> None:
+    """``detect_profile`` must return ``~/.config/elvish/rc.elv`` when
+    ``$SHELL`` is ``elvish``.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "HOME": str(home),
+        "SHELL": "/usr/bin/elvish",
+        "PATH": "/usr/bin:/bin",
+    }
+    result = _source_install_sh("detect_profile", env)
+    assert result.returncode == 0, (
+        f"detect_profile must succeed for elvish; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    expected = str(home / ".config" / "elvish" / "rc.elv")
+    assert result.stdout.strip() == expected, (
+        f"detect_profile must return '{expected}' for elvish; got: '{result.stdout.strip()}'"
+    )
+
+
+def test_modify_shell_profile_elvish_block(tmp_path: Path) -> None:
+    """``modify_shell_profile`` writes a ``# BEGIN ocx`` / ``# END ocx`` block
+    with Elvish ``eval (slurp < ...)`` syntax when ``$SHELL`` is ``elvish``.
+
+    The block must be idempotent: a second call must not add a second block.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    ocx_home = tmp_path / "ocx"
+    ocx_home.mkdir()
+
+    rc_elv = home / ".config" / "elvish" / "rc.elv"
+    rc_elv.parent.mkdir(parents=True)
+    rc_elv.write_text("# existing elvish config\n")
+
+    env = {
+        "HOME": str(home),
+        "OCX_HOME": str(ocx_home),
+        "SHELL": "/usr/bin/elvish",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    # First call — must add the block.
+    r1 = _source_install_sh("modify_shell_profile", env)
+    assert r1.returncode == 0, f"first modify_shell_profile (elvish) failed: {r1.stderr}"
+
+    content = rc_elv.read_text()
+    assert "# BEGIN ocx" in content, (
+        f"# BEGIN ocx must be added for elvish; profile:\n{content}"
+    )
+    assert "# END ocx" in content, (
+        f"# END ocx must be added for elvish; profile:\n{content}"
+    )
+    # Must use Elvish eval-slurp syntax, not POSIX dot-source.
+    assert "eval (slurp <" in content, (
+        f"elvish block must use eval (slurp < ...) syntax; got:\n{content}"
+    )
+    assert str(ocx_home) in content, (
+        f"elvish block must embed literal OCX_HOME path; got:\n{content}"
+    )
+    # Must contain the env.elv filename.
+    assert "env.elv" in content, (
+        f"elvish block must reference env.elv; got:\n{content}"
+    )
+
+    # Second call — must be idempotent (no duplicate block).
+    r2 = _source_install_sh("modify_shell_profile", env)
+    assert r2.returncode == 0, f"second modify_shell_profile (elvish) failed: {r2.stderr}"
+
+    content2 = rc_elv.read_text()
+    begin_count = content2.count("# BEGIN ocx")
+    assert begin_count == 1, (
+        f"# BEGIN ocx must appear exactly once (idempotent); found {begin_count} in:\n{content2}"
+    )
+
+
+def test_modify_shell_profile_posix_block_unchanged(tmp_path: Path) -> None:
+    """Regression: POSIX sh/bash/zsh block form must remain byte-identical to the
+    expected form — ``\\n# BEGIN ocx\\n. "<root>/env.sh"\\n# END ocx\\n``.
+
+    Ensures the Elvish generalisation did not alter the POSIX path.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    profile = home / ".profile"
+    profile.write_text("# header\n")
+    ocx_home = tmp_path / "ocx"
+    ocx_home.mkdir()
+    env = {
+        "HOME": str(home),
+        "OCX_HOME": str(ocx_home),
+        "SHELL": "/bin/sh",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    result = _source_install_sh("modify_shell_profile", env)
+    assert result.returncode == 0, f"modify_shell_profile (sh) failed: {result.stderr}"
+
+    content = profile.read_text()
+    expected_block = f'\n# BEGIN ocx\n. "{ocx_home}/env.sh"\n# END ocx\n'
+    assert expected_block in content, (
+        f"POSIX block must be byte-identical to expected form; "
+        f"expected:\n{expected_block!r}\ngot profile:\n{content!r}"
+    )
+    # Must NOT contain any Elvish or Nushell syntax.
+    assert "slurp" not in content, (
+        f"POSIX profile must not contain Elvish slurp syntax; got:\n{content}"
+    )
+
+
+def test_remove_shell_profile_elvish(tmp_path: Path) -> None:
+    """``remove_shell_profile`` strips the ``# BEGIN ocx`` / ``# END ocx`` block
+    from ``rc.elv`` when ``$SHELL`` is ``elvish``.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    ocx_home = tmp_path / "ocx"
+    ocx_home.mkdir()
+
+    rc_elv = home / ".config" / "elvish" / "rc.elv"
+    rc_elv.parent.mkdir(parents=True)
+    rc_elv.write_text(
+        "# header\n"
+        "\n# BEGIN ocx\n"
+        f'eval (slurp < "{ocx_home}/env.elv")\n'
+        "# END ocx\n"
+        "# user config\n"
+    )
+
+    env = {
+        "HOME": str(home),
+        "OCX_HOME": str(ocx_home),
+        "SHELL": "/usr/bin/elvish",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    result = _source_install_sh("remove_shell_profile", env)
+    assert result.returncode == 0, (
+        f"remove_shell_profile must succeed for elvish; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    content = rc_elv.read_text()
+    # BEGIN/END block must be gone.
+    assert "# BEGIN ocx" not in content, (
+        f"# BEGIN ocx must be stripped for elvish; profile:\n{content}"
+    )
+    assert "# END ocx" not in content, (
+        f"# END ocx must be stripped for elvish; profile:\n{content}"
+    )
+    # User content outside the block must survive.
+    assert "# user config" in content, (
+        f"user content outside the block must be preserved; profile:\n{content}"
+    )

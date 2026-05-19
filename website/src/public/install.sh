@@ -388,6 +388,81 @@ create_env_ps1() {
     } >"$_ocx_home/env.ps1"
 }
 
+# Write $OCX_HOME/env.nu — Nushell per-family file.
+# Nushell has no `eval` builtin; it ingests ocx env JSON output instead.
+# The binary path is the resolved install root embedded literally at install
+# time (not a runtime OCX_HOME fallback).  The JSON shape is:
+#   {"entries":[{"key","value","type":"constant"|"path"}]}
+# shellcheck disable=SC2016
+create_env_nu() {
+    local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
+
+    mkdir -p "$_ocx_home"
+
+    # Write the literal install root so the file works in fresh shells where
+    # OCX_HOME is not set.  SC2016 suppressed: single-quoted $ syntax is
+    # intentional — Nushell variable references must appear verbatim in the
+    # generated file.
+    {
+        printf '# Managed by ocx installer — do not edit.\n'
+        printf 'let _ocx_bin = "%s/symlinks/ocx.sh/ocx/current/bin/ocx"\n' "$_ocx_home"
+        printf 'if ($_ocx_bin | path exists) {\n'
+        printf '    let _ocx_out = (^$_ocx_bin --global env | complete)\n'
+        printf '    if $_ocx_out.exit_code == 0 {\n'
+        printf '        for e in ($_ocx_out.stdout | from json | get entries) {\n'
+        printf '            let _val = (if $e.type == "path" {\n'
+        printf '                let _prev = ($env | get -i $e.key | default "")\n'
+        printf '                if ($_prev | is-empty) { $e.value } else { $"($e.value)(char esep)($_prev)" }\n'
+        printf '            } else { $e.value })\n'
+        printf '            load-env { ($e.key): $_val }\n'
+        printf '        }\n'
+        printf '    }\n'
+        printf '}\n'
+    } >"$_ocx_home/env.nu"
+}
+
+# Write the Nushell vendor autoload file that sources $OCX_HOME/env.nu.
+# Nushell auto-sources every .nu file under the vendor/autoload directory at
+# startup — the path used at install time is resolved literally so it works
+# in shells where OCX_HOME is not exported.
+# `source` in Nushell is parse-time and cannot take a runtime variable; the
+# literal resolved path must be written into the file.
+create_nu_autoload() {
+    local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
+    local _nu_autoload_dir
+
+    _nu_autoload_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nushell/vendor/autoload"
+    mkdir -p "$_nu_autoload_dir"
+
+    {
+        printf '# OCX shell environment — managed by ocx installer.\n'
+        printf 'source "%s/env.nu"\n' "$_ocx_home"
+    } >"$_nu_autoload_dir/ocx.nu"
+}
+
+# Write $OCX_HOME/env.elv — Elvish per-family file.
+# Elvish supports `eval` at runtime; `ocx --global env --shell=elvish` emits
+# `set E:KEY = ...` lines that are safe to eval.  The binary path is the
+# resolved install root embedded literally at install time.
+# shellcheck disable=SC2016
+create_env_elv() {
+    local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
+
+    mkdir -p "$_ocx_home"
+
+    # Write the literal install root so the file works in fresh shells where
+    # OCX_HOME is not set.  SC2016 suppressed: single-quoted $ syntax is
+    # intentional — Elvish variable references must appear verbatim in the
+    # generated file.
+    {
+        printf '# Managed by ocx installer — do not edit.\n'
+        printf 'var _ocx_bin = "%s/symlinks/ocx.sh/ocx/current/bin/ocx"\n' "$_ocx_home"
+        printf 'if ?(test -x $_ocx_bin) {\n'
+        printf '    eval (e:$_ocx_bin --global env --shell=elvish | slurp)\n'
+        printf '}\n'
+    } >"$_ocx_home/env.elv"
+}
+
 # Compatibility alias: the old env file had no .sh extension.  Remove it on
 # install so upgraders don't source a stale file that calls deleted commands.
 remove_legacy_env_file() {
@@ -480,6 +555,14 @@ detect_profile() {
             # Fish uses conf.d — no block-marker profile edit needed
             echo ""
             ;;
+        nu)
+            # Nushell uses vendor/autoload — no block-marker profile edit needed
+            echo ""
+            ;;
+        elvish)
+            # Elvish uses rc.elv as the login profile
+            echo "${XDG_CONFIG_HOME:-$HOME/.config}/elvish/rc.elv"
+            ;;
         *)
             echo "$HOME/.profile"
             ;;
@@ -504,6 +587,13 @@ modify_shell_profile() {
         return
     fi
 
+    # Nushell: vendor/autoload handles activation; no block-marker profile edit.
+    if [ "$_shell_name" = "nu" ]; then
+        create_nu_autoload
+        say "Created Nushell autoload configuration."
+        return
+    fi
+
     _profile=$(detect_profile)
     if [ -z "$_profile" ]; then
         return
@@ -518,12 +608,19 @@ modify_shell_profile() {
         return
     fi
 
-    # Append the block-marker section.  Uses . (dot) not source — POSIX dash-safe.
+    # Append the block-marker section.
     # The install root is embedded as a literal resolved path (not a runtime
     # ${OCX_HOME:-...} fallback) so the block works in fresh shells where
     # OCX_HOME is not exported.
-    printf '\n# BEGIN ocx\n. "%s/env.sh"\n# END ocx\n' \
-        "$_ocx_home" >>"$_profile"
+    # Elvish uses `eval (slurp < ...)` syntax instead of POSIX `. "..."`;
+    # all other shells use the POSIX dot-source form (dash-safe).
+    if [ "$_shell_name" = "elvish" ]; then
+        printf '\n# BEGIN ocx\neval (slurp < "%s/env.elv")\n# END ocx\n' \
+            "$_ocx_home" >>"$_profile"
+    else
+        printf '\n# BEGIN ocx\n. "%s/env.sh"\n# END ocx\n' \
+            "$_ocx_home" >>"$_profile"
+    fi
     say "Added OCX to $(tildify "$_profile")"
 }
 
@@ -542,6 +639,16 @@ remove_shell_profile() {
         if [ -f "$_fish_conf" ]; then
             rm -f -- "$_fish_conf"
             say "Removed Fish configuration."
+        fi
+        return
+    fi
+
+    # Nushell: remove vendor/autoload file.
+    if [ "$_shell_name" = "nu" ]; then
+        local _nu_autoload="${XDG_DATA_HOME:-$HOME/.local/share}/nushell/vendor/autoload/ocx.nu"
+        if [ -f "$_nu_autoload" ]; then
+            rm -f -- "$_nu_autoload"
+            say "Removed Nushell autoload configuration."
         fi
         return
     fi
@@ -784,10 +891,17 @@ main() {
     create_env_sh
     create_env_fish
     create_env_ps1
+    create_env_nu
+    create_env_elv
 
     # Create Fish conf.d config if Fish is installed (regardless of default shell).
     if check_cmd fish; then
         create_fish_config
+    fi
+
+    # Create Nushell vendor/autoload if Nushell is installed (regardless of default shell).
+    if check_cmd nu; then
+        create_nu_autoload
     fi
 
     # Modify shell profile
