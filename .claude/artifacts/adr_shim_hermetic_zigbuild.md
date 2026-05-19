@@ -89,6 +89,10 @@ The hermetic toolchain (pinned Zig + rustc, no MS manifest) shipped, but the **b
 
 **Resolution — provenance/inputs gate** (the deciders' originally-mused model): the committed blob is authoritative, CI-built + SLSA-attested. `build-windows-shims.yml` no longer `cmp -s`; it now asserts the committed blob is a valid PE, within `SHIM_SIZE_BUDGET`, and matches the in-tree `SHIM_SHA256` (corruption canary), and the job's path filter forces a successful fresh build + a blob-refresh PR (from the uploaded `ocx-shim-fresh-*` artifact) whenever build inputs change. Integrity = SLSA attestation + SHA canary + refresh discipline, not cross-run byte identity. Size budget raised to 512 KiB (no-build-std blob ≈ 235–329 KiB). Net: hermetic *toolchain* (no floating Microsoft SDK — the original treadmill is gone) without an impossible byte-identity requirement.
 
+### Addendum 3 2026-05-19 — git-bash test bug (not a shim bug); PR #134 green
+
+`test_shim_resolves_via_pathext[git-bash]` (rc=1/empty-stderr, pre-existing, toolchain-independent) root-caused via runner instrumentation: bare `bash` on the GitHub Windows runner resolves to `C:\Windows\System32\bash.exe` (the WSL launcher); with no WSL distro it prints "no installed distributions" to stdout and exits rc=1 **without ever exec'ing the shim**. The shim and heterogeneous-environment (MSYS) support were never broken. Fixed by resolving Git-for-Windows bash explicitly (`_git_bash()` in the test). Build Windows Shims now fully green (Linux gate + both cross-builds + Windows acceptance).
+
 ### Consequences
 
 **Positive:** deterministic blob; treadmill gone; msvc/gnu TODO resolved; smaller attack/repro surface.
