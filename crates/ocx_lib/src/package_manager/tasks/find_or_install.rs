@@ -2,7 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 use tokio::task::JoinSet;
-use tracing::{Instrument, info_span};
 
 use crate::{
     log, oci,
@@ -60,12 +59,9 @@ impl PackageManager {
             return Ok(Vec::new());
         }
         if packages.len() == 1 {
-            let info = self
-                .find_or_install(&packages[0], platforms)
-                .instrument(crate::cli::progress::spinner_span(
-                    info_span!("Resolving", package = %packages[0]),
-                    &packages[0],
-                ))
+            let spin = self.progress().spinner(format!("Resolving '{}'", packages[0]));
+            let info = spin
+                .scope(self.find_or_install(&packages[0], platforms))
                 .await
                 .map_err(|kind| {
                     package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
@@ -82,15 +78,12 @@ impl PackageManager {
             let plat = platforms.clone();
             let sem = semaphore.clone();
 
-            let span = crate::cli::progress::spinner_span(info_span!("Resolving", package = %pkg), &pkg);
-            tasks.spawn(
-                async move {
-                    let _permit = super::super::concurrency::acquire_permit(&sem).await;
-                    let result = mgr.find_or_install(&pkg, plat).await;
-                    (pkg, result)
-                }
-                .instrument(span),
-            );
+            tasks.spawn(async move {
+                let _permit = super::super::concurrency::acquire_permit(&sem).await;
+                let spin = mgr.progress().spinner(format!("Resolving '{pkg}'"));
+                let result = spin.scope(mgr.find_or_install(&pkg, plat)).await;
+                (pkg, result)
+            });
         }
 
         super::common::drain_package_tasks(&packages, tasks, package_manager::error::Error::FindFailed).await

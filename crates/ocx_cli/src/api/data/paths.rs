@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use ocx_lib::cli::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -52,6 +53,9 @@ impl Printable for Paths {
             rows[0].push(entry.package.clone());
             rows[1].push(entry.path.display().to_string());
         }
-        printer.print_table(&["Package", "Path"], &rows);
+        printer.print_table(
+            &["Package".into(), "Path".into()],
+            &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+        );
     }
 }

@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use ocx_lib::cli::progress::ProgressManager;
+
 use super::options::SyncOptions;
 use crate::error::MirrorError;
 
@@ -23,6 +25,7 @@ impl Check {
             spec: self.spec.clone(),
             options,
         };
-        sync.execute(printer).await
+        // Dry-run never renders progress; pass a disabled manager.
+        sync.execute(printer, &ProgressManager::disabled()).await
     }
 }

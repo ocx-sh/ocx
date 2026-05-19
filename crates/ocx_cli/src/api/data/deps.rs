@@ -4,24 +4,21 @@
 use serde::Serialize;
 
 use ocx_lib::{
-    cli::{Annotation, Style, TreeItem},
+    cli::{Annotation, Cell, Theme, TreeItem},
     oci,
     package::metadata::visibility::Visibility,
 };
 
 use crate::api::Printable;
 
-const STYLE_DIGEST: Style = Style::new().style(console::Style::new().color256(117)); // light sky blue
-const STYLE_REPEATED: Style = Style::new().style(console::Style::new().italic().dim());
-
-const fn visibility_style(vis: Visibility) -> Style {
-    let inner = match (vis.private, vis.interface) {
-        (true, true) => console::Style::new().color256(114), // public — soft green
-        (true, false) => console::Style::new().italic().color256(179), // private — warm amber
-        (false, true) => console::Style::new().italic().color256(141), // interface — lavender
-        (false, false) => console::Style::new().italic().dim().color256(245), // sealed — muted gray
-    };
-    Style::new().style(inner)
+/// `registry/repo[:tag]` with the tag coloured by the theme and the
+/// digest deliberately omitted (it has its own column / annotation).
+fn name_tag(id: &oci::Identifier, theme: &Theme) -> String {
+    let mut out = format!("{}/{}", id.registry(), id.repository());
+    if let Some(tag) = id.tag() {
+        out.push_str(&theme.tag(format!(":{tag}")));
+    }
+    out
 }
 
 /// A node in the dependency tree (for tree view output).
@@ -50,32 +47,28 @@ impl Dependencies {
 }
 
 impl TreeItem for Dependency {
-    fn label(&self) -> String {
-        match self.identifier.tag() {
-            Some(tag) => format!(
-                "{}/{}:{}",
-                self.identifier.registry(),
-                self.identifier.repository(),
-                tag
-            ),
-            None => format!("{}/{}", self.identifier.registry(), self.identifier.repository()),
-        }
+    fn label(&self, theme: &Theme) -> String {
+        name_tag(&self.identifier, theme)
     }
 
     fn children(&self) -> &[Self] {
         if self.repeated { &[] } else { &self.dependencies }
     }
 
-    fn annotations(&self) -> Vec<Annotation> {
+    fn annotations(&self, theme: &Theme) -> Vec<Annotation> {
+        // Text is pre-inked by the theme; the annotation carries no style
+        // so the renderer emits it verbatim (same colour everywhere).
+        // Digest is full-length and goes last so the variable-width hash
+        // never pushes the short visibility / repeated tags out of eyeline.
         let mut out = Vec::new();
-        if let Some(digest) = self.identifier.digest() {
-            out.push(Annotation::new(digest.to_short_string()).with_style(STYLE_DIGEST));
-        }
         if let Some(vis) = self.visibility {
-            out.push(Annotation::new(vis.to_string()).with_style(visibility_style(vis)));
+            out.push(Annotation::new(theme.visibility(vis, vis.to_string())));
         }
         if self.repeated {
-            out.push(Annotation::new("repeated").with_style(STYLE_REPEATED));
+            out.push(Annotation::new(theme.repeated("repeated")));
+        }
+        if let Some(digest) = self.identifier.digest() {
+            out.push(Annotation::new(theme.digest(digest.to_string())));
         }
         out
     }
@@ -110,18 +103,24 @@ impl FlatDependencies {
 
 impl Printable for FlatDependencies {
     fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
-        let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        // Column-major. Every cell is pre-inked by the theme (same colours
+        // as the tree view); cells carry no per-cell style so the renderer
+        // emits the styled text verbatim and the colour-off path is
+        // byte-identical to the plain form.
+        let theme = printer.theme();
+        let mut rows: [Vec<Cell>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
             // Display identifier without digest — the digest has its own column.
             let id = &entry.identifier;
-            rows[0].push(match id.tag() {
-                Some(tag) => format!("{}/{}:{}", id.registry(), id.repository(), tag),
-                None => format!("{}/{}", id.registry(), id.repository()),
-            });
-            rows[1].push(entry.visibility.to_string());
-            rows[2].push(id.digest().map_or_else(String::new, |d| d.to_string()));
+            rows[0].push(Cell::new(name_tag(id, &theme)));
+            rows[1].push(Cell::new(
+                theme.visibility(entry.visibility, entry.visibility.to_string()),
+            ));
+            rows[2].push(Cell::new(
+                id.digest().map_or_else(String::new, |d| theme.digest(d.to_string())),
+            ));
         }
-        printer.print_table(&["Package", "Visibility", "Digest"], &rows);
+        printer.print_table(&["Package".into(), "Visibility".into(), "Digest".into()], &rows);
     }
 }
 
@@ -149,8 +148,10 @@ impl Printable for DependenciesTrace {
             }
             return;
         }
+        let theme = printer.theme();
         for path in &self.paths {
-            printer.print_steps(path);
+            let steps: Vec<String> = path.iter().map(|id| theme.of(id)).collect();
+            printer.print_steps(&steps);
         }
     }
 }
@@ -178,21 +179,31 @@ mod tests {
         }
     }
 
+    // Colour off: pre-inked text equals the plain form, so these
+    // assertions exercise composition without ANSI noise.
+    fn theme() -> Theme {
+        Theme::new(false)
+    }
+
     #[test]
     fn tree_node_label_returns_identifier() {
         let node = make_node("ocx.sh/cmake:3.28", make_digest('a'), false, vec![]);
-        assert_eq!(node.label(), "ocx.sh/cmake:3.28");
+        assert_eq!(node.label(&theme()), "ocx.sh/cmake:3.28");
     }
 
     fn annotation_texts(node: &Dependency) -> Vec<String> {
-        node.annotations().into_iter().map(|a| a.text.into_owned()).collect()
+        node.annotations(&theme())
+            .into_iter()
+            .map(|a| a.text.into_owned())
+            .collect()
     }
 
     #[test]
     fn tree_node_digest_annotation() {
         let node = make_node("ocx.sh/cmake:3.28", make_digest('a'), false, vec![]);
         let texts = annotation_texts(&node);
-        assert_eq!(texts[0], make_digest('a').to_short_string());
+        // Digest is full-length and the last annotation.
+        assert_eq!(*texts.last().unwrap(), make_digest('a').to_string());
     }
 
     #[test]
@@ -201,14 +212,14 @@ mod tests {
         node.visibility = None;
         let texts = annotation_texts(&node);
         assert_eq!(texts.len(), 1, "root node should only have digest");
-        assert_eq!(texts[0], make_digest('a').to_short_string());
+        assert_eq!(texts[0], make_digest('a').to_string());
     }
 
     #[test]
     fn tree_node_public_annotation() {
         let node = make_node("pkg", make_digest('a'), false, vec![]);
         let texts = annotation_texts(&node);
-        assert!(texts.contains(&make_digest('a').to_short_string()));
+        assert!(texts.contains(&make_digest('a').to_string()));
         assert!(texts.contains(&"public".to_string()));
     }
 
@@ -216,7 +227,7 @@ mod tests {
     fn tree_node_repeated_public_has_three_annotations() {
         let node = make_node("pkg", make_digest('a'), true, vec![]);
         let texts = annotation_texts(&node);
-        assert!(texts.contains(&make_digest('a').to_short_string()));
+        assert!(texts.contains(&make_digest('a').to_string()));
         assert!(texts.contains(&"repeated".to_string()));
         assert!(texts.contains(&"public".to_string()));
     }
@@ -262,13 +273,13 @@ mod tests {
     }
 
     #[test]
-    fn annotations_order_is_digest_visibility_repeated() {
+    fn annotations_order_is_visibility_repeated_digest() {
         let node = make_node("pkg", make_digest('a'), true, vec![]);
         let texts = annotation_texts(&node);
         assert_eq!(texts.len(), 3);
-        assert_eq!(texts[0], make_digest('a').to_short_string());
-        assert_eq!(texts[1], "public");
-        assert_eq!(texts[2], "repeated");
+        assert_eq!(texts[0], "public");
+        assert_eq!(texts[1], "repeated");
+        assert_eq!(texts[2], make_digest('a').to_string());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+//! clap help/usage styling. Data-rendering colours live in [`crate::cli::Theme`].
+
 use clap_builder::builder::styling::{AnsiColor, Effects, Styles};
 
 /// Returns clap styles with colored headings and usage when color is enabled,

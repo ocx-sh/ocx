@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::DataInterface;
+use ocx_lib::cli::{Cell, DataInterface};
 
 use crate::pipeline::mirror_result::MirrorResult;
 
@@ -105,8 +105,9 @@ pub fn report_results(results: &[MirrorResult], format: OutputFormat, printer: &
                 }
 
                 printer.print_table(
-                    &["Version", "Platform", "Status", "Detail"],
-                    &[versions, platforms, statuses, details],
+                    &["Version".into(), "Platform".into(), "Status".into(), "Detail".into()],
+                    &[versions, platforms, statuses, details]
+                        .map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
                 );
                 println!("---");
             }

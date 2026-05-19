@@ -3,8 +3,6 @@
 
 use std::path::PathBuf;
 
-use tracing::info_span;
-
 use crate::{
     log, oci,
     package_manager::{self, error::PackageError, error::PackageErrorKind},
@@ -44,7 +42,7 @@ impl PackageManager {
         deselect: bool,
         purge: bool,
     ) -> Result<Option<UninstallResult>, PackageErrorKind> {
-        let result = uninstall_symlinks(self.file_structure(), package, deselect).await?;
+        let result = uninstall_symlinks(self.file_structure(), self.progress(), package, deselect).await?;
         let Some((candidate, pkg_root)) = result else {
             return Ok(None);
         };
@@ -87,7 +85,7 @@ impl PackageManager {
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in packages {
-            match uninstall_symlinks(self.file_structure(), package, deselect).await {
+            match uninstall_symlinks(self.file_structure(), self.progress(), package, deselect).await {
                 Ok(Some((candidate, pkg_root))) => removals.push(SymlinkRemoval {
                     candidate: Some(candidate),
                     pkg_root,
@@ -154,10 +152,11 @@ impl PackageManager {
 /// Returns `(candidate_path, content_path)` or `None` if no candidate existed.
 async fn uninstall_symlinks(
     fs: &crate::file_structure::FileStructure,
+    progress: &crate::cli::progress::ProgressManager,
     package: &oci::Identifier,
     deselect: bool,
 ) -> Result<Option<(PathBuf, Option<PathBuf>)>, PackageErrorKind> {
-    let _span = crate::cli::progress::spinner_span(info_span!("Uninstalling", package = %package), package).entered();
+    let _spin = progress.spinner(format!("Uninstalling '{package}'"));
     log::debug!("Uninstalling package '{}'.", package);
 
     if package.digest().is_some() {

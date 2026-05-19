@@ -11,19 +11,35 @@ import pexpect
 # Regex to strip ANSI escape sequences from captured output
 _ANSI_RE = re.compile(r"\x1b\[[^a-zA-Z]*[a-zA-Z]|\x1b\][^\x07]*\x07")
 
-# Matches ANSI wrapping around a line: leading sequences, content, trailing sequences.
-# Used by realign_tables() to preserve styling after column reformatting.
-_ANSI_WRAP_RE = re.compile(
-    r"^((?:\x1b\[[^a-zA-Z]*[a-zA-Z])*)"     # leading ANSI (e.g. \x1b[4m)
-    r"(.*?)"                                # content
-    r"((?:\x1b\[[^a-zA-Z]*[a-zA-Z])*)$",    # trailing ANSI (e.g. \x1b[0m)
-)
 
 # Digest patterns for path truncation in recordings
 # Object store sharded path: sha256/XXXXXXXX/YYYYYYYY/ZZZZZZZZZZZZZZZZ
 _DIGEST_PATH_RE = re.compile(r"sha256/([a-f0-9]{8})/[a-f0-9]{8}/[a-f0-9]{16}")
-# OCI reference digest: @sha256:64-hex-chars
-_DIGEST_REF_RE = re.compile(r"@sha256:([a-f0-9]{8})[a-f0-9]{56}")
+# OCI reference digest: @sha256:64-hex-chars. The decorated-table renderer
+# paints `@` (punct) and `sha256:…` (digest) as separate SGR spans, so a
+# reset+colour escape run can sit between `@` and `sha256:`. Capture that
+# run and re-emit it verbatim so the recording stays coloured and shortened.
+_DIGEST_REF_RE = re.compile(r"@((?:\x1b\[[0-9;]*m)*)sha256:([a-f0-9]{8})[a-f0-9]{56}")
+# Bare digest in its own column / tree annotation (no `@`, no `/`): the
+# binary prints the full hash everywhere; the recorder is the single
+# truncation point for compact docs. Run *after* the path/ref subs so an
+# already-shortened digest (8 hex) can't re-match. Any surrounding colour
+# SGR sits outside the match and is left intact.
+_DIGEST_BARE_RE = re.compile(r"sha256:([a-f0-9]{8})[a-f0-9]{56}(?![a-f0-9])")
+
+# A single SGR escape (`\x1b[…m`). Realign only ever reflows styled table
+# output, which uses SGR colour codes exclusively.
+_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+# Inter-column boundary in the *visible* text: the renderer pads a cell
+# then adds a two-space GAP, so columns are always separated by a run of
+# two-or-more spaces. Cell values never contain a double space (digests,
+# identifiers, tags, visibility), so this split is unambiguous.
+_GAP_RE = re.compile(r"\x20{2,}")
+
+_GAP = "  "
+_UNDERLINE = "\x1b[4m"  # marks the (bold+underlined) header row
+_DIM = "\x1b[2m"        # zebra wrap on odd data rows
+_RESET = "\x1b[0m"
 
 # Matches everything from a braille spinner char up to the final erase-line
 # before real output.  The spinner uses \r\x1b[2K to overwrite itself, and
@@ -110,33 +126,79 @@ class CastRecording:
 
         Replaces:
         - Object store paths: ``sha256/8ce298b2/f4c357ee/3a6257cf491742fc`` → ``sha256/8ce298b2..``
-        - OCI reference digests: ``@sha256:8ce298b2f4c3...`` → ``@sha256:8ce298b2..``
+        - OCI reference digests: ``@sha256:8ce298b2f4c3...`` → ``@sha256:8ce298b2..``,
+          including the coloured form where SGR escapes split ``@`` from ``sha256:``.
+        - Bare column / annotation digests: ``sha256:8ce298b2f4c3...`` → ``sha256:8ce298b2..``.
+
+        Order matters: path and ref subs run first; the bare sub then catches
+        the standalone column form without re-matching an already-shortened
+        digest.
 
         Merges close events first so digest patterns aren't split across PTY chunks.
         """
         self._merge_close_events()
         for event in self.events:
             event.data = _DIGEST_PATH_RE.sub(r"sha256/\1..", event.data)
-            event.data = _DIGEST_REF_RE.sub(r"@sha256:\1..", event.data)
+            event.data = _DIGEST_REF_RE.sub(r"@\1sha256:\2..", event.data)
+            event.data = _DIGEST_BARE_RE.sub(r"sha256:\1..", event.data)
         return self
 
     def realign_tables(self) -> CastRecording:
-        """Re-align table columns after content-shortening replacements.
+        """Re-align decorated tables after content-shortening replacements.
 
-        When sanitize/truncate_digests shorten cell content, the original
-        column padding becomes excessive.  For each event whose data contains
-        ``\\r\\n``-separated lines that all split into the same number of
-        whitespace-delimited columns (>= 2), recalculate column widths.
+        ``truncate_digests`` / ``sanitize`` shrink cell content *after* the
+        binary already padded every column to the longest (untruncated)
+        value, leaving over-wide gaps.
 
-        ANSI escape sequences (underline for headers, reverse for odd rows)
-        are stripped before column detection and width measurement, then
-        re-applied to the reformatted lines.
+        The table style has no vertical ``│`` and no rule line: the header
+        row is bold+underlined (``\\x1b[4m``) and every cell — plus the
+        two-space inter-column GAP — is padded; data rows space-align under
+        it, odd rows dim-wrapped (zebra). A block is a header line (carries
+        the underline SGR, splits into ≥2 columns) followed by ≥1 data rows
+        that split into the same column count. Columns are recomputed from
+        the trimmed visible content and re-padded; each cell's raw ANSI span
+        (its colour, multi-part identifier ink, and the odd-row dim wrap) is
+        sliced out verbatim — only the trailing pad is resized. The header's
+        underline is re-extended across the GAP so it stays one line; the
+        zebra dim is re-applied across the GAP on odd rows.
         """
+
+        def analyze(line: str) -> tuple[str, list[int], list[tuple[int, int]]]:
+            """Return (visible, vmap, escs): visible text, the raw index of
+            each visible char, and (start, end) spans of every SGR escape."""
+            escs: list[tuple[int, int]] = []
+            vmap: list[int] = []
+            pos = 0
+            while pos < len(line):
+                m = _SGR_RE.match(line, pos)
+                if m:
+                    escs.append((m.start(), m.end()))
+                    pos = m.end()
+                    continue
+                vmap.append(pos)
+                pos += 1
+            vmap.append(len(line))
+            visible = "".join(line[v] for v in vmap[:-1])
+            return visible, vmap, escs
+
+        def spans(visible: str) -> list[tuple[int, int]]:
+            """Content spans (no surrounding pad), split on the ≥2-space GAP."""
+            out: list[tuple[int, int]] = []
+            prev = 0
+            for m in _GAP_RE.finditer(visible):
+                if m.start() > prev:
+                    out.append((prev, m.start()))
+                prev = m.end()
+            if len(visible) > prev:
+                out.append((prev, len(visible)))
+            trimmed: list[tuple[int, int]] = []
+            for st, en in out:
+                seg = visible[st:en].rstrip()
+                if seg:
+                    trimmed.append((st, st + len(seg)))
+            return trimmed
+
         for event in self.events:
-            # Separate optional ANSI "erase line" prefix from content.
-            # Use the *last* occurrence so progress-bar sequences (which
-            # contain many \x1b[2K) are fully consumed into the prefix,
-            # leaving only the final table output in `content`.
             erase_idx = event.data.rfind("\x1b[2K")
             if erase_idx >= 0:
                 prefix = event.data[: erase_idx + 4]
@@ -146,44 +208,82 @@ class CastRecording:
                 content = event.data
 
             lines = content.split("\r\n")
-
-            # Strip ANSI wrapping before splitting into columns so that
-            # escape sequences don't pollute column counts or widths.
-            parsed: list[tuple[int, list[str], str, str]] = []
-            for i, line in enumerate(lines):
-                m = _ANSI_WRAP_RE.match(line)
-                if m:
-                    lead, inner, trail = m.group(1), m.group(2), m.group(3)
-                else:
-                    lead, inner, trail = "", line, ""
-                cols = inner.split()
-                if cols:
-                    parsed.append((i, cols, lead, trail))
-
-            if len(parsed) < 2:
-                continue
-            col_counts = {len(cols) for _, cols, _, _ in parsed}
-            if len(col_counts) != 1:
-                continue
-            ncols = col_counts.pop()
-            if ncols < 2:
-                continue
-
-            widths = [0] * ncols
-            for _, cols, _, _ in parsed:
-                for j, cell in enumerate(cols):
-                    widths[j] = max(widths[j], len(cell))
-
             new_lines = list(lines)
-            for line_idx, cols, lead, trail in parsed:
-                # Pad all columns when ANSI-wrapped (e.g. underlined header)
-                # so the decoration extends to full table width.
-                pad_last = bool(lead or trail)
-                parts = [f"{cell:<{widths[j]}}" if (j < ncols - 1 or pad_last) else cell
-                         for j, cell in enumerate(cols)]
-                new_lines[line_idx] = lead + " ".join(parts) + trail
+            changed = False
 
-            event.data = prefix + "\r\n".join(new_lines)
+            i = 0
+            while i < len(lines):
+                if _UNDERLINE not in lines[i]:
+                    i += 1
+                    continue
+                hv, hmap, hesc = analyze(lines[i])
+                hsp = spans(hv)
+                if len(hsp) < 2:
+                    i += 1
+                    continue
+                ncols = len(hsp)
+                block = [(i, lines[i], hmap, hesc, hsp)]
+                j = i + 1
+                while j < len(lines):
+                    dv, dmap, desc = analyze(lines[j])
+                    if not dv.strip():
+                        break
+                    dsp = spans(dv)
+                    if len(dsp) != ncols:
+                        break
+                    block.append((j, lines[j], dmap, desc, dsp))
+                    j += 1
+                if len(block) < 2:
+                    i += 1
+                    continue
+
+                widths = [0] * ncols
+                for _, _, _, _, sp in block:
+                    for c, (s, e) in enumerate(sp):
+                        widths[c] = max(widths[c], e - s)
+
+                for rrow, (idx, raw, vmap, escs, sp) in enumerate(block):
+                    is_header = rrow == 0
+                    # Data rows are 0-based after the header; odd ones are
+                    # dim-wrapped (zebra) by the renderer.
+                    is_zebra = (not is_header) and (rrow - 1) % 2 == 1
+                    lead_first = ""
+                    parts: list[str] = []
+                    for c, (s, e) in enumerate(sp):
+                        cs = vmap[s]
+                        ce = vmap[e - 1] + 1
+                        # Absorb the ANSI directly bracketing the content so
+                        # colour / dim / underline is preserved; never a
+                        # space, so multi-part colour stays intact.
+                        ls = cs
+                        while any(en == ls for _, en in escs):
+                            ls = next(st for st, en in escs if en == ls)
+                        te = ce
+                        while any(st == te for st, _ in escs):
+                            te = next(en for st, en in escs if st == te)
+                        if c == 0:
+                            lead_first = raw[ls:cs]
+                        pad_n = widths[c] - (e - s)
+                        if is_header:
+                            # Keep the pad underlined too, else the header
+                            # underline breaks under each column's padding.
+                            pad = lead_first + " " * pad_n + _RESET
+                        else:
+                            pad = " " * pad_n
+                        parts.append(raw[ls:te] + pad)
+                    if is_header:
+                        gap = lead_first + _GAP + _RESET
+                    elif is_zebra:
+                        gap = _DIM + _GAP + _RESET
+                    else:
+                        gap = _GAP
+                    new_lines[idx] = gap.join(parts)
+                    changed = True
+
+                i = j
+
+            if changed:
+                event.data = prefix + "\r\n".join(new_lines)
         return self
 
     def _merge_close_events(self, threshold: float = 0.05) -> None:

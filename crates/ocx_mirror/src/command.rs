@@ -9,6 +9,7 @@ mod sync;
 mod validate;
 
 use ocx_lib::cli::DataInterface;
+use ocx_lib::cli::progress::ProgressManager;
 
 use crate::error::MirrorError;
 
@@ -29,9 +30,9 @@ pub enum Command {
 }
 
 impl Command {
-    pub async fn execute(&self, printer: &DataInterface) -> Result<(), MirrorError> {
+    pub async fn execute(&self, printer: &DataInterface, progress: &ProgressManager) -> Result<(), MirrorError> {
         match self {
-            Self::Sync(cmd) => cmd.execute(printer).await,
+            Self::Sync(cmd) => cmd.execute(printer, progress).await,
             Self::Check(cmd) => cmd.execute(printer).await,
             Self::Validate(cmd) => cmd.execute().await,
             #[cfg(feature = "jsonschema")]

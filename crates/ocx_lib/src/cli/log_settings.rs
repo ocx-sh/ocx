@@ -83,37 +83,20 @@ impl LogSettings {
         Ok(())
     }
 
-    /// Initialize a tracing subscriber with automatic progress indicator support.
+    /// Initialize a tracing subscriber whose fmt layer writes through the
+    /// given span-free [`ProgressManager`](crate::cli::progress::ProgressManager).
     ///
-    /// When stderr is a TTY, adds a `tracing-indicatif` layer for spinner/progress
-    /// display. When piped or redirected, falls back to the plain fmt subscriber.
-    ///
-    /// The `style` parameter sets the default progress style for spans (only used
-    /// when progress is enabled).
-    pub fn init_progress(
+    /// Log lines are flushed inside `MultiProgress::suspend` so they never
+    /// tear active progress bars. A disabled manager writes straight to
+    /// stderr (the non-TTY path), so callers do not branch on TTY state —
+    /// the manager already encodes it. There is no `tracing-indicatif`
+    /// layer: progress is driven by RAII guards, not spans
+    /// (ADR adr_progress_architecture).
+    pub fn init_with_progress(
         self,
-        style: indicatif::ProgressStyle,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let progress = super::ProgressMode::detect();
-        if progress.stderr {
-            self.init_with_indicatif(style)
-        } else {
-            self.init()
-        }
-    }
-
-    /// Initialize a tracing subscriber with `tracing-indicatif` progress bar support.
-    ///
-    /// Unconditionally adds the indicatif layer. Prefer [`init_progress`](Self::init_progress)
-    /// which auto-detects whether stderr is a TTY.
-    fn init_with_indicatif(
-        self,
-        style: indicatif::ProgressStyle,
+        progress: &crate::cli::progress::ProgressManager,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
-
-        let indicatif_layer = tracing_indicatif::IndicatifLayer::new().with_progress_style(style);
-        let writer = indicatif_layer.get_stderr_writer();
 
         let ansi = self
             .stderr_color
@@ -130,14 +113,11 @@ impl LogSettings {
             subscriber
                 .with_file(false)
                 .with_target(false)
-                .with_writer(writer)
+                .with_writer(progress.writer())
                 .with_filter(self.build_env_filter("CONSOLE", std::iter::empty()))
         };
 
-        tracing_subscriber::registry()
-            .with(indicatif_layer)
-            .with(fmt_layer)
-            .init();
+        tracing_subscriber::registry().with(fmt_layer).init();
         Ok(())
     }
 

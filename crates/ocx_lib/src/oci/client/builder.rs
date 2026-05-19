@@ -16,6 +16,7 @@ pub struct ClientBuilder {
     auth: auth::Auth,
     config: oci::native::ClientConfig,
     lock_timeout: Option<std::time::Duration>,
+    progress: crate::cli::progress::ProgressManager,
 }
 
 impl ClientBuilder {
@@ -27,16 +28,35 @@ impl ClientBuilder {
                 ..Default::default()
             },
             lock_timeout: None,
+            progress: crate::cli::progress::ProgressManager::disabled(),
         }
     }
 
     /// Creates a client configured from standard environment variables.
     ///
     /// Reads `OCX_INSECURE_REGISTRIES` to configure plain-HTTP registries.
+    /// Progress rendering is disabled; the CLI uses
+    /// [`from_env_with_progress`](Self::from_env_with_progress) to inject
+    /// its shared [`ProgressManager`](crate::cli::progress::ProgressManager).
     pub fn from_env() -> Client {
         ClientBuilder::new()
             .plain_http_registries(crate::env::insecure_registries())
             .build()
+    }
+
+    /// Like [`from_env`](Self::from_env) but renders transfer progress
+    /// through the supplied shared manager.
+    pub fn from_env_with_progress(progress: crate::cli::progress::ProgressManager) -> Client {
+        ClientBuilder::new()
+            .plain_http_registries(crate::env::insecure_registries())
+            .progress(progress)
+            .build()
+    }
+
+    /// Sets the shared progress manager used for download/upload bars.
+    pub fn progress(mut self, progress: crate::cli::progress::ProgressManager) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Registries that should be contacted over plain HTTP instead of HTTPS.
@@ -67,6 +87,7 @@ impl ClientBuilder {
             lock_timeout: self.lock_timeout.unwrap_or(std::time::Duration::from_secs(30)),
             tag_chunk_size: 100,
             repository_chunk_size: 100,
+            progress: self.progress,
         }
     }
 }

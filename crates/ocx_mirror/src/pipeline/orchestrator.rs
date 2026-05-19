@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use ocx_lib::cli::progress::{ProgressManager, Spinner};
 use ocx_lib::log;
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 use tokio::sync::Semaphore;
-use tracing::{Instrument, info_span};
 
 use super::download;
 use super::mirror_result::MirrorResult;
@@ -58,12 +58,18 @@ pub struct ConcurrencyParams {
 /// 2. *Push* (sequential) — Push tasks in version order (oldest first) for correct
 ///    cascade tag ordering. Each successful `(version, platform)` push is immediately
 ///    registered in the version map so subsequent cascade computations see it.
+// Pipeline entrypoint: orthogonal services + policy (tasks, registry
+// client, HTTP client, work dir, version map, progress, fail-fast,
+// concurrency). A params struct would relocate the list without
+// improving clarity, so the lint is allowed here.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_mirror(
     tasks: Vec<MirrorTask>,
     publisher: &Publisher,
     http_client: &reqwest::Client,
     work_dir: &Path,
     mut version_map: VersionPlatformMap,
+    progress: &ProgressManager,
     fail_fast: bool,
     concurrency: ConcurrencyParams,
 ) -> Vec<MirrorResult> {
@@ -122,12 +128,21 @@ pub async fn execute_mirror(
         let dl_sem = download_sem.clone();
         let bd_sem = bundle_sem.clone();
         let client = http_client.clone();
+        let progress = progress.clone();
 
         join_set.spawn(async move {
-            let span = info_span!("mirror_task");
+            let spinner = progress.spinner(format!("{} {}", task.normalized_version, task.platform));
 
-            match prepare_task(&task, &task_dir, &client, &span, &dl_sem, &bd_sem, compression_threads)
-                .instrument(span.clone())
+            match spinner
+                .scope(prepare_task(
+                    &task,
+                    &task_dir,
+                    &client,
+                    &spinner,
+                    &dl_sem,
+                    &bd_sem,
+                    compression_threads,
+                ))
                 .await
             {
                 Ok((bundle_path, metadata)) => (
@@ -182,19 +197,19 @@ pub async fn execute_mirror(
 
             match outcome {
                 PrepareOutcome::Ready(prep) => {
-                    let span = info_span!("mirror_task");
-                    progress::set_stage(&span, "Pushing", &prep.task.normalized_version, &prep.task.platform);
-                    let _guard = span.entered();
+                    let spinner = progress.spinner(format!("{} {}", prep.task.normalized_version, prep.task.platform));
+                    progress::set_stage(&spinner, "Pushing", &prep.task.normalized_version, &prep.task.platform);
 
                     let cascade_versions = version_map.versions_for_cascade();
-                    let push_result = push_task(
-                        &prep.task,
-                        &prep.bundle_path,
-                        &prep.metadata,
-                        publisher,
-                        &cascade_versions,
-                    )
-                    .await;
+                    let push_result = spinner
+                        .scope(push_task(
+                            &prep.task,
+                            &prep.bundle_path,
+                            &prep.metadata,
+                            publisher,
+                            &cascade_versions,
+                        ))
+                        .await;
 
                     match push_result {
                         Ok(result) => {
@@ -257,7 +272,7 @@ async fn prepare_task(
     task: &MirrorTask,
     task_dir: &Path,
     http_client: &reqwest::Client,
-    span: &tracing::Span,
+    spinner: &Spinner,
     download_sem: &Semaphore,
     bundle_sem: &Semaphore,
     compression_threads: u32,
@@ -286,13 +301,13 @@ async fn prepare_task(
 
         // Download
         if !archive_path.exists() {
-            progress::set_stage(span, "Downloading", &task.normalized_version, &task.platform);
+            progress::set_stage(spinner, "Downloading", &task.normalized_version, &task.platform);
             download::download(http_client, &task.download_url, &archive_path).await?;
         }
 
         // Verify (only if configured)
         if let Some(verify_config) = &task.verify_config {
-            progress::set_stage(span, "Verifying", &task.normalized_version, &task.platform);
+            progress::set_stage(spinner, "Verifying", &task.normalized_version, &task.platform);
             verify::verify(
                 verify_config,
                 http_client,
@@ -309,7 +324,7 @@ async fn prepare_task(
     {
         let _permit = bundle_sem.acquire().await.expect("semaphore closed");
 
-        progress::set_stage(span, "Bundling", &task.normalized_version, &task.platform);
+        progress::set_stage(spinner, "Bundling", &task.normalized_version, &task.platform);
         let asset_type = task.asset_type.clone();
 
         let ap = archive_path.clone();

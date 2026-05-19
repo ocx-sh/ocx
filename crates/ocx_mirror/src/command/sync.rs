@@ -4,10 +4,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use ocx_lib::cli::tracing_indicatif::span_ext::IndicatifSpanExt;
+use ocx_lib::cli::progress::ProgressManager;
 use ocx_lib::log;
 use ocx_lib::oci::Platform;
-use tracing::info_span;
 
 use super::options::{self, SyncOptions};
 use crate::error::MirrorError;
@@ -35,7 +34,11 @@ pub struct Sync {
 }
 
 impl Sync {
-    pub async fn execute(&self, printer: &ocx_lib::cli::DataInterface) -> Result<(), MirrorError> {
+    pub async fn execute(
+        &self,
+        printer: &ocx_lib::cli::DataInterface,
+        progress: &ProgressManager,
+    ) -> Result<(), MirrorError> {
         let spec_path = &self.spec;
         let spec = spec::load_spec(spec_path).await?;
         let spec_dir = spec_path.parent().unwrap_or(std::path::Path::new("."));
@@ -50,9 +53,7 @@ impl Sync {
         log::debug!("[{}] Found {} existing tags", spec.name, all_tags.len());
 
         // List upstream versions
-        let prep_span = info_span!("preparing");
-        prep_span.pb_set_message(&spec.name);
-        let _prep_guard = prep_span.entered();
+        let prep_spinner = progress.spinner(format!("preparing {}", spec.name));
 
         let upstream_versions = list_upstream_versions(&spec, spec_dir).await?;
         log::debug!("[{}] Found {} upstream versions", spec.name, upstream_versions.len());
@@ -211,8 +212,8 @@ impl Sync {
             }
         }
 
-        // Drop the prep span before starting orchestration
-        drop(_prep_guard);
+        // Clear the prep spinner before starting orchestration
+        drop(prep_spinner);
 
         log::info!(
             "[{}] Mirroring {} versions ({} tasks)",
@@ -252,6 +253,7 @@ impl Sync {
             &http_client,
             &work_dir,
             version_map,
+            progress,
             self.options.fail_fast,
             orchestrator::ConcurrencyParams {
                 max_downloads: spec.concurrency.max_downloads,

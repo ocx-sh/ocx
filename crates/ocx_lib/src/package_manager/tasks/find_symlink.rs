@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use tracing::info_span;
-
 use crate::{
     file_structure::{PackageDir, SymlinkKind},
     log, oci,
@@ -85,8 +83,7 @@ impl PackageManager {
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in &packages {
-            let _span =
-                crate::cli::progress::spinner_span(info_span!("Resolving", package = %package), package).entered();
+            let _spin = self.progress().spinner(format!("Resolving '{package}'"));
             match self.find_symlink(package, kind).await {
                 Ok(info) => infos.push(info),
                 Err(kind) => errors.push(PackageError::new(package.clone(), kind)),

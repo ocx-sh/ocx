@@ -7,8 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::Result;
 
-use tracing_indicatif::span_ext::IndicatifSpanExt;
-
 use super::backend::Backend;
 use super::error::Error;
 
@@ -64,9 +62,7 @@ impl Backend for TarBackend {
     }
 
     async fn add_dir_all(&mut self, archive_path: PathBuf, dir: PathBuf) -> Result<()> {
-        let span = tracing::Span::current();
         self.run_blocking(move |builder| {
-            let _guard = span.entered();
             let mut count = 0u64;
             add_dir_recursive(builder, &archive_path, &dir, &mut count)?;
             tracing::debug!("Bundled {count} entries total");
@@ -134,8 +130,6 @@ fn add_dir_recursive(
         if (*count).is_multiple_of(LOG_INTERVAL) {
             tracing::debug!("Bundled {} entries", *count);
         }
-
-        tracing::Span::current().pb_inc(1);
     }
     Ok(())
 }
@@ -181,7 +175,6 @@ pub(super) fn extract(reader: impl std::io::Read, output: &std::path::Path, stri
         if count.is_multiple_of(LOG_INTERVAL) {
             tracing::debug!("Extracted {count} entries");
         }
-        tracing::Span::current().pb_inc(1);
     }
     tracing::debug!("Extracted {count} entries total");
 

@@ -32,18 +32,27 @@ pub struct Context {
     default_registry: String,
     config_view: env::OcxConfigView,
     concurrency: package_manager::Concurrency,
+    progress: ocx_lib::cli::progress::ProgressManager,
 }
 
 impl Context {
     pub async fn try_init(options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<Context> {
-        let style =
-            ocx_lib::cli::indicatif::ProgressStyle::with_template("{span_child_prefix}{spinner} {span_name}{msg}")
-                .expect("valid indicatif template");
+        // Shared span-free progress manager (ADR adr_progress_architecture).
+        // Created before the subscriber so its `MultiProgress` backs the
+        // fmt log writer (log lines flush inside `suspend`, never tearing
+        // bars). Threaded into the OCI client (transfer bars) and the
+        // package manager (task spinners). Disabled when stderr is not a
+        // TTY so non-interactive runs pay no cost.
+        let progress = if ocx_lib::cli::ProgressMode::detect().stderr {
+            ocx_lib::cli::progress::ProgressManager::stderr()
+        } else {
+            ocx_lib::cli::progress::ProgressManager::disabled()
+        };
 
         ocx_lib::cli::LogSettings::default()
             .with_console_level(options.log_level)
             .with_stderr_color(color_config.stderr)
-            .init_progress(style)
+            .init_with_progress(&progress)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         log::debug!("Creating context with options: {:?}", options);
@@ -86,7 +95,7 @@ impl Context {
         let (remote_client, remote_index) = if options.offline {
             (None, None)
         } else {
-            let client = oci::ClientBuilder::from_env();
+            let client = oci::ClientBuilder::from_env_with_progress(progress.clone());
             (
                 Some(client.clone()),
                 Some(index::RemoteIndex::new(index::RemoteConfig { client })),
@@ -137,7 +146,8 @@ impl Context {
             selected_index.clone(),
             remote_client.clone(),
             &default_registry,
-        );
+        )
+        .with_progress(progress.clone());
 
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
@@ -167,7 +177,15 @@ impl Context {
             default_registry,
             config_view,
             concurrency,
+            progress,
         })
+    }
+
+    /// Shared span-free progress manager (ADR adr_progress_architecture).
+    /// Commands wrap long operations in guards from this manager
+    /// (`spinner`/`bytes`) instead of emitting tracing-indicatif spans.
+    pub fn progress(&self) -> &ocx_lib::cli::progress::ProgressManager {
+        &self.progress
     }
 
     pub fn is_offline(&self) -> bool {

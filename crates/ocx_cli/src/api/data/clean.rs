@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use ocx_lib::cli::Cell;
 use ocx_lib::package_manager::CleanedObject;
 
 use crate::api::Printable;
@@ -126,14 +127,20 @@ impl Printable for Clean {
                 );
                 rows[2].push(entry.path.display().to_string());
             }
-            printer.print_table(&["Type", "Held By", "Path"], &rows);
+            printer.print_table(
+                &["Type".into(), "Held By".into(), "Path".into()],
+                &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+            );
         } else {
             let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
             for entry in &self.entries {
                 rows[0].push(entry.kind.to_string());
                 rows[1].push(entry.path.display().to_string());
             }
-            printer.print_table(&["Type", "Path"], &rows);
+            printer.print_table(
+                &["Type".into(), "Path".into()],
+                &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+            );
         }
     }
 }

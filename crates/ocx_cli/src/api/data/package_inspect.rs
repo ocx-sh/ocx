@@ -4,23 +4,43 @@
 use serde::{Serialize, ser::SerializeStruct};
 
 use ocx_lib::{
-    cli::{Annotation, DataInterface, Style, TreeItem},
+    cli::{Annotation, DataInterface, Theme, TreeItem},
     oci,
-    package::metadata::{Metadata, env::modifier::ModifierKind},
+    package::metadata::{Metadata, env::modifier::ModifierKind, visibility::Visibility},
     package_manager::{InspectResult, ResolvedChain},
 };
 
 use crate::api::Printable;
 
-const STYLE_DIGEST: Style = Style::new().style(console::Style::new().color256(117)); // light sky blue
-const STYLE_DETAIL: Style = Style::new().style(console::Style::new().dim());
+/// Semantic role of a tree annotation. Text is stored raw; the [`Theme`]
+/// inks it at render time (`annotations`) so no style is hard-coded here.
+/// Each variant maps to one palette entry, so semantically identical things
+/// share a colour across every `inspect` view and follow the active theme.
+#[derive(Clone)]
+enum SemanticAnnotation {
+    /// A content digest (or digest-bearing identifier).
+    Digest(String),
+    /// An env-entry visibility tag — same palette entry as visibility
+    /// everywhere else (e.g. `ocx package deps`).
+    Visibility(Visibility),
+    /// A short informational note next to a value: modifier kind, media
+    /// type, byte size, or dispatch-command divergence.
+    Note(String),
+    /// Carried verbatim with the renderer's default annotation style.
+    Plain(String),
+}
 
-/// A digest-styled annotation. Single source of truth for how a digest (or
-/// digest-bearing identifier) is rendered across every `inspect` view —
-/// `candidates`, `metadata.dependencies`, and the `--resolve` chain/layers —
-/// so the colour stays consistent regardless of which sub-tree emits it.
-fn digest_annotation(text: String) -> Annotation {
-    Annotation::new(text).with_style(STYLE_DIGEST)
+impl SemanticAnnotation {
+    fn ink(&self, theme: &Theme) -> Annotation {
+        match self {
+            SemanticAnnotation::Digest(text) => Annotation::new(theme.digest(text)),
+            SemanticAnnotation::Visibility(visibility) => {
+                Annotation::new(theme.visibility(*visibility, visibility.to_string()))
+            }
+            SemanticAnnotation::Note(text) => Annotation::new(theme.note(text)),
+            SemanticAnnotation::Plain(text) => Annotation::new(text.clone()),
+        }
+    }
 }
 
 /// Read-only view of a package. The shape adapts to the requested reference
@@ -190,7 +210,7 @@ impl Serialize for PackageInspect {
 /// the `Serialize` impls above.
 struct Node {
     label: String,
-    annotations: Vec<Annotation>,
+    annotations: Vec<SemanticAnnotation>,
     children: Vec<Node>,
 }
 
@@ -211,14 +231,29 @@ impl Node {
         }
     }
 
-    fn with_annotation(mut self, annotation: Annotation) -> Self {
-        self.annotations.push(annotation);
+    fn with_digest(mut self, text: impl Into<String>) -> Self {
+        self.annotations.push(SemanticAnnotation::Digest(text.into()));
+        self
+    }
+
+    fn with_visibility(mut self, visibility: Visibility) -> Self {
+        self.annotations.push(SemanticAnnotation::Visibility(visibility));
+        self
+    }
+
+    fn with_note(mut self, text: impl Into<String>) -> Self {
+        self.annotations.push(SemanticAnnotation::Note(text.into()));
+        self
+    }
+
+    fn with_plain(mut self, text: impl Into<String>) -> Self {
+        self.annotations.push(SemanticAnnotation::Plain(text.into()));
         self
     }
 }
 
 impl TreeItem for Node {
-    fn label(&self) -> String {
+    fn label(&self, _theme: &Theme) -> String {
         self.label.clone()
     }
 
@@ -226,8 +261,8 @@ impl TreeItem for Node {
         &self.children
     }
 
-    fn annotations(&self) -> Vec<Annotation> {
-        self.annotations.clone()
+    fn annotations(&self, theme: &Theme) -> Vec<Annotation> {
+        self.annotations.iter().map(|a| a.ink(theme)).collect()
     }
 }
 
@@ -245,10 +280,10 @@ fn metadata_node(metadata: &Metadata) -> Node {
             .map(|var| {
                 let kind = ModifierKind::from(&var.modifier);
                 let mut node = Node::leaf(var.key.clone())
-                    .with_annotation(Annotation::new(kind.to_string()).with_style(STYLE_DETAIL))
-                    .with_annotation(Annotation::new(var.visibility.to_string()).with_style(STYLE_DETAIL));
+                    .with_note(kind.to_string())
+                    .with_visibility(var.visibility);
                 if let Some(value) = var.value() {
-                    node = node.with_annotation(Annotation::new(value.to_string()));
+                    node = node.with_plain(value.to_string());
                 }
                 node
             })
@@ -260,9 +295,7 @@ fn metadata_node(metadata: &Metadata) -> Node {
     if !deps.is_empty() {
         let dep_nodes = deps
             .iter()
-            .map(|dep| {
-                Node::leaf(dep.name().to_string()).with_annotation(digest_annotation(dep.identifier.to_string()))
-            })
+            .map(|dep| Node::leaf(dep.name().to_string()).with_digest(dep.identifier.to_string()))
             .collect();
         children.push(Node::branch("dependencies", dep_nodes));
     }
@@ -278,9 +311,7 @@ fn metadata_node(metadata: &Metadata) -> Node {
                 // the invocable name — no noise for the common case where
                 // they coincide.
                 match entry.command() {
-                    Some(cmd) if cmd.as_str() != name.as_str() => {
-                        node.with_annotation(Annotation::new(format!("→ {cmd}")).with_style(STYLE_DETAIL))
-                    }
+                    Some(cmd) if cmd.as_str() != name.as_str() => node.with_note(format!("→ {cmd}")),
                     _ => node,
                 }
             })
@@ -296,9 +327,9 @@ fn candidates_node(candidates: &[CandidateOut]) -> Node {
         .iter()
         .map(|c| {
             Node::leaf(c.platform.clone())
-                .with_annotation(digest_annotation(c.digest.clone()))
-                .with_annotation(Annotation::new(c.media_type.clone()).with_style(STYLE_DETAIL))
-                .with_annotation(Annotation::new(format!("{} bytes", c.size)).with_style(STYLE_DETAIL))
+                .with_digest(c.digest.clone())
+                .with_note(c.media_type.clone())
+                .with_note(format!("{} bytes", c.size))
         })
         .collect();
     Node::branch("candidates", entries)
@@ -312,7 +343,7 @@ fn resolution_node(resolution: &Resolution) -> Node {
         .chain
         .iter()
         .enumerate()
-        .map(|(i, d)| Node::leaf(format!("[{i}]")).with_annotation(digest_annotation(d.clone())))
+        .map(|(i, d)| Node::leaf(format!("[{i}]")).with_digest(d.clone()))
         .collect();
     let layers = resolution
         .layers
@@ -320,15 +351,15 @@ fn resolution_node(resolution: &Resolution) -> Node {
         .enumerate()
         .map(|(i, l)| {
             Node::leaf(format!("[{i}]"))
-                .with_annotation(digest_annotation(l.digest.clone()))
-                .with_annotation(Annotation::new(l.media_type.clone()).with_style(STYLE_DETAIL))
-                .with_annotation(Annotation::new(format!("{} bytes", l.size)).with_style(STYLE_DETAIL))
+                .with_digest(l.digest.clone())
+                .with_note(l.media_type.clone())
+                .with_note(format!("{} bytes", l.size))
         })
         .collect();
     Node::branch(
         "resolution",
         vec![
-            Node::leaf("pinned".to_string()).with_annotation(digest_annotation(resolution.pinned.clone())),
+            Node::leaf("pinned".to_string()).with_digest(resolution.pinned.clone()),
             Node::branch("chain", chain),
             Node::branch("layers", layers),
         ],

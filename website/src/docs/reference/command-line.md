@@ -1334,39 +1334,9 @@ The second gate is **at consumption time**, invoked whenever `ocx env` or `ocx e
 
 #### `env` {#shell-env}
 
-<<<<<<< HEAD
-Generate shell export statements for the environment variables declared by one or more packages.
-Intended to be evaluated by the shell:
-
-```shell
-eval "$(ocx shell env mypackage)"
-```
-
-This command does not auto-install packages — if a package is not already available locally it will fail with an error.
-See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
-
-**Usage**
-
-```shell
-ocx shell env [OPTIONS] <PACKAGE>...
-```
-
-**Arguments**
-
-- `<PACKAGE>`: Package identifiers to generate environment variable export statements for.
-
-**Options**
-
-- `-p`, `--platform`: Target platforms to consider. Auto-detected by default.
-- `-s`, `--shell <SHELL>`: Shell dialect to emit. Auto-detected by default.
-- `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
-- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
-
-=======
 > **REMOVED** — exits 64. The `ocx shell env` command has been removed.
 >
 > For eval-safe shell export of package env, use the root [`ocx env --shell=<SHELL>`](#env-root) command (toolchain-tier) or [`ocx package env`](#package-env) for OCI-tier packages.
->>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 
 #### `completion` {#shell-completion}
 
@@ -1456,57 +1426,7 @@ ocx version
 
 #### `export` {#ci-export}
 
-<<<<<<< HEAD
-Exports the environment variables declared by one or more packages directly into a CI system's
-runtime files. For [GitHub Actions][github-actions-docs], this appends path entries to
-`$GITHUB_PATH` and other variables to `$GITHUB_ENV`.
-
-The CI flavor is auto-detected from the environment (e.g. `GITHUB_ACTIONS=true`) but can be
-overridden with `--flavor`.
-
-Plain format writes directly to the CI runtime files and prints nothing to stdout.
-JSON format outputs `{"entries": [{"key": "…", "value": "…", "type": "constant"|"path"}, …]}` —
-the same canonical envelope as [`env`](#env).
-
-This command does not auto-install packages — if a package is not already available locally it
-will fail with an error. In CI workflows, use [`package pull`](#package-pull) before `ci export`.
-
-**Usage**
-
-```shell
-ocx ci export [OPTIONS] <PACKAGE>...
-```
-
-**Arguments**
-
-- `<PACKAGE>`: Package identifiers to export the environment for.
-
-**Options**
-
-- `--flavor <FLAVOR>`: CI system to target. Currently supported: `github-actions`. Auto-detected if omitted.
-- `-p`, `--platform`: Target platforms to consider when resolving packages.
-- `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
-- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
-- `-h`, `--help`: Print help information.
-
-
-For packages that declare [entry points][guide-entry-points], `ci export` includes a synthetic PATH
-entry pointing at the package's `entrypoints/` directory. This entry is placed before any
-`bin/`-style paths declared by the package's `env` metadata, so installed launchers take
-precedence over raw binaries when both are on the exported PATH. See the
-[entry-points guide][guide-entry-points] for the rationale behind this ordering.
-
-::: tip
-Pair with [`package pull`](#package-pull) for a minimal CI setup:
-
-```shell
-ocx package pull cmake:3.28
-ocx ci export cmake:3.28
-```
-:::
-=======
 > **REMOVED** — exits 64. See the [`ci`](#ci) section above.
->>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 
 ### `package` {#package}
 
@@ -2028,12 +1948,11 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [cmd-exec-self]: #exec
 [cmd-exec-clean]: #exec
 
-<<<<<<< HEAD
 <!-- global flags (package-inspect) -->
 [arg-offline]: #arg-offline
 [arg-remote]: #arg-remote
 [arg-format]: #arg-format
-=======
+
 <!-- commands (package group) -->
 [cmd-package-install]: #package-install
 [cmd-package-uninstall]: #package-uninstall
@@ -2047,7 +1966,6 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 
 <!-- commands (root env) -->
 [cmd-env-root]: #env-root
->>>>>>> 9b296687 (feat(cli)!: toolchain CLI taxonomy + global activation via env exporter)
 
 <!-- authoring -->
 [authoring-testing]: ../authoring/testing.md

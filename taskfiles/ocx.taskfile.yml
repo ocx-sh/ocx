@@ -21,6 +21,7 @@
 #   PACKAGE — OCX package reference
 #   TOOL    — binary name
 #   GLOB    — git ls-files glob pattern
+#   EXCLUDE — optional extra git pathspec(s), e.g. ':(exclude)path/' (default none)
 
 version: '3'
 
@@ -30,10 +31,11 @@ tasks:
     requires:
       vars: [PACKAGE, TOOL, GLOB]
     preconditions:
-      - sh: '[ -n "$(git ls-files "{{.GLOB}}")" ]'
+      - sh: '[ -n "$(git ls-files "{{.GLOB}}" {{.EXCLUDE}})" ]'
         msg: 'No {{.GLOB}} files found, skipping {{.TOOL}}'
     cmd: ocx exec --self {{.PACKAGE}} -- {{.TOOL}} {{.ARGS}} {{.FILES}}
     vars:
       ARGS: '{{.ARGS | default ""}}'
+      EXCLUDE: '{{.EXCLUDE | default ""}}'
       FILES:
-        sh: git ls-files '{{.GLOB}}' | tr '\n' ' '
+        sh: git ls-files '{{.GLOB}}' {{.EXCLUDE}} | tr '\n' ' '

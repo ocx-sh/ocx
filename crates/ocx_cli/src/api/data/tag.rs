@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use ocx_lib::cli::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -55,36 +56,40 @@ pub enum TagsData {
 
 impl Printable for Tags {
     fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+        let theme = printer.theme();
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        let (header, data) = match &self.packages {
+        let header = match &self.packages {
             TagsData::Tags(tags) => {
                 for (package, package_tags) in tags {
                     for tag in package_tags {
                         rows[0].push(package.clone());
-                        rows[1].push(tag.clone());
+                        rows[1].push(theme.tag(tag));
                     }
                 }
-                ("Tag", &rows)
+                "Tag"
             }
             TagsData::Platforms(platforms) => {
                 for (package, platform_list) in platforms {
                     for platform in platform_list {
                         rows[0].push(package.clone());
-                        rows[1].push(platform.clone());
+                        rows[1].push(theme.tag(platform));
                     }
                 }
-                ("Platform", &rows)
+                "Platform"
             }
             TagsData::Variants(variants) => {
                 for (package, variant_names) in variants {
                     for variant in variant_names {
                         rows[0].push(package.clone());
-                        rows[1].push(variant.clone());
+                        rows[1].push(theme.tag(variant));
                     }
                 }
-                ("Variant", &rows)
+                "Variant"
             }
         };
-        printer.print_table(&["Package", header], data);
+        printer.print_table(
+            &["Package".into(), header.into()],
+            &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+        );
     }
 }

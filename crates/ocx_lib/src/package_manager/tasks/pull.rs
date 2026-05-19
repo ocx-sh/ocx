@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinSet;
-use tracing::{Instrument, info_span};
+use tracing::info_span;
 
 use crate::{
     MEDIA_TYPE_PACKAGE_V1, file_structure, log, media_type_select_some, oci,
@@ -127,9 +127,10 @@ impl PackageManager {
     /// for cross-package diamond dependency dedup.
     ///
     /// Every caller — including single-package invocations — goes through the
-    /// same JoinSet dispatch so progress instrumentation is symmetric. An outer
-    /// `info_span!("Pulling", count)` wraps the entire batch; each per-package
-    /// task inherits it as a parent and gets its own child `spinner_span`.
+    /// same JoinSet dispatch so progress is symmetric. Each per-package task
+    /// owns a span-free `Spinner` guard (`Pulling '<id>'`) and `scope`s its
+    /// work so the download bar nests beneath it. An outer
+    /// `info_span!("Pulling", count)` carries only the batch log event.
     ///
     /// `concurrency` caps the **outer** dispatch only — at most N root-package
     /// pulls run in parallel. Inner `setup_dependencies` and `extract_layers`
@@ -149,8 +150,8 @@ impl PackageManager {
         let outer = info_span!("Pulling", count);
         // Emit an info-level event inside the outer span so the batch is
         // visible in tracing log output (e.g. `RUST_LOG=info`) regardless of
-        // whether stderr is a TTY. The IndicatifLayer renders the spinner only
-        // in a TTY; the log event is the non-TTY observable counterpart.
+        // whether stderr is a TTY — the non-TTY observable counterpart of the
+        // per-package spinners.
         tracing::info!(parent: &outer, count, "pulling");
 
         let shared_groups = SetupGroups::new();
@@ -162,19 +163,15 @@ impl PackageManager {
             let platforms = platforms.clone();
             let groups = shared_groups.clone();
             let sem = semaphore.clone();
-            let span =
-                crate::cli::progress::spinner_span(info_span!(parent: &outer, "Pulling", package = %package), &package);
-            tasks.spawn(
-                async move {
-                    // Permit lives for the full setup_with_tracker call; drop
-                    // happens after the await returns, releasing the slot for
-                    // the next queued root pull.
-                    let _permit = super::super::concurrency::acquire_permit(&sem).await;
-                    let result = setup_with_tracker(&mgr, &package, platforms, groups).await;
-                    (package, result)
-                }
-                .instrument(span),
-            );
+            tasks.spawn(async move {
+                // Permit lives for the full setup_with_tracker call; drop
+                // happens after the await returns, releasing the slot for
+                // the next queued root pull.
+                let _permit = super::super::concurrency::acquire_permit(&sem).await;
+                let spin = mgr.progress().spinner(format!("Pulling '{package}'"));
+                let result = spin.scope(setup_with_tracker(&mgr, &package, platforms, groups)).await;
+                (package, result)
+            });
         }
 
         super::common::drain_package_tasks(packages, tasks, package_manager::error::Error::InstallFailed).await
@@ -566,10 +563,10 @@ async fn setup_dependencies(
         let dep_id = dep.identifier.clone();
         let platforms = platforms.clone();
         let groups = groups.clone();
-        tasks.spawn(async move {
+        tasks.spawn(crate::cli::progress::inherit_scope(async move {
             let info = setup_with_tracker(&mgr, &dep_id, platforms, groups).await?;
             Ok::<_, PackageErrorKind>((idx, Arc::new(info)))
-        });
+        }));
     }
 
     let mut results: Vec<Option<Arc<InstallInfo>>> = vec![None; deps.len()];
@@ -689,10 +686,10 @@ async fn extract_layers(
         let pinned = pinned.clone();
         let metadata = metadata.clone();
         let layer_group = layer_group.clone();
-        tasks.spawn(async move {
+        tasks.spawn(crate::cli::progress::inherit_scope(async move {
             let res = extract_layer_atomic(&mgr, &pinned, &layer, &digest, &metadata, layer_group).await;
             (idx, res)
-        });
+        }));
     }
 
     let mut results: Vec<Option<oci::Digest>> = vec![None; tasks.len()];

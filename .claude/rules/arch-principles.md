@@ -90,6 +90,7 @@ CLI command (clap parse)
 | `adr_project_gc_symlink_ledger.md` | Flat symlink store `$OCX_HOME/projects/` as project GC ledger (supersedes `adr_clean_project_backlinks.md`) |
 | `adr_global_toolchain_tier.md` | Explicit `--global` toolchain tier, strict isolation, no implicit home fallback (supersedes Amendment C of `adr_project_toolchain_config.md`) |
 | `handshake_toolchain_cli.md` | **AUTHORITY for current CLI model** — `ocx package` group (OCI tier), root `ocx [--global] env [--shell]` (`--global` is a root flag before the subcommand), `ocx shell` reduced to `{completion}`, root `install/uninstall/select/exec/deselect/which/deps/ci/shell hook/init/env` removed (exit 64), activation via `$OCX_HOME/env.sh` block-marker, no PATH strip. Decisions 3/4/6/7 of `adr_global_toolchain_tier.md` superseded here. Per-command `--global` and `with_command_global` seam deleted 2026-05-17 (root-only collapse). |
+| `adr_progress_architecture.md` | Span-free progress: `cli::progress::ProgressManager` owns `indicatif::MultiProgress`; RAII guards (`Spinner`/`BytesBar`) instead of `tracing-indicatif` span-attached bars. Kills the concurrent sharded-registry clone-after-close panic by construction. `tracing-indicatif` dropped; fmt logs route through `ProgressManager::writer()` (suspend-coordinated). |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 

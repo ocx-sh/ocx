@@ -101,7 +101,7 @@ BundleBuilder::from_path(path)
     .create(output_path)                   // async, atomic (temp + rename)
 ```
 
-If source = directory: adds all files to archive root (no top-level dir). Progress via `tracing::info_span!("Bundling")`.
+If source = directory: adds all files to archive root (no top-level dir). `BundleBuilder` itself emits no progress; the caller wraps `create()` in a `ProgressManager` spinner (e.g. `package create`). ADR: `adr_progress_architecture.md`.
 
 ## Cascade Logic
 

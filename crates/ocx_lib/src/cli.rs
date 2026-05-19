@@ -19,10 +19,11 @@ mod log_settings;
 pub mod options;
 mod printer;
 mod styles;
+mod theme;
 mod user_interface;
 
 pub use classify::{ClassifyExitCode, classify_error};
-pub use data_interface::{Annotation, DataInterface, TreeItem};
+pub use data_interface::{Annotation, Cell, Column, DataInterface, TreeItem};
 pub use error::{MetadataResolutionError, UsageError};
 pub use exit_code::ExitCode;
 pub use log_level::LogLevel;
@@ -30,8 +31,7 @@ pub use log_settings::LogSettings;
 pub use options::{ColorMode, ColorModeConfig, ProgressMode};
 pub use printer::{Alignment, Printer, Style};
 pub use styles::clap_styles;
+pub use theme::{StyledInk, Theme};
 pub use user_interface::UserInterface;
 
 pub mod progress;
-pub use indicatif;
-pub use tracing_indicatif;
