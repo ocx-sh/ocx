@@ -56,7 +56,7 @@ Once installed, [`ocx package which --candidate`][cmd-which] returns the stable 
 :::
 
 ::: tip CI workflows: `ocx package pull`
-In CI pipelines, symlink management is unnecessary — you just need the binary at a known path. [`ocx package pull`][cmd-package-pull] downloads directly into the [object store][fs-objects] without creating candidate or current symlinks. To inject resolved environment variables into the runner, use [`ocx package env`][cmd-env] with `--format json` for machine-readable output, or `--shell=sh` to emit `export` statements directly into the runner's environment.
+In CI pipelines, symlink management is unnecessary — you just need the binary at a known path. [`ocx package pull`][cmd-package-pull] downloads directly into the [object store][fs-objects] without creating candidate or current symlinks. To inject resolved environment variables into the runner, use `ocx --format json package env` for machine-readable output, or `ocx package env --shell=sh` to emit `export` statements directly into the runner's environment.
 :::
 
 See the [object store][fs-objects] and [install symlinks][fs-symlinks] sections of the user guide for the full three-store architecture behind this.

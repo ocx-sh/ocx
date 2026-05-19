@@ -243,7 +243,7 @@ You can also emit the current global env manually and inspect it:
 
 <<< @/_scripts/user-guide/global-env.sh{sh}
 
-`--shell` is the only eval-safe output channel. Do not `eval "$(ocx --global env)"` — the default JSON format is not sourceable.
+`--shell` is the only eval-safe output channel. Do not `eval "$(ocx --global env)"` — plain table output is not sourceable.
 
 ### OCI-tier package operations {#global-toolchain-oci}
 
@@ -387,7 +387,7 @@ For **OCI-tier CI** (no `ocx.toml`, direct identifier pinning):
 
 [`ocx pull`][cmd-pull] (project-tier) and [`ocx package pull`][cmd-package-pull] (OCI-tier) download packages into the [content-addressed package store][in-depth-storage-packages] without creating any symlinks.
 
-To export environment variables into CI runtime files (e.g. `$GITHUB_PATH` / `$GITHUB_ENV` on [GitHub Actions][github-actions-docs]), consume the JSON output of `ocx package env` or `ocx env` in your workflow step and write entries to the appropriate CI sink. A dedicated CI export command is a deferred extension point — see the [env-composition reference][env-composition-ref] for the current JSON schema.
+To export environment variables into CI runtime files (e.g. `$GITHUB_PATH` / `$GITHUB_ENV` on [GitHub Actions][github-actions-docs]), use `ocx --format json package env` or `ocx --format json env` to get machine-readable output, then write entries to the appropriate CI sink. A dedicated CI export command is a deferred extension point — see the [env-composition reference][env-composition-ref] for the current JSON schema.
 
 ::: tip Concurrent matrix builds
 `package pull` only touches the package store — no symlinks, no symlink-store mutations. This makes it safe to run concurrently in matrix builds that share a cached [`OCX_HOME`][env-ocx-home]; [content-addressed writes][in-depth-storage-packages] are inherently idempotent.

@@ -315,11 +315,11 @@ Set to `true` by [GitHub Actions][github-actions-docs] runners. OCX uses this va
 
 ### `GITHUB_PATH` {#external-github-path}
 
-Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps may append `PATH` entries to this file to make tools available in subsequent steps. The removed `ocx ci export` command previously wrote to this file automatically; use `ocx package env --format json` with `jq` or `ocx run` instead.
+Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps may append `PATH` entries to this file to make tools available in subsequent steps. The removed `ocx ci export` command previously wrote to this file automatically; use `ocx --format json package env` with `jq` or `ocx run` instead.
 
 ### `GITHUB_ENV` {#external-github-env}
 
-Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps may append non-`PATH` environment variables to this file using `KEY=value` syntax (or [heredoc delimiters][github-multiline-env] for multiline values). The removed `ocx ci export` command previously wrote to this file automatically; use `ocx package env --format json` with `jq` instead.
+Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps may append non-`PATH` environment variables to this file using `KEY=value` syntax (or [heredoc delimiters][github-multiline-env] for multiline values). The removed `ocx ci export` command previously wrote to this file automatically; use `ocx --format json package env` with `jq` instead.
 
 ### `DOCKER_CONFIG` {#external-docker-config}
 
