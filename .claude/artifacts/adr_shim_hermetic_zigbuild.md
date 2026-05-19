@@ -83,6 +83,12 @@ PoC outcomes: `x86_64-pc-windows-gnu` ✅ (280K, hermetic). `x86_64-pc-windows-g
 
 Locally deterministic across clean rebuilds. **Supersedes the gnu/280K plan: no `SHIM_SIZE_BUDGET` bump needed; result is smaller than the old msvc 140K; near-zero deps (windows-sys + dunce only).** Quantified-impact + size-budget rows below are obsolete (kept for history).
 
+### Addendum 2 2026-05-19 — gate redesign (byte-equality abandoned)
+
+The hermetic toolchain (pinned Zig + rustc, no MS manifest) shipped, but the **byte-equality gate is not achievable**: cargo-zigbuild's `*-pc-windows-gnullvm` PE link is nondeterministic run-to-run even with pinned Zig 0.16.0 + pinned rustc + `/Brepro` + no `-Zbuild-std` (~10 CI runs; lld embeds a per-link build id `/Brepro` does not zero). `-Zbuild-std` additionally non-reproducible and was dropped.
+
+**Resolution — provenance/inputs gate** (the deciders' originally-mused model): the committed blob is authoritative, CI-built + SLSA-attested. `build-windows-shims.yml` no longer `cmp -s`; it now asserts the committed blob is a valid PE, within `SHIM_SIZE_BUDGET`, and matches the in-tree `SHIM_SHA256` (corruption canary), and the job's path filter forces a successful fresh build + a blob-refresh PR (from the uploaded `ocx-shim-fresh-*` artifact) whenever build inputs change. Integrity = SLSA attestation + SHA canary + refresh discipline, not cross-run byte identity. Size budget raised to 512 KiB (no-build-std blob ≈ 235–329 KiB). Net: hermetic *toolchain* (no floating Microsoft SDK — the original treadmill is gone) without an impossible byte-identity requirement.
+
 ### Consequences
 
 **Positive:** deterministic blob; treadmill gone; msvc/gnu TODO resolved; smaller attack/repro surface.

@@ -148,7 +148,9 @@ jobs:
         with:
           tool: cargo-zigbuild@0.22.3
 
-      # First reproducible build → the artifact we attest + compare.
+      # Fresh hermetic build — must succeed (proves the pinned Zig+rustc
+      # toolchain still produces a working shim for changed build inputs).
+      # The committed blob, not this output, is the attested artifact.
       - name: Cross-build shim (cargo-zigbuild, hermetic, stripped `shim` profile)
         run: task rust:shim:build TARGET=${{ matrix.target }}
 
@@ -173,21 +175,54 @@ jobs:
           compression-level: 0
           retention-days: 1
 
-      # Reproducible-rebuild byte-equality: the actual drift control (the
-      # SHIM_SHA256 unit test is only a corruption canary). The freshly built
-      # blob must be byte-identical to the committed one — a stale committed
-      # blob (refresh-PR skipped) fails the PR loudly here.
-      - name: Verify committed blob is byte-identical to a fresh rebuild
+      # Provenance / inputs gate (NOT byte-equality). cargo-zigbuild's
+      # gnullvm PE link is not byte-reproducible run-to-run even with a
+      # pinned Zig+rustc and /Brepro (lld embeds a per-link build id that
+      # /Brepro does not neutralize; verified across ~10 CI runs). A
+      # byte-identical-rebuild gate is therefore impossible here. Integrity
+      # instead rests on three controls:
+      #   1. SLSA build provenance attested on the committed blob (below).
+      #   2. The in-tree SHIM_SHA256 corruption canary — verified here
+      #      against the committed blob so a refresh that updates the blob
+      #      but not the constant (or vice versa) fails loudly.
+      #   3. This job's path filter: any change to the shim build inputs
+      #      (crates/ocx_shim/**, Cargo.lock, rust-toolchain.toml, the
+      #      taskfile, this workflow) runs this job, and a fresh hermetic
+      #      build must still succeed + fit the budget; the refresh PR
+      #      re-cuts the blob from the uploaded artifact above.
+      # See adr_shim_hermetic_zigbuild.md §"gate redesign".
+      - name: Validate committed shim blob (provenance model)
         run: |
-          built='${{ steps.paths.outputs.built }}'
           committed='${{ steps.paths.outputs.committed }}'
-          if ! cmp -s "$built" "$committed"; then
-            echo "::error::Committed ${committed} differs from a fresh reproducible rebuild."
-            echo "::error::Refresh it: task rust:shim:build TARGET=${{ matrix.target }} then copy + record SHIM_SHA256 (see crates/ocx_lib/src/shim.rs)."
-            sha256sum "$built" "$committed"
+          arch="$(echo '${{ matrix.target }}' | cut -d- -f1)"
+          # 1. valid PE (MZ magic)
+          if [ "$(head -c2 "$committed")" != "MZ" ]; then
+            echo "::error::${committed} is not a PE image (missing MZ magic)"
             exit 1
           fi
-          echo "OK: $(sha256sum "$committed")"
+          # 2. within the fail-closed size budget declared in shim.rs
+          budget_kib="$(grep -oE 'SHIM_SIZE_BUDGET: usize = [0-9]+ \* 1024' \
+            crates/ocx_lib/src/shim.rs | grep -oE '^SHIM_SIZE_BUDGET: usize = [0-9]+' \
+            | grep -oE '[0-9]+$')"
+          max=$(( budget_kib * 1024 ))
+          size=$(stat -c%s "$committed")
+          if [ "$size" -gt "$max" ]; then
+            echo "::error::${committed} ${size}B exceeds SHIM_SIZE_BUDGET ${max}B"
+            exit 1
+          fi
+          # 3. corruption canary: committed blob == recorded SHIM_SHA256.
+          # File order in shim.rs is x86_64 then aarch64.
+          shas=$(grep -oE 'SHIM_SHA256: &str = "[0-9a-f]{64}"' \
+            crates/ocx_lib/src/shim.rs | grep -oE '[0-9a-f]{64}')
+          if [ "$arch" = "x86_64" ]; then want="$(echo "$shas" | sed -n 1p)"; \
+            else want="$(echo "$shas" | sed -n 2p)"; fi
+          got="$(sha256sum "$committed" | cut -d' ' -f1)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::${committed} sha256 ${got} != recorded SHIM_SHA256 ${want}"
+            echo "::error::Refresh: download the ocx-shim-fresh-${{ matrix.target }} artifact, replace the blob, update SHIM_SHA256 in crates/ocx_lib/src/shim.rs."
+            exit 1
+          fi
+          echo "OK: ${committed} valid PE, ${size}B <= ${max}B, sha ${got} matches SHIM_SHA256"
 
       # SLSA Build provenance on the committed blob (real provenance leg; the
       # in-tree SHA is only a corruption canary — ADR §"SHA256 = corruption
