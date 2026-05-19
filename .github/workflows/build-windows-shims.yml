@@ -92,8 +92,8 @@ jobs:
       fail-fast: true
       matrix:
         target:
-          - x86_64-pc-windows-msvc
-          - aarch64-pc-windows-msvc
+          - x86_64-pc-windows-gnullvm
+          - aarch64-pc-windows-gnullvm
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -108,9 +108,24 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
         with:
           target: ${{ matrix.target }}
+          # rust-toolchain.toml pins channel + rust-src (build-std) + the
+          # gnullvm targets; this only adds the per-matrix target redundantly.
+
+      # Pinned Zig = the hermetic toolchain. The committed blob is
+      # byte-reproducible only against a fixed (rustc, zig) pair, so the Zig
+      # version is part of the reproducibility contract — bump deliberately
+      # in a blob-refresh PR (see adr_shim_hermetic_zigbuild.md).
+      - name: Setup Zig
+        uses: mlugg/setup-zig@a67e68dc5c8281d9608136d3d7ca1b282213e4ac # v2.0.5
+        with:
+          version: 0.16.0-dev.2670+56253d9e3
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        with:
+          tool: cargo-zigbuild@0.22.3
 
       # First reproducible build → the artifact we attest + compare.
-      - name: Cross-build shim (cargo-xwin, stripped `shim` profile)
+      - name: Cross-build shim (cargo-zigbuild, hermetic, stripped `shim` profile)
         run: task rust:shim:build TARGET=${{ matrix.target }}
 
       - name: Resolve blob paths

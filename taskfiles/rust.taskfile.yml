@@ -100,32 +100,42 @@ tasks:
       - install:cargo-deny
     cmd: cargo deny check licenses
 
-  install:cargo-xwin:
+  install:cargo-zigbuild:
     internal: true
+    # Pinned: a cargo-zigbuild release can change the link invocation and
+    # perturb the byte-equality gate. Ephemeral CI runners install exactly
+    # this; a dev box with another version is skipped by `.ensure-cargo-tool`
+    # `--version` status — `cargo install --locked cargo-zigbuild@0.22.3
+    # --force` before refreshing a blob. Zig itself is provisioned at a
+    # pinned version by build-windows-shims.yml (dev: any zig on PATH).
     cmds:
       - task: :.ensure-cargo-tool
-        vars: { TOOL: cargo-xwin, CRATE: cargo-xwin }
+        vars: { TOOL: cargo-zigbuild, CRATE: cargo-zigbuild@0.22.3 }
 
   shim:build:
     desc: Cross-build the stripped Windows shim blob (issue #66)
     summary: |
-      Cross-builds crates/ocx_shim with the size-tuned `shim` profile for one
-      windows-msvc target via cargo-xwin and writes the stripped binary to
-      OUT (default: target/<TARGET>/shim/ocx-shim.exe). The committed blobs
-      under crates/ocx_lib/src/shims/ and the SHIM_SHA256 constants are
-      refreshed from this output in a dedicated PR (see shim.rs module docs).
-      Required var: TARGET (x86_64-pc-windows-msvc | aarch64-pc-windows-msvc).
+      Hermetically cross-builds crates/ocx_shim with the size-tuned `shim`
+      profile for one *-pc-windows-gnullvm target via cargo-zigbuild and
+      writes the stripped binary to target/<TARGET>/shim/ocx-shim.exe. The
+      committed blobs under crates/ocx_lib/src/shims/ and the SHIM_SHA256
+      constants are refreshed from this output in a dedicated PR (see
+      shim.rs module docs and adr_shim_hermetic_zigbuild.md). Required var:
+      TARGET (x86_64-pc-windows-gnullvm | aarch64-pc-windows-gnullvm).
     requires:
       vars: [TARGET]
     deps:
-      - install:cargo-xwin
-    # Deterministic PE: `/Brepro` zeroes the COFF `TimeDateStamp` and
-    # `/PDBALTPATH:%_PDB%` strips the absolute PDB path from the debug
-    # directory. Without these, msvc PE nondeterminism makes the CI
-    # `cmp -s` byte-equality gate (build-windows-shims.yml) ALWAYS fail.
-    # RUSTFLAGS (not `.cargo/config.toml` rustflags) because cargo-xwin
-    # ignores config-file rustflags in some invocations (cargo-xwin#36);
-    # CI must keep calling this task, never raw cargo.
+      - install:cargo-zigbuild
+    # Hermetic + reproducible: Zig bundles its own clang/lld/libc, so output
+    # bytes depend only on pinned rustc (rust-toolchain.toml) + pinned zig +
+    # source — no floating Microsoft SDK manifest (the old cargo-xwin
+    # treadmill). `-Zbuild-std` + `-Cpanic=immediate-abort` sheds std's
+    # backtrace machinery (gimli/addr2line/object/miniz) → ~65 KiB blob,
+    # well under SHIM_SIZE_BUDGET. The gnullvm targets need the stack-probe
+    # builtins; crates/ocx_shim/src/chkstk.rs supplies them inline.
+    # RUSTC_BOOTSTRAP=1 enables -Z on the pinned stable toolchain. CI must
+    # call this task, never raw cargo.
     env:
-      RUSTFLAGS: '-C link-arg=/Brepro -C link-arg=/PDBALTPATH:%_PDB%'
-    cmd: cargo xwin build -p ocx_shim --profile shim --locked --target {{.TARGET}}
+      RUSTC_BOOTSTRAP: '1'
+      RUSTFLAGS: '-Zunstable-options -Cpanic=immediate-abort'
+    cmd: cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}} -Z build-std=std,panic_abort

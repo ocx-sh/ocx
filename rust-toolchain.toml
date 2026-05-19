@@ -1,9 +1,11 @@
 [toolchain]
 channel = "1.95.0"
 profile = "default"
-components = ["rustfmt", "clippy"]
-# Windows shim cross-compile targets (crates/ocx_shim, issue #66). Default to
-# msvc since dist-workspace.toml already lists the windows-msvc targets;
-# gnu-vs-msvc final call is an architecture-review item — see the
-# TODO(arch-review) note in crates/ocx_shim/src/main.rs.
-targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+# rust-src is required by `-Zbuild-std` (RUSTC_BOOTSTRAP) in the hermetic
+# shim cross-build — see adr_shim_hermetic_zigbuild.md and shim:build.
+components = ["rustfmt", "clippy", "rust-src"]
+# Windows shim cross-compile targets (crates/ocx_shim, issue #66). gnullvm
+# (LLVM ABI) built hermetically via cargo-zigbuild so the committed blob is
+# byte-reproducible across machines; resolves the former msvc-vs-gnu
+# arch-review item. See adr_shim_hermetic_zigbuild.md.
+targets = ["x86_64-pc-windows-gnullvm", "aarch64-pc-windows-gnullvm"]

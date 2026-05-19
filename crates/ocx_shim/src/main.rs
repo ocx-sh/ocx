@@ -30,6 +30,13 @@
 
 use std::process::exit;
 
+// Stack-probe builtins for the hermetic `*-pc-windows-gnullvm` cross-build
+// (cargo-zigbuild, `-nolibc`). `target_abi = "llvm"` is the discriminator that
+// uniquely selects the gnullvm targets — msvc/gnu builds get the probe from
+// their own runtime and must not pick this up. See `chkstk.rs`.
+#[cfg(all(target_os = "windows", target_env = "gnu", target_abi = "llvm"))]
+mod chkstk;
+
 /// Shim failure taxonomy. Mirrors the ADR §Error Taxonomy table.
 ///
 /// E7 (job-object setup failure) is intentionally **not** a variant: it is
