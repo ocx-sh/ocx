@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -147,11 +148,39 @@ def shim_entrypoint(tmp_path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _git_bash() -> str | None:
+    """Resolve the *Git for Windows* bash, never the WSL launcher.
+
+    A bare `bash` on a Windows runner resolves to
+    `C:\\Windows\\System32\\bash.exe` (the WSL launcher), which on a
+    distro-less machine exits rc=1 with a "no installed distributions"
+    message and never execs its argument — it is NOT git-bash. Probe the
+    known Git install locations explicitly; fall back to a PATH lookup only
+    if it is not the System32 WSL shim.
+    """
+    candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
+    return None
+
+
 @pytest.mark.parametrize(
     "shell",
     [
         pytest.param(["cmd", "/c"], id="cmd"),
         pytest.param(["pwsh", "-NoProfile", "-Command"], id="pwsh"),
+        # A native Windows .exe must be invocable from git-bash/MSYS too —
+        # heterogeneous-environment support is a core OCX goal. The bash
+        # binary is resolved to Git-for-Windows bash in the body (a bare
+        # "bash" is the WSL launcher on the runner — see _git_bash).
         pytest.param(["bash", "-c"], id="git-bash"),
     ],
 )
@@ -161,32 +190,44 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
     cmd/pwsh honour PATHEXT (`.EXE` before `.CMD`); git-bash resolves an
     explicit `hello.exe` on PATH. All must reach the shim, not cmd.exe.
     """
+    cmd = list(shell)
+    if cmd[0] == "bash":
+        gb = _git_bash()
+        if gb is None:
+            pytest.skip("Git-for-Windows bash not found (bare bash = WSL launcher)")
+        cmd[0] = gb
     ep_dir = shim_entrypoint["ep_dir"]
     env = dict(shim_entrypoint["env"])
     env["PATH"] = f"{ep_dir}{os.pathsep}{env.get('PATH', '')}"
+    # Pin `ocx` to a guaranteed-absent absolute path so the shim
+    # deterministically takes the `OcxNotFound { pinned: Some(_) }` branch
+    # on every shell, independent of ambient PATH — while still being
+    # *reached* via PATH/PATHEXT resolution of `hello[.exe]`, which is
+    # what this test guards.
+    env["OCX_BINARY_PIN"] = str(ep_dir / "definitely-no-ocx-here.exe")
     # cmd/pwsh honour PATHEXT and resolve bare `hello` → `hello.exe`.
     # git-bash does NOT honour PATHEXT and cannot exec a single-quoted
     # Windows backslash abs-path; it resolves an explicit `hello.exe`
     # against PATH (ep_dir is on PATH) — same target, bash-safe.
-    invocation = "hello --probe" if shell[0] != "bash" else "hello.exe --probe"
+    # cmd/pwsh resolve bare `hello` via PATHEXT; git-bash resolves an
+    # explicit `hello.exe` on PATH (ep_dir is on PATH) — same target.
+    invocation = "hello.exe --probe" if shell[0] == "bash" else "hello --probe"
     proc = subprocess.run(
-        [*shell, invocation],
+        [*cmd, invocation],
         capture_output=True,
         text=True,
         env=env,
     )
-    # No `ocx` is resolvable, so the shim must reach its own E5 path. The
-    # authoritative signal that the *shim* (not cmd.exe, not a loader
-    # crash) handled the call is its `ocx-shim:` stderr line and/or the
-    # native E5 code 69. pwsh `-Command` and git-bash do not reliably
-    # propagate a native child's exit code (pwsh remaps non-zero to 1
-    # unless `exit $LASTEXITCODE`), so the exit code alone is not a
-    # reliable cross-shell oracle — the stderr marker is.
-    reached_shim = "ocx-shim:" in proc.stderr or proc.returncode in (0, 69)
-    assert reached_shim, (
-        f"shim must resolve via PATH/PATHEXT and reach its own E5 path "
-        f"(not cmd.exe / loader error); rc={proc.returncode} "
-        f"stderr={proc.stderr!r}"
+    # The shim must be reached and hit its deterministic pinned-miss E5
+    # path. Its `ocx-shim:` stderr line is the authoritative cross-shell
+    # oracle (pwsh `-Command` / git-bash do not reliably propagate a
+    # native child's exit code), with the native E5 code 69 as a
+    # corroborating signal where it survives.
+    assert "ocx-shim: pinned ocx not found" in proc.stderr, (
+        f"shim must resolve via PATH/PATHEXT and reach its own pinned-miss "
+        f"E5 path (not cmd.exe / a stray ocx / loader error); "
+        f"rc={proc.returncode} stderr={proc.stderr!r} "
+        f"stdout={proc.stdout!r}"
     )
 
 
