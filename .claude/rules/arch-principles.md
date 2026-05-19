@@ -131,7 +131,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | `archive/` | Tar/zip extraction + bundling with pluggable backends | Mirror pipeline, package creation |
 | `auth/` | `AuthType` enum with env var + docker cred fallback | OCI Client |
 | `ci/` | CI flavor dispatch (GitHub Actions export) | **Removed** — `ocx ci` command deleted; CI export is a deferred extension point (`handshake_toolchain_cli.md` §6). Module kept in `ocx_lib` as a library; CLI surface gone. |
-| `shell/` | `ShellProfileBuilder` / `emit_lines` — shell-specific export gen | `ocx env`, `ocx package env`, `ocx direnv export`; `shell hook`/`init`/`env` commands removed |
+| `shell/` | `Shell` export helpers (`export_path`/`export_constant`/`unset`) + `conventions::emit_lines` — shell-specific export gen | `ocx env`, `ocx package env`, `ocx direnv export`; `shell hook`/`init`/`env` commands removed |
 | `utility/` | Extension traits + async + fs helpers — see [Utility Catalog](#utility-catalog) below | Everywhere (prelude for extension traits) |
 | `compression/` | Compression level config | Archive, OCI push |
 | `codesign/` | macOS ad-hoc code signing for Mach-O binaries | Package extraction |

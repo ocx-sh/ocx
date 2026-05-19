@@ -166,7 +166,7 @@ The child's own exit code passes through untouched on the success path, so a non
 
 PowerShell resolves `cmake` to `cmake.exe` on `$PATH` and runs it directly — there is no intervening `cmd.exe`, so PowerShell's own `%VAR%`-in-double-quotes expansion quirk does not apply to OCX launchers. OCX does not generate a `.ps1` variant: the native `.exe` shim already covers the entire PowerShell user base with no script-language argument-forwarding caveats.
 
-The practical rule is: PowerShell users should add `ocx --offline shell hook powershell | Invoke-Expression` to their `$PROFILE`. The resulting `$PATH` entries pick up the `.exe` launchers automatically.
+The practical rule is: PowerShell users get this for free from the installer, which writes `$OCX_HOME/env.ps1` and adds a block to `$PROFILE` that sources it. On every session `env.ps1` runs `Invoke-Expression ((& ocx --global env --shell=pwsh) | Out-String)`, and the resulting `$PATH` entries pick up the `.exe` launchers automatically.
 
 ### Git Bash and MSYS2 {#git-bash}
 
