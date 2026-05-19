@@ -54,13 +54,13 @@ pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-x86_64.exe");
 /// `shim_blob_matches_recorded_sha256_fail_closed_on_windows` test fails
 /// closed if this drifts from `sha256(SHIM_BYTES)`.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const SHIM_SHA256: &str = "58b7cb6d5b180216a7f4689517ce5d2495ac3c909edafffb57feea36263a0215";
+pub const SHIM_SHA256: &str = "f4052a2f986f5ec5086da4a09a0de237975db7284436f462903a8831fa52b33c";
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-aarch64.exe");
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const SHIM_SHA256: &str = "708aa445d882badd05cce67b70d69d29b946f63a3b0ed3e1039a6e169ada850b";
+pub const SHIM_SHA256: &str = "e30b175ffbd555f578692ba86a78fcd88819f82707cb5e1821d76e5320ce6335";
 
 #[cfg(not(target_os = "windows"))]
 pub const SHIM_BYTES: &[u8] = &[];

@@ -158,25 +158,35 @@ def shim_entrypoint(tmp_path: Path) -> dict:
 def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> None:
     """`hello` resolves to `hello.exe` via default PATHEXT from each shell.
 
-    cmd/pwsh honour PATHEXT (`.EXE` before `.CMD`); git-bash resolves the
-    explicit `.exe`. All must reach the shim, not the `.cmd`.
+    cmd/pwsh honour PATHEXT (`.EXE` before `.CMD`); git-bash resolves an
+    explicit `hello.exe` on PATH. All must reach the shim, not cmd.exe.
     """
     ep_dir = shim_entrypoint["ep_dir"]
     env = dict(shim_entrypoint["env"])
     env["PATH"] = f"{ep_dir}{os.pathsep}{env.get('PATH', '')}"
-    invocation = "hello --probe" if shell[0] != "bash" else f"'{ep_dir / 'hello.exe'}' --probe"
+    # cmd/pwsh honour PATHEXT and resolve bare `hello` → `hello.exe`.
+    # git-bash does NOT honour PATHEXT and cannot exec a single-quoted
+    # Windows backslash abs-path; it resolves an explicit `hello.exe`
+    # against PATH (ep_dir is on PATH) — same target, bash-safe.
+    invocation = "hello --probe" if shell[0] != "bash" else "hello.exe --probe"
     proc = subprocess.run(
         [*shell, invocation],
         capture_output=True,
         text=True,
         env=env,
     )
-    # The shim either reaches a pinned/PATH `ocx` (forwards) or fails E5 (69)
-    # because no `ocx` is resolvable. Either way it must NOT be cmd.exe that
-    # interpreted the call, and it must NOT crash with a Python/loader error.
-    assert proc.returncode in (0, 69), (
-        f"shim must resolve and either forward or report E5 (69); "
-        f"rc={proc.returncode} stderr={proc.stderr!r}"
+    # No `ocx` is resolvable, so the shim must reach its own E5 path. The
+    # authoritative signal that the *shim* (not cmd.exe, not a loader
+    # crash) handled the call is its `ocx-shim:` stderr line and/or the
+    # native E5 code 69. pwsh `-Command` and git-bash do not reliably
+    # propagate a native child's exit code (pwsh remaps non-zero to 1
+    # unless `exit $LASTEXITCODE`), so the exit code alone is not a
+    # reliable cross-shell oracle — the stderr marker is.
+    reached_shim = "ocx-shim:" in proc.stderr or proc.returncode in (0, 69)
+    assert reached_shim, (
+        f"shim must resolve via PATH/PATHEXT and reach its own E5 path "
+        f"(not cmd.exe / loader error); rc={proc.returncode} "
+        f"stderr={proc.stderr!r}"
     )
 
 
@@ -285,18 +295,29 @@ def test_shim_ampersand_arg_not_executed(shim_entrypoint: dict, tmp_path: Path) 
 def test_shim_propagates_child_exit_code(shim_entrypoint: dict, tmp_path: Path) -> None:
     """Tool exits 42 → `%ERRORLEVEL%` 42 (full passthrough, E8).
 
-    Provides a fake `ocx.cmd` on PATH that exits 42 so the shim's
+    Pins a fake `ocx` (via `OCX_BINARY_PIN`) that exits 42 so the shim's
     child-exit-code passthrough is exercised end-to-end without a registry.
+
+    The fake is pinned, not placed on PATH: the `.exe`-only cutover
+    (`adr_windows_exe_shim.md` established-fact #6) means an unset-pin
+    literal `ocx` resolves through `CreateProcessW` with NULL
+    `lpApplicationName`, which appends only `.EXE` — never the full
+    `PATHEXT`. A PATH `ocx.cmd` is therefore deliberately unresolvable;
+    real `ocx` ships as `ocx.exe`. Pinning takes the explicit
+    `lpApplicationName` branch (same path the passing
+    `test_shim_honours_ocx_binary_pin` / `test_shim_runs_without_console`
+    sentinel tests exercise), so a `.cmd` fake is a faithful exit-code
+    stand-in here without re-introducing `cmd.exe` PATHEXT semantics the
+    ADR removed.
     """
     fake_ocx_dir = tmp_path / "fake_ocx"
     fake_ocx_dir.mkdir()
     # The shim spawns `ocx launcher exec ...`; this fake `ocx` ignores its
     # args and exits 42 so we can assert the shim forwards that code.
-    (fake_ocx_dir / "ocx.cmd").write_text(
-        "@ECHO off\r\nEXIT /B 42\r\n", encoding="utf-8"
-    )
+    pinned = fake_ocx_dir / "ocx.cmd"
+    pinned.write_text("@ECHO off\r\nEXIT /B 42\r\n", encoding="utf-8")
     env = dict(shim_entrypoint["env"])
-    env["PATH"] = f"{fake_ocx_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["OCX_BINARY_PIN"] = str(pinned)
     proc = subprocess.run(
         [str(shim_entrypoint["exe"])],
         capture_output=True,
