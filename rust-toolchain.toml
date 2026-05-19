@@ -1,9 +1,7 @@
 [toolchain]
 channel = "1.95.0"
 profile = "default"
-# rust-src is required by `-Zbuild-std` (RUSTC_BOOTSTRAP) in the hermetic
-# shim cross-build — see adr_shim_hermetic_zigbuild.md and shim:build.
-components = ["rustfmt", "clippy", "rust-src"]
+components = ["rustfmt", "clippy"]
 # Windows shim cross-compile targets (crates/ocx_shim, issue #66). gnullvm
 # (LLVM ABI) built hermetically via cargo-zigbuild so the committed blob is
 # byte-reproducible across machines; resolves the former msvc-vs-gnu

@@ -135,17 +135,14 @@ tasks:
     # builtins; crates/ocx_shim/src/chkstk.rs supplies them inline.
     # RUSTC_BOOTSTRAP=1 enables -Z on the pinned stable toolchain. CI must
     # call this task, never raw cargo.
-    # Reproducibility flags (verified necessary: two identical CI runs with
-    # the same pinned Zig+rustc produced different bytes):
-    #   /Brepro            — zero the COFF TimeDateStamp + deterministic PE
-    #                        (lld-link embeds wall-clock time otherwise; the
-    #                        old cargo-xwin path had this, lost in the swap).
-    #   -Zremap-cwd-prefix — strip the absolute workspace path embedded by
-    #                        -Zbuild-std (rebuilds std per run). Nightly
-    #                        rustc flag (RUSTC_BOOTSTRAP) — kept out of the
-    #                        Cargo profile because `trim-paths` is unstable
-    #                        in cargo 1.95 and breaks stable cargo-deny.
+    # Reproducibility: `/Brepro` zeroes the COFF TimeDateStamp + makes the
+    # PE deterministic (lld-link embeds wall-clock time otherwise). NO
+    # -Zbuild-std: rebuilding std per run is not byte-reproducible (verified —
+    # two identical CI runs differed even with /Brepro), and it forced a
+    # nightly bootstrap. The toolchain's prebuilt std is deterministic. The
+    # gnullvm stack-probe gap is covered by crates/ocx_shim/src/chkstk.rs
+    # (independent of build-std). Pure stable; larger blob (~280 KiB) is
+    # within SHIM_SIZE_BUDGET — an accepted trade-off for reproducibility.
     env:
-      RUSTC_BOOTSTRAP: '1'
-      RUSTFLAGS: '-Zunstable-options -Cpanic=immediate-abort -Clink-arg=/Brepro -Zremap-cwd-prefix=.'
-    cmd: cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}} -Z build-std=std,panic_abort
+      RUSTFLAGS: '-Clink-arg=/Brepro'
+    cmd: cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}}
