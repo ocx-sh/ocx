@@ -217,7 +217,19 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
     // `lock_path_for(config) == <dir>/ocx.lock`, ARCH-4d). Derive the lock
     // path here so the downstream load/resolve pipeline (and the
     // `ProjectRootDigests.ocx_lock_path` diagnostic field) is unchanged.
-    let entries: Vec<PathBuf> = project_dirs.into_iter().map(|dir| dir.join("ocx.lock")).collect();
+    let mut entries: Vec<PathBuf> = project_dirs.into_iter().map(|dir| dir.join("ocx.lock")).collect();
+
+    // The global toolchain lock (`$OCX_HOME/ocx.lock`) is an **implicit** GC
+    // root. Its project directory is `$OCX_HOME` itself, which is barred from
+    // the `$OCX_HOME/projects/` symlink ledger by design
+    // (`adr_project_gc_symlink_ledger.md` — no self-link), so it never appears
+    // via `live_projects()`. But the global tier is the project tier with a
+    // different load site (`adr_global_toolchain_tier.md` D5, amended
+    // 2026-05-19): its pinned packages must be reachable exactly like a
+    // project's. Add it unconditionally — an absent global lock is mapped to
+    // `Ok(None)` by `ProjectLock::from_path` below and skipped, so this is a
+    // no-op when no global toolchain is configured.
+    entries.push(ocx_home.join("ocx.lock"));
 
     // Two-pass parallel walk:
     //   1. Read every registered `ocx.lock` in parallel (one task per entry).
@@ -529,4 +541,180 @@ async fn remove_stale_dir(dir_path: &std::path::Path, dry_run: bool, label: &str
             .map_err(|e| crate::Error::InternalFile(dir_path.to_path_buf(), e))?;
     }
     Ok(())
+}
+
+// ── Unit tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_structure::FileStructure;
+
+    // Minimal valid ocx.lock that `ProjectLock::from_path` can parse.
+    //
+    // The `declaration_hash` value is not validated on load — only
+    // `declaration_hash_version` is checked.  The `pinned` identifier must be
+    // a fully-qualified `registry/repo@sha256:<hex>` form so that
+    // `PinnedIdentifier::try_from` accepts it during deserialization.
+    //
+    // Registry must contain `.` or `:` or be "localhost" to be parsed as an
+    // explicit registry (see `oci::identifier::has_explicit_registry`).
+    // Using `localhost:5000` which carries a colon and is always valid.
+    const LOCK_WITH_ONE_TOOL: &str = r#"
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+generated_by = "ocx test"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+pinned = "localhost:5000/cmake@sha256:aaaa0000000000000000000000000000000000000000000000000000000000bb"
+"#;
+
+    // A second distinct pinned digest used in multi-tool fixtures.
+    const LOCK_WITH_TWO_TOOLS: &str = r#"
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+generated_by = "ocx test"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+pinned = "localhost:5000/cmake@sha256:aaaa0000000000000000000000000000000000000000000000000000000000bb"
+
+[[tool]]
+name = "shfmt"
+group = "default"
+pinned = "localhost:5000/shfmt@sha256:bbbb0000000000000000000000000000000000000000000000000000000000cc"
+"#;
+
+    /// `collect_project_roots` includes the pinned digest from
+    /// `$OCX_HOME/ocx.lock` as a GC root even when there are no entries in
+    /// the `$OCX_HOME/projects/` symlink ledger.
+    ///
+    /// Contract from `adr_global_toolchain_tier.md` D5 (amended 2026-05-19):
+    /// the global lock is an **implicit** GC root; it must never be reaped
+    /// even when no project is registered.
+    #[tokio::test]
+    async fn collect_roots_includes_global_lock_pinned_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let ocx_home = dir.path().to_path_buf();
+
+        // Write the global lock at `$OCX_HOME/ocx.lock`.
+        let lock_path = ocx_home.join("ocx.lock");
+        tokio::fs::write(&lock_path, LOCK_WITH_ONE_TOOL).await.unwrap();
+
+        // Empty projects/ directory — no ledger entries.
+        tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
+
+        let file_structure = FileStructure::with_root(ocx_home.clone());
+        let result = collect_project_roots(&ocx_home, &file_structure).await.unwrap();
+
+        let roots = match result {
+            CollectedRoots::Roots(roots) => roots,
+            CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
+        };
+
+        // The global lock's pinned digest must appear as a root.
+        assert_eq!(roots.len(), 1, "exactly one root (from the global lock)");
+        let global_root = &roots[0];
+        assert_eq!(
+            global_root.ocx_lock_path, lock_path,
+            "root's lock path must be $OCX_HOME/ocx.lock"
+        );
+        // The digest from the lock should be present.  `resolve_to_package_digests`
+        // falls back to the original pinned id when the blob is absent locally
+        // (the common case in a fresh temp dir).  Either way the digest is in roots.
+        assert!(
+            !global_root.digests.is_empty(),
+            "global lock must contribute at least one digest root"
+        );
+        let digest_strs: Vec<String> = global_root.digests.iter().map(|p| p.to_string()).collect();
+        assert!(
+            digest_strs.iter().any(|s| s.contains("sha256:aaaa0000")),
+            "cmake digest must be a GC root; got: {digest_strs:?}"
+        );
+    }
+
+    /// When `$OCX_HOME/ocx.lock` is absent, `collect_project_roots` treats the
+    /// global lock as a no-op: `from_path` returns `Ok(None)` for a missing file
+    /// and the function neither errors nor adds any global roots.
+    ///
+    /// Contract: an absent global lock must never cause `ocx clean` to abort or
+    /// change its exit code (exit 0; no-op).
+    #[tokio::test]
+    async fn collect_roots_absent_global_lock_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let ocx_home = dir.path().to_path_buf();
+
+        // No ocx.lock written — `$OCX_HOME/ocx.lock` does not exist.
+        // Empty projects/ directory.
+        tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
+
+        let file_structure = FileStructure::with_root(ocx_home.clone());
+        let result = collect_project_roots(&ocx_home, &file_structure).await.unwrap();
+
+        let roots = match result {
+            CollectedRoots::Roots(roots) => roots,
+            CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
+        };
+
+        // No global lock → no global root; the function must succeed with an
+        // empty root set (nothing for GC to protect from the global side).
+        assert!(
+            roots.is_empty(),
+            "absent global lock must produce no roots; got: {roots:?}",
+            roots = roots
+                .iter()
+                .map(|r| r.ocx_lock_path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A global lock with two tools contributes both pinned digests as GC roots.
+    ///
+    /// Regression guard: the per-tool loop inside `collect_project_roots` must
+    /// iterate all tools in the lock, not just the first.
+    #[tokio::test]
+    async fn collect_roots_global_lock_with_two_tools_yields_two_digests() {
+        let dir = tempfile::tempdir().unwrap();
+        let ocx_home = dir.path().to_path_buf();
+
+        let lock_path = ocx_home.join("ocx.lock");
+        tokio::fs::write(&lock_path, LOCK_WITH_TWO_TOOLS).await.unwrap();
+        tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
+
+        let file_structure = FileStructure::with_root(ocx_home.clone());
+        let result = collect_project_roots(&ocx_home, &file_structure).await.unwrap();
+
+        let roots = match result {
+            CollectedRoots::Roots(roots) => roots,
+            CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
+        };
+
+        assert_eq!(roots.len(), 1, "one root entry (the global lock)");
+        let global_root = &roots[0];
+        // Both tool digests must be present.
+        assert_eq!(
+            global_root.digests.len(),
+            2,
+            "two-tool global lock must produce two digest roots; got: {:?}",
+            global_root.digests.iter().map(|p| p.to_string()).collect::<Vec<_>>()
+        );
+        let digest_strs: Vec<String> = global_root.digests.iter().map(|p| p.to_string()).collect();
+        assert!(
+            digest_strs.iter().any(|s| s.contains("sha256:aaaa0000")),
+            "cmake digest must be a GC root; got: {digest_strs:?}"
+        );
+        assert!(
+            digest_strs.iter().any(|s| s.contains("sha256:bbbb0000")),
+            "shfmt digest must be a GC root; got: {digest_strs:?}"
+        );
+    }
 }

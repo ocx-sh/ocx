@@ -459,6 +459,261 @@ def test_env_global_with_env_project_conflict(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 9. NEW CONTRACT: global env follows lock pin, NOT current symlink
+# ---------------------------------------------------------------------------
+
+
+def test_global_env_follows_lock_pin_not_current_symlink(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """``ocx --global env`` output follows the lock-pinned digest, not the
+    ``current`` symlink.
+
+    NEW CONTRACT (adr_global_toolchain_tier.md D5 amended 2026-05-19):
+    ``resolve_global_pinned_env`` reads ``$OCX_HOME/ocx.lock`` and resolves
+    each tool offline by its pinned digest.  The ``current`` symlink is a
+    SEPARATE install/uninstall/select-only abstraction; it is NOT consulted
+    by ``ocx --global env``.
+
+    Consequence: deleting (or repointing) the ``current`` symlink for a
+    globally-installed tool must NOT change ``ocx --global env`` output.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+
+    add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
+    assert add.returncode == EXIT_SUCCESS, (
+        f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
+    )
+
+    # Capture the baseline `ocx --global env --shell=sh` output.
+    env_before = _run_cmd(ocx, tmp_path, "--global", "env", "--shell=sh")
+    assert env_before.returncode == EXIT_SUCCESS, (
+        f"ocx --global env --shell=sh must succeed after add; "
+        f"rc={env_before.returncode}\nstderr:\n{env_before.stderr}"
+    )
+    assert "export" in env_before.stdout, (
+        f"env --global --shell=sh must emit export lines before symlink removal; "
+        f"got:\n{env_before.stdout!r}"
+    )
+    path_before = env_before.stdout
+
+    # Delete the `current` symlink for this tool so the install-symlink
+    # layer is gone — simulating a manual removal or a deselect step.
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    from src.runner import registry_dir
+    reg_slug = registry_dir(ocx.registry)
+    current_link = ocx_home / "symlinks" / reg_slug / unique_repo / "current"
+    if current_link.exists() or current_link.is_symlink():
+        current_link.unlink()
+
+    # `ocx --global env` must produce the SAME output as before — the lock pin
+    # is the authoritative source, not the `current` symlink.
+    env_after = _run_cmd(ocx, tmp_path, "--global", "env", "--shell=sh")
+    assert env_after.returncode == EXIT_SUCCESS, (
+        f"ocx --global env --shell=sh must still succeed after current-symlink "
+        f"removal; rc={env_after.returncode}\nstderr:\n{env_after.stderr}"
+    )
+    assert env_after.stdout == path_before, (
+        "ocx --global env output must be identical before and after removing the "
+        "`current` symlink (lock pin is authoritative, not the current symlink);\n"
+        f"  before: {path_before!r}\n"
+        f"  after:  {env_after.stdout!r}"
+    )
+
+
+def test_global_upgrade_takes_effect_without_select(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """``ocx --global upgrade`` re-pins the lock and ``ocx --global env``
+    reflects the new pin immediately — no ``select`` step required.
+
+    NEW CONTRACT (adr_global_toolchain_tier.md D5 amended 2026-05-19):
+    because ``resolve_global_pinned_env`` reads the lock directly, any
+    change to ``$OCX_HOME/ocx.lock`` (e.g. via ``--global upgrade`` or
+    ``--global add`` of a new tag) is reflected in the next
+    ``ocx --global env`` invocation without an intervening
+    ``ocx package select``.
+
+    Flow:
+    1. Push v1 under a rolling tag (``latest``, created by cascade).
+       ``add --global`` binds to ``latest`` → lock records v1 digest.
+    2. Push v2 with ``new=False`` (cascade overwrites ``latest`` with v2 digest).
+    3. ``upgrade --global`` re-resolves ``latest`` → new digest → lock re-pinned.
+    4. ``pull --global`` materialises the new content into the local blob store.
+       (``upgrade`` re-pins the lock but does not download blobs; ``pull`` does.)
+    5. ``ocx --global env --shell=sh`` must emit the v2 content/bin path with NO
+       ``ocx package select`` step — the proof that env reads the lock pin directly,
+       not the ``current`` symlink.
+    6. The v2 binary must be reachable (runs and prints its v2 marker).
+
+    Using a rolling tag (``latest``) is essential: a pinned version tag like
+    ``1.0.0`` always resolves to the same digest, so ``upgrade`` would find
+    nothing to advance.  ``latest`` spans both pushes; after step 2 it points
+    at v2, giving ``upgrade`` a real pin change to record.
+    """
+    bin_name = "gtool"
+
+    # Step 1: push v1 with cascade — creates ``latest`` pointing at v1.
+    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=[bin_name])
+    # Bind the global tier to ``latest`` (rolling tag), not the pinned ``1.0.0``.
+    fq_latest = f"{ocx.registry}/{unique_repo}:latest"
+    add_v1 = _run_cmd(ocx, tmp_path, "--global", "add", fq_latest)
+    assert add_v1.returncode == EXIT_SUCCESS, (
+        f"add --global latest must succeed; rc={add_v1.returncode}\nstderr:\n{add_v1.stderr}"
+    )
+
+    # Step 2: push v2 with cascade + new=False — overwrites ``latest`` with v2 digest.
+    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, bins=[bin_name])
+    assert v1.marker != v2.marker, "precondition: markers differ between versions"
+
+    # Step 3: upgrade the global toolchain.
+    # ``ocx --global upgrade`` re-resolves all tools in the global ocx.toml and
+    # rewrites ocx.lock with the new digests.  ``latest`` now resolves to the v2
+    # digest → lock is updated.  Note: upgrade re-pins the lock only; it does NOT
+    # download the new manifest blobs — that is pull's responsibility (step 4).
+    upgrade = _run_cmd(ocx, tmp_path, "--global", "upgrade")
+    assert upgrade.returncode == EXIT_SUCCESS, (
+        f"ocx --global upgrade must succeed; rc={upgrade.returncode}\n"
+        f"stderr:\n{upgrade.stderr}"
+    )
+
+    # Step 4: pull the new content into the local blob store so that the offline
+    # env resolver can find the v2 manifests.  No ``ocx package select`` call is
+    # made here or below — that is the contract under test (env reads the lock pin
+    # directly, not the ``current`` symlink).
+    pull = _run_cmd(ocx, tmp_path, "--global", "pull")
+    assert pull.returncode == EXIT_SUCCESS, (
+        f"ocx --global pull must succeed after upgrade; rc={pull.returncode}\n"
+        f"stderr:\n{pull.stderr}"
+    )
+
+    # Step 5: env output must reference the v2 content path.
+    env_result = _run_cmd(ocx, tmp_path, "--global", "env", "--shell=sh")
+    assert env_result.returncode == EXIT_SUCCESS, (
+        f"ocx --global env --shell=sh must succeed after upgrade; "
+        f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
+    )
+    assert "export" in env_result.stdout, (
+        f"env must emit export lines after upgrade; got:\n{env_result.stdout!r}"
+    )
+
+    # Step 6: source the export lines and run the tool; it must print the v2 marker.
+    shell_result = _source_env_sh_script(
+        ocx, tmp_path, env_result.stdout, f"command -v {bin_name} && {bin_name}"
+    )
+    assert shell_result.returncode == EXIT_SUCCESS, (
+        f"global tool must be reachable after --global upgrade with no select step; "
+        f"rc={shell_result.returncode}\n"
+        f"stdout:\n{shell_result.stdout}\nstderr:\n{shell_result.stderr}"
+    )
+    assert v2.marker in shell_result.stdout, (
+        f"v2 marker must appear after upgrade (proving lock was re-pinned to v2 digest); "
+        f"v2.marker={v2.marker!r}\nstdout:\n{shell_result.stdout!r}"
+    )
+
+
+def test_clean_keeps_global_lock_pinned_package(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """``ocx clean`` must NOT collect a package pinned by ``$OCX_HOME/ocx.lock``.
+
+    NEW CONTRACT (adr_global_toolchain_tier.md D5 amended 2026-05-19 +
+    clean.rs::collect_project_roots): the global lock is an implicit GC root.
+    ``collect_project_roots`` appends ``$OCX_HOME/ocx.lock`` to the root set
+    unconditionally; the global lock-pinned package must survive ``ocx clean``
+    even when no project-registry ledger entry points at it.
+
+    Flow:
+    1. ``ocx --global add`` installs the package and writes the global lock.
+    2. ``ocx package deselect`` removes the ``current`` symlink so no install
+       symlink protects the package from GC.
+    3. ``ocx clean --dry-run --format json`` must report the package as
+       HELD (in ``held_by``) and NOT as unreferenced.
+    4. ``ocx clean`` (real) must not delete the package directory.
+    """
+    import json as _json
+
+    bin_name = "gtool"
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=[bin_name])
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+
+    # Step 1: add to global toolchain — installs + writes lock + selects current.
+    add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
+    assert add.returncode == EXIT_SUCCESS, (
+        f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
+    )
+
+    # Locate the installed package's content directory via install JSON output.
+    install_info = _run_cmd(ocx, tmp_path, "--format", "json", "package", "install",
+                            "--select", fq)
+    assert install_info.returncode == EXIT_SUCCESS, (
+        f"package install --select must succeed to locate content dir; "
+        f"rc={install_info.returncode}\nstderr:\n{install_info.stderr}"
+    )
+    install_data = _json.loads(install_info.stdout)
+    # The JSON is keyed by the package short name; value has a "path" field.
+    short_key = next(iter(install_data))
+    content_path = Path(install_data[short_key]["path"]).resolve()
+    assert content_path.is_dir(), (
+        f"package content directory must exist after install; path={content_path}"
+    )
+
+    # Step 2: deselect (remove the `current` symlink) so install symlinks no
+    # longer protect the package.  The global lock remains.
+    deselect = _run_cmd(ocx, tmp_path, "package", "deselect", fq)
+    # deselect may exit 0 (removed) or 79 (already absent) — both acceptable.
+    assert deselect.returncode in (EXIT_SUCCESS, 79), (
+        f"package deselect must exit 0 or 79; "
+        f"rc={deselect.returncode}\nstderr:\n{deselect.stderr}"
+    )
+
+    # Step 3: dry-run clean from a directory without its own project (no
+    # project-level lock protects the package; only the global lock does).
+    no_project = tmp_path / "no_project"
+    no_project.mkdir(exist_ok=True)
+    dry_run_result = _run_cmd(
+        ocx, no_project,
+        "--format", "json", "clean", "--dry-run",
+        extra_env={"OCX_NO_PROJECT": "1"},
+    )
+    assert dry_run_result.returncode == EXIT_SUCCESS, (
+        f"ocx clean --dry-run must succeed; "
+        f"rc={dry_run_result.returncode}\nstderr:\n{dry_run_result.stderr}"
+    )
+
+    # The global lock-pinned package must appear in held_by (not unreferenced).
+    entries = _json.loads(dry_run_result.stdout)
+    object_entries = [e for e in entries if e.get("kind") == "object"]
+    # Unreferenced entries (would-be-collected) have an empty held_by.
+    unreferenced_paths = {e["path"] for e in object_entries if not e.get("held_by")}
+    assert str(content_path) not in unreferenced_paths, (
+        f"global lock-pinned package must NOT appear as unreferenced in dry-run "
+        f"output; content_path={content_path}\n"
+        f"unreferenced={unreferenced_paths}"
+    )
+
+    # Step 4: real clean must not delete the package.
+    real_clean = _run_cmd(
+        ocx, no_project, "clean",
+        extra_env={"OCX_NO_PROJECT": "1"},
+    )
+    assert real_clean.returncode == EXIT_SUCCESS, (
+        f"ocx clean (real) must succeed; "
+        f"rc={real_clean.returncode}\nstderr:\n{real_clean.stderr}"
+    )
+    assert content_path.is_dir(), (
+        f"global lock-pinned package must survive ocx clean; "
+        f"content_path={content_path}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10. (original 8) No self-link for global file
+# ---------------------------------------------------------------------------
+
+
 def test_no_self_link_for_global_file(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
