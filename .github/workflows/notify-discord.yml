@@ -8,7 +8,18 @@ on:
     types: [published]
 
   workflow_run:
-    workflows: ["Basic Verification", "License Compliance", "Deploy Canary", "Deploy Website", "Deploy Dev"]
+    workflows:
+      - "Basic Verification"
+      - "Verify Deep"
+      - "License Compliance"
+      - "Deploy Website"
+      - "Deploy Dev"
+      - "Build Windows Shims"
+      - "OCI Publish"
+      - "Release"
+      - "Test Install Scripts"
+      - "Verify Version"
+      - "Notify Test"
     types: [completed]
 
   deployment_status:
@@ -34,7 +45,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'release' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure') ||
+      (github.event_name == 'workflow_run' && (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'timed_out')) ||
       (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success')
     env:
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -89,7 +100,7 @@ jobs:
 
       # --- Workflow failure ---
       - name: Workflow failed
-        if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' && env.DISCORD_WEBHOOK != ''
+        if: github.event_name == 'workflow_run' && (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'timed_out') && env.DISCORD_WEBHOOK != ''
         uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
