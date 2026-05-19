@@ -115,10 +115,13 @@ jobs:
       # byte-reproducible only against a fixed (rustc, zig) pair, so the Zig
       # version is part of the reproducibility contract — bump deliberately
       # in a blob-refresh PR (see adr_shim_hermetic_zigbuild.md).
+      # Stable release, NOT a dev build: ziglang.org only hosts dev builds
+      # transiently (they 404 within weeks), which would break the
+      # reproducibility contract. Stable tarballs are permanent.
       - name: Setup Zig
         uses: mlugg/setup-zig@a67e68dc5c8281d9608136d3d7ca1b282213e4ac # v2.0.5
         with:
-          version: 0.16.0-dev.2670+56253d9e3
+          version: 0.14.1
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
         with:
@@ -136,6 +139,18 @@ jobs:
           committed="crates/ocx_lib/src/shims/ocx-shim-${arch}.exe"
           echo "built=${built}" >> "$GITHUB_OUTPUT"
           echo "committed=${committed}" >> "$GITHUB_OUTPUT"
+
+      # Canonical hermetic bytes, uploaded BEFORE the byte-equality gate and
+      # even if it fails: this is the authoritative source for the blob-refresh
+      # PR flow (a dev machine cannot necessarily install the pinned Zig).
+      - name: Upload freshly built blob (refresh source)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocx-shim-fresh-${{ matrix.target }}
+          path: ${{ steps.paths.outputs.built }}
+          compression-level: 0
+          retention-days: 1
 
       # Reproducible-rebuild byte-equality: the actual drift control (the
       # SHIM_SHA256 unit test is only a corruption canary). The freshly built
