@@ -183,7 +183,7 @@ function Create-EnvFile {
 # Sourced by your PowerShell profile to add OCX to PATH and enable completions.
 # Manual changes will be overwritten on reinstall.
 $_OcxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { Join-Path $env:USERPROFILE '.ocx' }
-$_OcxBin = Join-Path $_OcxHome 'symlinks\ocx.sh\ocx\current\bin'
+$_OcxBin = Join-Path $_OcxHome 'symlinks\ocx.sh\ocx\cli\current\bin'
 if ($env:PATH -notlike "*$_OcxBin*") {
     $env:PATH = "$_OcxBin;$env:PATH"
 }
@@ -308,7 +308,7 @@ function Main {
 
     # Detect existing installation for upgrade messaging
     $oldVersion = ''
-    $existingBin = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\current\bin\ocx.exe'
+    $existingBin = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\bin\ocx.exe'
     if (Test-Path $existingBin) {
         try { $oldVersion = & $existingBin version 2>$null } catch {}
     }
@@ -383,11 +383,11 @@ function Main {
 
         # Bootstrap: OCX installs itself into its own package store
         Say 'Bootstrapping OCX into its own package store...'
-        & $bin --remote install --select "ocx.sh/ocx:$requestedVersion"
+        & $bin --remote install --select "ocx.sh/ocx/cli:$requestedVersion"
         if ($LASTEXITCODE -ne 0) {
-            Err "Bootstrap failed: 'ocx --remote install --select ocx.sh/ocx:$requestedVersion'`nEnsure ocx v$requestedVersion is published to the ocx.sh registry."
+            Err "Bootstrap failed: 'ocx --remote install --select ocx.sh/ocx/cli:$requestedVersion'`nEnsure ocx v$requestedVersion is published to the ocx.sh registry."
         }
-        $installDir = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\current\bin'
+        $installDir = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\bin'
         Say "Installed to $installDir\ocx.exe"
 
         # Create environment file
@@ -413,7 +413,7 @@ function Main {
 
         # Export GitHub Actions path if in CI
         if ($env:GITHUB_PATH) {
-            $ghBinPath = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\current\bin'
+            $ghBinPath = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\bin'
             try {
                 Add-Content -Path $env:GITHUB_PATH -Value $ghBinPath
             }

@@ -77,7 +77,7 @@ includes:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:
       PACKAGE: ocx
-      REPO: ocx.sh/ocx
+      REPO: ocx.sh/ocx/cli
   oras:
     taskfile: ../mirrors/mirror.taskfile.yml
     vars:

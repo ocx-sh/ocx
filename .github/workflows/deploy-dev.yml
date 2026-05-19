@@ -40,7 +40,7 @@ jobs:
         uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
         with:
           tool: git-cliff
-      - name: Compute next version and timestamp
+      - name: Compute next version
         id: cliff
         shell: bash
         run: |
@@ -51,9 +51,10 @@ jobs:
             echo "::error::git-cliff --bumped-version returned empty output; no commits since last tag — refusing to publish a dev build"
             exit 1
           fi
-          ts="$(date -u +%Y%m%d%H%M%S)"
-          echo "version=${version}"                         | tee -a "$GITHUB_OUTPUT"
-          echo "version_tag=${version}-dev_${ts}"           | tee -a "$GITHUB_OUTPUT"
+          # The UTC build-metadata segment is appended by oci-publish.yml via
+          # `ocx package push --build-timestamp` (build_timestamp: true).
+          echo "version=${version}"              | tee -a "$GITHUB_OUTPUT"
+          echo "version_tag=${version}-dev"      | tee -a "$GITHUB_OUTPUT"
 
   build-linux:
     name: Build (${{ matrix.target }})
@@ -159,6 +160,7 @@ jobs:
       variants: '["","mirror"]'
       targets: '["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-apple-darwin","aarch64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]'
       environment: dev.ocx.sh
+      build_timestamp: true
     secrets:
       REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

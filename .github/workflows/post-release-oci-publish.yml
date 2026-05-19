@@ -42,6 +42,9 @@ jobs:
       targets: '["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-apple-darwin","aarch64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]'
       environment: ocx.sh
       artifact_source: cargo-dist
+      # Release builds publish an immutable X.Y.Z_<TS> tag; --cascade still
+      # derives the rolling X.Y.Z / X.Y / X / latest tags users install.
+      build_timestamp: true
     secrets:
       REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

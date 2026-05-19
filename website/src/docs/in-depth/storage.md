@@ -147,6 +147,10 @@ If a file in your current directory is literally named like a digest reference (
 Layer reuse is most valuable when many packages share a large common base — a runtime library, a vendored toolchain, or a fixed dataset. Push the base once, record its digest, and reference it from every dependent package's push command. The registry stores it once; OCX downloads it once; every package gets a fresh `content/` view assembled from the same shared layer.
 :::
 
+::: warning Layer reuse is per-repository
+Reusing a layer by digest works only when that blob already lives in the **target repository**. OCX does not mount blobs across repositories, and an OCI registry does not share them implicitly: the same layer used by two repositories — say `ocx/cli` and `ocx/mirror` — is two separate uploads unless you push it to each, or [cross-mount it][oci-blob-mount] explicitly. Dedup is automatic *within* a repository and in the local [package store][fs-packages] — never *across* registry repositories.
+:::
+
 ## Tags {#tags}
 
 When you run `ocx install cmake:3.28`, how does OCX know which binary to fetch? It looks up the tag `3.28` in the local tag store and finds the corresponding <Tooltip term="digest">The content fingerprint stored in the OCI registry manifest. A tag like `3.28` is just a human-readable alias; the digest is the canonical, immutable identifier that pinpoints the exact binary build behind that tag at index-update time.</Tooltip>. The tag store is a local copy of that mapping — no network required.
@@ -220,6 +224,7 @@ Two symlink entries cover every use case. Both target the **package root** (`pac
 [pnpm]: https://pnpm.io/motivation#saving-disk-space
 [sdkman]: https://sdkman.io/
 [homebrew]: https://brew.sh/
+[oci-blob-mount]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#mounting-a-blob-from-another-repository
 
 <!-- commands -->
 [cmd-install]: ../reference/command-line.md#install
@@ -240,6 +245,7 @@ Two symlink entries cover every use case. Both target the **package root** (`pac
 [metadata-entry-points]: ../reference/metadata.md#entry-points
 
 <!-- internal -->
+[fs-packages]: #packages
 [user-storage]: ../user-guide.md#storage
 [in-depth-indices]: ./indices.md
 [in-depth-entry-points]: ./entry-points.md

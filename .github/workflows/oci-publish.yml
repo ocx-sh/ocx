@@ -19,7 +19,8 @@ on:
         required: true
         type: string
       repo:
-        description: Repository name within the registry (typically `ocx`).
+        description: First-party namespace within the registry (typically `ocx`).
+          Default variant publishes to `<repo>/cli`; named variants to `<repo>/<variant>`.
         required: true
         type: string
       version_tag:
@@ -43,6 +44,14 @@ on:
         required: false
         type: string
         default: bare
+      build_timestamp:
+        description: Append a UTC `_YYYYMMDDhhmmss` build-metadata segment to the
+          published tag via `ocx package push --build-timestamp`. Standard for
+          every build-producing publish (dev and release) — `--cascade` still
+          derives the rolling X.Y.Z / X.Y / X / latest tags users install.
+        required: false
+        type: boolean
+        default: false
     secrets:
       REGISTRY_USER:
         required: true
@@ -140,6 +149,7 @@ jobs:
           VERSION_TAG: ${{ inputs.version_tag }}
           VARIANTS_JSON: ${{ inputs.variants }}
           TARGETS_JSON: ${{ inputs.targets }}
+          BUILD_TIMESTAMP: ${{ inputs.build_timestamp }}
           OCX_AUTH_REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           OCX_AUTH_REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
@@ -177,19 +187,28 @@ jobs:
 
           METADATA="packaging/ocx/metadata.json"
 
+          # Build-producing publishes (dev + release) append a UTC
+          # build-metadata segment via the canonical flag; --cascade still
+          # derives the rolling X.Y.Z / X.Y / X / latest tags.
+          BT_ARGS=()
+          if [[ "${BUILD_TIMESTAMP}" == "true" ]]; then
+            BT_ARGS+=(--build-timestamp)
+          fi
+
           # variants is a JSON array of strings; iterate.
           mapfile -t VARIANTS < <(echo "${VARIANTS_JSON}" | jq -r '.[]')
           mapfile -t TARGETS  < <(echo "${TARGETS_JSON}"  | jq -r '.[]')
 
           for variant in "${VARIANTS[@]}"; do
-            # Empty string variant = default (binary "ocx", no tag prefix).
-            # Non-empty variant = e.g. "mirror" -> binary "ocx-mirror", tag "mirror-<version>".
+            # Empty string variant = default (binary "ocx") -> repo "<ns>/cli".
+            # Non-empty variant = e.g. "mirror" -> binary "ocx-mirror" -> repo "<ns>/mirror".
+            # First-party tools live under the "<ns>/" namespace; plain X.Y.Z tags.
             if [[ -z "$variant" ]]; then
               bin_stem="ocx"
-              tag_prefix=""
+              repo_path="${REPO}/cli"
             else
               bin_stem="ocx-${variant}"
-              tag_prefix="${variant}-"
+              repo_path="${REPO}/${variant}"
             fi
 
             for target in "${TARGETS[@]}"; do
@@ -217,7 +236,7 @@ jobs:
                 -o "$ARCHIVE" \
                 -p "$platform"
 
-              identifier="${REGISTRY}/${REPO}:${tag_prefix}${VERSION_TAG}"
+              identifier="${REGISTRY}/${repo_path}:${VERSION_TAG}"
               echo "==> Publishing ${identifier} (${platform})"
               ocx package push \
                 --identifier "${identifier}" \
@@ -225,6 +244,7 @@ jobs:
                 --cascade \
                 --new \
                 --metadata "${METADATA}" \
+                "${BT_ARGS[@]}" \
                 "$ARCHIVE"
 
               rm -rf "$WORK"

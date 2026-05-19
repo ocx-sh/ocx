@@ -69,6 +69,14 @@ For *build flavor* — debug, PGO, slim — use a [variant prefix][in-depth-vers
 [Storage In Depth → Symlinks][in-depth-storage-symlinks] — why `current` is floating, the SDKMAN/Homebrew/`update-alternatives` analogy.
 :::
 
+### Namespaces {#namespaces}
+
+The repository half of an [identifier][oci-identifier] is a path, not a single word — `registry/namespace…/name`. OCX uses this to separate what it ships from what it mirrors.
+
+Mirrored upstream tools sit at the registry root under their common name: `cmake`, `shellcheck`, `uv`. OCX's own first-party binaries live under the reserved `ocx/` namespace — the CLI is `ocx/cli`, the mirror tool is `ocx/mirror`. The namespace *is* the provenance: a root name is an upstream tool OCX repackaged; an `ocx/` name is OCX itself.
+
+Slash-nested names are ordinary OCI repositories — `ocx install ocx/mirror:1` resolves exactly like `ocx install cmake:3.28`. Anyone publishing to their own registry can group packages the same way; the convention is OCX's, the mechanism is the registry's.
+
 ## Embed a stable path in your IDE or shell {#stable-paths}
 
 Package-store paths are content-addressed and change on every upgrade — never embed them directly in an IDE config or shell profile. Embed a [symlink][in-depth-storage-symlinks] instead. Three modes cover every case:

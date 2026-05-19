@@ -318,8 +318,8 @@ create_env_file() {
 # Sourced by your shell profile to add OCX to PATH and enable completions.
 # Manual changes will be overwritten on reinstall.
 _ocx_home="${OCX_HOME:-$HOME/.ocx}"
-export PATH="${_ocx_home}/symlinks/ocx.sh/ocx/current/bin:$PATH"
-_ocx_bin="${_ocx_home}/symlinks/ocx.sh/ocx/current/bin/ocx"
+export PATH="${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/bin:$PATH"
+_ocx_bin="${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/bin/ocx"
 if [ -x "$_ocx_bin" ]; then
   eval "$("$_ocx_bin" --offline shell profile load 2>/dev/null)" 2>/dev/null || true
   eval "$("$_ocx_bin" --offline shell completion 2>/dev/null)" 2>/dev/null || true
@@ -339,8 +339,8 @@ create_fish_config() {
 # Guarded so that deleting $OCX_HOME does not error on every new fish session.
 set -l _ocx_home (set -q OCX_HOME; and echo $OCX_HOME; or echo $HOME/.ocx)
 if test -d "$_ocx_home"
-  fish_add_path --path "$_ocx_home/symlinks/ocx.sh/ocx/current/bin"
-  set -l _ocx_bin "$_ocx_home/symlinks/ocx.sh/ocx/current/bin/ocx"
+  fish_add_path --path "$_ocx_home/symlinks/ocx.sh/ocx/cli/current/bin"
+  set -l _ocx_bin "$_ocx_home/symlinks/ocx.sh/ocx/cli/current/bin/ocx"
   if test -x "$_ocx_bin"
     "$_ocx_bin" --offline shell profile load --shell fish 2>/dev/null | source
     "$_ocx_bin" --offline shell completion --shell fish 2>/dev/null | source
@@ -429,8 +429,8 @@ bootstrap_ocx() {
     local _bin="$1" _version="$2"
 
     say "Bootstrapping OCX into its own package store..."
-    if ! "$_bin" --remote install --select "ocx.sh/ocx:$_version"; then
-        err "bootstrap failed: 'ocx --remote install --select ocx.sh/ocx:$_version'
+    if ! "$_bin" --remote install --select "ocx.sh/ocx/cli:$_version"; then
+        err "bootstrap failed: 'ocx --remote install --select ocx.sh/ocx/cli:$_version'
   Ensure ocx v${_version} is published to the ocx.sh registry.
   If this is a first install and the registry is not yet populated,
   please wait for the release pipeline to complete."
@@ -545,7 +545,7 @@ main() {
 
     # Detect existing installation for upgrade messaging
     _old_version=""
-    _bin_path="${_ocx_home}/symlinks/ocx.sh/ocx/current/bin/ocx"
+    _bin_path="${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/bin/ocx"
     if [ -x "$_bin_path" ]; then
         _old_version=$("$_bin_path" version 2>/dev/null || echo "")
     fi
@@ -611,7 +611,7 @@ main() {
 
     # Bootstrap: OCX installs itself into its own package store
     bootstrap_ocx "$_bin" "$_version"
-    say "Installed to $(tildify "${_ocx_home}/symlinks/ocx.sh/ocx/current/bin/ocx")"
+    say "Installed to $(tildify "${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/bin/ocx")"
 
     # Create shell environment files
     create_env_file
@@ -636,7 +636,7 @@ main() {
 
 # Export the OCX bin directory to GITHUB_PATH for GitHub Actions.
 export_github_path() {
-    local _install_path="${OCX_HOME:-$HOME/.ocx}/symlinks/ocx.sh/ocx/current/bin"
+    local _install_path="${OCX_HOME:-$HOME/.ocx}/symlinks/ocx.sh/ocx/cli/current/bin"
     if [ -n "${GITHUB_PATH:-}" ]; then
         printf '%s\n' "$_install_path" >>"$GITHUB_PATH" ||
             warn "failed to write to \$GITHUB_PATH"
