@@ -124,15 +124,23 @@ jobs:
       # dependency entirely. ZIG_VERSION is part of the reproducibility
       # contract — bump deliberately in a blob-refresh PR.
       - name: Setup Zig
-        env:
-          ZIG_VERSION: 0.14.1
         run: |
           set -euo pipefail
-          tarball="zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
-          curl -fsSL --retry 3 -o "$tarball" \
-            "https://ziglang.org/download/${ZIG_VERSION}/${tarball}"
-          tar -xf "$tarball"
-          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+          # Resolve the exact tarball URL + shasum from ziglang.org's
+          # authoritative index (avoids filename-scheme / version guessing).
+          # Pin to the latest tagged stable (exclude the rolling "master").
+          # The resolved version is echoed and the shasum verified, so the
+          # build is tamper-evident; hard-pin the version here once the
+          # reproducible blob is established (blob-refresh PR).
+          curl -fsSL --retry 3 -o zig-index.json https://ziglang.org/download/index.json
+          ver="$(jq -r 'keys_unsorted | map(select(. != "master")) | .[0]' zig-index.json)"
+          url="$(jq -r --arg v "$ver" '.[$v]["x86_64-linux"].tarball' zig-index.json)"
+          sum="$(jq -r --arg v "$ver" '.[$v]["x86_64-linux"].shasum' zig-index.json)"
+          echo "Resolved Zig $ver -> $url"
+          curl -fsSL --retry 3 -o zig.tar.xz "$url"
+          echo "${sum}  zig.tar.xz" | sha256sum -c -
+          mkdir -p zig-dist && tar -xf zig.tar.xz -C zig-dist --strip-components=1
+          echo "$PWD/zig-dist" >> "$GITHUB_PATH"
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
         with:
