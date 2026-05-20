@@ -148,23 +148,20 @@ impl Add {
         let commit = guard.commit(staged, new_lock.clone()).await?;
         let _ = commit;
 
-        // Best-effort install AFTER the commit lands. A failure here
-        // does not roll back the manifest/lock — the binding is
-        // declaratively present even if the install retry is needed.
+        // Best-effort pull AFTER the commit lands. A failure here does
+        // not roll back the manifest/lock — the binding is declaratively
+        // present even if the pull needs a retry.
         //
-        // In the **global tier only**, also set the `current` selection
-        // for the added tool. The offline login exporter
-        // (`ocx --global env`, ADR `adr_global_toolchain_tier.md` D5)
-        // resolves the global toolchain through `find_symlink(Current)`,
-        // so without this the tool stays invisible until a manual
-        // `ocx package select`. The signed handshake §1 contract is
-        // "global IS the project toolchain — the only difference is the
-        // load site"; project-tier `add` needs no separate select, so
-        // global-tier `add` must not either. This reuses the exact
-        // `wire_selection` path `ocx package select` uses (the `select`
-        // flag on `install_all`) — no hand-rolled symlink writes.
-        // Project tier (no `--global`) keeps `select=false`: project
-        // resolution goes through the lock, never `current`.
+        // Symbol-free by design: `materialize_lock` warms the object
+        // store via `pull_all`, never `install_all`. The signed
+        // handshake §1 contract — "global IS the project toolchain, only
+        // difference is the load site" — combined with ADR D5
+        // (amended 2026-05-19, env = lock-pinned digest, current symlink
+        // demoted to IDE-anchor abstraction not consulted by env) means
+        // neither tier needs a candidate or `current` symlink to make
+        // the added tool resolvable. Users that want a per-repo stable
+        // anchor invoke `ocx package install` / `ocx package select`
+        // explicitly.
         //
         // `--no-pull` opts out: lock write happens regardless; only the
         // object-store materialization is deferred.

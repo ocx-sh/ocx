@@ -289,19 +289,34 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
 }
 
 /// Materialize all bindings from `lock` into the object store via
-/// `PackageManager::install_all`. Matches `ocx add` install semantics:
-/// `candidate=true`, `select=context.global()`.
+/// `PackageManager::pull_all`. Pure object-store warming: pulls blobs and
+/// assembles package content, never touches the `symlinks/` namespace.
+///
+/// Toolchain-tier commands (`add`, `lock`, `upgrade`) declare bindings in
+/// `ocx.toml` + `ocx.lock`; resolution at use-time goes through the lock
+/// (project tier) or `resolve_global_pinned_env` (global tier, ADR D5
+/// amended 2026-05-19). Neither path consults candidate or `current`
+/// symlinks, so creating them here would only produce a second, redundant
+/// GC root and conflate the OCI-tier `ocx package install` abstraction
+/// with the toolchain-tier mutator semantics. Users that want a stable
+/// per-repo anchor invoke `ocx package install` / `ocx package select`
+/// explicitly.
 ///
 /// When `eager` is `false`, returns immediately without contacting the
 /// manager. This is the no-op path used by `--no-pull` callers.
 ///
 /// Failures here do NOT roll back the manifest/lock — the binding is
-/// declaratively present even if the install needs a retry. Matches
-/// the established `add.rs` semantics.
+/// declaratively present even if the pull needs a retry. Matches the
+/// established `add.rs` semantics.
+///
+/// `--offline` is honoured transitively: `pull_all` calls
+/// `manager.require_client()` for every cache-miss layer, returning
+/// `Error::OfflineMode` (→ exit code `OfflineBlocked`) before any
+/// filesystem mutation.
 ///
 /// # Errors
 ///
-/// Propagates errors from `PackageManager::install_all` when `eager` is
+/// Propagates errors from `PackageManager::pull_all` when `eager` is
 /// `true`.
 pub async fn materialize_lock(
     context: &crate::app::Context,
@@ -314,11 +329,9 @@ pub async fn materialize_lock(
     let identifiers: Vec<ocx_lib::oci::Identifier> = lock.tools.iter().map(|t| t.pinned.clone().into()).collect();
     context
         .manager()
-        .install_all(
-            identifiers,
+        .pull_all(
+            &identifiers,
             crate::conventions::platforms_or_default(&[]),
-            /* candidate */ true,
-            /* select   */ context.global(),
             context.concurrency(),
         )
         .await?;

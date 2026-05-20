@@ -174,7 +174,13 @@ alpha = "{ocx.registry}/{repo_installed}:{tag_installed}"
 beta = "{ocx.registry}/{repo_missing}:{tag_missing}"
 """,
     )
-    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+    # ``lock --no-pull`` keeps the object store empty so we can hand-pick
+    # which tool is materialised. Eager-default lock now uses ``pull_all``
+    # (no candidate symlinks; project_context.rs::materialize_lock), so
+    # under bare ``lock`` BOTH tools would be pre-warmed and ``find_plain``
+    # would resolve ``beta`` — defeating the "only one pulled" precondition
+    # this test asserts.
+    assert _run_lock(ocx, project, "--no-pull").returncode == EXIT_SUCCESS
     assert (
         _run(ocx, project, "package", "pull", f"{ocx.registry}/{repo_installed}:{tag_installed}").returncode
         == EXIT_SUCCESS

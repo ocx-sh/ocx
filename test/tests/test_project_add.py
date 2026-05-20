@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
-from src.assertions import assert_symlink_exists, assert_not_exists
+from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
@@ -53,11 +53,27 @@ def _candidate_path(ocx: OcxRunner, repo: str, tag: str) -> Path:
     )
 
 
+def _packages_present_count(ocx: OcxRunner) -> int:
+    """Count distinct ``content/`` directories under
+    ``$OCX_HOME/packages/{registry_dir}/`` — the object-store observable for
+    eager-vs-lazy materialization. Toolchain mutators (`add`/`lock`/`upgrade`)
+    pull blobs and assemble package content but never create candidate or
+    `current` symlinks under the new model (see
+    ``project_context.rs::materialize_lock``), so package count is the only
+    public signal that distinguishes ``--pull`` from ``--no-pull``.
+    """
+    base = Path(ocx.ocx_home) / "packages" / registry_dir(ocx.registry)
+    if not base.exists():
+        return 0
+    return sum(1 for p in base.rglob("content") if p.is_dir())
+
+
 def test_add_appends_to_tools_table(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx add <pkg>`` appends to ``[tools]``, updates ``ocx.lock``, and
-    installs the package (candidate symlink present).
+    pre-warms the object store. No candidate symlink under the new
+    toolchain-mutator model — resolution goes through ``ocx.lock``.
 
     Spec: Unit 7 §2 bullet 1.
     """
@@ -81,8 +97,11 @@ def test_add_appends_to_tools_table(
 
     assert (project_dir / "ocx.lock").exists(), "ocx.lock must exist after ocx add"
 
+    assert _packages_present_count(ocx) >= 1, (
+        "eager ocx add must materialize the package into the object store"
+    )
     candidate = _candidate_path(ocx, repo, "1.0.0")
-    assert_symlink_exists(candidate)
+    assert_not_exists(candidate)
 
 
 def test_add_to_named_group_via_flag(
@@ -118,8 +137,11 @@ def test_add_to_named_group_via_flag(
 
     assert (project_dir / "ocx.lock").exists(), "ocx.lock must exist after ocx add --group"
 
+    assert _packages_present_count(ocx) >= 1, (
+        "eager ocx add --group must materialize the package into the object store"
+    )
     candidate = _candidate_path(ocx, repo, "2.0.0")
-    assert_symlink_exists(candidate)
+    assert_not_exists(candidate)
 
 
 def test_add_rejects_existing_binding(
@@ -293,16 +315,23 @@ def test_add_rejects_path_traversal_group_name(
 # ---------------------------------------------------------------------------
 
 
-def test_add_eager_default_creates_candidate_symlink_regression_guard(
+def test_add_eager_default_warms_object_store_without_symlinks(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """REGRESSION GUARD: ``ocx add tool:tag`` (no flags) still creates the
-    candidate symlink. Locks in the eager default to prevent a future
-    misrouting of the default branch to no-pull.
+    """REGRESSION GUARD: ``ocx add tool:tag`` (no flags) pre-warms the object
+    store but creates **no** candidate or `current` symlink.
 
-    This test is expected to PASS against the current implementation
-    (``add.rs`` already installs via ``install_all`` unconditionally). It
-    exists to catch any future refactor that accidentally breaks the default.
+    Locks in the new toolchain-mutator invariant:
+    ``project_context.rs::materialize_lock`` calls ``pull_all`` (not
+    ``install_all``). Project-tier resolution flows through ``ocx.lock``,
+    not symlinks, so candidate creation here would only produce a second,
+    redundant GC root — see commit fix(cli) after 066b50b9.
+
+    Two assertions wear two hats:
+
+    - Object-store content present → the eager default still materialized.
+    - Candidate symlink absent → the OCI-tier ``install`` shape is NOT
+      smuggled in via the toolchain-tier mutator.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_eager_guard"
@@ -317,18 +346,21 @@ def test_add_eager_default_creates_candidate_symlink_regression_guard(
         f"ocx add failed: rc={result.returncode}, stderr={result.stderr!r}"
     )
 
+    assert _packages_present_count(ocx) >= 1, (
+        "eager ocx add must materialize the package into the object store"
+    )
     candidate = _candidate_path(ocx, repo, "1.0.0")
-    assert_symlink_exists(candidate)
+    assert_not_exists(candidate)
 
 
 def test_add_no_pull_skips_install(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx add --no-pull tool:tag`` must write the binding + lock but NOT
-    create the candidate symlink.
+    """``ocx add --no-pull tool:tag`` must write the binding + lock and leave
+    the object store cold. No candidate symlink (eager doesn't create one
+    either under the new model).
 
-    Plan Phase-5 Step 3.4 contract. This test will FAIL against the current
-    stub because ``add.rs`` does not yet consult ``self.no_pull``.
+    Plan Phase-5 Step 3.4 contract.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_nopull"
@@ -351,7 +383,11 @@ def test_add_no_pull_skips_install(
     assert (project_dir / "ocx.lock").exists(), (
         "ocx.lock must exist after ocx add --no-pull"
     )
-    # Candidate symlink must NOT exist.
+    # Object store must stay cold — the only observable that distinguishes
+    # --no-pull from eager under the no-symlink mutator model.
+    assert _packages_present_count(ocx) == 0, (
+        "ocx add --no-pull must not materialize the package into the object store"
+    )
     candidate = _candidate_path(ocx, repo, "1.0.0")
     assert_not_exists(candidate)
 
@@ -377,6 +413,9 @@ def test_add_pull_then_no_pull_last_wins_no_install(
         f"ocx add --pull --no-pull failed: rc={result.returncode}, stderr={result.stderr!r}"
     )
 
+    assert _packages_present_count(ocx) == 0, (
+        "--no-pull must win: object store stays cold"
+    )
     candidate = _candidate_path(ocx, repo, "1.0.0")
     assert_not_exists(candidate)
 
@@ -385,7 +424,7 @@ def test_add_no_pull_then_pull_last_wins_installs(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx add --no-pull --pull tool:tag`` → ``--pull`` wins (POSIX
-    last-wins); candidate symlink MUST exist.
+    last-wins); object store warms, candidate symlink remains absent.
 
     Plan Phase-5 Step 3.4 last-wins contract.
     """
@@ -402,5 +441,8 @@ def test_add_no_pull_then_pull_last_wins_installs(
         f"ocx add --no-pull --pull failed: rc={result.returncode}, stderr={result.stderr!r}"
     )
 
+    assert _packages_present_count(ocx) >= 1, (
+        "--pull must win: object store warms"
+    )
     candidate = _candidate_path(ocx, repo, "1.0.0")
-    assert_symlink_exists(candidate)
+    assert_not_exists(candidate)

@@ -24,7 +24,7 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
-from src.assertions import assert_not_exists, assert_symlink_exists
+from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
@@ -419,6 +419,18 @@ def _candidate_path(ocx: OcxRunner, repo: str, tag: str) -> Path:
     )
 
 
+def _packages_present_count(ocx: OcxRunner) -> int:
+    """Count ``content/`` directories under
+    ``$OCX_HOME/packages/{registry_dir}/`` — eager-vs-lazy observable for
+    toolchain mutators (``project_context.rs::materialize_lock`` warms via
+    ``pull_all``, never creates symlinks).
+    """
+    base = Path(ocx.ocx_home) / "packages" / registry_dir(ocx.registry)
+    if not base.exists():
+        return 0
+    return sum(1 for p in base.rglob("content") if p.is_dir())
+
+
 def _two_tag_project(
     ocx: OcxRunner, tmp_path: Path
 ) -> tuple[Path, str, str, str]:
@@ -444,10 +456,13 @@ def _two_tag_project(
 tool = "{ocx.registry}/{repo}:{tag_v1}"
 """,
     )
-    # Write the initial lock so upgrade has a predecessor.  Use --no-pull so
-    # the setup step does not materialise candidate symlinks — the eager-pull
-    # default would otherwise install tag_v1, invalidating assertions that
-    # check for the absence of candidate paths after --no-pull / --check runs.
+    # Write the initial lock so upgrade has a predecessor.  Use --no-pull
+    # so the setup step leaves the object store cold; otherwise tag_v1
+    # would already be present and `_packages_present_count >= 1` would
+    # fire trivially, hiding whether the eager-default upgrade actually
+    # materialised tag_v2 (the cold-store baseline is the eager-vs-lazy
+    # observable now that candidate symlinks are no longer created by
+    # toolchain mutators).
     initial = _run_lock(ocx, project, "--no-pull")
     assert initial.returncode == EXIT_SUCCESS, initial.stderr
 
@@ -457,11 +472,13 @@ tool = "{ocx.registry}/{repo}:{tag_v1}"
 def test_upgrade_eager_default_materializes_new_digest(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx upgrade`` (no flags) after bumping the toml to a new tag must
-    write the lock AND create the candidate symlink for the new tag.
+    """REGRESSION GUARD: ``ocx upgrade`` (no flags) after bumping the toml to
+    a new tag writes the lock AND pre-warms the object store with the new
+    tag, but creates **no** candidate symlink.
 
-    Plan Phase-5 Step 3.3 contract: default is eager. This test will FAIL
-    against the stub because ``materialize_lock`` is ``unimplemented!()``.
+    Plan Phase-5 Step 3.3 contract: default is eager. The candidate-absent
+    half locks in the no-symlink mutator invariant
+    (``project_context.rs::materialize_lock`` → ``pull_all``).
     """
     project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
 
@@ -478,15 +495,19 @@ tool = "{ocx.registry}/{repo}:{tag_v2}"
         f"ocx upgrade failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
 
+    assert _packages_present_count(ocx) >= 1, (
+        "eager ocx upgrade must pre-warm the new digest into the object store"
+    )
     candidate = _candidate_path(ocx, repo, tag_v2)
-    assert_symlink_exists(candidate)
+    assert_not_exists(candidate)
 
 
 def test_upgrade_no_pull_skips_install(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx upgrade --no-pull`` writes the lock but must NOT create the
-    candidate symlink. Materialization deferred to ``ocx pull`` / first run.
+    """``ocx upgrade --no-pull`` writes the lock and leaves the object store
+    cold. No candidate symlink under either eager or lazy paths anymore;
+    cold-store is the only eager-vs-lazy observable.
 
     Plan Phase-5 Step 3.3 contract.
     """
@@ -505,6 +526,9 @@ tool = "{ocx.registry}/{repo}:{tag_v2}"
     )
     assert (project / "ocx.lock").is_file(), "ocx.lock must be written even with --no-pull"
 
+    assert _packages_present_count(ocx) == 0, (
+        "ocx upgrade --no-pull must leave the object store cold"
+    )
     candidate = _candidate_path(ocx, repo, tag_v2)
     assert_not_exists(candidate)
 
@@ -532,6 +556,9 @@ tool = "{ocx.registry}/{repo}:{tag_v2}"
     )
     assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
 
+    assert _packages_present_count(ocx) == 0, (
+        "--no-pull must win: object store stays cold"
+    )
     candidate_v2 = _candidate_path(ocx, repo, tag_v2)
     assert_not_exists(candidate_v2)
 
@@ -540,7 +567,8 @@ def test_upgrade_no_pull_then_pull_last_wins(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx upgrade --no-pull --pull`` → ``--pull`` wins (POSIX last-wins);
-    lock must advance to the new digest AND candidate_v2 must exist.
+    lock advances and object store warms with the new digest; candidate
+    symlink absent.
 
     Plan Phase-5 Step 3.3 last-wins contract for ``ocx upgrade``.
     """
@@ -559,8 +587,11 @@ tool = "{ocx.registry}/{repo}:{tag_v2}"
     )
     assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
 
+    assert _packages_present_count(ocx) >= 1, (
+        "--pull must win: object store warms with the new digest"
+    )
     candidate_v2 = _candidate_path(ocx, repo, tag_v2)
-    assert_symlink_exists(candidate_v2)
+    assert_not_exists(candidate_v2)
 
 
 def test_upgrade_check_unaffected_by_pull_flags(
@@ -575,9 +606,11 @@ def test_upgrade_check_unaffected_by_pull_flags(
     """
     project, repo, tag_v1, _tag_v2 = _two_tag_project(ocx, tmp_path)
 
-    # Candidate for tag_v1 must not exist — _two_tag_project uses _run_lock
-    # with --no-pull, so the setup step never materialises any candidate.
+    # Candidate symlinks are never created by toolchain mutators (lock /
+    # upgrade / add) under the no-symlink mutator model. The probe path
+    # is kept here as a regression anchor for the verify-vs-mutate split.
     candidate_v1 = _candidate_path(ocx, repo, tag_v1)
+    assert_not_exists(candidate_v1)
 
     lock_bytes_before = (project / "ocx.lock").read_bytes()
 

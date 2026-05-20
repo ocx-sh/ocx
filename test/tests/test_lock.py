@@ -31,7 +31,7 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
-from src.assertions import assert_not_exists, assert_symlink_exists
+from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
@@ -1052,6 +1052,18 @@ def _candidate_path(ocx: OcxRunner, repo: str, tag: str) -> "Path":
     )
 
 
+def _packages_present_count(ocx: OcxRunner) -> int:
+    """Count ``content/`` directories under
+    ``$OCX_HOME/packages/{registry_dir}/`` — the eager-vs-lazy observable for
+    toolchain mutators under the no-symlink model
+    (``project_context.rs::materialize_lock`` calls ``pull_all``).
+    """
+    base = Path(ocx.ocx_home) / "packages" / registry_dir(ocx.registry)
+    if not base.exists():
+        return 0
+    return sum(1 for p in base.rglob("content") if p.is_dir())
+
+
 def _single_tool_project(
     ocx: OcxRunner, tmp_path: "Path"
 ) -> tuple["Path", str, str]:
@@ -1078,15 +1090,18 @@ tool = "{ocx.registry}/{repo}:{tag}"
     return project, repo, tag
 
 
-def test_lock_eager_default_creates_candidate_symlink(
+def test_lock_eager_default_warms_object_store_without_symlinks(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx lock`` (no flags) must materialize the package after writing the
-    lock — the candidate symlink at
-    ``$OCX_HOME/symlinks/<reg>/<repo>/candidates/<tag>`` must exist.
+    """REGRESSION GUARD: ``ocx lock`` (no flags) pre-warms the object store
+    after writing the lock, but creates **no** candidate or `current`
+    symlinks.
 
-    Plan Phase-5 Step 3.2 contract: default is eager. This test will FAIL
-    against the stub because ``materialize_lock`` is ``unimplemented!()``.
+    Locks in the new toolchain-mutator invariant:
+    ``project_context.rs::materialize_lock`` calls ``pull_all``, never
+    ``install_all``. Project-tier resolution walks ``ocx.lock``, so a
+    candidate symlink here would only be a second, redundant GC root that
+    breaks ``ocx clean --force`` (see test_clean_project_backlinks).
     """
     project, repo, tag = _single_tool_project(ocx, tmp_path)
 
@@ -1096,17 +1111,21 @@ def test_lock_eager_default_creates_candidate_symlink(
     )
     assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
 
+    assert _packages_present_count(ocx) >= 1, (
+        "eager ocx lock must pre-warm the object store"
+    )
     candidate = _candidate_path(ocx, repo, tag)
-    assert_symlink_exists(candidate)
+    assert_not_exists(candidate)
 
 
 def test_lock_no_pull_skips_install(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx lock --no-pull`` must write the lock but NOT create the candidate
-    symlink. Materialization is deferred to ``ocx pull`` or first ``ocx run``.
+    """``ocx lock --no-pull`` writes the lock and leaves the object store
+    cold. No candidate symlink under either eager or lazy paths anymore;
+    cold-store is the only eager-vs-lazy observable.
 
-    Plan Phase-5 Step 3.2 contract. This test will FAIL against the stub.
+    Plan Phase-5 Step 3.2 contract.
     """
     project, repo, tag = _single_tool_project(ocx, tmp_path)
 
@@ -1116,6 +1135,9 @@ def test_lock_no_pull_skips_install(
     )
     assert (project / "ocx.lock").is_file(), "ocx.lock must be written even with --no-pull"
 
+    assert _packages_present_count(ocx) == 0, (
+        "ocx lock --no-pull must not warm the object store"
+    )
     candidate = _candidate_path(ocx, repo, tag)
     assert_not_exists(candidate)
 
@@ -1124,7 +1146,7 @@ def test_lock_pull_then_no_pull_last_wins_no_install(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx lock --pull --no-pull`` → ``--no-pull`` wins (POSIX last-wins);
-    candidate symlink must NOT exist.
+    object store stays cold, no candidate symlink.
 
     Plan Phase-5 Step 3.2 last-wins contract.
     """
@@ -1136,6 +1158,9 @@ def test_lock_pull_then_no_pull_last_wins_no_install(
     )
     assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
 
+    assert _packages_present_count(ocx) == 0, (
+        "--no-pull must win: object store stays cold"
+    )
     candidate = _candidate_path(ocx, repo, tag)
     assert_not_exists(candidate)
 
@@ -1144,7 +1169,7 @@ def test_lock_no_pull_then_pull_last_wins_installs(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx lock --no-pull --pull`` → ``--pull`` wins (POSIX last-wins);
-    candidate symlink MUST exist.
+    object store warms, candidate symlink remains absent.
 
     Plan Phase-5 Step 3.2 last-wins contract.
     """
@@ -1156,5 +1181,8 @@ def test_lock_no_pull_then_pull_last_wins_installs(
     )
     assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
 
+    assert _packages_present_count(ocx) >= 1, (
+        "--pull must win: object store warms"
+    )
     candidate = _candidate_path(ocx, repo, tag)
-    assert_symlink_exists(candidate)
+    assert_not_exists(candidate)
