@@ -110,9 +110,10 @@ def _run_run(
 def _run_lock(
     ocx: OcxRunner,
     cwd: Path,
+    *extra: str,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``ocx lock`` with ``cwd`` driving the ``ocx.toml`` CWD-walk."""
-    return _run_cmd(ocx, cwd, "lock")
+    return _run_cmd(ocx, cwd, "lock", *extra)
 
 
 def _write_ocx_toml(project_dir: Path, body: str) -> Path:
@@ -889,11 +890,20 @@ def test_run_self_view_exposes_private_entries(ocx: OcxRunner, tmp_path: Path) -
 
 
 def test_run_auto_installs_missing_packages(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx run -- hello`` auto-installs a package not yet in the store.
+    """``ocx run -- hello`` pulls a package not yet in the store, on demand.
 
-    Plan §3.2 test 21: Phase F.2 calls ``find_or_install_all`` which installs
-    missing packages. The test verifies the binary runs successfully (i.e.,
-    the package was installed) and that ``ocx package which`` can locate it afterward.
+    Plan §3.2 test 21: Phase F.2 calls ``find_or_install_all`` which falls
+    through to ``pull`` for missing packages (no candidate symlink — see
+    ``project_context.rs::materialize_lock`` doc comment for the no-symlink
+    toolchain-mutator invariant). The test verifies the binary runs (i.e.,
+    the package was materialised) and that ``ocx package which`` can locate
+    it afterward.
+
+    ``--no-pull`` on the setup ``lock`` is load-bearing: the eager default
+    now pre-warms the object store via ``pull_all``, so without ``--no-pull``
+    the package would already be present and ``find_or_install_all`` would
+    short-circuit on ``find`` — exercising the cache path instead of the
+    on-demand pull path that this test is meant to pin.
     """
     repo, tag = _published_tool(ocx, tmp_path, "autoinst")
 
@@ -904,10 +914,11 @@ def test_run_auto_installs_missing_packages(ocx: OcxRunner, tmp_path: Path) -> N
 {repo} = "{ocx.registry}/{repo}:{tag}"
 """)
 
-    lock = _run_lock(ocx, project)
+    lock = _run_lock(ocx, project, "--no-pull")
     assert lock.returncode == EXIT_SUCCESS, lock.stderr
 
-    # Package is NOT manually installed — run must install it on demand.
+    # Package is NOT in the object store yet — run must pull it on demand
+    # via find_or_install_all → find_or_install → pull (no symlinks).
     result = _run_run(ocx, project, "--", "hello")
     assert result.returncode == EXIT_SUCCESS, (
         f"auto-install via ocx run failed: rc={result.returncode}\n"
