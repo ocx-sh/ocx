@@ -89,83 +89,92 @@ def test_schema_includes_entrypoints_as_additive_optional_property() -> None:
     )
 
 
-def _resolve(schema: dict, node: dict) -> dict:
-    """Follow a single ``$ref`` hop into ``$defs``; pass inline nodes through."""
-    if "$ref" in node:
-        ref_key = node["$ref"].split("/")[-1]
+def test_schema_entrypoints_is_object_type() -> None:
+    """entrypoints in schema must be an object keyed by entrypoint name.
+
+    The wire shape is a JSON object (`{"cmake": {}, "ctest": {}}`) — uniqueness
+    within a package follows from JSON object key semantics.
+    """
+    schema = load_schema()
+    bundle = find_bundle_definition(schema)
+    ep_schema = bundle["properties"]["entrypoints"]
+
+    # May be a $ref or inline type.
+    if "$ref" in ep_schema:
+        ref_key = ep_schema["$ref"].split("/")[-1]
         defs = schema.get("$defs", schema.get("definitions", {}))
-        return defs.get(ref_key, node)
-    return node
+        ep_schema = defs.get(ref_key, ep_schema)
+
+    schema_type = ep_schema.get("type")
+    assert schema_type == "object", (
+        f"entrypoints must have type=object in schema, got: {ep_schema}"
+    )
+    assert "additionalProperties" in ep_schema, (
+        f"entrypoints object must declare additionalProperties; got: {ep_schema}"
+    )
 
 
-def test_schema_entrypoints_is_array_type() -> None:
-    """entrypoints in schema must be an ordered array of Entrypoint items.
+def test_schema_entrypoints_value_schema_is_entrypoint_object() -> None:
+    """The value type of each entrypoints entry must be the Entrypoint definition.
 
-    The wire shape is a JSON array (`[{"name": "cmake", "target": "..."}]`) —
-    a transparent wrapper over `Vec<Entrypoint>`. Uniqueness is enforced at
-    deserialization (`Entrypoints::new`), not by JSON object-key semantics.
+    The Entrypoint value object carries an optional ``command`` field (the
+    dispatch target when it diverges from the invocable name). ``command``
+    must be additive-optional: present in ``properties`` but absent from any
+    ``required`` list, so ``{}`` stays a valid entry.
     """
     schema = load_schema()
     bundle = find_bundle_definition(schema)
-    ep_schema = _resolve(schema, bundle["properties"]["entrypoints"])
+    ep_schema = bundle["properties"]["entrypoints"]
 
-    assert ep_schema.get("type") == "array", (
-        f"entrypoints must have type=array in schema, got: {ep_schema}"
-    )
-    items = ep_schema.get("items")
-    assert items is not None, (
-        f"entrypoints array must declare items; got: {ep_schema}"
-    )
-    item_schema = _resolve(schema, items)
-    assert item_schema.get("type") == "object", (
-        f"entrypoints items must resolve to the Entrypoint object; got: {item_schema}"
-    )
+    if "$ref" in ep_schema:
+        ref_key = ep_schema["$ref"].split("/")[-1]
+        defs = schema.get("$defs", schema.get("definitions", {}))
+        ep_schema = defs.get(ref_key, ep_schema)
 
+    value_schema = ep_schema.get("additionalProperties", {})
+    if "$ref" in value_schema:
+        ref_key = value_schema["$ref"].split("/")[-1]
+        defs = schema.get("$defs", schema.get("definitions", {}))
+        value_schema = defs.get(ref_key, value_schema)
 
-def test_schema_entrypoint_item_is_object_with_name_and_target() -> None:
-    """Each Entrypoint item declares required ``name`` and ``target``.
-
-    An Entrypoint is ``{name, target}``: the invocable name and the template
-    string for its binary target within the package content. Both are
-    required — an empty ``{}`` is not a valid entrypoint.
-    """
-    schema = load_schema()
-    bundle = find_bundle_definition(schema)
-    ep_schema = _resolve(schema, bundle["properties"]["entrypoints"])
-    item_schema = _resolve(schema, ep_schema.get("items", {}))
-
-    assert item_schema.get("type") == "object", (
-        f"Entrypoint item must be type=object; got: {item_schema}"
+    assert value_schema.get("type") == "object", (
+        f"Entrypoint value must be type=object; got: {value_schema}"
     )
-    props = item_schema.get("properties", {})
-    assert "name" in props and "target" in props, (
-        f"Entrypoint must declare 'name' and 'target' properties; got: {item_schema}"
+    props = value_schema.get("properties", {})
+    assert "command" in props, (
+        f"Entrypoint value object must declare the optional 'command' property; got: {value_schema}"
     )
-    required = item_schema.get("required", [])
-    assert "name" in required and "target" in required, (
-        f"'name' and 'target' must both be required; got: {item_schema}"
+    assert "command" not in value_schema.get("required", []), (
+        f"'command' must be additive-optional, not required; got: {value_schema}"
     )
 
 
-def test_schema_entrypoint_name_has_slug_pattern() -> None:
-    """The Entrypoint ``name`` type must carry the slug pattern and maxLength.
+def test_schema_entrypoints_propertyNames_has_slug_pattern() -> None:
+    """entrypoints propertyNames must declare the slug pattern and maxLength.
 
     The Rust `EntrypointName` newtype enforces `^[a-z0-9][a-z0-9_-]*$` with a
-    64-byte cap. The JSON Schema must carry matching constraints on the `name`
-    field so validators and editors surface the restriction without running
-    the binary.
+    64-byte cap. The JSON Schema must carry matching `propertyNames` constraints
+    so validators and editors can surface the restriction without running the
+    binary.
     """
     schema = load_schema()
     bundle = find_bundle_definition(schema)
-    ep_schema = _resolve(schema, bundle["properties"]["entrypoints"])
-    item_schema = _resolve(schema, ep_schema.get("items", {}))
-    name_schema = _resolve(schema, item_schema.get("properties", {}).get("name", {}))
+    ep_schema = bundle["properties"]["entrypoints"]
 
-    assert name_schema.get("pattern") == r"^[a-z0-9][a-z0-9_-]*$", (
-        f"name.pattern must be the slug regex; got: {name_schema.get('pattern')!r}"
+    if "$ref" in ep_schema:
+        ref_key = ep_schema["$ref"].split("/")[-1]
+        defs = schema.get("$defs", schema.get("definitions", {}))
+        ep_schema = defs.get(ref_key, ep_schema)
+
+    property_names = ep_schema.get("propertyNames")
+    assert property_names is not None, (
+        f"entrypoints schema must declare propertyNames; got: {ep_schema}"
     )
-    assert name_schema.get("maxLength") == 64, (
-        f"name.maxLength must be 64; got: {name_schema.get('maxLength')!r}"
+    assert property_names.get("pattern") == r"^[a-z0-9][a-z0-9_-]*$", (
+        f"propertyNames.pattern must be the slug regex; got: {property_names.get('pattern')!r}"
+    )
+    assert property_names.get("maxLength") == 64, (
+        f"propertyNames.maxLength must be 64; got: {property_names.get('maxLength')!r}"
     )
 
 
