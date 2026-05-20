@@ -66,7 +66,7 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
       # actions-rust-lang/setup-rust-toolchain does NOT ship cargo-nextest;
       # the repo provisions it via taiki-e/install-action everywhere it runs
       # nextest in CI (verify-basic.yml, verify-deep.yml). Without this the
@@ -74,7 +74,7 @@ jobs:
       # `acceptance-windows` (both `needs: gate`) never run and the committed
       # shim blobs / Win32 behaviours are unprotected.
       - name: Install nextest
-        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
         with:
           tool: cargo-nextest
       - name: Shim + launcher spec tests (host-runnable)
@@ -107,7 +107,7 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           target: ${{ matrix.target }}
           # rust-toolchain.toml pins channel + rust-src (build-std) + the
@@ -144,7 +144,7 @@ jobs:
           mkdir -p zig-dist && tar -xf zig.tar.xz -C zig-dist --strip-components=1
           echo "$PWD/zig-dist" >> "$GITHUB_PATH"
       - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
         with:
           tool: cargo-zigbuild@0.22.3
 
@@ -168,7 +168,7 @@ jobs:
       # PR flow (a dev machine cannot necessarily install the pinned Zig).
       - name: Upload freshly built blob (refresh source)
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-shim-fresh-${{ matrix.target }}
           path: ${{ steps.paths.outputs.built }}
@@ -228,12 +228,12 @@ jobs:
       # in-tree SHA is only a corruption canary — ADR §"SHA256 = corruption
       # canary"). Refresh-PR checklist adds `gh attestation verify`.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@bd77c077858b8d561b7a36cbe48ef4cc642ca39d # v2.2.3
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v2.2.3
         with:
           subject-path: ${{ steps.paths.outputs.committed }}
 
       - name: Upload shim blob
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-shim-${{ matrix.target }}
           path: ${{ steps.paths.outputs.committed }}
@@ -260,7 +260,7 @@ jobs:
         with:
           submodules: true
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
 
