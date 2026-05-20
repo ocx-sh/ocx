@@ -1,0 +1,44 @@
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_ocx")
+local_path_override(
+    module_name = "rules_ocx",
+    path = "../",
+)
+
+ocx = use_extension("@rules_ocx//ocx:extension.bzl", "ocx")
+ocx.package(
+    repository = "cmake",
+)
+ocx.package(
+    name = "cmake_3",
+    repository = "cmake",
+    tag = "3.31",
+)
+ocx.package(
+    repository = "uv",
+)
+ocx.package(
+    name = "uv_0_10",
+    repository = "uv",
+    tag = "0.10",
+)
+ocx.package(
+    name = "uv_0_10_10",
+    repository = "uv",
+    tag = "0.10.10",
+)
+ocx.package(
+    name = "task",
+    repository = "go-task",
+)
+ocx.package(
+    repository = "ocx",
+)
+ocx.package(
+    local_index_path = "//:.ocx/index/ocx.sh/tags/shellcheck.json",
+    repository = "shellcheck",
+    tag = "0.11",
+)
+use_repo(ocx, "cmake", "cmake_3", "ocx", "shellcheck", "task", "uv", "uv_0_10", "uv_0_10_10")
