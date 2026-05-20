@@ -42,14 +42,8 @@ use ocx_lib::project::{MutationGuard, ProjectConfig, ProjectLock, acquire_projec
 /// and continue using `Context` freely.
 pub struct ProjectContext {
     /// Absolute path to the `ocx.toml` file that was loaded.
-    // NOTE: not yet consumed by pull.rs / run.rs but exposed for future
-    // callers (add, update, lock) when they migrate to this helper.
-    #[allow(dead_code)]
     pub config_path: PathBuf,
     /// Absolute path to the sibling `ocx.lock` file that was loaded.
-    // NOTE: not yet consumed by pull.rs / run.rs but exposed for future
-    // callers (add, update, lock) when they migrate to this helper.
-    #[allow(dead_code)]
     pub lock_path: PathBuf,
     /// Parsed project configuration from `ocx.toml`.
     pub config: ProjectConfig,
@@ -292,6 +286,43 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
         config,
         lock,
     })
+}
+
+/// Materialize all bindings from `lock` into the object store via
+/// `PackageManager::install_all`. Matches `ocx add` install semantics:
+/// `candidate=true`, `select=context.global()`.
+///
+/// When `eager` is `false`, returns immediately without contacting the
+/// manager. This is the no-op path used by `--no-pull` callers.
+///
+/// Failures here do NOT roll back the manifest/lock — the binding is
+/// declaratively present even if the install needs a retry. Matches
+/// the established `add.rs` semantics.
+///
+/// # Errors
+///
+/// Propagates errors from `PackageManager::install_all` when `eager` is
+/// `true`.
+pub async fn materialize_lock(
+    context: &crate::app::Context,
+    lock: &ocx_lib::project::ProjectLock,
+    eager: bool,
+) -> anyhow::Result<()> {
+    if !eager {
+        return Ok(());
+    }
+    let identifiers: Vec<ocx_lib::oci::Identifier> = lock.tools.iter().map(|t| t.pinned.clone().into()).collect();
+    context
+        .manager()
+        .install_all(
+            identifiers,
+            crate::conventions::platforms_or_default(&[]),
+            /* candidate */ true,
+            /* select   */ context.global(),
+            context.concurrency(),
+        )
+        .await?;
+    Ok(())
 }
 
 /// Mutation-side counterpart to [`load_project_with_lock`].

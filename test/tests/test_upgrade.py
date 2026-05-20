@@ -24,8 +24,9 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package
-from src.runner import OcxRunner
+from src.runner import OcxRunner, registry_dir
 
 
 EXIT_SUCCESS = 0
@@ -399,3 +400,197 @@ citool = "{ocx.registry}/{repo_ci}:2.0.0"
     assert after_def == initial_def, (
         "defaulttool digest must be unchanged when not selected by --group"
     )
+
+
+# ---------------------------------------------------------------------------
+# Eager materialization — Phase-5 contracts
+# ---------------------------------------------------------------------------
+
+
+def _candidate_path(ocx: OcxRunner, repo: str, tag: str) -> Path:
+    """Return the expected candidate-symlink path for ``repo:tag``."""
+    return (
+        Path(ocx.ocx_home)
+        / "symlinks"
+        / registry_dir(ocx.registry)
+        / repo
+        / "candidates"
+        / tag
+    )
+
+
+def _two_tag_project(
+    ocx: OcxRunner, tmp_path: Path
+) -> tuple[Path, str, str, str]:
+    """Publish a tool with two distinct tags and return ``(project_dir, repo, tag_v1, tag_v2)``.
+
+    The project's ``ocx.toml`` is initially locked to ``tag_v1``; callers that
+    want to exercise upgrade behaviour swap the toml to ``tag_v2`` and re-run
+    ``ocx lock`` / ``ocx upgrade``.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_upg_eager"
+    tag_v1 = "1.0.0"
+    tag_v2 = "2.0.0"
+    make_package(ocx, repo, tag_v1, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, tag_v2, tmp_path, new=False, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:{tag_v1}"
+""",
+    )
+    # Write the initial lock so upgrade has a predecessor.  Use --no-pull so
+    # the setup step does not materialise candidate symlinks — the eager-pull
+    # default would otherwise install tag_v1, invalidating assertions that
+    # check for the absence of candidate paths after --no-pull / --check runs.
+    initial = _run_lock(ocx, project, "--no-pull")
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+
+    return project, repo, tag_v1, tag_v2
+
+
+def test_upgrade_eager_default_materializes_new_digest(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx upgrade`` (no flags) after bumping the toml to a new tag must
+    write the lock AND create the candidate symlink for the new tag.
+
+    Plan Phase-5 Step 3.3 contract: default is eager. This test will FAIL
+    against the stub because ``materialize_lock`` is ``unimplemented!()``.
+    """
+    project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
+
+    # Bump the toml to tag_v2 then upgrade.
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:{tag_v2}"
+""",
+    )
+    result = _run_update(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx upgrade failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    candidate = _candidate_path(ocx, repo, tag_v2)
+    assert_symlink_exists(candidate)
+
+
+def test_upgrade_no_pull_skips_install(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx upgrade --no-pull`` writes the lock but must NOT create the
+    candidate symlink. Materialization deferred to ``ocx pull`` / first run.
+
+    Plan Phase-5 Step 3.3 contract.
+    """
+    project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
+
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:{tag_v2}"
+""",
+    )
+    result = _run_update(ocx, project, "--no-pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx upgrade --no-pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert (project / "ocx.lock").is_file(), "ocx.lock must be written even with --no-pull"
+
+    candidate = _candidate_path(ocx, repo, tag_v2)
+    assert_not_exists(candidate)
+
+
+def test_upgrade_pull_then_no_pull_last_wins(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx upgrade --pull --no-pull`` → ``--no-pull`` wins (POSIX last-wins);
+    lock must advance to the new digest but candidate_v2 must NOT exist.
+
+    Plan Phase-5 Step 3.3 last-wins contract for ``ocx upgrade``.
+    """
+    project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
+
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:{tag_v2}"
+""",
+    )
+    result = _run_update(ocx, project, "--pull", "--no-pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx upgrade --pull --no-pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
+
+    candidate_v2 = _candidate_path(ocx, repo, tag_v2)
+    assert_not_exists(candidate_v2)
+
+
+def test_upgrade_no_pull_then_pull_last_wins(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx upgrade --no-pull --pull`` → ``--pull`` wins (POSIX last-wins);
+    lock must advance to the new digest AND candidate_v2 must exist.
+
+    Plan Phase-5 Step 3.3 last-wins contract for ``ocx upgrade``.
+    """
+    project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
+
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:{tag_v2}"
+""",
+    )
+    result = _run_update(ocx, project, "--no-pull", "--pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx upgrade --no-pull --pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
+
+    candidate_v2 = _candidate_path(ocx, repo, tag_v2)
+    assert_symlink_exists(candidate_v2)
+
+
+def test_upgrade_check_unaffected_by_pull_flags(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx upgrade --check`` is a pure dry-run and must NOT create any
+    candidate symlink regardless of ``--pull`` / ``--no-pull`` flags.
+
+    Plan Phase-5 Step 3.3: the ``--check`` early-return path in
+    ``upgrade.rs:175`` (before the materialize call) guarantees this.
+    The test is a regression guard for the separation of verify vs mutate.
+    """
+    project, repo, tag_v1, _tag_v2 = _two_tag_project(ocx, tmp_path)
+
+    # Candidate for tag_v1 must not exist — _two_tag_project uses _run_lock
+    # with --no-pull, so the setup step never materialises any candidate.
+    candidate_v1 = _candidate_path(ocx, repo, tag_v1)
+
+    lock_bytes_before = (project / "ocx.lock").read_bytes()
+
+    # Run with both --check and --pull to confirm --check wins.
+    result = _run_update(ocx, project, "--check", "--pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx upgrade --check --pull must exit 0 on a current lock; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    lock_bytes_after = (project / "ocx.lock").read_bytes()
+    assert lock_bytes_before == lock_bytes_after, (
+        "ocx upgrade --check must NOT rewrite ocx.lock"
+    )
+    # --check must not materialize anything even when --pull is present.
+    assert_not_exists(candidate_v1)

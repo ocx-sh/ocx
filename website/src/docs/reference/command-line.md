@@ -326,6 +326,8 @@ ocx add [OPTIONS] <IDENTIFIER>
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
+| `--pull` | — | After writing the lock, materialise the newly added tool into the object store and create its candidate symlink. Default when `--no-pull` is absent. |
+| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. |
 | `--help` | `-h` | Print help information. |
 
 ::: tip Target the global toolchain
@@ -1016,6 +1018,8 @@ ocx lock [OPTIONS]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--group <NAME>` | `-g` | Restrict resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every `[tools]` and `[group.*]` entry is resolved. | *(all groups)* |
+| `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
+| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
 | `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
 | `--help` | `-h` | Print help information. | — |
 
@@ -1061,6 +1065,8 @@ ocx upgrade [OPTIONS] [BINDING...]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--group <NAME>` | `-g` | Restrict re-resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. Combinable with positional binding names (intersection). | *(all groups)* |
+| `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
+| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
 | `--check` | — | Verify the candidate lock would match the predecessor and exit. Mirrors `lock --check`: re-resolves the requested subset (or the full toolchain when no positional names and no `-g` are supplied), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, candidate would change). When the predecessor lock is absent, exits 78. No writes, no commit. | off |
 | `--project <PATH>` | | Path to `ocx.toml`. Bypasses the CWD walk. | CWD walk |
 | `--config <PATH>` | | Extra config file layered on top of the discovered chain. | *(none)* |
@@ -1140,6 +1146,10 @@ Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`]
 | 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `--global` combined with `--project`. |
 | 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
 | 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. |
+
+**Lock mtime touch**
+
+After a successful pull, `ocx pull` re-saves `ocx.lock` with byte-identical content so the file's mtime advances. This re-fires [`ocx direnv`](#direnv) `watch_file ocx.lock`, ensuring direnv refreshes the shell environment once the object store is warmed. The save is skipped under `--dry-run`.
 
 #### Dry-run preview {#pull-dry-run}
 

@@ -62,14 +62,14 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `add IDENTIFIER` | Append binding to `ocx.toml`, update lock, install | `-g/--group` |
+| `add IDENTIFIER` | Append binding to `ocx.toml`, update lock, install | `-g/--group`, `--pull/--no-pull` |
 | `init` | Create minimal `ocx.toml` in current directory | — |
 | `remove IDENTIFIER` | Drop binding from `ocx.toml`, rewrite lock | — |
-| `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group` |
-| `upgrade PKGS...` | Re-resolve advisory tags in lock | `-g/--group` |
+| `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--pull/--no-pull` |
+| `upgrade PKGS...` | Re-resolve advisory tags in lock | `-g/--group`, `--pull/--no-pull` |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self` |
 | `env [--shell[=NAME]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe | `--shell[=NAME]` |
-| `pull` | Pre-warm package store from `ocx.lock` | — |
+| `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |
 
 ### OCI-Tier Commands (`ocx package`)
 

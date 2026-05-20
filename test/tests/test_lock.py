@@ -31,8 +31,9 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package
-from src.runner import OcxRunner
+from src.runner import OcxRunner, registry_dir
 
 
 # ---------------------------------------------------------------------------
@@ -1034,3 +1035,126 @@ alpha = "{ocx.registry}/{repo_a}:{tag_a}"
     )
 
 
+# ---------------------------------------------------------------------------
+# Eager materialization — Phase-5 contracts
+# ---------------------------------------------------------------------------
+
+
+def _candidate_path(ocx: OcxRunner, repo: str, tag: str) -> "Path":
+    """Return the expected candidate-symlink path for ``repo:tag``."""
+    return (
+        Path(ocx.ocx_home)
+        / "symlinks"
+        / registry_dir(ocx.registry)
+        / repo
+        / "candidates"
+        / tag
+    )
+
+
+def _single_tool_project(
+    ocx: OcxRunner, tmp_path: "Path"
+) -> tuple["Path", str, str]:
+    """Publish one tool and return ``(project_dir, repo, tag)``.
+
+    The project directory contains only ``ocx.toml``; NO ``ocx.lock`` yet.
+    We deliberately use `ocx lock` to create the lock rather than `ocx add`
+    so the test setup is independent of `add`'s eager-default.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_eager"
+    tag = "1.0.0"
+    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+    return project, repo, tag
+
+
+def test_lock_eager_default_creates_candidate_symlink(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx lock`` (no flags) must materialize the package after writing the
+    lock — the candidate symlink at
+    ``$OCX_HOME/symlinks/<reg>/<repo>/candidates/<tag>`` must exist.
+
+    Plan Phase-5 Step 3.2 contract: default is eager. This test will FAIL
+    against the stub because ``materialize_lock`` is ``unimplemented!()``.
+    """
+    project, repo, tag = _single_tool_project(ocx, tmp_path)
+
+    result = _run_lock(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx lock failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
+
+    candidate = _candidate_path(ocx, repo, tag)
+    assert_symlink_exists(candidate)
+
+
+def test_lock_no_pull_skips_install(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx lock --no-pull`` must write the lock but NOT create the candidate
+    symlink. Materialization is deferred to ``ocx pull`` or first ``ocx run``.
+
+    Plan Phase-5 Step 3.2 contract. This test will FAIL against the stub.
+    """
+    project, repo, tag = _single_tool_project(ocx, tmp_path)
+
+    result = _run_lock(ocx, project, "--no-pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx lock --no-pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert (project / "ocx.lock").is_file(), "ocx.lock must be written even with --no-pull"
+
+    candidate = _candidate_path(ocx, repo, tag)
+    assert_not_exists(candidate)
+
+
+def test_lock_pull_then_no_pull_last_wins_no_install(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx lock --pull --no-pull`` → ``--no-pull`` wins (POSIX last-wins);
+    candidate symlink must NOT exist.
+
+    Plan Phase-5 Step 3.2 last-wins contract.
+    """
+    project, repo, tag = _single_tool_project(ocx, tmp_path)
+
+    result = _run_lock(ocx, project, "--pull", "--no-pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx lock --pull --no-pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
+
+    candidate = _candidate_path(ocx, repo, tag)
+    assert_not_exists(candidate)
+
+
+def test_lock_no_pull_then_pull_last_wins_installs(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx lock --no-pull --pull`` → ``--pull`` wins (POSIX last-wins);
+    candidate symlink MUST exist.
+
+    Plan Phase-5 Step 3.2 last-wins contract.
+    """
+    project, repo, tag = _single_tool_project(ocx, tmp_path)
+
+    result = _run_lock(ocx, project, "--no-pull", "--pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx lock --no-pull --pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert (project / "ocx.lock").is_file(), "ocx.lock must be written"
+
+    candidate = _candidate_path(ocx, repo, tag)
+    assert_symlink_exists(candidate)

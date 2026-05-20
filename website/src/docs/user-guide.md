@@ -306,6 +306,14 @@ ocx.lock merge=union
 ```
 :::
 
+### Fresh clone {#project-fresh-clone}
+
+Just checked out a repo that already has an `ocx.toml` and `ocx.lock`? Warm the local object store with [`ocx pull`][cmd-pull]:
+
+<<< @/_scripts/user-guide/fresh-clone.sh{sh}
+
+Then run [`direnv allow`][direnv] once to re-evaluate `.envrc`. `ocx direnv export` then puts the locked tools on `PATH`. No re-resolution, no registry writes — the lock is the only input.
+
 ### Groups
 
 CI needs `shellcheck` and `shfmt`; a release pipeline needs `goreleaser`; daily development needs neither. Named groups scope subsets so workstations do not download release tooling on first checkout:
