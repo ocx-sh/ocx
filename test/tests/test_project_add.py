@@ -286,3 +286,121 @@ def test_add_rejects_path_traversal_group_name(
     assert (project_dir / "ocx.toml").read_text() == original_toml, (
         "ocx.toml must be unchanged when add rejects an invalid group name"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase-5 contracts: --pull / --no-pull flag pair on ``ocx add``
+# ---------------------------------------------------------------------------
+
+
+def test_add_eager_default_creates_candidate_symlink_regression_guard(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """REGRESSION GUARD: ``ocx add tool:tag`` (no flags) still creates the
+    candidate symlink. Locks in the eager default to prevent a future
+    misrouting of the default branch to no-pull.
+
+    This test is expected to PASS against the current implementation
+    (``add.rs`` already installs via ``install_all`` unconditionally). It
+    exists to catch any future refactor that accidentally breaks the default.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_add_eager_guard"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    result = _run_cmd(ocx, project_dir, "add", pkg.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    candidate = _candidate_path(ocx, repo, "1.0.0")
+    assert_symlink_exists(candidate)
+
+
+def test_add_no_pull_skips_install(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add --no-pull tool:tag`` must write the binding + lock but NOT
+    create the candidate symlink.
+
+    Plan Phase-5 Step 3.4 contract. This test will FAIL against the current
+    stub because ``add.rs`` does not yet consult ``self.no_pull``.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_add_nopull"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    result = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add --no-pull failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    # Binding must be in the toml.
+    assert repo in (project_dir / "ocx.toml").read_text(), (
+        "ocx.toml must contain the binding after ocx add --no-pull"
+    )
+    # Lock must be written.
+    assert (project_dir / "ocx.lock").exists(), (
+        "ocx.lock must exist after ocx add --no-pull"
+    )
+    # Candidate symlink must NOT exist.
+    candidate = _candidate_path(ocx, repo, "1.0.0")
+    assert_not_exists(candidate)
+
+
+def test_add_pull_then_no_pull_last_wins_no_install(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add --pull --no-pull tool:tag`` → ``--no-pull`` wins (POSIX
+    last-wins); candidate symlink must NOT exist.
+
+    Plan Phase-5 Step 3.4 last-wins contract.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_add_p_np"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    result = _run_cmd(ocx, project_dir, "add", "--pull", "--no-pull", pkg.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add --pull --no-pull failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    candidate = _candidate_path(ocx, repo, "1.0.0")
+    assert_not_exists(candidate)
+
+
+def test_add_no_pull_then_pull_last_wins_installs(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add --no-pull --pull tool:tag`` → ``--pull`` wins (POSIX
+    last-wins); candidate symlink MUST exist.
+
+    Plan Phase-5 Step 3.4 last-wins contract.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_add_np_p"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    result = _run_cmd(ocx, project_dir, "add", "--no-pull", "--pull", pkg.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx add --no-pull --pull failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    candidate = _candidate_path(ocx, repo, "1.0.0")
+    assert_symlink_exists(candidate)

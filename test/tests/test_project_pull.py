@@ -31,7 +31,7 @@ Test inventory
 9. ``test_pull_empty_group_segment_exits_64``    — ``-g ci,,lint`` empty segment
 10. ``test_pull_does_not_create_symlinks``        — pull_all-only invariant
 11. ``test_pull_idempotent_second_run_no_changes`` — re-run is no-op
-12. ``test_pull_does_not_modify_ocx_lock``        — lock is read-only input
+12. ``test_pull_does_not_modify_ocx_lock``        — ocx pull re-saves the lock with the same bytes (content preserved, mtime advances)
 13. ``test_pull_offline_succeeds_when_objects_already_present`` — offline cache hit
 """
 from __future__ import annotations
@@ -99,8 +99,15 @@ def _run_lock(
     cwd: Path,
     *extra: str,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``ocx lock`` with ``cwd`` driving the ``ocx.toml`` CWD-walk."""
-    cmd = _ocx_cmd(ocx, "lock", *extra)
+    """Run ``ocx lock --no-pull`` with ``cwd`` driving the ``ocx.toml`` CWD-walk.
+
+    Pull-test setup needs an empty object store as baseline — the test
+    delta then measures what ``ocx pull`` materialized. ``ocx lock``
+    materializes by default (eager); pass ``--no-pull`` so setup stays
+    lock-only. Callers that want the eager-default lock behavior can
+    override by passing ``"--pull"`` in ``extra``.
+    """
+    cmd = _ocx_cmd(ocx, "lock", "--no-pull", *extra)
     return subprocess.run(
         cmd,
         cwd=cwd,
@@ -728,12 +735,16 @@ b = "{ocx.registry}/{repo_b}:{tag_b}"
 def test_pull_does_not_modify_ocx_lock(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx pull`` is read-only on ``ocx.lock``.
+    """``ocx pull`` re-saves ``ocx.lock`` with byte-identical content so its
+    mtime advances; the lock text itself is not modified.
 
-    Distinguishes ``ocx pull`` from ``ocx update`` (Phase 5). ``ocx update``
-    re-resolves and rewrites the lock; ``ocx pull`` consumes it as input.
-    Plan §6 makes this explicit by routing only through ``pull_all()`` —
-    no resolver mutation. Asserted via byte-level equality before/after.
+    After a successful pull the lock is atomically re-written via
+    ``ProjectLock::save`` with the prior lock passed as ``existing`` argument.
+    The ``tools_content_equal`` guard inside ``save`` freezes ``generated_at``
+    when the resolved content is unchanged, so the resulting bytes are
+    identical to the input. The atomic rename still advances the file's mtime,
+    which re-fires ``direnv watch_file ocx.lock`` for consumers that rely on
+    the mtime change. Asserted here via byte-level equality before/after.
     """
     repo, tag = _published_tool(ocx, tmp_path, "readonly_lock")
 
@@ -1133,7 +1144,12 @@ hello = "{ocx.registry}/{repo}:{tag}"
 def test_pull_dry_run_does_not_modify_lock(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``--dry-run`` is read-only on ``ocx.lock`` — bytes unchanged."""
+    """``--dry-run`` is read-only on ``ocx.lock`` — bytes AND mtime unchanged.
+
+    Extended in Phase-5 to also assert mtime is preserved, locking down the
+    no-touch contract: ``--dry-run`` must never advance the lock's mtime even
+    when the real pull would.
+    """
     repo, tag = _published_tool(ocx, tmp_path, "dryrun_lock")
 
     project = tmp_path / "proj"
@@ -1149,12 +1165,21 @@ hello = "{ocx.registry}/{repo}:{tag}"
     lock = _run_lock(ocx, project)
     assert lock.returncode == EXIT_SUCCESS, lock.stderr
 
-    lock_bytes_before = (project / "ocx.lock").read_bytes()
+    lock_path = project / "ocx.lock"
+    lock_bytes_before = lock_path.read_bytes()
+    mtime_before = lock_path.stat().st_mtime_ns
+
     result = _run_pull(ocx, project, "--dry-run")
     assert result.returncode == EXIT_SUCCESS, result.stderr
-    lock_bytes_after = (project / "ocx.lock").read_bytes()
+
+    lock_bytes_after = lock_path.read_bytes()
+    mtime_after = lock_path.stat().st_mtime_ns
+
     assert lock_bytes_before == lock_bytes_after, (
-        "ocx pull --dry-run must not modify ocx.lock"
+        "ocx pull --dry-run must not modify ocx.lock bytes"
+    )
+    assert mtime_after == mtime_before, (
+        "ocx pull --dry-run must not advance ocx.lock mtime"
     )
 
 
@@ -1236,4 +1261,64 @@ hello = "{ocx.registry}/{repo}:{tag}"
     assert result.returncode == EXIT_SUCCESS, (
         f"OCX_JOBS=1 + --jobs 4 must succeed; "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase-5 contract: ``ocx pull`` touches ``ocx.lock`` mtime on success
+# ---------------------------------------------------------------------------
+
+
+def test_pull_advances_lock_mtime_on_success(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx pull`` re-saves ``ocx.lock`` (same bytes, new mtime) so that
+    direnv's ``watch_file`` directive re-fires after a successful pull.
+
+    We sleep 1 second before pulling to ensure the filesystem mtime granularity
+    on coarse-grained filesystems (1-second resolution) produces a distinct
+    mtime_ns value. The assertion is post_mtime_ns > pre_mtime_ns.
+
+    Plan Phase-5 Step 3.5 contract. This test will FAIL against the stub
+    because ``pull.rs`` has a ``TODO(phase-5)`` in place of the lock-touch.
+    """
+    import time
+
+    repo, tag = _published_tool(ocx, tmp_path, "mtime_advance")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+hello = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+
+    lock = _run_lock(ocx, project)
+    assert lock.returncode == EXIT_SUCCESS, lock.stderr
+
+    lock_path = project / "ocx.lock"
+    lock_bytes_before = lock_path.read_bytes()
+
+    # Sleep to ensure a distinct mtime on coarse (1-second) filesystems.
+    time.sleep(1.1)
+
+    mtime_ns_before = lock_path.stat().st_mtime_ns
+
+    result = _run_pull(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    mtime_ns_after = lock_path.stat().st_mtime_ns
+    lock_bytes_after = lock_path.read_bytes()
+
+    assert lock_bytes_after == lock_bytes_before, (
+        "ocx pull must not change the content of ocx.lock"
+    )
+    assert mtime_ns_after > mtime_ns_before, (
+        "ocx pull must advance ocx.lock mtime so direnv watch_file re-fires; "
+        f"mtime before={mtime_ns_before} after={mtime_ns_after}"
     )

@@ -9,7 +9,7 @@ use ocx_lib::cli;
 use ocx_lib::project::{DEFAULT_GROUP, ResolveLockOptions, resolve_lock};
 
 use crate::api::data::lock::{LockEntry, LockReport};
-use crate::app::project_context::{load_project_for_mutate, load_project_with_lock};
+use crate::app::project_context::{load_project_for_mutate, load_project_with_lock, materialize_lock};
 
 /// Resolve tool tags to digests and write `ocx.lock`.
 ///
@@ -17,6 +17,15 @@ use crate::app::project_context::{load_project_for_mutate, load_project_with_loc
 /// pinned OCI index-manifest digest, and writes a deterministic
 /// `ocx.lock` next to it. Fully transactional — either every tool
 /// resolves or nothing is written.
+///
+/// **Behavior change:** this command now materializes packages by default
+/// after writing the lock (matching `ocx add`). Pass `--no-pull` to
+/// restore the prior lock-only behavior.
+///
+/// `--pull` is the affirmative form of the default (redundant but
+/// accepted). Both flags use POSIX last-wins semantics (`overrides_with`):
+/// `--no-pull --pull` resolves to pull; `--pull --no-pull` resolves to
+/// no-pull.
 #[derive(Parser, Clone)]
 pub struct Lock {
     /// Restrict resolution to the named group(s).
@@ -38,6 +47,22 @@ pub struct Lock {
     /// (the canonical "lock missing" code shared with `ocx pull`).
     #[arg(long = "check", default_value_t = false)]
     pub check: bool,
+
+    /// Materialize packages into the object store after writing the lock (default).
+    ///
+    /// `--pull` is the affirmative form of the default behavior; `--no-pull`
+    /// opts out. Both flags use POSIX last-wins semantics (`overrides_with`):
+    /// `--pull --no-pull` resolves to no-pull; `--no-pull --pull` resolves
+    /// to pull. Combining the flags is not an error — git `--[no-]verify`
+    /// idiom.
+    #[arg(long, overrides_with = "no_pull")]
+    pub pull: bool,
+
+    /// Write the lock without downloading. Materialization is deferred to
+    /// `ocx pull` or first `ocx run` / direnv hit. Useful for CI flows that
+    /// batch lock changes and materialize separately.
+    #[arg(long = "no-pull", overrides_with = "pull")]
+    pub no_pull: bool,
 }
 
 impl Lock {
@@ -95,6 +120,13 @@ impl Lock {
         let config_path = guard.config_path().to_path_buf();
         let commit = guard.commit(staged, new_lock.clone()).await?;
         let _ = commit;
+
+        // Best-effort materialization AFTER the commit lands. A failure here
+        // does not roll back the lock — the declaration is committed; only
+        // the object-store population is deferred. Matches `add` semantics.
+        // `--no-pull` opts out: defers to `ocx pull` or the first direnv hit.
+        let eager = !self.no_pull;
+        materialize_lock(&context, &new_lock, eager).await?;
 
         // Non-fatal advisory note when `.gitattributes` lacks
         // `ocx.lock merge=union`.
@@ -157,4 +189,67 @@ async fn gitattributes_has_merge_union(project_dir: &Path) -> bool {
         }
         tokens.any(|t| t == "merge=union")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn parse(args: &[&str]) -> Lock {
+        Lock::try_parse_from(args).unwrap()
+    }
+
+    fn eager(lock: &Lock) -> bool {
+        !lock.no_pull
+    }
+
+    // ── cases ─────────────────────────────────────────────────────────────────
+
+    /// Neither `--pull` nor `--no-pull` → both fields false; default is eager.
+    #[test]
+    fn parse_no_flags_defaults_to_eager() {
+        let lock = parse(&["lock"]);
+        assert!(!lock.pull, "pull must be false when neither flag is given");
+        assert!(!lock.no_pull, "no_pull must be false when neither flag is given");
+        assert!(eager(&lock), "default must be eager (eager = !no_pull)");
+    }
+
+    /// `--pull` alone → pull=true, no_pull=false; still eager.
+    #[test]
+    fn parse_only_pull_is_eager() {
+        let lock = parse(&["lock", "--pull"]);
+        assert!(lock.pull, "pull must be true with --pull");
+        assert!(!lock.no_pull, "no_pull must be false with --pull only");
+        assert!(eager(&lock), "eager must be true when --pull is the last flag");
+    }
+
+    /// `--no-pull` alone → pull=false, no_pull=true; lazy.
+    #[test]
+    fn parse_only_no_pull_is_lazy() {
+        let lock = parse(&["lock", "--no-pull"]);
+        assert!(!lock.pull, "pull must be false with --no-pull only");
+        assert!(lock.no_pull, "no_pull must be true with --no-pull");
+        assert!(!eager(&lock), "eager must be false when --no-pull is set");
+    }
+
+    /// `--pull --no-pull` → POSIX last-wins: no_pull wins, pull=false; lazy.
+    #[test]
+    fn parse_pull_then_no_pull_no_pull_wins() {
+        let lock = parse(&["lock", "--pull", "--no-pull"]);
+        assert!(lock.no_pull, "no_pull must be true when --no-pull follows --pull");
+        assert!(!lock.pull, "pull must be false when --no-pull overrides it");
+        assert!(!eager(&lock), "eager must be false when --no-pull wins");
+    }
+
+    /// `--no-pull --pull` → POSIX last-wins: pull wins, no_pull=false; eager.
+    #[test]
+    fn parse_no_pull_then_pull_pull_wins() {
+        let lock = parse(&["lock", "--no-pull", "--pull"]);
+        assert!(lock.pull, "pull must be true when --pull follows --no-pull");
+        assert!(!lock.no_pull, "no_pull must be false when --pull overrides it");
+        assert!(eager(&lock), "eager must be true when --pull wins");
+    }
 }

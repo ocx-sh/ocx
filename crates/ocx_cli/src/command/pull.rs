@@ -19,6 +19,11 @@ use crate::conventions::platforms_or_default;
 /// one into the local object store. Distinct from `ocx package pull`: this
 /// command is project-tier (driven by the lock file) and never touches the
 /// candidate or current symlink namespace.
+///
+/// After a successful pull, `ocx.lock` is re-saved with byte-identical content
+/// so its mtime advances. This re-fires `direnv watch_file ocx.lock`, ensuring
+/// direnv refreshes the environment after the object store catches up to the
+/// declared lock. Skipped under `--dry-run`.
 #[derive(Parser, Clone)]
 pub struct Pull {
     /// Preview which locked tools are cached vs. would be fetched.
@@ -111,6 +116,20 @@ impl Pull {
         let info = context
             .manager()
             .pull_all(&identifiers, platforms_or_default(&[]), context.concurrency())
+            .await?;
+
+        // Re-save the lock with same bytes to advance its mtime, so direnv
+        // re-fires after a successful pull. The `tools_content_equal` guard
+        // inside `ProjectLock::save` freezes `generated_at` when content is
+        // unchanged — atomic rename still advances mtime. Skipped under
+        // `--dry-run` because dry-run must not cause any side effects.
+        ctx.lock
+            .save(
+                &ctx.lock_path,
+                Some(&ctx.lock),
+                context.file_structure().root(),
+                &ctx.config_path,
+            )
             .await?;
 
         let entries: Vec<api::data::paths::PathEntry> = identifiers
