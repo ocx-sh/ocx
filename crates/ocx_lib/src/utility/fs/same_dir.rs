@@ -18,6 +18,48 @@
 
 use std::path::Path;
 
+/// Windows file-identity triple: volume serial number + 64-bit file index.
+///
+/// `BY_HANDLE_FILE_INFORMATION` splits the file index into two 32-bit
+/// halves; collapsing them into a single `u64` keeps the equality check
+/// readable.
+#[cfg(windows)]
+#[derive(PartialEq, Eq)]
+struct FileId {
+    volume_serial: u32,
+    file_index: u64,
+}
+
+#[cfg(windows)]
+fn file_id(path: &Path) -> std::io::Result<FileId> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+
+    // `FILE_FLAG_BACKUP_SEMANTICS` (0x02000000) — see module doc above.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0) // no read/write, identity probe only
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` owns a valid open handle for the duration of this
+    // call (closed on drop after we return). `&mut info` is a valid
+    // writable pointer to a properly aligned `BY_HANDLE_FILE_INFORMATION`.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(FileId {
+        volume_serial: info.dwVolumeSerialNumber,
+        file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
+}
+
 /// Returns `true` when `a` and `b` denote the same directory by filesystem
 /// identity (Unix `dev`+`ino`; Windows canonicalized-handle equivalence).
 ///
@@ -40,15 +82,22 @@ pub fn same_dir(a: &Path, b: &Path) -> std::io::Result<bool> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-
         // The Windows inode equivalent is the (volume serial number, file
-        // index) pair. `std::fs::metadata` follows reparse points so a
-        // directory junction/symlink resolves to its target's identity,
-        // matching the Unix `dev`/`ino` semantics above.
-        let ma = std::fs::metadata(a)?;
-        let mb = std::fs::metadata(b)?;
-        Ok(ma.volume_serial_number() == mb.volume_serial_number() && ma.file_index() == mb.file_index())
+        // index) pair from `BY_HANDLE_FILE_INFORMATION`. We open each path
+        // and pull that pair via `GetFileInformationByHandle` — the stable
+        // counterpart to the nightly `MetadataExt::{volume_serial_number,
+        // file_index}` accessors (rust-lang/rust#63010, gated behind the
+        // `windows_by_handle` feature).
+        //
+        // `FILE_FLAG_BACKUP_SEMANTICS` is required to open a *directory*
+        // handle on Windows. Opening with default flags (i.e. via
+        // `File::open`) fails on directories. We deliberately *do not* set
+        // `FILE_FLAG_OPEN_REPARSE_POINT`: a directory junction or symlink
+        // must resolve to its target so identity matches the Unix
+        // `dev`/`ino` semantics above.
+        let ia = file_id(a)?;
+        let ib = file_id(b)?;
+        Ok(ia == ib)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -96,6 +145,26 @@ mod tests {
         assert!(
             same_dir(&real, &link).expect("same_dir on dir + symlink-to-dir"),
             "a directory and a symlink resolving to it must compare equal by identity"
+        );
+    }
+
+    /// Windows mirror of `dir_and_symlink_to_it_are_same`: a directory and a
+    /// junction pointing at it must compare equal by identity — the Win32
+    /// `GetFileInformationByHandle` probe follows the reparse point because
+    /// we do not pass `FILE_FLAG_OPEN_REPARSE_POINT`.
+    #[test]
+    #[cfg(windows)]
+    fn dir_and_junction_to_it_are_same() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).expect("create real");
+        let link = tmp.path().join("link");
+        junction::create(&real, &link).expect("junction");
+
+        assert_ne!(real.as_os_str(), link.as_os_str());
+        assert!(
+            same_dir(&real, &link).expect("same_dir on dir + junction-to-dir"),
+            "a directory and a junction resolving to it must compare equal by identity"
         );
     }
 

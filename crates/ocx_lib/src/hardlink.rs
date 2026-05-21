@@ -403,12 +403,32 @@ mod tests {
         }
 
         /// W3: On Windows, the inode equivalent is the (volume serial number,
-        /// file index) pair returned by `MetadataExt::file_index()`.
-        /// A hardlink on the same NTFS volume must share the file index with the
-        /// source, proving they reference the same on-disk record.
+        /// file index) pair returned by `BY_HANDLE_FILE_INFORMATION`. A
+        /// hardlink on the same NTFS volume must share the file index with
+        /// the source, proving they reference the same on-disk record.
+        ///
+        /// The probe goes through `GetFileInformationByHandle` rather than the
+        /// nightly-only `MetadataExt::file_index()` accessor
+        /// (rust-lang/rust#63010, `windows_by_handle`).
         #[test]
         fn hardlink_preserves_file_index_on_ntfs() {
-            use std::os::windows::fs::MetadataExt;
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+
+            fn file_index(path: &std::path::Path) -> u64 {
+                let f = std::fs::File::open(path).unwrap();
+                let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+                // SAFETY: `f` owns a valid handle for the duration of the
+                // call; `&mut info` points to writable, aligned storage.
+                let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle() as HANDLE, &mut info) };
+                assert!(
+                    ok != 0,
+                    "GetFileInformationByHandle: {}",
+                    std::io::Error::last_os_error()
+                );
+                (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)
+            }
 
             let (_dir, root) = setup();
             let source = make_file(&root, "source", b"content");
@@ -416,14 +436,12 @@ mod tests {
 
             create(&source, &link).unwrap();
 
-            let m_source = std::fs::metadata(&source).unwrap();
-            let m_link = std::fs::metadata(&link).unwrap();
-            // Both paths live in the same tempdir so the volume serial number is
-            // implicitly equal. Comparing file_index is sufficient to confirm
-            // shared-inode semantics on NTFS.
+            // Both paths live in the same tempdir so the volume serial number
+            // is implicitly equal; comparing the 64-bit file index is
+            // sufficient to confirm shared-inode semantics on NTFS.
             assert_eq!(
-                m_source.file_index(),
-                m_link.file_index(),
+                file_index(&source),
+                file_index(&link),
                 "NTFS hardlink must share the FileId with its source"
             );
         }
