@@ -19,11 +19,11 @@ tokio = { workspace = true }
 # fixed it. Floor set here to prevent pulling the broken versions when used
 # by `ocx run`'s parser shape. Source: clap CHANGELOG.
 clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
-clap_complete = "4.6.2"
+clap_complete = "4.6.5"
 anyhow = "1.0.101"
-tar = "0.4.45"
+tar = "0.4.46"
 tempfile = "3"
-lzma-rust2 = "0.16.0"
+lzma-rust2 = "0.16.3"
 flate2 = "1.1.9"
 futures = "0.3.31"
 tracing = "0.1.44"

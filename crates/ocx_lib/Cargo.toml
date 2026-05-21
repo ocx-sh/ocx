@@ -11,7 +11,7 @@ schemars = "1"
 tokio = { workspace = true }
 
 oci-client = "0.16.0"
-lzma-rust2 = "0.16.2"
+lzma-rust2 = "0.16.3"
 serde_json = "1.0.149"
 serde_json_canonicalizer = "0.3.2"
 serde = { version = "1.0.*", features = ["derive"] }
@@ -21,13 +21,13 @@ indexmap = "2"
 toml = "1.1.2"
 toml_edit = { version = "0.25", features = ["serde"] }
 flate2 = "1.1.9"
-tar = "0.4.45"
+tar = "0.4.46"
 tempfile = "3.25.0"
 serde_repr = "0.1.20"
 serde_yaml_ng = { workspace = true }
 bytes = "1"
 futures = "0.3.31"
-fs4 = { version = "0.13", features = ["sync"] }
+fs4 = { version = "1.1", features = ["sync"] }
 chrono = "0.4.43"
 regex = "1.12.3"
 lazy_static = "1.5.0"
@@ -38,11 +38,11 @@ base64 = "0.22"
 symlink = "0.1.0"
 dunce = "1.0.5"
 dirs = "6"
-sysinfo = "0.38.4"
+sysinfo = "0.39.2"
 clap_builder = "4.5.60"
 colored_json = "5"
 console = "0.16"
-clap_complete = "4.6.2"
+clap_complete = "4.6.5"
 tracing = "0.1.44"
 tracing-log = "0.2.0"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "std", "fmt", "registry"] }
@@ -59,7 +59,7 @@ rpassword = "7"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-junction = "1.2.0"
+junction = "2.0.0"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [lints]
