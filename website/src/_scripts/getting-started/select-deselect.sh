@@ -1,7 +1,0 @@
-ocx package install "corretto:21.0.0"
-ocx package install "corretto:25.0.0"
-ocx package select "corretto:21.0.0"
-ocx package which --current "corretto:21.0.0"
-ocx package select "corretto:25.0.0"
-ocx package which --current "corretto:21.0.0"
-ocx package deselect "corretto:21.0.0"
