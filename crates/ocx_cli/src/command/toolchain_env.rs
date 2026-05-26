@@ -146,8 +146,7 @@ impl ToolchainEnv {
 
         // Structured report. Format is a context-level concern (root
         // `--format`); this command does not override it.
-        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-        let mut env_data: Vec<api::data::env::EnvEntry> = entries
+        let env_data: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
             .map(|e| api::data::env::EnvEntry {
                 key: e.key,
@@ -156,16 +155,10 @@ impl ToolchainEnv {
             })
             .collect();
 
-        // On Windows, append a synthetic `PATHEXT ⊳ .CMD` entry so generated
-        // `.cmd` launcher shims resolve after the consumer sources our output.
-        // Shared with `ocx package env` (conventions::synthetic_pathext_entry).
-        #[cfg(target_os = "windows")]
-        {
-            let host_pathext = std::env::var("PATHEXT").unwrap_or_default();
-            if let Some(entry) = crate::conventions::synthetic_pathext_entry(&host_pathext) {
-                env_data.push(entry);
-            }
-        }
+        // No synthetic PATHEXT entry: the Windows launcher is now a native
+        // `<name>.exe` shim, and `.EXE` is unconditionally in the default
+        // Windows PATHEXT — nothing to inject for bare-name resolution.
+
         // Backend channel is stdout; if a human is watching a TTY, hint that
         // the default report output is not eval-safe (stderr only — stdout
         // stays a pure machine channel).

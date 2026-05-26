@@ -302,8 +302,6 @@ impl Env {
     /// method vs. delegating to `which_in` which reads `std::env::var_os`.
     #[cfg(windows)]
     fn resolve_command_windows(&self, command: &OsStr, cwd: &std::path::Path) -> Option<PathBuf> {
-        use std::path::PathBuf;
-
         // Parse PATHEXT from our child env. Fall back to a sensible Windows
         // default when absent so bare `foo` can still resolve `foo.exe`.
         let pathext_str = self

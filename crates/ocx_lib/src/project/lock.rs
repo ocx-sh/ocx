@@ -326,6 +326,7 @@ impl ProjectLock {
             // accidentally world-writable file is not perpetuated through the
             // atomic rename cycle (Warn #8).
             let prior_perms = std::fs::metadata(&path).ok().map(|m| {
+                #[cfg_attr(not(unix), allow(unused_mut))]
                 let mut perms = m.permissions();
                 #[cfg(unix)]
                 {
