@@ -308,35 +308,42 @@ get_latest_version() {
 # --- Shell environment files ---
 
 # Write $OCX_HOME/env.sh — POSIX fail-safe form.
-# Resolves the ocx binary via the LITERAL install root embedded at install time
-# (not a $OCX_HOME runtime fallback), so activation survives fresh shells where
-# OCX_HOME is not exported.  The [ -x ] guard + || true ensure a broken/absent
-# global ocx.toml never aborts a shell login (nvm fail-safe pattern).
-# A same-session re-eval guard (_OCX_ENV_LOADED) prevents duplicate PATH entries
-# when a profile is re-sourced mid-session.
+# Prepends the OCX bin directory (resolved through the install candidate's
+# `current` symlink) to PATH, then sources the global toolchain env for any
+# additional tools the user has declared in $OCX_HOME/ocx.toml. OCX itself
+# is NOT a global-toolchain entry — its version source is the install
+# candidate, updated via `ocx package install --select ocx.sh/ocx/cli:N`
+# or by re-running the install script.
+# Idempotency: PATH `case`-match below dedups within a single session
+# without needing a top-level guard variable (which can survive shell
+# state across reinstalls and silently no-op the source).
 create_env_sh() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
-    # Write the literal install root so the file works in fresh shells where
-    # OCX_HOME is not set.  Single-quoted printf format strings intentionally
-    # contain shell variable syntax ($) that must appear verbatim in the
-    # generated file — SC2016 is correct to flag them; suppressed here.
+    # Single-quoted printf format strings intentionally contain shell variable
+    # syntax ($) that must appear verbatim in the generated file.
     # shellcheck disable=SC2016
     {
         printf '#!/bin/sh\n'
         printf '# Managed by ocx installer — do not edit.\n'
-        printf '# Sources the global toolchain env so tools declared in %s/ocx.toml\n' \
-            "$_ocx_home"
-        printf '# are on PATH for every login shell.\n'
-        printf '# Same-session guard: skip if already applied this shell session.\n'
-        printf 'if [ -n "${_OCX_ENV_LOADED:-}" ]; then return 0 2>/dev/null || true; fi\n'
-        printf 'export _OCX_ENV_LOADED=1\n'
         printf 'export OCX_HOME="%s"\n' "$_ocx_home"
-        printf '_ocx_bin="%s/symlinks/ocx.sh/ocx/cli/current/bin/ocx"\n' "$_ocx_home"
+        printf '_ocx_bin="%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
         printf 'if [ -x "$_ocx_bin" ]; then\n'
+        printf '    _ocx_bindir="${_ocx_bin%%/ocx}"\n'
+        printf '    case ":${PATH:-}:" in\n'
+        printf '        *":${_ocx_bindir}:"*) ;;\n'
+        printf '        *) PATH="${_ocx_bindir}${PATH:+:$PATH}"; export PATH ;;\n'
+        printf '    esac\n'
+        printf '    unset _ocx_bindir\n'
         printf '    eval "$("$_ocx_bin" --global env --shell=sh 2>/dev/null)" || true\n'
+        printf '    # Shell completions — detect interactive shell and eval inline.\n'
+        printf '    if [ -n "${ZSH_VERSION:-}" ]; then\n'
+        printf '        eval "$("$_ocx_bin" shell completion --shell=zsh 2>/dev/null)" || true\n'
+        printf '    elif [ -n "${BASH_VERSION:-}" ]; then\n'
+        printf '        eval "$("$_ocx_bin" shell completion --shell=bash 2>/dev/null)" || true\n'
+        printf '    fi\n'
         printf 'fi\n'
         printf 'unset _ocx_bin\n'
     } >"$_ocx_home/env.sh"
@@ -344,23 +351,27 @@ create_env_sh() {
 
 # Write $OCX_HOME/env.fish — fish-syntax per-family file.
 # Fish cannot use the POSIX eval form; pipe-to-source is the idiomatic
-# equivalent in fish 4.x.  The binary path is the resolved install root
-# embedded literally at install time (not a runtime OCX_HOME fallback).
+# equivalent in fish 4.x.  PATH is prepended directly from the install
+# candidate; global toolchain env is layered on top for user-declared tools.
 create_env_fish() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
-    # Write the literal install root into the file so it works in fresh shells
-    # where OCX_HOME is not set.  SC2016 suppressed: single-quoted $ syntax is
-    # intentional — fish variable references must appear verbatim in the file.
+    # SC2016 suppressed: single-quoted $ syntax is intentional — fish variable
+    # references must appear verbatim in the file.
     # shellcheck disable=SC2016
     {
         printf '# Managed by ocx installer — do not edit.\n'
-        printf 'set -l _ocx_bin "%s/symlinks/ocx.sh/ocx/cli/current/bin/ocx"\n' "$_ocx_home"
+        printf 'set -l _ocx_bin "%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
         printf 'if test -x "$_ocx_bin"\n'
         printf '    set -x OCX_HOME "%s"\n' "$_ocx_home"
+        printf '    set -l _ocx_bindir (string replace -r "/ocx\\$" "" "$_ocx_bin")\n'
+        printf '    if not contains -- "$_ocx_bindir" $PATH\n'
+        printf '        set -x PATH "$_ocx_bindir" $PATH\n'
+        printf '    end\n'
         printf '    "$_ocx_bin" --global env --shell=fish 2>/dev/null | source\n'
+        printf '    "$_ocx_bin" shell completion --shell=fish 2>/dev/null | source\n'
         printf 'end\n'
     } >"$_ocx_home/env.fish"
 }
@@ -381,9 +392,16 @@ create_env_ps1() {
     {
         printf '# Managed by ocx installer — do not edit.\n'
         printf '$env:OCX_HOME = "%s"\n' "$_ocx_home"
-        printf '$_ocxBin = "%s/symlinks/ocx.sh/ocx/cli/current/bin/ocx"\n' "$_ocx_home"
+        printf '$_ocxBin = "%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
         printf 'if (Test-Path $_ocxBin -PathType Leaf) {\n'
+        printf '    $_ocxBinDir = Split-Path $_ocxBin -Parent\n'
+        printf '    $_pathSep = [IO.Path]::PathSeparator\n'
+        printf '    if (-not (($env:PATH -split [regex]::Escape($_pathSep)) -contains $_ocxBinDir)) {\n'
+        printf '        $env:PATH = "$_ocxBinDir$_pathSep$env:PATH"\n'
+        printf '    }\n'
+        printf '    Remove-Variable _ocxBinDir, _pathSep -ErrorAction SilentlyContinue\n'
         printf '    Invoke-Expression ((& $_ocxBin --global env --shell=pwsh 2>$null) | Out-String)\n'
+        printf '    Invoke-Expression ((& $_ocxBin shell completion --shell=powershell 2>$null) | Out-String)\n'
         printf '}\n'
     } >"$_ocx_home/env.ps1"
 }
@@ -405,8 +423,16 @@ create_env_nu() {
     # generated file.
     {
         printf '# Managed by ocx installer — do not edit.\n'
-        printf 'let _ocx_bin = "%s/symlinks/ocx.sh/ocx/current/bin/ocx"\n' "$_ocx_home"
+        printf 'let _ocx_bin = "%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
         printf 'if ($_ocx_bin | path exists) {\n'
+        printf '    let _ocx_bindir = ($_ocx_bin | path dirname)\n'
+        printf '    let _path_sep = (char esep)\n'
+        printf '    let _path_list = ($env.PATH? | default "" | split row $_path_sep)\n'
+        printf '    if not ($_path_list | any { |p| $p == $_ocx_bindir }) {\n'
+        printf '        let _prev = ($env.PATH? | default "")\n'
+        printf '        let _next = (if ($_prev | is-empty) { $_ocx_bindir } else { $"($_ocx_bindir)($_path_sep)($_prev)" })\n'
+        printf '        load-env { PATH: $_next }\n'
+        printf '    }\n'
         printf '    let _ocx_out = (^$_ocx_bin --global env | complete)\n'
         printf '    if $_ocx_out.exit_code == 0 {\n'
         printf '        for e in ($_ocx_out.stdout | from json | get entries) {\n'
@@ -456,9 +482,14 @@ create_env_elv() {
     # generated file.
     {
         printf '# Managed by ocx installer — do not edit.\n'
-        printf 'var _ocx_bin = "%s/symlinks/ocx.sh/ocx/current/bin/ocx"\n' "$_ocx_home"
+        printf 'var _ocx_bin = "%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
         printf 'if ?(test -x $_ocx_bin) {\n'
+        printf '    var _ocx_bindir = (path:dir $_ocx_bin)\n'
+        printf '    if (not (has-value $paths $_ocx_bindir)) {\n'
+        printf '        set paths = [$_ocx_bindir $@paths]\n'
+        printf '    }\n'
         printf '    eval (e:$_ocx_bin --global env --shell=elvish | slurp)\n'
+        printf '    eval (e:$_ocx_bin shell completion --shell=elvish | slurp)\n'
         printf '}\n'
     } >"$_ocx_home/env.elv"
 }
@@ -492,9 +523,12 @@ FISHEOF
 # --- Legacy profile line migration (W6) ---
 
 # Detect and remove any stale `. "$OCX_HOME/init.<shell>"` lines written by
-# the deleted `ocx shell init` command.  These differ from the new block-marker
-# block so the awk uninstall path won't catch them.  Applies to both install
-# and uninstall so upgraders never keep a dangling broken source line.
+# the deleted `ocx shell init` command, plus older `. "$OCX_HOME/env"` lines
+# (extensionless legacy env file). The current installer writes `env.sh`;
+# stale source lines for the extensionless file silently skip via [[ -r ]]
+# guards and leave ocx off PATH. Detection anchors to actual dot-source
+# command form (leading whitespace + a dot/period command) so benign user
+# comments are never modified (CWE-73 defense).
 remove_legacy_init_lines() {
     local _profile="$1" _ocx_home _tmpfile
 
@@ -504,29 +538,65 @@ remove_legacy_init_lines() {
 
     _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
-    # Match lines written by the deleted `ocx shell init` command.  Those lines
-    # had the form:  . "$OCX_HOME/init.bash"  (or init.zsh, init.fish, etc.)
-    # Detection anchors to actual dot-source command form (leading whitespace +
-    # a dot/period command) so benign user comments containing ".ocx/init." are
-    # never treated as legacy source lines (CWE-73 defense).
-    if grep -qF "${_ocx_home}/init." "$_profile" 2>/dev/null ||
-        grep -qE '^[[:space:]]*\. .*\.ocx/init\.' "$_profile" 2>/dev/null; then
+    # Detection: file references one of the legacy patterns.
+    if grep -qF "${_ocx_home}/init." "$_profile" 2>/dev/null \
+        || grep -qE '^[[:space:]]*\. .*\.ocx/init\.' "$_profile" 2>/dev/null \
+        || grep -qE '\.ocx/env"' "$_profile" 2>/dev/null; then
         _tmpfile=$(mktemp)
-        # Delete only actual dot-source lines referencing .ocx/init.<word>.
-        # Anchored to leading whitespace + dot-command to avoid nuking comments.
-        grep -vE '^[[:space:]]*\. .*\.ocx/init\.' "$_profile" >"$_tmpfile" || true
-        mv -- "$_tmpfile" "$_profile"
-        say "Removed legacy ocx shell init line from $(tildify "$_profile")"
+        # State machine. state: 0 = pass-through, 1 = saw `# OCX` header
+        # (buffered, not yet committed), 2 = inside multi-line legacy guard.
+        # Transitions:
+        #   0 → 1   on `# OCX` heading
+        #   1 → 2   on `if [[ -r "..ocx/env" ]] …`  (discard header + opener)
+        #   1 → 0   on any other line (flush buffered header, then print line)
+        #   2 → 0   on `fi`                          (discard closer)
+        # Bare dot-source legacy lines drop in any state.
+        awk '
+            state==0 && /^[[:space:]]*#[[:space:]]*OCX[[:space:]]*$/ {
+                header=$0; state=1; next
+            }
+            state==1 && /^[[:space:]]*if[[:space:]]+\[\[[[:space:]]*-r[[:space:]]+"[^"]*\.ocx\/env"[[:space:]]*\]\]/ {
+                # Inline single-line form: `… ]]; then . "…"; fi`
+                if ($0 ~ /;[[:space:]]*fi[[:space:]]*$/) { state=0; header=""; next }
+                state=2; next
+            }
+            state==1 {
+                # Buffered `# OCX` did not introduce a legacy guard — emit it.
+                print header; header=""; state=0
+            }
+            state==2 && /^[[:space:]]*fi[[:space:]]*$/ { state=0; next }
+            state==2 { next }
+            # Bare legacy dot-source lines (no surrounding guard).
+            /^[[:space:]]*\. .*\.ocx\/init\./ { next }
+            /^[[:space:]]*\. .*\.ocx\/env"?[[:space:]]*$/ { next }
+            { print }
+            END { if (state==1 && header != "") print header }
+        ' "$_profile" >"$_tmpfile" || true
+        if ! cmp -s -- "$_profile" "$_tmpfile"; then
+            mv -- "$_tmpfile" "$_profile"
+            say "Removed legacy OCX activation lines from $(tildify "$_profile")"
+        else
+            rm -f -- "$_tmpfile"
+        fi
     fi
 }
 
 # --- Shell profile modification ---
 
-# Profile target decision tree (login-shell scope, per research §84-89):
-#   zsh  → ${ZDOTDIR:-$HOME}/.zprofile  (macOS Terminal opens login by default)
-#   bash → ~/.bash_profile if exists else ~/.profile
+# Profile target decision tree — covers BOTH login and interactive rc files
+# so the activation block fires regardless of how the terminal is launched.
+# Login-only targets (.zprofile, .bash_profile) miss Linux/WSL/VSCode
+# terminals which open interactive non-login shells; interactive-only
+# targets (.zshrc, .bashrc) miss macOS Terminal's default login shells.
+# Writing to both is safe — env.sh's PATH `case`-match makes the second
+# source a no-op (idempotent dedup).
+#
+#   bash → ~/.bash_profile (or ~/.profile if no .bash_profile) + ~/.bashrc
+#   zsh  → ${ZDOTDIR:-$HOME}/.zprofile + ${ZDOTDIR:-$HOME}/.zshrc
 #   fish → ~/.config/fish/conf.d (managed via conf.d — no block needed here)
 #   *    → ~/.profile
+#
+# Returns one path per line.
 detect_profile() {
     local _shell_name _zdotdir
 
@@ -539,17 +609,18 @@ detect_profile() {
             else
                 echo "$HOME/.profile"
             fi
+            echo "$HOME/.bashrc"
             ;;
         zsh)
-            # .zprofile: sourced for login shells (macOS Terminal default).
-            # Respects ZDOTDIR when set.  Reject ZDOTDIR="/" to prevent writing
+            # Respect ZDOTDIR when set. Reject ZDOTDIR="/" to prevent writing
             # /.zprofile (CWE-22 defense — filesystem root write guard).
             _zdotdir="${ZDOTDIR:-$HOME}"
             if [ "$_zdotdir" = "/" ]; then
-                warn "ZDOTDIR is '/' — refusing to write /.zprofile; falling back to ~/.zprofile"
+                warn "ZDOTDIR is '/' — refusing to write under /; falling back to \$HOME"
                 _zdotdir="$HOME"
             fi
             echo "$_zdotdir/.zprofile"
+            echo "$_zdotdir/.zshrc"
             ;;
         fish)
             # Fish uses conf.d — no block-marker profile edit needed
@@ -569,13 +640,16 @@ detect_profile() {
     esac
 }
 
-# Append a block-marker idempotent section to the login profile.
+# Append a block-marker idempotent section to each profile target.
 # Pattern: conda-style # BEGIN ocx / # END ocx block.
-# - Idempotent: grep -qF the BEGIN marker before append (never double-appends).
+# - Idempotent per file: grep -qF the BEGIN marker before append.
 # - Dot (.) not source: POSIX dash-safe.
 # - Legacy detection: remove old $OCX_HOME/init.* source lines first (W6).
+# - detect_profile may return multiple paths (one per line) so the block
+#   reaches both login (.zprofile/.bash_profile) and interactive
+#   (.zshrc/.bashrc) entry points.
 modify_shell_profile() {
-    local _profile _ocx_home _shell_name
+    local _profiles _profile _ocx_home _shell_name
 
     _ocx_home="${OCX_HOME:-$HOME/.ocx}"
     _shell_name=$(basename "${SHELL:-sh}")
@@ -594,41 +668,53 @@ modify_shell_profile() {
         return
     fi
 
-    _profile=$(detect_profile)
-    if [ -z "$_profile" ]; then
+    _profiles=$(detect_profile)
+    if [ -z "$_profiles" ]; then
         return
     fi
 
-    # W6: strip any legacy `ocx shell init`-written lines before inserting block.
-    remove_legacy_init_lines "$_profile"
-
-    # Idempotent: skip if block already present.
-    if grep -qF "# BEGIN ocx" "$_profile" 2>/dev/null; then
-        say "Shell profile already configured ($(tildify "$_profile"))."
-        return
+    # Always strip legacy OCX activation lines from .zshenv (sourced for
+    # every zsh invocation — most aggressive cleanup target). Older
+    # installers wrote a `[[ -r $HOME/.ocx/env ]] && . ...` block here that
+    # silently swallows the missing extensionless env file and leaves ocx
+    # off PATH.
+    if [ -f "${ZDOTDIR:-$HOME}/.zshenv" ]; then
+        remove_legacy_init_lines "${ZDOTDIR:-$HOME}/.zshenv"
     fi
 
-    # Append the block-marker section.
-    # The install root is embedded as a literal resolved path (not a runtime
-    # ${OCX_HOME:-...} fallback) so the block works in fresh shells where
-    # OCX_HOME is not exported.
-    # Elvish uses `eval (slurp < ...)` syntax instead of POSIX `. "..."`;
-    # all other shells use the POSIX dot-source form (dash-safe).
-    if [ "$_shell_name" = "elvish" ]; then
-        printf '\n# BEGIN ocx\neval (slurp < "%s/env.elv")\n# END ocx\n' \
-            "$_ocx_home" >>"$_profile"
-    else
-        printf '\n# BEGIN ocx\n. "%s/env.sh"\n# END ocx\n' \
-            "$_ocx_home" >>"$_profile"
-    fi
-    say "Added OCX to $(tildify "$_profile")"
+    # Iterate over each candidate profile file.
+    echo "$_profiles" | while IFS= read -r _profile; do
+        [ -z "$_profile" ] && continue
+
+        # W6: strip any legacy `ocx shell init`-written lines before inserting block.
+        remove_legacy_init_lines "$_profile"
+
+        # Idempotent per file: skip if block already present.
+        if grep -qF "# BEGIN ocx" "$_profile" 2>/dev/null; then
+            say "Shell profile already configured ($(tildify "$_profile"))."
+            continue
+        fi
+
+        # Append the block-marker section. The install root is embedded as a
+        # literal resolved path so the block works in fresh shells where
+        # OCX_HOME is not exported. Elvish uses `eval (slurp < ...)` syntax;
+        # all other shells use the POSIX dot-source form (dash-safe).
+        if [ "$_shell_name" = "elvish" ]; then
+            printf '\n# BEGIN ocx\neval (slurp < "%s/env.elv")\n# END ocx\n' \
+                "$_ocx_home" >>"$_profile"
+        else
+            printf '\n# BEGIN ocx\n. "%s/env.sh"\n# END ocx\n' \
+                "$_ocx_home" >>"$_profile"
+        fi
+        say "Added OCX to $(tildify "$_profile")"
+    done
 }
 
 # Remove the block-marker section from the profile (uninstall path).
 # Uses POSIX awk — avoids non-portable `sed -i`.
 # Also strips legacy $OCX_HOME/init.* lines (W6).
 remove_shell_profile() {
-    local _profile _ocx_home _tmpfile _shell_name
+    local _profiles _profile _ocx_home _tmpfile _shell_name
 
     _ocx_home="${OCX_HOME:-$HOME/.ocx}"
     _shell_name=$(basename "${SHELL:-sh}")
@@ -653,25 +739,28 @@ remove_shell_profile() {
         return
     fi
 
-    _profile=$(detect_profile)
-    if [ -z "$_profile" ] || ! [ -f "$_profile" ]; then
+    _profiles=$(detect_profile)
+    if [ -z "$_profiles" ]; then
         return
     fi
 
-    # W6: strip legacy init.* lines first.
-    remove_legacy_init_lines "$_profile"
+    # Iterate over each candidate profile file. The block-strip form:
+    # BEGIN marker sets p=1 and is itself skipped; END marker resets p=0 and
+    # is itself skipped; only non-suppressed (!p) lines are printed.
+    echo "$_profiles" | while IFS= read -r _profile; do
+        [ -z "$_profile" ] && continue
+        [ -f "$_profile" ] || continue
 
-    # Remove the # BEGIN ocx … # END ocx block.
-    # Correct block-strip form: BEGIN marker sets p=1 and is itself skipped;
-    # END marker resets p=0 and is itself skipped; only non-suppressed (!p)
-    # lines are printed.  This ensures both markers AND all interior lines are
-    # removed and the END marker correctly resets the flag.
-    if grep -qF "# BEGIN ocx" "$_profile" 2>/dev/null; then
-        _tmpfile=$(mktemp)
-        awk '/^# BEGIN ocx/{p=1;next} /^# END ocx/{p=0;next} !p{print}' \
-            "$_profile" >"$_tmpfile" && mv -- "$_tmpfile" "$_profile"
-        say "Removed OCX from $(tildify "$_profile")"
-    fi
+        # W6: strip legacy init.* lines first.
+        remove_legacy_init_lines "$_profile"
+
+        if grep -qF "# BEGIN ocx" "$_profile" 2>/dev/null; then
+            _tmpfile=$(mktemp)
+            awk '/^# BEGIN ocx/{p=1;next} /^# END ocx/{p=0;next} !p{print}' \
+                "$_profile" >"$_tmpfile" && mv -- "$_tmpfile" "$_profile"
+            say "Removed OCX from $(tildify "$_profile")"
+        fi
+    done
 }
 
 # --- Bootstrap: OCX installs itself ---
@@ -680,13 +769,14 @@ bootstrap_ocx() {
     local _bin="$1" _version="$2"
 
     say "Bootstrapping OCX into its own package store..."
-    if ! "$_bin" --remote install --select "ocx.sh/ocx/cli:$_version"; then
-        err "bootstrap failed: 'ocx --remote install --select ocx.sh/ocx/cli:$_version'
+    if ! "$_bin" --remote package install --select "ocx.sh/ocx/cli:$_version"; then
+        err "bootstrap failed: 'ocx --remote package install --select ocx.sh/ocx/cli:$_version'
   Ensure ocx v${_version} is published to the ocx.sh registry.
   If this is a first install and the registry is not yet populated,
   please wait for the release pipeline to complete."
     fi
 }
+
 
 # --- Success message ---
 
@@ -816,7 +906,7 @@ main() {
 
     # Detect existing installation for upgrade messaging
     _old_version=""
-    _bin_path="${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/bin/ocx"
+    _bin_path="${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"
     if [ -x "$_bin_path" ]; then
         _old_version=$("$_bin_path" version 2>/dev/null || echo "")
     fi
@@ -882,7 +972,7 @@ main() {
 
     # Bootstrap: OCX installs itself into its own package store
     bootstrap_ocx "$_bin" "$_version"
-    say "Installed to $(tildify "${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/bin/ocx")"
+    say "Installed to $(tildify "${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx")"
 
     # Create shell environment files (POSIX + per-family variants).
     # remove_legacy_env_file strips the old extensionless $OCX_HOME/env file
@@ -919,7 +1009,7 @@ main() {
 
 # Export the OCX bin directory to GITHUB_PATH for GitHub Actions.
 export_github_path() {
-    local _install_path="${OCX_HOME:-$HOME/.ocx}/symlinks/ocx.sh/ocx/cli/current/bin"
+    local _install_path="${OCX_HOME:-$HOME/.ocx}/symlinks/ocx.sh/ocx/cli/current/content/bin"
     if [ -n "${GITHUB_PATH:-}" ]; then
         printf '%s\n' "$_install_path" >>"$GITHUB_PATH" ||
             warn "failed to write to \$GITHUB_PATH"

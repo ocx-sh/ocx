@@ -178,19 +178,28 @@ function Create-EnvFile {
 
     $envFile = Join-Path $OcxHome 'env.ps1'
 
-    # Mirror of install.sh `create_env_ps1`: the file sources only the global
-    # toolchain env (`ocx --global env`). PATH is produced entirely by that
-    # command — no separate ocx-bin injection (the old `shell profile load`
-    # model is deleted). The install root is embedded literally so the file
-    # works in fresh shells where $env:OCX_HOME is not set. `ocx --global env`
-    # resolves offline via the current symlinks, so no network at login.
-    $ocxBin = Join-Path $OcxHome 'symlinks\ocx.sh\ocx\cli\current\bin\ocx.exe'
+    # Mirror of install.sh `create_env_sh`: prepend the OCX bin directory
+    # (resolved through the install candidate's `current` symlink) to PATH,
+    # then source the global toolchain env for any additional tools the user
+    # has declared in $OCX_HOME/ocx.toml. OCX itself is NOT a global-toolchain
+    # entry — its version source is the install candidate, updated via
+    # `ocx package install --select ocx.sh/ocx/cli:N` or by re-running the
+    # install script. The install root is embedded literally so the file
+    # works in fresh shells where $env:OCX_HOME is not set.
+    $ocxBin = Join-Path $OcxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe'
     $envContent = @"
 # Managed by ocx installer — do not edit.
 `$env:OCX_HOME = "$OcxHome"
 `$_ocxBin = "$ocxBin"
 if (Test-Path `$_ocxBin -PathType Leaf) {
+    `$_ocxBinDir = Split-Path `$_ocxBin -Parent
+    `$_pathSep = [IO.Path]::PathSeparator
+    if (-not ((`$env:PATH -split [regex]::Escape(`$_pathSep)) -contains `$_ocxBinDir)) {
+        `$env:PATH = "`$_ocxBinDir`$_pathSep`$env:PATH"
+    }
+    Remove-Variable _ocxBinDir, _pathSep -ErrorAction SilentlyContinue
     Invoke-Expression ((& `$_ocxBin --global env --shell=pwsh 2>`$null) | Out-String)
+    Invoke-Expression ((& `$_ocxBin shell completion --shell=powershell 2>`$null) | Out-String)
 }
 Remove-Variable _ocxBin -ErrorAction SilentlyContinue
 "@
@@ -376,7 +385,7 @@ function Main {
 
     # Detect existing installation for upgrade messaging
     $oldVersion = ''
-    $existingBin = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\bin\ocx.exe'
+    $existingBin = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe'
     if (Test-Path $existingBin) {
         try { $oldVersion = & $existingBin version 2>$null } catch {}
     }
@@ -451,11 +460,11 @@ function Main {
 
         # Bootstrap: OCX installs itself into its own package store
         Say 'Bootstrapping OCX into its own package store...'
-        & $bin --remote install --select "ocx.sh/ocx/cli:$requestedVersion"
+        & $bin --remote package install --select "ocx.sh/ocx/cli:$requestedVersion"
         if ($LASTEXITCODE -ne 0) {
-            Err "Bootstrap failed: 'ocx --remote install --select ocx.sh/ocx/cli:$requestedVersion'`nEnsure ocx v$requestedVersion is published to the ocx.sh registry."
+            Err "Bootstrap failed: 'ocx --remote package install --select ocx.sh/ocx/cli:$requestedVersion'`nEnsure ocx v$requestedVersion is published to the ocx.sh registry."
         }
-        $installDir = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\bin'
+        $installDir = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
         Say "Installed to $installDir\ocx.exe"
 
         # Create environment file
@@ -481,7 +490,7 @@ function Main {
 
         # Export GitHub Actions path if in CI
         if ($env:GITHUB_PATH) {
-            $ghBinPath = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\bin'
+            $ghBinPath = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
             try {
                 Add-Content -Path $env:GITHUB_PATH -Value $ghBinPath
             }
