@@ -175,7 +175,10 @@ def build_package_data(
     registry: str,
 ) -> dict:
     """Build complete data for a single package."""
-    name = repo.split("/")[-1] if "/" in repo else repo
+    # `name` keeps the full namespace under the registry root so nested OCI
+    # repos (e.g. `ocx.sh/ocx/cli`) survive as `ocx/cli` rather than `cli`.
+    prefix = f"{registry}/"
+    name = repo.removeprefix(prefix) if repo.startswith(prefix) else repo
     pkg_dir = output_dir / "packages" / name
     pkg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -245,8 +248,8 @@ def generate_package_page(
         readme=readme,
     )
 
-    pages_dir.mkdir(parents=True, exist_ok=True)
     page_path = pages_dir / f"{summary['name']}.md"
+    page_path.parent.mkdir(parents=True, exist_ok=True)
     page_path.write_text(content, encoding="utf-8")
 
 
@@ -309,11 +312,14 @@ def main() -> None:
     if args.packages and existing_catalog:
         print(f"Selective refresh for: {', '.join(args.packages)}")
         all_repos = get_catalog_with_tags(args.ocx_binary, remote=args.remote)
+        registry_prefix = f"{args.registry}/"
         repos_to_process = {
             repo: tags
             for repo, tags in all_repos.items()
             if any(
-                pkg == repo or pkg == repo.split("/")[-1]
+                pkg == repo
+                or pkg == repo.removeprefix(registry_prefix)
+                or pkg == repo.split("/")[-1]
                 for pkg in args.packages
             )
         }
@@ -376,22 +382,43 @@ def main() -> None:
         generate_package_page(template, summary, pkg_dir, pages_dir)
     print(f"Generated {len(summaries)} package pages in {pages_dir}")
 
-    # Clean up stale data dirs
+    catalog_names = {s["name"] for s in summaries}
+    catalog_pkg_dirs = {(output_dir / "packages" / n).resolve() for n in catalog_names}
+
+    # Clean up stale data dirs. With nested names (`ocx/cli`), a live entry
+    # parents intermediate dirs that themselves are not catalog members —
+    # only prune leaves that hold no live descendant.
     packages_dir = output_dir / "packages"
     if packages_dir.exists():
-        catalog_names = {s["name"] for s in summaries}
-        for pkg_dir in packages_dir.iterdir():
-            if pkg_dir.is_dir() and pkg_dir.name not in catalog_names:
-                shutil.rmtree(pkg_dir)
-                print(f"  Removed stale package dir: {pkg_dir.name}")
+        for pkg_dir in sorted(
+            (p for p in packages_dir.rglob("*") if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            resolved = pkg_dir.resolve()
+            if resolved in catalog_pkg_dirs:
+                continue
+            # Skip parents of live entries.
+            if any(live.is_relative_to(resolved) for live in catalog_pkg_dirs):
+                continue
+            shutil.rmtree(pkg_dir)
+            print(f"  Removed stale package dir: {pkg_dir.relative_to(packages_dir)}")
 
-    # Clean up stale page files
+    # Clean up stale page files (recursive, prune empty parent dirs).
     if pages_dir.exists():
-        catalog_names = {s["name"] for s in summaries}
-        for page in pages_dir.glob("*.md"):
-            if page.stem not in catalog_names:
+        catalog_stems = {f"{n}.md" for n in catalog_names}
+        for page in pages_dir.rglob("*.md"):
+            rel = page.relative_to(pages_dir).as_posix()
+            if rel not in catalog_stems:
                 page.unlink()
-                print(f"  Removed stale page: {page.name}")
+                print(f"  Removed stale page: {rel}")
+        for sub in sorted(
+            (p for p in pages_dir.rglob("*") if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            if not any(sub.iterdir()):
+                sub.rmdir()
 
 
 if __name__ == "__main__":

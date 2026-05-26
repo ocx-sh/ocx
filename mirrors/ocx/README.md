@@ -1,12 +1,12 @@
 ---
-title: OCX
-description: A fast, cross-platform binary package manager built on OCI registries
-keywords: ocx,package-manager,oci,binary,cross-platform
+title: OCX CLI
+description: The ocx command-line interface — a fast, cross-platform binary package manager built on OCI registries
+keywords: ocx,cli,package-manager,oci,binary,cross-platform
 ---
 
-# OCX
+# OCX CLI
 
-OCX is a fast, cross-platform binary package manager that uses OCI registries as storage. It turns any Docker/OCI registry — Docker Hub, GHCR, ECR, or a private instance — into a binary distribution platform. A single standalone binary with no runtime dependencies.
+The `ocx` command-line interface — a fast, cross-platform binary package manager that uses OCI registries as storage. It turns any Docker/OCI registry — Docker Hub, GHCR, ECR, or a private instance — into a binary distribution platform. A single standalone binary with no runtime dependencies.
 
 ## What's included
 

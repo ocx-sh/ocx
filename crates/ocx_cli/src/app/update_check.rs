@@ -33,7 +33,7 @@ pub async fn check_for_update(ctx: &Context) {
         }
         Ok(UpdateCheckResult::UpdateAvailable(identifier)) => {
             eprintln!(
-                "A new OCX version is available: {identifier}. Consider updating by running `ocx --remote install --select ocx`."
+                "A new OCX version is available: {identifier}. Consider updating by running `ocx --remote package install --select {identifier}`."
             );
         }
         Err(err) => {
@@ -59,7 +59,7 @@ async fn try_check_for_update(ctx: &Context) -> Result<UpdateCheckResult, Error>
     let current_version_str = super::version();
     let current_version = Version::parse(current_version_str)
         .ok_or_else(|| ocx_lib::package::error::Error::VersionInvalid(current_version_str.into()))?;
-    let ocx_identifier = oci::Identifier::new_registry("ocx", oci::OCX_SH_REGISTRY);
+    let ocx_identifier = oci::Identifier::new_registry("ocx/cli", oci::OCX_SH_REGISTRY);
 
     let remote_index = ctx.remote_index()?;
     let remote_index = oci::index::Index::from_remote(remote_index.clone());

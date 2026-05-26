@@ -75,8 +75,8 @@ The `musl` variants have no runtime dependency on glibc. Use them in Alpine cont
 Once ocx is installed, it can manage its own updates. Refresh the local index to discover new versions, then install and select the latest:
 
 ```sh
-ocx index update ocx
-ocx install --select ocx
+ocx index update ocx/cli
+ocx package install --select ocx.sh/ocx/cli
 ```
 
 Alternatively, re-run the install script — it always fetches the latest release:

@@ -56,7 +56,7 @@ irm https://ocx.sh/install.ps1 | iex
 ```
 :::
 
-Open a new terminal and run `ocx --remote install uv:0.10` to install your first package.
+Open a new terminal and run `ocx --remote --global add uv:0.10` to install your first package.
 
 </div>
 
@@ -84,7 +84,7 @@ One command installs and activates a package. Switch versions instantly. Every i
 
 Think `docker pull` — but for standalone binaries. You name the package, OCI multi-platform manifests resolve the right build for your OS and architecture. No platform conditionals, no filename guessing, no architecture mapping tables.
 
-Write `ocx install uv:0.10` once. It works on your Mac, your CI runner's Linux, and your colleague's Windows machine — the tools you already use, distributed the way containers taught us.
+Write `ocx add uv:0.10` once. It works on your Mac, your CI runner's Linux, and your colleague's Windows machine — the tools you already use, distributed the way containers taught us.
 
   </template>
 
@@ -132,7 +132,7 @@ Every command returns structured JSON with `--format json`. Exit codes are meani
 
 Every install is a self-contained directory — no global state, no registry database, no fragile symlinks into system paths. Copy the store to a USB drive, zip it into a CI cache artifact, or `scp` it to a machine behind a firewall.
 
-The local index snapshot plus the content-addressed object store is everything `ocx --offline` needs. Bundle a toolchain once, redistribute it to air-gapped hosts, and `ocx install --offline` resolves it without ever touching the network.
+The local index snapshot plus the content-addressed object store is everything `ocx --offline` needs. Bundle a toolchain once, redistribute it to air-gapped hosts, and `ocx --offline run` resolves it without ever touching the network.
 
   </template>
 

@@ -21,9 +21,13 @@ interface PackageInfo {
 }
 
 const route = useRoute()
+// URL is `/docs/catalog/<name>` where `<name>` may contain slashes
+// (nested OCI repos, e.g. `ocx/cli`). Strip the catalog prefix and
+// `.html` suffix, then trim any trailing slash.
 const pkgName = computed(() => {
-  const segments = route.path.split('/')
-  return segments[segments.length - 1].replace(/\.html$/, '')
+  const prefix = '/docs/catalog/'
+  const path = route.path.replace(/\.html$/, '').replace(/\/$/, '')
+  return path.startsWith(prefix) ? path.slice(prefix.length) : ''
 })
 
 const info = ref<PackageInfo | null>(null)
@@ -38,16 +42,16 @@ const qualifiedName = computed(() => {
 
 const latestVersion = computed(() => info.value?.latestVersion || info.value?.latestTag || '')
 
-const installCmd = computed(() => {
+const addProjectCmd = computed(() => {
   if (!info.value) return ''
   const tag = latestVersion.value ? `:${latestVersion.value}` : ''
-  return `ocx --remote install ${qualifiedName.value}${tag}`
+  return `ocx --remote add ${qualifiedName.value}${tag}`
 })
 
-const profileCmd = computed(() => {
+const addGlobalCmd = computed(() => {
   if (!info.value) return ''
   const tag = latestVersion.value ? `:${latestVersion.value}` : ''
-  return `ocx --remote shell profile add ${qualifiedName.value}${tag}`
+  return `ocx --remote --global add ${qualifiedName.value}${tag}`
 })
 
 onMounted(async () => {
@@ -105,6 +109,7 @@ onMounted(async () => {
         </div>
         <div class="header-text">
           <h1 class="header-title">{{ info.title }}</h1>
+          <code v-if="qualifiedName" class="header-repo">{{ qualifiedName }}</code>
           <p v-if="info.description" class="header-desc">
             {{ info.description }}
           </p>
@@ -131,15 +136,15 @@ onMounted(async () => {
 
       <!-- Install Snippets -->
       <div class="snippets">
-        <h3 class="snippets-title">Install</h3>
+        <h3 class="snippets-title">Add</h3>
         <div class="snippet-list">
           <div class="snippet-row">
-            <span class="snippet-label">Install</span>
-            <CopySnippet label="$" :code="installCmd" />
+            <span class="snippet-label">Project</span>
+            <CopySnippet label="$" :code="addProjectCmd" />
           </div>
           <div class="snippet-row">
-            <span class="snippet-label">Profile</span>
-            <CopySnippet label="$" :code="profileCmd" />
+            <span class="snippet-label">Global</span>
+            <CopySnippet label="$" :code="addGlobalCmd" />
           </div>
         </div>
       </div>
@@ -220,10 +225,21 @@ onMounted(async () => {
 .header-title {
   font-size: 1.75rem;
   font-weight: 700;
-  margin: 0 0 0.35rem;
+  margin: 0 0 0.2rem;
   border: none;
   padding: 0;
   line-height: 1.3;
+}
+
+.header-repo {
+  display: inline-block;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.8rem;
+  color: var(--vp-c-text-3);
+  background: var(--vp-c-bg-soft);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
 }
 
 .header-desc {
