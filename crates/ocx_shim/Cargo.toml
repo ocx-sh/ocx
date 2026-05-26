@@ -12,18 +12,11 @@ path = "src/main.rs"
 [dependencies]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_System_Threading",
-    "Win32_System_JobObjects",
-    "Win32_System_Console",
-    "Win32_Foundation",
-    "Win32_System_LibraryLoader",
-    # CreateProcessW's signature references Security::SECURITY_ATTRIBUTES;
-    # windows-sys gates each function behind the features of every type it
-    # mentions, so the Security feature is required to import CreateProcessW.
-    "Win32_Security",
-] }
-dunce = "1"
+# CreateProcessW's signature references Security::SECURITY_ATTRIBUTES;
+# windows-sys gates each function behind the features of every type it
+# mentions, so the Security feature is required to import CreateProcessW.
+windows-sys.workspace = true
+dunce.workspace = true
 
 [lints]
 workspace = true

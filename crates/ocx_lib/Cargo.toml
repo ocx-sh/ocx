@@ -7,60 +7,55 @@ publish = false
 exclude = ["src/test_data/**"]
 
 [dependencies]
-schemars = "1"
-tokio = { workspace = true }
+schemars.workspace = true
+tokio.workspace = true
 
-oci-client = "0.16.0"
-lzma-rust2 = "0.16.2"
-serde_json = "1.0.149"
-serde_json_canonicalizer = "0.3.2"
-serde = { version = "1.0.*", features = ["derive"] }
-sha2 = "0.11.0"
-hex = "0.4.3"
-indexmap = "2"
-toml = "1.1.2"
-toml_edit = { version = "0.25", features = ["serde"] }
-flate2 = "1.1.9"
-tar = "0.4.45"
-tempfile = "3.25.0"
-serde_repr = "0.1.20"
-serde_yaml_ng = { workspace = true }
-bytes = "1"
-futures = "0.3.31"
-fs4 = { version = "0.13", features = ["sync"] }
-chrono = "0.4.43"
-regex = "1.12.3"
-lazy_static = "1.5.0"
-async-trait = "0.1.89"
-docker_credential = "1.3.2"
-secrecy = "0.10"
-base64 = "0.22"
-symlink = "0.1.0"
-dunce = "1.0.5"
-dirs = "6"
-sysinfo = "0.38.4"
-clap_builder = "4.5.60"
-colored_json = "5"
-console = "0.16"
-clap_complete = "4.6.2"
-tracing = "0.1.44"
-tracing-log = "0.2.0"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter", "std", "fmt", "registry"] }
-which = "8"
-# "deflate" unfortunately pulls in zopfli; zip crate doesn't expose flate2-only deflate
-zip = { version = "8", default-features = false, features = ["deflate"] }
-indicatif = { version = "0.18.3", features = ["tokio"] }
-thiserror = "2"
-rpassword = "7"
-
-[dev-dependencies]
+oci-client.workspace = true
+lzma-rust2.workspace = true
+serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
+serde.workspace = true
+sha2.workspace = true
+hex.workspace = true
+indexmap.workspace = true
+toml.workspace = true
+flate2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+serde_repr.workspace = true
+serde_yaml_ng.workspace = true
+bytes.workspace = true
+futures.workspace = true
+fs4.workspace = true
+chrono.workspace = true
+regex.workspace = true
+async-trait.workspace = true
+docker_credential.workspace = true
+secrecy.workspace = true
+base64.workspace = true
+symlink.workspace = true
+dunce.workspace = true
+dirs.workspace = true
+sysinfo.workspace = true
+clap_builder.workspace = true
+colored_json.workspace = true
+console.workspace = true
+clap_complete.workspace = true
+tracing.workspace = true
+tracing-log.workspace = true
+tracing-subscriber.workspace = true
+which.workspace = true
+zip.workspace = true
+indicatif.workspace = true
+thiserror.workspace = true
+rpassword.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-junction = "1.2.0"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+junction.workspace = true
+windows-sys.workspace = true
 
 [lints]
 workspace = true
