@@ -16,6 +16,7 @@ test/.out/
 .fonts/
 .mirror-work/
 mirrors/*/out.json
+.cache/xwin/
 
 # =============================================================================
 # Claude Code Local Files

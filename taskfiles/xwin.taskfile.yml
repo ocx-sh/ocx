@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Windows MSVC cross-compile template backed by the messense/cargo-xwin
+# Docker image. Each include creates a (TARGET, SUBCOMMAND) namespace —
+# callers depend on the namespace, never on cargo-xwin directly.
+#
+# Root or subsystem taskfile registers a variant:
+#
+#   xwin-check-x86:
+#     taskfile: ./taskfiles/xwin.taskfile.yml
+#     internal: true
+#     vars: { TARGET: x86_64-pc-windows-msvc, SUBCOMMAND: check }
+#
+# Identity vars (set at include time):
+#   TARGET     — Rust target triple (e.g. x86_64-pc-windows-msvc)
+#   SUBCOMMAND — cargo-xwin subcommand + flags (e.g. "check" or "build --release")
+#
+# Caches under {{.ROOT_DIR}}/.cache/xwin/ (gitignored) survive across runs:
+#   - rustup/ — pinned toolchain + MSVC target add (downloaded once)
+#   - xwin/   — MSVC SDK headers (~250 MiB, downloaded once)
+#   - cargo/  — crate registry + git deps (shared across both Windows arches)
+#   - target/xwin/ holds cargo build artefacts (separate from host target/)
+#
+# Container runs as the invoking host UID/GID so the worktree never grows
+# root-owned files; image pin matches deploy-dev.yml so local runs and CI
+# resolve to the same cargo-xwin + MSVC SDK manifest snapshot. `rustup
+# target add` runs inside the container to honour rust-toolchain.toml,
+# which pins gnullvm targets only — MSVC targets must be added on demand
+# (mirrors verify-deep.yml:74-77).
+
+version: '3'
+
+vars:
+  IMAGE: messense/cargo-xwin@sha256:543cdaeb5cd3ed0ca1dd29b9e5aba4100aa0008f8ed088b793f3b9255a635869
+  CACHE_DIR: '{{.ROOT_DIR}}/.cache/xwin'
+
+tasks:
+  exec:
+    internal: true
+    requires:
+      vars: [TARGET, SUBCOMMAND]
+    cmds:
+      - mkdir -p "{{.CACHE_DIR}}/cargo" "{{.CACHE_DIR}}/xwin" "{{.CACHE_DIR}}/rustup" "{{.ROOT_DIR}}/target/xwin"
+      - >-
+        docker run --rm
+        --user "$(id -u):$(id -g)"
+        -v "{{.ROOT_DIR}}:/io" -w /io
+        -e HOME=/io/.cache/xwin
+        -e RUSTUP_HOME=/io/.cache/xwin/rustup
+        -e XWIN_CACHE_DIR=/io/.cache/xwin/xwin
+        -e CARGO_HOME=/io/.cache/xwin/cargo
+        -e CARGO_TARGET_DIR=target/xwin
+        {{.IMAGE}}
+        sh -c 'rustup target add {{.TARGET}} && cargo xwin {{.SUBCOMMAND}} --target={{.TARGET}} --locked'

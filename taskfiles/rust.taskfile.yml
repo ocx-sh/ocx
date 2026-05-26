@@ -2,6 +2,24 @@
 
 version: '3'
 
+includes:
+  xwin-check-x86:
+    taskfile: ./xwin.taskfile.yml
+    internal: true
+    vars: { TARGET: x86_64-pc-windows-msvc, SUBCOMMAND: check }
+  xwin-check-arm:
+    taskfile: ./xwin.taskfile.yml
+    internal: true
+    vars: { TARGET: aarch64-pc-windows-msvc, SUBCOMMAND: check }
+  xwin-build-x86:
+    taskfile: ./xwin.taskfile.yml
+    internal: true
+    vars: { TARGET: x86_64-pc-windows-msvc, SUBCOMMAND: "build --release" }
+  xwin-build-arm:
+    taskfile: ./xwin.taskfile.yml
+    internal: true
+    vars: { TARGET: aarch64-pc-windows-msvc, SUBCOMMAND: "build --release" }
+
 x-shared:
   rust-sources: &rust-sources
     - '{{.ROOT_DIR}}/crates/**/*.rs'
@@ -146,3 +164,30 @@ tasks:
     env:
       RUSTFLAGS: '-Clink-arg=/Brepro'
     cmd: cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}}
+
+  check:windows:
+    desc: Cross-compile-check both Windows MSVC targets via Docker (cargo-xwin, cached)
+    summary: |
+      Runs `cargo xwin check` for x86_64-pc-windows-msvc and
+      aarch64-pc-windows-msvc inside the messense/cargo-xwin Docker image.
+      Mirrors the CI cross-compile (verify-deep.yml) so Windows-only build
+      breakage is catchable locally without a Windows host. First run
+      downloads the MSVC SDK headers (~250 MiB) and crate registry into
+      .cache/xwin/; subsequent runs reuse both caches plus target/xwin/
+      so an unchanged tree finishes in seconds.
+    cmds:
+      - task: xwin-check-x86:exec
+      - task: xwin-check-arm:exec
+
+  build:windows:
+    desc: Cross-build release binaries for both Windows MSVC targets via Docker (cargo-xwin, cached)
+    summary: |
+      Runs `cargo xwin build --release` for x86_64-pc-windows-msvc and
+      aarch64-pc-windows-msvc inside the messense/cargo-xwin Docker image.
+      Mirrors the CI cross-compile (verify-deep.yml) byte-for-byte modulo
+      the Docker-from-host scaffolding. Produces
+      target/xwin/<triple>/release/{ocx,ocx-mirror}.exe. Shares caches
+      with check:windows under .cache/xwin/.
+    cmds:
+      - task: xwin-build-x86:exec
+      - task: xwin-build-arm:exec
