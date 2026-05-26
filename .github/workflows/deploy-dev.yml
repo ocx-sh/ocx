@@ -51,10 +51,13 @@ jobs:
             echo "::error::git-cliff --bumped-version returned empty output; no commits since last tag — refusing to publish a dev build"
             exit 1
           fi
-          # The UTC build-metadata segment is appended by oci-publish.yml via
-          # `ocx package push --build-timestamp` (build_timestamp: true).
-          echo "version=${version}"              | tee -a "$GITHUB_OUTPUT"
-          echo "version_tag=${version}-dev"      | tee -a "$GITHUB_OUTPUT"
+          # Freeze the UTC build-metadata segment here so every (variant, target)
+          # leg of the publish loop shares the same tag. Computing it inside the
+          # per-push `ocx package push --build-timestamp` would re-stamp each call
+          # at second granularity and split the multi-platform index.
+          ts="$(date -u +%Y%m%d%H%M%S)"
+          echo "version=${version}"                  | tee -a "$GITHUB_OUTPUT"
+          echo "version_tag=${version}-dev_${ts}"    | tee -a "$GITHUB_OUTPUT"
 
   build-linux:
     name: Build (${{ matrix.target }})
@@ -160,7 +163,6 @@ jobs:
       variants: '["","mirror"]'
       targets: '["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-apple-darwin","aarch64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]'
       environment: dev.ocx.sh
-      build_timestamp: true
     secrets:
       REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

@@ -24,7 +24,11 @@ on:
         required: true
         type: string
       version_tag:
-        description: Version core including any pre-release segment (e.g. `0.3.0-dev`).
+        description: Fully formed publish tag, including any pre-release and UTC
+          build-metadata segments (e.g. `0.3.0-dev_20260514120000`). Callers are
+          responsible for freezing the build-metadata segment once per workflow
+          run so every (variant, target) leg of the publish loop shares the
+          same tag — `ocx package push` is invoked without `--build-timestamp`.
         required: true
         type: string
       variants:
@@ -44,14 +48,6 @@ on:
         required: false
         type: string
         default: bare
-      build_timestamp:
-        description: Append a UTC `_YYYYMMDDhhmmss` build-metadata segment to the
-          published tag via `ocx package push --build-timestamp`. Standard for
-          every build-producing publish (dev and release) — `--cascade` still
-          derives the rolling X.Y.Z / X.Y / X / latest tags users install.
-        required: false
-        type: boolean
-        default: false
     secrets:
       REGISTRY_USER:
         required: true
@@ -149,7 +145,6 @@ jobs:
           VERSION_TAG: ${{ inputs.version_tag }}
           VARIANTS_JSON: ${{ inputs.variants }}
           TARGETS_JSON: ${{ inputs.targets }}
-          BUILD_TIMESTAMP: ${{ inputs.build_timestamp }}
           OCX_AUTH_REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           OCX_AUTH_REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
@@ -187,13 +182,9 @@ jobs:
 
           METADATA="packaging/ocx/metadata.json"
 
-          # Build-producing publishes (dev + release) append a UTC
-          # build-metadata segment via the canonical flag; --cascade still
-          # derives the rolling X.Y.Z / X.Y / X / latest tags.
-          BT_ARGS=()
-          if [[ "${BUILD_TIMESTAMP}" == "true" ]]; then
-            BT_ARGS+=(--build-timestamp)
-          fi
+          # The UTC build-metadata segment is already baked into VERSION_TAG by
+          # the caller (deploy-dev.yml / post-release-oci-publish.yml). --cascade
+          # still derives the rolling X.Y.Z / X.Y / X / latest tags users install.
 
           # variants is a JSON array of strings; iterate.
           mapfile -t VARIANTS < <(echo "${VARIANTS_JSON}" | jq -r '.[]')
@@ -244,7 +235,6 @@ jobs:
                 --cascade \
                 --new \
                 --metadata "${METADATA}" \
-                "${BT_ARGS[@]}" \
                 "$ARCHIVE"
 
               rm -rf "$WORK"

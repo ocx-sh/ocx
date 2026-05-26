@@ -25,7 +25,14 @@ jobs:
     steps:
       - id: tag
         shell: bash
-        run: echo "version_tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          # Freeze the UTC build-metadata segment here so every (variant, target)
+          # leg of the publish loop shares the same tag. Computing it inside the
+          # per-push `ocx package push --build-timestamp` would re-stamp each call
+          # at second granularity and split the multi-platform index.
+          ts="$(date -u +%Y%m%d%H%M%S)"
+          echo "version_tag=${GITHUB_REF_NAME#v}_${ts}" >> "$GITHUB_OUTPUT"
 
   publish:
     if: ${{ !contains(github.ref_name, '-') }}
@@ -42,9 +49,6 @@ jobs:
       targets: '["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-apple-darwin","aarch64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]'
       environment: ocx.sh
       artifact_source: cargo-dist
-      # Release builds publish an immutable X.Y.Z_<TS> tag; --cascade still
-      # derives the rolling X.Y.Z / X.Y / X / latest tags users install.
-      build_timestamp: true
     secrets:
       REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
