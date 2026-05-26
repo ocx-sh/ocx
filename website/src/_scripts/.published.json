@@ -30,6 +30,7 @@
     "user-guide/deps.sh",
     "user-guide/direnv.sh",
     "user-guide/exec-once.sh",
+    "user-guide/fresh-clone.sh",
     "user-guide/global-add.sh",
     "user-guide/global-env.sh",
     "user-guide/global-manage.sh",
