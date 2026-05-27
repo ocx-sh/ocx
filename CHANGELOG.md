@@ -5,78 +5,143 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.1] - 2026-05-27
 
 ### Added
 
-- `ocx self activate [--shell[=NAME]]` — emit eval-safe PATH prepend, completion injection, and global env eval; intended to be sourced from `$OCX_HOME/env.sh` at shell startup *(cli)*
-- `ocx self update` and `ocx self update --check` — check for and install a newer OCX release; both bypass the auto-check throttle as explicit user intent *(cli)*
-- `OCX_NO_COMPLETIONS` — set to a truthy value to skip the completion-injection block in `ocx self activate` *(env)*
-- `OCX_UPDATE_CHECK_INTERVAL` — override the minimum interval between automatic update-check probes (`0` = always, default 24h) *(env)*
+- Direct PATH activation with completions, write both login and rc profiles *(install)*
+- Add `ocx self` command group with throttled update checks *(cli)*
 
 ### Changed
 
-- `install.ps1` now requires PowerShell 7.4 or later — Windows PowerShell 5.1 is no longer supported *(install)* **BREAKING**
-- `install.sh` writes byte-identical env shims (`env.sh`, `env.fish`, `env.ps1`) — `OCX_HOME` is resolved at runtime via `${OCX_HOME:=$HOME/.ocx}` instead of substituted at install time *(install)*
+- Nest ocx mirror as ocx/cli and adopt package install / add CLI
+
+### Fixed
+
+- Exclude ocx_shim from cargo-dist plan *(release)*
+- Resolve via current symlink + correct test wire shape *(self-update)*
+- Build smoke artifact with __testing feature; parallelize acceptance tests *(ci)*
+- Blob store locking + path normalization *(windows)*
 
 ## [0.3.0] - 2026-05-26
 
 ### Added
 
+- Redesign landing page with feature sections, scroll reveal, and licensed asset pipeline *(website)*
+- Redesign roadmap as standalone page with scroll-driven timeline *(website)*
+- Add package dependency resolution with deps CLI
+- Replace export bool with Visibility enum on dependencies
+- Per-platform asset_type override + lychee mirror *(mirror)*
 - Three-tier content-addressed storage **BREAKING**
-- Project toolchain — `ocx.toml` + `ocx.lock`, `run`/`add`/`remove`/`init`, explicit `--global` tier, GC ledger, global lock as implicit GC root *(project)* **BREAKING**
-- CLI taxonomy reshuffle *(cli)* **BREAKING**
-  - Renamed: `update`→`upgrade`, `find`→`which`, `info`→`about`
-  - Grouped: `which`, `deps`, `test`, `inspect` under `ocx package`; direnv commands under `ocx direnv`
-  - `--global` collapsed to single root-only flag; global activation via env exporter
-  - New: `ocx login`/`logout`, `ocx package test`, `ocx package inspect`
-- Package entrypoints overhaul — map shape, `Entrypoint.command` dispatch, composed-PATH resolution *(package)* **BREAKING**
-- Multi-layer package push/pull (#20), zero-layer config-only artifacts, dep resolution with `deps` CLI, `Visibility` enum on deps *(package)* **BREAKING**
-- Index/OCI — chain refs + `--remote` as CAS cache mode, multi-registry catalog, transparent tag fallback, per-repo tag-log lock, `BlobNotFound` surfacing *(oci)* **BREAKING**
-- Layered async config + registry resolution, JSON Schema + taplo completion for `config.toml` *(config)*
-- Readable inspect output — themed root, human sizes, descriptor chain, unified digest rendering *(cli)* **BREAKING**
-- Env output format is context-only *(cli)* **BREAKING**
-- Eager pull default for lock/upgrade + `--pull`/`--no-pull`; pull touches lock for direnv *(cli)* **BREAKING**
-- Windows native `.exe` shim, `.cmd` cutover (#66) *(launcher)* **BREAKING**
-- Publish first-party binaries under `ocx/` namespace *(release)*
-- Typed exit codes + error normalization *(cli)*
-- Decorated table output with per-column/cell styles *(cli)*
-- Activate Nushell + Elvish in `install.sh` *(install)*
-- Per-platform `asset_type` override + lychee mirror *(mirror)*
-- Doc-script render harness — `doc_scripts` tree, publish render layer, scenario migration *(test,website)*
-- Shell-driven scenario harness *(test)*
+- Multi-registry support for index catalog command *(cli)*
+- Transparent tag fallback on local index miss *(oci)*
+- Serialise local tag log writes with per-repo lock *(oci)*
+- Chain refs resolution and --remote as CAS cache mode *(oci)* **BREAKING**
+- Multi-layer package push and pull (#20) *(package)* **BREAKING**
+- Surface ClientError::BlobNotFound as PackageErrorKind::BlobNotFound *(error)*
+- Support zero-layer config-only OCI artifacts *(package)*
 - List accepted extensions in bare-digest error *(publisher)*
-- Website — landing redesign with scroll reveal + licensed asset pipeline, standalone roadmap with timeline, `dev.ocx.sh` staging deploy with banner, `--build-timestamp` continuous deploy *(website)*
-- `/next` skill for state-aware next-step suggestions *(claude)*
+- Add async layered configuration system with registry resolution *(config)*
+- Typed exit codes and error normalization *(cli)*
+- Add JSON Schema generation and taplo auto-completion for config.toml *(config)*
+- Add /next skill for state-aware next-step suggestions *(claude)*
+- Package entry points *(package)* **BREAKING**
+- Add dev.ocx.sh staging deploy with banner *(website)*
+- Add ocx package test for local pre-push validation *(cli)* **BREAKING**
+- Shell-driven scenario harness for acceptance tests *(test)*
+- Project toolchain (ocx.toml + ocx.lock + run/add/remove/init) *(project)* **BREAKING**
+- --build-timestamp + dev.ocx.sh continuous deploy
+- Add ocx login and ocx logout commands *(cli)* **BREAKING**
+- Add ocx package inspect command *(cli)*
+- Add Entrypoint.command dispatch divergence *(package)*
+- Unify inspect digest rendering across views *(cli)*
+- Windows native .exe shim, .cmd cutover (resolves #66) *(launcher)* **BREAKING**
+- Publish first-party binaries under ocx/ namespace *(release)*
+- Symlink GC ledger + explicit --global toolchain tier *(project)* **BREAKING**
+- Toolchain CLI taxonomy + global activation via env exporter *(cli)* **BREAKING**
+- Doc-script render harness — doc_scripts tree, publish render layer, scenario migration *(test,website)*
+- Decorated table output with per-column/cell styles *(cli)*
+- Activate Nushell + Elvish shells in install.sh *(install)*
+- Readable inspect output — themed root, human sizes, descriptor chain *(cli)* **BREAKING**
+- Env output format is a context-only concern *(cli)* **BREAKING**
+- Global toolchain ocx.lock is an implicit GC root *(clean)*
+- Eager pull default for lock/upgrade + --pull/--no-pull pair; pull touches lock for direnv *(cli)* **BREAKING**
 
 ### Changed
 
-- OCI pull pipeline — `PinnedIdentifier` decomposition, algorithm-typed digest dispatch, drop redundant root id from `ResolvedPackage`, offload SHA-256 to `spawn_blocking`, extract `resolve_top_manifest`, extract config-blob metadata loader *(oci,package)*
-- Garbage collector — extract with BFS reachability
-- Symlink/path — route archive extraction through `symlink::create`, `path_exists_lossy` across call sites, unify bounded-concurrency on `stream::buffered`
-- Drop `--shell` from `ocx shell direnv` *(cli)*
-- Remove dead static-init/profile/path-strip scaffolding + `_OCX_APPLIED` fingerprint helpers
+- Route archive symlink extraction through symlink::create
+- Extract garbage collector with BFS reachability
+- Add PinnedIdentifier and decompose OCI pull pipeline
+- Drop redundant root identifier from ResolvedPackage *(package)*
+- Offload layer SHA-256 hashing to spawn_blocking *(oci)*
+- Algorithm-typed digest dispatch and enriched BlobNotFound *(oci)*
+- Add path_exists_lossy and adopt across call sites *(utility)*
+- Unify bounded-concurrency fan-out on stream::buffered
+- Drop --shell from ocx shell direnv *(cli)*
+- Drop Entrypoint.target, dispatch via composed PATH *(package)* **BREAKING**
+- Convert entrypoints from array to map shape *(package)* **BREAKING**
+- Extract config-blob metadata loader into common.rs *(package)*
+- Extract resolve_top_manifest shared helper *(package-manager)*
+- Rename update command to upgrade *(cli)* **BREAKING**
+- Rename find command to which *(cli)* **BREAKING**
+- Rename info command to about *(cli)* **BREAKING**
+- Consolidate direnv into a dedicated ocx direnv group *(cli)* **BREAKING**
+- Move ocx which under the ocx package group *(cli)* **BREAKING**
+- Collapse --global to single root-only flag *(cli)* **BREAKING**
+- Move ocx deps under the ocx package group *(cli)* **BREAKING**
+- Remove dead static-init/profile/path-strip shell scaffolding
+- Remove dead _OCX_APPLIED fingerprint helpers
 
 ### Documentation
 
-- Redesign user guide as use-case-driven walkthrough; add package authoring guide *(website)*
-- Shell-activation model, global toolchain, inspect chain — supersede stale ADRs, fix release/arch rules + user docs; signed-off handshake + harden superseded tier ADR; prior-art research for handshake §4
-- Correct push layer arguments + digest reference syntax; soften read-only wording, document `command` field *(cli,package-inspect)*
+- Correct push layer arguments and digest reference syntax *(cli)*
+- Redesign user guide as use-case-driven walkthrough *(website)*
+- Add package authoring guide *(website)*
+- Soften read-only wording, document command field *(package-inspect)*
+- Signed-off handshake + harden superseded tier ADR *(toolchain)*
+- Shell-profile activation prior-art for handshake §4 *(research)*
+- Retruth shell-activation model — supersede stale ADRs, fix release/arch rules + user docs
+- Shell-activation model, global toolchain, inspect chain
 
 ### Fixed
 
-- Config — harden loader, error-chain rendering, exit-code coverage; static commands survive malformed ambient config *(config,cli)*
-- OCI/index — verify pulled layer bytes match claimed digest, route `ChainedIndex` catalog/tag list by `ChainMode`, surface malformed image-index child digest as structured error *(oci,cli)*
-- Entrypoints/package-manager — emit synth-entrypoints PATH after declared `bin/`, rehydrate offline from cached blobs/layers, `LayerRef` media type total via `ArchiveMediaType`, reconcile then restore schema tests *(package-manager,test)*
-- Toolchain mutators no longer create candidate symlinks *(cli)* **BREAKING**
+- Stub missing licensed assets so CI build succeeds *(website)*
+- Preserve original licensed asset URLs in build output *(website)*
+- Add --remote flag to first-run commands *(website)*
+- Enable clippy --all-targets to lint test code
+- Cap ProgressWriter write size for smoother download progress
+- Update workflow task references to rust: namespace *(ci)*
+- Guard shell RC source line so deleting $OCX_HOME does not error *(install)*
+- Verify pulled layer bytes match claimed digest *(oci)*
+- Make LayerRef media type total via ArchiveMediaType enum *(publisher)*
+- Verify file digest with manifest-declared algorithm *(mirror)*
+- Static commands survive malformed ambient config *(cli)*
+- Harden config loader, fix error chain rendering, and extend exit-code coverage *(config,cli)*
+- Route ChainedIndex catalog and tag list by ChainMode *(oci)*
+- Exclude worktrees from .claude markdown scans *(tests)*
+- Completion error casing, debug log level, install docs *(shell)*
+- Trigger roadmap item fade-in on initial load *(website)*
+- Emit synth-entrypoints PATH after declared bin/ *(package-manager)*
+- Rehydrate package offline from cached blobs and layers *(package-manager)*
+- Relax AC2 disjoint-refs assertion to per-side uniqueness *(test)*
+- Mark recording setup env entries public so consumer view emits PATH *(test)*
+- Zero uid/gid in tar headers for reproducibility *(archive)*
+- Make discord website-deploy notification env-aware *(ci)*
+- Make macOS portable *(tests)*
+- Surface malformed image-index child digest as structured error *(cli)*
+- Refresh drifted Windows shim blobs; align windows acceptance tests *(shim)*
+- Hermetic reproducible cross-build via cargo-zigbuild *(shim)*
+- Reconcile entrypoints schema tests with array contract *(test)*
 - Fail-closed GC ledger + global/project conflict seam *(project)*
-- Windows shim — refresh drifted blobs + align acceptance tests, hermetic reproducible cross-build via cargo-zigbuild, replace nightly `windows_by_handle` with stable Win32, drop deleted `synthetic_pathext_entry` call *(shim,windows)*
-- Install — adopt `install.ps1` to global toolchain + pwsh alias; guard shell RC source line; completion error casing, debug log level, install docs *(install,shell)*
-- Mirror/archive — verify file digest with manifest-declared algorithm, zero uid/gid in tar headers for reproducibility *(mirror,archive)*
-- Website — stub missing licensed assets so CI build succeeds, preserve original licensed asset URLs, `--remote` on first-run commands, trigger roadmap fade-in on initial load *(website)*
-- Tests — relax AC2 disjoint-refs assertion to per-side uniqueness, mark recording setup env public, exclude worktrees from `.claude` scans, make macOS portable *(test)*
-- CI — update workflow task refs to `rust:` namespace, make discord notification env-aware *(ci)*
-- Misc — enable `clippy --all-targets` on test code, cap `ProgressWriter` write size *(cli)*
+- Adopt install.ps1 to global toolchain model + pwsh shell alias *(install)*
+- Toolchain mutators no longer create candidate symlinks *(cli)* **BREAKING**
+- Restore entrypoints schema tests to object contract *(test)*
+- Replace nightly windows_by_handle with stable Win32 API *(windows)*
+- Drop deleted synthetic_pathext_entry call + unused-mut/import warnings *(windows)*
+
+### Release
+
+- V0.3.0
 
 ## [0.2.1] - 2026-03-24
 
@@ -258,6 +323,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build ocx-mirror in verify-deep and fix discord webhook *(ci)*
 - Remove push-to-main Discord notifications *(ci)*
 
+### Release
+
+- V0.1.0
+[0.3.1]: https://github.com/ocx-sh/ocx/compare/v0.3.0..0.3.1
 [0.3.0]: https://github.com/ocx-sh/ocx/compare/v0.2.1..v0.3.0
 [0.2.1]: https://github.com/ocx-sh/ocx/compare/v0.2.0..v0.2.1
 [0.2.0]: https://github.com/ocx-sh/ocx/compare/v0.1.0..v0.2.0
