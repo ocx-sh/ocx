@@ -1,16 +1,8 @@
+tool = []
+
 [metadata]
 lock_version = 1
 declaration_hash_version = 1
-declaration_hash = "sha256:15f3e7e9071e2bfe0bbe451757cd5bc8d1c9c19601ba4bc99b092f9703e1608b"
-generated_by = "ocx 0.2.1"
-generated_at = "2026-05-18T07:05:10Z"
-
-[[tool]]
-name = "shfmt"
-group = "ci"
-pinned = "ocx.sh/shfmt@sha256:011244340dd2ab9e216c44c0da8ae3e1efede1fad713fa8e2e2d290af52f2e7b"
-
-[[tool]]
-name = "cmake"
-group = "default"
-pinned = "ocx.sh/cmake@sha256:c841eb8467763bfc9bb1e5bcb85e52a9c4cc1c88e37b54ba0bef6eb574c1579c"
+declaration_hash = "sha256:3110f8345dc4c5212b94d6a8286773b2e86ab817db53cf02ce7eede77c2c36ab"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-05-27T21:05:35Z"
