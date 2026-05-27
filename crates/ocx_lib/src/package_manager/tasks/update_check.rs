@@ -413,10 +413,14 @@ const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Queries the installed version of the OCX binary by running it as a subprocess.
 ///
 /// Resolves the installed `ocx` binary path via the proper PackageManager task
-/// surface (`find` → `resolve_env`) rather than constructing it from raw file
-/// paths. Returns `None` on any failure: package not locally installed (bootstrap
-/// mode), env resolution error, subprocess launch error, non-zero exit,
-/// subprocess timeout (5 s), or malformed JSON output.
+/// surface (`find_symlink(SymlinkKind::Current)` → `resolve_env`) rather than
+/// constructing it from raw file paths. Using the `current` install symlink
+/// avoids tag resolution (which would require the canonical `:latest` tag to
+/// exist) and matches the semantic truth: the running ocx binary IS what
+/// `current` points at. Returns `None` on any failure: package not locally
+/// installed (bootstrap mode — current symlink absent), env resolution error,
+/// subprocess launch error, non-zero exit, subprocess timeout (5 s), or
+/// malformed JSON output.
 ///
 /// The binary path is resolved via the composed env's PATH
 /// (`PackageManager::resolve_env`), which applies the package's full interface
@@ -438,9 +442,17 @@ const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// the caller; the update-check path skips the version comparison and returns
 /// `Skipped(Bootstrap)`.
 async fn query_installed_version(manager: &PackageManager, identifier: &oci::Identifier) -> Option<String> {
-    // 1. Resolve the package locally — returns NotFound when no install is present
-    //    (= bootstrap). Any error (including network) maps to None.
-    let info = manager.find(identifier, oci::Platform::supported_set()).await.ok()?;
+    // 1. Resolve via the `current` install symlink — the running ocx binary
+    //    IS what `current` points at, so this is the semantically correct
+    //    truth source for "what version am I". Avoids tag resolution
+    //    (which would require `:latest` to exist in the index — fragile, and
+    //    breaks against test registries that publish without cascade tags).
+    //    Returns SymlinkNotFound when no install is present (= bootstrap).
+    //    Any error (including network) maps to None.
+    let info = manager
+        .find_symlink(identifier, crate::file_structure::SymlinkKind::Current)
+        .await
+        .ok()?;
 
     // 2. Resolve the composed env (interface view — matches default exec semantics).
     let infos = vec![Arc::new(info)];
@@ -1139,10 +1151,12 @@ mod tests {
     //
     // The function collapses four distinct failure modes to `Option<String>`:
     //
-    //   1. Bootstrap — `manager.find()` returns NotFound (package not locally
-    //      installed). Unit-testable: offline manager with empty store.
+    //   1. Bootstrap — `manager.find_symlink(.., Current)` returns
+    //      SymlinkNotFound (no `current` install symlink — package not
+    //      locally selected). Unit-testable: offline manager with empty store.
     //   2. Env-resolve fail — `manager.resolve_env()` errors. Only reachable
-    //      once `find()` returns Ok, which itself needs a populated store.
+    //      once `find_symlink()` returns Ok, which itself needs the `current`
+    //      symlink populated.
     //      Not unit-testable without major test scaffolding; covered by URI-1.
     //   3. Subprocess non-zero exit — `tokio::process::Command::output()`
     //      returns success=false. Requires a real binary on disk that exits
@@ -1153,15 +1167,15 @@ mod tests {
     //      contract gate that the consumer relies on).
     //
     // The unit test below proves the bootstrap case at the lowest layer:
-    // when `find()` cannot resolve the package locally, `query_installed_version`
-    // returns `None` — never `Some("")` (which would silently break the
-    // `UnparseableCurrent` branch downstream).
+    // when `find_symlink(.., Current)` cannot resolve the package locally,
+    // `query_installed_version` returns `None` — never `Some("")` (which would
+    // silently break the `UnparseableCurrent` branch downstream).
 
-    /// Bootstrap path: package not in local store → `query_installed_version`
+    /// Bootstrap path: no `current` install symlink → `query_installed_version`
     /// returns `None`.
     ///
     /// Regression guard: a refactor that mistakenly returns `Some(String::new())`
-    /// on resolve failure would let an empty string flow into
+    /// on symlink-resolve failure would let an empty string flow into
     /// `Version::parse("")`, surfacing as `Skipped(UnparseableCurrent(""))` —
     /// not bootstrap. The downstream `self_check_update` branch then takes the
     /// `UnparseableCurrent` arm instead of `Bootstrap`, producing the wrong

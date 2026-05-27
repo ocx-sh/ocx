@@ -308,8 +308,10 @@ def test_activate_emits_global_env_eval_bash(
     """stdout must contain the --global env eval line for bash.
 
     Plan: "emit the eval line that loads the global toolchain env" via
-    `emit_global_env_eval`.  For sh-family shells the form is:
-      if command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell=bash)"; fi
+    `emit_global_env_eval`.  For sh-family shells the form is gated on
+    OCX_ACTIVATED so re-sourcing the user's shell profile becomes a cheap
+    no-op (mirrors mise's MISE_SHELL double-activation guard):
+      if [ -z "${OCX_ACTIVATED:-}" ] && command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell=bash)"; fi
 
     The literal substring "--global env" is the discriminating token.
     """
@@ -320,9 +322,13 @@ def test_activate_emits_global_env_eval_bash(
         "stdout must contain the '--global env' eval line for --shell=bash; "
         f"got (rc={result.returncode}):\n{stdout}\nstderr:\n{result.stderr}"
     )
-    # Verify the sh-family conditional form is present.
-    assert "if command -v ocx" in stdout, (
-        "stdout must contain 'if command -v ocx' conditional for --shell=bash; "
+    # Verify the sh-family OCX_ACTIVATED guard + ocx-existence probe.
+    assert '[ -z "${OCX_ACTIVATED:-}" ]' in stdout, (
+        "stdout must contain the OCX_ACTIVATED guard for --shell=bash; "
+        f"got:\n{stdout}"
+    )
+    assert "command -v ocx" in stdout, (
+        "stdout must contain 'command -v ocx' conditional for --shell=bash; "
         f"got:\n{stdout}"
     )
 
@@ -332,7 +338,9 @@ def test_activate_emits_global_env_eval_fish(
 ) -> None:
     """stdout must contain the --global env eval line for fish.
 
-    Fish form: if type -q ocx; ocx --global env --shell=fish | source; end
+    Fish form gated on OCX_ACTIVATED so re-sourcing the user's shell profile
+    becomes a no-op (mirrors mise's MISE_SHELL double-activation guard):
+      if not set -q OCX_ACTIVATED; and type -q ocx; ocx --global env --shell=fish | source; end
     """
     result = _run_activate(ocx, "--shell=fish")
     stdout = result.stdout
@@ -341,9 +349,13 @@ def test_activate_emits_global_env_eval_fish(
         "stdout must contain the '--global env' eval line for --shell=fish; "
         f"got (rc={result.returncode}):\n{stdout}\nstderr:\n{result.stderr}"
     )
-    # Verify the fish-specific conditional form.
-    assert "if type" in stdout, (
-        "stdout must contain 'if type' conditional for --shell=fish; "
+    # Verify the fish-specific OCX_ACTIVATED guard + ocx-existence probe.
+    assert "not set -q OCX_ACTIVATED" in stdout, (
+        "stdout must contain the OCX_ACTIVATED guard for --shell=fish; "
+        f"got:\n{stdout}"
+    )
+    assert "type -q ocx" in stdout, (
+        "stdout must contain 'type -q ocx' conditional for --shell=fish; "
         f"got:\n{stdout}"
     )
 

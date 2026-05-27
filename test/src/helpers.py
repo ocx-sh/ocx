@@ -63,22 +63,26 @@ def _build_trap_script(outputs: dict[str, str], marker: str) -> str:
     """Build an argument-aware trap shell script.
 
     ``outputs`` maps argument strings to the exact output the binary should
-    produce (e.g. ``{"--version": "uv 0.10.10"}``).  Multi-line values are
-    emitted via heredocs.
+    produce (e.g. ``{"--version": "uv 0.10.10"}``).  All values are emitted
+    via single-quoted heredocs so JSON output containing ``"`` characters
+    (e.g. ``{"version": "0.0.1"}``) survives untouched — embedding such
+    values in a double-quoted ``echo`` argument would let the inner ``"``
+    terminate the string and corrupt the payload.
     """
     lines = ["#!/bin/sh", 'case "$*" in']
     for args, output in outputs.items():
         lines.append(f'  "{args}")')
-        if "\n" in output:
-            lines.append("    cat <<'TRAP_EOF'")
-            lines.append(output)
-            lines.append("TRAP_EOF")
-        else:
-            lines.append(f'    echo "{output}"')
+        lines.append("    cat <<'TRAP_EOF'")
+        lines.append(output)
+        lines.append("TRAP_EOF")
         lines.append("    ;;")
-    # Fallback: echo marker for acceptance tests
+    # Fallback: emit marker for acceptance tests (also via heredoc so any
+    # marker shape — currently ASCII-only, but defensive for future changes —
+    # is byte-exact preserved).
     lines.append("  *)")
-    lines.append(f'    echo "{marker}"')
+    lines.append("    cat <<'TRAP_EOF'")
+    lines.append(marker)
+    lines.append("TRAP_EOF")
     lines.append("    ;;")
     lines.append("esac")
     return "\n".join(lines) + "\n"

@@ -212,18 +212,18 @@ def test_self_update_installs_newer_version(
     assert current_symlink.is_symlink() or current_symlink.exists(), (
         f"current symlink must still exist after self update; missing at {current_symlink}"
     )
-    # Resolve current → must match v2's content path (same digest as fresh install).
+    # Resolve current → package-root directory of v2 (post-install symlink
+    # targets the package root, not the content tree). Package files live
+    # under `<resolved>/content/` per the three-tier CAS layout.
     resolved = current_symlink.resolve()
-    # The resolved path is the content directory of v2 — assert it contains
-    # bin/ocx (the binary we just installed).
-    assert (resolved / "bin" / "ocx").exists(), (
-        f"current symlink must resolve to a directory containing bin/ocx; "
+    bin_ocx = resolved / "content" / "bin" / "ocx"
+    assert bin_ocx.exists(), (
+        f"current symlink must resolve to a package root containing content/bin/ocx; "
         f"resolved={resolved}, content: {list(resolved.iterdir()) if resolved.exists() else 'absent'}"
     )
     # The v2 marker presence is the strongest assertion that the new version
-    # is what `current` resolves to.  `bin/ocx` for v2 returns
+    # is what `current` resolves to.  `content/bin/ocx` for v2 returns
     # {"version":"0.0.2"} when invoked with --format json version.
-    bin_ocx = resolved / "bin" / "ocx"
     if bin_ocx.exists():
         probe = subprocess.run(
             [str(bin_ocx), "--format", "json", "version"],
