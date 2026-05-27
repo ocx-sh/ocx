@@ -4,6 +4,8 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 repository = "https://github.com/ocx-sh/ocx"
+# Internal blob (include_bytes!'d into ocx); not a release artifact.
+publish = false
 
 [[bin]]
 name = "ocx-shim"
