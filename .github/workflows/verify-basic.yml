@@ -126,7 +126,7 @@ jobs:
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Run Acceptance Tests
-        run: task test -- --junit-xml=results/junit.xml
+        run: task test:parallel -- --junit-xml=results/junit.xml
         env:
           OCX_MIRROR_COMMAND: ${{ github.workspace }}/test/bin/ocx-mirror
       - name: Publish Acceptance Test Results

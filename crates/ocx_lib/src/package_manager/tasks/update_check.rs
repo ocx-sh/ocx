@@ -350,10 +350,10 @@ impl PackageManager {
 ///
 /// Always resolves to `ocx.sh/ocx/cli` — self-update is canonical and opinionated
 /// about its registry. The seam below is a **private test-only** override, gated
-/// behind `cfg(test)` or the `test-self-update-seam` Cargo feature so release
-/// artifacts physically lack the code path.
+/// behind `cfg(test)` or the `__testing` Cargo feature so release artifacts
+/// physically lack the code path.
 fn ocx_cli_identifier() -> oci::Identifier {
-    #[cfg(any(test, feature = "test-self-update-seam"))]
+    #[cfg(any(test, feature = "__testing"))]
     {
         if let Ok(spec) = std::env::var("__OCX_SELF_IMAGE")
             && let Some((registry, repo)) = parse_self_image_spec(&spec)
@@ -376,7 +376,7 @@ fn ocx_cli_identifier() -> oci::Identifier {
 /// Format: `<registry>/<repo>` where the first `/` separates registry from
 /// repo (registry may contain `:port`, repo may contain further `/` segments).
 /// Returns `None` on malformed input.
-#[cfg(any(test, feature = "test-self-update-seam"))]
+#[cfg(any(test, feature = "__testing"))]
 fn parse_self_image_spec(spec: &str) -> Option<(&str, &str)> {
     spec.split_once('/').filter(|(r, p)| !r.is_empty() && !p.is_empty())
 }
@@ -385,7 +385,7 @@ fn parse_self_image_spec(spec: &str) -> Option<(&str, &str)> {
 ///
 /// Accepts `localhost`, `127.0.0.1`, and the IPv6 loopback `::1` (with or
 /// without bracketed `[::1]` host syntax), each with an optional `:port`.
-#[cfg(any(test, feature = "test-self-update-seam"))]
+#[cfg(any(test, feature = "__testing"))]
 fn is_loopback_registry(registry: &str) -> bool {
     // Bracketed IPv6 form: `[host]` or `[host]:port`. Extract the host inside.
     let host = if let Some(stripped) = registry.strip_prefix('[') {

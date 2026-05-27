@@ -7,15 +7,18 @@ publish = false
 exclude = ["src/test_data/**"]
 
 [features]
-# Private test-only seam: lets the canonical self-update identifier
-# (`ocx.sh/ocx/cli`) be overridden via the `__OCX_SELF_IMAGE` env var so
-# acceptance tests can exercise the install path against `localhost:5000`.
+# Internal-only escape hatch: gates test seams used by acceptance tests.
+# Follows the Rust ecosystem `__name` convention (cf. axum `__private`,
+# reqwest `__tls`) signalling "internal, no stability guarantee, do not
+# enable from downstream code".
 #
-# Compile-gated out of release artifacts — release builds physically lack the
-# code path, so the seam is not an attack surface. A loopback-registry assert
-# inside the gate prevents misuse even when the feature is enabled. Named with
-# a double-underscore env var to signal "internal, undocumented, may break".
-test-self-update-seam = []
+# Currently gates the `__OCX_SELF_IMAGE` env var seam that lets the
+# canonical self-update identifier (`ocx.sh/ocx/cli`) be overridden so
+# acceptance tests can exercise the install path against `localhost:5000`.
+# A loopback-registry assert inside the gate prevents misuse even when the
+# feature is enabled. Compile-gated out of release artifacts — release
+# builds physically lack the code path.
+__testing = []
 
 [dependencies]
 schemars.workspace = true

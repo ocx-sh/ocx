@@ -6,9 +6,9 @@ These tests exercise both the `ocx --format json version` contract that
 `query_installed_version` depends on, and the end-to-end self-update install
 path via the private `__OCX_SELF_IMAGE` test-only seam (URI-1).
 
-The seam is gated behind the `test-self-update-seam` Cargo feature in
-`ocx_lib` and `ocx_cli`. The test binary is built with that feature enabled
-(see `test/taskfile.yml::build`). The seam carries a runtime loopback-only
+The seam is gated behind the `__testing` Cargo feature in `ocx_lib` and
+`ocx_cli`. The test binary is built with that feature enabled (see
+`test/taskfile.yml::build`). The seam carries a runtime loopback-only
 assertion so even with the feature compiled in, only `localhost` /
 `127.0.0.1` / `[::1]` registries are accepted.
 
@@ -133,7 +133,7 @@ def test_self_update_installs_newer_version(
 
     The seam is loopback-only (asserted at runtime inside `ocx_cli_identifier`);
     `localhost:5000` satisfies that gate.  The seam itself is compile-gated
-    behind `--features test-self-update-seam`.
+    behind `--features __testing`.
     """
     # Use the same `unique_repo` for both publish and seam so identifiers match.
     repo = unique_repo

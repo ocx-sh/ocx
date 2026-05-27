@@ -69,11 +69,21 @@ tasks:
 
   build:
     desc: Build release binary
+    summary: |
+      Builds the `ocx` release binary with the `__testing` feature enabled.
+      The feature compile-gates internal-only test seams (currently the
+      `__OCX_SELF_IMAGE` env var override that acceptance tests use to
+      redirect the canonical `ocx.sh/ocx/cli` identifier to a localhost
+      test registry — see `test/taskfile.yml::build` and
+      `crates/ocx_lib/Cargo.toml`). The seams are loopback-only-asserted
+      at runtime — safe in all non-release binaries. User-facing release
+      artifacts come from cargo-dist (release.yml), which does not pass
+      this feature flag and therefore physically lacks the seams.
     sources: *rust-sources
     status:
       - test -f {{.ROOT_DIR}}/target/release/ocx
     method: timestamp
-    cmd: cargo build --release -p ocx --locked
+    cmd: cargo build --release -p ocx --features ocx/__testing --locked
 
   install:nextest:
     internal: true
