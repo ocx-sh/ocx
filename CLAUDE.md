@@ -1,76 +1,41 @@
 # CLAUDE.md
 
-This file guide Claude Code (claude.ai/code) when work in this repo.
+Guide Claude Code (claude.ai/code) in this repo.
 
 ## What is OCX
 
-OCX = Rust package manager. Use OCI registries (Docker Hub, GHCR, private) as storage for pre-built binaries. "Backend tool" for other tools (GitHub Actions, Bazel, Python scripts), not end users. Binary named `ocx`.
+OCX = Rust package manager. OCI registries (Docker Hub, GHCR, private) as storage for pre-built binaries. "Backend tool" for other tools (GitHub Actions, Bazel, Python scripts), not end users. Binary named `ocx`.
 
 ## Current State
 
-The project is in early stages. Core library and CLI implemented with basic functionality. We do not enforce a stable API, CLI or config yet. For refactors we often expect the user to just delete all and start over. The same does not hold true for published packages. The metadata and OCI manifest should be backward compatible.
+Early stage. Core lib + CLI implemented. No stable API/CLI/config — refactors often delete-all-restart. Exception: metadata + OCI manifest must stay backward compatible for published packages.
 
 ## Project Identity
 
-Full product vision, competitive positioning ("why not Homebrew / Nix / ORAS / mise"), target users, differentiators, use cases → [`product-context.md`](./.claude/rules/product-context.md). Consult when reason about project direction, scope trade-offs, ADR motivation, research framing, or anywhere product context shape technical decision. Canonical OCX product context — keep current (update protocol at bottom of same file).
+Vision/positioning/competitors/users/use cases → [`product-context.md`](./.claude/rules/product-context.md). Canonical product context — keep current (update protocol at bottom of same file).
 
 ## Rule Catalog
 
-Before plan, research, or architectural decision, scan "By concern" in catalog below. Auto-loaded rules (via path globs) fire when edit matching files; catalog covers cases needing guidance *before* file open.
+Before plan/research/architectural decision, scan "By concern" in catalog. Auto-loaded rules fire on file edit; catalog covers cases needing guidance *before* file open.
 
 @.claude/rules.md
 
-## Build & Development Commands
+## Build & Development
 
-**Task runner**: [`task`](https://taskfile.dev) (Taskfile v3) primary runner. **Always check tasks with `task --list` before invent ad-hoc commands.** Taskfiles tree-structured: root (`taskfile.yml`), subsystem dirs (`test/`, `website/`, `.claude/`, `mirror-sdk-py/`), `taskfiles/*.taskfile.yml` for cross-cutting concerns.
+Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify` (full gate), `task rust:verify`, `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit, `task verify` after implementation. Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
 
-**Key workflows:**
-```sh
-task                           # fast check (format + clippy + cargo check)
-task verify                    # full quality gate (parallel lint, then build + tests)
-task --force verify            # bypass caching — run everything
-task rust:verify               # Rust-only gate (format, clippy, license, build, unit tests)
-task shell:verify              # shell-only gate (shellcheck + shfmt)
-task checkpoint                # save progress (amends into single "Checkpoint" commit)
-task rust:build                # release binary
-task test                      # build + registry + all acceptance tests
-task test:quick                # skip binary rebuild
-task test:parallel             # pytest-xdist (-n auto)
-task coverage                  # LLVM coverage report
-task coverage:open             # open HTML report in browser
-task website:serve             # VitePress dev server
-task website:build             # full website build (schema + recordings + sbom + catalog + vitepress)
-```
-
-**Cargo commands** (when need finer control):
-```sh
-cargo check                    # fast check
-cargo build --release -p ocx   # release CLI binary
-cargo fmt                      # format (max_width=120, see rustfmt.toml)
-cargo clippy --workspace       # lint
-cargo nextest run --workspace  # all unit tests
-cargo nextest run -p ocx_lib <test_name>         # single test by name
-cargo test -p ocx_lib -- <test_name> --nocapture # with output
-```
-
-**Single acceptance test:**
+Single acceptance test:
 ```sh
 cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v --no-build
 ```
 
-**Always run `task verify` after implementation done.** Always run `cargo fmt` before commit.
-
-**Lint tooling first-time setup** (one-off): `shellcheck`, `shfmt`, `lychee` managed by OCX itself via pinned local index at `.ocx/index/`. Run `ocx index update shellcheck shfmt lychee && ocx install --select shellcheck:0.11 && ocx install --select shfmt:3 && ocx install --select lychee:0` once. `lychee` powers `task claude:lint:links` (cross-reference check scoped to `.claude/`, `CLAUDE.md`, `AGENTS.md`), available once `mirrors/lychee/` mirror synced.
-
-**Taskfile conventions**: subsystem verify tasks (`rust:verify`, `shell:verify`, `claude:verify`) = AI dev-loop gates — run subsystem gate for code changed. Full `task verify` runs only as final gate before commit. Verify pipeline two phases: parallel lint (`deps:`) then sequential build+test (`cmds:`). Reusable tool templates use `ocx.taskfile.yml` included with different `vars:`. Full conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
+Lint tooling setup (one-off): `ocx index update shellcheck shfmt lychee && ocx package install --select shellcheck:0.11 && ocx package install --select shfmt:3 && ocx package install --select lychee:0`.
 
 ## Architecture
 
-**Workspace layout**: Four crates — `crates/ocx_lib` (core lib), `crates/ocx_cli` (thin CLI shell, package name `ocx`), `crates/ocx_mirror` (mirror tool), `crates/ocx_schema` (JSON schema gen, build-only). Rust edition 2024, resolver v3.
+Four crates: `crates/ocx_lib` (core), `crates/ocx_cli` (thin CLI, pkg `ocx`), `crates/ocx_mirror`, `crates/ocx_schema` (build-only JSON schema). Rust 2024, resolver v3. `oci-client` patched to `external/rust-oci-client`.
 
-**Patched dependency**: `oci-client` patched to local git submodule at `external/rust-oci-client`.
-
-**Subsystem context**: Each major subsystem has detailed context rule in `.claude/rules/subsystem-*.md` that auto-loads when work on matching files:
+Subsystem rules auto-load on path match. Read relevant one before work on that area:
 
 | Subsystem | Rule | Scope |
 |-----------|------|-------|
@@ -83,74 +48,43 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 | Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
 | Website/docs | [subsystem-website.md](./.claude/rules/subsystem-website.md) | `website/**` |
 
-**Read relevant subsystem rule before work on code in that area.**
-
 ## Environment Variables
 
-| Variable | Purpose | Default |
-|---|---|---|
-| `OCX_HOME` | Root data directory | `~/.ocx` |
-| `OCX_DEFAULT_REGISTRY` | Default registry for short identifiers | `ocx.sh` |
-| `OCX_INSECURE_REGISTRIES` | Comma-separated HTTP-only registries | (empty) |
-| `OCX_OFFLINE` | Disable all network access; tag→digest must resolve locally or be pinned | false |
-| `OCX_REMOTE` | Route mutable lookups to remote registry; pure queries never write local index | false |
-| `OCX_CONFIG` | Path to an extra config file layered on top of the discovered tier chain | (unset) |
-| `OCX_NO_CONFIG` | Skip the discovered config chain (system/user/home); explicit `--config` paths still load | false |
-| `OCX_PROJECT` | Path to an explicit `ocx.toml` (overrides CWD walk) | (unset) |
-| `OCX_NO_PROJECT` | Skip CWD walk + `OCX_PROJECT`; explicit `--project` paths still load | false |
-| `OCX_INDEX` | Override local index directory path | (unset → `$OCX_HOME/index/`) |
-| `OCX_BINARY_PIN` | Absolute path to the running `ocx`; set on every subprocess spawn so a child ocx (e.g. via a generated launcher) pins to the same binary | (unset → PATH lookup) |
-| `OCX_GLOBAL` | Select global toolchain tier (`$OCX_HOME/ocx.toml`); equivalent to `--global`; resolution-affecting, forwarded to child ocx. Implicit home discovery removed — use `--global` explicitly. | (unset) |
-| `OCX_NO_UPDATE_CHECK` | Disable update check notification | false |
-| `OCX_UPDATE_CHECK_INTERVAL` | Min seconds between auto update-check probes; `0` = always check | 86400 (24h) |
-| `OCX_NO_COMPLETIONS` | Skip completion-injection block in `ocx self activate` output | false |
-| `OCX_NO_MODIFY_PATH` | Disable shell profile modification during install | false |
-
-## Acceptance Test Structure
-
-Tests live in `test/` using pytest + Docker Compose (registry:2 on localhost:5000). Full fixture reference + patterns → [subsystem-tests.md](./.claude/rules/subsystem-tests.md).
+Canonical reference → [`website/src/docs/reference/environment.md`](./website/src/docs/reference/environment.md).
 
 ## Deep Context
 
-- `.claude/rules/product-context.md` — Product vision, positioning, competitive analysis, use cases (auto-loads on website/agents/skill paths)
-- `.claude/rules/arch-principles.md` — Design principles, glossary, ADR index (auto-loads on Rust files)
-- `website/src/docs/user-guide.md` — Primary conceptual doc: three-store architecture, versioning, locking, auth
+- [`product-context.md`](./.claude/rules/product-context.md) — vision, competitors, use cases
+- [`arch-principles.md`](./.claude/rules/arch-principles.md) — design principles, glossary, ADR index (auto-loads on Rust)
+- [`website/src/docs/user-guide.md`](./website/src/docs/user-guide.md) — three-store architecture, versioning, locking, auth
 
 ## Core Principles
 
-Eight principles distill every rule, skill, standard in framework. Follow them, everything else follows.
+Eight principles distill every rule, skill, standard. Deep dive: [`quality-core.md`](./.claude/rules/quality-core.md) (SOLID/DRY/KISS/YAGNI).
 
 ### 1. Understand First
-
-Read before write. Grep before create. Never modify code not read — before change function, grep all callers. Check what exists before build new.
+Read before write. Grep before create. Never modify unread code — grep all callers before change function.
 
 ### 2. Prove It Works
-
-Write tests for customer use case first. Run before commit. Every bug fix get regression test. All quality gates must pass — tests, linter, types, build.
+Tests for customer use case first. Run before commit. Regression test per bug fix. All gates pass — tests, linter, types, build.
 
 ### 3. Keep It Safe
-
-No secrets in code — use env vars or secret managers. Validate all external input. Parameterized queries only. Least privilege everywhere. Flag vulnerabilities immediately.
+No secrets in code — env vars / secret managers. Validate external input. Parameterized queries only. Least privilege. Flag vulnerabilities immediately.
 
 ### 4. Keep It Simple
-
-Small functions, single responsibility. No premature abstraction — three similar lines beat bad helper. Delete dead code. Avoid `any` types. Fix warnings before commit. Comments explain *why*, never *what* — no comments that restate code. Assume senior engineer as reader.
+Small functions, single responsibility. No premature abstraction — three similar lines beat bad helper. Delete dead code. Avoid `any` types. Fix warnings. Comments explain *why*, never *what*.
 
 ### 5. Don't Repeat Yourself
-
-Check `.claude/skills/` before ad-hoc gen. Follow existing patterns in codebase. Single source of truth for business logic. Extract only when duplication real, not incidental.
+Check `.claude/skills/` before ad-hoc gen. Follow existing patterns. Single source of truth for business logic. Extract on real duplication, not incidental.
 
 ### 6. Ship It
-
-Work on branch, never main. Commit iteratively. **Never push to remote** — human decide when push. Push triggers CI, real cost.
+Work on branch, never main. Commit iteratively. **Never push to remote** — human decides. Push triggers CI, real cost.
 
 ### 7. Leave a Trail
-
-Planning artifacts go in `./.claude/artifacts/`. Document architectural decisions in ADRs. Name things so next person understand.
+Planning artifacts → `./.claude/artifacts/`. ADRs for architectural decisions. Name things so next person understand.
 
 ### 8. Learn and Adapt
-
-When get user feedback or corrections, evaluate if insight should persist as AI config update (rules, skills, agents) — not just memory. Patterns, conventions, quality standards belong in config so apply systematically.
+On user feedback or corrections, evaluate if insight should persist as AI config update (rules/skills/agents) — not just memory.
 
 ## Tech Stack
 
@@ -158,7 +92,7 @@ When get user feedback or corrections, evaluate if insight should persist as AI 
 
 ## Workflow
 
-**Worktrees**: Four git worktrees with fixed branch names:
+**Worktrees**: Four git worktrees, fixed branches:
 
 | Directory | Branch |
 |-----------|--------|
@@ -167,36 +101,16 @@ When get user feedback or corrections, evaluate if insight should persist as AI 
 | `ocx-sion` | `sion` |
 | `ocx-soraka` | `soraka` |
 
-**Commits**: Use [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). Scopes optional. No `Co-Authored-By` trailers. Use `chore:` for AI settings, skills, CLAUDE.md, tooling files that should not appear in changelog.
+Commits: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). No `Co-Authored-By` trailers. `chore:` for AI settings/CLAUDE.md/tooling (no changelog).
 
-**During development**: Use `task checkpoint` to save progress. Amends all changes into single "Checkpoint" commit on feature branch.
+Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). Landing: `/finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).
 
-**Landing a feature**: When feature done, run `/finalize` to clean branch history into sequence of Conventional Commits ready to fast-forward onto `main`. Two-phase model (`/commit` during dev, `/finalize` before landing) → [workflow-git.md](./.claude/rules/workflow-git.md). Manual fallback:
-1. Amend checkpoint commit with proper conventional commit message: `git commit --amend -m "feat: ..."`
-2. Rebase feature branch onto `main`: `git rebase main`
-3. Switch to `main`: `git checkout main`
-4. Fast-forward merge: `git merge --ff-only <branch>`
-5. Switch back to worktree branch: `git checkout <branch>`
-
-**Planning flow**: ADR → Design Spec → Plan → Implementation
-
-**Artifacts**: All planning docs stored in `./.claude/artifacts/`.
-**Templates**: Templates for markdown files in `./.claude/templates/artifacts/`.
-
-> **Note:** Planning artifacts internal process, no replace proper documentation in website or code comments.
-
-| Type | Pattern | Example |
-|------|---------|---------|
-| Architecture | `adr_[topic].md` | `adr_database_choice.md` |
-| System Design | `system_design_[component].md` | `system_design_api.md` |
-| Design | `design_spec_[component].md` | `design_spec_login_form.md` |
-| Plan | `plan_[task].md` | `plan_api_refactor.md` |
-| Security Audit | `security_audit_[date].md` | `security_audit_2025-01.md` |
+Planning flow: ADR → Design Spec → Plan → Implementation. Artifacts → `./.claude/artifacts/`; templates → `./.claude/templates/artifacts/`. Filename patterns: `adr_<topic>.md`, `system_design_<comp>.md`, `design_spec_<comp>.md`, `plan_<task>.md`, `security_audit_<date>.md`.
 
 ## Skills & Personas
 
-Persona skills (`/architect`, `/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`, `/swarm-plan`, `/swarm-execute`, `/swarm-review`) and task skills live in `.claude/skills/`. Full map → "Skills by task topic" table in [.claude/rules.md](./.claude/rules.md). Check `.claude/skills/` before ad-hoc gen.
+Persona skills (`/architect`, `/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`, `/swarm-plan`, `/swarm-execute`, `/swarm-review`) + task skills in `.claude/skills/`. Map → "Skills by task topic" in [.claude/rules.md](./.claude/rules.md). Check before ad-hoc gen.
 
 ## Starting Work
 
-Every task starts with [workflow-intent.md](./.claude/rules/workflow-intent.md) — classify work (feature, bug fix, refactoring), check GitHub for related issues/PRs, then follow appropriate workflow. Also: [workflow-feature.md](./.claude/rules/workflow-feature.md), [workflow-bugfix.md](./.claude/rules/workflow-bugfix.md), [workflow-refactor.md](./.claude/rules/workflow-refactor.md).
+Every task starts with [workflow-intent.md](./.claude/rules/workflow-intent.md) — classify (feature/bugfix/refactor), check GitHub for related issues/PRs, route to [workflow-feature.md](./.claude/rules/workflow-feature.md) / [workflow-bugfix.md](./.claude/rules/workflow-bugfix.md) / [workflow-refactor.md](./.claude/rules/workflow-refactor.md).
