@@ -99,7 +99,7 @@ impl TagManager {
         // Shared (reader) lock on the tag file itself. `acquire_shared`
         // returns `Ok(None)` when the file doesn't exist, which is how we
         // distinguish "no tags known for this repo" from a real I/O error.
-        let Some(guard) = TagGuard::acquire_shared(tags_path.clone()).await? else {
+        let Some(mut guard) = TagGuard::acquire_shared(tags_path.clone()).await? else {
             log::debug!(
                 "Tags file '{}' not found for identifier '{}'.",
                 tags_path.display(),
@@ -128,7 +128,7 @@ impl TagManager {
         // disk-only entries are preserved; identical-tag races resolve
         // last-writer-wins.
         let tags_path = self.tag_store.tags(identifier);
-        let guard = TagGuard::acquire_exclusive(tags_path).await?;
+        let mut guard = TagGuard::acquire_exclusive(tags_path).await?;
         let mut merged = guard.read_disk(identifier).await?;
         merged.extend(fetched);
         guard.write_disk(identifier, &merged).await?;

@@ -10,6 +10,16 @@ pub struct FileLock {
 }
 
 impl FileLock {
+    /// The file handle that owns the lock.
+    ///
+    /// Windows `LockFileEx` locks a byte range on a specific handle. Other
+    /// handles in the same process that touch the locked range get
+    /// `ERROR_LOCK_VIOLATION` (os error 33). In-place reads or writes against
+    /// a directly-locked file MUST go through this handle.
+    pub fn file_mut(&mut self) -> &mut std::fs::File {
+        &mut self._lock_file
+    }
+
     /// Try to acquire an exclusive lock without blocking.
     ///
     /// Returns `Ok(Some(guard))` if the lock was acquired, `Ok(None)` if another

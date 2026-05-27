@@ -2,13 +2,12 @@
 // Copyright 2026 The OCX Authors
 
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
-
 use crate::file_lock::FileLock;
-use crate::{Result, error::file_error, log, oci, prelude::*};
+use crate::{Result, error::file_error, log, oci};
 
 use super::tag_lock::TagLock;
 
@@ -37,7 +36,7 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 /// crash atomicity is a rare edge case, and the sidecar file was never
 /// cleaned up.
 pub(super) struct TagGuard {
-    _lock: FileLock,
+    lock: FileLock,
     target_path: PathBuf,
 }
 
@@ -71,10 +70,7 @@ impl TagGuard {
         let lock = FileLock::lock_exclusive_with_timeout(file, LOCK_TIMEOUT)
             .await
             .map_err(|e| file_error(&target_path, e))?;
-        Ok(Self {
-            _lock: lock,
-            target_path,
-        })
+        Ok(Self { lock, target_path })
     }
 
     /// Acquires a shared (reader) lock on the tag file at `target_path`.
@@ -100,30 +96,34 @@ impl TagGuard {
         let lock = FileLock::lock_shared_with_timeout(file, LOCK_TIMEOUT)
             .await
             .map_err(|e| file_error(&target_path, e))?;
-        Ok(Some(Self {
-            _lock: lock,
-            target_path,
-        }))
+        Ok(Some(Self { lock, target_path }))
     }
 
     /// Reads and parses the current tag file under the lock. Returns an
-    /// empty map when the file is missing, was freshly created by an
-    /// exclusive acquire and not yet written, **or** is unparseable.
+    /// empty map when the file is empty, was freshly created by an exclusive
+    /// acquire and not yet written, **or** is unparseable.
     ///
     /// The unparseable case is the documented kill-9 recovery window: a
     /// writer killed mid-`write_disk` can leave the file truncated or
     /// corrupt. Treat that the same as "no tags yet" so the next chain walk
     /// or `ocx index update` can rewrite it cleanly, and log a warn so the
     /// recovery is observable.
-    pub async fn read_disk(&self, identifier: &oci::Identifier) -> Result<HashMap<String, oci::Digest>> {
-        match tokio::fs::metadata(&self.target_path).await {
-            Ok(m) if m.len() == 0 => return Ok(HashMap::new()),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
-            Err(e) => return Err(file_error(&self.target_path, e)),
+    ///
+    /// Reads go through the lock-owning handle. Opening a second handle
+    /// against the locked range hits `ERROR_LOCK_VIOLATION` on Windows under
+    /// an exclusive lock; same-process handles are not exempt.
+    pub async fn read_disk(&mut self, identifier: &oci::Identifier) -> Result<HashMap<String, oci::Digest>> {
+        let file = self.lock.file_mut();
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| file_error(&self.target_path, e))?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)
+            .map_err(|e| file_error(&self.target_path, e))?;
+        if buf.is_empty() {
+            return Ok(HashMap::new());
         }
-        let parsed = TagLock::read_json(&self.target_path)
-            .await
+        let parsed = serde_json::from_slice::<TagLock>(&buf)
+            .map_err(crate::Error::from)
             .and_then(|tag_lock| tag_lock.into_tags(identifier, &self.target_path));
         match parsed {
             Ok(tags) => Ok(tags),
@@ -141,28 +141,24 @@ impl TagGuard {
     /// Truncates the existing file (same inode), writes the full JSON, and
     /// `sync_all`s for durability. Concurrent writers are serialised by the
     /// exclusive lock held by the caller.
-    pub async fn write_disk(&self, identifier: &oci::Identifier, tags: &HashMap<String, oci::Digest>) -> Result<()> {
+    ///
+    /// Writes go through the lock-owning handle. A second open against the
+    /// locked range hits `ERROR_LOCK_VIOLATION` on Windows even from the same
+    /// process — `LockFileEx` ranges are per-handle, not per-process.
+    pub async fn write_disk(
+        &mut self,
+        identifier: &oci::Identifier,
+        tags: &HashMap<String, oci::Digest>,
+    ) -> Result<()> {
         let tag_lock = TagLock::new(identifier, tags.clone());
         let bytes = serde_json::to_vec_pretty(&tag_lock)?;
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&self.target_path)
-            .await
+        let file = self.lock.file_mut();
+        file.set_len(0).map_err(|e| file_error(&self.target_path, e))?;
+        file.seek(SeekFrom::Start(0))
             .map_err(|e| file_error(&self.target_path, e))?;
-        file.write_all(&bytes)
-            .await
-            .map_err(|e| file_error(&self.target_path, e))?;
-        file.sync_all().await.map_err(|e| file_error(&self.target_path, e))?;
-        // Explicitly close the write handle before returning (Windows safety).
-        // See `BlobGuard::write_bytes` for the full explanation: on Windows,
-        // tokio::fs::File drop is async, leaving the handle open until a
-        // background thread processes the close. A subsequent reader on the
-        // same path hitting that open handle gets ERROR_LOCK_VIOLATION (os
-        // error 33). `shutdown()` forces a synchronous close before return.
-        file.shutdown().await.map_err(|e| file_error(&self.target_path, e))?;
+        file.write_all(&bytes).map_err(|e| file_error(&self.target_path, e))?;
+        file.sync_all().map_err(|e| file_error(&self.target_path, e))?;
         Ok(())
     }
 }
@@ -209,7 +205,7 @@ mod tests {
     async fn read_disk_returns_empty_when_file_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("ghcr.io").join("cmake.json");
-        let guard = TagGuard::acquire_exclusive(target).await.unwrap();
+        let mut guard = TagGuard::acquire_exclusive(target).await.unwrap();
         let tags = guard.read_disk(&make_id()).await.unwrap();
         assert!(tags.is_empty());
     }
@@ -221,7 +217,7 @@ mod tests {
         let id = make_id();
         let tags = tags_with(&[("3.28", 'a'), ("latest", 'b')]);
 
-        let guard = TagGuard::acquire_exclusive(target.clone()).await.unwrap();
+        let mut guard = TagGuard::acquire_exclusive(target.clone()).await.unwrap();
         guard.write_disk(&id, &tags).await.unwrap();
         let readback = guard.read_disk(&id).await.unwrap();
         assert_eq!(readback, tags);
@@ -232,7 +228,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("ghcr.io");
         let target = parent.join("cmake.json");
-        let guard = TagGuard::acquire_exclusive(target.clone()).await.unwrap();
+        let mut guard = TagGuard::acquire_exclusive(target.clone()).await.unwrap();
         guard
             .write_disk(&make_id(), &tags_with(&[("3.28", 'a')]))
             .await
@@ -291,6 +287,31 @@ mod tests {
             .expect("shared guard must be Some after file exists");
     }
 
+    /// Regression: on Windows `LockFileEx` blocks any other handle in the
+    /// same process from writing into the locked byte range, even via
+    /// `tokio::fs`. The original implementation re-opened the tag file in
+    /// `write_disk` and hit `ERROR_LOCK_VIOLATION` (os error 33), surfacing
+    /// as "uncategorized error". The current implementation routes writes
+    /// through the lock-owning handle (`FileLock::file_mut`). This test pins
+    /// the rewrite path: acquire exclusive, write twice in place under the
+    /// same lock, then read back the latest content.
+    #[tokio::test]
+    async fn merge_under_lock_rewrites_in_place_through_lock_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ghcr.io").join("cmake.json");
+        let id = make_id();
+
+        let mut guard = TagGuard::acquire_exclusive(target.clone()).await.unwrap();
+        let initial = tags_with(&[("3.28", 'a')]);
+        guard.write_disk(&id, &initial).await.unwrap();
+        // Second rewrite under the same lock — must reuse the locked handle,
+        // not open a second one.
+        let updated = tags_with(&[("3.28", 'a'), ("3.29", 'b')]);
+        guard.write_disk(&id, &updated).await.unwrap();
+        let readback = guard.read_disk(&id).await.unwrap();
+        assert_eq!(readback, updated);
+    }
+
     #[tokio::test]
     async fn shared_locks_can_coexist() {
         let dir = tempfile::tempdir().unwrap();
@@ -298,7 +319,7 @@ mod tests {
 
         // Establish the file with an exclusive acquire + write + drop so the
         // subsequent shared acquires find an existing file to lock.
-        let writer = TagGuard::acquire_exclusive(target.clone()).await.unwrap();
+        let mut writer = TagGuard::acquire_exclusive(target.clone()).await.unwrap();
         writer
             .write_disk(&make_id(), &tags_with(&[("3.28", 'a')]))
             .await
