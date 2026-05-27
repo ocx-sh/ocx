@@ -1245,3 +1245,68 @@ def test_detect_profile_rejects_zdotdir_root_writes_no_file_under_root(
     assert "# BEGIN ocx" in zprofile.read_text(), (
         f"$HOME/.zprofile must contain '# BEGIN ocx' block:\n{zprofile.read_text()}"
     )
+
+
+# verify_checksum — sha256.sum format parsing
+
+
+def _make_archive(path: Path, content: bytes = b"payload") -> str:
+    import hashlib
+
+    path.write_bytes(content)
+    return hashlib.sha256(content).hexdigest()
+
+
+def test_verify_checksum_accepts_binary_mode_format(tmp_path: Path) -> None:
+    """Regression: parser must accept '<hash> *<name>' (cargo-dist default)."""
+    archive = tmp_path / "ocx-x86_64-unknown-linux-gnu.tar.xz"
+    digest = _make_archive(archive)
+    (tmp_path / "sha256.sum").write_text(f"{digest} *{archive.name}\n")
+
+    env = {"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"}
+    result = _source_install_sh(
+        f'verify_checksum "{tmp_path}" "{archive.name}"', env
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Checksum verified" in result.stdout
+
+
+def test_verify_checksum_accepts_text_mode_format(tmp_path: Path) -> None:
+    """Parser must also accept '<hash>  <name>' (text mode, no asterisk)."""
+    archive = tmp_path / "ocx-x86_64-unknown-linux-gnu.tar.xz"
+    digest = _make_archive(archive)
+    (tmp_path / "sha256.sum").write_text(f"{digest}  {archive.name}\n")
+
+    env = {"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"}
+    result = _source_install_sh(
+        f'verify_checksum "{tmp_path}" "{archive.name}"', env
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_verify_checksum_rejects_substring_match(tmp_path: Path) -> None:
+    """Exact filename match: 'foo.tar.xz' must not match 'foo.tar.xz.sig'."""
+    archive = tmp_path / "ocx-x86_64-unknown-linux-gnu.tar.xz"
+    digest = _make_archive(archive)
+    (tmp_path / "sha256.sum").write_text(f"{digest} *{archive.name}.sig\n")
+
+    env = {"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"}
+    result = _source_install_sh(
+        f'verify_checksum "{tmp_path}" "{archive.name}"', env
+    )
+    assert result.returncode != 0
+    assert "not found" in result.stderr
+
+
+def test_verify_checksum_detects_mismatch(tmp_path: Path) -> None:
+    archive = tmp_path / "ocx-x86_64-unknown-linux-gnu.tar.xz"
+    _make_archive(archive, content=b"real content")
+    wrong_digest = "0" * 64
+    (tmp_path / "sha256.sum").write_text(f"{wrong_digest} *{archive.name}\n")
+
+    env = {"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"}
+    result = _source_install_sh(
+        f'verify_checksum "{tmp_path}" "{archive.name}"', env
+    )
+    assert result.returncode != 0
+    assert "checksum mismatch" in result.stderr

@@ -314,10 +314,10 @@ verify_checksum() {
         return 0
     fi
 
-    # Exact-filename match: sha256.sum line format is "<hash>  <filename>".
-    # Using awk field comparison prevents substring matches (e.g. "foo.tar.xz"
-    # matching "foo.tar.xz.sig") that grep -F would silently accept.
-    _expected=$(awk -v f="$_file" '$2 == f { print $1 }' "$_dir/sha256.sum")
+    # Strip the optional leading "*" (binary-mode sha256sum) before comparing.
+    _expected=$(awk -v f="$_file" '
+        { name = $2; sub(/^\*/, "", name); if (name == f) { print $1; exit } }
+    ' "$_dir/sha256.sum")
     if [ -z "$_expected" ]; then
         err "checksum for $_file not found in sha256.sum"
     fi
