@@ -9,6 +9,11 @@ repository = "https://github.com/ocx-sh/ocx"
 name = "ocx"
 path = "src/main.rs"
 
+[features]
+# Forwards `ocx_lib`'s private test-only self-update seam. NEVER enable in
+# release builds. See `ocx_lib`'s manifest for the full contract.
+test-self-update-seam = ["ocx_lib/test-self-update-seam"]
+
 [dependencies]
 ocx_lib.workspace = true
 

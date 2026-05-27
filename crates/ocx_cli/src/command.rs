@@ -37,6 +37,7 @@ pub mod pull;
 pub mod remove;
 pub mod run;
 pub mod select;
+pub mod self_group;
 pub mod shell;
 pub mod shell_completion;
 pub mod toolchain_env;
@@ -99,6 +100,9 @@ pub enum Command {
     Run(run::Run),
     #[command(subcommand)]
     Shell(shell::Shell),
+    /// Manage the OCX installation itself (PATH activation, completions, self-update).
+    #[command(name = "self", subcommand)]
+    Self_(self_group::SelfGroup),
     /// Print the version of ocx
     Version(version::Version),
 }
@@ -123,7 +127,8 @@ impl Command {
             Command::Remove(remove) => remove.execute(context).await,
             Command::Run(r) => r.execute(context).await,
             Command::Shell(shell) => shell.execute(context).await,
-            Command::Version(version) => version.execute().await,
+            Command::Self_(group) => group.execute(context).await,
+            Command::Version(_) => unreachable!("Version is handled in the static-command bypass in App::run"),
         }
     }
 }

@@ -320,7 +320,10 @@ impl clap_builder::ValueEnum for Shell {
             Self::Bash => PossibleValue::new("bash"),
             Self::Elvish => PossibleValue::new("elvish"),
             Self::Fish => PossibleValue::new("fish"),
-            Self::Batch => PossibleValue::new("batch"),
+            // `cmd` is the canonical shell name on Windows (the interpreter is
+            // `cmd.exe`).  Without this alias `--shell=cmd` would fail clap
+            // parsing (exit 64), which is surprising for Windows users.
+            Self::Batch => PossibleValue::new("batch").alias("cmd"),
             // `pwsh` is an alias for `powershell` — same C5 zero-new-variant
             // contract as the `sh`→Dash alias above.  The installer-generated
             // `env.ps1`/`env.sh` emit `--shell=pwsh`; without the alias that
@@ -328,7 +331,11 @@ impl clap_builder::ValueEnum for Shell {
             // toolchain activation on Windows.
             Self::PowerShell => PossibleValue::new("powershell").alias("pwsh"),
             Self::Zsh => PossibleValue::new("zsh"),
-            Self::Nushell => PossibleValue::new("nushell"),
+            // `nu` is the canonical short name used in most Nushell installations
+            // (e.g. `which nu`, PATH entry `nu`, shebang `#!/usr/bin/env nu`).
+            // Without this alias `--shell=nu` would fail clap parsing (exit 64),
+            // which is surprising for the majority of Nushell users.
+            Self::Nushell => PossibleValue::new("nushell").alias("nu"),
         })
     }
 }
@@ -778,6 +785,47 @@ mod tests {
             .to_possible_value()
             .expect("Nushell must produce a PossibleValue");
         assert_eq!(pv.get_name(), "nushell");
+    }
+
+    // ── `nu` clap alias for Nushell ──────────────────────────────────────
+    //
+    // `nu` is the canonical executable name used in the majority of Nushell
+    // installations (PATH entry, shebang `#!/usr/bin/env nu`, `which nu`).
+    // Without the alias `--shell=nu` fails clap parsing (exit 64), which is
+    // surprising for most users.  Confirm both canonical name and alias work.
+
+    #[test]
+    fn nu_alias_parses_to_nushell_variant() {
+        use clap_builder::ValueEnum;
+        let parsed = <Shell as ValueEnum>::from_str("nu", true).expect("'nu' must be a valid shell alias for Nushell");
+        assert_eq!(
+            parsed,
+            Shell::Nushell,
+            "--shell=nu must resolve to Shell::Nushell; got {parsed:?}"
+        );
+        // Canonical name `nushell` must still work — alias adds, never replaces.
+        let canonical = <Shell as ValueEnum>::from_str("nushell", true).expect("'nushell' canonical value");
+        assert_eq!(canonical, Shell::Nushell);
+    }
+
+    // ── `cmd` clap alias for Batch ───────────────────────────────────────────
+    //
+    // `cmd` is the canonical Windows shell name (`cmd.exe`).  Without the alias
+    // `--shell=cmd` would fail clap parsing (exit 64), which is surprising for
+    // Windows users.  Confirm both canonical name and alias work.
+
+    #[test]
+    fn cmd_alias_parses_to_batch_variant() {
+        use clap_builder::ValueEnum;
+        let parsed = <Shell as ValueEnum>::from_str("cmd", true).expect("'cmd' must be a valid shell alias for Batch");
+        assert_eq!(
+            parsed,
+            Shell::Batch,
+            "--shell=cmd must resolve to Shell::Batch; got {parsed:?}"
+        );
+        // Canonical name `batch` must still work — alias adds, never replaces.
+        let canonical = <Shell as ValueEnum>::from_str("batch", true).expect("'batch' canonical value");
+        assert_eq!(canonical, Shell::Batch);
     }
 
     #[test]

@@ -6,6 +6,17 @@ license.workspace = true
 publish = false
 exclude = ["src/test_data/**"]
 
+[features]
+# Private test-only seam: lets the canonical self-update identifier
+# (`ocx.sh/ocx/cli`) be overridden via the `__OCX_SELF_IMAGE` env var so
+# acceptance tests can exercise the install path against `localhost:5000`.
+#
+# Compile-gated out of release artifacts — release builds physically lack the
+# code path, so the seam is not an attack surface. A loopback-registry assert
+# inside the gate prevents misuse even when the feature is enabled. Named with
+# a double-underscore env var to signal "internal, undocumented, may break".
+test-self-update-seam = []
+
 [dependencies]
 schemars.workspace = true
 tokio.workspace = true

@@ -6,6 +6,9 @@ requires-python = ">=3.10"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "requires_tty: test requires a real TTY on stderr; skipped in capture-output environments (is_terminal() returns false in pipes)",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-xdist>=3.5", "pexpect>=4.9", "oras>=0.2.42", "rich>=14.0"]

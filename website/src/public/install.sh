@@ -188,18 +188,40 @@ detect_target() {
 # Detect curl or wget; sets _downloader
 # Snap-packaged curl on Ubuntu has sandbox restrictions that can silently
 # break downloads to /tmp — prefer wget if curl is from snap.
+# wget must support --secure-protocol, --https-only AND --header-file
+# (--header-file requires wget >= 1.17, circa 2015 — the binding constraint).
+# On too-old wget without these flags, fail closed: do not silently downgrade
+# to unprotected HTTP, do not silently leak GITHUB_TOKEN via argv.
+_check_wget_tls_flags() {
+    # Probe via --help output — no network call, no side-effects on localhost.
+    # grep exits 1 on no match; treat that as flags absent (old wget).
+    # Cache --help once: separate invocations could see different binaries.
+    local _wh
+    _wh=$(wget --help 2>&1) || return 1
+    printf '%s' "$_wh" | grep -q -- '--https-only' || return 1
+    printf '%s' "$_wh" | grep -q -- '--header-file' || return 1
+    return 0
+}
+
 detect_downloader() {
     if check_cmd curl; then
         if curl --version 2>&1 | head -1 | grep -qF 'snap'; then
             warn "detected snap-packaged curl (may have sandbox restrictions)"
             if check_cmd wget; then
-                _downloader="wget"
-                return
+                if _check_wget_tls_flags; then
+                    _downloader="wget"
+                    return
+                fi
+                warn "wget too old to enforce TLS restrictions — falling back to snap curl"
             fi
-            warn "no wget fallback — continuing with snap curl"
+            warn "no usable wget fallback — continuing with snap curl"
         fi
         _downloader="curl"
     elif check_cmd wget; then
+        if ! _check_wget_tls_flags; then
+            err "wget found but is too old to enforce TLS-only downloads (need wget >= 1.17).
+  Install a newer wget or install curl to continue."
+        fi
         _downloader="wget"
     else
         err "either curl or wget is required to download OCX"
@@ -213,7 +235,7 @@ download_to_file() {
     if [ "$_downloader" = "curl" ]; then
         curl --proto '=https' --tlsv1.2 -fsSL -o "$_dest" "$_url"
     else
-        wget -q -O "$_dest" "$_url"
+        wget --secure-protocol=TLSv1_2 --https-only -q -O "$_dest" "$_url"
     fi
 }
 
@@ -222,19 +244,55 @@ download() {
     if [ "$_downloader" = "curl" ]; then
         curl --proto '=https' --tlsv1.2 -fsSL "$1"
     else
-        wget -qO- "$1"
+        wget --secure-protocol=TLSv1_2 --https-only -qO- "$1"
     fi
 }
 
 # Download GitHub API URL to stdout — uses GITHUB_TOKEN when set
+# curl: token passed via -H @<file> (curl 7.55+) to keep it out of argv/ps list.
+#   A chmod-600 temp file holds the header line; deleted immediately after use.
+# wget: token also passed via --header-file=<file> (wget >= 1.17) for the same
+#   reason — argv is visible in /proc/PID/cmdline and `ps ef` on shared hosts.
 download_api() {
     local _url="$1"
 
     if [ -n "${GITHUB_TOKEN:-}" ]; then
         if [ "$_downloader" = "curl" ]; then
-            curl --proto '=https' --tlsv1.2 -fsSL -H "Authorization: token ${GITHUB_TOKEN}" "$_url"
+            # Write header to a 0600 temp file; -H @<file> reads it without
+            # exposing the token value in the process argument list.
+            local _hdr_file
+            _hdr_file=$(mktemp)
+            chmod 600 "$_hdr_file"
+            printf 'Authorization: token %s\n' "${GITHUB_TOKEN}" >"$_hdr_file"
+            # Capture return code without relying on set -e — if curl fails,
+            # bare statement position would exit before the rm -f, leaking the
+            # token file on disk.  if/else always executes rm -f regardless.
+            local _rc
+            if curl --proto '=https' --tlsv1.2 -fsSL -H "@${_hdr_file}" "$_url"; then
+                _rc=0
+            else
+                _rc=$?
+            fi
+            rm -f "$_hdr_file"
+            return "$_rc"
         else
-            wget -q --header="Authorization: token ${GITHUB_TOKEN}" -O- "$_url"
+            # Mirror curl pattern: write Authorization header to a 0600 temp
+            # file and pass via --header-file so the token never appears in
+            # argv (visible in /proc/PID/cmdline and `ps ef` on shared hosts).
+            # --header-file supported since wget 1.17 (2015); _check_wget_tls_flags
+            # already ensures we only reach this path on a capable wget.
+            local _whdr_file _wrc
+            _whdr_file=$(mktemp)
+            chmod 600 "$_whdr_file"
+            printf 'Authorization: token %s\n' "${GITHUB_TOKEN}" >"$_whdr_file"
+            if wget --secure-protocol=TLSv1_2 --https-only -q \
+                    --header-file="$_whdr_file" -O- "$_url"; then
+                _wrc=0
+            else
+                _wrc=$?
+            fi
+            rm -f "$_whdr_file"
+            return "$_wrc"
         fi
     else
         download "$_url"
@@ -256,7 +314,10 @@ verify_checksum() {
         return 0
     fi
 
-    _expected=$(grep -F "$_file" "$_dir/sha256.sum" | awk '{print $1}')
+    # Exact-filename match: sha256.sum line format is "<hash>  <filename>".
+    # Using awk field comparison prevents substring matches (e.g. "foo.tar.xz"
+    # matching "foo.tar.xz.sig") that grep -F would silently accept.
+    _expected=$(awk -v f="$_file" '$2 == f { print $1 }' "$_dir/sha256.sum")
     if [ -z "$_expected" ]; then
         err "checksum for $_file not found in sha256.sum"
     fi
@@ -322,176 +383,160 @@ create_env_sh() {
 
     mkdir -p "$_ocx_home"
 
-    # Single-quoted printf format strings intentionally contain shell variable
-    # syntax ($) that must appear verbatim in the generated file.
-    # shellcheck disable=SC2016
-    {
-        printf '#!/bin/sh\n'
-        printf '# Managed by ocx installer — do not edit.\n'
-        printf 'export OCX_HOME="%s"\n' "$_ocx_home"
-        printf '_ocx_bin="%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
-        printf 'if [ -x "$_ocx_bin" ]; then\n'
-        printf '    _ocx_bindir="${_ocx_bin%%/ocx}"\n'
-        printf '    case ":${PATH:-}:" in\n'
-        printf '        *":${_ocx_bindir}:"*) ;;\n'
-        printf '        *) PATH="${_ocx_bindir}${PATH:+:$PATH}"; export PATH ;;\n'
-        printf '    esac\n'
-        printf '    unset _ocx_bindir\n'
-        printf '    eval "$("$_ocx_bin" --global env --shell=sh 2>/dev/null)" || true\n'
-        printf '    # Shell completions — detect interactive shell and eval inline.\n'
-        printf '    if [ -n "${ZSH_VERSION:-}" ]; then\n'
-        printf '        eval "$("$_ocx_bin" shell completion --shell=zsh 2>/dev/null)" || true\n'
-        printf '    elif [ -n "${BASH_VERSION:-}" ]; then\n'
-        printf '        eval "$("$_ocx_bin" shell completion --shell=bash 2>/dev/null)" || true\n'
-        printf '    fi\n'
-        printf 'fi\n'
-        printf 'unset _ocx_bin\n'
-    } >"$_ocx_home/env.sh"
+    # Emit a thin shim that delegates to `ocx self activate --shell=sh` at
+    # runtime.  Every variable reference inside is intentionally verbatim
+    # (no install-time substitution) so the file is byte-identical across
+    # users regardless of their OCX_HOME path.
+    cat >"$_ocx_home/env.sh" <<'EOF'
+#!/bin/sh
+# Managed by ocx installer — do not edit.
+
+# Double-source guard — prevents PATH duplication on re-source (e.g. user
+# re-sources .bashrc).  Set before any side effects so that a re-source after
+# a partial failure also short-circuits cleanly.  Idempotent under `set -u`.
+if [ -n "${_OCX_ENV_LOADED:-}" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+_OCX_ENV_LOADED=1
+export _OCX_ENV_LOADED
+
+# OCX_HOME env-var-with-fallback. Assigns and exports only when unset or empty.
+: "${OCX_HOME:=$HOME/.ocx}"
+export OCX_HOME
+
+_ocx_bin="$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"
+if [ -x "$_ocx_bin" ]; then
+    eval "$("$_ocx_bin" self activate --shell=sh 2>/dev/null)" || true
+fi
+unset _ocx_bin
+EOF
 }
 
 # Write $OCX_HOME/env.fish — fish-syntax per-family file.
-# Fish cannot use the POSIX eval form; pipe-to-source is the idiomatic
-# equivalent in fish 4.x.  PATH is prepended directly from the install
-# candidate; global toolchain env is layered on top for user-declared tools.
+# Thin shim that delegates to `ocx self activate --shell=fish` at runtime.
+# File is byte-identical across users — no install-time substitution.
 create_env_fish() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
-    # SC2016 suppressed: single-quoted $ syntax is intentional — fish variable
-    # references must appear verbatim in the file.
-    # shellcheck disable=SC2016
-    {
-        printf '# Managed by ocx installer — do not edit.\n'
-        printf 'set -l _ocx_bin "%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
-        printf 'if test -x "$_ocx_bin"\n'
-        printf '    set -x OCX_HOME "%s"\n' "$_ocx_home"
-        printf '    set -l _ocx_bindir (string replace -r "/ocx\\$" "" "$_ocx_bin")\n'
-        printf '    if not contains -- "$_ocx_bindir" $PATH\n'
-        printf '        set -x PATH "$_ocx_bindir" $PATH\n'
-        printf '    end\n'
-        printf '    "$_ocx_bin" --global env --shell=fish 2>/dev/null | source\n'
-        printf '    "$_ocx_bin" shell completion --shell=fish 2>/dev/null | source\n'
-        printf 'end\n'
-    } >"$_ocx_home/env.fish"
+    cat >"$_ocx_home/env.fish" <<'EOF'
+# Managed by ocx installer — do not edit.
+# Double-source guard — prevents PATH duplication on re-source.
+# Set before any side effects so re-source after partial failure also short-circuits.
+if set -q _OCX_ENV_LOADED
+    return
+end
+set -gx _OCX_ENV_LOADED 1
+
+if not set -q OCX_HOME
+    set -gx OCX_HOME "$HOME/.ocx"
+end
+
+set -l _ocx_bin "$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"
+if test -x "$_ocx_bin"
+    "$_ocx_bin" self activate --shell=fish 2>/dev/null | source
+end
+EOF
 }
 
 # Write $OCX_HOME/env.ps1 — PowerShell per-family file.
-# $PROFILE is resolved at runtime by the PowerShell profile, never hardcoded
-# here. The binary path is the resolved install root embedded literally at
-# install time (not a runtime $env:OCX_HOME fallback).
+# Thin shim that delegates to `ocx self activate --shell=powershell` at
+# runtime.  File is byte-identical across users — no install-time substitution.
 create_env_ps1() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
-    # Write the literal install root so the file works in fresh shells where
-    # OCX_HOME is not set.  SC2016 suppressed: single-quoted PowerShell $
-    # variable references must appear verbatim in the generated file.
-    # shellcheck disable=SC2016
-    {
-        printf '# Managed by ocx installer — do not edit.\n'
-        printf '$env:OCX_HOME = "%s"\n' "$_ocx_home"
-        printf '$_ocxBin = "%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
-        printf 'if (Test-Path $_ocxBin -PathType Leaf) {\n'
-        printf '    $_ocxBinDir = Split-Path $_ocxBin -Parent\n'
-        printf '    $_pathSep = [IO.Path]::PathSeparator\n'
-        printf '    if (-not (($env:PATH -split [regex]::Escape($_pathSep)) -contains $_ocxBinDir)) {\n'
-        printf '        $env:PATH = "$_ocxBinDir$_pathSep$env:PATH"\n'
-        printf '    }\n'
-        printf '    Remove-Variable _ocxBinDir, _pathSep -ErrorAction SilentlyContinue\n'
-        printf '    Invoke-Expression ((& $_ocxBin --global env --shell=pwsh 2>$null) | Out-String)\n'
-        printf '    Invoke-Expression ((& $_ocxBin shell completion --shell=powershell 2>$null) | Out-String)\n'
-        printf '}\n'
-    } >"$_ocx_home/env.ps1"
+    cat >"$_ocx_home/env.ps1" <<'EOF'
+# Managed by ocx installer — do not edit.
+# Double-source guard — prevents PATH duplication on re-source.
+# Set before any side effects so re-source after partial failure also short-circuits.
+if ($env:_OCX_ENV_LOADED) { return }
+$env:_OCX_ENV_LOADED = '1'
+
+if (-not $env:OCX_HOME) { $env:OCX_HOME = Join-Path $env:USERPROFILE '.ocx' }
+
+$_ocxBin = Join-Path $env:OCX_HOME 'symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe'
+if (Test-Path $_ocxBin -PathType Leaf) {
+    Invoke-Expression ((& $_ocxBin self activate --shell=powershell 2>$null) | Out-String)
+}
+Remove-Variable _ocxBin -ErrorAction SilentlyContinue
+EOF
 }
 
 # Write $OCX_HOME/env.nu — Nushell per-family file.
-# Nushell has no `eval` builtin; it ingests ocx env JSON output instead.
-# The binary path is the resolved install root embedded literally at install
-# time (not a runtime OCX_HOME fallback).  The JSON shape is:
-#   {"entries":[{"key","value","type":"constant"|"path"}]}
-# shellcheck disable=SC2016
+# Thin shim that delegates to `ocx self activate --shell=nushell` at runtime.
+# Nushell's `source` is parse-time, so activation output is written to a temp
+# file and sourced from there.  File is byte-identical across users — no
+# install-time substitution.
 create_env_nu() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
-    # Write the literal install root so the file works in fresh shells where
-    # OCX_HOME is not set.  SC2016 suppressed: single-quoted $ syntax is
-    # intentional — Nushell variable references must appear verbatim in the
-    # generated file.
-    {
-        printf '# Managed by ocx installer — do not edit.\n'
-        printf 'let _ocx_bin = "%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
-        printf 'if ($_ocx_bin | path exists) {\n'
-        printf '    let _ocx_bindir = ($_ocx_bin | path dirname)\n'
-        printf '    let _path_sep = (char esep)\n'
-        printf '    let _path_list = ($env.PATH? | default "" | split row $_path_sep)\n'
-        printf '    if not ($_path_list | any { |p| $p == $_ocx_bindir }) {\n'
-        printf '        let _prev = ($env.PATH? | default "")\n'
-        printf '        let _next = (if ($_prev | is-empty) { $_ocx_bindir } else { $"($_ocx_bindir)($_path_sep)($_prev)" })\n'
-        printf '        load-env { PATH: $_next }\n'
-        printf '    }\n'
-        printf '    let _ocx_out = (^$_ocx_bin --global env | complete)\n'
-        printf '    if $_ocx_out.exit_code == 0 {\n'
-        printf '        for e in ($_ocx_out.stdout | from json | get entries) {\n'
-        printf '            let _val = (if $e.type == "path" {\n'
-        printf '                let _prev = ($env | get -i $e.key | default "")\n'
-        printf '                if ($_prev | is-empty) { $e.value } else { $"($e.value)(char esep)($_prev)" }\n'
-        printf '            } else { $e.value })\n'
-        printf '            load-env { ($e.key): $_val }\n'
-        printf '        }\n'
-        printf '    }\n'
-        printf '}\n'
-    } >"$_ocx_home/env.nu"
+    cat >"$_ocx_home/env.nu" <<'EOF'
+# Managed by ocx installer — do not edit.
+# Double-source guard — prevents PATH duplication on re-source.
+# Set before any side effects so re-source after partial failure also short-circuits.
+if ($env._OCX_ENV_LOADED? | default '') != '' { return }
+$env._OCX_ENV_LOADED = '1'
+
+$env.OCX_HOME = ($env.OCX_HOME? | default ($env.HOME | path join '.ocx'))
+
+let _ocx_bin = ($env.OCX_HOME | path join 'symlinks/ocx.sh/ocx/cli/current/content/bin/ocx')
+if ($_ocx_bin | path exists) {
+    ^$_ocx_bin self activate --shell=nushell 2>/dev/null | save --force ($nu.temp-path | path join 'ocx_activate.nu')
+    source ($nu.temp-path | path join 'ocx_activate.nu')
+}
+EOF
 }
 
 # Write the Nushell vendor autoload file that sources $OCX_HOME/env.nu.
 # Nushell auto-sources every .nu file under the vendor/autoload directory at
-# startup — the path used at install time is resolved literally so it works
-# in shells where OCX_HOME is not exported.
-# `source` in Nushell is parse-time and cannot take a runtime variable; the
-# literal resolved path must be written into the file.
+# startup.  The autoload file sets OCX_HOME via env-var-with-fallback at
+# runtime, then computes the env.nu path from it — no literal substitution.
+# Note: the inner `source` inside env.nu still requires a literal path
+# resolved at startup by env.nu itself (via the temp-file pattern).
 create_nu_autoload() {
-    local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
     local _nu_autoload_dir
 
     _nu_autoload_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nushell/vendor/autoload"
     mkdir -p "$_nu_autoload_dir"
 
-    {
-        printf '# OCX shell environment — managed by ocx installer.\n'
-        printf 'source "%s/env.nu"\n' "$_ocx_home"
-    } >"$_nu_autoload_dir/ocx.nu"
+    cat >"$_nu_autoload_dir/ocx.nu" <<'EOF'
+# OCX shell environment — managed by ocx installer.
+$env.OCX_HOME = ($env.OCX_HOME? | default ($env.HOME | path join '.ocx'))
+source ($env.OCX_HOME + '/env.nu')
+EOF
 }
 
 # Write $OCX_HOME/env.elv — Elvish per-family file.
-# Elvish supports `eval` at runtime; `ocx --global env --shell=elvish` emits
-# `set E:KEY = ...` lines that are safe to eval.  The binary path is the
-# resolved install root embedded literally at install time.
-# shellcheck disable=SC2016
+# Thin shim that delegates to `ocx self activate --shell=elvish` at runtime.
+# File is byte-identical across users — no install-time substitution.
 create_env_elv() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
-    # Write the literal install root so the file works in fresh shells where
-    # OCX_HOME is not set.  SC2016 suppressed: single-quoted $ syntax is
-    # intentional — Elvish variable references must appear verbatim in the
-    # generated file.
-    {
-        printf '# Managed by ocx installer — do not edit.\n'
-        printf 'var _ocx_bin = "%s/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"\n' "$_ocx_home"
-        printf 'if ?(test -x $_ocx_bin) {\n'
-        printf '    var _ocx_bindir = (path:dir $_ocx_bin)\n'
-        printf '    if (not (has-value $paths $_ocx_bindir)) {\n'
-        printf '        set paths = [$_ocx_bindir $@paths]\n'
-        printf '    }\n'
-        printf '    eval (e:$_ocx_bin --global env --shell=elvish | slurp)\n'
-        printf '    eval (e:$_ocx_bin shell completion --shell=elvish | slurp)\n'
-        printf '}\n'
-    } >"$_ocx_home/env.elv"
+    cat >"$_ocx_home/env.elv" <<'EOF'
+# Managed by ocx installer — do not edit.
+# Double-source guard — prevents PATH duplication on re-source.
+# Set before any side effects so re-source after partial failure also short-circuits.
+if (has-env _OCX_ENV_LOADED) {
+    return
+}
+set-env _OCX_ENV_LOADED 1
+
+if (not (has-env OCX_HOME)) {
+    set-env OCX_HOME (path:join $E:HOME .ocx)
+}
+
+var _ocx_bin = (path:join $E:OCX_HOME symlinks/ocx.sh/ocx/cli/current/content/bin/ocx)
+if ?(test -x $_ocx_bin) {
+    eval (e:$_ocx_bin self activate --shell=elvish 2>/dev/null | slurp)
+}
+EOF
 }
 
 # Compatibility alias: the old env file had no .sh extension.  Remove it on
@@ -499,8 +544,21 @@ create_env_elv() {
 remove_legacy_env_file() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
     local _old="$_ocx_home/env"
-    if [ -f "$_old" ] && ! [ -L "$_old" ]; then
-        rm -f -- "$_old"
+    # Defence-in-depth (CWE-367 TOCTOU): use `stat` once to read both the file
+    # type and the symlink status from a single inode probe so an attacker
+    # can't swap the regular file for a symlink between two independent
+    # `test` invocations. `stat -c '%F'` is GNU; fall back to a single `[`
+    # composition with -a on platforms that lack GNU stat (still POSIX and
+    # narrows the race window vs the previous two-process form).
+    if command -v stat >/dev/null 2>&1 && stat -c '%F' /dev/null >/dev/null 2>&1; then
+        if [ "$(stat -c '%F' "$_old" 2>/dev/null || true)" = "regular file" ]; then
+            rm -f -- "$_old"
+        fi
+    else
+        # shellcheck disable=SC2166  # POSIX -a kept inside a single test for TOCTOU window narrowing
+        if [ -f "$_old" -a ! -L "$_old" ]; then
+            rm -f -- "$_old"
+        fi
     fi
 }
 
@@ -539,9 +597,9 @@ remove_legacy_init_lines() {
     _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     # Detection: file references one of the legacy patterns.
-    if grep -qF "${_ocx_home}/init." "$_profile" 2>/dev/null \
-        || grep -qE '^[[:space:]]*\. .*\.ocx/init\.' "$_profile" 2>/dev/null \
-        || grep -qE '\.ocx/env"' "$_profile" 2>/dev/null; then
+    if grep -qF "${_ocx_home}/init." "$_profile" 2>/dev/null ||
+        grep -qE '^[[:space:]]*\. .*\.ocx/init\.' "$_profile" 2>/dev/null ||
+        grep -qE '\.ocx/env"' "$_profile" 2>/dev/null; then
         _tmpfile=$(mktemp)
         # State machine. state: 0 = pass-through, 1 = saw `# OCX` header
         # (buffered, not yet committed), 2 = inside multi-line legacy guard.
@@ -777,7 +835,6 @@ bootstrap_ocx() {
     fi
 }
 
-
 # --- Success message ---
 
 print_success() {
@@ -882,7 +939,7 @@ main() {
     # metacharacters so a CI-injected OCX_HOME cannot break out of the
     # quoted context in the generated activation files.
     case "$_ocx_home" in
-        *'"'* | *'$'* | *'`'* | *';'* | *'&'* | *'|'* | *'
+        *'"'* | *'$'* | *'`'* | *';'* | *'&'* | *'|'* | *'\'* | *'
 '*) err "OCX_HOME contains characters unsafe for shell embedding: $_ocx_home" ;;
     esac
 
@@ -935,8 +992,68 @@ main() {
     # Verify checksum
     verify_checksum "$_tmpdir" "$_archive"
 
-    # Extract archive
-    if ! tar xf "$_tmpdir/$_archive" -C "$_tmpdir" 2>/dev/null; then
+    # Pre-scan archive for path-traversal and symlink-escape entries before extraction.
+    # Rejects: absolute paths (leading /), parent-component (..) traversal, and
+    # symlinks whose target resolves outside the extraction directory.
+    # Two-pass scan:
+    #   Pass 1 (entry names): catches absolute paths and ".." traversal in entry names.
+    #   Pass 2 (symlink targets): tar -tv lists "link -> target"; awk extracts the
+    #     target (last field after "->") and rejects absolute or parent-escaping targets.
+    #     Without -v, tar --list only emits entry names — symlink targets are invisible.
+    local _bad_entry
+    _bad_entry=$(tar --list -f "$_tmpdir/$_archive" 2>/dev/null |
+        grep -E '(^|/)\.\.(^|/|$)|^/' || true)
+    if [ -n "$_bad_entry" ]; then
+        printf 'ocx-install: error: archive contains unsafe path entry: %s\n' \
+            "$_bad_entry" >&2
+        exit 1
+    fi
+    # Reject symlinks pointing outside the extraction directory.  Catches:
+    #   - absolute paths (leading /)
+    #   - parent-relative prefix (../...)
+    #   - middle-relative escapes (e.g. `subdir/../../etc/passwd`) which the
+    #     prior regex `^(\.\.|/)` missed (CWE-22 / CWE-59 — symlink-target
+    #     path traversal).  The awk normalizer walks each '/'-split component
+    #     and tracks depth: any '..' that would take depth below zero means
+    #     the target resolves outside the extraction root.
+    # Use field-split on ' -> ' instead of a greedy sub() so that symlink
+    # targets containing a literal ' -> ' substring are preserved intact and
+    # checked correctly.  Fields $2..$NF are joined back with ' -> ' so the
+    # full target string reaches the guard even in the (rare) edge case.
+    local _bad_target
+    _bad_target=$(tar -tvf "$_tmpdir/$_archive" 2>/dev/null |
+        awk -F ' -> ' '
+            /->/ {
+                target=""
+                for (i=2; i<=NF; i++) target = target (i==2 ? "" : " -> ") $i
+                # Absolute path — always rejected.
+                if (substr(target, 1, 1) == "/") { print target; next }
+                # Walk components, track resolved depth from extraction root.
+                n = split(target, parts, "/")
+                depth = 0
+                for (j=1; j<=n; j++) {
+                    if (parts[j] == "" || parts[j] == ".") continue
+                    if (parts[j] == "..") {
+                        depth--
+                        if (depth < 0) { print target; next }
+                    } else {
+                        depth++
+                    }
+                }
+            }
+        ' || true)
+    if [ -n "$_bad_target" ]; then
+        printf 'ocx-install: error: archive contains symlink targeting outside extraction dir: %s\n' \
+            "$_bad_target" >&2
+        exit 1
+    fi
+
+    # Extract with owner/permission isolation to prevent setuid/setgid attacks.
+    # --no-overwrite-dir (CWE-59 / CWE-22 defence-in-depth) prevents a
+    # malicious archive from replacing permissions/ownership on a pre-existing
+    # directory in $_tmpdir. Flag is standard on GNU tar and BSD tar.
+    if ! tar xf "$_tmpdir/$_archive" -C "$_tmpdir" \
+        --no-same-owner --no-same-permissions --no-overwrite-dir 2>/dev/null; then
         err "failed to extract ${_archive} — ensure tar and xz-utils are installed"
     fi
 

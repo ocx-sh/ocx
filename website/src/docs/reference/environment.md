@@ -36,17 +36,30 @@ The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by 
 
 ### Shell Activation Files {#shell-activation-files}
 
-The installer writes one activation file per supported shell family into `$OCX_HOME`. Each file re-queries `ocx` at shell start so the activated environment reflects the current selection without being a stale snapshot.
+The installer writes one thin shim file per supported shell family into `$OCX_HOME`. Each shim calls [`ocx self activate`][cmd-self-activate] at shell start, which delegates runtime logic to the binary: `PATH` prepend, completion injection, and global toolchain env eval. Shim files are byte-identical across users — no install-time substitution occurs.
 
 | File | Shell | Mechanism | Wired by |
 |------|-------|-----------|----------|
 | `$OCX_HOME/env.sh` | bash, zsh, dash, ash, ksh | `. "$OCX_HOME/env.sh"` in login profile (block-marker) | Installer writes block-marker to `~/.bash_profile`, `~/.zprofile`, or `~/.profile` |
 | `$OCX_HOME/env.fish` | fish | `source "$OCX_HOME/env.fish"` from `conf.d` | Installer writes `~/.config/fish/conf.d/ocx.fish` |
-| `$OCX_HOME/env.nu` | nushell | JSON ingest (`ocx --global env \| from json`) at startup | Installer writes `~/.local/share/nushell/vendor/autoload/ocx.nu` (auto-sourced) |
-| `$OCX_HOME/env.elv` | elvish | `eval (e:ocx --global env --shell=elvish \| slurp)` | Installer writes `eval (slurp < "$OCX_HOME/env.elv")` block-marker to `~/.config/elvish/rc.elv` |
-| `$OCX_HOME/env.ps1` | PowerShell | `Invoke-Expression (& ocx --global env --shell=pwsh \| Out-String)` | Installer writes source line to `$PROFILE` |
+| `$OCX_HOME/env.nu` | nushell | Nushell autoload via `vendor/autoload/` | Installer writes `~/.local/share/nushell/vendor/autoload/ocx.nu` (auto-sourced) |
+| `$OCX_HOME/env.elv` | elvish | `eval (slurp < "$OCX_HOME/env.elv")` block-marker | Installer writes block-marker to `~/.config/elvish/rc.elv` |
+| `$OCX_HOME/env.ps1` | PowerShell | `. "$OCX_HOME/env.ps1"` in `$PROFILE` | Installer writes source line to `$PROFILE` |
 
-Every file embeds the **literal install root** resolved at install time — not a runtime `$OCX_HOME` reference — so activation works in fresh shells where `OCX_HOME` is not exported.
+Each shim resolves `OCX_HOME` at runtime using shell-native assign-if-unset syntax (e.g. `: "${OCX_HOME:=$HOME/.ocx}"`), so activation works in fresh shells where `OCX_HOME` has not been exported.
+
+### `_OCX_ENV_LOADED` {#ocx-env-loaded}
+
+Set automatically to `1` by `env.sh` / `env.fish` / `env.ps1` / `env.nu` /
+`env.elv` on first source to prevent double-application of OCX shell
+activation (PATH prepend, completions, env eval). Internal — do not set
+manually. Unset to force re-sourcing in the current shell session.
+
+### `OCX_ACTIVATED` {#ocx-activated}
+
+Set to `1` by the output of [`ocx self activate`][cmd-self-activate] so re-sourcing the shell profile becomes a cheap no-op. The activation output emits both a guard line (`[ -z "${OCX_ACTIVATED:-}" ]` for POSIX shells, equivalent forms for fish / pwsh / elvish / nushell / cmd) wrapping the expensive `ocx --global env --shell=NAME` subprocess, and an unconditional marker line `export OCX_ACTIVATED=1`. The marker is also set on a fresh activation; subsequent re-sources see the marker and skip the eval. Mirrors mise's `MISE_SHELL` double-activation guard.
+
+Internal — do not set manually. Unset (`unset OCX_ACTIVATED` / `set -e OCX_ACTIVATED` / `Remove-Item Env:OCX_ACTIVATED`) to force `ocx self activate` to re-run the global env eval in the current shell.
 
 ### `_OCX_APPLIED` {#ocx-applied}
 
@@ -223,6 +236,18 @@ OCX_NO_CONFIG=1 ocx --config /ci/ocx.toml install cmake:3.28
 
 `OCX_NO_CONFIG` is available only as an environment variable. A `--no-config` CLI flag would duplicate surface without solving a new problem: the hermetic-CI use case is best expressed via env vars, which are how CI systems already inject policy. A flag would require callers to both export the env var and pass the flag in every per-command invocation — two sources of truth for the same intent.
 
+### `OCX_NO_COMPLETIONS` {#ocx-no-completions}
+
+When set to a [truthy value](#truthy-values), `ocx self activate` skips the shell-completion injection block. `PATH` prepend and global toolchain env eval still run.
+
+Use this when you manage completions through a separate framework (e.g. [oh-my-zsh][oh-my-zsh] or a Nix-generated completion store) and do not want OCX to overwrite them on every shell start.
+
+```sh
+export OCX_NO_COMPLETIONS=1
+```
+
+This variable has no effect on [`ocx shell completion`][cmd-shell-completion], which always generates the completion script regardless.
+
 ### `OCX_NO_UPDATE_CHECK` {#ocx-no-update-check}
 
 When set to a [truthy value](#truthy-values), OCX will not check the remote registry for newer versions on CLI startup.
@@ -233,6 +258,8 @@ The update check is also automatically suppressed when:
 - [`OCX_OFFLINE`](#ocx-offline) is set to a truthy value (or `--offline` flag)
 - stderr is not a terminal (e.g., piped or redirected)
 - the command is `version`, `about`, or `shell completion`
+
+To disable the check entirely (including suppressing the throttle state write), use this variable. To change the check frequency instead of disabling it, use [`OCX_UPDATE_CHECK_INTERVAL`](#ocx-update-check-interval).
 
 ### `OCX_NO_PROJECT` {#ocx-no-project}
 
@@ -302,6 +329,27 @@ When set to a [truthy value](#truthy-values), routes mutable lookups (tag list, 
 
 Equivalent to passing the [`--remote`][arg-remote] flag on every invocation. See the user guide for the [routing model][indices-routing] and the [pinned-only mode][cmd-pinned-only-mode] (combined with `OCX_OFFLINE`).
 
+### `OCX_UPDATE_CHECK_INTERVAL` {#ocx-update-check-interval}
+
+Override the minimum interval between automatic update-check registry probes. The check runs once per shell invocation after the interval elapses; it is a background notification only and does not block the command.
+
+| Value | Behaviour |
+|-------|-----------|
+| Unset | Default 24-hour interval |
+| `0` | Always check on every eligible invocation (bypass throttle) |
+| Positive integer | Custom interval in seconds |
+
+```sh
+export OCX_UPDATE_CHECK_INTERVAL=3600   # check at most once per hour
+export OCX_UPDATE_CHECK_INTERVAL=0      # always check (development use)
+```
+
+The state file that tracks the last probe is at `$OCX_HOME/state/update-check/ocx_sh_ocx_cli`. Its mtime is the data — the file is zero bytes.
+
+The automatic update check is also suppressed when stderr is not a terminal (typical CI runners, pipelines, and redirected output) and when [`CI`](#external-ci) is set. Setting `OCX_UPDATE_CHECK_INTERVAL` does not override these suppressions — the notification is intentionally invisible in non-interactive contexts.
+
+To disable the check entirely rather than adjusting its frequency, use [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check). The explicit [`ocx self update`][cmd-self-update] and [`ocx self update --check`][cmd-self-update] commands always bypass this interval — they are explicit user intent.
+
 ## External {#external}
 
 ### `CI` {#external-ci}
@@ -359,6 +407,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- external -->
 [mach-o]: https://en.wikipedia.org/wiki/Mach-O
+[oh-my-zsh]: https://ohmyz.sh/
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [github-multiline-env]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strings
 [bazel-rules]: https://bazel.build/extending/rules
@@ -383,6 +432,9 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-remote]: command-line.md#arg-remote
 [cmd-index-update]: command-line.md#index-update
 [cmd-pinned-only-mode]: command-line.md#pinned-only-mode
+[cmd-self-activate]: command-line.md#self-activate
+[cmd-self-update]: command-line.md#self-update
+[cmd-shell-completion]: command-line.md#shell-completion
 [indices-routing]: ../user-guide.md#indices-routing
 
 <!-- in-depth -->

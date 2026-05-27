@@ -39,6 +39,7 @@ Facade = single coord point for all package ops. Hide store + index + client com
 | `tasks/uninstall.rs` | `uninstall()`, `uninstall_all()` — remove symlinks, optional purge |
 | `tasks/deselect.rs` | `deselect()`, `deselect_all()` — remove current symlink |
 | `tasks/clean.rs` | `clean()` — GC unreferenced objects + stale temps; `collect_project_roots` free function — calls `ProjectRegistry::live_projects()` (flat symlink ledger, no JSON parse), resolves each live project dir's `ocx.lock` pinned digests into `Vec<ProjectRootDigests>`, **plus an implicit `$OCX_HOME/ocx.lock` root** (global toolchain — its project dir is `$OCX_HOME`, barred from the ledger by `adr_project_gc_symlink_ledger.md`, so added unconditionally; absent lock → `Ok(None)` → no-op; ADR `adr_global_toolchain_tier.md` D5 amended 2026-05-19); opportunistically removes legacy `projects.json`/`.projects.lock` if found; no corrupt-registry exit-78 branch (eliminated with the JSON parse surface) |
+| `tasks/update_check.rs` | Update-check task methods + throttle machinery. Exports `SkippedReason` enum (`Bootstrap`, `Offline`, `Throttled`, `RegistryProbeFailed(String)`, `NotFound`, `UnparseableCurrent(String)`, `UnparseableLatest`, `NoReleaseTag`) with `Display` + JSON serialization. Exports `UpdateCheckResult` (`AlreadyUpToDate`, `Skipped(SkippedReason)`, `UpdateAvailable(Identifier)`) and `SelfUpdateResult` (`AlreadyUpToDate`, `Installed { from: Option<String>, to }`, `Skipped(SkippedReason)`). Public methods: `check_update`, `self_check_update(throttle)`, `self_update()`. Private helpers: `query_installed_version` (subprocess-based, `tokio::process::Command`), `is_throttled`, `touch_state_atomic`, `find_latest_version`. `installed_version` / `installed_version_from_paths` deleted (2026-05-27). Full throttle contract and touch policy in the module `//!` doc. |
 | `composer.rs` | Two-env composition: `compose(roots, store, self_view: bool) -> Vec<Entry>` (flat iteration over each root's pre-built TC with cross-root dedup, surface-gated via `has_interface()`/`has_private()`); `check_entrypoints(roots, store)` (interface-projection collision gate over 1..N roots, reports all N owners) |
 
 ## Facade Pattern
@@ -117,8 +118,31 @@ TOCTOU `!target.exists()` pre-check intentionally absent — eventual consistenc
 | `uninstall()` / `uninstall_all()` | N/A | `Option<UninstallResult>` | None = candidate already absent |
 | `deselect()` / `deselect_all()` | N/A | `Option<PathBuf>` | None = current already absent |
 | `clean(dry_run, force)` | N/A | `CleanResult` | Removes unreferenced objects + stale temps; `force=true` bypasses project registry |
+| `check_update(identifier, throttle)` | N/A | `UpdateCheckResult` | Generic update-check for any identifier. Throttle: `None` = 24h, `Some(ZERO)` = bypass, `Some(d)` = custom. Returns `Skipped` on short-circuit (no state touch). |
+| `self_check_update(throttle)` | N/A | `UpdateCheckResult` | Convenience wrapper for the canonical `ocx.sh/ocx/cli`. Resolves the running version via subprocess (`ocx --format json version` on the current symlink binary); returns `Skipped(SkippedReason::Bootstrap)` when subprocess fails (binary absent / exec fail / non-zero exit / malformed JSON). Otherwise compares remote latest against installed; returns `AlreadyUpToDate` when remote ≤ current. Same throttle convention. |
+| `self_update()` | N/A | `SelfUpdateResult` | Checks (always bypasses throttle) then installs via `install_all(candidate=false, select=true)` if newer. Bootstrap mode no longer short-circuits — install always proceeds. Returns `Installed { from: Option<String>, to }` on success (`from` is `None` when subprocess version query fails), `AlreadyUpToDate` if current, `Skipped(SkippedReason)` on soft failure. Wraps check errors in `Error::SelfCheckFailed`. |
 
 **`_all` methods must preserve input order** — caller zips results with original identifiers.
+
+## Update-Check Throttle Convention
+
+All three update-check methods share one `throttle: Option<Duration>` contract:
+
+| Value | Behaviour |
+|-------|-----------|
+| `None` | Default 24-hour interval (auto-check path from `app.rs`) |
+| `Some(Duration::ZERO)` | Bypass; always query the registry |
+| `Some(d)` | Custom interval |
+
+`self_update` always bypasses (explicit user intent — throttle parameter is not exposed).
+
+**State-file touch policy** (in `$OCX_HOME/state/update-check/<slug>`):
+
+- Touch on successful probe (any `UpdateCheckResult` variant returned cleanly).
+- Touch on probe error (avoids hammering a broken registry on every command).
+- **Do NOT touch** on throttle short-circuit — touching on short-circuit would extend the window indefinitely.
+
+The slug is `to_slug(identifier.to_string())` — replaces all non-alphanumeric characters with `_`. For `ocx.sh/ocx/cli` this produces `ocx_sh_ocx_cli` (no dots). File content is always zero bytes; mtime is the data. See `subsystem-file-structure.md` for the directory contract.
 
 ## Parallel vs Sequential
 
@@ -145,6 +169,28 @@ Span-free. Progress is rendered through `crate::cli::progress::ProgressManager`
 ## OCX Configuration Forwarding
 
 Generated entrypoint launchers re-enter ocx via `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Any subprocess spawn site that may chain back into ocx MUST forward the running ocx's resolution-affecting config onto the child env via `env::Env::apply_ocx_config(ctx.config_view())`. Full rule + Block-tier review criteria live in `subsystem-cli.md` "Cross-Cutting: OCX Configuration Forwarding".
+
+### Hermetic subprocess pattern (env_clear + envs + timeout)
+
+A distinct second subprocess invocation pattern is used by self-update's version
+query in `tasks/update_check.rs::query_installed_version`:
+
+- Builds an `env::Env` from `resolve_env(..., self_view=false)` for the queried
+  identifier.
+- Calls `tokio::process::Command::new(bin).env_clear().envs(env)` — the child
+  receives **only** the `resolve_env`-composed entries; no `HOME`, no inherited
+  `PATH`, no `OCX_*`.
+- Wraps the `.output()` future in `tokio::time::timeout(Duration::from_secs(5),
+  …)` — a hung installed binary must not stall update-check.
+- Treats any failure (resolve fail, exec error, non-zero exit, timeout,
+  malformed JSON) as `None` → caller routes to `Skipped(Bootstrap)`.
+
+This pattern is **NOT** for re-entering ocx through a launcher (use
+`apply_ocx_config` for that). It is the right shape only when the spawned
+subcommand must produce a hermetic, side-effect-free response — currently only
+`ocx --format json version`. The invoked command MUST stay pure-version
+(no `HOME`/`PATH`/`OCX_*` reads) or the query silently bootstraps. The
+`Version::execute` doc-comment links back to this contract.
 
 The stable wire ABI is the `launcher` + `exec` subcommand name pair and positional shape. Byte-exact golden tests at `body.rs::tests` act as canaries — any template change that changes the launcher body must update the golden strings there.
 

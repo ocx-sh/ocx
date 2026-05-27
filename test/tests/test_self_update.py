@@ -1,0 +1,263 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+"""Acceptance tests for `ocx self update` and `ocx self update --check`.
+
+These tests exercise both the `ocx --format json version` contract that
+`query_installed_version` depends on, and the end-to-end self-update install
+path via the private `__OCX_SELF_IMAGE` test-only seam (URI-1).
+
+The seam is gated behind the `test-self-update-seam` Cargo feature in
+`ocx_lib` and `ocx_cli`. The test binary is built with that feature enabled
+(see `test/taskfile.yml::build`). The seam carries a runtime loopback-only
+assertion so even with the feature compiled in, only `localhost` /
+`127.0.0.1` / `[::1]` registries are accepted.
+
+In release builds the seam is compile-gated out entirely — the code path is
+not present in shipped binaries.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from src import (
+    OcxRunner,
+    assert_not_exists,
+    assert_symlink_exists,
+    make_package,
+    registry_dir,
+)
+
+
+# ---------------------------------------------------------------------------
+# `ocx version` JSON contract
+# ---------------------------------------------------------------------------
+
+
+def test_version_json_format(ocx: OcxRunner) -> None:
+    """``ocx --format json version`` must return valid JSON with a ``version``
+    field whose value matches the plain ``ocx version`` output.
+
+    This is the contract that `query_installed_version` in
+    `crates/ocx_lib/src/package_manager/tasks/update_check.rs` relies on when
+    it invokes the installed binary to determine the running version.
+    """
+    # JSON form via OcxRunner.json (prepends --format json).
+    json_result = ocx.json("version")
+
+    assert "version" in json_result, (
+        f"`ocx --format json version` must return an object with a 'version' key; got: {json_result!r}"
+    )
+    version_from_json = json_result["version"]
+    assert isinstance(version_from_json, str), (
+        f"version field must be a string; got: {type(version_from_json).__name__!r}"
+    )
+    assert version_from_json, "version field must not be empty"
+
+    # Plain form — strip trailing whitespace so the comparison is exact.
+    plain_result = ocx.plain("version")
+    version_from_plain = plain_result.stdout.strip()
+
+    assert version_from_json == version_from_plain, (
+        f"`ocx --format json version` and `ocx version` must report the same version string; "
+        f"json={version_from_json!r}, plain={version_from_plain!r}"
+    )
+
+
+def test_version_json_shape(ocx: OcxRunner) -> None:
+    """``ocx --format json version`` must produce a flat JSON object with
+    exactly one key: ``version``.
+
+    Pins the wire format so that the subprocess consumer
+    (`query_installed_version`) — which parses ``.get("version")`` — never
+    silently regresses to a broken shape.
+    """
+    json_result = ocx.json("version")
+
+    assert set(json_result.keys()) == {"version"}, (
+        f"JSON version output must have exactly one key 'version'; got keys: {set(json_result.keys())!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# URI-1 — End-to-end self-update install path via `__OCX_SELF_IMAGE` seam
+#
+# Exercises the full `SelfUpdateResult::Installed { from, to }` path against
+# a real OCI registry on localhost:5000 by redirecting the canonical
+# `ocx.sh/ocx/cli` identifier to a test repo via the private seam.
+#
+# Builds two versions of a stand-in "ocx" package (a shell script that
+# responds correctly to `ocx --format json version`), pre-installs the older
+# one, then runs `ocx self update` with the seam active and asserts:
+#   - exit code 0
+#   - `current` symlink updated to the newer version
+#   - NO `candidates/<version>` symlink (decision: `candidate=false`)
+#   - JSON wire shape `{"status":"installed","from":"0.0.1","to":"0.0.2"}`
+#
+# The test is Linux/macOS only — the seam exists on every platform but the
+# stand-in binary is a POSIX shell script (Windows requires a .bat shim).
+# ---------------------------------------------------------------------------
+
+
+# URI-1 is POSIX-only because the stand-in `ocx` package is a shell script.
+# The seam itself is cross-platform; only the test harness is sh-bound.
+_skip_on_windows = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="URI-1 stand-in package uses a POSIX shell script; Windows not covered here.",
+)
+
+
+@_skip_on_windows
+def test_self_update_installs_newer_version(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    unique_repo: str,
+) -> None:
+    """End-to-end: ``ocx self update`` upgrades the installed version when a
+    newer tag exists in the registry.
+
+    Sequence:
+      1. Publish `<repo>:0.0.1` and `<repo>:0.0.2` to localhost:5000.
+      2. Pre-install `<repo>:0.0.1` with `--select` so `current` points at it.
+      3. Set `__OCX_SELF_IMAGE=localhost:5000/<repo>` and run `ocx self update`
+         with `--format json` so the JSON wire shape can be asserted.
+      4. Assert exit 0.
+      5. Assert JSON output is `{"status":"installed","from":"0.0.1","to":"0.0.2"}`.
+      6. Assert `current` symlink now resolves to the 0.0.2 content directory.
+      7. Assert NO `candidates/0.0.2` symlink (decision: `candidate=false`).
+
+    The seam is loopback-only (asserted at runtime inside `ocx_cli_identifier`);
+    `localhost:5000` satisfies that gate.  The seam itself is compile-gated
+    behind `--features test-self-update-seam`.
+    """
+    # Use the same `unique_repo` for both publish and seam so identifiers match.
+    repo = unique_repo
+
+    # 1. Publish 0.0.1 and 0.0.2 — cascade=False to avoid latest/major/minor
+    #    cascade churn; we only need the two patch tags discoverable in the
+    #    remote tag list.
+    v1 = make_package(
+        ocx, repo, "0.0.1", tmp_path,
+        new=True, cascade=False, bins=["ocx"],
+        outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.1"})}},
+    )
+    v2 = make_package(
+        ocx, repo, "0.0.2", tmp_path,
+        new=False, cascade=False, bins=["ocx"],
+        outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.2"})}},
+    )
+    # Make both tags visible in the index for self_check_update's tag walk.
+    ocx.plain("index", "update", repo)
+
+    # 2. Pre-install 0.0.1 with --select so `current` points to it.
+    #    This populates the local store so `query_installed_version` can
+    #    resolve the running version via the env-composed PATH lookup.
+    ocx.json("package", "install", "-s", v1.short)
+
+    current_symlink = (
+        Path(ocx.env["OCX_HOME"])
+        / "symlinks"
+        / registry_dir(ocx.registry)
+        / repo
+        / "current"
+    )
+    assert_symlink_exists(current_symlink)
+
+    # 3. Activate the seam and run `ocx --format json self update`.
+    env = dict(ocx.env)
+    env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
+
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "self", "update"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    # 4. Exit code 0.
+    assert result.returncode == 0, (
+        f"`ocx self update` must exit 0 when a newer version is installed; "
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    # 5. JSON wire shape.
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(
+            f"`ocx --format json self update` must produce valid JSON; "
+            f"got stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        ) from e
+    assert payload.get("status") == "installed", (
+        f"JSON payload must have status='installed' when an update was installed; "
+        f"got: {payload!r}"
+    )
+    assert payload.get("from") == "0.0.1", (
+        f"JSON payload must report from='0.0.1'; got: {payload!r}\n"
+        "If this is None, query_installed_version returned None — the "
+        "stand-in `bin/ocx` script did not return the expected JSON for "
+        "`--format json version`."
+    )
+    assert payload.get("to") == "0.0.2", (
+        f"JSON payload must report to='0.0.2'; got: {payload!r}"
+    )
+
+    # 6. `current` symlink now points to 0.0.2 content.
+    #    install_all(candidate=false, select=true) updates `current` only.
+    assert current_symlink.is_symlink() or current_symlink.exists(), (
+        f"current symlink must still exist after self update; missing at {current_symlink}"
+    )
+    # Resolve current → must match v2's content path (same digest as fresh install).
+    resolved = current_symlink.resolve()
+    # The resolved path is the content directory of v2 — assert it contains
+    # bin/ocx (the binary we just installed).
+    assert (resolved / "bin" / "ocx").exists(), (
+        f"current symlink must resolve to a directory containing bin/ocx; "
+        f"resolved={resolved}, content: {list(resolved.iterdir()) if resolved.exists() else 'absent'}"
+    )
+    # The v2 marker presence is the strongest assertion that the new version
+    # is what `current` resolves to.  `bin/ocx` for v2 returns
+    # {"version":"0.0.2"} when invoked with --format json version.
+    bin_ocx = resolved / "bin" / "ocx"
+    if bin_ocx.exists():
+        probe = subprocess.run(
+            [str(bin_ocx), "--format", "json", "version"],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        # The stand-in trap script ignores args except the literal "--format
+        # json version" match; on success its stdout should be the JSON shape.
+        if probe.returncode == 0:
+            try:
+                probe_payload = json.loads(probe.stdout)
+                assert probe_payload.get("version") == "0.0.2", (
+                    f"current/bin/ocx must report version 0.0.2 after self update; "
+                    f"got: {probe_payload!r}"
+                )
+            except json.JSONDecodeError:
+                # The stand-in script's fallback echoes a marker — not JSON.
+                # That means current points at the old version (test failure).
+                raise AssertionError(
+                    f"current/bin/ocx did not return JSON for `--format json version`; "
+                    f"stdout: {probe.stdout!r}"
+                )
+
+    # 7. NO `candidates/0.0.2` symlink — self-update sets candidate=false.
+    candidate_v2 = (
+        Path(ocx.env["OCX_HOME"])
+        / "symlinks"
+        / registry_dir(ocx.registry)
+        / repo
+        / "candidates"
+        / "0.0.2"
+    )
+    assert_not_exists(candidate_v2)
+
+    # Keep v2 reference alive for the duration of the test (silences linter).
+    assert v2.tag == "0.0.2"

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `ocx self activate [--shell[=NAME]]` — emit eval-safe PATH prepend, completion injection, and global env eval; intended to be sourced from `$OCX_HOME/env.sh` at shell startup *(cli)*
+- `ocx self update` and `ocx self update --check` — check for and install a newer OCX release; both bypass the auto-check throttle as explicit user intent *(cli)*
+- `OCX_NO_COMPLETIONS` — set to a truthy value to skip the completion-injection block in `ocx self activate` *(env)*
+- `OCX_UPDATE_CHECK_INTERVAL` — override the minimum interval between automatic update-check probes (`0` = always, default 24h) *(env)*
+
+### Changed
+
+- `install.ps1` now requires PowerShell 7.4 or later — Windows PowerShell 5.1 is no longer supported *(install)* **BREAKING**
+- `install.sh` writes byte-identical env shims (`env.sh`, `env.fish`, `env.ps1`) — `OCX_HOME` is resolved at runtime via `${OCX_HOME:=$HOME/.ocx}` instead of substituted at install time *(install)*
+
 ## [0.3.0] - 2026-05-26
 
 ### Added

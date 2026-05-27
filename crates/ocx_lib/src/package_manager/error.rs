@@ -43,6 +43,15 @@ pub enum Error {
     /// A resolve operation failed for one or more packages.
     #[error("{}", format_batch("resolve", _0))]
     ResolveFailed(Vec<PackageError>),
+    /// The self-update check operation failed.
+    ///
+    /// Distinct from [`InstallFailed`]: a check failure does not imply an
+    /// install was attempted.  Carries the [`PackageError`] that caused the
+    /// check to abort, boxed to break the recursive-type cycle
+    /// (`crate::Error` → `package_manager::Error` → `PackageError` →
+    /// `PackageErrorKind::Internal` → `crate::Error`).
+    #[error("self-update check failed: {0}")]
+    SelfCheckFailed(Box<PackageError>),
 }
 
 /// An error tied to a specific package.
@@ -186,14 +195,15 @@ impl ClassifyExitCode for Error {
         // chain walker never reaches the inner `PackageErrorKind`. Classify
         // the first package error directly — preserves per-package semantics
         // for single-failure cases.
-        let errors = match self {
+        match self {
+            // Box<PackageError>: deref to access kind directly.
+            Self::SelfCheckFailed(pe) => pe.kind.classify(),
             Self::FindFailed(es)
             | Self::InstallFailed(es)
             | Self::UninstallFailed(es)
             | Self::DeselectFailed(es)
-            | Self::ResolveFailed(es) => es,
-        };
-        errors.first().and_then(|pe| pe.kind.classify())
+            | Self::ResolveFailed(es) => es.first().and_then(|pe| pe.kind.classify()),
+        }
     }
 }
 

@@ -2,10 +2,11 @@
 // Copyright 2026 The OCX Authors
 
 use clap::Parser;
+use ocx_lib::cli::{ColorModeConfig, DataInterface, Printer};
 use ocx_lib::env::OcxConfigView;
 use ocx_lib::{cli, env};
 
-use crate::options;
+use crate::{api, options};
 
 #[derive(Debug, Parser)]
 pub struct ContextOptions {
@@ -66,9 +67,10 @@ pub struct ContextOptions {
 
     /// The format to use when outputting information.
     ///
-    /// When omitted, each command chooses its own default: legacy commands
-    /// default to `plain`; `ocx env` and `ocx package env` default to `json`
-    /// (backend-first per handshake §3).
+    /// Output format is a context-only concern (handshake §3 amended
+    /// 2026-05-19): when omitted, every command defaults to `plain`. No
+    /// subcommand declares its own `--format`. The single default is
+    /// applied by [`Self::build_api`] via `unwrap_or(Format::Plain)`.
     #[arg(long, value_enum, value_name = "FORMAT")]
     pub format: Option<options::Format>,
 
@@ -110,6 +112,24 @@ pub struct ContextOptions {
 }
 
 impl ContextOptions {
+    /// Build the reporting [`Api`](api::Api) from parsed flags + resolved
+    /// color config.  Single source of truth for the printer +
+    /// format-default + quiet wiring, shared by
+    /// [`crate::app::Context::try_init`] and the Context-free
+    /// static-command bypass paths (`ocx version`).
+    ///
+    /// Layering: `ContextOptions` is the CLI-surface parser tier and may
+    /// reach down into `api`; the reverse is forbidden (api has no
+    /// knowledge of the parser).  Centralising this constructor avoids two
+    /// historical failure modes: the static-command path hardcoding
+    /// `Printer::new(false, false)` (lost `--color` honouring) and the
+    /// `format.unwrap_or(Plain)` default drifting between init sites.
+    pub fn build_api(&self, color_config: ColorModeConfig) -> api::Api {
+        let printer = Printer::new(color_config.stdout, color_config.stderr);
+        let data = DataInterface::new(printer);
+        api::Api::new(self.format.unwrap_or(options::Format::Plain), data, self.quiet)
+    }
+
     /// Builds the resolution-affecting policy snapshot forwarded to child ocx
     /// processes. `self_exe` is the absolute path of the running `ocx`
     /// executable (captured by `Context::try_init` from `current_exe()`).

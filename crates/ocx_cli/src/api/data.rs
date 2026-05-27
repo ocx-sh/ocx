@@ -15,4 +15,6 @@ pub mod package_inspect;
 pub mod paths;
 pub mod pull_dry_run;
 pub mod removed;
+pub mod self_update;
 pub mod tag;
+pub mod version;

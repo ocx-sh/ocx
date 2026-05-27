@@ -102,6 +102,8 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 | `OCX_BINARY_PIN` | Absolute path to the running `ocx`; set on every subprocess spawn so a child ocx (e.g. via a generated launcher) pins to the same binary | (unset → PATH lookup) |
 | `OCX_GLOBAL` | Select global toolchain tier (`$OCX_HOME/ocx.toml`); equivalent to `--global`; resolution-affecting, forwarded to child ocx. Implicit home discovery removed — use `--global` explicitly. | (unset) |
 | `OCX_NO_UPDATE_CHECK` | Disable update check notification | false |
+| `OCX_UPDATE_CHECK_INTERVAL` | Min seconds between auto update-check probes; `0` = always check | 86400 (24h) |
+| `OCX_NO_COMPLETIONS` | Skip completion-injection block in `ocx self activate` output | false |
 | `OCX_NO_MODIFY_PATH` | Disable shell profile modification during install | false |
 
 ## Acceptance Test Structure

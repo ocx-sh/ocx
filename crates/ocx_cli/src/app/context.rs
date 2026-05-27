@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::{
     ConfigInputs, ConfigLoader,
-    cli::{ColorModeConfig, DataInterface, Printer, UserInterface},
+    cli::{ColorModeConfig, Printer, UserInterface},
     env,
     file_structure::{self, BlobStore, TagStore},
     log,
@@ -13,7 +13,7 @@ use ocx_lib::{
     package_manager,
 };
 
-use crate::{api, options};
+use crate::api;
 
 use super::ContextOptions;
 
@@ -84,13 +84,14 @@ impl Context {
         .await?;
 
         let printer = Printer::new(color_config.stdout, color_config.stderr);
-        let data = DataInterface::new(printer);
         let ui = UserInterface::new(printer, console::Term::stderr().is_term(), options.quiet);
-        // B1 precondition (plan_toolchain_cli.md Phase 1): `format` is now
-        // `Option<Format>`. Legacy commands keep their `Plain` default via
-        // `.unwrap_or`; only `ocx env` / `ocx package env` will resolve
-        // `None → Json` internally (in their own execute bodies, Phase 2).
-        let api = api::Api::new(options.format.unwrap_or(options::Format::Plain), data, options.quiet);
+        // `ContextOptions::build_api` owns the printer + format-default +
+        // quiet wiring. Shared with the Context-free static-command bypass
+        // (`ocx version`) so both paths honour `--color` and the
+        // `None → Plain` format default identically (handshake §3 amended
+        // 2026-05-19: format is a context-only concern, no per-command
+        // divergence).
+        let api = options.build_api(color_config);
 
         let (remote_client, remote_index) = if options.offline {
             (None, None)

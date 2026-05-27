@@ -129,8 +129,14 @@ def make_package(
     marker = f"marker-{uuid4().hex[:12]}"
     bin_names = bins or ["hello"]
 
+    # Sanitize repo for use in filesystem paths: replace `/` and other
+    # path-separator characters so pathlib does not treat the segment as
+    # a subdirectory. The repo value is still passed unchanged to ocx
+    # package commands (OCI identifier semantics).
+    fname_slug = repo.replace("/", "_")
+
     # Build content
-    pkg_dir = tmp_path / f"pkg-{repo}-{tag}"
+    pkg_dir = tmp_path / f"pkg-{fname_slug}-{tag}"
     bin_dir = pkg_dir / "bin"
     bin_dir.mkdir(parents=True)
 
@@ -155,8 +161,8 @@ def make_package(
         data_file.write_bytes(os.urandom(size_mb * 1024 * 1024))
 
     # Write metadata
-    metadata_path = tmp_path / f"metadata-{repo}-{tag}.json"
-    home_key = repo.upper().replace("-", "_") + "_HOME"
+    metadata_path = tmp_path / f"metadata-{fname_slug}-{tag}.json"
+    home_key = repo.upper().replace("/", "_").replace("-", "_") + "_HOME"
     # Default env is tagged ``"visibility": "public"`` so the per-entry
     # filter under ``ExecMode::Consumer`` (the default since the v2 flip)
     # admits PATH and {REPO}_HOME — matching the in-tree bare-binary mirror
@@ -186,7 +192,7 @@ def make_package(
     metadata_path.write_text(json.dumps(metadata_obj))
 
     # Create bundle
-    bundle = tmp_path / f"bundle-{repo}-{tag}.tar.xz"
+    bundle = tmp_path / f"bundle-{fname_slug}-{tag}.tar.xz"
     ocx.plain(
         "package",
         "create",

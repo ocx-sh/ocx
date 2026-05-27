@@ -17,3 +17,4 @@ pub mod pull_local;
 pub mod purge;
 pub mod resolve;
 pub mod uninstall;
+pub mod update_check;

@@ -247,6 +247,7 @@ pub use tasks::common::WireSelectionOutcome;
 pub use tasks::hook::{AppliedSet, collect_applied};
 pub use tasks::inspect::InspectResult;
 pub use tasks::resolve::{ChainBlob, ChainRole, ResolvedChain};
+pub use tasks::update_check::{SelfUpdateResult, SkippedReason, UpdateCheckResult};
 
 use crate::{file_structure, oci};
 

@@ -122,10 +122,18 @@ impl App {
 
         // Static commands dispatch without constructing a Context so they
         // survive a malformed ambient config (`~/.ocx/config.toml`).
-        // `Version::execute`, `ShellCompletion::execute`, and bare `ocx` (None)
-        // are Context-free — the entire `Context::try_init` path (which calls
-        // `ConfigLoader::load` and aborts on bad TOML / oversized files) is
-        // unnecessary for them.
+        // `Version::execute`, `ShellCompletion::execute`, `SelfActivate::execute`,
+        // and bare `ocx` (None) are Context-free — the entire `Context::try_init`
+        // path (which calls `ConfigLoader::load` and aborts on bad TOML /
+        // oversized files) is unnecessary for them.
+        //
+        // `Self_(SelfActivate)` is in this list because `self activate` runs on
+        // every shell startup (sourced from `$OCX_HOME/env.sh`).  The full
+        // `Context::try_init` cost — ConfigLoader file walk, OCI client,
+        // RemoteIndex, PackageManager construction — is paid unnecessarily on
+        // every new shell session.  `SelfActivate::execute` only needs a
+        // `FileStructure` (to resolve the absolute symlink bin path), which it
+        // constructs cheaply via `FileStructure::new()` directly.
         //
         // `Info` is deliberately NOT in this list: it reads
         // `context.default_registry()` from the loaded config and is expected
@@ -134,8 +142,9 @@ impl App {
         // diagnostic path. The regression guard lives at
         // `test/tests/test_config.py::test_info_still_requires_valid_config_when_ambient_broken`.
         match &cli.command {
-            Some(command::Command::Version(v)) => return v.execute().await,
+            Some(command::Command::Version(v)) => return v.execute(&cli.context, color_config).await,
             Some(command::Command::Shell(command::shell::Shell::Completion(c))) => return c.execute().await,
+            Some(command::Command::Self_(command::self_group::SelfGroup::Activate(a))) => return a.execute().await,
             None => {
                 Cli::command().color(color_mode.into()).styles(styles).print_help()?;
                 return Ok(ExitCode::SUCCESS);
@@ -162,10 +171,139 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
             command::Command::Version(_)
                 | command::Command::About(_)
                 | command::Command::Shell(command::shell::Shell::Completion(_))
+                | command::Command::Self_(_)
         )
     )
 }
 
 pub async fn run() -> anyhow::Result<ExitCode> {
     App::new().run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_check_for_update;
+    use crate::command::{self, self_group, version};
+
+    // ── should_check_for_update skip-list canary ─────────────────────────────
+
+    /// `Self_(SelfGroup::Activate(_))` must NOT trigger the background update
+    /// check.  `self activate` runs on every shell startup (sourced from
+    /// `$OCX_HOME/env.sh`); running the auto-check there would add noticeable
+    /// latency to every new shell session.
+    ///
+    /// This test enumerates a representative `Self_` variant and asserts that
+    /// `should_check_for_update` returns `false`.  It is a canary — any change
+    /// to the skip list that accidentally removes `Self_` coverage will fail
+    /// loudly here rather than silently regressing shell startup performance.
+    #[test]
+    fn should_check_for_update_skips_self_activate() {
+        // Construct a minimal `SelfActivate` via its clap `Args` derive.
+        // We use `clap::Parser::parse_from` on an empty argv so we get the
+        // struct with all defaults — no flags needed for this test.
+        use clap::Parser as _;
+        let activate = self_group::activate::SelfActivate::parse_from(["self-activate"]);
+        let cmd = Some(command::Command::Self_(self_group::SelfGroup::Activate(activate)));
+        assert!(
+            !should_check_for_update(&cmd),
+            "Self_(Activate) must not trigger update check (shell-startup hot path)"
+        );
+    }
+
+    /// `Self_(SelfGroup::Update(_))` must NOT trigger the background update
+    /// check.  `self update` is the explicit user-facing update command; the
+    /// auto-check path must never run alongside it.
+    #[test]
+    fn should_check_for_update_skips_self_update() {
+        use clap::Parser as _;
+        let update = self_group::update::SelfUpdate::parse_from(["self-update"]);
+        let cmd = Some(command::Command::Self_(self_group::SelfGroup::Update(update)));
+        assert!(
+            !should_check_for_update(&cmd),
+            "Self_(Update) must not trigger update check (user is explicitly managing version)"
+        );
+    }
+
+    /// `Command::Version(_)` must NOT trigger the background update check.
+    /// `ocx version` is a static-info command in the skip list; any regression
+    /// here wastes a network probe on a version-info command.
+    #[test]
+    fn should_check_for_update_skips_version() {
+        use clap::Parser as _;
+        let ver = version::Version::parse_from(["version"]);
+        let cmd = Some(command::Command::Version(ver));
+        assert!(
+            !should_check_for_update(&cmd),
+            "Version must not trigger update check (static-info command)"
+        );
+    }
+
+    /// `None` (bare `ocx` with no subcommand) is handled in the static-command
+    /// bypass block before `should_check_for_update` is ever called, so the
+    /// function is not invoked for `None` in normal operation.
+    ///
+    /// This test documents the actual return value (`true`) to make it explicit
+    /// that `None` is NOT in the skip list — the guard is the early-return in
+    /// `App::run`, not `should_check_for_update`.
+    #[test]
+    fn should_check_for_update_returns_true_for_none() {
+        // None is handled by the static-command bypass before this function is
+        // called; documenting the raw return value here as a design canary.
+        assert!(
+            should_check_for_update(&None),
+            "None returns true from should_check_for_update; the guard is the early-return in App::run"
+        );
+    }
+
+    /// Exhaustive canary — every `SelfGroup` variant must be in the skip list.
+    ///
+    /// `self activate` runs on every shell startup (sourced from
+    /// `$OCX_HOME/env.sh`); `self update` is the explicit user-facing update
+    /// command.  Neither must trigger a background `self_check_update` —
+    /// `activate` would add latency to every new shell, and `update` would
+    /// race with the user's explicit invocation.
+    ///
+    /// This test uses an exhaustive `match` on `SelfGroup` so adding a new
+    /// `Self_` variant in the future is a compile error here — the contributor
+    /// is forced to decide whether the new variant belongs in the skip list
+    /// (typically yes — anything under `self` is install-management).  The
+    /// canary fails loudly rather than silently regressing shell-startup
+    /// performance or producing recursive update-check fan-out.
+    #[test]
+    fn should_check_for_update_skips_all_self_variants_canary() {
+        use clap::Parser as _;
+
+        // Constructor table: one entry per `SelfGroup` variant.  Adding a new
+        // variant requires adding a matching row here AND extending the
+        // exhaustive match below — the compiler enforces both.
+        let activate = self_group::activate::SelfActivate::parse_from(["self-activate"]);
+        let update = self_group::update::SelfUpdate::parse_from(["self-update"]);
+
+        // Exhaustive enumeration of `SelfGroup`.  This match has no wildcard;
+        // adding a new variant breaks the build until updated.
+        let all_variants: Vec<self_group::SelfGroup> = vec![
+            self_group::SelfGroup::Activate(activate),
+            self_group::SelfGroup::Update(update),
+        ];
+        for variant in &all_variants {
+            // Exhaustiveness guard: forces the contributor to make a deliberate
+            // skip-list decision when adding a new variant.
+            match variant {
+                self_group::SelfGroup::Activate(_) | self_group::SelfGroup::Update(_) => {}
+            }
+        }
+
+        for (idx, variant) in all_variants.into_iter().enumerate() {
+            let label = match &variant {
+                self_group::SelfGroup::Activate(_) => "SelfGroup::Activate",
+                self_group::SelfGroup::Update(_) => "SelfGroup::Update",
+            };
+            let cmd = Some(command::Command::Self_(variant));
+            assert!(
+                !should_check_for_update(&cmd),
+                "every Self_ variant must be in the skip list (canary against shell-startup recursive update-check fan-out); \
+                 variant idx={idx} ({label}) returned true from should_check_for_update"
+            );
+        }
+    }
 }

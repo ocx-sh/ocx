@@ -68,13 +68,10 @@ pub fn resolve_metadata_path(
 
 /// List of platforms supported by the current system.
 /// This is used as default for package installation, but can be overridden by the user.
+///
+/// Delegates to [`oci::Platform::supported_set`] — the canonical source of truth.
 pub fn supported_platforms() -> Vec<oci::Platform> {
-    let mut platforms = Vec::new();
-    if let Some(platform) = oci::Platform::current() {
-        platforms.push(platform);
-    }
-    platforms.push(oci::Platform::any());
-    platforms
+    oci::Platform::supported_set()
 }
 
 pub fn platforms_or_default(platforms: &[oci::Platform]) -> Vec<oci::Platform> {
@@ -140,8 +137,10 @@ pub fn resolve_shell_arg(shell: Option<Option<Shell>>) -> anyhow::Result<Option<
         Some(None) => {
             let s = Shell::detect().ok_or_else(|| {
                 UsageError::new(
-                    "bare --shell requires a detectable $SHELL or parent process; \
-                     use --shell=bash (or another explicit shell name)",
+                    "could not autodetect shell from $SHELL or parent process; \
+                     pass --shell=NAME explicitly. \
+                     Legal values: bash, zsh, fish, ash, dash, ksh, sh, \
+                     pwsh, elvish, nushell, batch (sh ≡ dash POSIX alias)",
                 )
             })?;
             Ok(Some(s))

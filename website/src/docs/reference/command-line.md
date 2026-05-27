@@ -1398,6 +1398,151 @@ ocx shell completion --shell powershell | Out-String | Invoke-Expression
 >
 > Global toolchain activation is now handled by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile. The file runs `eval "$(ocx --global env --shell=sh)"`. For project toolchain activation, use [`ocx direnv`](#direnv).
 
+### `self` {#self}
+
+The `ocx self` group manages the OCX installation itself: PATH activation, shell-completion injection, and binary self-update.
+
+#### `self activate` {#self-activate}
+
+Emit eval-safe shell activation lines for the current OCX installation.
+
+Running `ocx self activate` prints three blocks of shell code to stdout:
+
+1. A `PATH` prepend with the resolved absolute path to `<OCX_HOME>/symlinks/ocx.sh/ocx/cli/current/content/bin`. The path is resolved at runtime from the binary's own `OCX_HOME` — no shell variable reference is emitted.
+2. A completion script for the detected shell (skipped silently when `OCX_NO_COMPLETIONS=1` is set, or when the shell has no [`clap_complete`][clap-complete] backend).
+3. A global env eval line: `if command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell=NAME)"; fi` (POSIX form shown). Per-shell variants use the target shell's native idiom — `fish` uses `command -v ocx >/dev/null 2>&1; and ocx --global env --shell=fish | source`; `powershell`/`pwsh` use `if (Get-Command ocx -ErrorAction SilentlyContinue) { (ocx --global env --shell=pwsh) | Out-String | Invoke-Expression }`; `elvish` and `nushell` use their respective eval-from-string idioms.
+
+The `OCX_HOME` assignment-with-fallback lives in `env.sh` itself — written once by the installer, not emitted by `ocx self activate`. See the [environment reference][env-ocx-home] for details.
+
+The output is designed to be sourced from `$OCX_HOME/env.sh` at login:
+
+```sh
+: "${OCX_HOME:=$HOME/.ocx}"
+export OCX_HOME
+if command -v ocx >/dev/null 2>&1; then
+    eval "$(ocx self activate --shell=sh)"
+fi
+```
+
+*Simplified illustration; the installer writes a byte-identical `env.sh` shim — `OCX_HOME` is resolved at runtime via `${OCX_HOME:=$HOME/.ocx}`, not substituted at install time — plus a [`_OCX_ENV_LOADED`][env-ocx-env-loaded] double-source guard. See the [environment reference][env-ocx-env-loaded].*
+
+**Usage**
+
+```shell
+ocx self activate [--shell[=NAME]]
+```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--shell[=NAME]` | — | Target shell dialect. Must use the `=` form (`--shell=bash`). Bare `--shell` (no value) and absent `--shell` both trigger autodetect from `$SHELL` or the parent process. Exit 64 if undetectable. `--shell=sh` ≡ `--shell=dash` (POSIX strict alias). | *(autodetect)* |
+| `-h`, `--help` | | Print help information. | — |
+
+**Supported shells**
+
+| Name | Dialect |
+|------|---------|
+| `sh` | POSIX strict (alias for `dash`) |
+| `dash` | Dash |
+| `bash` | Bash |
+| `zsh` | Zsh |
+| `ash` | Almquist shell |
+| `ksh` | Korn shell |
+| `fish` | Fish |
+| `powershell` / `pwsh` | PowerShell |
+| `elvish` | Elvish |
+| `nushell` / `nu` | Nushell |
+| `batch` / `cmd` | Windows CMD (Command Prompt) |
+
+::: tip Shell completion coverage
+Completion injection wraps [`clap_complete`][clap-complete]. Not every shell supported by `ocx self activate` has a `clap_complete` backend. Unsupported shells silently skip the completion block — PATH prepend and global env eval still run. Set `OCX_NO_COMPLETIONS=1` to suppress completion injection entirely.
+:::
+
+**Environment variables**
+
+| Variable | Effect |
+|----------|--------|
+| [`OCX_NO_COMPLETIONS`][env-ocx-no-completions] | Set to a truthy value to skip the completion injection block. |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Activation lines emitted successfully. |
+| 64 | Shell undetectable (bare or absent `--shell` and `$SHELL` unset or unrecognised). |
+
+#### `self update` {#self-update}
+
+Check for a newer version of OCX and, if found, install it.
+
+Both forms bypass the [auto-check throttle][env-ocx-update-check-interval] — explicit user intent always queries the registry regardless of when the last automatic check ran.
+
+**Usage**
+
+```shell
+ocx self update [--check]
+```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--check` | — | Query the registry and report whether an update is available, without installing anything. | off |
+| `-h`, `--help` | | Print help information. | — |
+
+**Behavior without `--check`**
+
+Queries the registry for the latest `major.minor.patch` release tag (rolling tags like `1`, `1.2`, build-tagged versions like `1.2.3+build`, and pre-releases like `1.2.3-rc1` are filtered out). If the remote version is greater than the running binary, installs via the same path as `ocx package install --select`. Reports one of three outcomes:
+
+- **Already up to date** — the running version is the latest.
+- **Installed** — a newer version was downloaded and selected.
+- **Skipped** — a soft failure (registry unreachable, version unparseable) prevented the check; the running binary is unchanged.
+
+**Behavior with `--check`**
+
+Same registry probe, no installation. Exits 0 when the probe completes (including "already up to date" and "update available") — the result is printed to stdout. Exits 75 when the check is skipped (registry unreachable, version unparseable, throttled). Use `ocx --format json self update --check` for machine-readable output.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Check or install succeeded (including "already up to date" and "update available"). |
+| 69 | Registry unreachable. |
+| 74 | I/O error writing the installed binary. |
+| 75 | Skipped — soft failure (registry probe failed, version unparseable, throttled, bootstrap, etc.); the running binary is unchanged. |
+| 79 | No release version found in the registry. |
+| 80 | Authentication failure against the registry. |
+
+**JSON output shape**
+
+`ocx --format json self update [--check]` emits a single document with a `status` field:
+
+```json
+{"status": "up_to_date"}
+{"status": "update_available", "identifier": "ocx.sh/ocx/cli:1.2.3"}
+{"status": "installed", "from": "0.0.1", "to": "0.0.2"}
+{"status": "skipped", "skipped_reason": {"reason": "offline"}}
+{"status": "skipped", "skipped_reason": {"reason": "registry_probe_failed", "detail": "503 Service Unavailable"}}
+```
+
+`from` is omitted on `installed` when the previous version could not be determined (subprocess version query failed — bootstrap mode). `skipped_reason.reason` is one of:
+
+| `reason` | Meaning | Carries `detail`? |
+|------|---------|--------|
+| `bootstrap` | Subprocess version query failed — binary absent, non-zero exit, or malformed JSON. | No |
+| `offline` | OCX is in offline mode; no probe attempted. | No |
+| `throttled` | Auto-check window has not elapsed (only emitted on the auto-check path; `self update [--check]` always bypasses). | No |
+| `registry_probe_failed` | Remote tag listing returned an error. | Yes — error text |
+| `not_found` | The canonical `ocx.sh/ocx/cli` repository was not found in the registry. | No |
+| `unparseable_current` | The installed binary returned a version string that does not parse as a release version. | Yes — the offending string |
+| `unparseable_latest` | The newest tag in the registry does not parse as a release version. | No |
+| `no_release_tag` | No clean `major.minor.patch` release tag exists in the registry tag list. | No |
+
+::: tip Dogfood install
+`ocx self update` installs the new version into the package store and updates the `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current` symlink to point at it. No candidate symlink is created — only `current` is swapped. The same `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin` PATH entry that `ocx self activate` sets up resolves to the new binary automatically.
+:::
+
 ### `uninstall` {#uninstall}
 
 > **Moved to `ocx package uninstall`** — exits 64 if invoked as bare `ocx uninstall`. See [`package uninstall`](#package-uninstall) for the current form.
@@ -1954,6 +2099,13 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [env-ocx-quiet]: ./environment.md#ocx-quiet
 [env-ocx-jobs]: ./environment.md#ocx-jobs
 [env-docker-config]: ./environment.md#external-docker-config
+[env-ocx-home]: ./environment.md#ocx-home
+[env-ocx-no-completions]: ./environment.md#ocx-no-completions
+[env-ocx-env-loaded]: ./environment.md#ocx-env-loaded
+[env-ocx-update-check-interval]: ./environment.md#ocx-update-check-interval
+
+<!-- external: completions -->
+[clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/
 
 <!-- reference -->
 [config-ref]: ./configuration.md

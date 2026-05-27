@@ -230,20 +230,24 @@ Both flags pick a project file. Passing them together exits with code 64 (`Usage
 
 ### Shell activation for global tools {#global-toolchain-shell}
 
-The OCX installer writes one file and one login-profile line. The file — `$OCX_HOME/env.sh` — runs `ocx --global env --shell=sh` each time a new shell opens, placing the global toolchain on `PATH`. The login-profile line sources it, guarded by a block marker so re-running the installer is idempotent:
+The OCX installer writes a thin shim file — `$OCX_HOME/env.sh` — and a single idempotent source line in the login profile. The shim calls [`ocx self activate`][cmd-self-activate] at runtime, so its content is byte-identical across users and survives `OCX_HOME` changes without re-running the installer.
+
+`ocx self activate` emits `PATH` prepend, shell completions (unless [`OCX_NO_COMPLETIONS=1`][env-ocx-no-completions]), and an `eval "$(ocx --global env --shell=sh)"` call for the global toolchain. Every new login shell runs this block, placing the currently-selected OCX and its installed global tools on `PATH`.
+
+The installer appends a block-marker source line to the login profile so re-running it is idempotent:
 
 ```sh
-# written by the OCX installer in ~/.bashrc / ~/.zshrc / ~/.profile
 # BEGIN ocx
-[ -x "$HOME/.ocx/ocx" ] && eval "$("$HOME/.ocx/ocx" --global env --shell=sh 2>/dev/null)" || true
+. "$HOME/.ocx/env.sh"
 # END ocx
 ```
 
-You can also emit the current global env manually and inspect it:
+You can inspect what the global env exports:
 
 <<< @/_scripts/user-guide/global-env.sh{sh}
 
 `--shell` is the only eval-safe output channel. Do not `eval "$(ocx --global env)"` — plain table output is not sourceable.
+
 
 ### OCI-tier package operations {#global-toolchain-oci}
 
@@ -536,6 +540,29 @@ Files are loaded lowest-to-highest and merged. Missing files are silently skippe
 [Configuration In Depth][in-depth-configuration] — discovery tier rationale, merge semantics, worked examples (Docker base image, hermetic CI, portable install).
 :::
 
+## Update OCX {#update-ocx}
+
+OCX is itself an OCX-managed package. The binary lives at `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx`. Unlike other packages, `ocx self update` only swaps the `current` symlink — no candidate symlink is created for the new version.
+
+Run [`ocx self update`][cmd-self-update] to update OCX to the latest released version, or [`ocx self update --check`][cmd-self-update] to query for a newer version without installing it.
+
+Both commands bypass the background update-check throttle — they always query the registry. If a new version is available, `ocx self update` installs it and updates the `current` symlink. The `$OCX_HOME/symlinks/…/current/content/bin` PATH entry that `ocx self activate` exports picks up the new binary automatically on the next shell invocation.
+
+When `ocx self update` runs, OCX queries for the latest `major.minor.patch` release tag. Rolling tags (`1`, `1.2`), pre-releases (`1.2.3-rc1`), and build-tagged versions (`1.2.3+build`) are filtered out — the command recommends only stable releases.
+
+The background update-check runs automatically at most once per day (configurable via [`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval]). When a newer version is detected, a notice is printed to stderr at the end of the current command:
+
+```
+A new OCX version is available: ocx.sh/ocx/cli:1.1.0. Consider updating by running `ocx self update`.
+```
+
+Set [`OCX_NO_UPDATE_CHECK=1`][env-ocx-no-update-check] to disable the background check entirely. The check is also suppressed in CI environments and non-TTY stderr.
+
+::: tip Learn more
+[Command-line reference → `ocx self update`][cmd-self-update] — exit codes, install path, throttle bypass.
+[Environment reference → `OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval] — adjust the background check frequency.
+:::
+
 ## Remove and clean up {#cleanup}
 
 [`ocx package uninstall cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary if no [other reference][in-depth-storage-gc] remains.
@@ -641,6 +668,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 
 <!-- commands -->
 [cmd-add-global]: ./reference/command-line.md#global-flag
+[cmd-self-activate]: ./reference/command-line.md#self-activate
+[cmd-self-update]: ./reference/command-line.md#self-update
 [cmd-logout]: ./reference/command-line.md#logout
 [cmd-login]: ./reference/command-line.md#login
 [cmd-run]: ./reference/command-line.md#run
@@ -676,6 +705,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [arg-index]: ./reference/command-line.md#arg-index
 
 <!-- environment -->
+[env-ocx-no-completions]: ./reference/environment.md#ocx-no-completions
 [env-ocx-binary-pin]: ./reference/environment.md#ocx-binary-pin
 [env-ocx-home]: ./reference/environment.md#ocx-home
 [env-ocx-index]: ./reference/environment.md#ocx-index
@@ -686,6 +716,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-auth-user]: ./reference/environment.md#ocx-auth-registry-user
 [env-auth-token]: ./reference/environment.md#ocx-auth-registry-token
 [env-docker-config]: ./reference/environment.md#external-docker-config
+[env-ocx-no-update-check]: ./reference/environment.md#ocx-no-update-check
+[env-ocx-update-check-interval]: ./reference/environment.md#ocx-update-check-interval
 [xdg-basedir]: ./reference/environment.md#external-xdg-config-home
 [env-ref]: ./reference/environment.md
 

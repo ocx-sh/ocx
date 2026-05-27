@@ -6,6 +6,7 @@ mod cas_path;
 pub mod error;
 mod layer_store;
 mod package_store;
+mod state_store;
 mod symlink_store;
 mod tag_store;
 mod temp_store;
@@ -14,6 +15,7 @@ pub use blob_store::{BlobDir, BlobGuard, BlobStore};
 pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, read_digest_file, write_digest_file};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore};
+pub use state_store::StateStore;
 pub use symlink_store::{SymlinkKind, SymlinkStore};
 pub use tag_store::TagStore;
 pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
@@ -21,13 +23,14 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 /// Root layout of the local OCX data directory.
 ///
 /// `FileStructure` is a thin composite that provides typed, well-named access
-/// to six top-level stores:
+/// to seven top-level stores:
 ///
 /// - **`blobs`**    — content-addressed raw blob store
 /// - **`layers`**   — content-addressed extracted layer store
 /// - **`packages`** — content-addressed package store (content, metadata, refs)
 /// - **`tags`**     — tag-to-digest mapping store (local index)
 /// - **`symlinks`** — install symlinks (candidate / current)
+/// - **`state`**    — persistent runtime state (update-check timestamps, etc.)
 /// - **`temp`**     — temporary staging directories for in-progress downloads
 ///
 /// Default root: `~/.ocx` (resolved via [`default_ocx_root`]).
@@ -39,6 +42,7 @@ pub struct FileStructure {
     pub packages: PackageStore,
     pub tags: TagStore,
     pub symlinks: SymlinkStore,
+    pub state: StateStore,
     pub temp: TempStore,
 }
 
@@ -63,6 +67,7 @@ impl FileStructure {
             packages: PackageStore::new(root.join("packages")),
             tags: TagStore::new(root.join("tags")),
             symlinks: SymlinkStore::new(root.join("symlinks")),
+            state: StateStore::new(root.join("state")),
             temp: TempStore::new(root.join("temp")),
             root,
         }

@@ -40,6 +40,13 @@ Canonical form: `ocx --global <subcommand>`.
 - `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)
 - `ocx shell hook`, `ocx shell init`, `ocx shell env` — **DELETED** (handshake §7)
 
+### `ocx self` — installation management group
+- `ocx self activate [--shell[=NAME]]` — emit eval-safe PATH prepend + completion injection + global env eval. Absent or bare `--shell` → autodetect; explicit `--shell=bash` → named shell. `OCX_NO_COMPLETIONS=1` suppresses completion injection. Intended to be called from `$OCX_HOME/env.sh` at shell startup.
+- `ocx self update` — check + install latest version; always bypasses throttle (explicit intent).
+- `ocx self update --check` — query only, no install; always bypasses throttle.
+
+`Self_` is in the auto-check **skip list** (`app.rs` `should_check_for_update`): `self activate` runs on every shell startup and must not trigger the background update-check. The skip applies to all `Self_` variants.
+
 ### Removed root commands (handshake §7 — exit 64 if invoked)
 - `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect`, `ocx which`, `ocx deps` → moved to `ocx package`; ocx maps clap usage errors → EX_USAGE 64 (see `app.rs:112-119`)
 - `ocx ci` → removed

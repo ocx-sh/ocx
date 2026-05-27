@@ -90,6 +90,24 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
 | `package deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `--self`, `-p` |
 
+### Installation Management Commands (`ocx self`)
+
+| Command | Purpose | Key Flags |
+|---------|---------|-----------|
+| `self activate` | Emit eval-safe PATH prepend + completions + global env eval for the detected shell | `--shell[=NAME]` |
+| `self update` | Check and install the latest released ocx version | — |
+| `self update --check` | Query registry for newer version; no install | `--check` |
+
+**`self activate` notes:**
+- `--shell` absent or bare → autodetect from `$SHELL`/parent process; exit 64 if undetectable. Differs from `ocx env --shell` where absent means "structured report path".
+- `OCX_NO_COMPLETIONS=1` → suppress completion injection.
+- `Self_` variants are in the `should_check_for_update` skip list — `self activate` runs on every shell start and must not trigger the background update-check.
+
+**`self update` / `self update --check` notes:**
+- Both always bypass the auto-check throttle (explicit user intent).
+- `--check` calls `self_check_update(Some(Duration::ZERO), version)` and reports without installing.
+- Without `--check` calls `self_update(version)` which routes the install through `install_all`.
+
 ### Other Commands
 
 | Command | Purpose | Key Flags |

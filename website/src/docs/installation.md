@@ -18,6 +18,10 @@ irm https://ocx.sh/install.ps1 | iex
 ```
 :::
 
+::: warning PowerShell 7.4+ required
+`install.ps1` hard-fails on PowerShell earlier than 7.4 — it calls APIs introduced in that release and exits immediately with an error. Windows ships with Windows PowerShell 5.1, which is not supported. Install PowerShell 7.4 or later from [aka.ms/install-powershell][install-powershell] before running the script.
+:::
+
 After installation, open a new terminal and verify:
 
 ```sh
@@ -68,6 +72,10 @@ install -m 755 ocx-x86_64-unknown-linux-gnu/ocx ~/.local/bin/ocx
 
 ::: info The musl builds are fully statically linked
 The `musl` variants have no runtime dependency on glibc. Use them in Alpine containers, minimal Docker images, or any environment where libc compatibility is uncertain.
+:::
+
+::: warning Old wget (<1.17) is rejected by `install.sh`
+`install.sh` fails closed when only an older `wget` is available — the strict TLS flags it relies on were added in wget 1.17 (2015), and downgrading would silently weaken the download integrity check. Alpine edge and some minimal Docker base images still ship older builds. If you hit this, either install a newer `wget` (`apk add --upgrade wget` on Alpine) or use the `curl` form of the install pipeline shown above — `curl` is the default and always works when present.
 :::
 
 ## Updating {#updating}
@@ -151,6 +159,7 @@ This removes all installed packages, the local index cache, and ocx itself. If y
 
 <!-- external -->
 [releases]: https://github.com/ocx-sh/ocx/releases/latest
+[install-powershell]: https://aka.ms/install-powershell
 
 <!-- downloads -->
 [dl-linux-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-gnu.tar.xz

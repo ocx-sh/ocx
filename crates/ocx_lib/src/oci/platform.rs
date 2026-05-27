@@ -194,6 +194,24 @@ impl Platform {
             features: None,
         })
     }
+
+    /// Returns the default supported-platform list for the current host.
+    ///
+    /// The list always contains at most two entries:
+    /// - [`Platform::current()`] — the host-native platform, when detectable.
+    /// - [`Platform::any()`] — the platform-agnostic fallback, always present.
+    ///
+    /// This is the canonical source of truth for "which platforms should this
+    /// host install?". Both the CLI install path and the self-update path
+    /// consume this helper so the set stays in sync.
+    pub fn supported_set() -> Vec<Self> {
+        let mut platforms = Vec::new();
+        if let Some(platform) = Self::current() {
+            platforms.push(platform);
+        }
+        platforms.push(Self::any());
+        platforms
+    }
 }
 
 /// Defaults to [`Platform::Any`] (platform-agnostic).

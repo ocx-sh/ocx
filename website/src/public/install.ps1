@@ -12,7 +12,11 @@
 #   - Custom install location flag
 #   - --force / -y flag for non-interactive mode
 
-#Requires -Version 5.1
+# Require PowerShell 7.4+ — Expand-Archive in PS 7.4 validates entry paths and
+# rejects zip-slip (absolute paths / parent-traversal ".." components) by default,
+# closing the CVE class present in PS 5.1's System.IO.Compression implementation.
+# PS 5.1 (Windows PowerShell) users must upgrade; see https://aka.ms/install-powershell.
+#Requires -Version 7.4
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -178,33 +182,27 @@ function Create-EnvFile {
 
     $envFile = Join-Path $OcxHome 'env.ps1'
 
-    # Mirror of install.sh `create_env_sh`: prepend the OCX bin directory
-    # (resolved through the install candidate's `current` symlink) to PATH,
-    # then source the global toolchain env for any additional tools the user
-    # has declared in $OCX_HOME/ocx.toml. OCX itself is NOT a global-toolchain
-    # entry — its version source is the install candidate, updated via
-    # `ocx package install --select ocx.sh/ocx/cli:N` or by re-running the
-    # install script. The install root is embedded literally so the file
-    # works in fresh shells where $env:OCX_HOME is not set.
-    $ocxBin = Join-Path $OcxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe'
-    $envContent = @"
+    # Thin shim that delegates to `ocx self activate --shell=powershell` at
+    # runtime.  Single-quoted here-string (@'...'@) prevents any PowerShell
+    # expansion at install time — content is byte-identical across users
+    # regardless of their OcxHome path.
+    $envContent = @'
 # Managed by ocx installer — do not edit.
-`$env:OCX_HOME = "$OcxHome"
-`$_ocxBin = "$ocxBin"
-if (Test-Path `$_ocxBin -PathType Leaf) {
-    `$_ocxBinDir = Split-Path `$_ocxBin -Parent
-    `$_pathSep = [IO.Path]::PathSeparator
-    if (-not ((`$env:PATH -split [regex]::Escape(`$_pathSep)) -contains `$_ocxBinDir)) {
-        `$env:PATH = "`$_ocxBinDir`$_pathSep`$env:PATH"
-    }
-    Remove-Variable _ocxBinDir, _pathSep -ErrorAction SilentlyContinue
-    Invoke-Expression ((& `$_ocxBin --global env --shell=pwsh 2>`$null) | Out-String)
-    Invoke-Expression ((& `$_ocxBin shell completion --shell=powershell 2>`$null) | Out-String)
+# Double-source guard — prevents PATH duplication on re-source.
+# Set before any side effects so re-source after partial failure also short-circuits.
+if ($env:_OCX_ENV_LOADED) { return }
+$env:_OCX_ENV_LOADED = '1'
+
+if (-not $env:OCX_HOME) { $env:OCX_HOME = Join-Path $env:USERPROFILE '.ocx' }
+
+$_ocxBin = Join-Path $env:OCX_HOME 'symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe'
+if (Test-Path $_ocxBin -PathType Leaf) {
+    Invoke-Expression ((& $_ocxBin self activate --shell=powershell 2>$null) | Out-String)
 }
 Remove-Variable _ocxBin -ErrorAction SilentlyContinue
-"@
+'@
 
-    Set-Content -Path $envFile -Value $envContent -Encoding UTF8
+    Set-Content -Path $envFile -Value $envContent -NoNewline
 }
 
 # --- OCX_HOME validation ---
@@ -226,8 +224,13 @@ function Assert-SafeOcxHome {
         Err "OCX_HOME must not contain '..' components: $Path"
     }
     # `"`, backtick and `$` would break the double-quoted embedding; `;` and
-    # newlines would inject statements into env.ps1 / the profile.
-    if ($Path -match '["`$;\r\n]') {
+    # newlines would inject statements into env.ps1 / the profile. `[`, `]`,
+    # `(`, `)` can interfere with PowerShell expression / index / sub-expression
+    # evaluation when the path is re-interpolated. U+2028 (line separator) and
+    # U+2029 (paragraph separator) are tokenized as line breaks by the
+    # PowerShell parser in some hosts — treat them as injection vectors
+    # (CWE-94 / CWE-78 defence-in-depth).
+    if ($Path -match '["`$;\r\n  \[\]()]') {
         Err "OCX_HOME contains characters unsafe for shell embedding: $Path"
     }
 }
@@ -354,6 +357,16 @@ function Print-Success {
 # --- Main ---
 
 function Main {
+    # Runtime PS version check — belt-and-suspenders alongside the #Requires directive above.
+    # `irm ... | iex` evaluates content as a string, bypassing the parser-level #Requires
+    # directive (which is only honoured when executing a .ps1 file from disk).  This
+    # explicit gate ensures the version constraint is enforced under both execution paths.
+    if ($PSVersionTable.PSVersion -lt [Version]'7.4') {
+        Write-Host 'ocx-install: error: PowerShell 7.4+ required (Expand-Archive zip-slip protection).' -ForegroundColor Red
+        Write-Host 'Upgrade: https://aka.ms/install-powershell'
+        exit 1
+    }
+
     # Read parameters from caller scope (for piped execution: & { $Version = '0.5.0'; irm ... | iex })
     $requestedVersion = if (Get-Variable -Name 'Version' -Scope 1 -ErrorAction SilentlyContinue) {
         (Get-Variable -Name 'Version' -Scope 1).Value
@@ -451,9 +464,20 @@ function Main {
             Warn 'Binary failed to execute — it may be blocked by antivirus or execution policy.'
         }
 
-        # PATH shadowing: warn if a different ocx.exe already exists on PATH
+        # PATH shadowing: warn if a different ocx.exe already exists on PATH.
+        # Use OrdinalIgnoreCase (CWE-178 defence — incorrect case handling):
+        # Windows file paths are case-insensitive at the OS layer, but the
+        # default `String.StartsWith` is culture-sensitive (e.g. in Turkish
+        # locale 'i' and 'I' don't match), which could miss the shadow check
+        # and silently let an unrelated `ocx.exe` win on PATH.
+        #
+        # Anchor the prefix to a trailing path separator so a sibling directory
+        # named '.ocx-evil\' or '.ocxbackup\' cannot pose as an in-tree binary
+        # and suppress the warning. Without the trailing '\', StartsWith would
+        # accept any directory that lexically begins with $ocxHome.
         $existingOcx = Get-Command ocx -ErrorAction SilentlyContinue
-        if ($existingOcx -and -not $existingOcx.Source.StartsWith($ocxHome)) {
+        $ocxHomePrefix = $ocxHome.TrimEnd('\') + '\'
+        if ($existingOcx -and -not $existingOcx.Source.StartsWith($ocxHomePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             Warn "An existing ocx was found at $($existingOcx.Source)"
             Warn 'The new install may be shadowed — check your PATH order.'
         }
