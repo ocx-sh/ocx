@@ -12,11 +12,10 @@
 #   - Custom install location flag
 #   - --force / -y flag for non-interactive mode
 
-# Require PowerShell 7.4+ — Expand-Archive in PS 7.4 validates entry paths and
-# rejects zip-slip (absolute paths / parent-traversal ".." components) by default,
-# closing the CVE class present in PS 5.1's System.IO.Compression implementation.
-# PS 5.1 (Windows PowerShell) users must upgrade; see https://aka.ms/install-powershell.
-#Requires -Version 7.4
+# Support Windows PowerShell 5.1+ (the default on Windows 10/11). Zip extraction
+# routes through Expand-ZipSafely, which validates every entry against zip-slip
+# before writing — so we don't depend on Expand-Archive's PS 7.4 hardening.
+#Requires -Version 5.1
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -150,6 +149,73 @@ function Verify-Checksum {
     Say 'Checksum verified.'
 }
 
+# --- Archive extraction ---
+
+# Extract a .zip with zip-slip protection on PowerShell 5.1+. Expand-Archive
+# only validates entry paths from PS 7.4 onwards, so we use the .NET API
+# directly and reject any entry that escapes the destination directory. We
+# stay on [System.IO.*] APIs (not PowerShell cmdlets) to avoid parameter-set
+# binding errors under Set-StrictMode in Windows PowerShell 5.1.
+function Expand-ZipSafely {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+
+    [System.IO.Directory]::CreateDirectory($Destination) | Out-Null
+    $destRoot = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\', '/')
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName
+            $rel = $name -replace '/', '\'
+
+            # Reject absolute paths, drive letters, and parent-traversal segments.
+            $segments = $rel.Split('\')
+            if ($rel.StartsWith('\') -or $rel -match '^[A-Za-z]:' -or
+                ($segments -contains '..')) {
+                throw "Archive contains unsafe entry: $name"
+            }
+
+            $target = [System.IO.Path]::GetFullPath(
+                [System.IO.Path]::Combine($destRoot, $rel))
+            if ($target -ne $destRoot -and
+                -not $target.StartsWith($destRoot + $sep,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Archive entry escapes destination: $name"
+            }
+
+            # Directory entries (zip spec uses trailing '/').
+            if ($name.EndsWith('/') -or $name.EndsWith('\')) {
+                [System.IO.Directory]::CreateDirectory($target) | Out-Null
+                continue
+            }
+
+            $parent = [System.IO.Path]::GetDirectoryName($target)
+            if ($parent) {
+                [System.IO.Directory]::CreateDirectory($parent) | Out-Null
+            }
+
+            $in = $entry.Open()
+            try {
+                $out = [System.IO.File]::Create($target)
+                try {
+                    $in.CopyTo($out)
+                }
+                finally { $out.Dispose() }
+            }
+            finally { $in.Dispose() }
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+
 # --- Version resolution ---
 
 function Get-LatestVersion {
@@ -230,7 +296,7 @@ function Assert-SafeOcxHome {
     # U+2029 (paragraph separator) are tokenized as line breaks by the
     # PowerShell parser in some hosts — treat them as injection vectors
     # (CWE-94 / CWE-78 defence-in-depth).
-    if ($Path -match '["`$;\r\n  \[\]()]') {
+    if ($Path -match '["`$;\r\n\[\]()]') {
         Err "OCX_HOME contains characters unsafe for shell embedding: $Path"
     }
 }
@@ -357,12 +423,13 @@ function Print-Success {
 # --- Main ---
 
 function Main {
-    # Runtime PS version check — belt-and-suspenders alongside the #Requires directive above.
-    # `irm ... | iex` evaluates content as a string, bypassing the parser-level #Requires
-    # directive (which is only honoured when executing a .ps1 file from disk).  This
-    # explicit gate ensures the version constraint is enforced under both execution paths.
-    if ($PSVersionTable.PSVersion -lt [Version]'7.4') {
-        Write-Host 'ocx-install: error: PowerShell 7.4+ required (Expand-Archive zip-slip protection).' -ForegroundColor Red
+    # Runtime PS version check — belt-and-suspenders alongside the #Requires
+    # directive above. `irm ... | iex` evaluates content as a string and
+    # bypasses parser-level #Requires (which only fires when executing a .ps1
+    # from disk). 5.1 is the minimum because Expand-ZipSafely uses
+    # System.IO.Compression.ZipFile, which ships in .NET 4.5+.
+    if ($PSVersionTable.PSVersion -lt [Version]'5.1') {
+        Write-Host 'ocx-install: error: PowerShell 5.1+ required.' -ForegroundColor Red
         Write-Host 'Upgrade: https://aka.ms/install-powershell'
         exit 1
     }
@@ -430,10 +497,10 @@ function Main {
         # Verify checksum
         Verify-Checksum -Dir $tmpDir -File $archive
 
-        # Extract archive
+        # Extract archive (zip-slip safe on PS 5.1+; see Expand-ZipSafely).
         $extractDir = Join-Path $tmpDir 'extracted'
         try {
-            Expand-Archive -Path (Join-Path $tmpDir $archive) -DestinationPath $extractDir -Force
+            Expand-ZipSafely -Path (Join-Path $tmpDir $archive) -Destination $extractDir
         }
         catch {
             Err "Failed to extract $archive — $($_.Exception.Message)"

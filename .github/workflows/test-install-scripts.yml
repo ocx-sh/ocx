@@ -73,13 +73,20 @@ jobs:
           test -f "$HOME/.ocx/env"
 
   test-install-ps1-windows:
-    name: install.ps1 (Windows)
+    name: install.ps1 (Windows ${{ matrix.shell }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `powershell` is Windows PowerShell 5.1 (default on Windows 10/11);
+        # `pwsh` is PowerShell 7+. We test both to guard against version-gated
+        # APIs (e.g. Expand-Archive zip-slip protection landed in PS 7.4).
+        shell: [powershell, pwsh]
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Run install.ps1
-        shell: pwsh
+        shell: ${{ matrix.shell }}
         run: |
           $env:OCX_NO_MODIFY_PATH = '1'
           if ('${{ inputs.release_tag }}') {
@@ -87,7 +94,7 @@ jobs:
           }
           & ./website/src/public/install.ps1
       - name: Verify installation
-        shell: pwsh
+        shell: ${{ matrix.shell }}
         run: |
           $env:PATH = "$env:USERPROFILE\.ocx\symlinks\ocx.sh\ocx\cli\current\bin;$env:PATH"
           ocx version
