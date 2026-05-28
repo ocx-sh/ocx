@@ -1,17 +1,48 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Shell-script quality tasks. shellcheck + shfmt come from the project
+# toolchain (`ocx.toml` → direnv → PATH); no `ocx package exec` wrapping.
+# When running outside direnv, prefix with `direnv exec . <task>` or
+# `ocx run -- <task>` so the project tools are on PATH.
 
 version: '3'
+
+vars:
+  SHELL_GLOB: "'*.sh' ':(exclude)website/src/_scripts/'"
 
 tasks:
   verify:
     desc: Shell script quality gate (shellcheck + shfmt)
     cmds:
-      - task: :shellcheck:exec
-      - task: :shfmt:exec
-        vars: { ARGS: '-d -i 4 -ci' }
+      - task: shellcheck
+      - task: shfmt:check
+
+  shellcheck:
+    desc: Lint shell scripts with shellcheck (severity warning+; see quality-bash.md)
+    preconditions:
+      - sh: '[ -n "$(git ls-files {{.SHELL_GLOB}})" ]'
+        msg: 'No *.sh files found, skipping shellcheck'
+    vars:
+      FILES:
+        sh: git ls-files {{.SHELL_GLOB}} | tr '\n' ' '
+    cmd: shellcheck -S warning {{.FILES}}
+
+  shfmt:check:
+    desc: Check shell-script formatting (diff mode, no write)
+    preconditions:
+      - sh: '[ -n "$(git ls-files {{.SHELL_GLOB}})" ]'
+        msg: 'No *.sh files found, skipping shfmt'
+    vars:
+      FILES:
+        sh: git ls-files {{.SHELL_GLOB}} | tr '\n' ' '
+    cmd: shfmt -d -i 4 -ci {{.FILES}}
 
   format:
-    desc: Format shell scripts with shfmt
-    cmds:
-      - task: :shfmt:exec
-        vars: { ARGS: '-w -i 4 -ci' }
+    desc: Format shell scripts with shfmt (writes in place)
+    preconditions:
+      - sh: '[ -n "$(git ls-files {{.SHELL_GLOB}})" ]'
+        msg: 'No *.sh files found, skipping shfmt'
+    vars:
+      FILES:
+        sh: git ls-files {{.SHELL_GLOB}} | tr '\n' ' '
+    cmd: shfmt -w -i 4 -ci {{.FILES}}

@@ -14,5 +14,5 @@
 *.[tT][aA][rR].[bB][zZ] binary
 *.[tT][aA][rR].[xX][zZ] binary
 
-# OCX index lockfiles (collapsed in PR diffs)
-.ocx/index/** linguist-generated
+# OCX lock files
+ocx.lock merge=union

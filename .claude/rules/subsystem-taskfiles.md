@@ -16,8 +16,8 @@ paths:
 | `taskfile.yml` | root | entry point -- `task verify`, `task default`, etc. |
 | `.taskrc.yml` | root | project config -- `failfast: true` |
 | `taskfiles/rust.taskfile.yml` | Rust subsystem | `rust:` -- format, clippy, license, build, test:unit |
-| `taskfiles/shell.taskfile.yml` | Shell subsystem | `shell:` -- verify (delegates to ocx-exec templates) |
-| `taskfiles/ocx.taskfile.yml` | OCX CLI templates | included multiple times with different `vars:`; `.exec` wraps `ocx exec` |
+| `taskfiles/shell.taskfile.yml` | Shell subsystem | `shell:` -- shellcheck + shfmt called directly off the project toolchain |
+| `taskfiles/xwin.taskfile.yml` | Rust subsystem | Windows MSVC cross-compile template; included with `(TARGET, SUBCOMMAND)` vars |
 | `taskfiles/coverage.taskfile.yml` | cross-cutting | `coverage:` |
 | `taskfiles/duplo.taskfile.yml` | cross-cutting | `duplo:` |
 | `taskfiles/release.taskfile.yml` | cross-cutting | `release:` |
@@ -48,7 +48,7 @@ Each subsystem rule has Quality Gate section specifying which verify task to run
 |---|---|
 | `output: group` + `error_only: true` | Clean verify output; only show failures |
 | `.taskrc.yml` | Project-wide `failfast: true` (abort on first failure) |
-| Include-with-vars templates | `ocx.taskfile.yml` included as `shellcheck:` and `shfmt:` with different vars; uses `requires:` for mandatory vars |
+| Include-with-vars templates | `xwin.taskfile.yml` included multiple times with `(TARGET, SUBCOMMAND)` vars; uses `requires:` for mandatory vars |
 | `internal: true` on includes | Template includes hidden from `task --list` |
 | `:` prefix cross-references | Child taskfiles call root helpers like `:.ensure-cargo-tool` |
 | `--force` | Bypass all caching for one run (replaces `rm -rf .task/`) |
@@ -63,7 +63,7 @@ Each subsystem rule has Quality Gate section specifying which verify task to run
 2. **Composite tasks aggregate subtasks.** Each linter/formatter has own subtask so independently runnable. `verify` references composite tasks only -- one entry per concern.
 3. **Helpers use dot-prefix + `internal: true`.** Internal tasks named with dot prefix (e.g., `.ensure-cargo-tool`, `.verify:lint`) -- like GitLab CI hidden jobs. Visually distinct + hidden from `task --list`.
 4. **Tool installs use `status:` for idempotency.** `status: - cargo nextest --version` skips install when tool already present. Cross-include dedup pattern -- `run: once` does **not** work reliably across namespaced includes (go-task issue #852).
-5. **Subsystem env overrides go on task, not include.** Root sets `OCX_INDEX` globally; subsystem tasks needing different value override with per-task `env:`.
+5. **Subsystem env overrides go on task, not include.** Project toolchain env (OCX_HOME, OCX_INDEX, etc.) come from direnv (`.envrc` → `ocx direnv export`) locally and from the `setup-ocx` action in CI -- taskfiles do not set these. When a task genuinely needs a different value, override with per-task `env:`.
 
 ## Caching Contract
 

@@ -24,12 +24,14 @@ Before plan/research/architectural decision, scan "By concern" in catalog. Auto-
 
 Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify` (full gate), `task rust:verify`, `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit, `task verify` after implementation. Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
 
+**Project toolchain.** `ocx.toml` lists `go-task`, `shellcheck`, `shfmt`, `lychee`, `bun`, `uv`, `git-cliff`. [direnv](https://direnv.net) loads them onto `PATH` via `.envrc` (`eval "$(ocx direnv export)"`); CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. After editing `ocx.toml`, direnv reloads automatically (`watch_file ocx.toml ocx.lock`). For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell that hasn't allowed direnv — prefix with `direnv exec . <cmd>` or `ocx run -- <cmd>`.
+
 Single acceptance test:
 ```sh
 cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v --no-build
 ```
 
-Lint tooling setup (one-off): `ocx index update shellcheck shfmt lychee && ocx package install --select shellcheck:0.11 && ocx package install --select shfmt:3 && ocx package install --select lychee:0`.
+Lint tooling setup (one-off): `task ocx:index-update` populates `.ocx/index/` for every tool in `ocx.toml`; first `direnv allow` (or `task` invocation) materializes the symlinks under `~/.ocx/`.
 
 ## Architecture
 
