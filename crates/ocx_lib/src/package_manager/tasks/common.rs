@@ -24,7 +24,6 @@ use tokio::task::JoinSet;
 
 use crate::{
     MEDIA_TYPE_PACKAGE_METADATA_V1,
-    file_lock::FileLock,
     file_structure::{self, PackageStore},
     log, media_type_select, oci,
     package::{install_info::InstallInfo, metadata, resolved_package::ResolvedPackage},
@@ -32,6 +31,7 @@ use crate::{
     prelude::SerdeExt,
     reference_manager::ReferenceManager,
     utility,
+    utility::fs::LockedFile,
 };
 
 /// Finds a package in the object store without index resolution.
@@ -294,30 +294,15 @@ pub fn reference_manager(fs: &file_structure::FileStructure) -> ReferenceManager
 /// The lock file lives at `{symlinks/{registry}/{repo}}/.select.lock` and
 /// serializes mutations of the per-repo `current` symlink across
 /// `install --select`, `deselect`, and `uninstall --deselect`. The returned
-/// [`FileLock`] guard releases the lock on drop.
+/// [`LockedFile`] guard releases the lock on drop.
 pub async fn acquire_select_lock(
     fs: &file_structure::FileStructure,
     package: &oci::Identifier,
-) -> Result<FileLock, PackageErrorKind> {
+) -> Result<LockedFile, PackageErrorKind> {
     let lock_path = fs.symlinks.select_lock(package);
-    if let Some(parent) = lock_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(parent, e)))?;
-    }
-    let file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
+    LockedFile::open_exclusive(lock_path)
         .await
-        .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&lock_path, e)))?
-        .into_std()
-        .await;
-    FileLock::lock_exclusive(file)
-        .await
-        .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&lock_path, e)))
+        .map_err(PackageErrorKind::Internal)
 }
 
 /// Outcome of [`wire_selection`] for the caller's reporting.
@@ -394,7 +379,7 @@ pub async fn wire_selection(
 /// Used by `deselect` / `uninstall --deselect` to hold the same critical
 /// section as [`wire_selection`] while unlinking the symlink pair.
 pub struct SelectionLocks {
-    _select: FileLock,
+    _select: LockedFile,
 }
 
 /// Acquires the per-repo `.select.lock`.

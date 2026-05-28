@@ -18,6 +18,7 @@ jobs:
         job:
           - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu }
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
+          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc }
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -63,7 +64,10 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          - { name: Windows x64, target: x86_64-pc-windows-msvc }
+          # x86_64-pc-windows-msvc is now built natively in the `build` job
+          # (windows-latest leg) so it can execute unit tests, including the
+          # cfg(target_os = "windows") F1/F2 cannot-recur tests. Cross-compile
+          # leg keeps aarch64 only — no native arm64 Windows runner on GitHub.
           - { name: Windows ARM64, target: aarch64-pc-windows-msvc }
     steps:
       - name: Checkout
@@ -106,8 +110,14 @@ jobs:
           # so Docker/Colima cannot run. Intel runners (macos-13) support Colima but
           # add ~$0.87/run and complexity for marginal gain over the arm64 unit tests
           # in the build job. Revisit if GitHub ships M3 runners with nested virt.
+          #
+          # No Windows entry: the embedded `registry:2` Docker image does not run
+          # reliably on `windows-latest` runners (Linux container under Hyper-V
+          # routing issues). F1 / F2 cannot-recur coverage is provided by the
+          # `windows-latest` leg of the `build` job above via cfg(target_os =
+          # "windows") unit tests. See ADR adr_file_lock_unification.md §CI
+          # Integration. Revisit if a stable Windows registry option appears.
           - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu, ext: "" }
-          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc, ext: ".exe" }
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

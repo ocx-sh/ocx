@@ -5,6 +5,8 @@ mod assemble;
 mod dir_walker;
 mod drop_file;
 mod empty_or_absent;
+mod file_lock;
+mod locked_file;
 pub mod path;
 mod same_dir;
 mod same_filesystem;
@@ -14,6 +16,14 @@ pub use assemble::{AssemblyError, AssemblyStats, assemble_from_layer, assemble_f
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 pub use empty_or_absent::{EmptyOrAbsentError, ensure_empty_or_absent};
+// `FileLock` is the underlying primitive; consumers prefer the
+// `LockedFile` / `LockedJsonFile` / `LockedTomlFile` API for in-place
+// F2-safe I/O. `FileLock` itself is re-exported for the synchronous
+// acquisition path (`lock_exclusive_blocking_with_timeout`) needed by
+// `auth::store` inside a `spawn_blocking` body, and for `temp_store`
+// which acquires synchronously from `stale_entries`.
+pub use file_lock::FileLock;
+pub use locked_file::{LockedFile, LockedJsonFile, LockedTomlFile};
 pub use same_dir::same_dir;
 pub use same_filesystem::{SameFilesystemError, same_filesystem};
 pub use symlink_walk::{SymlinkWalkError, refuse_if_symlink_in_path};

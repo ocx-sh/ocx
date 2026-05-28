@@ -91,6 +91,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::project::error::Error as ProjectError;
     use crate::utility::fs::{EmptyOrAbsentError, SameFilesystemError, SymlinkWalkError};
+    use crate::utility::singleflight::Error as SingleflightError;
 
     macro_rules! try_downcast {
         ($ty:ty) => {
@@ -125,6 +126,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(CiError);
     try_downcast!(PackageError);
     try_downcast!(ProjectError);
+    try_downcast!(SingleflightError);
 
     // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
     // for it (orphan rule). Only `PermissionDenied` maps to a specific code;
@@ -405,6 +407,39 @@ mod tests {
         let arc: crate::error::ArcError = inner.into();
         let err = crate::oci::index::error::Error::SourceWalkFailed(arc);
         assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    // ── singleflight::Error exit-code classification ─────────────────────────
+
+    #[test]
+    fn singleflight_error_classifies_to_correct_exit_codes() {
+        use crate::utility::singleflight::{self, SharedError};
+
+        // Failed with a generic io::Error inner cause → Failure(1): the inner
+        // error has no specific classification, so the walker falls through.
+        let shared = SharedError::for_test(std::io::Error::other("leader boom"));
+        let err = singleflight::Error::Failed(shared);
+        assert_eq!(
+            classify(err),
+            ExitCode::Failure,
+            "Failed with unclassified inner error must fall through to Failure(1)"
+        );
+
+        // Abandoned → Failure(1): leader was dropped without completing.
+        let err = singleflight::Error::Abandoned;
+        assert_eq!(classify(err), ExitCode::Failure, "Abandoned must map to Failure(1)");
+
+        // Timeout → TempFail(75): transient; retry once in-flight work settles.
+        let err = singleflight::Error::Timeout;
+        assert_eq!(classify(err), ExitCode::TempFail, "Timeout must map to TempFail(75)");
+
+        // CapacityExceeded → TempFail(75): transient; same rationale.
+        let err = singleflight::Error::CapacityExceeded { max: 1024 };
+        assert_eq!(
+            classify(err),
+            ExitCode::TempFail,
+            "CapacityExceeded must map to TempFail(75)"
+        );
     }
 
     // ── Fall-through lock-in ─────────────────────────────────────────────────

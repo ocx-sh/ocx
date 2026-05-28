@@ -11,7 +11,9 @@ mod symlink_store;
 mod tag_store;
 mod temp_store;
 
-pub use blob_store::{BlobDir, BlobGuard, BlobStore};
+pub use blob_store::{BlobDir, BlobStore};
+#[cfg(test)]
+pub(crate) use blob_store::{WRITE_BLOB_CALL_COUNT, WRITE_BLOB_TEST_LOCK};
 pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, read_digest_file, write_digest_file};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore};

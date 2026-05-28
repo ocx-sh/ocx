@@ -247,6 +247,34 @@ impl ProjectConfig {
         Self::from_str_with_path(s, PathBuf::new())
     }
 
+    /// Parse a [`ProjectConfig`] from pre-read bytes attributed to `path`.
+    ///
+    /// Used by callers that already hold the file open (e.g.
+    /// `load_project_for_mutate`, which reads through its exclusive
+    /// `LockedFile` handle to avoid the Windows F1 (`ERROR_LOCK_VIOLATION`)
+    /// that a second raw open would trigger). Enforces the same 64 KiB size
+    /// cap as [`Self::from_path`] and surfaces the same structured errors.
+    pub fn from_toml_bytes_with_path(bytes: &[u8], path: PathBuf) -> Result<Self, super::Error> {
+        let limit = super::internal::FILE_SIZE_LIMIT_BYTES;
+        if bytes.len() as u64 > limit {
+            return Err(ProjectError::new(
+                path,
+                ProjectErrorKind::FileTooLarge {
+                    size: bytes.len() as u64,
+                    limit,
+                },
+            )
+            .into());
+        }
+        let content = std::str::from_utf8(bytes).map_err(|e| {
+            ProjectError::new(
+                path.clone(),
+                ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            )
+        })?;
+        Self::from_str_with_path(content, path)
+    }
+
     /// Load and parse a [`ProjectConfig`] from a filesystem path.
     ///
     /// Enforces a 64 KiB size cap (`super::internal::FILE_SIZE_LIMIT_BYTES`)

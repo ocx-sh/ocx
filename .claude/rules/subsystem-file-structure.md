@@ -23,8 +23,7 @@ Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`
 | File | Purpose | Key Types |
 |------|---------|-----------|
 | `file_structure.rs` | Composite root; `slugify()`, `repository_path()` | `FileStructure` |
-| `blob_store.rs` | Raw OCI blob storage | `BlobStore`, `BlobDir` |
-| `blob_store/blob_guard.rs` | RAII read/write lock on individual blob data files | `BlobGuard` |
+| `blob_store.rs` | Raw OCI blob storage; stateless `write_blob` / `read_blob` (tempfile + atomic rename + Windows-cfg retry-with-backoff) | `BlobStore`, `BlobDir` |
 | `layer_store.rs` | Extracted layer storage | `LayerStore`, `LayerDir` |
 | `package_store.rs` | Assembled package storage | `PackageStore`, `PackageDir` |
 | `tag_store.rs` | Local tag→digest index | `TagStore` |
@@ -186,7 +185,11 @@ Project-registry roots read via `ProjectRegistry::live_projects()` at the start 
 
 Blobs first-class BFS entries: every `CasTier` variant (`Package`, `Layer`, `Blob`) included in reachability walk. Previous `tier != CasTier::Blob` skip removed; blobs retained only when live `refs/blobs/` symlink points to them.
 
-`BlobGuard` (`blob_store/blob_guard.rs`) provide RAII shared/exclusive advisory locking for individual blob data files. Acquire read lock before read, write lock before write. Internals use `file_lock::FileLock` (wraps `fs2` in `spawn_blocking`) — do not call `BlobStore::data()` directly in concurrent paths; always go through `BlobGuard::acquire_read` / `acquire_write`.
+`BlobStore::write_blob` / `read_blob` (stateless) are the only blob-IO entry points. Writes use `tempfile::NamedTempFile::new_in(parent)` + `sync_data` + atomic rename to the CAS path; content-addressed invariant (same digest ⟹ same bytes) means concurrent writers produce byte-equivalent output and the rename is idempotent. On Windows, `persist_with_windows_retry` wraps the rename with exponential backoff (3 retries: 100/400/800 ms ±25 % jitter) on `ERROR_SHARING_VIOLATION` (32) and `ERROR_ACCESS_DENIED` (5) — Windows Defender real-time scanning on `windows-latest` GitHub Actions runners is the dominant source of these transients (rattler `rename_with_retry` precedent). After retry exhaustion the function re-checks existence and returns Ok if the path now exists (idempotent recovery).
+
+Same-process dedup for concurrent same-digest fan-out lives in `package_manager::tasks::pull_local::PullCoordinator`, which owns a `singleflight::Group<oci::Digest, ()>` scoped per pull operation. The OCI manifest layer-download path is the only caller with concurrent same-digest writes; index-layer callers (`write_manifest_blob`, `local_index::stage_blob_bytes`) call `BlobStore::write_blob` directly without dedup — they are sequential and the content-addressed invariant covers any rare cross-process race.
+
+There is no `LockFileEx` on blob `data` files. The F1 class (cross-process raw reader of a locked range → `ERROR_LOCK_VIOLATION`) is structurally impossible — see ADR `adr_file_lock_unification.md` §Decision 2.
 
 ## symlink Module
 

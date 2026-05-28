@@ -412,7 +412,7 @@ mod spec_tests {
     /// `resolve` against a flat `ImageManifest` yields a `ResolvedChain`
     /// with two entries — the top-level manifest digest followed by the
     /// config-blob digest.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolve_single_image_returns_two_chain_entries() {
         let dir = TempDir::new().unwrap();
         seed_flat_manifest(&dir, &digest_a());
@@ -440,7 +440,7 @@ mod spec_tests {
     /// `resolve` against an `ImageIndex` yields a `ResolvedChain` with three
     /// entries — the top-level index, the platform-selected child manifest,
     /// and the trailing config-blob digest.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolve_image_index_returns_three_chain_entries() {
         let dir = TempDir::new().unwrap();
         seed_image_index(&dir, &digest_a(), &digest_b());
@@ -471,7 +471,7 @@ mod spec_tests {
 
     /// Nested image indexes (index pointing at another index) are rejected
     /// with a clear error — unsupported OCI shape.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolve_rejects_nested_image_index() {
         let dir = TempDir::new().unwrap();
 
@@ -501,7 +501,7 @@ mod spec_tests {
 
     /// Property guarantee: every `(registry, digest)` entry in a successful
     /// `ResolvedChain` has an on-disk `data` file at the CAS-sharded path.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolve_result_every_entry_has_on_disk_blob_file() {
         let dir = TempDir::new().unwrap();
         seed_flat_manifest(&dir, &digest_a());

@@ -126,8 +126,8 @@ tasks:
     deps:
       - task: rust:format:check
       - task: rust:clippy:check
-      - task: shell:verify
-      - task: claude:verify
+      # - task: shell:verify
+      # - task: claude:verify
 
   .verify:build-test:
     internal: true

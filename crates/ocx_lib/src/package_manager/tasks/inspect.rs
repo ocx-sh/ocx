@@ -229,7 +229,7 @@ mod spec_tests {
     }
 
     /// Default mode against a flat image manifest returns metadata only.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn inspect_default_flat_manifest_returns_metadata() {
         let dir = TempDir::new().unwrap();
         let tag_store = TagStore::new(dir.path().join("tags"));
@@ -251,7 +251,7 @@ mod spec_tests {
 
     /// Default mode against an image index returns the platform candidates,
     /// no metadata loaded.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn inspect_default_image_index_returns_candidates() {
         let dir = TempDir::new().unwrap();
         let tag_store = TagStore::new(dir.path().join("tags"));
@@ -279,7 +279,7 @@ mod spec_tests {
 
     /// `--resolve` against an image index platform-selects the child and
     /// returns metadata plus a 3-entry chain.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn inspect_resolve_image_index_returns_chain() {
         let dir = TempDir::new().unwrap();
         let tag_store = TagStore::new(dir.path().join("tags"));
@@ -305,7 +305,7 @@ mod spec_tests {
     }
 
     /// Unknown tag resolves to `NotFound` in default mode.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn inspect_unknown_tag_is_not_found() {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir);
@@ -330,7 +330,7 @@ mod spec_tests {
     /// Mirrors the `common.rs` `load_object_data_rejects_invalid_metadata`
     /// pattern: an env entry references an undeclared dependency, so
     /// `ValidMetadata::try_from` rejects it at the ingress boundary.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn inspect_default_malformed_metadata_is_internal() {
         const BAD_METADATA_JSON: &str = r#"{"type":"bundle","version":1,"dependencies":[],"env":[{"key":"FOO","type":"constant","value":"${deps.missing.installPath}/x","visibility":"public"}],"entrypoints":{}}"#;
 
@@ -363,7 +363,7 @@ mod spec_tests {
     /// (so the message names the bad value), not the misleading
     /// `DigestMissing` ("identifier has no digest after resolution"). The
     /// kind still classifies to `DataError`/65.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn inspect_default_bad_child_digest_is_internal_digest_error() {
         let dir = TempDir::new().unwrap();
         let tag_store = TagStore::new(dir.path().join("tags"));

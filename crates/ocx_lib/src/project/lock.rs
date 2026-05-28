@@ -1196,30 +1196,45 @@ generated_at = "2099-01-01T00:00:00Z"
             .expect("acquire after release must succeed");
     }
 
-    /// On Unix, a symlink at `ocx.toml` must cause `acquire_project_lock` to
-    /// return `ProjectErrorKind::Io` (via `O_NOFOLLOW`), not `Locked`, and must
-    /// NOT follow the symlink to its target.
-    #[cfg(unix)]
+    /// A symlink at `ocx.toml` must cause `acquire_project_lock` to return
+    /// `ProjectErrorKind::Io`, not `Locked`, and must NOT follow the symlink
+    /// to its target.
+    ///
+    /// The lock target is `ocx.toml` itself (in-place lock — see ADR §Decision 3).
+    /// A planted symlink at `ocx.toml` could redirect the lock and the
+    /// subsequent in-place rewrite to an attacker-chosen file, so we reject it
+    /// with `InvalidInput` before calling `LockedFile::try_exclusive`.
     #[tokio::test]
     async fn acquire_project_lock_rejects_symlink_at_ocx_toml() {
-        use std::os::unix::fs::symlink;
+        #[cfg(unix)]
+        use std::os::unix::fs::symlink as make_symlink;
+        #[cfg(not(unix))]
+        fn make_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+            std::os::windows::fs::symlink_file(target, link)
+        }
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join("sensitive_file");
+
+        let sensitive_file = dir.path().join("sensitive_file");
+        let link_path = dir.path().join("ocx.toml");
         // Plant a symlink at ocx.toml pointing to a non-existent sensitive target.
-        symlink(&target, dir.path().join("ocx.toml")).expect("create symlink at ocx.toml");
+        if make_symlink(&sensitive_file, &link_path).is_err() {
+            // Symlink creation can fail on Windows without elevated privileges or
+            // developer mode. Skip rather than fail on those configurations.
+            return;
+        }
 
         let err = crate::project::acquire_project_lock(dir.path())
             .await
             .expect_err("acquire_project_lock must fail when ocx.toml is a symlink");
 
-        // O_NOFOLLOW causes ELOOP → surfaced as Io, not Locked.
+        // The symlink_metadata pre-check surfaces InvalidInput → Io, not Locked.
         assert_kind!(err, ProjectErrorKind::Io(_));
 
         // The symlink target must NOT have been created or modified.
         assert!(
-            !target.exists(),
-            "symlink target must not be touched; found: {target:?}"
+            !sensitive_file.exists(),
+            "symlink target must not be touched; found: {sensitive_file:?}"
         );
     }
 

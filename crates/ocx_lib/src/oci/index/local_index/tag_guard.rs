@@ -2,12 +2,10 @@
 // Copyright 2026 The OCX Authors
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::file_lock::FileLock;
-use crate::{Result, error::file_error, log, oci};
+use crate::{Result, oci, utility::fs::LockedJsonFile};
 
 use super::tag_lock::TagLock;
 
@@ -19,10 +17,11 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Per-repository reader/writer guard over the local tag lock file.
 ///
-/// Holds an `fs2` advisory lock — shared for reads, exclusive for writes —
-/// directly on the canonical tag file itself. No sidecar `.lock` file, no
-/// temp sibling, no atomic rename: writers lock the tag file and update it
-/// in place (truncate + write + `sync_all`).
+/// Thin typed shim over [`LockedJsonFile<TagLock>`]. The underlying
+/// `LockedJsonFile` acquires an `fs2` advisory lock — shared for reads,
+/// exclusive for writes — directly on the canonical tag file itself.
+/// No sidecar `.lock` file, no temp sibling, no atomic rename: writers lock
+/// the tag file and update it in place (truncate + write + `sync_data`).
 ///
 /// This is deliberately different from the classic "sidecar lock + atomic
 /// rename" pattern. Atomic rename rotates the tag file's inode, which would
@@ -35,8 +34,12 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 /// deliberate — concurrency safety is what matters for fallback writes,
 /// crash atomicity is a rare edge case, and the sidecar file was never
 /// cleaned up.
+///
+/// All reads and writes route through the lock-owning handle (via
+/// `LockedJsonFile`), eliminating the F2 `ERROR_LOCK_VIOLATION` class
+/// by construction (see ADR §Decision 1).
 pub(super) struct TagGuard {
-    lock: FileLock,
+    inner: LockedJsonFile<TagLock>,
     target_path: PathBuf,
 }
 
@@ -45,32 +48,8 @@ impl TagGuard {
     /// creating the file and its parent directories on first use. Blocks
     /// until the lock is available or [`LOCK_TIMEOUT`] elapses.
     pub async fn acquire_exclusive(target_path: PathBuf) -> Result<Self> {
-        if let Some(parent) = target_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| file_error(parent, e))?;
-        }
-        // Sync handle: `fs2::FileExt` advisory-locks on the raw fd, and the
-        // handle must outlive the lock (owned by `FileLock`). Run the blocking
-        // `open` on the blocking pool so the reactor thread never blocks on a
-        // filesystem syscall.
-        let open_path = target_path.clone();
-        let file = tokio::task::spawn_blocking(move || {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&open_path)
-        })
-        .await
-        .map_err(std::io::Error::other)
-        .and_then(std::convert::identity)
-        .map_err(|e| file_error(&target_path, e))?;
-        let lock = FileLock::lock_exclusive_with_timeout(file, LOCK_TIMEOUT)
-            .await
-            .map_err(|e| file_error(&target_path, e))?;
-        Ok(Self { lock, target_path })
+        let inner = LockedJsonFile::open_exclusive_with_timeout(target_path.clone(), LOCK_TIMEOUT).await?;
+        Ok(Self { inner, target_path })
     }
 
     /// Acquires a shared (reader) lock on the tag file at `target_path`.
@@ -81,22 +60,8 @@ impl TagGuard {
     /// lock concurrently; an exclusive writer waits until the last reader
     /// drops.
     pub async fn acquire_shared(target_path: PathBuf) -> Result<Option<Self>> {
-        // Run the blocking `open` on the blocking pool; matches the
-        // off-reactor pattern in `acquire_exclusive`.
-        let open_path = target_path.clone();
-        let open_result = tokio::task::spawn_blocking(move || std::fs::OpenOptions::new().read(true).open(&open_path))
-            .await
-            .map_err(std::io::Error::other)
-            .and_then(std::convert::identity);
-        let file = match open_result {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(file_error(&target_path, e)),
-        };
-        let lock = FileLock::lock_shared_with_timeout(file, LOCK_TIMEOUT)
-            .await
-            .map_err(|e| file_error(&target_path, e))?;
-        Ok(Some(Self { lock, target_path }))
+        let maybe_inner = LockedJsonFile::open_shared_with_timeout(target_path.clone(), LOCK_TIMEOUT).await?;
+        Ok(maybe_inner.map(|inner| Self { inner, target_path }))
     }
 
     /// Reads and parses the current tag file under the lock. Returns an
@@ -109,57 +74,41 @@ impl TagGuard {
     /// or `ocx index update` can rewrite it cleanly, and log a warn so the
     /// recovery is observable.
     ///
-    /// Reads go through the lock-owning handle. Opening a second handle
-    /// against the locked range hits `ERROR_LOCK_VIOLATION` on Windows under
-    /// an exclusive lock; same-process handles are not exempt.
+    /// Reads go through the lock-owning handle (via `LockedJsonFile`). Opening
+    /// a second handle against the locked range hits `ERROR_LOCK_VIOLATION` on
+    /// Windows under an exclusive lock; same-process handles are not exempt.
     pub async fn read_disk(&mut self, identifier: &oci::Identifier) -> Result<HashMap<String, oci::Digest>> {
-        let file = self.lock.file_mut();
-        file.seek(SeekFrom::Start(0))
-            .map_err(|e| file_error(&self.target_path, e))?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)
-            .map_err(|e| file_error(&self.target_path, e))?;
-        if buf.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let parsed = serde_json::from_slice::<TagLock>(&buf)
-            .map_err(crate::Error::from)
-            .and_then(|tag_lock| tag_lock.into_tags(identifier, &self.target_path));
-        match parsed {
-            Ok(tags) => Ok(tags),
-            Err(e) => {
-                log::warn!(
-                    "Tag file '{}' is unparseable ({e}) — treating as empty for recovery.",
-                    self.target_path.display()
-                );
-                Ok(HashMap::new())
-            }
+        match self.inner.read().await? {
+            None => Ok(HashMap::new()),
+            Some(tag_lock) => match tag_lock.into_tags(identifier, &self.target_path) {
+                Ok(tags) => Ok(tags),
+                Err(e) => {
+                    crate::log::warn!(
+                        "Tag file '{}' is unparseable ({e}) — treating as empty for recovery.",
+                        self.target_path.display()
+                    );
+                    Ok(HashMap::new())
+                }
+            },
         }
     }
 
     /// Overwrites the tag file in place with a `TagLock` containing `tags`.
     /// Truncates the existing file (same inode), writes the full JSON, and
-    /// `sync_all`s for durability. Concurrent writers are serialised by the
+    /// `sync_data`s for durability. Concurrent writers are serialised by the
     /// exclusive lock held by the caller.
     ///
-    /// Writes go through the lock-owning handle. A second open against the
-    /// locked range hits `ERROR_LOCK_VIOLATION` on Windows even from the same
-    /// process — `LockFileEx` ranges are per-handle, not per-process.
+    /// Writes go through the lock-owning handle (via `LockedJsonFile`). A
+    /// second open against the locked range hits `ERROR_LOCK_VIOLATION` on
+    /// Windows even from the same process — `LockFileEx` ranges are per-handle,
+    /// not per-process.
     pub async fn write_disk(
         &mut self,
         identifier: &oci::Identifier,
         tags: &HashMap<String, oci::Digest>,
     ) -> Result<()> {
         let tag_lock = TagLock::new(identifier, tags.clone());
-        let bytes = serde_json::to_vec_pretty(&tag_lock)?;
-
-        let file = self.lock.file_mut();
-        file.set_len(0).map_err(|e| file_error(&self.target_path, e))?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|e| file_error(&self.target_path, e))?;
-        file.write_all(&bytes).map_err(|e| file_error(&self.target_path, e))?;
-        file.sync_all().map_err(|e| file_error(&self.target_path, e))?;
-        Ok(())
+        self.inner.write(&tag_lock).await
     }
 }
 
@@ -201,7 +150,7 @@ mod tests {
         assert!(result.is_none(), "shared acquire on missing file must return None");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn read_disk_returns_empty_when_file_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("ghcr.io").join("cmake.json");
@@ -210,7 +159,7 @@ mod tests {
         assert!(tags.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn write_then_read_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("ghcr.io").join("cmake.json");
@@ -223,7 +172,7 @@ mod tests {
         assert_eq!(readback, tags);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn write_leaves_no_sidecar_or_tmp_files() {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("ghcr.io");
@@ -295,7 +244,7 @@ mod tests {
     /// through the lock-owning handle (`FileLock::file_mut`). This test pins
     /// the rewrite path: acquire exclusive, write twice in place under the
     /// same lock, then read back the latest content.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn merge_under_lock_rewrites_in_place_through_lock_handle() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("ghcr.io").join("cmake.json");
@@ -312,7 +261,7 @@ mod tests {
         assert_eq!(readback, updated);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn shared_locks_can_coexist() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("ghcr.io").join("cmake.json");
@@ -330,5 +279,24 @@ mod tests {
         let b = TagGuard::acquire_shared(target.clone()).await.unwrap().unwrap();
         drop(a);
         drop(b);
+    }
+
+    /// Smoke test: proves the TagGuard shim works correctly over the
+    /// `LockedJsonFile` internals — constructs a guard, writes a tag map,
+    /// reads it back, asserts equality.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tag_guard_is_locked_json_file_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ghcr.io").join("cmake.json");
+        let id = make_id();
+        let tags = tags_with(&[("3.28", 'a'), ("3.29", 'b'), ("latest", 'b')]);
+
+        let mut guard = TagGuard::acquire_exclusive(target.clone()).await.unwrap();
+        guard.write_disk(&id, &tags).await.unwrap();
+        let readback = guard.read_disk(&id).await.unwrap();
+        assert_eq!(
+            readback, tags,
+            "TagGuard shim must round-trip tag maps via LockedJsonFile"
+        );
     }
 }

@@ -148,10 +148,11 @@ impl LocalIndex {
             return Ok(Some(cached));
         }
 
-        // Shared lock on the blob `data` file. Missing file → `Ok(None)`,
-        // which is the cache-miss signal ChainedIndex turns into a chain walk.
-        let pinned: oci::PinnedIdentifier = identifier.clone_with_digest(digest.clone()).try_into()?;
-        let Some(guard) = self.blob_store.acquire_read(&pinned).await? else {
+        // Read the blob data file directly (no lock — content-addressed and immutable).
+        // Missing file → `Ok(None)`, which is the cache-miss signal ChainedIndex
+        // turns into a chain walk.
+        let registry = identifier.registry();
+        let Some(bytes) = self.blob_store.read_blob(registry, digest).await? else {
             log::debug!(
                 "Manifest file not found for identifier '{}' and digest '{}'.",
                 identifier,
@@ -165,8 +166,6 @@ impl LocalIndex {
             identifier,
             digest
         );
-        let bytes = guard.read_bytes().await?;
-        drop(guard);
         let manifest: oci::Manifest = match serde_json::from_slice(&bytes) {
             Ok(m) => m,
             Err(e) => {
@@ -193,17 +192,24 @@ impl LocalIndex {
     }
 }
 
-/// Writes `manifest` under an exclusive `BlobGuard` on the blob store's
-/// CAS path for `pinned`. Also writes the sibling `digest` marker file as
-/// part of `BlobStore::acquire_write`.
+/// Writes `manifest` to the blob store's CAS path for `pinned` via
+/// `BlobStore::write_blob` (tempfile + atomic rename). Also writes the
+/// sibling `digest` marker file.
+///
+/// Sequential caller — no singleflight wrapper. Content-addressed safety
+/// covers any rare cross-process race: concurrent writers produce
+/// byte-equivalent content for the same digest.
 async fn write_manifest_blob(
     blob_store: &BlobStore,
     pinned: &oci::PinnedIdentifier,
     manifest: &oci::Manifest,
 ) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(manifest)?;
-    let guard = blob_store.acquire_write(pinned).await?;
-    guard.write_bytes(&bytes).await?;
+    blob_store
+        .write_blob(pinned.registry(), &pinned.digest(), &bytes)
+        .await?;
+    let digest_path = blob_store.digest_file(pinned.registry(), &pinned.digest());
+    crate::file_structure::write_digest_file(&digest_path, &pinned.digest()).await?;
     Ok(())
 }
 
@@ -288,11 +294,7 @@ impl index_impl::IndexImpl for LocalIndex {
     }
 
     async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
-        let Some(guard) = self.blob_store.acquire_read(blob_ref).await? else {
-            return Ok(None);
-        };
-        let bytes = guard.read_bytes().await?;
-        Ok(Some(bytes))
+        self.blob_store.read_blob(blob_ref.registry(), &blob_ref.digest()).await
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -303,10 +305,15 @@ impl index_impl::IndexImpl for LocalIndex {
 impl LocalIndex {
     /// Stage raw blob bytes into the local CAS under the blob's own digest.
     ///
-    /// Content-addressed: re-staging the same digest is idempotent.
+    /// Writes the `data` file via `BlobStore::write_blob` (tempfile + atomic
+    /// rename) and the sibling `digest` marker file. Both writes are idempotent
+    /// — re-staging the same digest is safe.
     pub async fn stage_blob_bytes(&self, blob_ref: &oci::PinnedIdentifier, bytes: &[u8]) -> Result<()> {
-        let guard = self.blob_store.acquire_write(blob_ref).await?;
-        guard.write_bytes(bytes).await?;
+        self.blob_store
+            .write_blob(blob_ref.registry(), &blob_ref.digest(), bytes)
+            .await?;
+        let digest_path = self.blob_store.digest_file(blob_ref.registry(), &blob_ref.digest());
+        crate::file_structure::write_digest_file(&digest_path, &blob_ref.digest()).await?;
         Ok(())
     }
 }
@@ -463,7 +470,7 @@ mod spec_tests {
     /// Design record (rev §4 of plan_resolution_chain_refs.md):
     /// `refresh_tags` merges the source's tag set with any existing on-disk
     /// entries, preserving tags that the source does not report.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn refresh_tags_merges_new_tags_with_existing_disk_entries() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
@@ -486,7 +493,7 @@ mod spec_tests {
 
     /// `refresh_tags` must preserve tags present on disk that the source
     /// does not report for the requested identifier.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn refresh_tags_preserves_tags_not_in_source() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
@@ -515,7 +522,7 @@ mod spec_tests {
 
     /// Eight concurrent `refresh_tags` callers on different tags all land
     /// on disk — proves the atomic tag-writer serialises correctly.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn refresh_tags_concurrent_callers_both_visible_on_disk() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
@@ -545,7 +552,7 @@ mod spec_tests {
 
     /// `ChainedIndex::fetch_manifest` on a cache miss must persist the
     /// fetched image manifest blob at the expected CAS path.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_manifest_persists_image_blob_at_expected_cas_path() {
         let dir = TempDir::new().unwrap();
         let cache = make_index(&dir);
@@ -574,7 +581,7 @@ mod spec_tests {
     /// pinned identifier must walk the source chain via
     /// `GET /v2/<repo>/manifests/<digest>` and persist the blob into the
     /// cache — no tag commit, but the data file must exist after the fetch.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_manifest_persists_blob_for_digest_only_identifier() {
         let dir = TempDir::new().unwrap();
         let cache = make_index(&dir);
@@ -642,7 +649,7 @@ mod spec_tests {
     /// `ChainedIndex::fetch_manifest` must write both the top-level image
     /// index blob and every child manifest blob when the resolved identifier
     /// points at an image index.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_manifest_recurses_for_image_index_children() {
         let dir = TempDir::new().unwrap();
         let cache = make_index(&dir);
@@ -740,7 +747,7 @@ mod spec_tests {
 
     /// Every blob `ChainedIndex::fetch_manifest` persists on a cache miss
     /// is accompanied by a sibling `digest` marker file.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_manifest_writes_sibling_digest_marker_for_every_blob() {
         let dir = TempDir::new().unwrap();
         let cache = make_index(&dir);
@@ -770,7 +777,7 @@ mod spec_tests {
     ///
     /// This verifies the Phase E.3 requirement: BlobStore::acquire_read
     /// wrapping + graceful parse-failure recovery in get_manifest.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn get_manifest_on_truncated_blob_file_returns_none_and_logs_warn() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
@@ -799,7 +806,7 @@ mod spec_tests {
     /// This is an integration-style test because it exercises the full path:
     /// `LocalIndex::fetch_manifest` sees cache-miss on the blob → `ChainedIndex`
     /// walks the source → write-through persists it → re-read succeeds.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn latent_bug_fix_missing_manifest_triggers_refetch_via_chain() {
         let dir = TempDir::new().unwrap();
         let cache = make_index(&dir);
@@ -848,9 +855,10 @@ mod spec_tests {
     /// `ERROR_LOCK_VIOLATION` between an open write handle and the rename /
     /// cross-process read), not the READ refusing to recover.
     ///
-    /// `BlobGuard`'s sidecar-lock + `shutdown().await` fixes close the write
-    /// race directly (see `blob_guard.rs` unit tests). This test pins the
-    /// caller-side recovery contract that the production retry depends on:
+    /// The stateless `BlobStore::write_blob` (tempfile + atomic rename +
+    /// Windows-cfg retry-with-backoff) closes the write race directly. This
+    /// test pins the caller-side recovery contract that the production retry
+    /// depends on:
     /// when the on-disk manifest blob is corrupt or zero-byte,
     /// `LocalIndex::get_manifest` must return `Ok(None)` and `ChainedIndex`
     /// must walk the source and re-persist — never propagate as `Err`,
@@ -859,7 +867,7 @@ mod spec_tests {
     /// Cross-platform: the bug-producing write race is Windows-only, but the
     /// recovery contract this test exercises must hold on every OS so future
     /// regressions of the cache-miss treatment are caught at the unit level.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn corrupted_manifest_blob_triggers_refetch_via_chain() {
         let dir = TempDir::new().unwrap();
         let cache = make_index(&dir);
@@ -1025,7 +1033,7 @@ mod concurrency_tests {
     /// its own source `Index`, and assert every written entry survives the
     /// race. The per-repo exclusive lock + read-modify-write merge under the
     /// lock is what makes this safe.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_update_different_tags_preserves_all() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);
@@ -1057,7 +1065,7 @@ mod concurrency_tests {
     /// Many writers racing the same tag must not corrupt the file. The final
     /// digest is one of the contenders (last-writer-wins is the agreed
     /// policy), and the file round-trips cleanly.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_update_same_tag_does_not_corrupt() {
         let dir = TempDir::new().unwrap();
         let index = make_index(&dir);

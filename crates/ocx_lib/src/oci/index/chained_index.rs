@@ -496,7 +496,7 @@ mod chain_refs_tests {
 
     /// Design record §22: in Default mode, a cache hit returns without touching
     /// sources. Source call count must remain zero.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn default_mode_cache_hit_returns_without_touching_sources() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -519,7 +519,7 @@ mod chain_refs_tests {
 
     /// Design record §23: in Default mode, a cache miss walks the source,
     /// persists the chain on disk. After the call, the blob data file exists.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn default_mode_cache_miss_walks_source_and_persists_chain_on_disk() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -546,7 +546,7 @@ mod chain_refs_tests {
 
     /// Design record §24: in Remote mode, tag lookups bypass the cache and go
     /// to the source, but blobs ARE still persisted on disk after the call.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remote_mode_bypasses_cache_for_tag_lookup_but_still_persists_blobs() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -580,7 +580,7 @@ mod chain_refs_tests {
     /// Design record §25: in Remote mode, digest-addressed lookups use the
     /// cache (immutable content — no reason to bypass). The source must NOT
     /// be consulted for digest-addressed fetches.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remote_mode_digest_addressed_lookup_uses_cache() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -615,7 +615,7 @@ mod chain_refs_tests {
 
     /// Design record §26: in Offline mode, a cache miss returns None without
     /// consulting any sources.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn offline_mode_cache_miss_returns_none_without_consulting_sources() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -634,7 +634,7 @@ mod chain_refs_tests {
 
     /// Design record §27: in Offline mode, a cache hit returns from disk
     /// without consulting sources.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn offline_mode_cache_hit_returns_from_disk() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -657,7 +657,7 @@ mod chain_refs_tests {
 
     /// Design record §28: singleflight deduplicates concurrent identical cache
     /// misses — only 1 source fetch is recorded even when 4 tasks race.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn singleflight_dedups_concurrent_identical_cache_miss_fetches() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -690,7 +690,7 @@ mod chain_refs_tests {
 
     /// Design record §29: when the source errors during a singleflight-guarded
     /// fetch, all waiters receive the error (broadcast error propagation).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn singleflight_broadcasts_source_error_to_waiters() {
         #[derive(Clone)]
         struct AlwaysErrorSource;
@@ -755,7 +755,7 @@ mod chain_refs_tests {
     /// Default: local index only, no source contact.
     /// Remote: hits source, returns source tags, no write-through.
     /// Offline: local index only, never consults source.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_tags_respects_chain_mode() {
         // --- Default: local only ---
         let cache_dir = TempDir::new().unwrap();
@@ -802,7 +802,7 @@ mod chain_refs_tests {
     /// across every `ChainMode` using a spy source that records every
     /// invocation: zero calls means no chain walk happened, which means
     /// no write-through could have happened either.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn op_query_never_walks_source_in_any_mode() {
         for mode in [ChainMode::Default, ChainMode::Remote, ChainMode::Offline] {
             let cache_dir = TempDir::new().unwrap();
@@ -846,7 +846,7 @@ mod chain_refs_tests {
     /// post-pin contract is to skip the tag commit and let the lock own
     /// the tag→digest mapping. Asserted by checking that the tag store
     /// directory is never created.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn pinned_id_pull_skips_tag_pointer_commit() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -882,7 +882,7 @@ mod chain_refs_tests {
     /// store layout is `{root}/{registry_slug}/{repository}.json`, so a
     /// Remote-mode `list_tags` call must not create the registry directory
     /// nor any per-repository tag file.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remote_mode_list_tags_does_not_mutate_local_index() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -916,7 +916,7 @@ mod chain_refs_tests {
     /// Design record §31: list_repositories routes by ChainMode. Default and
     /// Offline read the persisted cache without consulting sources; Remote
     /// bypasses the cache and returns the source's repo list.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_repositories_respects_chain_mode() {
         // --- Default: cache only, source untouched ---
         let cache_dir = TempDir::new().unwrap();
@@ -955,7 +955,7 @@ mod chain_refs_tests {
 
     /// Remote mode must NOT silently fall back to cached repos when every
     /// configured source errors — same trust boundary as list_tags.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remote_mode_list_repositories_propagates_source_errors() {
         #[derive(Clone)]
         struct AlwaysErrorSource;
@@ -1005,7 +1005,7 @@ mod chain_refs_tests {
     /// Remote mode must NOT silently fall back to cached tags when every
     /// configured source errors — that would hide registry outages from
     /// callers relying on `--remote` for live lookups.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remote_mode_list_tags_propagates_source_errors() {
         #[derive(Clone)]
         struct AlwaysErrorSource;
@@ -1055,7 +1055,7 @@ mod chain_refs_tests {
     /// Design record §32: property — for any mode, after a successful
     /// fetch_manifest returning Some((digest, _)), the blob data file must
     /// exist on disk (digest is guaranteed on disk).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn fetch_manifest_post_persist_is_guaranteed_on_disk() {
         // Test with Default mode (the main case; Remote is covered in test 24).
         let cache_dir = TempDir::new().unwrap();
@@ -1087,7 +1087,7 @@ mod chain_refs_tests {
     /// 8 simultaneous tasks racing on the same tagged identifier must produce
     /// exactly 1 source call. Complements test 28 (4 tasks) with a larger
     /// concurrency factor to stress the singleflight key computation.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn singleflight_dedups_eight_concurrent_identical_cache_miss_fetches() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1163,7 +1163,7 @@ mod chain_refs_tests {
     /// Cache hit: blob already in `blobs/{registry}/.../data` — returns the
     /// bytes without consulting any source. Proves the offline-rehydration
     /// path works when the local CAS already holds the blob.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_cache_hit_no_source_call() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1196,7 +1196,7 @@ mod chain_refs_tests {
 
     /// Offline mode + local miss → `Ok(None)`. Caller maps `None` to
     /// `Error::OfflineMode` at the policy boundary (see `pull::setup_owned`).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_offline_miss_returns_none() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1223,7 +1223,7 @@ mod chain_refs_tests {
     /// bytes, AND persists them into the local CAS so a subsequent offline
     /// read hits without a network round-trip. This is the regression
     /// guarantee for `ocx clean; rm -rf packages installs; --offline install`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_walks_chain_and_persists() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1493,7 +1493,7 @@ mod tests {
     //
     // Pre-seed the cache with a tag→digest mapping, then call fetch_manifest.
     // The source should never be queried (zero calls recorded in TestIndex).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn cache_hit_returns_immediately_without_querying_source() {
         // We need to pre-seed the LocalIndex on disk.  The LocalIndex reads tags
         // from disk lazily.  The easiest way is to run an update via a TestIndex
@@ -1528,7 +1528,7 @@ mod tests {
     }
 
     // Case 2: cache miss + source has tag → update_tag called → retry succeeds.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn cache_miss_source_has_tag_returns_manifest() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1547,7 +1547,7 @@ mod tests {
     }
 
     // Case 2b: fetch_manifest_digest has same chain logic.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn cache_miss_source_has_tag_returns_digest() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1564,7 +1564,7 @@ mod tests {
     }
 
     // Case 3: cache miss + source doesn't have the tag → returns None (warn logged).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn cache_miss_source_missing_tag_returns_none() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1585,7 +1585,7 @@ mod tests {
     // error so callers can distinguish "package not found" from "registry
     // outage / auth failure". Collapsing to Ok(None) would break automation
     // retry logic.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn cache_miss_source_error_propagates() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1608,7 +1608,7 @@ mod tests {
     }
 
     // Case 4b: fetch_manifest_digest propagates errors the same way.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn cache_miss_digest_source_error_propagates() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1633,7 +1633,7 @@ mod tests {
     // Case 5: digest-only identifier → walks the source chain via
     // `GET /v2/<repo>/manifests/<digest>` and persists the blob, even though
     // there is no tag to commit. Required for `ocx install repo@sha256:...`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn digest_only_identifier_walks_chain() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1657,7 +1657,7 @@ mod tests {
     }
 
     // Case 5b: fetch_manifest_digest with digest-only identifier walks the chain too.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn digest_only_identifier_digest_query_walks_chain() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1683,7 +1683,7 @@ mod tests {
     // `:latest`. `ocx install cmake` on a fresh machine must behave the same as
     // `ocx install cmake:latest` — the fallback chain substitutes "latest" and
     // persists it for the subsequent cache lookup.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn bare_identifier_walks_chain_as_latest() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1703,7 +1703,7 @@ mod tests {
     }
 
     // Case 5d: bare identifier + source has no "latest" → degrades to None.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn bare_identifier_latest_missing_returns_none() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1727,7 +1727,7 @@ mod tests {
     //
     // Clone the ChainedIndex (via Index::clone → box_clone), seed the cache on
     // the original, then verify the cloned index can read the same data.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn box_clone_shares_cache() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1752,7 +1752,7 @@ mod tests {
     }
 
     // Case 7: list_tags delegates to cache only — source not queried.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_tags_delegates_to_cache_only() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1779,7 +1779,7 @@ mod tests {
     }
 
     // Case 8: list_repositories delegates to cache only.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_repositories_delegates_to_cache_only() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1798,7 +1798,7 @@ mod tests {
     // ── Multi-source chain tests ──────────────────────────────────────────
 
     // Case 9: two sources, first has the tag → second source NOT queried.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn multi_source_first_hit_second_not_queried() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1827,7 +1827,7 @@ mod tests {
     }
 
     // Case 10: two sources, first errors but second has the tag → tag persisted, success.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn multi_source_first_error_second_succeeds() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1851,7 +1851,7 @@ mod tests {
     }
 
     // Case 10b: fetch_manifest_digest with same multi-source degradation.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn multi_source_first_error_second_succeeds_digest() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1877,7 +1877,7 @@ mod tests {
     // When the entire chain is exhausted by errors the chain MUST surface
     // an error so the caller can distinguish a real outage from a clean
     // not-found.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn multi_source_all_errors_propagates() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1906,7 +1906,7 @@ mod tests {
     // chain must NOT collapse the earlier error into `Ok(None)`. A mirror
     // answering "not found" does not disprove an authoritative source's
     // transient failure; callers still need the `Err` to keep retry policy honest.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn fetch_and_persist_chain_propagates_error_when_later_source_misses_cleanly() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1936,7 +1936,7 @@ mod tests {
     }
 
     // Case 11c: same scenario for fetch_manifest_digest.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn fetch_and_persist_chain_digest_propagates_error_when_later_source_misses_cleanly() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1962,7 +1962,7 @@ mod tests {
     }
 
     // Case 12: empty sources Vec → behaves like LocalIndex alone (no fallback).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn empty_sources_behaves_like_local_index() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -1979,7 +1979,7 @@ mod tests {
 
     // Case 12b: tag persistence after fetch — a second call with empty sources
     // should still succeed because the first call persisted the tag to cache.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn tag_persisted_in_cache_after_source_fetch() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -2012,7 +2012,7 @@ mod tests {
     // window from `tag_guard.rs`) must not short-circuit the chain walk.
     // `ChainedIndex::fetch_manifest` should log a warn, degrade to the source,
     // and the re-read of the now-rewritten file must succeed.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn corrupted_cache_read_falls_back_to_chain() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
@@ -2040,7 +2040,7 @@ mod tests {
     }
 
     // Case 13b: same degrade path for `fetch_manifest_digest`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn corrupted_cache_read_digest_falls_back_to_chain() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);

@@ -26,7 +26,6 @@ pub mod codesign;
 pub mod compression;
 pub mod env;
 pub mod error;
-pub mod file_lock;
 pub mod file_structure;
 pub mod hardlink;
 pub mod log;

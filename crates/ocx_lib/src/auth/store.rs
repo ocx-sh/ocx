@@ -23,10 +23,16 @@ use serde::{Deserialize, Serialize};
 use crate::auth::AuthError;
 use crate::auth::registry_url::canonicalize_registry;
 
-/// Local RAII guard wrapping a locked file. Dropping the file releases the
-/// advisory lock.
-struct ConfigLock {
-    _file: std::fs::File,
+use crate::utility::fs::LockedFile;
+
+/// Local RAII guard wrapping the locked `config.json`. Dropping the guard
+/// releases the advisory lock and closes the lock-owning handle.
+///
+/// The guard owns the read+write fd through which all I/O on `config.json`
+/// must route (Windows `LockFileEx` is per-handle; opening a second fd on
+/// the locked range from the same process hits `ERROR_LOCK_VIOLATION`).
+struct ConfigGuard {
+    locked: LockedFile,
 }
 
 /// Credential persisted to docker config / credential helper.
@@ -194,8 +200,8 @@ impl CredentialStore for DockerCredentialStore {
         let path = self.config_path.clone();
         // Read under exclusive lock to coexist with concurrent writers.
         let blocking = tokio::task::spawn_blocking(move || -> Result<Option<Credential>, AuthError> {
-            let _guard = acquire_lock(&path)?;
-            let config = read_config(&path)?;
+            let mut guard = acquire_config_guard(&path)?;
+            let config = guard.read()?;
             let resolution = resolve_helper(&config, &canonical, false);
             match resolution {
                 HelperResolution::Helper(helper) => {
@@ -230,8 +236,8 @@ impl CredentialStore for DockerCredentialStore {
         let cred_copy = clone_credential(cred);
 
         let blocking = tokio::task::spawn_blocking(move || -> Result<(), AuthError> {
-            let _guard = acquire_lock(&path)?;
-            let mut config = read_config(&path)?;
+            let mut guard = acquire_config_guard(&path)?;
+            let mut config = guard.read()?;
 
             // Decide store tier from current config.
             let mut detected_helper: Option<String> = None;
@@ -262,7 +268,7 @@ impl CredentialStore for DockerCredentialStore {
                     if let Some(detected) = detected_helper {
                         // Sticky-detected helpers are persisted on first successful put.
                         config.creds_store = Some(detected);
-                        write_config(&path, &config)?;
+                        guard.write(&config)?;
                     }
                 }
                 StoreTier::Plaintext => {
@@ -276,7 +282,7 @@ impl CredentialStore for DockerCredentialStore {
                         entry.auth = Some(BASE64_STANDARD.encode(user_pass.as_bytes()));
                         entry.identity_token = None;
                     }
-                    write_config(&path, &config)?;
+                    guard.write(&config)?;
                 }
             }
             Ok(())
@@ -292,14 +298,8 @@ impl CredentialStore for DockerCredentialStore {
         let path = self.config_path.clone();
 
         let blocking = tokio::task::spawn_blocking(move || -> Result<(), AuthError> {
-            let _guard = acquire_lock(&path)?;
-            let mut config = match read_config(&path) {
-                Ok(c) => c,
-                Err(AuthError::WriteConfigFailed { source, .. }) if source.kind() == ErrorKind::NotFound => {
-                    return Ok(()); // nothing to delete
-                }
-                Err(err) => return Err(err),
-            };
+            let mut guard = acquire_config_guard(&path)?;
+            let mut config = guard.read()?;
 
             // Helper erase (consult per-registry helper, then credsStore).
             let helper = config
@@ -317,7 +317,7 @@ impl CredentialStore for DockerCredentialStore {
             // Remove plaintext entry.
             let auths_changed = config.auths.remove(&canonical).is_some();
             if auths_changed {
-                write_config(&path, &config)?;
+                guard.write(&config)?;
             }
             Ok(())
         });
@@ -385,136 +385,79 @@ fn clone_credential(cred: &Credential) -> Credential {
     }
 }
 
-/// Acquire an exclusive flock on the config path (parent dir + sentinel file).
-/// Used by every read-modify-write op so concurrent `ocx login` invocations
-/// serialise without torn writes. Sync — runs inside a `spawn_blocking` task.
-fn acquire_lock(path: &Path) -> Result<ConfigLock, AuthError> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|source| AuthError::WriteConfigFailed {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    // Lock file is the target file itself when present, or its parent
-    // sentinel `.config.json.lock` when not. Using a sibling lock file
-    // sidesteps mode-bit interaction with the atomic rename.
-    let lock_path = path.with_extension("json.lock");
-    let lock_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|source| AuthError::WriteConfigFailed {
-            path: lock_path.clone(),
-            source,
-        })?;
-    // NOTE: inline retry loop instead of `FileLock::lock_exclusive_with_timeout`
-    // because we're inside a `spawn_blocking` closure (sync context). The async
-    // helper would require entering the runtime here; reusing the simpler
-    // fs4 sync API keeps the blocking surface contained.
-    use fs4::fs_std::FileExt as _;
-    // Best-effort 5s budget: try non-blocking first, then poll briefly.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match lock_file.try_lock_exclusive() {
-            Ok(true) => break,
-            Ok(false) => {
-                if std::time::Instant::now() >= deadline {
-                    return Err(AuthError::WriteConfigFailed {
-                        path: lock_path,
-                        source: std::io::Error::new(ErrorKind::TimedOut, "config.json lock timed out"),
-                    });
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(source) => {
-                return Err(AuthError::WriteConfigFailed {
-                    path: lock_path,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(ConfigLock { _file: lock_file })
-}
-
-fn read_config(path: &Path) -> Result<DockerConfig, AuthError> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            if bytes.is_empty() {
-                return Ok(DockerConfig::default());
-            }
-            serde_json::from_slice(&bytes).map_err(|err| AuthError::WriteConfigFailed {
-                path: path.to_path_buf(),
-                source: std::io::Error::new(ErrorKind::InvalidData, err),
-            })
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(DockerConfig::default()),
-        Err(source) => Err(AuthError::WriteConfigFailed {
+/// Acquire an exclusive lock directly on `config.json` and return the
+/// lock-owning handle.
+///
+/// Every read-modify-write op of the docker config routes its I/O through
+/// this guard so concurrent `ocx login` invocations serialise without torn
+/// writes. Sync — runs inside a `spawn_blocking` task. No sidecar lock
+/// file; the data file IS the lock target.
+fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
+    let locked = LockedFile::open_exclusive_blocking_with_timeout(path, Duration::from_secs(5)).map_err(|e| {
+        AuthError::WriteConfigFailed {
             path: path.to_path_buf(),
-            source,
-        }),
+            source: std::io::Error::other(e),
+        }
+    })?;
+    // Tighten file permissions to owner-only on Unix. Re-applied on every
+    // acquire so an externally-relaxed mode is restored before any write
+    // exposes credentials. On a freshly created file the umask default
+    // applies for the brief window between open and `set_permissions`; this
+    // is acceptable because no credentials are written until the subsequent
+    // `replace_bytes_blocking` call.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|source| {
+            AuthError::WriteConfigFailed {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
     }
+    Ok(ConfigGuard { locked })
 }
 
-fn write_config(path: &Path, config: &DockerConfig) -> Result<(), AuthError> {
-    // INVARIANT: `path` always has a parent directory because it is derived from
-    // `DockerConfig::path()`, which always resolves to an absolute path inside
-    // `DOCKER_CONFIG` dir or `~/.docker/`. The `unwrap_or(Path::new("."))` is a
-    // defensive fallback that should never be reached in practice.
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let serialized = serde_json::to_vec_pretty(config).map_err(|err| AuthError::WriteConfigFailed {
-        path: path.to_path_buf(),
-        source: std::io::Error::new(ErrorKind::InvalidData, err),
-    })?;
-    // Atomic write: temp file in same directory, then rename.
-    let mut suffix: u64 = 0;
-    let tmp_path = loop {
-        let nano = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as u64)
-            .unwrap_or(0)
-            ^ std::process::id() as u64
-            ^ suffix;
-        let candidate = parent.join(format!(".config.json.tmp.{nano}"));
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
+impl ConfigGuard {
+    /// Read the docker config through the lock-owning handle.
+    ///
+    /// Empty file (freshly created by [`LockedFile::open_exclusive_blocking_with_timeout`])
+    /// yields [`DockerConfig::default()`]. Unparseable JSON surfaces as
+    /// [`AuthError::WriteConfigFailed`] with `ErrorKind::InvalidData`.
+    fn read(&mut self) -> Result<DockerConfig, AuthError> {
+        let bytes = self
+            .locked
+            .read_bytes_blocking()
+            .map_err(|e| AuthError::WriteConfigFailed {
+                path: self.locked.path().to_path_buf(),
+                source: std::io::Error::other(e),
+            })?;
+        if bytes.is_empty() {
+            return Ok(DockerConfig::default());
         }
-        match opts.open(&candidate) {
-            Ok(mut file) => {
-                use std::io::Write as _;
-                file.write_all(&serialized)
-                    .map_err(|source| AuthError::WriteConfigFailed {
-                        path: candidate.clone(),
-                        source,
-                    })?;
-                file.flush().map_err(|source| AuthError::WriteConfigFailed {
-                    path: candidate.clone(),
-                    source,
-                })?;
-                break candidate;
-            }
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                suffix = suffix.wrapping_add(1);
-                continue;
-            }
-            Err(source) => {
-                return Err(AuthError::WriteConfigFailed {
-                    path: candidate,
-                    source,
-                });
-            }
-        }
-    };
-    std::fs::rename(&tmp_path, path).map_err(|source| AuthError::WriteConfigFailed {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
+        serde_json::from_slice(&bytes).map_err(|err| AuthError::WriteConfigFailed {
+            path: self.locked.path().to_path_buf(),
+            source: std::io::Error::new(ErrorKind::InvalidData, err),
+        })
+    }
+
+    /// Rewrite the docker config in place through the lock-owning handle.
+    ///
+    /// Truncate + write + sync_data on the locked inode. No tempfile, no
+    /// rename. SIGKILL between `set_len(0)` and `sync_data` can leave
+    /// `config.json` truncated; recovery is manual (`ocx login` again).
+    fn write(&mut self, config: &DockerConfig) -> Result<(), AuthError> {
+        let serialized = serde_json::to_vec_pretty(config).map_err(|err| AuthError::WriteConfigFailed {
+            path: self.locked.path().to_path_buf(),
+            source: std::io::Error::new(ErrorKind::InvalidData, err),
+        })?;
+        self.locked
+            .replace_bytes_blocking(&serialized)
+            .map_err(|e| AuthError::WriteConfigFailed {
+                path: self.locked.path().to_path_buf(),
+                source: std::io::Error::other(e),
+            })
+    }
 }
 
 // ─────────────────────────── tests ───────────────────────────

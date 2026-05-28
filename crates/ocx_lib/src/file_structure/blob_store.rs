@@ -5,10 +5,6 @@ use std::path::{Path, PathBuf};
 
 use crate::{Result, log, oci};
 
-mod blob_guard;
-
-pub use blob_guard::BlobGuard;
-
 /// Represents a single content-addressed blob directory within the blob store.
 ///
 /// A blob directory has a fixed layout:
@@ -72,9 +68,10 @@ impl BlobStore {
     /// Returns the `data` file path for the given registry and digest.
     ///
     /// # Invariant
-    /// All writes to this path MUST go through `BlobStore::acquire_write` to
-    /// respect the cooperative advisory lock protocol. Direct `fs` writes
-    /// corrupt concurrent readers.
+    /// All writes to this path go through `BlobStore::write_blob`, which uses
+    /// `tempfile::NamedTempFile` + atomic rename. The content-addressed
+    /// invariant (same digest → same bytes) makes concurrent writers safe:
+    /// each writes byte-equivalent content, and the rename is idempotent.
     pub(crate) fn data(&self, registry: &str, digest: &oci::Digest) -> PathBuf {
         self.path(registry, digest).join("data")
     }
@@ -84,29 +81,88 @@ impl BlobStore {
         self.path(registry, digest).join(super::cas_path::DIGEST_FILENAME)
     }
 
-    /// Acquires an exclusive lock on the blob `data` file for the given
-    /// pinned identifier (registry + digest), creating parent directories on
-    /// first use. Writers must hold this guard while calling
-    /// [`BlobGuard::write_bytes`](blob_guard::BlobGuard::write_bytes).
+    /// Idempotently write `bytes` to the CAS `data` path for `(registry, digest)`.
     ///
-    /// Also writes the sibling `digest` marker file so that CAS recovery
-    /// tools can map the sharded directory back to its full digest string.
-    /// The marker write is idempotent — re-acquiring the same blob rewrites
-    /// the same content.
-    pub async fn acquire_write(&self, pinned: &oci::PinnedIdentifier) -> Result<BlobGuard> {
-        let digest = pinned.digest();
-        let data_path = self.data(pinned.registry(), &digest);
-        let guard = BlobGuard::acquire_exclusive(data_path).await?;
-        let digest_path = self.digest_file(pinned.registry(), &digest);
-        super::cas_path::write_digest_file(&digest_path, &digest).await?;
-        Ok(guard)
+    /// Caller MUST have verified `digest == sha256(bytes)` upstream — this
+    /// function does not re-hash.
+    ///
+    /// Behavior:
+    /// 1. If the CAS `data` path already exists **and is non-empty**, return
+    ///    `Ok(())` (idempotent). A zero-byte file is treated as absent — it
+    ///    is a crash artifact from a kill-9 during a previous write and must
+    ///    be overwritten via the tempfile+rename path.
+    /// 2. Otherwise: `tempfile::NamedTempFile::new_in(cas_parent_dir)` →
+    ///    `write_all(bytes)` → `sync_data` → `persist(cas_path)`.
+    /// 3. On Windows `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED`
+    ///    (5) — caused by concurrent non-sharing readers or AV scanning —
+    ///    retry the persist with exponential backoff (3 retries:
+    ///    100ms / 400ms / 800ms with ±25% jitter). After exhausting retries,
+    ///    re-check the CAS path; if it now exists, return `Ok(())`
+    ///    (the writer that won the race is byte-equivalent by content-addressing).
+    ///    Matches rattler's `rename_with_retry` precedent for the same hazard.
+    ///
+    /// # Errors
+    ///
+    /// Returns `crate::Error::InternalFile(cas_path, io::Error)` on disk
+    /// failure after retry exhaustion.
+    ///
+    /// No `BlobGuard` is acquired — there is no advisory lock on the `data`
+    /// file. F1 (cross-process read of locked blob data) cannot recur because
+    /// the lock has been removed entirely, not relocated.
+    pub(crate) async fn write_blob(&self, registry: &str, digest: &oci::Digest, bytes: &[u8]) -> crate::Result<()> {
+        #[cfg(test)]
+        WRITE_BLOB_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let target = self.data(registry, digest);
+        // Check-first: idempotent fast path (content-addressed invariant).
+        // A zero-byte file is a crash artifact (kill-9 recovery window); treat
+        // it as absent so the tempfile+rename path overwrites it correctly.
+        if tokio::fs::metadata(&target).await.map(|m| m.len() > 0).unwrap_or(false) {
+            return Ok(());
+        }
+        let parent = target
+            .parent()
+            .ok_or_else(|| crate::error::file_error(&target, std::io::Error::other("blob data path has no parent")))?
+            .to_path_buf();
+        tokio::fs::create_dir_all(&parent)
+            .await
+            .map_err(|e| crate::error::file_error(&parent, e))?;
+        let bytes_owned = bytes.to_vec();
+        let target_for_blocking = target.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let mut tmp = tempfile::NamedTempFile::new_in(&parent)?;
+            std::io::Write::write_all(&mut tmp, &bytes_owned)?;
+            tmp.as_file().sync_data()?;
+            persist_with_windows_retry(tmp, &target_for_blocking)
+        })
+        .await
+        .map_err(|join_err| crate::error::file_error(&target, std::io::Error::other(join_err)))?
+        .map_err(|io_err| crate::error::file_error(&target, io_err))?;
+        Ok(())
     }
 
-    /// Acquires a shared lock on the blob `data` file for the given pinned
-    /// identifier. Returns `Ok(None)` when the file does not exist.
-    pub async fn acquire_read(&self, pinned: &oci::PinnedIdentifier) -> Result<Option<BlobGuard>> {
-        let data_path = self.data(pinned.registry(), &pinned.digest());
-        BlobGuard::acquire_shared(data_path).await
+    /// Read the full blob bytes from the CAS `data` path.
+    ///
+    /// Returns `Ok(None)` if the path does not exist. No lock taken — the blob
+    /// is immutable by digest, race-free.
+    ///
+    /// # Trust
+    ///
+    /// Bytes are returned without re-hashing against `digest`. Integrity rests
+    /// on the write-side contract: [`Self::write_blob`] requires the caller to
+    /// have verified `digest == sha256(bytes)` upstream. A future code path
+    /// that writes to the CAS without that pre-verification would silently
+    /// break the integrity guarantee this method depends on. Any new writer
+    /// MUST honor the upstream-verification contract; this is enforced by
+    /// convention and code review (the audit in
+    /// `.claude/artifacts/discovery_file_lock_unification.md` §"Blob-store
+    /// content-addressed audit" validates today's three production writers).
+    pub(crate) async fn read_blob(&self, registry: &str, digest: &oci::Digest) -> crate::Result<Option<Vec<u8>>> {
+        let target = self.data(registry, digest);
+        match tokio::fs::read(&target).await {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(crate::error::file_error(&target, e)),
+        }
     }
 
     /// Lists all blob directories currently present in the store.
@@ -147,6 +203,100 @@ fn classify_blob_dir(dir: &Path, _depth: usize) -> crate::utility::fs::WalkDecis
     }
     crate::utility::fs::WalkDecision::descend_skip(BLOB_SKIP_NAMES)
 }
+
+/// Windows-cfg retry-with-backoff wrapping `NamedTempFile::persist`.
+///
+/// 3 retries: 100ms / 400ms / 800ms with ±25% jitter on
+/// ERROR_SHARING_VIOLATION (32) or ERROR_ACCESS_DENIED (5). After retry
+/// exhaustion, re-check existence; if the target now exists, return Ok
+/// (content-addressed idempotency — the racing writer's bytes are
+/// byte-equivalent by definition).
+///
+/// Cites rattler's `rename_with_retry` precedent for the same Windows
+/// Defender amplification surface on `windows-latest` GitHub Actions
+/// runners (research §6 Finding 2).
+///
+/// On non-Windows, persist is called once with no retry.
+fn persist_with_windows_retry(tmp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::time::Duration;
+
+        const RETRIES: [Duration; 3] = [
+            Duration::from_millis(100),
+            Duration::from_millis(400),
+            Duration::from_millis(800),
+        ];
+
+        let mut tmp_opt = Some(tmp);
+        let mut last_err: Option<std::io::Error> = None;
+
+        // First attempt: no backoff. Then up to 3 retries with jitter.
+        for backoff in std::iter::once(Duration::ZERO).chain(RETRIES.iter().copied()) {
+            if !backoff.is_zero() {
+                // ±25% jitter using subsecond nanos from SystemTime as a
+                // pseudo-random seed. No `rand` dep needed.
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos();
+                let jitter_scale = 0.75 + (f64::from(nanos % 1024) / 1023.0) * 0.5;
+                let scaled = Duration::from_secs_f64(backoff.as_secs_f64() * jitter_scale);
+                std::thread::sleep(scaled);
+            }
+            let temp_file = tmp_opt.take().expect("tmp_opt is always Some at loop entry");
+            match temp_file.persist(target) {
+                Ok(_) => return Ok(()),
+                Err(persist_err) => {
+                    let raw_os_error = persist_err.error.raw_os_error();
+                    if matches!(raw_os_error, Some(5) | Some(32)) {
+                        tmp_opt = Some(persist_err.file);
+                        last_err = Some(persist_err.error);
+                        continue;
+                    }
+                    return Err(persist_err.error);
+                }
+            }
+        }
+        // Retry exhausted; idempotent re-check (content-addressed invariant).
+        if target.exists() {
+            return Ok(());
+        }
+        Err(last_err.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "persist retries exhausted")))
+    }
+    #[cfg(not(windows))]
+    {
+        tmp.persist(target).map(|_| ()).map_err(|e| e.error)
+    }
+}
+
+/// Test-only call counter on `BlobStore::write_blob`.
+///
+/// Used by `PullCoordinator::stage_blob_bytes` coalescing tests to assert
+/// the singleflight dedup actually fires (the leader executes exactly once,
+/// waiters short-circuit). Without this instrumentation, content-addressing
+/// alone makes "both calls return Ok" a passing condition even when no
+/// dedup happens — masking a regression that would otherwise cost a
+/// duplicate download per concurrent caller.
+///
+/// The counter is process-global. Tests that read it for assertion MUST
+/// acquire [`WRITE_BLOB_TEST_LOCK`] to serialise against sibling tests
+/// that also call `write_blob` (e.g. the Windows-cfg `write_blob_retries_*`
+/// tests). `cargo test` parallelises within a single test binary, so the
+/// static would otherwise be racy.
+#[cfg(test)]
+pub(crate) static WRITE_BLOB_CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-binary-local serializer for the `WRITE_BLOB_CALL_COUNT` static. Held
+/// for the duration of any test that reads the counter as an assertion, or
+/// that calls `write_blob` while such a test might be running.
+///
+/// Uses `tokio::sync::Mutex` (not `std::sync::Mutex`) because every consumer
+/// is a `#[tokio::test]` that awaits blob I/O while holding the guard. A
+/// std-sync guard across `.await` is a Block-tier anti-pattern per
+/// `quality-rust.md` (`clippy::await_holding_lock`).
+#[cfg(test)]
+pub(crate) static WRITE_BLOB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 mod tests {
@@ -252,91 +402,6 @@ mod tests {
         assert_eq!(blobs.len(), 1);
     }
 
-    // ── BlobStore wrapper tests (plan_resolution_chain_refs.md tests 11-13) ──
-
-    /// Builds a pinned identifier for `example.com/pkg@sha256:<SHA256_HEX>`.
-    fn pinned() -> oci::PinnedIdentifier {
-        let id = oci::Identifier::new_registry("pkg", "example.com")
-            .clone_with_digest(oci::Digest::Sha256(SHA256_HEX.to_string()));
-        oci::PinnedIdentifier::try_from(id).unwrap()
-    }
-
-    /// Test 11: acquire_write writes a sibling digest marker file in addition
-    /// to the locked `data` file. The digest file path must be the sibling
-    /// `digest` file next to `data`.
-    #[tokio::test]
-    async fn acquire_write_writes_sibling_digest_marker_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = BlobStore::new(dir.path());
-        let pinned = pinned();
-        let guard = store.acquire_write(&pinned).await.unwrap();
-        guard.write_bytes(b"{}").await.unwrap();
-        drop(guard);
-        // After a successful write, the sibling `digest` file must exist.
-        let digest_file = store.digest_file(pinned.registry(), &pinned.digest());
-        assert!(
-            digest_file.exists(),
-            "digest marker file must be written alongside data after acquire_write"
-        );
-    }
-
-    /// Test 12: acquire_write followed by acquire_read returns the same bytes.
-    #[tokio::test]
-    async fn acquire_write_then_acquire_read_returns_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = BlobStore::new(dir.path());
-        let pinned = pinned();
-        let payload = b"manifest content here";
-        let writer = store.acquire_write(&pinned).await.unwrap();
-        writer.write_bytes(payload).await.unwrap();
-        drop(writer);
-
-        let reader = store.acquire_read(&pinned).await.unwrap().unwrap();
-        let bytes = reader.read_bytes().await.unwrap();
-        assert_eq!(bytes, payload, "acquire_read must return what acquire_write wrote");
-    }
-
-    /// Test 13: eight concurrent tasks acquire_write on the same digest;
-    /// the final file content is valid (no corruption). Only one writer wins
-    /// per round; `BlobGuard` serialises them via `fs2` exclusive lock.
-    #[tokio::test]
-    async fn concurrent_acquire_write_on_same_digest_serialises() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(BlobStore::new(dir.path()));
-        let pinned = pinned();
-
-        let mut tasks = tokio::task::JoinSet::new();
-        for i in 0u8..8 {
-            let store_clone = store.clone();
-            let pinned_clone = pinned.clone();
-            tasks.spawn(async move {
-                let guard = store_clone.acquire_write(&pinned_clone).await.unwrap();
-                // Each writer writes a fixed-length payload distinct by `i`.
-                let payload = vec![i; 16];
-                guard.write_bytes(&payload).await.unwrap();
-            });
-        }
-        while let Some(joined) = tasks.join_next().await {
-            joined.expect("task panicked");
-        }
-
-        // The data file must exist and contain exactly 16 bytes (one writer's payload).
-        let data_path = store.data(pinned.registry(), &pinned.digest());
-        let content = std::fs::read(&data_path).unwrap();
-        assert_eq!(
-            content.len(),
-            16,
-            "concurrent writes must not corrupt the data file; got {} bytes",
-            content.len()
-        );
-        // All bytes must be the same value (one writer's uniform payload).
-        let first_byte = content[0];
-        assert!(
-            content.iter().all(|&b| b == first_byte),
-            "data file must contain a single writer's uniform payload, not mixed bytes"
-        );
-    }
-
     #[tokio::test]
     async fn list_all_skips_directory_without_data_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -348,5 +413,225 @@ mod tests {
         let store = BlobStore::new(dir.path());
         let blobs = store.list_all().await.unwrap();
         assert_eq!(blobs.len(), 0);
+    }
+
+    // ---- write_blob / read_blob -------------------------------------------
+
+    /// write_blob is idempotent: calling it again when the target already
+    /// exists returns Ok(()) and does not overwrite the existing file.
+    #[tokio::test]
+    async fn write_blob_idempotent_when_target_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path());
+        let d = digest();
+
+        let first_bytes = b"first write";
+        store.write_blob("example.com", &d, first_bytes).await.unwrap();
+        assert_eq!(std::fs::read(store.data("example.com", &d)).unwrap(), first_bytes);
+
+        // A second write with different bytes must be a no-op: the target
+        // already exists, so the check-first path returns Ok(()).
+        store.write_blob("example.com", &d, b"second write").await.unwrap();
+        assert_eq!(
+            std::fs::read(store.data("example.com", &d)).unwrap(),
+            first_bytes,
+            "write_blob must be idempotent when the target data file already exists"
+        );
+    }
+
+    /// N concurrent writers on the same digest all succeed and the final
+    /// file is non-empty (atomic rename is idempotent under concurrent writes).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_write_blob_on_same_digest_atomic_rename_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(BlobStore::new(dir.path()));
+        let d = digest();
+        let payload = b"content-addressed payload";
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let store_clone = store.clone();
+            let d_clone = d.clone();
+            tasks.spawn(async move {
+                store_clone.write_blob("example.com", &d_clone, payload).await.unwrap();
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            joined.expect("task panicked");
+        }
+
+        // All writers produced byte-equivalent content; the file must exist
+        // and contain the correct bytes.
+        let on_disk = std::fs::read(store.data("example.com", &d)).unwrap();
+        assert_eq!(
+            on_disk, payload,
+            "concurrent write_blob must leave the correct content on disk"
+        );
+    }
+
+    /// read_blob returns None when the blob has not been written yet.
+    #[tokio::test]
+    async fn read_blob_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path());
+        let result = store.read_blob("example.com", &digest()).await.unwrap();
+        assert!(
+            result.is_none(),
+            "read_blob must return None when the data file is absent"
+        );
+    }
+
+    /// write_blob then read_blob round-trips the bytes.
+    #[tokio::test]
+    async fn write_then_read_blob_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path());
+        let d = digest();
+        let payload = b"round-trip payload";
+
+        store.write_blob("example.com", &d, payload).await.unwrap();
+        let read_back = store.read_blob("example.com", &d).await.unwrap().unwrap();
+        assert_eq!(read_back, payload);
+    }
+
+    /// write_blob overwrites a zero-byte crash artifact — a zero-byte `data`
+    /// file from a previous kill-9 must not be treated as a valid completed
+    /// write (content-addressed invariant only holds for non-empty files).
+    #[tokio::test]
+    async fn write_blob_overwrites_zero_byte_crash_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path());
+        let d = digest();
+
+        // Simulate a kill-9 mid-write: create a zero-byte data file.
+        let data_path = store.data("example.com", &d);
+        std::fs::create_dir_all(data_path.parent().unwrap()).unwrap();
+        std::fs::write(&data_path, b"").unwrap();
+        assert_eq!(std::fs::metadata(&data_path).unwrap().len(), 0);
+
+        // write_blob must overwrite the zero-byte file.
+        let payload = b"recovered content";
+        store.write_blob("example.com", &d, payload).await.unwrap();
+        let on_disk = std::fs::read(&data_path).unwrap();
+        assert_eq!(
+            on_disk, payload,
+            "write_blob must overwrite a zero-byte crash artifact with the correct content"
+        );
+    }
+
+    /// No data.lock sidecar file is created alongside the data file — the
+    /// tempfile+rename write path leaves no sentinel.
+    #[tokio::test]
+    async fn write_blob_leaves_no_lock_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path());
+        let d = digest();
+
+        store.write_blob("example.com", &d, b"payload").await.unwrap();
+
+        let data_dir = store.path("example.com", &d);
+        let lock_file = data_dir.join("data.lock");
+        assert!(
+            !lock_file.exists(),
+            "write_blob must not create a data.lock sidecar; BlobGuard has been deleted"
+        );
+    }
+
+    // ── Windows cfg-gated retry behavior tests ──────────────────────────────
+    //
+    // These tests verify the Windows-specific retry-with-backoff logic in
+    // `persist_with_windows_retry`. They are gated on `#[cfg(target_os =
+    // "windows")]` and compile but do not run on Linux/macOS.
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_blob_retries_on_sharing_violation_then_succeeds() {
+        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
+        // which reads `WRITE_BLOB_CALL_COUNT` as an assertion. See the
+        // `WRITE_BLOB_TEST_LOCK` doc-comment.
+        let _serialize = super::WRITE_BLOB_TEST_LOCK.lock().await;
+        // Open the eventual CAS path with std::fs::File::open (no FILE_SHARE_DELETE)
+        // so that a rename over it will trigger ERROR_SHARING_VIOLATION (32).
+        // Then race a write_blob. The retry-with-backoff loop should eventually
+        // succeed once we close our blocking handle.
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(BlobStore::new(dir.path()));
+        let d = digest();
+        let target = store.data("example.com", &d);
+
+        // Pre-create the parent directory and an empty data file, then re-open
+        // read-only. `OpenOptions::create(true)` requires `write` or `append`
+        // access on Windows, so the create + reopen split keeps the blocker
+        // handle read-only (no FILE_SHARE_DELETE) as the test intends.
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let _ = std::fs::File::create(&target).unwrap();
+        let blocker = std::fs::OpenOptions::new().read(true).open(&target).unwrap();
+
+        let store_clone = store.clone();
+        let d_clone = d.clone();
+        let handle = tokio::task::spawn(async move {
+            // We expect this to succeed via the retry loop once the blocker
+            // is dropped below.
+            store_clone.write_blob("example.com", &d_clone, b"retry-payload").await
+        });
+
+        // Hold the blocking handle briefly, then release.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(blocker);
+
+        // write_blob should eventually succeed.
+        handle.await.unwrap().unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_blob_returns_ok_when_target_exists_after_retry_exhaustion() {
+        let _serialize = super::WRITE_BLOB_TEST_LOCK.lock().await;
+        // Simulate the scenario where retry exhaustion occurs but the target
+        // file is created by a concurrent writer. The idempotent re-check
+        // should return Ok(()).
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path());
+        let d = digest();
+        let target = store.data("example.com", &d);
+
+        // Pre-create the target file so the existence check succeeds on the
+        // very first call (the check-first fast path in write_blob).
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"pre-existing content").unwrap();
+
+        // write_blob must return Ok(()) without overwriting.
+        store.write_blob("example.com", &d, b"newer bytes").await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"pre-existing content");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn launcher_child_can_read_blob_data_during_concurrent_other_write() {
+        let _serialize = super::WRITE_BLOB_TEST_LOCK.lock().await;
+        // F1 cannot-recur proof: spawn a writer for digest A and simultaneously
+        // open blob A's data file (if already written) with bare File::open.
+        // There is no LockFileEx on the data file after BlobGuard removal, so
+        // the reader must never see ERROR_LOCK_VIOLATION (os error 33).
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(BlobStore::new(dir.path()));
+        let d = digest();
+
+        // Pre-write so there is a data file to read.
+        store.write_blob("example.com", &d, b"f1-proof content").await.unwrap();
+
+        let target = store.data("example.com", &d);
+        let read_result = std::fs::File::open(&target);
+        assert!(
+            read_result.is_ok(),
+            "F1 cannot-recur: data file must be openable without ERROR_LOCK_VIOLATION; \
+             no LockFileEx lock exists on the data file after BlobGuard removal: {:?}",
+            read_result.err()
+        );
+
+        use std::io::Read;
+        let mut content = Vec::new();
+        read_result.unwrap().read_to_end(&mut content).unwrap();
+        assert_eq!(content, b"f1-proof content");
     }
 }

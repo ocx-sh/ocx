@@ -91,27 +91,19 @@ def _count_blobs(blobs_dir: Path) -> set[Path]:
 def _collect_sidecar_files(blobs_dir: Path) -> list[Path]:
     """Return unexpected sidecar files anywhere under blobs/.
 
-    Allowed sidecars (intentional, part of the blob-store contract):
+    No sidecars are permitted after ``BlobGuard`` deletion (commit 9 of the
+    file-lock unification migration). ``BlobStore::write_blob`` uses
+    tempfile + atomic rename with no advisory lock; the ``data.lock`` sidecar
+    that ``BlobGuard`` left behind can never appear in a clean store.
 
-    - ``data.lock`` — per-blob advisory-lock sentinel held by ``BlobGuard``.
-      Sidecar is required on Windows: an ``fs4`` exclusive lock on ``data``
-      itself triggers ``ERROR_LOCK_VIOLATION`` (os error 33) for any
-      concurrent reader, so the lock is placed on a sibling ``data.lock``
-      file and intentionally retained across acquire/drop cycles. See
-      ``crates/ocx_lib/src/file_structure/blob_store/blob_guard.rs`` design
-      record §9 for the full rationale.
-
-    Forbidden: ``.log``, ``.tmp``, and any other ``.lock`` files (e.g.
-    stray ``something.lock`` not named ``data.lock``).
+    Forbidden: all ``.lock``, ``.log``, and ``.tmp`` files — including the
+    formerly-exempt ``data.lock``.
     """
     if not blobs_dir.exists():
         return []
     sidecars: list[Path] = []
     for suffix in (".lock", ".log", ".tmp"):
         for path in blobs_dir.rglob(f"*{suffix}"):
-            # Allow the intentional per-blob `data.lock` sentinel.
-            if path.name == "data.lock":
-                continue
             sidecars.append(path)
     return sidecars
 
@@ -540,23 +532,22 @@ def test_parallel_install_races_preserve_full_chain(
 def test_no_sidecar_lock_files_in_blobs_dir_after_install(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
-    """AC12: After any successful install, no unexpected sidecar .lock, .log,
-    or .tmp files remain anywhere under $OCX_HOME/blobs/.
+    """AC12: After any successful install, no sidecar .lock, .log, or .tmp
+    files remain anywhere under $OCX_HOME/blobs/.
 
-    The per-blob ``data.lock`` advisory-lock sentinel is exempt: it is the
-    intentional, persistent sidecar that holds ``BlobGuard``'s ``fs4`` lock
-    off the ``data`` file (required on Windows — see
-    ``blob_guard.rs`` design record §9). All other ``.lock``, ``.log``, and
-    ``.tmp`` files are forbidden as leftover sidecars from non-atomic write
-    paths.
+    ``BlobGuard`` has been deleted (commit 9 of the file-lock unification
+    migration). ``BlobStore::write_blob`` uses tempfile + atomic rename with
+    no advisory lock; ``data.lock`` sidecars can never appear in a clean
+    store. All ``.lock``, ``.log``, and ``.tmp`` files are forbidden — the
+    formerly-exempt ``data.lock`` is now a violation too.
     """
     pkg = published_package
     ocx.plain("package", "install", pkg.short)
 
     sidecars = _collect_sidecar_files(_blobs_dir(ocx))
     assert not sidecars, (
-        f"AC12: no unexpected sidecar .lock/.log/.tmp files must remain under "
-        f"blobs/ after install (per-blob data.lock is the only allowed sidecar).\n"
+        f"AC12: no sidecar .lock/.log/.tmp files must remain under blobs/ after "
+        f"install; BlobGuard deleted — data.lock must not appear either.\n"
         f"Found: {[str(s) for s in sidecars]}"
     )
 

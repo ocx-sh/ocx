@@ -289,7 +289,7 @@ pub async fn setup_owned(
         && let Some(info) = mgr.find_plain(pinned).await?
     {
         let install_path = mgr.file_structure().packages.install_status(pinned);
-        if utility::fs::path_exists_lossy(&install_path).await {
+        if crate::package::install_status::check_install_status(&install_path).await {
             log::debug!("Package '{}' already fully installed, skipping.", pinned);
             // Top up chain refs in case the already-installed package was
             // resolved via a different image-index path (alias tag). See
@@ -300,9 +300,9 @@ pub async fn setup_owned(
                 .map_err(PackageErrorKind::Internal)?;
             return Ok(info);
         }
-        // Content exists but sentinel missing — crash recovery, re-pull.
+        // Status missing / partial / not-ok — crash recovery, re-pull.
         log::debug!(
-            "Package '{}' present in object store but not stamped, re-pulling.",
+            "Package '{}' present in object store but install status not OK, re-pulling.",
             pinned
         );
     }
@@ -323,7 +323,7 @@ pub async fn setup_owned(
         && let Some(info) = mgr.find_plain(pinned).await?
     {
         let install_path = mgr.file_structure().packages.install_status(pinned);
-        if utility::fs::path_exists_lossy(&install_path).await {
+        if crate::package::install_status::check_install_status(&install_path).await {
             log::debug!(
                 "Package '{}' installed by another process while waiting for lock, skipping.",
                 pinned
@@ -607,11 +607,19 @@ async fn post_download_actions(
         .await
         .map_err(PackageErrorKind::Internal)?;
 
-    InstallStatus::new()
-        .ok()
-        .write_json(pkg.install_status())
-        .await
-        .map_err(PackageErrorKind::Internal)?;
+    // Write install.json through the lock-owning handle so concurrent
+    // `check_install_status` readers (shared lock) wait for the write to
+    // complete before reading. Eliminates the existence-probe race where a
+    // reader could observe a partial JSON document from a mid-write writer.
+    {
+        let mut locked = utility::fs::LockedJsonFile::<InstallStatus>::open_exclusive(pkg.install_status())
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+        locked
+            .write(&InstallStatus::new().ok())
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+    }
 
     file_structure::write_digest_file(&pkg.digest_file(), &pinned.digest())
         .await

@@ -842,7 +842,7 @@ mod tests {
 
     /// Concurrent `touch_state_atomic` calls for the same path must all succeed
     /// (no panics, no I/O errors) and the file must exist at the end.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn touch_state_atomic_concurrent_safety() {
         let tmp = tempfile::tempdir().unwrap();
         let path = std::sync::Arc::new(tmp.path().join("state").join("update-check").join("concurrent_slug"));
@@ -880,7 +880,7 @@ mod tests {
     ///
     /// The mtime-unchanged assertion proves the touch policy (DO NOT touch on
     /// short-circuit) is respected.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn check_update_throttle_short_circuit_does_not_touch() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
@@ -910,7 +910,7 @@ mod tests {
 
     /// `Duration::ZERO` bypasses throttle regardless of state-file mtime.
     /// An offline manager returns Skipped("offline") rather than panicking.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn check_update_bypass_with_zero_duration() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
@@ -937,7 +937,7 @@ mod tests {
     ///
     /// Touching on error avoids hammering a broken registry on every command
     /// invocation (see the module `//!` touch-policy doc).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn check_update_touches_state_on_probe_error() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
@@ -973,7 +973,7 @@ mod tests {
     /// `Skipped("offline mode")`) before reaching the installed-version
     /// subprocess query or the bootstrap guard.  The observable contract —
     /// "returns `Ok(Skipped(…))`, not a hard error" — is unchanged.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn self_check_update_offline_returns_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
@@ -996,7 +996,7 @@ mod tests {
     /// This test exercises the fast path: a fresh state file (within a 1-hour
     /// throttle window) triggers throttle short-circuit in `check_update`, so
     /// the installed-version subprocess query is never reached.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn self_check_update_throttled_returns_skipped_without_subprocess() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
@@ -1023,7 +1023,7 @@ mod tests {
     /// `self_check_update` with a bypassed throttle on an offline manager reaches
     /// the probe path and returns `Skipped("offline mode")`.  The subprocess
     /// query is not invoked because the registry probe short-circuits first.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn self_check_update_bypass_on_offline_returns_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
@@ -1180,7 +1180,7 @@ mod tests {
     /// not bootstrap. The downstream `self_check_update` branch then takes the
     /// `UnparseableCurrent` arm instead of `Bootstrap`, producing the wrong
     /// `SkippedReason` for scripts.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn query_installed_version_returns_none_on_bootstrap() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());

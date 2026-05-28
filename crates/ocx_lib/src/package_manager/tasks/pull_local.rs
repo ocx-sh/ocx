@@ -1,16 +1,77 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::time::Duration;
+
 use crate::{
     archive, file_structure, oci,
     package::{self, install_info::InstallInfo, metadata},
     package_manager::error::PackageErrorKind,
-    publisher,
+    publisher, utility,
 };
 
 use super::super::PackageManager;
 use super::pull::{SetupGroups, setup_owned};
 use super::resolve::{ChainBlob, ChainRole, ResolvedChain};
+
+/// Singleflight coordinator for blob writes within a single `pull_local` operation.
+///
+/// Owns a `singleflight::Group<Digest, ()>` scoped to one pull operation, coalescing
+/// concurrent same-digest fan-out from the resolver `JoinSet`. Created per
+/// [`PackageManager::pull_local`] call so entries are freed when the pull completes.
+///
+/// Index-layer callers (`write_manifest_blob`, `local_index::stage_blob_bytes`) call
+/// `BlobStore::write_blob` directly without a coordinator — they are sequential callers
+/// and content-addressed safety covers them.
+pub(crate) struct PullCoordinator {
+    write_group: utility::singleflight::Group<oci::Digest, ()>,
+}
+
+impl PullCoordinator {
+    pub(crate) fn new() -> Self {
+        Self {
+            write_group: utility::singleflight::Group::new(
+                /* max_entries */ 1024,
+                /* timeout */ Duration::from_secs(60),
+            ),
+        }
+    }
+
+    /// Wrap `BlobStore::write_blob` with per-pull-operation dedup.
+    ///
+    /// The first caller for a given `digest` becomes the leader and performs
+    /// the actual write. Concurrent callers with the same digest become waiters
+    /// and receive the result when the leader completes. This prevents redundant
+    /// concurrent downloads of the same digest within a single pull operation.
+    pub(crate) async fn stage_blob_bytes(
+        &self,
+        store: &crate::file_structure::BlobStore,
+        registry: &str,
+        digest: &oci::Digest,
+        bytes: &[u8],
+    ) -> crate::Result<()> {
+        use utility::singleflight::Acquisition;
+
+        match self.write_group.try_acquire(digest.clone()).await {
+            Ok(Acquisition::Resolved(())) => Ok(()),
+            Ok(Acquisition::Leader(handle)) => {
+                match store.write_blob(registry, digest, bytes).await {
+                    Ok(()) => {
+                        handle.complete(());
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Broadcast a shared error to waiters; the leader
+                        // surfaces the original typed error to its caller.
+                        let _shared = handle.fail(std::io::Error::other(format!("{e}")));
+                        Err(e)
+                    }
+                }
+            }
+            Err(sf_err) => Err(crate::Error::Singleflight(sf_err)),
+        }
+    }
+}
 
 /// Maximum size (in bytes) for a file-layer archive that `pull_local` will load into memory.
 ///
@@ -69,10 +130,15 @@ impl PackageManager {
         let fs = self.file_structure();
         let registry = info.identifier.registry().to_string();
 
+        // Create a per-pull coordinator that coalesces concurrent same-digest
+        // blob writes within this operation via singleflight dedup.
+        let coordinator = PullCoordinator::new();
+
         // Step 1: Resolve layer descriptors locally.
         // File layers → hash + write to blobs/ + extract to layers/{digest}/content/
         // Digest layers → pull from registry on demand (or error offline).
-        let layer_descriptors = stage_layers(self, layers, &info.identifier, &registry, &info.metadata).await?;
+        let layer_descriptors =
+            stage_layers(self, layers, &info.identifier, &registry, &info.metadata, &coordinator).await?;
 
         // Step 2: Synthesize the OCI image manifest from the info + layer descriptors.
         // Shared with `Publisher::push_package_image` so push and test agree byte-for-byte.
@@ -80,7 +146,14 @@ impl PackageManager {
             .map_err(|e| PackageErrorKind::Internal(e.into()))?;
 
         // Step 3: Stage the manifest blob to blobs/ so refs/blobs/ links resolve.
-        stage_blob_bytes(fs, &registry, &parts.manifest_bytes, &parts.manifest_digest).await?;
+        stage_blob_bytes(
+            fs,
+            &registry,
+            &parts.manifest_bytes,
+            &parts.manifest_digest,
+            &coordinator,
+        )
+        .await?;
 
         // Step 4: Synthesize a PinnedIdentifier keyed by the manifest digest.
         let pinned = {
@@ -147,6 +220,7 @@ async fn stage_layers(
     base_identifier: &oci::Identifier,
     registry: &str,
     metadata: &metadata::Metadata,
+    coordinator: &PullCoordinator,
 ) -> Result<Vec<oci::Descriptor>, PackageErrorKind> {
     use crate::MEDIA_TYPE_TAR_GZ;
 
@@ -178,7 +252,7 @@ async fn stage_layers(
                 let media_type = crate::media_type_from_path(path).unwrap_or(MEDIA_TYPE_TAR_GZ);
 
                 // Stage raw bytes to blobs/ so refs/blobs/ links are valid.
-                stage_blob_bytes(fs, registry, &bytes, &digest).await?;
+                stage_blob_bytes(fs, registry, &bytes, &digest, coordinator).await?;
 
                 // Explicitly release the allocation before extraction so peak RSS is
                 // approximately max(archive_size) rather than 2× (Perf W3).
@@ -420,34 +494,29 @@ async fn extract_archive_to_temp(
     Ok(())
 }
 
-/// Write `bytes` into `blobs/{registry}/{digest}/data` under an advisory write lock.
+/// Write `bytes` into `blobs/{registry}/{digest}/data` via tempfile + atomic rename.
 ///
 /// Content-addressed: if the blob data file already exists the write is skipped
-/// (identity guaranteed — same digest ⟹ same bytes).
+/// (identity guaranteed — same digest ⟹ same bytes). The `coordinator` coalesces
+/// concurrent same-digest writes within a single pull operation so the underlying
+/// `BlobStore::write_blob` is called at most once per unique digest.
 async fn stage_blob_bytes(
     fs: &file_structure::FileStructure,
     registry: &str,
     bytes: &[u8],
     digest: &oci::Digest,
+    coordinator: &PullCoordinator,
 ) -> Result<(), PackageErrorKind> {
-    // Build a synthetic pinned identifier for the blob-store API.
-    let synth_id =
-        oci::Identifier::new_registry(format!("__local/{}", digest.hex()), registry).clone_with_digest(digest.clone());
-    let pinned = oci::PinnedIdentifier::try_from(synth_id).map_err(|e| PackageErrorKind::Internal(e.into()))?;
-
     // Fast-path: blob is content-addressed, so if the data file exists the
-    // bytes are identical. Skip the write to avoid redundant I/O.
+    // bytes are identical. Skip before entering the singleflight group.
     if fs.blobs.data(registry, digest).exists() {
         return Ok(());
     }
 
-    let guard = fs
-        .blobs
-        .acquire_write(&pinned)
+    coordinator
+        .stage_blob_bytes(&fs.blobs, registry, digest, bytes)
         .await
-        .map_err(PackageErrorKind::Internal)?;
-    guard.write_bytes(bytes).await.map_err(PackageErrorKind::Internal)?;
-    Ok(())
+        .map_err(PackageErrorKind::Internal)
 }
 
 #[cfg(test)]
@@ -468,10 +537,15 @@ mod tests {
                 env::Env,
             },
         },
-        package_manager::{PackageManager, error::PackageErrorKind},
+        package_manager::PackageManager,
     };
 
+    // Consumed only by tests gated `#[cfg(unix)]` / `#[cfg(not(target_os = "windows"))]`
+    // — on Windows neither test compiles, so guard the imports to match.
+    #[cfg(not(target_os = "windows"))]
     use super::MAX_FILE_LAYER_BYTES;
+    #[cfg(not(target_os = "windows"))]
+    use crate::package_manager::error::PackageErrorKind;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -541,7 +615,7 @@ mod tests {
     //
     // At Phase 3 (Specify), this test panics with `unimplemented!()` — that is
     // the expected failing state. After Phase 4 implementation it must pass.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dest_override_threads_to_move() {
         let (root_dir, mgr) = setup_offline_manager();
         let info = fixture_info("mytool");
@@ -581,7 +655,7 @@ mod tests {
     // invocation finds wrong paths.
     //
     // Requires at least one entrypoint so launcher generation is triggered.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn launcher_baked_with_override_root() {
         let (root_dir, mgr) = setup_offline_manager();
         let info = fixture_info_with_entrypoint("launcher-tool");
@@ -624,7 +698,7 @@ mod tests {
     // used `setup_impl`, the second call would be deduplicated and land in the same
     // destination as the first. By bypassing `setup_impl` and calling `setup_owned`
     // with a fresh `SetupGroups`, each call gets its own materialization.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_same_content_distinct_dests() {
         let (root_dir, mgr) = setup_offline_manager();
         let info_a = fixture_info("concurrent-tool");
@@ -673,7 +747,7 @@ mod tests {
     // This test uses a `StubTransport` with the real `archive.tar.xz` fixture
     // to exercise the full download + extraction path, then confirms that
     // `head_blob` was called and the resulting manifest has a non-zero layer size.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn digest_layer_descriptor_size_matches_head_blob() {
         use crate::{
             oci::{
@@ -792,7 +866,7 @@ mod tests {
     //
     // On Windows `File::set_len` may pre-allocate real space depending on
     // filesystem type; we skip the test there to avoid storage pressure.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[cfg(not(target_os = "windows"))]
     async fn file_layer_exceeding_size_cap_errors() {
         use std::fs::OpenOptions;
@@ -838,7 +912,7 @@ mod tests {
     //
     // A size of 0 in the synthesized manifest breaks byte-for-byte parity with
     // the manifest produced by `package push` for the same layer.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn cached_digest_layer_with_absent_blob_uses_head_blob() {
         use crate::{
             oci::{
@@ -932,7 +1006,7 @@ mod tests {
     // Sockets are chosen because `std::os::unix::net::UnixListener::bind`
     // creates one without extra dependencies (unlike FIFOs which require
     // `nix::unistd::mkfifo` or `mkfifo(1)`).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[cfg(unix)]
     async fn non_regular_file_layer_rejected() {
         let (root_dir, mgr) = setup_offline_manager();
@@ -964,5 +1038,137 @@ mod tests {
             }
             other => panic!("expected Internal(InternalFile) error for non-regular file layer, got: {other:?}"),
         }
+    }
+
+    // ── pull_coordinator_coalesces_concurrent_same_digest_writers ────────────
+    //
+    // PullCoordinator.stage_blob_bytes must coalesce concurrent calls for the
+    // same digest: the first call (leader) performs the actual write; concurrent
+    // callers (waiters) receive Ok(()) WITHOUT re-executing the write.
+    //
+    // Asserts the coalescing property via the `BlobStore::WRITE_BLOB_CALL_COUNT`
+    // test-only AtomicUsize: after two concurrent calls resolve, the counter
+    // must equal exactly 1. Without this assertion, content-addressing alone
+    // would make "both calls return Ok" a passing condition even when no dedup
+    // happens — masking a regression that would otherwise cost a duplicate
+    // download per concurrent caller in `ocx_mirror`.
+    //
+    // Uses a `tokio::sync::Barrier` to force both async tasks to reach
+    // `stage_blob_bytes` before either advances, ensuring the leader/waiter
+    // split is exercised deterministically rather than relying on scheduler
+    // luck.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pull_coordinator_coalesces_concurrent_same_digest_writers() {
+        use crate::{file_structure::BlobStore, oci::Algorithm};
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use tokio::sync::Barrier;
+
+        // Serialise against sibling tests that also call `BlobStore::write_blob`
+        // (the Windows-cfg `write_blob_retries_*` tests). The counter is a
+        // process-global static; cargo runs tests in parallel within a single
+        // binary by default, so a sibling write_blob caller would inflate the
+        // observed delta. The lock is the single sanctioned serializer.
+        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
+
+        // Capture the call-count BASELINE before any work, then assert on the
+        // DELTA at the end. Under the test lock, no sibling write_blob caller
+        // can interpose.
+        let baseline = crate::file_structure::WRITE_BLOB_CALL_COUNT.load(Ordering::SeqCst);
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path().join("blobs"));
+        let coordinator = Arc::new(super::PullCoordinator::new());
+
+        let bytes = b"hello coordinator";
+        let digest = Algorithm::Sha256.hash(bytes);
+        let registry = "example.com";
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Launch two concurrent calls for the same digest, gated by a barrier
+        // so both reach stage_blob_bytes before either can complete.
+        let store_a = store.clone();
+        let store_b = store.clone();
+        let coordinator_a = coordinator.clone();
+        let coordinator_b = coordinator.clone();
+        let digest_a = digest.clone();
+        let digest_b = digest.clone();
+        let bytes_a = bytes.to_vec();
+        let bytes_b = bytes.to_vec();
+        let barrier_a = barrier.clone();
+        let barrier_b = barrier.clone();
+
+        let (result_a, result_b) = tokio::join!(
+            async move {
+                barrier_a.wait().await;
+                coordinator_a
+                    .stage_blob_bytes(&store_a, registry, &digest_a, &bytes_a)
+                    .await
+            },
+            async move {
+                barrier_b.wait().await;
+                coordinator_b
+                    .stage_blob_bytes(&store_b, registry, &digest_b, &bytes_b)
+                    .await
+            },
+        );
+
+        assert!(result_a.is_ok(), "first concurrent writer must succeed: {result_a:?}");
+        assert!(result_b.is_ok(), "second concurrent writer must succeed: {result_b:?}");
+
+        // The target data file must exist after both calls.
+        let data_path = store.data(registry, &digest);
+        assert!(
+            data_path.exists(),
+            "blob data file must exist after concurrent writes: {data_path:?}"
+        );
+        let written = std::fs::read(&data_path).unwrap();
+        assert_eq!(written, bytes, "blob data must equal the written bytes");
+
+        // Singleflight coalescing: exactly ONE invocation of BlobStore::write_blob
+        // across both concurrent callers. A delta > 1 means dedup failed and
+        // duplicate work was performed.
+        let delta = crate::file_structure::WRITE_BLOB_CALL_COUNT
+            .load(Ordering::SeqCst)
+            .saturating_sub(baseline);
+        assert_eq!(
+            delta, 1,
+            "PullCoordinator must coalesce: expected exactly 1 NEW call to BlobStore::write_blob across both \
+             concurrent same-digest writers; got delta={delta}. A regression that removes singleflight or calls \
+             write_blob directly would surface here as delta >= 2."
+        );
+    }
+
+    // ── pull_coordinator_returns_singleflight_error_on_leader_failure ────────
+    //
+    // When the leader call to BlobStore::write_blob fails, PullCoordinator must
+    // propagate the error to the caller.
+    //
+    // We simulate the failure by pointing the BlobStore at a path that cannot be
+    // created (a file path used as a directory).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pull_coordinator_returns_singleflight_error_on_leader_failure() {
+        use crate::{file_structure::BlobStore, oci::Algorithm};
+
+        let dir = tempfile::tempdir().unwrap();
+        // Create a file where the blobs directory would be — this blocks
+        // directory creation and forces write_blob to fail.
+        let blobs_path = dir.path().join("blobs");
+        std::fs::write(&blobs_path, b"not a directory").unwrap();
+
+        let store = BlobStore::new(blobs_path);
+        let coordinator = super::PullCoordinator::new();
+
+        let bytes = b"this write must fail";
+        let digest = Algorithm::Sha256.hash(bytes);
+        let registry = "example.com";
+
+        let result = coordinator.stage_blob_bytes(&store, registry, &digest, bytes).await;
+
+        assert!(
+            result.is_err(),
+            "stage_blob_bytes must propagate leader failure; got Ok"
+        );
     }
 }
