@@ -4,12 +4,17 @@
 use serde::Serialize;
 
 use crate::api::Printable;
+use crate::app::build_info::Provenance;
 
 /// System information about the ocx installation.
 ///
 /// Plain format: colored logo with key-value pairs alongside.
 ///
-/// JSON format: flat object with version, registry, platforms, shell, home.
+/// JSON format: flat object with version + registry + platforms + shell +
+/// home plus optional `channel`, `commit`, `build`, `ci` blocks merged
+/// from [`Provenance::current`]. The build-provenance fields are absent
+/// on local `cargo build` without git, matching `ocx version --format
+/// json` behaviour.
 #[derive(Serialize)]
 pub struct About {
     pub version: String,
@@ -17,6 +22,8 @@ pub struct About {
     pub platforms: Vec<String>,
     pub shell: Option<String>,
     pub home: String,
+    #[serde(flatten)]
+    pub provenance: Provenance,
 }
 
 impl About {
@@ -27,7 +34,16 @@ impl About {
             platforms,
             shell,
             home,
+            provenance: Provenance::current(),
         }
+    }
+
+    /// Short commit summary for the info-table — `<short> (clean|dirty)`,
+    /// or `None` when no git metadata was baked in.
+    pub fn commit_summary(&self) -> Option<String> {
+        let commit = self.provenance.commit.as_ref()?;
+        let dirty = if commit.dirty { "dirty" } else { "clean" };
+        Some(format!("{} ({dirty})", commit.short))
     }
 }
 
@@ -36,9 +52,99 @@ impl Printable for About {
         // Plain format is handled directly by the command (logo rendering).
         // This is only called as a fallback.
         println!("Version:   {}", self.version);
+        if let Some(commit) = self.commit_summary() {
+            println!("Commit:    {commit}");
+        }
+        if let Some(channel) = self.provenance.channel {
+            println!("Channel:   {channel}");
+        }
         println!("Registry:  {}", self.registry);
         println!("Platforms: {}", self.platforms.join(", "));
         println!("Shell:     {}", self.shell.as_deref().unwrap_or("n/a"));
         println!("Home:      {}", self.home);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::About;
+    use crate::app::build_info::{CommitInfo, Provenance};
+
+    fn make_about_with_provenance(provenance: Provenance) -> About {
+        About {
+            version: "1.0.0".to_owned(),
+            registry: "registry.example.com".to_owned(),
+            platforms: vec!["linux/amd64".to_owned()],
+            shell: None,
+            home: "/home/user/.ocx".to_owned(),
+            provenance,
+        }
+    }
+
+    /// `commit_summary` returns `None` when no git metadata is baked in.
+    #[test]
+    fn commit_summary_none_when_no_commit() {
+        let about = make_about_with_provenance(Provenance {
+            channel: None,
+            commit: None,
+            build: None,
+            ci: None,
+        });
+        assert_eq!(about.commit_summary(), None);
+    }
+
+    /// `commit_summary` returns `"<short> (clean)"` for a clean commit.
+    #[test]
+    fn commit_summary_clean() {
+        let about = make_about_with_provenance(Provenance {
+            channel: None,
+            commit: Some(CommitInfo {
+                sha: "abcdef1234567890".to_owned(),
+                short: "abcdef12".to_owned(),
+                describe: "v1.0.0".to_owned(),
+                dirty: false,
+                timestamp: None,
+            }),
+            build: None,
+            ci: None,
+        });
+        assert_eq!(about.commit_summary(), Some("abcdef12 (clean)".to_owned()));
+    }
+
+    /// `commit_summary` returns `"<short> (dirty)"` for a dirty commit.
+    #[test]
+    fn commit_summary_dirty() {
+        let about = make_about_with_provenance(Provenance {
+            channel: None,
+            commit: Some(CommitInfo {
+                sha: "abcdef1234567890".to_owned(),
+                short: "abcdef12".to_owned(),
+                describe: "v1.0.0-dirty".to_owned(),
+                dirty: true,
+                timestamp: None,
+            }),
+            build: None,
+            ci: None,
+        });
+        assert_eq!(about.commit_summary(), Some("abcdef12 (dirty)".to_owned()));
+    }
+
+    /// `About::print_plain` does not panic; it is a smoke test only because
+    /// constructing a full `DataInterface` is lightweight (Printer + color=false).
+    /// See acceptance test `test_about_*` for full output verification.
+    #[test]
+    fn print_plain_smoke() {
+        use crate::api::Printable as _;
+        use ocx_lib::cli::{DataInterface, Printer};
+
+        let about = make_about_with_provenance(Provenance {
+            channel: None,
+            commit: None,
+            build: None,
+            ci: None,
+        });
+        let di = DataInterface::new(Printer::new(false, false));
+        // Must not panic.
+        about.print_plain(&di);
     }
 }

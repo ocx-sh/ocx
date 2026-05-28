@@ -811,13 +811,49 @@ After running `ocx index update <pkg>`, an `ocx --offline install <pkg>` will fa
 
 ### `about` {#about}
 
-Prints environment information: the ocx version, default registry, supported platforms, detected shell, and home directory.
+Prints environment information: the ocx version, default registry, supported platforms, detected shell, and home directory. When build provenance was baked in at compile time, two optional rows appear: `Commit` (short SHA and clean/dirty status) and `Channel` (e.g. `dev`). These rows are absent on local builds and on stable releases without a channel override.
+
+In a terminal, `ocx about` renders an isometric logo alongside the info table. In non-interactive contexts (piped output without `--color always`), the plain key-value fallback is used instead.
 
 **Usage**
 
 ```shell
 ocx about
 ```
+
+**Plain output — terminal**
+
+```
+              ++++++               ++++++
+          ...                              (logo)
+
+Version    0.3.2-dev+20260528143045
+Commit     a1b2c3d4 (clean)
+Channel    dev
+Registry   ocx.sh
+Platform   linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
+Shell      bash
+Home       /home/user/.ocx
+```
+
+**JSON output**
+
+`ocx --format json about` emits a flat object. The `commit`, `build`, and `ci` blocks are merged from the [build provenance][version-json-schema] payload and follow the same schema and suppression rules as `ocx --format json version`:
+
+```json
+{
+  "version": "0.3.2",
+  "registry": "ocx.sh",
+  "platforms": ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64", "windows/amd64"],
+  "shell": "bash",
+  "home": "/home/user/.ocx",
+  "commit": { "sha": "...", "short": "a1b2c3d4", "describe": "...", "dirty": false },
+  "build":  { "timestamp": "...", "profile": "release", "target": "...", "rustc": "..." },
+  "ci":     { "provider": "github-actions", "run_url": "...", "workflow": "...", "ref": "...", "sha": "..." }
+}
+```
+
+`channel` is present only when baked in (dev-deploy builds). `commit`, `build`, and `ci` blocks are absent on local builds without git or CI context.
 
 ### `init` {#init}
 
@@ -1569,13 +1605,78 @@ ocx package uninstall [OPTIONS] <PACKAGE>...
 
 ### `version` {#version}
 
-Prints the ocx version number.
+Prints the ocx version. Without flags, prints a bare `major.minor.patch` string suitable for script consumption. With `--verbose`, prints a multi-line build provenance summary. JSON output always includes the populated subset of provenance fields regardless of `--verbose`.
 
 **Usage**
 
 ```shell
-ocx version
+ocx version [--verbose]
+ocx --format json version
 ```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--verbose` | `-v` | Emit multi-line build provenance: commit SHA, dirty flag, build timestamp, profile, target triple, rustc version, and CI run URL. Absent fields are suppressed — a local build without git shows no commit row; a build outside CI shows no CI row. | off |
+| `-h`, `--help` | | Print help information. | — |
+
+**Plain output — default (no flag)**
+
+```
+0.3.2
+```
+
+The bare semver string is the stable contract for script consumers. No trailing newline formatting varies by shell — pipe safely to `grep`, `cut`, or similar.
+
+**Plain output — `--verbose`**
+
+```
+ocx 0.3.2-dev+20260528143045 (cargo: 0.3.1, channel: dev)
+commit:   a1b2c3d4 (clean) — 2026-05-28T12:00:00Z
+built:    2026-05-28T14:30:45Z (release)
+target:   x86_64-unknown-linux-gnu
+rustc:    1.79.0
+ci:       https://github.com/ocx-sh/ocx/actions/runs/1234567890
+```
+
+Rows for `commit`, `built`/`target`/`rustc`, and `ci` appear only when the corresponding data was baked in at build time. Local `cargo build` without git shows no `commit` row; builds outside GitHub Actions show no `ci` row.
+
+**JSON output**
+
+`ocx --format json version` emits a single object. Only `version` is required; all other fields are optional and absent when their source data was unavailable at build time:
+
+```json
+{
+  "version": "0.3.2-dev+20260528143045",
+  "cargo_pkg_version": "0.3.1",
+  "channel": "dev",
+  "commit": {
+    "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "short": "a1b2c3d4",
+    "describe": "v0.3.1-5-ga1b2c3d4",
+    "dirty": false,
+    "timestamp": "2026-05-28T12:00:00Z"
+  },
+  "build": {
+    "timestamp": "2026-05-28T14:30:45Z",
+    "profile": "release",
+    "target": "x86_64-unknown-linux-gnu",
+    "rustc": "1.79.0"
+  },
+  "ci": {
+    "provider": "github-actions",
+    "run_url": "https://github.com/ocx-sh/ocx/actions/runs/1234567890",
+    "workflow": "release",
+    "ref": "refs/tags/v0.3.2-dev",
+    "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+  }
+}
+```
+
+`cargo_pkg_version` is present only when it differs from `version` — this occurs on dev-deploy builds where the effective version is overridden via `__OCX_BUILD_VERSION`. A stable release always omits this field.
+
+The `version` key is the only field the [self update](#self-update) parser reads when comparing versions. Additional provenance fields are additive and ignored by the self-update parser — the JSON schema is open for extension without breaking wire compatibility.
 
 ### `ci` {#ci}
 
@@ -2151,6 +2252,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 
 <!-- commands (root env) -->
 [cmd-env-root]: #env-root
+[version-json-schema]: #version
 
 <!-- authoring -->
 [authoring-testing]: ../authoring/testing.md

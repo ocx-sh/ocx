@@ -21,6 +21,8 @@ mod update_check;
 mod version;
 pub use version::version;
 
+pub mod build_info;
+
 /// A CLI-local command failure carrying its own exit code.
 ///
 /// Mirrors `ocx_lib::cli::UsageError` (message + fixed classification) but

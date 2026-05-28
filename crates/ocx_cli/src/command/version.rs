@@ -6,10 +6,17 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::cli::ColorModeConfig;
 
-use crate::{api::data::version::VersionData, app::ContextOptions};
+use crate::api::data::version::{VerboseVersionData, VersionData};
+use crate::app::ContextOptions;
 
 #[derive(Parser)]
-pub struct Version;
+pub struct Version {
+    /// Emit enriched build provenance — commit, dirty flag, build time,
+    /// target, rustc, CI run URL. JSON output always includes the
+    /// populated subset; this flag only affects plain text.
+    #[arg(short, long)]
+    verbose: bool,
+}
 
 impl Version {
     /// Context-free execution path — called from `app.rs` before
@@ -33,10 +40,19 @@ impl Version {
     /// new behaviour requires config, route it through the parent process
     /// and let the subprocess stay pure-version. See
     /// `subsystem-package-manager.md` "OCX Configuration Forwarding".
+    ///
+    /// The build provenance fields populated by
+    /// [`VersionData::enriched`] are read from compile-time `option_env!`
+    /// constants (see `app::build_info`), not runtime `std::env` — they
+    /// stay correct under `env_clear()`.
     pub async fn execute(&self, options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<ExitCode> {
-        options
-            .build_api(color_config)
-            .report(&VersionData::new(crate::app::version()))?;
+        let data = VersionData::enriched(crate::app::version(), env!("CARGO_PKG_VERSION"));
+        let api = options.build_api(color_config);
+        if self.verbose {
+            api.report(&VerboseVersionData(data))?;
+        } else {
+            api.report(&data)?;
+        }
         Ok(ExitCode::SUCCESS)
     }
 }

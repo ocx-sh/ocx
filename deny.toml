@@ -1,3 +1,8 @@
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+version = 2
+yanked = "warn"
+
 [licenses]
 allow = [
   "Apache-2.0",

@@ -14,6 +14,18 @@ path = "src/main.rs"
 # release builds. See `ocx_lib`'s manifest for the full contract.
 __testing = ["ocx_lib/__testing"]
 
+[build-dependencies]
+# vergen-gix bakes git + build metadata into the binary via `cargo:rustc-env`
+# instructions emitted from `build.rs`. Used by `app::build_info` for the
+# enriched `ocx version --verbose` and `ocx version --format json` output.
+# Pure-Rust git via `gix` — no libgit2 / native dep. Note: `gix` is an
+# unconditional dep of vergen-gix; the features list below controls which
+# VERGEN_* vars are emitted, not whether `gix` compiles.
+# Pinned exactly (`=9.1.0`) because this is a build-dep with ~31 transitive
+# gix-family crates: a floating `^9.1` would let `cargo update` silently
+# bump all of them without review.
+vergen-gix = { version = "=9.1.0", default-features = false, features = ["build", "cargo", "rustc"] }
+
 [dependencies]
 ocx_lib.workspace = true
 
