@@ -5,13 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-05-28
+
+### Added
+
+- Enrich `ocx version` + `ocx about` with build provenance *(cli)*
+- Dispatch unknown subcommands to ocx-<name> plugins on PATH *(cli)*
+
+### Changed
+
+- Unify on LockedFile primitive *(file-lock)*
+
+### Fixed
+
+- Accept binary-mode sha256.sum *(install)*
+- Support Windows PowerShell 5.1 in install.ps1 *(install)*
+- Write tag store through lock-owning handle on Windows *(oci)*
+- Tolerate populated build-info blocks in CI test *(cli)*
+- Make download tests fast and meaningful *(ocx-mirror)*
+- Emit package root from ocx pull, not content/ subdir *(cli)*
+- Align torn-JSON test with locked-reader contract *(auth)*
+
 ## [0.3.1] - 2026-05-27
 
 ### Added
 
 - Direct PATH activation with completions, write both login and rc profiles *(install)*
 - Add `ocx self` command group with throttled update checks *(cli)*
-- External subcommand dispatch: unknown `ocx <name>` invocations exec-forward to `ocx-<name>` on PATH, matching the cargo/git plugin pattern. Plugin not-found exits 64 with an install hint. *(cli)*
 
 ### Changed
 
@@ -23,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve via current symlink + correct test wire shape *(self-update)*
 - Build smoke artifact with __testing feature; parallelize acceptance tests *(ci)*
 - Blob store locking + path normalization *(windows)*
+
+### Release
+
+- 0.3.1
 
 ## [0.3.0] - 2026-05-26
 
@@ -327,7 +351,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
-[0.3.1]: https://github.com/ocx-sh/ocx/compare/v0.3.0..0.3.1
+[0.3.2]: https://github.com/ocx-sh/ocx/compare/v0.3.1..v0.3.2
+[0.3.1]: https://github.com/ocx-sh/ocx/compare/v0.3.0..v0.3.1
 [0.3.0]: https://github.com/ocx-sh/ocx/compare/v0.2.1..v0.3.0
 [0.2.1]: https://github.com/ocx-sh/ocx/compare/v0.2.0..v0.2.1
 [0.2.0]: https://github.com/ocx-sh/ocx/compare/v0.1.0..v0.2.0
