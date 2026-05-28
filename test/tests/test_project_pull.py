@@ -1141,6 +1141,96 @@ hello = "{ocx.registry}/{repo}:{tag}"
     )
 
 
+def test_pull_emits_package_root_not_content_dir(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx pull`` and ``ocx pull --dry-run`` both emit package-root paths.
+
+    Locks the contract documented on ``api/data/paths.rs::PathEntry`` and
+    ``api/data/pull_dry_run.rs::DryRunEntry``: the ``Path`` column / JSON
+    ``path`` field is the package root (parent of ``content/`` and
+    ``entrypoints/``), never the ``content/`` subdirectory. Consumers (CI
+    scripts, project tooling) traverse into ``<root>/content/`` themselves
+    or, preferably, consume ``ocx env``.
+
+    Asserts on both code paths:
+
+    1. ``ocx pull --format json`` (real pull, ``command/pull.rs`` line ~140)
+    2. ``ocx pull --dry-run --format json`` cached entry (line ~175)
+
+    A regression in either site would surface a trailing ``/content`` and
+    a missing ``<path>/content`` subdir on disk.
+    """
+    repo, tag = _published_tool(ocx, tmp_path, "pull_root")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+hello = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+
+    lock = _run_lock(ocx, project)
+    assert lock.returncode == EXIT_SUCCESS, lock.stderr
+
+    # ── Phase 1: real pull emits a root path ─────────────────────────────
+    pull = subprocess.run(
+        _ocx_cmd(ocx, "--format", "json", "pull"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert pull.returncode == EXIT_SUCCESS, (
+        f"ocx pull failed: rc={pull.returncode}\nstderr:\n{pull.stderr}"
+    )
+
+    import json as _json
+
+    pull_payload = _json.loads(pull.stdout)
+    # ``Paths`` serializes as an object keyed by the input identifier; one entry here.
+    assert len(pull_payload) == 1, f"expected 1 pull entry, got {pull_payload}"
+    pull_path_str = next(iter(pull_payload.values()))
+    pull_path = Path(pull_path_str)
+    assert pull_path.name != "content", (
+        f"ocx pull emitted content/ instead of package root: {pull_path_str}"
+    )
+    assert (pull_path / "content").is_dir(), (
+        f"package root {pull_path_str} must contain a content/ subdir"
+    )
+
+    # ── Phase 2: dry-run cached entry emits a root path ──────────────────
+    dry = subprocess.run(
+        _ocx_cmd(ocx, "--format", "json", "pull", "--dry-run"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert dry.returncode == EXIT_SUCCESS, (
+        f"ocx pull --dry-run failed: rc={dry.returncode}\nstderr:\n{dry.stderr}"
+    )
+
+    dry_payload = _json.loads(dry.stdout)
+    assert len(dry_payload) == 1, f"expected 1 dry-run entry, got {dry_payload}"
+    cached = dry_payload[0]
+    assert cached["status"] == "cached", cached
+    dry_path = Path(cached["path"])
+    assert dry_path.name != "content", (
+        f"dry-run emitted content/ instead of package root: {cached['path']}"
+    )
+    assert (dry_path / "content").is_dir(), (
+        f"dry-run package root {cached['path']} must contain a content/ subdir"
+    )
+    # Pull and dry-run must agree on the root for the same identifier.
+    assert dry_path == pull_path, (
+        f"pull root ({pull_path}) and dry-run root ({dry_path}) must agree"
+    )
+
+
 def test_pull_dry_run_does_not_modify_lock(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

@@ -1197,9 +1197,14 @@ forbid the cache-miss network probe entirely.
 ```shell
 $ ocx pull --dry-run
 Package                         Status       Path
-localhost:5000/cmake@sha256:... cached       /home/me/.ocx/packages/.../content
+localhost:5000/cmake@sha256:... cached       /home/me/.ocx/packages/...
 localhost:5000/ripgrep@sha256:..would-fetch  -
 ```
+
+The `Path` column matches the contract of [`ocx package which`](#package-which): it
+is the **package root** (parent of `content/` and `entrypoints/`), not the
+`content/` subdirectory. Consumers traverse into `<path>/content/` for files or
+prefer [`ocx env`](#env) to compose `PATH` and friends.
 
 The staleness gate fires ahead of the dry-run branch, so a stale lock still
 exits 65 — the preview is not a way to bypass `declaration_hash` validation.

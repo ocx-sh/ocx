@@ -173,7 +173,7 @@ The tag store is a *snapshot*: it reflects the state of the remote registry at t
 
 ## Symlinks {#symlinks}
 
-Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/content`. That path changes on every upgrade. You cannot put it in a shell profile, an IDE config, or a build file and expect it to still work next month.
+Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/`. That path changes on every upgrade. You cannot put it in a shell profile, an IDE config, or a build file and expect it to still work next month.
 
 `symlinks/` solves this with <Tooltip term="stable symlinks">A symbolic link (symlink) is a filesystem entry that points to another path. The link's own path never changes — only its target can be updated. Tools that reference the link path continue to work transparently after the target is re-pointed to a new version.</Tooltip> whose paths never change — only their targets are re-pointed when you install or select a new version.
 

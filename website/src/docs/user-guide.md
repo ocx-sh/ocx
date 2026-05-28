@@ -94,6 +94,10 @@ export PATH="$HOME/.ocx/symlinks/ocx.sh/cmake/current/content/bin:$PATH"
 
 When `ocx package install --select cmake:3.32` runs later, `current` is re-pointed and the IDE / shell pick up the new version with no config edits.
 
+:::tip Prefer `ocx env` for shells
+The hand-written `export PATH=…/current/content/bin` above is an escape hatch for tools that cannot evaluate shell at startup (IDEs, JSON config files). For interactive shells and project envs, prefer [`ocx env`][cmd-env-root] (toolchain-tier) or [`ocx package env`][cmd-package-env] (per-package) — they compose the full env, not just `PATH`, and stay forward-compatible if the package adds new env entries on upgrade.
+:::
+
 For automation, [`ocx package which`][cmd-which] prints the resolved package root directly:
 
 <<< @/_scripts/user-guide/stable-paths-which.sh{sh}

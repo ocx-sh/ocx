@@ -29,9 +29,12 @@ impl fmt::Display for PullStatus {
 
 /// A single dry-run preview row.
 ///
-/// `path` is `Some` for cached entries (pointing at the existing
-/// `content/` directory in the store) and `None` for `WouldFetch` rows
-/// where no path exists yet.
+/// `path` is `Some` for cached entries (the package root directory,
+/// parent of `content/` and `entrypoints/`) and `None` for `WouldFetch`
+/// rows where nothing has been materialised yet. Mirrors the contract
+/// documented on [`crate::api::data::paths::PathEntry`]: consumers
+/// traverse into `<path>/content/` for installed files or
+/// `<path>/entrypoints/` for generated launchers.
 #[derive(Serialize)]
 pub struct DryRunEntry {
     pub package: String,

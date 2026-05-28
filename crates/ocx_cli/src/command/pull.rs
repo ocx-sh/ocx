@@ -137,7 +137,7 @@ impl Pull {
             .zip(info.iter())
             .map(|(id, info)| api::data::paths::PathEntry {
                 package: id.to_string(),
-                path: info.dir().content(),
+                path: info.dir().root().to_path_buf(),
             })
             .collect();
         let paths = api::data::paths::Paths::new(entries);
@@ -172,7 +172,10 @@ async fn run_dry_run(context: &crate::app::Context, pinned: &[oci::PinnedIdentif
         };
         let (status, path) = match resolved {
             Some(pinned) => match manager.find_plain(&pinned).await? {
-                Some(info) => (api::data::pull_dry_run::PullStatus::Cached, Some(info.dir().content())),
+                Some(info) => (
+                    api::data::pull_dry_run::PullStatus::Cached,
+                    Some(info.dir().root().to_path_buf()),
+                ),
                 None => (api::data::pull_dry_run::PullStatus::WouldFetch, None),
             },
             None => (api::data::pull_dry_run::PullStatus::WouldFetch, None),
