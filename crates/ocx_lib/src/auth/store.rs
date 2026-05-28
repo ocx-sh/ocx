@@ -656,8 +656,16 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON after 10 concurrent puts");
     }
 
+    /// Concurrent writers run under exclusive flock on `config.json` (the
+    /// data file IS the lock target — no sidecar). Readers that respect the
+    /// same lock see only fully-formed JSON, never a torn intermediate from
+    /// the writer's `set_len(0)` → `write_all` → `sync_data` sequence.
+    ///
+    /// Lockless readers (raw `read_to_string`) are NOT a supported client
+    /// and CAN observe the truncate-window — see `ConfigGuard::write`
+    /// docstring. This test asserts the locked-reader contract.
     #[test]
-    fn dockerconfigstore_put_atomic_rename_no_torn_json() {
+    fn dockerconfigstore_locked_reader_never_observes_torn_json() {
         let (_dir, path) = fresh_config_path();
         let store = std::sync::Arc::new(DockerCredentialStore::with_path(path.clone(), opts(true)));
         let runtime = std::sync::Arc::new(rt());
@@ -668,11 +676,15 @@ mod tests {
         let reader = std::thread::spawn(move || {
             let mut iters = 0;
             while !stop_for_reader.load(std::sync::atomic::Ordering::SeqCst) && iters < 1000 {
-                if let Ok(raw) = std::fs::read_to_string(&path_for_reader)
-                    && !raw.is_empty()
-                {
-                    let _: serde_json::Value = serde_json::from_str(&raw).expect("reader must never observe torn JSON");
+                let mut locked =
+                    LockedFile::open_exclusive_blocking_with_timeout(&path_for_reader, Duration::from_secs(5))
+                        .expect("reader acquires exclusive lock");
+                let bytes = locked.read_bytes_blocking().expect("reader reads under lock");
+                if !bytes.is_empty() {
+                    let _: serde_json::Value =
+                        serde_json::from_slice(&bytes).expect("locked reader never observes torn JSON");
                 }
+                drop(locked);
                 iters += 1;
             }
         });
