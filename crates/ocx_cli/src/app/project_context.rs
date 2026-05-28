@@ -400,11 +400,21 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         lock_path_for(&config_path),
         "lock_path must be derived from config_path"
     );
-    let flock = acquire_project_lock_for_file(&config_path).await?;
+    let mut flock = acquire_project_lock_for_file(&config_path).await?;
 
-    // Load the current `ocx.toml` snapshot under the flock so any concurrent
-    // reader-then-writer race resolves with us as the canonical writer.
-    let config = ProjectConfig::from_path(&config_path).await?;
+    // Load the current `ocx.toml` snapshot THROUGH the lock-owning handle.
+    // On Windows `LockFileEx` is per-handle and mandatory: opening a second
+    // raw handle on the locked range (which is what `ProjectConfig::from_path`
+    // does via `tokio::fs::File::open`) hits `ERROR_LOCK_VIOLATION (33)`. By
+    // reading via `flock.read_bytes()` we route through the single
+    // lock-owning fd, so the snapshot load is safe regardless of platform.
+    let bytes = flock.read_bytes().await.map_err(|e| {
+        ocx_lib::project::Error::Project(ocx_lib::project::error::ProjectError::new(
+            config_path.clone(),
+            ocx_lib::project::error::ProjectErrorKind::Io(std::io::Error::other(e)),
+        ))
+    })?;
+    let config = ProjectConfig::from_toml_bytes_with_path(&bytes, config_path.clone())?;
 
     // Optional predecessor lock — `None` is the bootstrap case.
     let previous_lock = ProjectLock::from_path(&lock_path).await?;

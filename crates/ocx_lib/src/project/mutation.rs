@@ -22,13 +22,21 @@
 //! there was none). The reverse failure (lock write fails, manifest
 //! untouched) leaves the existing on-disk state unchanged.
 //!
-//! The guard owns the exclusive advisory flock acquired via
-//! [`crate::project::acquire_project_lock`]. It is intentionally
-//! neither [`Clone`] nor [`Copy`]: a project can have at most one
-//! in-flight mutation transaction at a time, and the flock lifetime
-//! tracks the guard's. Drop semantics: dropping a guard without
-//! [`MutationGuard::commit`] or [`MutationGuard::rollback`] releases
-//! the flock and discards any staged in-memory mutation.
+//! The guard owns the exclusive advisory flock on `ocx.toml` itself,
+//! acquired via [`crate::project::acquire_project_lock`]. The commit
+//! body rewrites `ocx.toml` IN PLACE through the lock-owning handle
+//! ([`crate::utility::fs::LockedFile::replace_bytes`]) — no tempfile,
+//! no rename, no orphan inode. This keeps mutual exclusion on Windows
+//! intact (`LockFileEx` is per-handle; a rename would strand the lock
+//! fd on the orphan inode). See `project_lock.rs` module-doc and
+//! `adr_file_lock_unification.md §Decision 3` for the full rationale.
+//!
+//! The guard is intentionally neither [`Clone`] nor [`Copy`]: a project
+//! can have at most one in-flight mutation transaction at a time, and
+//! the flock lifetime tracks the guard's. Drop semantics: dropping a
+//! guard without [`MutationGuard::commit`] or
+//! [`MutationGuard::rollback`] releases the flock and discards any
+//! staged in-memory mutation.
 //!
 //! Typical use (from a CLI mutator):
 //!
@@ -39,11 +47,10 @@
 //! guard.commit(staged, new_lock).await?;
 //! ```
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::file_lock::FileLock;
 use crate::log;
+use crate::utility::fs::LockedFile;
 
 use super::Error;
 use super::config::ProjectConfig;
@@ -52,8 +59,8 @@ use super::lock::ProjectLock;
 
 /// RAII handle to an in-flight project-tier mutation transaction.
 ///
-/// Holds the exclusive advisory flock on `ocx.toml`, an immutable
-/// snapshot of the current [`ProjectConfig`] on disk, the optional
+/// Holds the exclusive advisory flock on `ocx.toml` itself, an
+/// immutable snapshot of the current [`ProjectConfig`] on disk, the optional
 /// predecessor [`ProjectLock`], and the absolute paths of both files.
 ///
 /// Constructed only via the CLI shim
@@ -70,13 +77,13 @@ use super::lock::ProjectLock;
 /// invariant; pass references through the staging closure instead.
 #[non_exhaustive]
 pub struct MutationGuard {
-    /// Exclusive advisory flock on `ocx.toml`. Released on drop.
+    /// Exclusive advisory flock on `ocx.toml` itself. Released on drop.
     ///
-    /// `dead_code` is suppressed because the field is intentionally
-    /// inert outside of `Drop` — its lifetime is the lifetime of the
-    /// transaction, and the lock value is never read or moved out.
-    #[allow(dead_code)]
-    flock: FileLock,
+    /// The lock target IS the data file. [`Self::commit`] rewrites `ocx.toml`
+    /// in place via [`LockedFile::replace_bytes`] (truncate + write through the
+    /// lock-owning handle). No tempfile, no rename — the inode stays stable so
+    /// `LockFileEx` on Windows never strands on an orphan inode.
+    flock: LockedFile,
     /// Absolute path to `ocx.toml`.
     config_path: PathBuf,
     /// Absolute path to the sibling `ocx.lock`.
@@ -217,10 +224,16 @@ impl MutationGuard {
     /// existing tempfile-and-rename helper in
     /// [`crate::project::lock::ProjectLock::save`] (which respects
     /// the `previous` byte-for-byte preservation contract), then
-    /// `ocx.toml` is rewritten via the same atomic-write primitive
-    /// used by [`crate::project::mutate`]. Both writes individually
-    /// already use `tempfile + rename + parent fsync`; this method
-    /// adds the cross-file rollback contract:
+    /// `ocx.toml` is rewritten IN PLACE through the lock-owning handle
+    /// via [`LockedFile::replace_bytes`]. The `ocx.lock` write uses
+    /// `tempfile + rename + parent fsync`; the `ocx.toml` rewrite is a
+    /// truncate-and-write on the locked inode so mutual exclusion on
+    /// Windows remains intact (no inode rotation under a held
+    /// `LockFileEx`).
+    ///
+    /// Kill-9 trade-off: a SIGKILL between the `ocx.toml` `set_len(0)`
+    /// and `sync_data` leaves the file truncated or partial.
+    /// Recovery is manual.
     ///
     /// - Lock write fails → return error, `ocx.toml` untouched on disk.
     /// - Lock write succeeds, manifest write fails → roll the lock
@@ -240,7 +253,7 @@ impl MutationGuard {
     /// surfaced; rollback failures log at WARN and do not mask the
     /// primary failure. This matches the design principle that
     /// callers should always see the first thing that went wrong.
-    pub async fn commit(self, staged: StagedMutation, new_lock: ProjectLock) -> Result<MutationCommit, Error> {
+    pub async fn commit(mut self, staged: StagedMutation, new_lock: ProjectLock) -> Result<MutationCommit, Error> {
         // Defense-in-depth coherence gate: the lock the caller hands us
         // must claim the same `declaration_hash` as the candidate config
         // we are about to write. If the resolver path produced a lock
@@ -301,15 +314,15 @@ impl MutationGuard {
             // the lock rename and the manifest rewrite.
             maybe_inject_fault(fault.as_deref(), CommitStage::PauseBeforeManifestWrite).await?;
 
-            // Stage 4: rewrite ocx.toml only when the staging closure actually
-            // changed the manifest. Lock-only commits (`lock`, `update`)
-            // legitimately want to leave ocx.toml byte-identical.
+            // Stage 4: rewrite ocx.toml IN PLACE through the lock-owning
+            // handle. Only when the staging closure actually changed the
+            // manifest — lock-only commits (`lock`, `update`) legitimately
+            // want to leave ocx.toml byte-identical.
             if staged.manifest_changed {
                 let serialized = config_to_toml_string(&staged.candidate)?;
-                let config_path = self.config_path.clone();
-                tokio::task::spawn_blocking(move || atomic_write_blocking(&config_path, &serialized))
-                    .await
-                    .expect("spawn_blocking panicked in MutationGuard::commit manifest write")?;
+                self.flock.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
+                    ProjectError::new(self.config_path.clone(), ProjectErrorKind::Io(std::io::Error::other(e)))
+                })?;
             }
             Ok(())
         }
@@ -400,12 +413,12 @@ impl StagedMutation {
 impl MutationGuard {
     /// Assemble a [`MutationGuard`] from already-validated parts.
     ///
-    /// Callers MUST have already acquired the exclusive advisory flock
-    /// on `ocx.toml` via [`crate::project::acquire_project_lock`] and
-    /// loaded both the current [`ProjectConfig`] and the optional
+    /// Callers MUST have already acquired the exclusive advisory flock on
+    /// `ocx.toml` via [`crate::project::acquire_project_lock`]
+    /// and loaded both the current [`ProjectConfig`] and the optional
     /// predecessor [`ProjectLock`]. The constructor does not re-validate
-    /// these inputs — it merely packages them into a guard whose drop
-    /// glue releases the flock.
+    /// these inputs — it merely packages them into a guard whose drop glue
+    /// releases the flock.
     ///
     /// The only sanctioned external ingress is the CLI shim
     /// `ocx_cli::app::project_context::load_project_for_mutate`, which
@@ -414,7 +427,7 @@ impl MutationGuard {
     /// staleness gate). Library consumers should reach the guard
     /// through that shim rather than calling `from_parts` directly.
     pub fn from_parts(
-        flock: FileLock,
+        flock: LockedFile,
         config_path: PathBuf,
         lock_path: PathBuf,
         home: PathBuf,
@@ -575,40 +588,4 @@ async fn rollback_lock_after_failure(
 fn config_to_toml_string(config: &ProjectConfig) -> Result<String, Error> {
     toml::to_string_pretty(config)
         .map_err(|e| ProjectError::new(PathBuf::new(), ProjectErrorKind::TomlSerialize(e)).into())
-}
-
-/// Blocking atomic write of `content` to `path` via tempfile + rename
-/// + parent fsync.
-///
-/// Mirrors the helper in `crate::project::mutate::atomic_write` —
-/// duplicated here to avoid promoting that helper to `pub(crate)`.
-/// The two impls are identical in contract; if either diverges,
-/// harmonise by extracting to `crate::project::internal`.
-fn atomic_write_blocking(path: &Path, content: &str) -> Result<(), Error> {
-    let parent = path
-        .parent()
-        .expect("MutationGuard config_path always has a parent (CLI shim resolves an absolute file path)");
-    if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-    }
-
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-    tmp.write_all(content.as_bytes())
-        .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-    tmp.as_file()
-        .sync_data()
-        .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-    tmp.persist(path)
-        .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e.error)))?;
-
-    #[cfg(unix)]
-    if !parent.as_os_str().is_empty()
-        && let Ok(dir) = std::fs::File::open(parent)
-    {
-        let _ = dir.sync_all();
-    }
-
-    Ok(())
 }

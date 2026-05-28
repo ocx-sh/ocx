@@ -490,9 +490,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::file_lock::FileLock;
     use crate::oci::Identifier;
     use crate::project::{ProjectConfig, ProjectErrorKind};
+    use crate::utility::fs::LockedFile;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -802,30 +802,33 @@ mod tests {
 
     // ── advisory lock integration ─────────────────────────────────────────────
 
-    /// Spec: mutate §5 bullet 9 — add_binding returns Locked when another fd
-    /// holds the exclusive flock on `ocx.toml`.
+    /// `add_binding` returns `Locked` when another task holds the exclusive
+    /// lock on `ocx.toml` itself (in-place lock design — no sidecar).
     ///
-    /// Opens `ocx.toml` and acquires an exclusive flock from the test itself,
-    /// then verifies that `add_binding` returns `Err(…Locked…)` while the
-    /// first fd holds. This works because `fs4` uses `flock(2)` on Unix (per-fd
-    /// semantics), so a second open fd cannot upgrade to exclusive even within
+    /// The lock target IS the data file: `MutationGuard::commit` rewrites
+    /// `ocx.toml` through the lock-owning handle via
+    /// `LockedFile::replace_bytes` (no rename, no orphan inode). A second
+    /// `try_exclusive` on the same path returns `None` while the first
+    /// handle's lock is held, surfacing as `ProjectErrorKind::Locked`.
+    ///
+    /// This works because `fs4` uses `flock(2)` on Unix (per-fd semantics), so
+    /// a second open fd on the same path cannot acquire exclusive even within
     /// the same process.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_returns_locked_when_ocx_toml_already_locked() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
 
-        // Acquire an exclusive flock on ocx.toml from this task.
+        // Acquire an exclusive flock directly on `ocx.toml` from this task.
         let toml_path = dir.path().join("ocx.toml");
-        let toml_file = fs::OpenOptions::new().read(true).write(true).open(&toml_path).unwrap();
-        let _guard = FileLock::try_exclusive(toml_file)
+        let _guard = LockedFile::try_exclusive(&toml_path)
+            .await
             .unwrap()
             .expect("first exclusive lock on ocx.toml must succeed");
 
-        // A second exclusive try_exclusive on the same file from a different fd
-        // should return None (contended) because flock is per-fd on Unix.
-        // add_binding internally opens ocx.toml and calls try_exclusive, which
-        // will see the first lock held and return Locked.
+        // add_binding internally calls acquire_project_lock_for_file, which
+        // attempts LockedFile::try_exclusive on ocx.toml. Because the first
+        // guard holds that lock, try_exclusive returns None → Locked.
         let id = test_id("example.com", "cmake", "3.28");
         let err = add_binding(&toml(dir.path()), &id, None)
             .await

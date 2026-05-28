@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use crate::{file_lock, log};
+use crate::log;
+use crate::utility::fs::LockedFile;
 
 use super::TempStore;
 use super::temp_dir::TempDir;
@@ -14,10 +15,10 @@ use super::temp_dir::TempDir;
 /// deleted (best-effort).
 ///
 /// The custom `Drop` impl deletes the `.lock` file while the OS lock
-/// (`FileLock`) is still held — field destructors run after `Drop::drop`,
+/// (`LockedFile`) is still held — field destructors run after `Drop::drop`,
 /// preventing a window where the file exists unlocked.
 pub struct TempAcquireResult {
-    pub lock: file_lock::FileLock,
+    pub lock: LockedFile,
     pub dir: TempDir,
     /// `true` if the directory contained leftover artifacts that were cleaned.
     pub was_cleaned: bool,

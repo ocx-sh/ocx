@@ -6,9 +6,12 @@ Cluster A (mutation transactionality) — Codex H2 / Architect H2 fixes.
 
 Project-tier mutators (`ocx add`, `ocx remove`, `ocx update`, `ocx lock`,
 `ocx init`) must hold an exclusive advisory flock on `ocx.toml` for the
-duration of the staged → resolve → commit transaction. Two concurrent
-writers must serialize: one wins, the other either retries cleanly or
-exits with `Locked` (TempFail 75).
+duration of the staged → resolve → commit transaction (in-place lock
+per ADR `adr_file_lock_unification.md` §Decision 3 — `ocx.toml` is
+rewritten in place through the lock-owning handle, no tempfile, no
+rename, so the lock fd never strands on an orphan inode). Two
+concurrent writers must serialize: one wins, the other either retries
+cleanly or exits with `Locked` (TempFail 75).
 
 Spec sources:
 - ``crates/ocx_lib/src/project/mutation.rs`` (MutationGuard contract)
@@ -249,21 +252,23 @@ def test_lock_holder_blocks_other_writers(
 ) -> None:
     """An external process holding the exclusive flock makes ``ocx add`` exit 75.
 
-    Uses ``flock(1)`` from the host shell to hold the advisory lock, then
-    invokes ``ocx add`` with a short ``--lock-timeout`` (or the default
-    timeout). The mutator must exit ``EXIT_TEMP_FAIL`` rather than block
-    forever or silently overwrite.
+    Uses ``flock(1)`` from the host shell to hold the advisory lock on
+    ``ocx.toml`` itself (the canonical lock target in the in-place lock
+    design — see ADR §Decision 3), then invokes ``ocx add``. The mutator
+    must exit ``EXIT_TEMP_FAIL`` rather than block forever or silently
+    overwrite.
     """
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(project, "[tools]\n")
 
-    # Hold the exclusive flock on ocx.toml from a sleeping subshell.
-    # `flock -x -n` returns immediately if it cannot acquire (-n = non-block);
-    # we want a long-running holder, so use `flock -x` (blocking) with a
-    # multi-second sleep wrapped around it.
+    # Hold the exclusive flock on ocx.toml itself from a sleeping
+    # subshell. `flock -x` (blocking) wraps a multi-second sleep so the
+    # holder lives long enough for the contending `ocx add` to observe
+    # contention and surface Locked → TempFail.
+    toml_path = project / "ocx.toml"
     holder = subprocess.Popen(
-        ["flock", "-x", str(project / "ocx.toml"), "-c", "sleep 10"],
+        ["flock", "-x", str(toml_path), "-c", "sleep 10"],
     )
 
     try:

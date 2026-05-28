@@ -56,6 +56,14 @@ impl std::error::Error for SharedError {
 }
 
 /// Error from a singleflight wait.
+///
+/// Exit-code classification:
+/// - `Failed` → defers to the wrapped leader error's source chain; falls back
+///   to `ExitCode::Failure(1)` if the inner chain produces no specific code.
+/// - `Abandoned` → `ExitCode::Failure(1)`: the leader was dropped without
+///   completing; the operation cannot succeed without a retry.
+/// - `Timeout` and `CapacityExceeded` → `ExitCode::TempFail(75)`: transient;
+///   a retry once in-flight work completes should succeed.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -219,6 +227,24 @@ where
             },
             Ok(Err(_changed_err)) => Err(Error::Abandoned),
             Err(_elapsed) => Err(Error::Timeout),
+        }
+    }
+}
+
+impl crate::cli::ClassifyExitCode for Error {
+    fn classify(&self) -> Option<crate::cli::ExitCode> {
+        match self {
+            // Failed: return None so the chain walker continues via source()
+            // into the SharedError payload. SharedError::source() exposes the
+            // leader's typed error directly, letting classify_error downcast to
+            // the inner discriminant (e.g. PackageErrorKind::EntrypointCollision
+            // → DataError). If the inner error has no specific code the walker
+            // falls through to ExitCode::Failure.
+            Self::Failed(_) => None,
+            // Abandoned has no inner cause — return Failure directly.
+            Self::Abandoned => Some(crate::cli::ExitCode::Failure),
+            // Transient: retry once in-flight blobs complete.
+            Self::Timeout | Self::CapacityExceeded { .. } => Some(crate::cli::ExitCode::TempFail),
         }
     }
 }

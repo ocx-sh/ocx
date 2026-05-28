@@ -12,7 +12,8 @@ pub use temp_dir::TempDir;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::{Error, Result, file_lock, oci};
+use crate::utility::fs::LockedFile;
+use crate::{Error, Result, oci};
 
 const LOCK_EXTENSION: &str = "lock";
 
@@ -124,9 +125,13 @@ impl TempStore {
     ///
     /// Used by both `install` (to prepare a clean temp dir before downloading)
     /// and `clean` (to detect and remove stale dirs).
+    ///
+    /// Uses [`LockedFile::try_exclusive_blocking`] — the sync, non-blocking
+    /// constructor — because callers (`stale_entries`, sync tests) run
+    /// outside a Tokio runtime and cannot await the async API.
     pub fn try_acquire(&self, path: &Path) -> Result<Option<TempAcquireResult>> {
-        let file = Self::prepare_lock_file(path)?;
-        match file_lock::FileLock::try_exclusive(file) {
+        let lock_path = Self::lock_path_for(path);
+        match LockedFile::try_exclusive_blocking(&lock_path) {
             Ok(Some(lock)) => Ok(Some(Self::finish_acquire(path, lock)?)),
             Ok(None) => Ok(None),
             Err(_) => Ok(None),
@@ -136,29 +141,14 @@ impl TempStore {
     /// Like [`try_acquire`](Self::try_acquire) but blocks until the lock is
     /// available or `timeout` expires.
     pub async fn acquire_with_timeout(&self, path: &Path, timeout: std::time::Duration) -> Result<TempAcquireResult> {
-        let file = Self::prepare_lock_file(path)?;
         let lock_path = Self::lock_path_for(path);
-        let lock = file_lock::FileLock::lock_exclusive_with_timeout(file, timeout)
-            .await
-            .map_err(|e| Error::InternalFile(lock_path, e))?;
+        let lock = LockedFile::open_exclusive_with_timeout(lock_path, timeout).await?;
         Self::finish_acquire(path, lock)
-    }
-
-    /// Creates the sibling lock file and returns the file handle.
-    ///
-    /// Ensures the temp root exists but does NOT create the temp directory
-    /// itself — that happens in [`finish_acquire`] after the lock is held.
-    fn prepare_lock_file(dir_path: &Path) -> Result<std::fs::File> {
-        if let Some(parent) = dir_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| Error::InternalFile(parent.to_path_buf(), e))?;
-        }
-        let lock_path = Self::lock_path_for(dir_path);
-        std::fs::File::create(&lock_path).map_err(|e| Error::InternalFile(lock_path, e))
     }
 
     /// Shared post-lock logic: create the content directory, check for and
     /// clean leftover artifacts.
-    fn finish_acquire(dir_path: &Path, lock: file_lock::FileLock) -> Result<TempAcquireResult> {
+    fn finish_acquire(dir_path: &Path, lock: LockedFile) -> Result<TempAcquireResult> {
         std::fs::create_dir_all(dir_path).map_err(|e| Error::InternalFile(dir_path.to_path_buf(), e))?;
         let dir = TempDir {
             dir: dir_path.to_path_buf(),
@@ -225,6 +215,7 @@ impl TempStore {
 mod tests {
     use super::*;
     use crate::oci;
+    use crate::utility::fs::FileLock;
 
     const SHA256_HEX: &str = "43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
 
@@ -455,7 +446,7 @@ mod tests {
         std::fs::write(TempStore::lock_path_for(&b), b"").unwrap();
 
         let store = TempStore::new(dir.path());
-        let _lock = file_lock::FileLock::try_exclusive(std::fs::File::open(TempStore::lock_path_for(&a)).unwrap())
+        let _lock = FileLock::try_exclusive(std::fs::File::open(TempStore::lock_path_for(&a)).unwrap())
             .unwrap()
             .unwrap();
 
@@ -480,5 +471,22 @@ mod tests {
             StaleEntry::Orphan(path) => assert_eq!(*path, orphan),
             StaleEntry::Locked(_) => panic!("expected Orphan, got Locked"),
         }
+    }
+
+    /// Smoke test: proves `TempAcquireResult.lock` is a `LockedFile` — the
+    /// lock field holds the sentinel `.lock` file path.
+    #[test]
+    fn temp_store_uses_locked_file_primitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp_path = dir.path().join("test_dir");
+        let store = TempStore::new(dir.path());
+
+        let acquired = store.try_acquire(&temp_path).unwrap().unwrap();
+        // `LockedFile::path()` returns the sentinel lock file path.
+        assert_eq!(
+            acquired.lock.path(),
+            TempStore::lock_path_for(&temp_path).as_path(),
+            "TempAcquireResult.lock must be a LockedFile over the sentinel .lock file"
+        );
     }
 }

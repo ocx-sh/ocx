@@ -452,10 +452,13 @@ mod tests {
         let bin_dir = dir.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
 
-        let real = create_file_with_magic(&bin_dir, "real_binary", &0xFEED_FACFu32.to_be_bytes());
-        let link = bin_dir.join("link_binary");
+        // `real`/`link` are only used by the Unix `symlink()` call below;
+        // prefix with `_` so the compiler does not warn on Windows where the
+        // `#[cfg(unix)]` block is excluded.
+        let _real = create_file_with_magic(&bin_dir, "real_binary", &0xFEED_FACFu32.to_be_bytes());
+        let _link = bin_dir.join("link_binary");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::os::unix::fs::symlink(&_real, &_link).unwrap();
 
         let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;

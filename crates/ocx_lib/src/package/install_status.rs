@@ -3,7 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{file_lock, log, prelude::SerdeExt};
+use crate::log;
+use crate::utility::fs::LockedJsonFile;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct InstallStatus {
@@ -33,46 +34,47 @@ impl InstallStatus {
     }
 }
 
-/// Checks the installation status by attempting to acquire a shared lock on the lock file and reading the status file.
-/// Returns a tuple of (ok, status), where ok is true if the package has been successfully installed already.
-pub async fn check_install_status(
-    status_path: impl AsRef<std::path::Path>,
-    lock_path: impl AsRef<std::path::Path>,
-    timeout: std::time::Duration,
-) -> (bool, Option<InstallStatus>) {
+/// Probes whether `status_path` records a successful install
+/// (`status.ok == true`).
+///
+/// Coordinates with concurrent writers via a shared advisory lock acquired
+/// through [`LockedJsonFile`]. The status file IS the lock target — no
+/// sidecar. Three outcomes collapse to `false`:
+///
+/// - File absent (no install attempt yet) → `false`.
+/// - File exists but unparseable (kill-9 mid-write left partial JSON) →
+///   `false`; the inline [`LockedJsonFile::read`] kill-9-recovery contract
+///   surfaces a `warn` log.
+/// - Lock acquisition failed (e.g. permission denied) → `false` + debug log.
+///
+/// Returns `true` only when the file exists, parses, and `status.ok` is set.
+/// A concurrent writer holding the exclusive lock will block the shared
+/// acquisition until its `replace_bytes` write completes, so a partial-write
+/// window cannot escape this probe.
+pub async fn check_install_status(status_path: impl AsRef<std::path::Path>) -> bool {
     let status_path = status_path.as_ref();
-    let lock_path = lock_path.as_ref();
-
-    let lock_file_handle = match std::fs::File::create(lock_path) {
-        Ok(lock_file) => lock_file,
-
+    let mut locked = match LockedJsonFile::<InstallStatus>::open_shared(status_path).await {
+        Ok(Some(locked)) => locked,
+        Ok(None) => return false, // file absent — no install attempt yet
         Err(error) => {
             log::debug!(
-                "Failed to create install status lock file '{}': {}",
-                lock_path.display(),
-                error
-            );
-            return (false, None);
-        }
-    };
-    let shared_lock = match file_lock::FileLock::lock_shared_with_timeout(lock_file_handle, timeout).await {
-        Ok(shared_lock) => shared_lock,
-        Err(error) => {
-            log::debug!("Failed to acquire shared lock: {}", error);
-            return (false, None);
-        }
-    };
-    let status = match InstallStatus::read_json(status_path).await {
-        Ok(status) => status,
-        Err(error) => {
-            log::debug!(
-                "Failed to read install status from file '{}': {}",
+                "Failed to acquire shared lock on install status '{}': {}",
                 status_path.display(),
                 error
             );
-            return (false, None);
+            return false;
         }
     };
-    drop(shared_lock);
-    (status.ok, Some(status))
+    match locked.read().await {
+        Ok(Some(status)) => status.ok,
+        Ok(None) => false, // empty or unparseable — treat as not-installed
+        Err(error) => {
+            log::debug!(
+                "Failed to read install status from '{}': {}",
+                status_path.display(),
+                error
+            );
+            false
+        }
+    }
 }

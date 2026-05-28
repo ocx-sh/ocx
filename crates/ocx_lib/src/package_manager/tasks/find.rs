@@ -125,7 +125,7 @@ mod tests {
         (dir, mgr, obj_path)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn find_plain_present_returns_install_info() {
         let (_dir, mgr, obj_path) = setup_manager();
         let pkg = file_structure::PackageDir { dir: obj_path.clone() };
@@ -141,7 +141,7 @@ mod tests {
         assert!(info.resolved().dependencies.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn find_plain_absent_no_content_returns_none() {
         let (_dir, mgr, obj_path) = setup_manager();
         let pkg = file_structure::PackageDir { dir: obj_path.clone() };
@@ -153,7 +153,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn find_plain_absent_no_metadata_returns_none() {
         let (_dir, mgr, obj_path) = setup_manager();
         let pkg = file_structure::PackageDir { dir: obj_path };
@@ -163,7 +163,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn find_plain_absent_no_resolve_returns_none() {
         let (_dir, mgr, obj_path) = setup_manager();
         let pkg = file_structure::PackageDir { dir: obj_path };
@@ -174,7 +174,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn find_plain_absent_empty_returns_none() {
         let (_dir, mgr, _obj_path) = setup_manager();
 
@@ -182,7 +182,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn find_plain_invalid_metadata_returns_error() {
         let (_dir, mgr, obj_path) = setup_manager();
         let pkg = file_structure::PackageDir { dir: obj_path };

@@ -82,6 +82,11 @@ pub enum Error {
     #[error(transparent)]
     PinnedIdentifier(#[from] crate::oci::pinned_identifier::PinnedIdentifierError),
 
+    /// A singleflight coordination error (leader failure, abandonment, timeout,
+    /// or capacity exceeded).
+    #[error("singleflight: {0}")]
+    Singleflight(#[from] crate::utility::singleflight::Error),
+
     /// A string baked into an install-time launcher contains a character that
     /// cannot be safely embedded in the Unix `.sh` template or the Windows
     /// `.shim` sidecar (single-quote, percent, double-quote, NUL, CR, LF).
@@ -203,6 +208,7 @@ impl ClassifyExitCode for Error {
             Self::Digest(e) => e.classify(),
             Self::Dependency(e) => e.classify(),
             Self::PinnedIdentifier(e) => e.classify(),
+            Self::Singleflight(e) => e.classify(),
             Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
         }
     }

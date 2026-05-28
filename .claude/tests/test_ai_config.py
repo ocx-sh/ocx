@@ -1871,3 +1871,58 @@ class TestPlanStatusBlock:
                 assert field in block, (
                     f"{tmpl.relative_to(ROOT)} Status block missing field {field}"
                 )
+
+
+class TestVerifyDeepBuildMatrix:
+    """Structural invariant: `verify-deep.yml::build` matrix must keep an
+    enabled (non-commented-out) `macos-latest` entry on `main`.
+
+    Background: ADR `adr_file_lock_unification.md` §CI Integration permits an
+    iteration tactic of temporarily commenting out the `macos-latest` matrix
+    entry to save ≈ $0.50/run while debugging the new Windows leg. The tactic
+    is correct during iteration but produces a permanent macOS coverage gap
+    if the restore is forgotten. The architect review (P7) flagged the
+    human-checklist safeguard as historically failure-prone and asked for a
+    structural test that physically blocks merge to `main` when macOS is
+    missing.
+
+    This test reads `verify-deep.yml` as text and asserts a non-comment line
+    matching `os: macos-latest` appears in the `build` job's matrix block.
+    Pure structural — does not validate the rest of the matrix, just that the
+    macOS leg is enabled when the branch lands.
+    """
+
+    _WORKFLOW = ROOT / ".github" / "workflows" / "verify-deep.yml"
+
+    def test_macos_latest_is_enabled_in_verify_deep_build(self) -> None:
+        assert self._WORKFLOW.exists(), (
+            f"workflow missing: {self._WORKFLOW.relative_to(ROOT)}"
+        )
+        text = self._WORKFLOW.read_text()
+        # Locate the `build:` job block. It starts at `^  build:` (2-space
+        # indent under `jobs:`) and ends at the next sibling-level job
+        # (`^  \w[\w-]*:`) or EOF.
+        build_match = re.search(r"(?m)^  build:\n", text)
+        assert build_match is not None, (
+            "`build:` job not found in verify-deep.yml — workflow shape changed?"
+        )
+        # Find the start of the next 2-space-indented job (sibling level).
+        next_job = re.search(r"(?m)^  [A-Za-z_][A-Za-z0-9_-]*:\n", text[build_match.end():])
+        block = text[build_match.start() : build_match.end() + next_job.start()] if next_job else text[build_match.start():]
+        # Within the build block, look for an UNCOMMENTED line matching `os: macos-latest`.
+        # A commented-out matrix entry begins with `#` (possibly preceded by whitespace).
+        for raw_line in block.splitlines():
+            stripped = raw_line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            if "os: macos-latest" in stripped:
+                return  # invariant holds
+        # Fallthrough: macos entry missing or only present as a comment.
+        raise AssertionError(
+            "`os: macos-latest` matrix entry missing from `verify-deep.yml::build` "
+            "(or only present as a commented-out line). Restore it before merging "
+            "to `main` — see ADR adr_file_lock_unification.md §CI Integration "
+            "'Final state diff (must land before main)'. The iteration tactic of "
+            "temporarily commenting out macOS is permitted DURING Windows debug "
+            "cycles only; the leg MUST be re-enabled before the branch lands."
+        )

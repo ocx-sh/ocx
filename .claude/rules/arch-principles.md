@@ -148,8 +148,9 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Slugify for filesystem use | `StringExt::to_slug` / `to_relaxed_slug` | prelude |
 | Sorted / dedup `Vec` fluently | `VecExt::sorted` / `unique_clone` | prelude |
 | Ignore `Result` deliberately | `ResultExt::ignore` | prelude |
-| Cross-process advisory file lock (shared/exclusive, timeout, RAII) | `file_lock::FileLock` | `crates/ocx_lib/src/file_lock.rs` |
-| Shared/exclusive advisory lock on blob data files with RAII cleanup | `BlobGuard::acquire_read` / `acquire_write` | `crates/ocx_lib/src/file_structure/blob_store/blob_guard.rs` |
+| Cross-process advisory file lock with RAII + in-place I/O via the lock-owning handle | `utility::fs::LockedFile` (+ `LockedJsonFile<T>` / `LockedTomlFile<T>` codec wrappers) | `crates/ocx_lib/src/utility/fs/locked_file.rs` |
+| Stateless content-addressed blob write/read (tempfile + atomic rename + Windows-cfg retry-with-backoff) | `BlobStore::write_blob` / `read_blob` | `crates/ocx_lib/src/file_structure/blob_store.rs` |
+| Per-pull-operation singleflight dedup of concurrent same-digest blob writes | `package_manager::tasks::pull_local::PullCoordinator` (wraps `singleflight::Group<oci::Digest, ()>`) | `crates/ocx_lib/src/package_manager/tasks/pull_local.rs` |
 | RAII "delete path on drop" guard | `utility::fs::DropFile` | `utility/fs/drop_file.rs` |
 | Watch-based async singleflight (dedupe in-flight work by key) | `utility::singleflight` | `utility/singleflight.rs` |
 | Parallel directory tree walk with pruning decisions | `utility::fs::{DirWalker, WalkDecision}` | `utility/fs/dir_walker.rs` |

@@ -35,7 +35,7 @@ mod resolve_env_package_root_tests {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolve_env_from_missing_package_root_errors() {
         let tmp = tempdir().unwrap();
         let manager = make_test_manager(tmp.path());
@@ -46,7 +46,7 @@ mod resolve_env_package_root_tests {
         assert!(result.is_err(), "missing package root must return Err");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolve_env_from_package_root_with_missing_metadata_errors() {
         let tmp = tempdir().unwrap();
         let pkg_root = tmp.path().join("pkg");
@@ -58,7 +58,7 @@ mod resolve_env_package_root_tests {
         assert!(result.is_err(), "missing metadata.json must return Err");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn resolve_env_from_package_root_with_missing_resolve_json_errors() {
         let tmp = tempdir().unwrap();
         let pkg_root = tmp.path().join("pkg");
@@ -121,7 +121,7 @@ mod install_info_identifier_tests {
     /// Two distinct package roots (as passed to `install_info_from_package_root`)
     /// must produce distinct repository components so they do not collapse onto
     /// the same key in the `seen_repos` dedup map inside `resolve_env`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn distinct_package_roots_yield_distinct_identifiers() {
         let tmp = tempdir().unwrap();
         let manager = make_test_manager(tmp.path());
@@ -168,7 +168,7 @@ mod install_info_identifier_tests {
     /// inside `resolve_env`. One side then surfaced as a "conflicting digest"
     /// warning and was silently dropped. Using the full digest hex makes such
     /// a collision probabilistically impossible (full SHA-256 keyspace).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn pkg_roots_with_same_16char_digest_prefix_do_not_collapse() {
         let tmp = tempdir().unwrap();
         let manager = make_test_manager(tmp.path());
@@ -214,7 +214,7 @@ mod install_info_identifier_tests {
 
     /// Calling `install_info_from_package_root` twice on the same root must
     /// yield the same repository component (idempotency).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn same_package_root_yields_stable_identifier() {
         let tmp = tempdir().unwrap();
         let manager = make_test_manager(tmp.path());
