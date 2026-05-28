@@ -601,7 +601,10 @@ def test_global_env_sh_activation_replaces_departed_hook(
     2. ``ocx --global env --shell=sh`` emits POSIX ``export …`` lines.
     3. Eval the output in a subshell → the tool's bin dir is on PATH.
     4. Remove the tool (``ocx --global remove``).
-    5. ``ocx --global env --shell=sh`` with no global toolchain → exit 64.
+    5. ``ocx --global env --shell=sh`` with no global toolchain → exit 0,
+       empty output. The eval-safe ``--shell`` channel is the login exporter
+       that runs on every shell start, so an empty toolchain is a silent no-op,
+       not an error.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_gdepart"
@@ -657,21 +660,22 @@ def test_global_env_sh_activation_replaces_departed_hook(
         f"remove --global must succeed; stderr:\n{remove.stderr}"
     )
 
-    # After removal, all tools are gone and no `current` symlinks exist.
-    # `resolve_global_current_env` returns None when no current-selected tools
-    # exist (same code path as "no global toolchain configured") → exit 64.
-    # This matches the docstring step 5: "no global toolchain → exit 64".
-    # The runtime maps "empty current-symlink set" to "no global toolchain
-    # configured" because the global tier is only meaningful when tools are
-    # installed AND selected.
+    # After removal the global toolchain resolves to nothing. On the eval-safe
+    # `--shell` channel (the login exporter, run on every shell start) that is a
+    # silent no-op: exit 0, empty stdout. Erroring here would print a spurious
+    # ERROR line on every shell after the last tool is removed (and break
+    # `Invoke-Expression` on PowerShell). The non-`--shell` report path still
+    # exits 64 — see test_env_global_no_toml_exits_64 in test_toolchain_env.py.
     env_empty = _run(
         ocx, empty, "--global", "env", "--shell=sh",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
-    assert env_empty.returncode == EXIT_USAGE, (
-        f"--global env --shell=sh after removing all tools must exit {EXIT_USAGE} "
-        f"(no current-selected tools = 'no global toolchain configured'); "
+    assert env_empty.returncode == EXIT_SUCCESS, (
+        f"--global env --shell=sh after removing all tools must exit 0 (silent no-op); "
         f"got {env_empty.returncode}\nstderr:\n{env_empty.stderr}"
+    )
+    assert env_empty.stdout == "", (
+        f"--global env --shell=sh with empty toolchain must emit nothing; got:\n{env_empty.stdout!r}"
     )
 
 

@@ -27,6 +27,8 @@ All tests:
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1071,9 +1073,12 @@ def test_create_env_ps1_uses_envvar_fallback_not_literal(tmp_path: Path) -> None
         "(if (-not $env:OCX_HOME) ...); "
         f"got:\n{content}"
     )
-    # Must delegate to `ocx self activate --shell=powershell`.
-    assert "self activate --shell=powershell" in content, (
-        f"env.ps1 must delegate to 'ocx self activate --shell=powershell'; got:\n{content}"
+    # Must delegate to `ocx self activate --shell=powershell`. The command is
+    # built as an array (so the appended completion flag is never a $null
+    # positional — Gap D), so assert the array form rather than a contiguous
+    # command string.
+    assert "@('self', 'activate', '--shell=powershell')" in content, (
+        f"env.ps1 must delegate to 'ocx self activate --shell=powershell' (array form); got:\n{content}"
     )
 
 
@@ -1310,3 +1315,98 @@ def test_verify_checksum_detects_mismatch(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "checksum mismatch" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Gap D — env.ps1 must guard Invoke-Expression against $null/empty output and
+# pass a gated --completion/--no-completion flag.
+#
+# `Out-String` of empty/failed `self activate` output yields $null, and
+# `Invoke-Expression $null` throws "Cannot bind argument to parameter 'Command'
+# because it is null" on every shell start with no global toolchain. The commit
+# fixed the INNER `--global env` eval line but left the OUTER `self activate`
+# call in the env.ps1 templates unguarded. Both PowerShell-emitting templates
+# (install.ps1's here-string and install.sh's create_env_ps1 heredoc) must
+# carry the guard.
+# ---------------------------------------------------------------------------
+
+POWERSHELL_INSTALLER = INSTALL_SH.parent / "install.ps1"
+
+
+def _assert_env_ps1_guards(body: str) -> None:
+    """Shared assertions for the env.ps1 activation body."""
+    assert "| Out-String" in body, "env.ps1 must collapse activate output via Out-String"
+    assert "if ($_ocxActivate)" in body, (
+        "env.ps1 must guard Invoke-Expression on the captured non-empty variable "
+        "(Gap D: `Invoke-Expression $null` throws 'Cannot bind argument ... is null')"
+    )
+    # The guard must wrap Invoke-Expression — never call it on the raw (& ...) output.
+    assert "Invoke-Expression ((&" not in body and "Invoke-Expression (& " not in body, (
+        "env.ps1 must NOT pass the raw (& ocx ...) output straight to Invoke-Expression"
+    )
+    assert "--completion" in body, "env.ps1 must request completions via --completion"
+    assert "--no-completion" in body, (
+        "env.ps1 must opt out via --no-completion for the non-interactive / legacy-PS arm"
+    )
+    assert "[Environment]::UserInteractive" in body, (
+        "env.ps1 must gate the completion flag on an interactive session"
+    )
+    assert "PSVersion.Major -ge 5" in body, (
+        "env.ps1 must gate completion generation on PowerShell 5.0+ (legacy WinPS <5.0 "
+        "cannot run clap's `using`/`Register-ArgumentCompleter` output)"
+    )
+
+
+def test_install_ps1_env_file_guards_invoke_expression() -> None:
+    """The env.ps1 here-string embedded in install.ps1 (the PowerShell installer)
+    guards Invoke-Expression and passes a gated completion flag (Gap D)."""
+    _assert_env_ps1_guards(POWERSHELL_INSTALLER.read_text())
+
+
+def test_install_sh_generated_env_ps1_guards_invoke_expression(tmp_path: Path) -> None:
+    """install.sh's create_env_ps1 writes the same guarded env.ps1 (Gap D)."""
+    ocx_home = tmp_path / "ocx"
+    ocx_home.mkdir()
+    env = {"HOME": str(tmp_path / "home"), "OCX_HOME": str(ocx_home), "PATH": "/usr/bin:/bin"}
+    result = _source_install_sh("create_env_ps1", env)
+    assert result.returncode == 0, f"create_env_ps1 must succeed; stderr:\n{result.stderr}"
+    _assert_env_ps1_guards((ocx_home / "env.ps1").read_text())
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh not available on this runner")
+def test_real_env_ps1_no_null_bind_error_on_empty_activate(tmp_path: Path) -> None:
+    """Running the REAL env.ps1 under pwsh against an ocx.exe that emits nothing
+    must not throw 'Cannot bind argument ... is null' (Gap D end-to-end).
+
+    The empty-output case is exactly "no global toolchain configured yet" — the
+    state that crashed activation on every shell start before the guard.
+    """
+    ocx_home = tmp_path / "ocx"
+    bin_dir = ocx_home / "symlinks" / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin"
+    bin_dir.mkdir(parents=True)
+    # Stub ocx.exe that emits nothing (the no-toolchain / empty-activate case).
+    stub = bin_dir / "ocx.exe"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    gen_env = {"HOME": str(home), "OCX_HOME": str(ocx_home), "PATH": "/usr/bin:/bin"}
+    assert _source_install_sh("create_env_ps1", gen_env).returncode == 0
+    env_ps1 = ocx_home / "env.ps1"
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", f". '{env_ps1}'"],
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "OCX_HOME": str(ocx_home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        },
+    )
+    assert result.returncode == 0, (
+        f"env.ps1 must source cleanly against an empty-output ocx; stderr:\n{result.stderr}"
+    )
+    assert "Cannot bind argument" not in result.stderr, (
+        f"empty activate output must not trigger the null-bind crash; stderr:\n{result.stderr}"
+    )

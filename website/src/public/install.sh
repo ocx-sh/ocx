@@ -405,10 +405,31 @@ export _OCX_ENV_LOADED
 export OCX_HOME
 
 _ocx_bin="$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"
-if [ -x "$_ocx_bin" ]; then
-    eval "$("$_ocx_bin" self activate --shell=sh 2>/dev/null)" || true
+
+# Detect the real sourcing shell so the right completion backend is chosen.
+# This file is sourced by bash AND zsh (not just /bin/sh); `sh` resolves to
+# Shell::Dash, which has no clap completion backend — so bash/zsh users would
+# get no completions if we hardcoded `--shell=sh`. PATH and global-env-eval
+# output are identical across the POSIX arms, so this only changes the
+# completion extension.
+_ocx_shell=sh
+if [ -n "${BASH_VERSION:-}" ]; then
+    _ocx_shell=bash
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    _ocx_shell=zsh
 fi
-unset _ocx_bin
+
+# Decide completions here, where interactivity is known ($- carries `i` for an
+# interactive shell), and pass the explicit --completion/--no-completion flag.
+# stderr is still redirected (2>/dev/null) to suppress startup diagnostics, but
+# the gate no longer depends on the binary probing isatty(2).
+if [ -x "$_ocx_bin" ]; then
+    case "$-" in
+        *i*) eval "$("$_ocx_bin" self activate --shell="$_ocx_shell" --completion 2>/dev/null)" || true ;;
+        *) eval "$("$_ocx_bin" self activate --shell="$_ocx_shell" --no-completion 2>/dev/null)" || true ;;
+    esac
+fi
+unset _ocx_bin _ocx_shell
 EOF
 }
 
@@ -434,8 +455,15 @@ if not set -q OCX_HOME
 end
 
 set -l _ocx_bin "$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"
+# Decide completions here via `status is-interactive` and pass the explicit
+# --completion/--no-completion flag. stderr is still redirected (2>/dev/null) to
+# suppress startup diagnostics, but the gate no longer depends on isatty(2).
 if test -x "$_ocx_bin"
-    "$_ocx_bin" self activate --shell=fish 2>/dev/null | source
+    if status is-interactive
+        "$_ocx_bin" self activate --shell=fish --completion 2>/dev/null | source
+    else
+        "$_ocx_bin" self activate --shell=fish --no-completion 2>/dev/null | source
+    end
 end
 EOF
 }
@@ -459,9 +487,25 @@ if (-not $env:OCX_HOME) { $env:OCX_HOME = Join-Path $env:USERPROFILE '.ocx' }
 
 $_ocxBin = Join-Path $env:OCX_HOME 'symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe'
 if (Test-Path $_ocxBin -PathType Leaf) {
-    Invoke-Expression ((& $_ocxBin self activate --shell=powershell 2>$null) | Out-String)
+    # Build args as an array so the completion flag is appended cleanly — never
+    # a $null/empty positional that clap would reject (Windows PowerShell 5.1
+    # passes a bare $null arg as an empty string).
+    # Request completions only on an interactive PowerShell 5.0+ session: legacy
+    # Windows PowerShell <5.0 cannot run clap's `using namespace` /
+    # `Register-ArgumentCompleter -Native` completion output, so it opts out with
+    # --no-completion while still emitting PATH + global env.
+    $_ocxArgs = @('self', 'activate', '--shell=powershell')
+    if ([Environment]::UserInteractive -and $PSVersionTable.PSVersion.Major -ge 5) {
+        $_ocxArgs += '--completion'
+    } else {
+        $_ocxArgs += '--no-completion'
+    }
+    $_ocxActivate = (& $_ocxBin @_ocxArgs 2>$null) | Out-String
+    # Guard $null/empty: Out-String of empty/failed output yields $null, and
+    # `Invoke-Expression $null` throws "Cannot bind argument ... is null".
+    if ($_ocxActivate) { Invoke-Expression $_ocxActivate }
 }
-Remove-Variable _ocxBin -ErrorAction SilentlyContinue
+Remove-Variable _ocxBin, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
 EOF
 }
 
@@ -470,6 +514,9 @@ EOF
 # Nushell's `source` is parse-time, so activation output is written to a temp
 # file and sourced from there.  File is byte-identical across users — no
 # install-time substitution.
+# No completion flag: nushell has no clap_complete backend
+# (completion_target → None), so the flag would be a no-op. PATH + global env
+# are the only activation output here, and those are session-independent.
 create_env_nu() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
@@ -533,8 +580,11 @@ if (not (has-env OCX_HOME)) {
 }
 
 var _ocx_bin = (path:join $E:OCX_HOME symlinks/ocx.sh/ocx/cli/current/content/bin/ocx)
+# rc.elv is sourced only for interactive Elvish sessions, so --completion is
+# unconditional here. The hook redirects stderr (2>/dev/null), so the flag —
+# not an isatty(2) probe — is what gates completion work.
 if ?(test -x $_ocx_bin) {
-    eval (e:$_ocx_bin self activate --shell=elvish 2>/dev/null | slurp)
+    eval (e:$_ocx_bin self activate --shell=elvish --completion 2>/dev/null | slurp)
 }
 EOF
 }

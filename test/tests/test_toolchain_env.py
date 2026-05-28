@@ -533,13 +533,15 @@ def test_root_exec_removed(ocx: OcxRunner, tmp_path: Path) -> None:
     assert result.stderr.strip(), "clap must write a usage error to stderr"
 
 
-def test_env_global_no_toml_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx --global env`` with no ``$OCX_HOME/ocx.toml`` → exit 64.
+def test_env_global_no_toml_is_empty_env(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx --global env`` with no ``$OCX_HOME/ocx.toml`` → exit 0 (empty env).
 
-    Block A2 / review-fix fix: the old code exited 74 (IoError) when the
-    global toml was absent. The corrected behaviour is exit 64 (UsageError /
-    EX_USAGE): a missing global toolchain is a usage error (``ocx --global add``
-    must be run first), not an I/O error.
+    A global toolchain is OPTIONAL — "not configured yet" is a valid empty
+    state, not a usage error (EX_USAGE). Querying an unconfigured global tier
+    returns the empty set on the report path AND the eval-safe path, with no
+    asymmetry between them. (History: this previously exited 64; the report-path
+    error was reconsidered — an unconfigured global tier is not a misuse of the
+    command, only a real failure like a corrupt lock is.)
     """
     ocx_home = Path(ocx.env["OCX_HOME"])
     global_toml = ocx_home / "ocx.toml"
@@ -551,9 +553,85 @@ def test_env_global_no_toml_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
         ocx, empty, "--global", "env",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
-    assert result.returncode == EXIT_USAGE, (
-        f"ocx --global env with no global toml must exit {EXIT_USAGE} (UsageError); "
-        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx --global env with no global toolchain must exit {EXIT_SUCCESS} (empty env, "
+        f"not a usage error); got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_env_global_no_toolchain_shell_is_silent_noop(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx --global env --shell=NAME`` with no toolchain → exit 0, empty stdout.
+
+    Regression for the released Windows activation bug: the eval-safe ``--shell``
+    channel is the login exporter that runs on EVERY shell start (``env.sh`` /
+    ``env.ps1``). With no global toolchain configured it must stay silent — emit
+    nothing and exit 0 — so a fresh install does not print a scary ERROR line on
+    POSIX or feed ``$null`` into ``Invoke-Expression`` on PowerShell. The report
+    path (no ``--shell``) keeps exit 64; see ``test_env_global_no_toml_exits_64``.
+    """
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    assert not (ocx_home / "ocx.toml").exists(), "precondition: no global ocx.toml"
+
+    empty = tmp_path / "no_project"
+    empty.mkdir()
+    for shell in ("sh", "bash", "pwsh", "powershell"):
+        result = _run(
+            ocx, empty, "--global", "env", f"--shell={shell}",
+            extra_env={"OCX_NO_PROJECT": "1"},
+        )
+        assert result.returncode == EXIT_SUCCESS, (
+            f"ocx --global env --shell={shell} with no toolchain must exit 0 "
+            f"(silent no-op); got {result.returncode}\nstderr:\n{result.stderr}"
+        )
+        assert result.stdout == "", (
+            f"ocx --global env --shell={shell} with no toolchain must emit nothing "
+            f"on stdout; got:\n{result.stdout!r}"
+        )
+
+
+def test_env_global_corrupt_lock_is_empty_env_both_paths(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A corrupt ``$OCX_HOME/ocx.lock`` degrades to an empty env on BOTH the
+    eval-safe ``--shell`` path and the report path (Gap A — lenient global tier).
+
+    The §4 login exporter ``eval "$(ocx --global env --shell=sh)"`` runs on EVERY
+    shell start; a corrupt/stale global lock must NOT break the shell. The global
+    tier is lenient and consistent: "no usable global toolchain" is an empty env
+    (exit 0) regardless of ``--shell`` — there is no shell/no-shell asymmetry. A
+    corrupt global lock instead surfaces via the lock-rewriting commands
+    (``ocx --global lock``/``add``/``upgrade``), not this read-only exporter.
+    (Before Gap A, only the clean "no lock" case was silenced — a parse failure
+    propagated via ``?`` and broke the eval line on every shell start.)
+    """
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    # The global lock sits next to $OCX_HOME/ocx.toml — i.e. $OCX_HOME/ocx.lock.
+    (ocx_home / "ocx.lock").write_text("@@@ this is not valid toml @@@\n")
+
+    empty = tmp_path / "no_project"
+    empty.mkdir()
+
+    # Eval-safe path: empty env, exit 0, empty stdout.
+    shell_result = _run(
+        ocx, empty, "--global", "env", "--shell=sh",
+        extra_env={"OCX_NO_PROJECT": "1"},
+    )
+    assert shell_result.returncode == EXIT_SUCCESS, (
+        f"corrupt global lock on --shell path must degrade to exit 0; "
+        f"got {shell_result.returncode}\nstderr:\n{shell_result.stderr}"
+    )
+    assert shell_result.stdout == "", (
+        f"corrupt global lock on --shell path must emit nothing on stdout; "
+        f"got:\n{shell_result.stdout!r}"
+    )
+
+    # Report path: same lenient outcome — exit 0 (not a usage/data error).
+    report_result = _run(
+        ocx, empty, "--global", "env",
+        extra_env={"OCX_NO_PROJECT": "1"},
+    )
+    assert report_result.returncode == EXIT_SUCCESS, (
+        f"corrupt global lock on the report path must also degrade to exit 0 "
+        f"(lenient global tier — no shell/no-shell asymmetry); "
+        f"got {report_result.returncode}\nstdout:\n{report_result.stdout}\nstderr:\n{report_result.stderr}"
     )
 
 
