@@ -20,6 +20,8 @@ pub(super) fn theme(color: bool) -> Theme {
         vis_private: s(console::Style::new().italic()),
         vis_interface: s(console::Style::new().italic().underlined()),
         vis_sealed: s(console::Style::new().dim()),
+        label: s(console::Style::new().bold()),
+        aside: s(console::Style::new().dim()),
         header: s(console::Style::new().bold().underlined()),
         chrome: s(console::Style::new().dim()),
         hint: s(console::Style::new().dim().italic()),

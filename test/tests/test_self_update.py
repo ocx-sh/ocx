@@ -68,19 +68,91 @@ def test_version_json_format(ocx: OcxRunner) -> None:
         f"json={version_from_json!r}, plain={version_from_plain!r}"
     )
 
+    # GAP-4: `ocx version` plain output is a single-line bare semver string.
+    # Scripts and piped consumers (`VERSION=$(ocx version)`) rely on this; a
+    # multi-line plain output would silently break those consumers.
+    plain_lines = [line for line in plain_result.stdout.splitlines() if line.strip()]
+    assert len(plain_lines) == 1, (
+        f"`ocx version` plain output must be exactly one line (script-consumer contract); "
+        f"got {len(plain_lines)} lines: {plain_result.stdout!r}"
+    )
+
 
 def test_version_json_shape(ocx: OcxRunner) -> None:
-    """``ocx --format json version`` must produce a flat JSON object with
-    exactly one key: ``version``.
+    """``ocx --format json version`` must always carry a parseable
+    ``version`` field whose value is a non-empty semver-shaped string.
 
-    Pins the wire format so that the subprocess consumer
-    (`query_installed_version`) — which parses ``.get("version")`` — never
-    silently regresses to a broken shape.
+    Pins the wire-format invariant the subprocess consumer
+    (`query_installed_version`, in
+    `crates/ocx_lib/src/package_manager/tasks/update_check.rs`) relies
+    on: it parses ``.get("version")`` and feeds the value to
+    ``semver::Version::parse``. Any additional top-level keys
+    (``cargo_pkg_version``, ``channel``, ``commit``, ``build``, ``ci``)
+    are additive build provenance that this test deliberately tolerates
+    — they appear in dev-deploy / CI builds but never in local
+    ``cargo build`` runs without git.
     """
     json_result = ocx.json("version")
 
-    assert set(json_result.keys()) == {"version"}, (
-        f"JSON version output must have exactly one key 'version'; got keys: {set(json_result.keys())!r}"
+    assert "version" in json_result, (
+        f"JSON version output must always contain a 'version' key; got keys: {set(json_result.keys())!r}"
+    )
+    version = json_result["version"]
+    assert isinstance(version, str) and version, (
+        f"'version' must be a non-empty string; got: {version!r}"
+    )
+    # Enriched fields, when present, must keep their declared shape — a
+    # regression that emits a string where an object is expected would
+    # break downstream bug-report tooling.
+    for nested_key in ("commit", "build", "ci"):
+        if nested_key in json_result:
+            assert isinstance(json_result[nested_key], dict), (
+                f"'{nested_key}' must be a JSON object when present; got: {type(json_result[nested_key]).__name__}"
+            )
+
+
+def test_version_json_under_env_clear(ocx: OcxRunner) -> None:
+    """``ocx --format json version`` must succeed and emit a populated
+    ``version`` field when the process environment is fully cleared.
+
+    Simulates the exact subprocess invocation shape used by
+    ``query_installed_version`` in
+    ``crates/ocx_lib/src/package_manager/tasks/update_check.rs``,
+    which calls ``Command::env_clear()`` before spawning the binary.
+    The provenance fields (``commit``, ``build``, ``ci``) are baked at
+    compile time via ``option_env!()`` (see
+    ``crates/ocx_cli/src/app/build_info.rs:14-22``); this test pins the
+    hermetic-subprocess invariant so a future regression that reads
+    ``std::env`` at runtime breaks visibly.
+
+    A minimal ``HOME`` is injected because some TLS backends on Linux
+    probe ``$HOME/.netrc`` or the system certificate store via a path
+    that may ultimately need a writable home; ``version`` itself is
+    purely in-process but the binary init path on some platforms queries
+    HOME for config-dir resolution before the command dispatch occurs.
+    The HOME value points at a non-existent directory so no host
+    configuration leaks in.
+    """
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "version"],
+        capture_output=True,
+        text=True,
+        env={"HOME": "/nonexistent"},
+    )
+    assert result.returncode == 0, (
+        f"`ocx --format json version` must succeed under env_clear(); "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"`ocx --format json version` must emit valid JSON under env_clear(); "
+            f"stdout={result.stdout!r}"
+        ) from exc
+    assert isinstance(payload.get("version"), str) and payload["version"], (
+        f"version field must be a non-empty string under env_clear(); "
+        f"got: {payload!r}"
     )
 
 

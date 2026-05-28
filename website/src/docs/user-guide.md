@@ -558,8 +558,11 @@ A new OCX version is available: ocx.sh/ocx/cli:1.1.0. Consider updating by runni
 
 Set [`OCX_NO_UPDATE_CHECK=1`][env-ocx-no-update-check] to disable the background check entirely. The check is also suppressed in CI environments and non-TTY stderr.
 
+When reporting a bug, run [`ocx version --verbose`][cmd-version] to capture commit, build timestamp, target, and CI run URL. For dev-channel builds the output also shows `channel: dev`.
+
 ::: tip Learn more
 [Command-line reference → `ocx self update`][cmd-self-update] — exit codes, install path, throttle bypass.
+[Command-line reference → `ocx version`][cmd-version] — verbose build provenance, JSON schema.
 [Environment reference → `OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval] — adjust the background check frequency.
 :::
 
@@ -670,6 +673,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-add-global]: ./reference/command-line.md#global-flag
 [cmd-self-activate]: ./reference/command-line.md#self-activate
 [cmd-self-update]: ./reference/command-line.md#self-update
+[cmd-version]: ./reference/command-line.md#version
 [cmd-logout]: ./reference/command-line.md#logout
 [cmd-login]: ./reference/command-line.md#login
 [cmd-run]: ./reference/command-line.md#run

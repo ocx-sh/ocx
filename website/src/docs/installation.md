@@ -121,6 +121,24 @@ curl -fsSL https://ocx.sh/install.sh | sh -s -- --version 0.5.0
 ocx about
 ```
 
+## Dev Builds {#dev-builds}
+
+Binaries published from the `deploy-dev` workflow carry a `channel: dev` field and a version string with a build-metadata suffix, such as `0.3.2-dev+20260528143045`. These are pre-release snapshots, not stable releases.
+
+To identify whether your installed binary is a dev build, run:
+
+```sh
+ocx version --verbose
+```
+
+The `channel: dev` line appears in the verbose output when present. For scripting use:
+
+```sh
+ocx --format json version | jq .channel
+```
+
+This returns `"dev"` for dev builds and `null` (field absent) for stable releases. Include this output when filing bug reports — it helps distinguish issues introduced between stable releases.
+
 ## Uninstalling {#uninstalling}
 
 To completely remove ocx and all installed packages, delete the data directory (default [`~/.ocx`][env-home], or whatever [`OCX_HOME`][env-home] points to):

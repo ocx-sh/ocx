@@ -61,6 +61,16 @@ pub struct Theme {
     vis_interface: Style,
     vis_sealed: Style,
 
+    /// The key in a labelled-value pair (e.g. `Version: 1.2.3`). Plain bold
+    /// so it stands out from the value without the column-header connotation
+    /// of [`Self::header`] (which is bold *and* underlined for table contexts).
+    label: Style,
+    /// A parenthetical or secondary value adjacent to the primary value
+    /// (e.g. a build timestamp shown next to a version, or a file path shown
+    /// next to a name). Plain dim, matching [`Self::note`] in weight but
+    /// separate so the two roles can diverge later without a rename.
+    aside: Style,
+
     // Table / tree chrome.
     header: Style,
     /// Tree connectors, table rule, and column separators.
@@ -154,6 +164,22 @@ impl Theme {
     /// kind, dispatch-command divergence) — an aside next to a value.
     pub fn note(&self, text: impl AsRef<str>) -> String {
         self.paint(&self.note, text)
+    }
+
+    /// Style the key in a labelled-value pair (plain bold). Distinct from
+    /// [`Self::header`], which is bold *and* underlined and reserved for
+    /// table column headers.
+    pub fn label(&self, text: impl AsRef<str>) -> String {
+        self.paint(&self.label, text)
+    }
+
+    /// Style a parenthetical or secondary value (plain dim). Distinct from
+    /// [`Self::note`] semantically — `note` annotates an entity, `aside`
+    /// qualifies a value in a labelled-value display — though both currently
+    /// render dim. Kept separate so the two roles can diverge without
+    /// breaking callers.
+    pub fn aside(&self, text: impl AsRef<str>) -> String {
+        self.paint(&self.aside, text)
     }
 
     /// Colour a visibility tag by value (same mapping everywhere).
@@ -269,6 +295,30 @@ mod tests {
         assert_eq!(theme.digest("sha256:ab"), "sha256:ab");
         assert_eq!(theme.visibility(Visibility::PUBLIC, "public"), "public");
         assert_eq!(theme.note("12 bytes"), "12 bytes");
+        assert_eq!(theme.label("Version"), "Version");
+        assert_eq!(theme.aside("(2026-05-28)"), "(2026-05-28)");
+    }
+
+    #[test]
+    fn label_is_bold_in_both_themes() {
+        // A key in a labelled-value pair is plain bold (SGR 1). Both shipped
+        // themes share this attribute.
+        for theme in [colorful::theme(true), mono::theme(true)] {
+            let out = theme.label("Version");
+            assert!(out.contains("\x1b[1m"), "expected bold SGR: {out:?}");
+            assert_eq!(console::strip_ansi_codes(&out), "Version");
+        }
+    }
+
+    #[test]
+    fn aside_is_dim_in_both_themes() {
+        // A parenthetical or secondary value is plain dim (SGR 2). Both
+        // shipped themes share this attribute.
+        for theme in [colorful::theme(true), mono::theme(true)] {
+            let out = theme.aside("(2026-05-28)");
+            assert!(out.contains("\x1b[2m"), "expected dim SGR: {out:?}");
+            assert_eq!(console::strip_ansi_codes(&out), "(2026-05-28)");
+        }
     }
 
     #[test]

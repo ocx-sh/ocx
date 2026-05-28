@@ -30,6 +30,11 @@ jobs:
     outputs:
       version: ${{ steps.cliff.outputs.version }}
       version_tag: ${{ steps.cliff.outputs.version_tag }}
+      # Semver form of `version_tag` (replaces the OCI-safe `_` separator
+      # with `+`). dev-deploy publishes the OCI form to the registry
+      # (`+` is not a valid OCI reference char) but the binary embeds
+      # the semver form so `ocx version` reports a parseable semver.
+      version_semver: ${{ steps.cliff.outputs.version_semver }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -58,6 +63,11 @@ jobs:
           ts="$(date -u +%Y%m%d%H%M%S)"
           echo "version=${version}"                  | tee -a "$GITHUB_OUTPUT"
           echo "version_tag=${version}-dev_${ts}"    | tee -a "$GITHUB_OUTPUT"
+          # Semver form for in-binary embedding via `__OCX_BUILD_VERSION`:
+          # `+` is invalid in OCI references but is the canonical
+          # build-metadata separator per SemVer §10. Builds bake the
+          # semver form so `ocx version` reports a parseable string.
+          echo "version_semver=${version}-dev+${ts}" | tee -a "$GITHUB_OUTPUT"
 
   build-linux:
     name: Build (${{ matrix.target }})
@@ -65,6 +75,12 @@ jobs:
     # ubuntu-22.04 matches the runner cargo-dist plans for linux targets —
     # older glibc baseline for portability of any future gnu targets.
     runs-on: ubuntu-22.04
+    # Job-level env propagates into the composite build action's `cargo
+    # build`/`cargo zigbuild` step, so `build.rs` sees these and bakes
+    # them into the binary as compile-time constants via `rustc-env`.
+    env:
+      __OCX_BUILD_VERSION: ${{ needs.compute-version.outputs.version_semver }}
+      __OCX_BUILD_CHANNEL: dev
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +105,9 @@ jobs:
     name: Build (${{ matrix.target }})
     needs: [compute-version]
     runs-on: macos-latest
+    env:
+      __OCX_BUILD_VERSION: ${{ needs.compute-version.outputs.version_semver }}
+      __OCX_BUILD_CHANNEL: dev
     strategy:
       fail-fast: false
       matrix:
@@ -110,6 +129,9 @@ jobs:
     name: Build (${{ matrix.target }})
     needs: [compute-version]
     runs-on: ubuntu-latest
+    env:
+      __OCX_BUILD_VERSION: ${{ needs.compute-version.outputs.version_semver }}
+      __OCX_BUILD_CHANNEL: dev
     container:
       # messense/cargo-xwin has no stable versioned tag — pinned by digest. Re-pin with:
       #   docker pull messense/cargo-xwin && docker inspect --format='{{index .RepoDigests 0}}' messense/cargo-xwin

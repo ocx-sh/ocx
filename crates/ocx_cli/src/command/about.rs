@@ -44,7 +44,10 @@ const LOGO_WIDTH: usize = 52;
 
 impl About {
     pub async fn execute(&self, context: Context) -> anyhow::Result<ExitCode> {
-        let version = env!("CARGO_PKG_VERSION").to_string();
+        // Effective version (honours dev-deploy `__OCX_BUILD_VERSION`
+        // override) — same source the `version` command + lock metadata
+        // use, so all three stay aligned.
+        let version = crate::app::version().to_string();
         // Reflect the same default registry the rest of the CLI resolves —
         // env var, layered config, then compiled fallback (already merged in
         // Context::default_registry).
@@ -87,14 +90,24 @@ impl About {
 
         let platforms = info.platforms.join(", ");
         let shell_str = info.shell.as_deref().unwrap_or("n/a");
+        let commit_summary = info.commit_summary();
 
-        let info_entries: &[(&str, &str)] = &[
-            ("Version", &info.version),
-            ("Registry", &info.registry),
-            ("Platform", &platforms),
-            ("Shell", shell_str),
-            ("Home", &info.home),
-        ];
+        // Build the info-table in a Vec so optional rows (Commit,
+        // Channel) only land when their source data was baked into the
+        // binary. Local `cargo build` without git → no Commit row;
+        // non-dev-deploy build → no Channel row.
+        let mut info_entries: Vec<(&str, &str)> = Vec::with_capacity(7);
+        info_entries.push(("Version", &info.version));
+        if let Some(commit) = commit_summary.as_deref() {
+            info_entries.push(("Commit", commit));
+        }
+        if let Some(channel) = info.provenance.channel {
+            info_entries.push(("Channel", channel));
+        }
+        info_entries.push(("Registry", &info.registry));
+        info_entries.push(("Platform", &platforms));
+        info_entries.push(("Shell", shell_str));
+        info_entries.push(("Home", &info.home));
 
         let info_lines: Vec<String> = info_entries
             .iter()
