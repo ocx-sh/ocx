@@ -53,12 +53,9 @@ tasks:
   lint:links:
     desc: Check markdown cross-references in .claude/, CLAUDE.md, and AGENTS.md (offline)
     dir: '{{.TASKFILE_DIR}}'
-    env:
-      OCX_INDEX: '{{.HOME}}/.ocx/index'
     cmds:
       - mkdir -p {{.REPORTS_DIR}}
       - >
-        ocx package exec --self ocx.sh/lychee:0 --
         lychee --offline --no-progress --include-verbatim
         --exclude-path artifacts
         --exclude-path tests/.venv

@@ -1,1 +1,8 @@
 [tools]
+go-task = "ocx.sh/go-task:3"
+shellcheck = "ocx.sh/shellcheck:0.11"
+shfmt = "ocx.sh/shfmt:3"
+lychee = "ocx.sh/lychee:0"
+bun = "ocx.sh/bun:1"
+uv = "ocx.sh/uv:0"
+git-cliff = "ocx.sh/git-cliff:2"

@@ -286,7 +286,7 @@ download_api() {
             chmod 600 "$_whdr_file"
             printf 'Authorization: token %s\n' "${GITHUB_TOKEN}" >"$_whdr_file"
             if wget --secure-protocol=TLSv1_2 --https-only -q \
-                    --header-file="$_whdr_file" -O- "$_url"; then
+                --header-file="$_whdr_file" -O- "$_url"; then
                 _wrc=0
             else
                 _wrc=$?
