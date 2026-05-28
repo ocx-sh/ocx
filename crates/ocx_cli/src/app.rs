@@ -14,6 +14,8 @@ pub use context::Context;
 mod context_options;
 pub use context_options::ContextOptions;
 
+pub mod plugin_dispatch;
+
 pub mod project_context;
 
 mod update_check;
@@ -89,6 +91,12 @@ pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> cli::ExitCode 
 #[derive(Parser)]
 #[command(name = "ocx", about, long_about = None)]
 #[command(about = "A simple package manager for pre-built binaries.", long_about = None)]
+// Disable clap's auto-generated `help` subcommand so `ocx help <name>` falls
+// through to the External variant and is rewritten to `ocx-<name> --help` by
+// `plugin_dispatch::rewrite_help_invocation`. Without this, clap intercepts
+// `help <X>` before External fires, producing a confusing "unrecognized
+// subcommand" error instead of dispatching to the plugin.
+#[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[command(flatten)]
     pub context: ContextOptions,
@@ -143,10 +151,16 @@ impl App {
         // config is broken, falling back to `ocx version` is the documented
         // diagnostic path. The regression guard lives at
         // `test/tests/test_config.py::test_info_still_requires_valid_config_when_ambient_broken`.
-        match &cli.command {
-            Some(command::Command::Version(v)) => return v.execute(&cli.context, color_config).await,
-            Some(command::Command::Shell(command::shell::Shell::Completion(c))) => return c.execute().await,
-            Some(command::Command::Self_(command::self_group::SelfGroup::Activate(a))) => return a.execute().await,
+        // Consuming match so the External arm can take argv by value (no clone).
+        // The fallthrough arm binds `command` by value; the separate
+        // `should_check_for_update` call below re-borrows from the re-bound name.
+        match cli.command {
+            Some(command::Command::Version(ref v)) => return v.execute(&cli.context, color_config).await,
+            Some(command::Command::Shell(command::shell::Shell::Completion(ref c))) => return c.execute().await,
+            Some(command::Command::Self_(command::self_group::SelfGroup::Activate(ref a))) => return a.execute().await,
+            Some(command::Command::External(argv)) => {
+                return plugin_dispatch::dispatch(argv, &cli.context).await;
+            }
             None => {
                 Cli::command().color(color_mode.into()).styles(styles).print_help()?;
                 return Ok(ExitCode::SUCCESS);

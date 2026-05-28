@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::Subcommand;
@@ -105,6 +106,10 @@ pub enum Command {
     Self_(self_group::SelfGroup),
     /// Print the version of ocx
     Version(version::Version),
+    /// External subcommand: dispatched to an `ocx-<name>` binary discovered on PATH.
+    /// See `adr_cli_plugin_pattern.md` and `app::plugin_dispatch`.
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 impl Command {
@@ -129,6 +134,11 @@ impl Command {
             Command::Shell(shell) => shell.execute(context).await,
             Command::Self_(group) => group.execute(context).await,
             Command::Version(_) => unreachable!("Version is handled in the static-command bypass in App::run"),
+            Command::External(_) => {
+                // External subcommands are dispatched from `App::run` before
+                // `Context::try_init`, so this arm is unreachable.
+                unreachable!("Command::External must be handled in App::run before reaching execute()")
+            }
         }
     }
 }

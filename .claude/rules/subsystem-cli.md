@@ -61,11 +61,12 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 |------|---------|
 | `main.rs` | Entry point (tokio runtime) |
 | `app.rs` | CLI parser root + `Cli` struct |
-| `command.rs` | `Command` enum dispatching to subcommands |
+| `command.rs` | `Command` enum dispatching to subcommands; `External(Vec<OsString>)` variant routes unknown names to plugin dispatch |
 | `app/context.rs` | `Context`: per-invocation state (FileStructure, Index, PackageManager, Api) |
 | `app/context_options.rs` | `ContextOptions`: global flags (offline, remote, format, color, log-level) |
 | `app/update_check.rs` | GitHub release update notification |
 | `app/version.rs` | Version string accessor |
+| `app/plugin_dispatch.rs` | Git/cargo-style external subcommand dispatch; see "Cross-Cutting: Plugin Dispatch" below |
 | `command/*.rs` | One file per subcommand |
 | `command/env.rs` | Toolchain-tier composed-env command (`ocx env`) |
 | `command/run.rs` | Toolchain-tier child-spawn command (`ocx run`) |
@@ -137,6 +138,10 @@ Strict isolation rules:
 Activation (new model): the OCX install script writes `$OCX_HOME/env.sh` containing `eval "$(ocx --global env --shell=sh)"` and appends a block-marker idempotent line to the user's login profile. No `$OCX_HOME/init.<shell>` static files. No `ocx shell hook`/`shell init`.
 
 ADR: `adr_global_toolchain_tier.md`.
+
+## Cross-Cutting: Plugin Dispatch
+
+The `External(Vec<OsString>)` variant on `Command` routes unknown subcommand names to `ocx-<name>` binaries discovered on `$PATH`, matching the cargo / git / kubectl plugin pattern. Dispatch fires from `App::run` before `Context::try_init`, so plugins bypass `FileStructure` / OCI client init. Resolution-affecting env is forwarded via `Env::apply_ocx_config`; plugins inherit the full parent env (trust boundary, see module doc). Built-ins always shadow plugins — clap matches built-in variants first; `External` only fires for unrecognized names. Plugin not-found exits 64 (`EX_USAGE`) with a stderr install hint. Implementation: `app/plugin_dispatch.rs`. ADR: `adr_cli_plugin_pattern.md`.
 
 ## Cross-Cutting: OCX Configuration Forwarding
 

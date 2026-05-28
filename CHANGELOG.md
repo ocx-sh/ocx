@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Direct PATH activation with completions, write both login and rc profiles *(install)*
 - Add `ocx self` command group with throttled update checks *(cli)*
+- External subcommand dispatch: unknown `ocx <name>` invocations exec-forward to `ocx-<name>` on PATH, matching the cargo/git plugin pattern. Plugin not-found exits 64 with an install hint. *(cli)*
 
 ### Changed
 

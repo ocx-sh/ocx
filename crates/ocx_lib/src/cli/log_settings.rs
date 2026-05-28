@@ -65,6 +65,9 @@ impl LogSettings {
     ///
     /// Use this for tools that don't need `tracing-indicatif`. For tools that do,
     /// call [`build_env_filter`] and compose the subscriber manually.
+    ///
+    /// Returns an error if a global subscriber is already installed (safe to call
+    /// `.ok()` on at sites where double-init is expected, e.g. plugin dispatch).
     pub fn init(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
@@ -77,10 +80,12 @@ impl LogSettings {
             .with_file(false)
             .with_target(false)
             .with_writer(std::io::stderr)
-            .with_filter(self.build_env_filter("CONSOLE", std::iter::empty()));
+            .with_filter(self.build_env_filter("CONSOLE", std::iter::empty())?);
 
-        tracing_subscriber::registry().with(fmt_layer).init();
-        Ok(())
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .try_init()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
     /// Initialize a tracing subscriber whose fmt layer writes through the
@@ -114,22 +119,28 @@ impl LogSettings {
                 .with_file(false)
                 .with_target(false)
                 .with_writer(progress.writer())
-                .with_filter(self.build_env_filter("CONSOLE", std::iter::empty()))
+                .with_filter(self.build_env_filter("CONSOLE", std::iter::empty())?)
         };
 
-        tracing_subscriber::registry().with(fmt_layer).init();
-        Ok(())
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .try_init()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
     /// Build an `EnvFilter` using the OCX env var cascade.
     ///
     /// Checks in order: `OCX_LOG_{extra_name}` → `OCX_LOG` → `RUST_LOG` → default level.
     /// The `extra_filter` iterator allows adding additional filter directives.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the resolved env var contains an invalid filter directive.
     pub fn build_env_filter<'a>(
         &'a self,
         extra_name: &str,
         extra_filter: impl Iterator<Item = &'a String>,
-    ) -> tracing_subscriber::filter::EnvFilter {
+    ) -> Result<tracing_subscriber::filter::EnvFilter, Box<dyn std::error::Error + Send + Sync>> {
         let name_env = format!("OCX_LOG_{extra_name}");
 
         let builder = tracing_subscriber::EnvFilter::builder();
@@ -160,25 +171,24 @@ impl LogSettings {
 
         let filter = if let Some(console_level) = self.console_level {
             let console_level: tracing_subscriber::filter::LevelFilter = console_level.into();
-            builder
-                .parse(console_level.to_string())
-                .expect("Failed to initialize log filter!")
+            builder.parse(console_level.to_string())?
         } else {
-            builder.from_env().expect("Failed to initialize log filter!")
+            builder.from_env()?
         };
 
-        self.filter
+        Ok(self
+            .filter
             .iter()
             .chain(extra_filter)
             .fold(filter, |filter, directive| {
                 let directive = match directive.parse() {
                     Ok(directive) => directive,
                     Err(error) => {
-                        crate::log::error!("Failed to parse log filter directive: {error}");
+                        crate::log::error!("failed to parse log filter directive: {error}");
                         return filter;
                     }
                 };
                 filter.add_directive(directive)
-            })
+            }))
     }
 }

@@ -2548,6 +2548,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vergen-gix",
+ "which",
 ]
 
 [[package]]
