@@ -549,10 +549,12 @@ eval "$(ocx --global env --shell=sh)"
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success. |
-| 64 | `--shell NAME` passed as two tokens (use `--shell=NAME`); or `--global` combined with `--project`. |
-| 65 | `ocx.lock` is stale — run `ocx lock`. |
-| 78 | `ocx.toml` or `ocx.lock` parse error. |
+| 0 | Success. Under `--global`, any unusable global toolchain — not configured, or a corrupt/stale `$OCX_HOME/ocx.lock` — is a valid empty environment, not an error (report path and `--shell` path alike). The global tier is lenient. |
+| 64 | `--shell NAME` passed as two tokens (use `--shell=NAME`); or `--global` combined with `--project`; or no `ocx.toml` in scope (project tier). |
+| 65 | `ocx.lock` is stale — run `ocx lock` (project tier). |
+| 78 | `ocx.toml` or `ocx.lock` parse error (project tier). |
+
+The global tier is lenient: `ocx --global env` never fails on an unconfigured or corrupt global toolchain — it exports an empty environment. This is one predictable rule that does not depend on `--shell` (which only selects the output format, never whether the command errors). A corrupt global lock surfaces instead via the commands that rewrite it — `ocx --global lock`, `ocx --global add`, `ocx --global upgrade`. The project tier stays strict (a missing/stale/corrupt `ocx.lock` errors). A useful consequence of the lenient global rule: the installer's `env.sh`/`env.ps1`, which source `ocx --global env --shell=…` on every shell start, can never be broken by global toolchain state.
 
 ---
 
@@ -1450,7 +1452,7 @@ Emit eval-safe shell activation lines for the current OCX installation.
 Running `ocx self activate` prints three blocks of shell code to stdout:
 
 1. A `PATH` prepend with the resolved absolute path to `<OCX_HOME>/symlinks/ocx.sh/ocx/cli/current/content/bin`. The path is resolved at runtime from the binary's own `OCX_HOME` — no shell variable reference is emitted.
-2. A completion script for the detected shell (skipped silently when `OCX_NO_COMPLETIONS=1` is set, or when the shell has no [`clap_complete`][clap-complete] backend).
+2. A completion script for the detected shell — loaded only when completions are enabled (skipped silently when `OCX_NO_COMPLETIONS=1` is set, when `--no-completion` is passed, when the session is non-interactive, or when the shell has no [`clap_complete`][clap-complete] backend). The script is written to a version-stamped file under `<OCX_HOME>/state/completions/` and a `source`/dot-source line is emitted (the file keeps PowerShell's `using namespace` directives valid). The installer's `env.sh`/`env.ps1` shim decides interactivity itself and passes the explicit `--completion`/`--no-completion` flag; a direct `ocx self activate` with neither flag falls back to whether stderr is a terminal.
 3. A global env eval line: `if command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell=NAME)"; fi` (POSIX form shown). Per-shell variants use the target shell's native idiom — `fish` uses `command -v ocx >/dev/null 2>&1; and ocx --global env --shell=fish | source`; `powershell`/`pwsh` use `if (Get-Command ocx -ErrorAction SilentlyContinue) { (ocx --global env --shell=pwsh) | Out-String | Invoke-Expression }`; `elvish` and `nushell` use their respective eval-from-string idioms.
 
 The `OCX_HOME` assignment-with-fallback lives in `env.sh` itself — written once by the installer, not emitted by `ocx self activate`. See the [environment reference][env-ocx-home] for details.
@@ -1470,7 +1472,7 @@ fi
 **Usage**
 
 ```shell
-ocx self activate [--shell[=NAME]]
+ocx self activate [--shell[=NAME]] [--completion | --no-completion]
 ```
 
 **Options**
@@ -1478,6 +1480,8 @@ ocx self activate [--shell[=NAME]]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--shell[=NAME]` | — | Target shell dialect. Must use the `=` form (`--shell=bash`). Bare `--shell` (no value) and absent `--shell` both trigger autodetect from `$SHELL` or the parent process. Exit 64 if undetectable. `--shell=sh` ≡ `--shell=dash` (POSIX strict alias). | *(autodetect)* |
+| `--completion` | — | Force completion injection on, regardless of session interactivity. | *(auto)* |
+| `--no-completion` | — | Force completion injection off. Last of `--completion`/`--no-completion` wins. | *(auto)* |
 | `-h`, `--help` | | Print help information. | — |
 
 **Supported shells**
@@ -1498,6 +1502,8 @@ ocx self activate [--shell[=NAME]]
 
 ::: tip Shell completion coverage
 Completion injection wraps [`clap_complete`][clap-complete]. Not every shell supported by `ocx self activate` has a `clap_complete` backend. Unsupported shells silently skip the completion block — PATH prepend and global env eval still run. Set `OCX_NO_COMPLETIONS=1` to suppress completion injection entirely.
+
+Completions load only for **interactive** sessions. The installer's `env.sh`/`env.ps1` shim decides interactivity itself (`$-`, `status is-interactive`, `[Environment]::UserInteractive`) and passes the explicit `--completion`/`--no-completion` flag, so the gate never depends on the binary probing a stderr the shim has redirected. Non-interactive sources — scripts, `ssh host cmd` — get the PATH prepend and global env eval but skip the completion file work entirely. A direct `ocx self activate` with neither flag falls back to whether stderr is a terminal.
 :::
 
 **Environment variables**

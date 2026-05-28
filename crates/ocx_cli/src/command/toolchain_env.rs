@@ -24,8 +24,16 @@
 //!   with no select step). The §4 login exporter
 //!   `eval "$(ocx --global env --shell=sh)"` runs on every shell start — it
 //!   MUST NOT contact the registry, install, or hang. A pinned tool not
-//!   materialised locally ⇒ silently skipped; no global lock at all ⇒ exit 64
-//!   ("no global toolchain configured"), never exit 74.
+//!   materialised locally ⇒ silently skipped. The global tier is LENIENT: ANY
+//!   resolution failure — nothing configured ("no lock / nothing local") OR a
+//!   real fault (corrupt/stale `$OCX_HOME/ocx.lock`, env-composition error) —
+//!   yields the SAME **empty env** (exit 0). This does not depend on `--shell`,
+//!   which only selects the output FORMAT, never the error semantics: one
+//!   predictable rule, an unusable global toolchain is empty. A corrupt global
+//!   lock surfaces loudly via the commands that rewrite it
+//!   (`ocx --global lock`/`add`/`upgrade`), not via this read-only exporter; a
+//!   genuine fault is logged at `debug`. Never exit 74. (The PROJECT tier stays
+//!   strict — see below.)
 //! - **project** (no `--global`) routes through `load_project_with_lock` +
 //!   `compose_tool_set`, then a **single batched** `find_or_install_all` over
 //!   all composed identifiers (mirrors `run.rs` — no per-tool N+1 network
@@ -44,7 +52,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ocx_lib::{
-    cli::UsageError,
     package::metadata::env::entry::Entry,
     project::{DEFAULT_GROUP, ProjectLock, compose_tool_set, lock::lock_path_for},
 };
@@ -74,8 +81,13 @@ use crate::{
 ///
 /// # Exit codes
 ///
-/// - 64 (`UsageError`): no `ocx.toml` in scope (project tier); **no global
-///   toolchain configured** (`--global`, no `$OCX_HOME/ocx.lock`); `--shell`
+/// - 0 (`Success`): under `--global`, ANY resolution outcome short of a usage
+///   error — nothing configured (no `$OCX_HOME/ocx.lock`, or nothing resolves
+///   locally) AND a corrupt/stale global lock or composition fault — yields an
+///   empty env on the report path AND the eval-safe `--shell` path. The global
+///   tier is lenient; a corrupt global lock surfaces via `ocx --global lock`/
+///   `add`/`upgrade`, not this read-only exporter.
+/// - 64 (`UsageError`): no `ocx.toml` in scope (project tier); `--shell`
 ///   (bare) with undetectable `$SHELL`/parent; `--global` ⟂ `--project`
 ///   (clap `conflicts_with`, mapped to EX_USAGE 64 — NOT exit 2).
 /// - 78 (`ConfigError`): `ocx.lock` absent (project tier).
@@ -111,13 +123,32 @@ impl ToolchainEnv {
         let entries = if context.global() {
             // OFFLINE current-symlink resolution (ADR D5, handshake §1/§4).
             // The login exporter runs this every shell — never network/install.
-            match resolve_global_pinned_env(&context).await? {
-                Some(entries) => entries,
-                None => {
-                    return Err(UsageError::new(
-                        "no global toolchain configured; run `ocx --global add <id>` to create one",
-                    )
-                    .into());
+            //
+            // The global tier is LENIENT — it is an implicit, optional
+            // toolchain. "No usable global toolchain" is a normal empty result,
+            // not an error. Every non-success outcome — nothing configured
+            // (`Ok(None)`: no `$OCX_HOME/ocx.lock`, or nothing materialised
+            // locally) OR a real fault (`Err`: corrupt/stale lock,
+            // env-composition error) — yields the SAME empty env (exit 0).
+            //
+            // This is INDEPENDENT of `--shell`: that flag selects the output
+            // FORMAT (eval-safe lines vs structured report), never the error
+            // semantics. One predictable rule — an unusable global toolchain is
+            // empty, full stop — instead of behaviour that forks on how the
+            // caller happens to format output.
+            //
+            // A genuine fault is logged at `debug` so it stays observable
+            // (`-l debug`); a corrupt global lock also surfaces loudly via the
+            // commands that actually rewrite it (`ocx --global lock`/`add`/
+            // `upgrade`), so this read-only exporter need not. The PROJECT tier
+            // (the `else` arm) stays strict: an explicit project's
+            // missing/stale/corrupt `ocx.lock` IS an error.
+            match resolve_global_pinned_env(&context).await {
+                Ok(Some(entries)) => entries,
+                Ok(None) => Vec::new(),
+                Err(error) => {
+                    tracing::debug!("global toolchain env resolution failed; emitting empty env: {error:#}");
+                    Vec::new()
                 }
             }
         } else {
@@ -194,8 +225,11 @@ impl ToolchainEnv {
 /// expose them to garbage collection.
 ///
 /// Returns `Ok(None)` when there is no global `ocx.lock`, or no global tool
-/// resolves locally — the caller maps that to exit 64 ("no global toolchain
-/// configured"), not exit 74.
+/// resolves locally. A real failure (corrupt lock, composition error) returns
+/// `Err`. The caller treats the global tier as lenient — it maps BOTH `Ok(None)`
+/// and `Err` to a no-op empty env (exit 0) on the report and eval-safe paths
+/// alike (logging the `Err` at `debug`); a corrupt global lock surfaces via the
+/// lock-rewriting commands, not this read-only exporter. Never exit 74.
 ///
 /// # Offline guarantee
 ///

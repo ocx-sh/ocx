@@ -132,7 +132,17 @@ impl BlobStore {
             let mut tmp = tempfile::NamedTempFile::new_in(&parent)?;
             std::io::Write::write_all(&mut tmp, &bytes_owned)?;
             tmp.as_file().sync_data()?;
-            persist_with_windows_retry(tmp, &target_for_blocking)
+            match crate::utility::fs::persist_temp_file(tmp, &target_for_blocking) {
+                Ok(()) => Ok(()),
+                // Content-addressed idempotency: the CAS path is immutable
+                // (same digest ⇒ same bytes), so a concurrent writer that
+                // published it during our retry window produced byte-equivalent
+                // content — an existing target IS success. This re-check is
+                // valid ONLY because the path is content-addressed; it is
+                // deliberately NOT baked into the generic `persist_temp_file`.
+                Err(_) if target_for_blocking.exists() => Ok(()),
+                Err(err) => Err(err),
+            }
         })
         .await
         .map_err(|join_err| crate::error::file_error(&target, std::io::Error::other(join_err)))?
@@ -202,72 +212,6 @@ fn classify_blob_dir(dir: &Path, _depth: usize) -> crate::utility::fs::WalkDecis
         return crate::utility::fs::WalkDecision::skip();
     }
     crate::utility::fs::WalkDecision::descend_skip(BLOB_SKIP_NAMES)
-}
-
-/// Windows-cfg retry-with-backoff wrapping `NamedTempFile::persist`.
-///
-/// 3 retries: 100ms / 400ms / 800ms with ±25% jitter on
-/// ERROR_SHARING_VIOLATION (32) or ERROR_ACCESS_DENIED (5). After retry
-/// exhaustion, re-check existence; if the target now exists, return Ok
-/// (content-addressed idempotency — the racing writer's bytes are
-/// byte-equivalent by definition).
-///
-/// Cites rattler's `rename_with_retry` precedent for the same Windows
-/// Defender amplification surface on `windows-latest` GitHub Actions
-/// runners (research §6 Finding 2).
-///
-/// On non-Windows, persist is called once with no retry.
-fn persist_with_windows_retry(tmp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        use std::time::Duration;
-
-        const RETRIES: [Duration; 3] = [
-            Duration::from_millis(100),
-            Duration::from_millis(400),
-            Duration::from_millis(800),
-        ];
-
-        let mut tmp_opt = Some(tmp);
-        let mut last_err: Option<std::io::Error> = None;
-
-        // First attempt: no backoff. Then up to 3 retries with jitter.
-        for backoff in std::iter::once(Duration::ZERO).chain(RETRIES.iter().copied()) {
-            if !backoff.is_zero() {
-                // ±25% jitter using subsecond nanos from SystemTime as a
-                // pseudo-random seed. No `rand` dep needed.
-                let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos();
-                let jitter_scale = 0.75 + (f64::from(nanos % 1024) / 1023.0) * 0.5;
-                let scaled = Duration::from_secs_f64(backoff.as_secs_f64() * jitter_scale);
-                std::thread::sleep(scaled);
-            }
-            let temp_file = tmp_opt.take().expect("tmp_opt is always Some at loop entry");
-            match temp_file.persist(target) {
-                Ok(_) => return Ok(()),
-                Err(persist_err) => {
-                    let raw_os_error = persist_err.error.raw_os_error();
-                    if matches!(raw_os_error, Some(5) | Some(32)) {
-                        tmp_opt = Some(persist_err.file);
-                        last_err = Some(persist_err.error);
-                        continue;
-                    }
-                    return Err(persist_err.error);
-                }
-            }
-        }
-        // Retry exhausted; idempotent re-check (content-addressed invariant).
-        if target.exists() {
-            return Ok(());
-        }
-        Err(last_err.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "persist retries exhausted")))
-    }
-    #[cfg(not(windows))]
-    {
-        tmp.persist(target).map(|_| ()).map_err(|e| e.error)
-    }
 }
 
 /// Test-only call counter on `BlobStore::write_blob`.
@@ -540,8 +484,9 @@ mod tests {
     // ── Windows cfg-gated retry behavior tests ──────────────────────────────
     //
     // These tests verify the Windows-specific retry-with-backoff logic in
-    // `persist_with_windows_retry`. They are gated on `#[cfg(target_os =
-    // "windows")]` and compile but do not run on Linux/macOS.
+    // `utility::fs::persist_temp_file` (reached via `write_blob`). They are
+    // gated on `#[cfg(target_os = "windows")]` and compile but do not run on
+    // Linux/macOS.
 
     #[cfg(target_os = "windows")]
     #[tokio::test(flavor = "multi_thread")]

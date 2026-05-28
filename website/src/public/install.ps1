@@ -263,9 +263,25 @@ if (-not $env:OCX_HOME) { $env:OCX_HOME = Join-Path $env:USERPROFILE '.ocx' }
 
 $_ocxBin = Join-Path $env:OCX_HOME 'symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe'
 if (Test-Path $_ocxBin -PathType Leaf) {
-    Invoke-Expression ((& $_ocxBin self activate --shell=powershell 2>$null) | Out-String)
+    # Build args as an array so the completion flag is appended cleanly — never
+    # a $null/empty positional that clap would reject (Windows PowerShell 5.1
+    # passes a bare $null arg as an empty string).
+    # Request completions only on an interactive PowerShell 5.0+ session: legacy
+    # Windows PowerShell <5.0 cannot run clap's `using namespace` /
+    # `Register-ArgumentCompleter -Native` completion output, so it opts out with
+    # --no-completion while still emitting PATH + global env.
+    $_ocxArgs = @('self', 'activate', '--shell=powershell')
+    if ([Environment]::UserInteractive -and $PSVersionTable.PSVersion.Major -ge 5) {
+        $_ocxArgs += '--completion'
+    } else {
+        $_ocxArgs += '--no-completion'
+    }
+    $_ocxActivate = (& $_ocxBin @_ocxArgs 2>$null) | Out-String
+    # Guard $null/empty: Out-String of empty/failed output yields $null, and
+    # `Invoke-Expression $null` throws "Cannot bind argument ... is null".
+    if ($_ocxActivate) { Invoke-Expression $_ocxActivate }
 }
-Remove-Variable _ocxBin -ErrorAction SilentlyContinue
+Remove-Variable _ocxBin, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
 '@
 
     Set-Content -Path $envFile -Value $envContent -NoNewline
@@ -598,4 +614,8 @@ function Main {
     }
 }
 
-Main
+# Run Main only when executed (irm|iex, & ./install.ps1, iex (irm ...)) — skip
+# when dot-sourced (. ./install.ps1) so tests can call Create-EnvFile directly.
+# InvocationName is '.' only for dot-source; all execution forms give the
+# script name or empty string, never a literal dot.
+if ($MyInvocation.InvocationName -ne '.') { Main }
