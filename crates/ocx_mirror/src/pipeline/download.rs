@@ -28,19 +28,74 @@ pub async fn download(client: &reqwest::Client, url: &Url, output: &Path) -> Res
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Install the rustls crypto provider exactly once per process. Reqwest
+    /// builds its TLS stack lazily on first `Client::new` and panics with
+    /// "No provider set" if none is registered, even for `http://` URLs.
+    fn install_crypto_provider() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+    }
+
+    /// Reserve an ephemeral port, then drop the listener so subsequent connects
+    /// fail fast with `ECONNREFUSED`. Avoids hardcoded ports like `127.0.0.1:1`
+    /// that silently drop SYNs on some hosts (WSL2, hardened kernels), which
+    /// pushes the test from ~0ms to the OS TCP retry budget (~130s).
+    fn reserved_unused_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
 
     #[tokio::test]
-    async fn download_empty_response_error() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    async fn download_connect_refused() {
+        install_crypto_provider();
 
-        // We can't easily test against a real server in unit tests.
-        // This test validates the error path for empty content.
         let dir = TempDir::new().unwrap();
         let output = dir.path().join("test.bin");
+        let url = Url::parse(&format!("http://127.0.0.1:{}/nonexistent", reserved_unused_port())).unwrap();
 
-        // An invalid URL will fail at the HTTP level, which is expected.
         let client = reqwest::Client::new();
-        let result = download(&client, &Url::parse("http://127.0.0.1:1/nonexistent").unwrap(), &output).await;
-        assert!(result.is_err());
+        let result = download(&client, &url, &output).await;
+        assert!(result.is_err(), "expected connect failure to surface as Err");
+    }
+
+    #[tokio::test]
+    async fn download_empty_body_is_error() {
+        install_crypto_provider();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Drain request headers; payload not inspected.
+            let mut scratch = [0u8; 1024];
+            let _ = socket.read(&mut scratch).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            socket.shutdown().await.unwrap();
+        });
+
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("test.bin");
+        let url = Url::parse(&format!("http://{addr}/blob")).unwrap();
+
+        let client = reqwest::Client::new();
+        let result = download(&client, &url, &output).await;
+        server.await.unwrap();
+
+        let err = result.expect_err("empty body must error");
+        assert!(
+            err.to_string().contains("downloaded file is empty"),
+            "unexpected error: {err}"
+        );
     }
 }
