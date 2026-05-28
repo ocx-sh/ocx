@@ -161,22 +161,32 @@ fn ci_info() -> Option<CiInfo> {
 mod tests {
     use super::*;
 
-    /// `Provenance::current()` is callable in unit tests; with no
-    /// `__testing` env vars exported at test-binary build time, the CI
-    /// block is always absent and channel is always absent.
-    /// The build block is present when vergen-gix is active (CI and most
-    /// developer builds); absent only in stripped/offline builds.
+    /// `Provenance::current()` is callable in unit tests. Each optional
+    /// block is populated when its backing env vars happen to be exported
+    /// at test-binary build time (`option_env!` is compile-time):
+    ///
+    /// - `build` — present when vergen-gix is active (CI + most dev builds),
+    ///   absent only in stripped/offline builds.
+    /// - `ci` — present when the test binary is compiled inside CI itself
+    ///   (GitHub Actions exports `GITHUB_*`); absent locally.
+    /// - `channel` — present only when `__OCX_BUILD_CHANNEL` is set at
+    ///   compile time (cargo-dist release jobs).
+    ///
+    /// Assert structural invariants on each populated block instead of
+    /// presence, so the test passes in every build environment.
     #[test]
     fn current_is_callable() {
         let info = Provenance::current();
-        assert!(info.ci.is_none(), "test builds do not export GITHUB_* env vars");
-        // channel is absent in local cargo builds (no __OCX_BUILD_CHANNEL set)
-        assert!(info.channel.is_none(), "test builds do not set __OCX_BUILD_CHANNEL");
-        // Build block is present when vergen-gix emits env vars; assert
-        // content validity only when the block is actually populated.
         if let Some(build) = &info.build {
             assert!(!build.target.is_empty(), "target triple must be non-empty");
             assert!(!build.rustc.is_empty(), "rustc semver must be non-empty");
+        }
+        if let Some(ci) = &info.ci {
+            assert!(!ci.provider.is_empty(), "CI provider must be non-empty");
+            assert!(!ci.run_url.is_empty(), "CI run URL must be non-empty");
+        }
+        if let Some(channel) = info.channel {
+            assert!(!channel.is_empty(), "channel must be non-empty when present");
         }
     }
 
