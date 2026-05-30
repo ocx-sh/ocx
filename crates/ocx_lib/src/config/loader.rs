@@ -361,6 +361,22 @@ impl ConfigLoader {
         let mut config = Config::default();
         for path in paths {
             let path = path.as_ref();
+            // Reject a non-regular path (e.g. a directory) with a consistent
+            // message on every platform *before* opening. On Windows,
+            // `File::open` on a directory fails with a generic "Access is
+            // denied" that never reaches the `is_file()` guard below; on Unix
+            // the open succeeds and the guard fires. Stat-first makes the
+            // rejection uniform across platforms.
+            if let Ok(meta) = tokio::fs::metadata(path).await
+                && !meta.file_type().is_file()
+            {
+                return Err(Error::Io {
+                    path: path.to_path_buf(),
+                    tier: ConfigSource::Config,
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "config path is not a regular file"),
+                }
+                .into());
+            }
             let file = match tokio::fs::File::open(path).await {
                 Ok(f) => f,
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
