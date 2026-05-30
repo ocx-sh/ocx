@@ -560,13 +560,16 @@ fn touch_state_atomic(path: &Path) -> std::io::Result<()> {
     // Build a unique temp filename using PID + a counter derived from the
     // thread ID so concurrent tasks don't collide on the same suffix.
     let unique_suffix = {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        // Mix PID with nanos for cross-process + within-process uniqueness.
-        format!("{}.{}", std::process::id(), nanos)
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // PID gives cross-process uniqueness; a process-global monotonic
+        // counter gives within-process uniqueness. A wall-clock nanos suffix
+        // (the previous approach) collides when concurrent tasks land in the
+        // same clock bucket on coarse-resolution timers — observed flaky on
+        // macOS. The counter guarantees every call gets a distinct temp name,
+        // so concurrent writers never race on the same temp file.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{}.{}", std::process::id(), n)
     };
     let tmp_path = parent.join(format!(
         ".{}.tmp.{}",
