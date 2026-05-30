@@ -250,7 +250,10 @@ mod tests {
 
         assert_eq!(
             read(&targets.env_file),
-            "LD_LIBRARY_PATH=/home/user/.ocx/objects/foo/lib:/existing/lib\n"
+            format!(
+                "LD_LIBRARY_PATH=/home/user/.ocx/objects/foo/lib{0}/existing/lib\n",
+                crate::env::PATH_SEPARATOR
+            )
         );
     }
 
@@ -339,7 +342,10 @@ mod tests {
         targets.flush().unwrap();
 
         let content = read(&targets.env_file);
-        assert_eq!(content, "LD_LIBRARY_PATH=/pkg1/lib:/pkg2/lib\n");
+        assert_eq!(
+            content,
+            format!("LD_LIBRARY_PATH=/pkg1/lib{0}/pkg2/lib\n", crate::env::PATH_SEPARATOR)
+        );
     }
 
     #[test]
@@ -358,7 +364,13 @@ mod tests {
         targets.flush().unwrap();
 
         let content = read(&targets.env_file);
-        assert_eq!(content, "LD_LIBRARY_PATH=/pkg1/lib:/pkg2/lib:/existing/lib\n");
+        assert_eq!(
+            content,
+            format!(
+                "LD_LIBRARY_PATH=/pkg1/lib{0}/pkg2/lib{0}/existing/lib\n",
+                crate::env::PATH_SEPARATOR
+            )
+        );
     }
 
     #[test]
