@@ -685,12 +685,18 @@ mod tests {
         use super::*;
         use crate::utility::fs::file_lock::FileLock;
 
-        /// Codifies that opening a second raw handle on a file locked by
-        /// `FileLock` hits `ERROR_LOCK_VIOLATION` (os error 33). This
-        /// demonstrates why callers must use `LockedFile` (which routes all
-        /// I/O through the lock-owning handle) rather than raw file opens.
+        /// On Windows `FileLock` takes an advisory byte-range lock
+        /// (`LockFileEx`). That lock does NOT prevent a second *open* of the
+        /// same path: a raw `OpenOptions::open` still succeeds, handing the
+        /// caller an unlocked handle that bypasses the advisory lock. This is
+        /// exactly why callers must go through `LockedFile` (which owns the one
+        /// lock-bearing handle) instead of opening the file directly.
+        ///
+        /// The lock itself is still genuinely exclusive: a second
+        /// `try_exclusive` on the freshly opened handle reports contention
+        /// rather than acquiring.
         #[test]
-        fn same_process_second_handle_fails_outside_locked_file() {
+        fn second_raw_open_succeeds_but_lock_stays_exclusive() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test.lock");
             // Create the file.
@@ -698,20 +704,19 @@ mod tests {
             let file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
             let _lock = FileLock::try_exclusive(file).unwrap().expect("acquired exclusive");
 
-            // Second raw open on the same path must fail with ERROR_LOCK_VIOLATION.
-            let second = std::fs::OpenOptions::new().read(true).write(true).open(&path);
-            match second {
-                Err(e) => {
-                    let raw = e.raw_os_error();
-                    assert_eq!(
-                        raw,
-                        Some(33),
-                        "expected os error 33 (ERROR_LOCK_VIOLATION), got {:?}",
-                        raw
-                    );
-                }
-                Ok(_) => panic!("expected ERROR_LOCK_VIOLATION but second open succeeded"),
-            }
+            // A second raw open succeeds — the advisory lock does not block opens.
+            let second = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("second raw open must succeed despite the advisory lock");
+
+            // But the lock is still exclusive: locking the second handle is contended.
+            let contended = FileLock::try_exclusive(second).unwrap();
+            assert!(
+                contended.is_none(),
+                "second try_exclusive must observe contention while the first lock is held"
+            );
         }
 
         /// Demonstrates that `replace_bytes` via the lock-owning handle does

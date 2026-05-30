@@ -409,6 +409,9 @@ mod tests {
 
     // -- sign_directory -----------------------------------------------------------
 
+    // Unix-only: `signed_inodes` dedups by inode, but `file_inode` returns
+    // `None` on non-Unix, so the count expectation only holds on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sign_directory_finds_standalone_binaries() {
         let dir = TempDir::new().unwrap();
@@ -446,6 +449,8 @@ mod tests {
         assert!(signed_inodes.lock().unwrap().is_empty());
     }
 
+    // Unix-only: relies on Unix symlinks and inode-based dedup.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sign_directory_skips_symlinks() {
         let dir = TempDir::new().unwrap();
@@ -467,6 +472,9 @@ mod tests {
         assert_eq!(signed_inodes.lock().unwrap().len(), 1);
     }
 
+    // Unix-only: `signed_inodes` dedups by inode, but `file_inode` returns
+    // `None` on non-Unix, so the count expectation only holds on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sign_directory_deduplicates_hardlinks() {
         let dir = TempDir::new().unwrap();
