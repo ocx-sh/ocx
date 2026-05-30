@@ -9,6 +9,10 @@ inputs:
     description: Use cargo-zigbuild instead of cargo build (required for cross-compiling aarch64-linux and musl from x86 runners)
     required: false
     default: "false"
+  features:
+    description: Space/comma-separated cargo features (e.g. `ocx/__testing` for acceptance binaries). Empty = release-clean.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -43,13 +47,15 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
-      run: cargo build --release --target="$TARGET" --locked
+        FEATURES: ${{ inputs.features }}
+      run: cargo build --release --target="$TARGET" --locked ${FEATURES:+--features "$FEATURES"}
     - name: Build (zigbuild)
       if: ${{ inputs.use_zigbuild == 'true' }}
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
-      run: cargo zigbuild --release --target="$TARGET" --locked
+        FEATURES: ${{ inputs.features }}
+      run: cargo zigbuild --release --target="$TARGET" --locked ${FEATURES:+--features "$FEATURES"}
     - name: Prepare Binaries
       shell: bash
       env:
