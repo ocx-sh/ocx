@@ -72,50 +72,6 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), Error> {
 
 // ── read-modify-write helpers ─────────────────────────────────────────────
 
-/// Read and parse the project config file at `config_path`.
-///
-/// Enforces the same 64 KiB size cap used by
-/// [`crate::project::config::ProjectConfig::from_path`] (via
-/// `super::internal::FILE_SIZE_LIMIT_BYTES`). Oversized files are
-/// rejected with [`ProjectErrorKind::FileTooLarge`] rather than read
-/// into memory — defense-in-depth against pathological inputs during
-/// the atomic read-modify-write cycle.
-fn load_config(config_path: &Path) -> Result<crate::project::config::ProjectConfig, Error> {
-    let limit = crate::project::internal::FILE_SIZE_LIMIT_BYTES;
-
-    // Stat before reading — reject obviously oversized files without allocating.
-    let meta = std::fs::metadata(config_path)
-        .map_err(|e| ProjectError::new(config_path.to_path_buf(), ProjectErrorKind::Io(e)))?;
-    if meta.len() > limit {
-        return Err(ProjectError::new(
-            config_path.to_path_buf(),
-            ProjectErrorKind::FileTooLarge {
-                size: meta.len(),
-                limit,
-            },
-        )
-        .into());
-    }
-
-    let text = std::fs::read_to_string(config_path)
-        .map_err(|e| ProjectError::new(config_path.to_path_buf(), ProjectErrorKind::Io(e)))?;
-
-    // Guard synthetic files (e.g. procfs) whose metadata reports 0 but whose
-    // read may produce more bytes than the cap allows.
-    if text.len() as u64 > limit {
-        return Err(ProjectError::new(
-            config_path.to_path_buf(),
-            ProjectErrorKind::FileTooLarge {
-                size: text.len() as u64,
-                limit,
-            },
-        )
-        .into());
-    }
-
-    crate::project::config::ProjectConfig::from_toml_str(&text)
-}
-
 /// Derive the binding key (TOML map key) from an identifier.
 ///
 /// Per the `ocx.toml` schema, the binding key is the repository basename —
@@ -153,6 +109,43 @@ fn validate_group_name(name: &str) -> bool {
 }
 
 // ── public API ────────────────────────────────────────────────────────────
+
+/// Read and parse the project config file THROUGH the lock-owning handle.
+///
+/// Reading via a *second* handle (e.g. `std::fs::read_to_string`) while the
+/// exclusive advisory lock is held works on POSIX (flock is advisory) but hits
+/// `ERROR_LOCK_VIOLATION` on Windows, where `LockFileEx` blocks reads of the
+/// locked range by other handles. Reading through `guard` (the lock owner)
+/// avoids the second handle. Enforces the same 64 KiB size cap as the former
+/// `load_config`.
+async fn read_config_via_guard(
+    guard: &mut crate::utility::fs::LockedFile,
+    config_path: &Path,
+) -> Result<crate::project::config::ProjectConfig, Error> {
+    let bytes = guard.read_bytes().await.map_err(|e| {
+        Error::Project(ProjectError::new(
+            config_path.to_path_buf(),
+            ProjectErrorKind::Io(std::io::Error::other(e)),
+        ))
+    })?;
+    let limit = crate::project::internal::FILE_SIZE_LIMIT_BYTES;
+    if bytes.len() as u64 > limit {
+        return Err(Error::Project(ProjectError::new(
+            config_path.to_path_buf(),
+            ProjectErrorKind::FileTooLarge {
+                size: bytes.len() as u64,
+                limit,
+            },
+        )));
+    }
+    let text = String::from_utf8(bytes).map_err(|e| {
+        Error::Project(ProjectError::new(
+            config_path.to_path_buf(),
+            ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        ))
+    })?;
+    crate::project::config::ProjectConfig::from_toml_str(&text)
+}
 
 /// Apply an `add` binding mutation to a [`crate::project::config::ProjectConfig`]
 /// in memory.
@@ -268,7 +261,7 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
 
     let mut guard = acquire_project_lock_for_file(config_path).await?;
 
-    let mut config = load_config(config_path)?;
+    let mut config = read_config_via_guard(&mut guard, config_path).await?;
 
     // Compose: in-memory mutation + write-back through the lock-owning handle.
     add_binding_in_memory(&mut config, config_path, identifier, group)?;
@@ -318,7 +311,7 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
 pub async fn remove_binding(config_path: &Path, identifier: &Identifier, group: Option<&str>) -> Result<(), Error> {
     let mut guard = acquire_project_lock_for_file(config_path).await?;
 
-    let mut config = load_config(config_path)?;
+    let mut config = read_config_via_guard(&mut guard, config_path).await?;
 
     remove_binding_in_memory(&mut config, config_path, identifier, group)?;
 
