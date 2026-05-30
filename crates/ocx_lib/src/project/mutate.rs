@@ -266,15 +266,25 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
         )));
     }
 
-    let _guard = acquire_project_lock_for_file(config_path).await?;
+    let mut guard = acquire_project_lock_for_file(config_path).await?;
 
     let mut config = load_config(config_path)?;
 
-    // Compose: in-memory mutation + final atomic write.
+    // Compose: in-memory mutation + write-back through the lock-owning handle.
     add_binding_in_memory(&mut config, config_path, identifier, group)?;
 
     let serialized = config_to_toml_string(&config)?;
-    atomic_write(config_path, &serialized)?;
+    // Rewrite ocx.toml IN PLACE through the lock-owning handle. A tempfile +
+    // rename would rotate the file's inode and strand the lock fd on the
+    // orphan, breaking mutual exclusion on Windows (where LockFileEx is
+    // per-handle and rename-over-open-file is refused). See project_lock.rs
+    // module docs ("WHY IN-PLACE").
+    guard.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
+        Error::Project(ProjectError::new(
+            config_path.to_path_buf(),
+            ProjectErrorKind::Io(std::io::Error::other(e)),
+        ))
+    })?;
 
     Ok(())
 }
@@ -306,14 +316,20 @@ pub async fn add_binding(config_path: &Path, identifier: &Identifier, group: Opt
 /// - [`ProjectErrorKind::Locked`] — another process holds the exclusive flock
 ///   on the config file; the caller should retry with backoff.
 pub async fn remove_binding(config_path: &Path, identifier: &Identifier, group: Option<&str>) -> Result<(), Error> {
-    let _guard = acquire_project_lock_for_file(config_path).await?;
+    let mut guard = acquire_project_lock_for_file(config_path).await?;
 
     let mut config = load_config(config_path)?;
 
     remove_binding_in_memory(&mut config, config_path, identifier, group)?;
 
     let serialized = config_to_toml_string(&config)?;
-    atomic_write(config_path, &serialized)?;
+    // Rewrite in place through the lock-owning handle (see add_binding).
+    guard.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
+        Error::Project(ProjectError::new(
+            config_path.to_path_buf(),
+            ProjectErrorKind::Io(std::io::Error::other(e)),
+        ))
+    })?;
     Ok(())
 }
 
@@ -518,7 +534,7 @@ mod tests {
     // ── add_binding ──────────────────────────────────────────────────────────
 
     /// Spec: mutate §5 bullet 1 — default group (group: None).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_appends_to_default_group() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -534,7 +550,7 @@ mod tests {
     }
 
     /// Spec: mutate §5 bullet 2 — named group.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_into_named_group() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -550,7 +566,7 @@ mod tests {
     }
 
     /// Spec: mutate §5 bullet 3 — duplicate binding in the same group returns BindingAlreadyExists.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_errors_on_same_group_duplicate() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -584,7 +600,7 @@ mod tests {
     }
 
     /// Allow same binding name in default group AND a named group.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_allows_same_name_default_and_named_group() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -609,7 +625,7 @@ mod tests {
     // ── remove_binding ───────────────────────────────────────────────────────
 
     /// Spec: mutate §5 bullet 4 — remove from default group (no --group).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remove_binding_drops_default_group_entry() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -626,7 +642,7 @@ mod tests {
     }
 
     /// Spec: mutate §5 bullet 5 — remove from named group (no --group).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remove_binding_drops_named_group_entry() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -641,7 +657,7 @@ mod tests {
     }
 
     /// Spec: mutate §5 bullet 6 — missing binding returns BindingNotFound.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remove_binding_errors_when_missing() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -659,7 +675,7 @@ mod tests {
     }
 
     /// Explicit --group targets only that group; sibling groups untouched.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remove_binding_with_explicit_group_targets_that_group() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -682,7 +698,7 @@ mod tests {
     }
 
     /// Without --group, ambiguous binding (in multiple groups) returns BindingAmbiguous.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remove_binding_without_group_errors_when_ambiguous() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -702,7 +718,7 @@ mod tests {
     }
 
     /// Without --group, unique binding (only in one group) removes successfully.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn remove_binding_without_group_succeeds_when_unique() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -846,7 +862,7 @@ mod tests {
     ///
     /// `add_binding(dir, id, Some("all"))` must return
     /// `Err(InvalidGroupName { name: "all" })`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_rejects_reserved_group_all() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -866,7 +882,7 @@ mod tests {
     ///
     /// `add_binding(dir, id, Some("default"))` must return
     /// `Err(InvalidGroupName { name: "default" })`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_rejects_reserved_group_default() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
@@ -885,7 +901,7 @@ mod tests {
     /// Plan §Phase 3.1: `add_binding_accepts_normal_group_name_unchanged`
     ///
     /// Regression: a normal group name like `"ci"` must still succeed.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_accepts_normal_group_name_unchanged() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
