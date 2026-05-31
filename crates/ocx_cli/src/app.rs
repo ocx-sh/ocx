@@ -236,17 +236,19 @@ mod tests {
     /// non-ASCII char cannot enter via a single-line doc comment in the first
     /// place. On failure, replace the offender: `->` for `→`, `-` for `—`,
     /// `...` for `…`.
-    #[test]
-    fn cli_help_text_is_ascii() {
+    /// Collect every (location, help-text) pair clap renders across the whole
+    /// `ocx` command tree: each command's about/long_about + before/after(_long)
+    /// help, every argument's help/long_help, and every possible-value name +
+    /// help.
+    ///
+    /// Shared by `cli_help_text_is_ascii` and
+    /// `cli_help_text_has_no_internal_references` so both guards cover an
+    /// identical, authoritative set of clap-facing strings — the traversal is
+    /// the single definition of "what a user sees via `--help` / completions".
+    fn collect_clap_help_texts() -> Vec<(String, String)> {
         use clap::CommandFactory as _;
 
-        fn record(offenders: &mut Vec<String>, here: &str, label: &str, text: &str) {
-            if !text.is_ascii() {
-                offenders.push(format!("[{here}] {label}: {text:?}"));
-            }
-        }
-
-        fn check(cmd: &clap::Command, path: &str, offenders: &mut Vec<String>) {
+        fn walk(cmd: &clap::Command, path: &str, out: &mut Vec<(String, String)>) {
             let here = if path.is_empty() {
                 cmd.get_name().to_string()
             } else {
@@ -261,42 +263,126 @@ mod tests {
                 ("after_long_help", cmd.get_after_long_help()),
             ] {
                 if let Some(styled) = styled {
-                    record(offenders, &here, label, &styled.to_string());
+                    out.push((format!("[{here}] {label}"), styled.to_string()));
                 }
             }
             for arg in cmd.get_arguments() {
                 let id = arg.get_id().as_str();
                 if let Some(help) = arg.get_help() {
-                    record(offenders, &here, &format!("arg {id} help"), &help.to_string());
+                    out.push((format!("[{here}] arg {id} help"), help.to_string()));
                 }
                 if let Some(help) = arg.get_long_help() {
-                    record(offenders, &here, &format!("arg {id} long_help"), &help.to_string());
+                    out.push((format!("[{here}] arg {id} long_help"), help.to_string()));
                 }
                 for value in arg.get_possible_values() {
                     let name = value.get_name();
-                    record(offenders, &here, &format!("arg {id} value-name"), name);
+                    out.push((format!("[{here}] arg {id} value-name"), name.to_string()));
                     if let Some(help) = value.get_help() {
-                        record(
-                            offenders,
-                            &here,
-                            &format!("arg {id} value {name} help"),
-                            &help.to_string(),
-                        );
+                        out.push((format!("[{here}] arg {id} value {name} help"), help.to_string()));
                     }
                 }
             }
             for sub in cmd.get_subcommands() {
-                check(sub, &here, offenders);
+                walk(sub, &here, out);
             }
         }
 
-        let mut offenders = Vec::new();
-        check(&super::Cli::command(), "", &mut offenders);
+        let mut out = Vec::new();
+        walk(&super::Cli::command(), "", &mut out);
+        out
+    }
+
+    #[test]
+    fn cli_help_text_is_ascii() {
+        let offenders: Vec<String> = collect_clap_help_texts()
+            .into_iter()
+            .filter(|(_, text)| !text.is_ascii())
+            .map(|(loc, text)| format!("{loc}: {text:?}"))
+            .collect();
         assert!(
             offenders.is_empty(),
             "clap help text must be ASCII-only (Windows PowerShell 5.1 reads completion \
              tooltips and piped `--help` under the console codepage and mojibakes non-ASCII). \
              Replace `->` for `→`, `-` for `—`, `...` for `…`. Offenders:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    // ── Internal-reference help guard ────────────────────────────────────────
+
+    /// No clap-facing help string may leak internal design provenance.
+    ///
+    /// Help text is a user-facing product surface; handshake/ADR references,
+    /// amendment dates, and build timestamps belong in ADRs or `//` comments,
+    /// never in `--help` (see `quality-cli-help.md`). This walks the same built
+    /// command tree as `cli_help_text_is_ascii` and fails on unambiguous markers
+    /// — a backstop so internal references cannot silently re-enter help.
+    #[test]
+    fn cli_help_text_has_no_internal_references() {
+        /// Longest run of consecutive ASCII digits — catches build timestamps
+        /// (`20260514120000`) without pulling in a regex dependency.
+        fn max_digit_run(text: &str) -> usize {
+            let mut max = 0usize;
+            let mut run = 0usize;
+            for byte in text.bytes() {
+                if byte.is_ascii_digit() {
+                    run += 1;
+                    max = max.max(run);
+                } else {
+                    run = 0;
+                }
+            }
+            max
+        }
+
+        /// Detect an ISO-8601 calendar date `20dd-dd-dd` (e.g. `2026-05-19`).
+        fn has_iso_date(text: &str) -> bool {
+            text.as_bytes().windows(10).any(|w| {
+                w[0] == b'2'
+                    && w[1] == b'0'
+                    && w[2].is_ascii_digit()
+                    && w[3].is_ascii_digit()
+                    && w[4] == b'-'
+                    && w[5].is_ascii_digit()
+                    && w[6].is_ascii_digit()
+                    && w[7] == b'-'
+                    && w[8].is_ascii_digit()
+                    && w[9].is_ascii_digit()
+            })
+        }
+
+        fn marker(text: &str) -> Option<&'static str> {
+            let lower = text.to_ascii_lowercase();
+            if text.contains('§') {
+                return Some("`§` section reference");
+            }
+            if lower.contains("handshake") {
+                return Some("`handshake` reference");
+            }
+            if lower.contains("adr_") {
+                return Some("`adr_` reference");
+            }
+            if lower.contains("amended") {
+                return Some("`amended` (design history)");
+            }
+            if has_iso_date(text) {
+                return Some("ISO date (YYYY-MM-DD)");
+            }
+            if max_digit_run(text) >= 8 {
+                return Some("8+ digit timestamp");
+            }
+            None
+        }
+
+        let offenders: Vec<String> = collect_clap_help_texts()
+            .into_iter()
+            .filter_map(|(loc, text)| marker(&text).map(|why| format!("{loc}: {why}: {text:?}")))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "clap help must not leak internal design references (handshake/ADR/date \
+             markers). State what the command or flag does for the user; move design \
+             history to ADRs or `//` comments (see quality-cli-help.md). Offenders:\n{}",
             offenders.join("\n")
         );
     }
