@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-05-31
+
+### Documentation
+
+- Strip internal design references from --help text *(cli)*
+
+### Fixed
+
+- Escape angle brackets in changelog *(release)*
+- Mark `package test` trailing command as a `last` positional *(cli)*
+- Emit shell completions inline, ASCII-safe (fixes zsh + PowerShell activation) *(cli)*
+- Cross-platform pwsh env.ps1 + local test-install mode *(install)*
+- Make Windows installers ASCII- and StrictMode-safe *(install)*
+- Keep shell-completion help text ASCII-safe for PowerShell *(cli)*
+
 ## [0.3.3] - 2026-05-31
 
 ### Fixed
@@ -14,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give touch_state_atomic collision-free temp names *(update-check)*
 - Reject a non-regular config path consistently across platforms *(config)*
 - Read ocx.toml through the lock-owning handle *(project)*
+
+### Release
+
+- V0.3.3
 
 ## [0.3.2] - 2026-05-28
 
@@ -365,11 +384,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.3.4]: https://github.com/ocx-sh/ocx/compare/v0.3.3..v0.3.4
 [0.3.3]: https://github.com/ocx-sh/ocx/compare/v0.3.2..v0.3.3
 [0.3.2]: https://github.com/ocx-sh/ocx/compare/v0.3.1..v0.3.2
 [0.3.1]: https://github.com/ocx-sh/ocx/compare/v0.3.0..v0.3.1
 [0.3.0]: https://github.com/ocx-sh/ocx/compare/v0.2.1..v0.3.0
 [0.2.1]: https://github.com/ocx-sh/ocx/compare/v0.2.0..v0.2.1
 [0.2.0]: https://github.com/ocx-sh/ocx/compare/v0.1.0..v0.2.0
-[0.1.0]: https://github.com/ocx-sh/ocx/tree/v0.1.0
+[0.1.0]: https://github.com/ocx-sh/ocx/compare/v0.0.0..v0.1.0
 
