@@ -11,11 +11,26 @@ tasks:
     status:
       - cargo set-version --version
 
+  # Guard: the website embeds CHANGELOG.md via a VitePress @include, so the file
+  # is compiled as a Vue template. A raw `<tag>` from a commit subject (e.g.
+  # "ocx-<name>") breaks the build with "Element is missing end tag". cliff.toml
+  # HTML-escapes angle brackets; this fails loudly if that escaping ever regresses.
+  changelog:validate:
+    internal: true
+    cmds:
+      - |
+        if grep -nE '<[A-Za-z/]' CHANGELOG.md; then
+          echo "ERROR: CHANGELOG.md contains raw HTML/Vue tags (lines above)." >&2
+          echo "git-cliff escaping regressed; the website (VitePress) build will fail." >&2
+          exit 1
+        fi
+
   # Regenerate CHANGELOG.md from the full git history.
   changelog:
     desc: Update CHANGELOG.md from git history
     cmds:
       - git-cliff --output CHANGELOG.md
+      - task: changelog:validate
 
   # Show what would go into the next release's changelog section.
   changelog:preview:
@@ -39,6 +54,7 @@ tasks:
       - echo "Next version:{{.NEXT_VERSION}}"
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
+      - task: changelog:validate
       - task verify
       - |
         echo ""
