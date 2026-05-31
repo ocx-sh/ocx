@@ -36,6 +36,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Website / docs work | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), skill `docs` |
 | Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
+| CLI help / `--help` text wording | [quality-cli-help.md](./rules/quality-cli-help.md), [subsystem-cli.md](./rules/subsystem-cli.md), [quality-rust.md](./rules/quality-rust.md) (two-register) |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
 | Metadata / schema changes | [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md), [subsystem-package.md](./rules/subsystem-package.md) |
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md), [workflow-release.md](./rules/workflow-release.md) |
@@ -92,7 +93,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `crates/ocx_lib/src/package/**`, `package.rs` | + [subsystem-package.md](./rules/subsystem-package.md) |
 | `crates/ocx_lib/src/package_manager/**`, `package_manager.rs` | + [subsystem-package-manager.md](./rules/subsystem-package-manager.md) |
 | `crates/ocx_lib/src/package/metadata/**`, `crates/ocx_schema/**` | + [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
-| `crates/ocx_cli/src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md) |
+| `crates/ocx_cli/src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [quality-cli-help.md](./rules/quality-cli-help.md) |
 | `crates/ocx_cli/src/api/**`, `command/**` | + [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | `crates/ocx_mirror/**`, `mirrors/**` | + [subsystem-mirror.md](./rules/subsystem-mirror.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
