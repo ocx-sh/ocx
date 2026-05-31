@@ -59,12 +59,11 @@ pub mod which;
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Emit the composed environment for the in-scope toolchain.
+    /// Compose and print the toolchain environment.
     ///
-    /// Reads `ocx.toml` + `ocx.lock` (project tier) or `$OCX_HOME/ocx.toml`
-    /// (when `--global` is set).  Default output: JSON (backend-first, section 3).
-    /// Use `--format plain` for human inspection (NOT sourceable).
-    /// Use `--shell[=NAME]` for the ONLY eval-safe form.
+    /// Reads the in-scope `ocx.toml` + `ocx.lock`, or the global toolchain
+    /// under `--global`. Defaults to a plain table; `ocx --format json env`
+    /// emits JSON. `--shell[=NAME]` is the only eval-safe form.
     Env(toolchain_env::ToolchainEnv),
     /// Add a tool binding to ocx.toml.
     Add(add::Add),

@@ -7,9 +7,8 @@ use clap::Subcommand;
 
 /// Shell-integration commands.
 ///
-/// `ocx shell hook`, `ocx shell init`, and `ocx shell env` are deleted
-/// (handshake section 7).  The login-profile activation model (`$OCX_HOME/env.sh`
-/// + `ocx --global env --shell=sh`) replaces them.  Only `completion` survives.
+/// Generate static shell completion scripts. Login-profile activation is
+/// handled by `$OCX_HOME/env.sh` (sourced from your shell profile), not here.
 #[derive(Subcommand)]
 pub enum Shell {
     /// Generate shell completion scripts.

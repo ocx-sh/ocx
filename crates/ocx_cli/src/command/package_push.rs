@@ -36,7 +36,7 @@ pub struct PackagePush {
     /// metadata is rejected.
     ///
     /// Use this in continuous-deploy pipelines to publish rolling versions
-    /// like `dev.ocx.sh/ocx:0.3.0-dev_20260514120000`.
+    /// like `dev.ocx.sh/ocx:0.3.0-dev_<YYYYMMDDhhmmss>`.
     #[clap(
         long = "build-timestamp",
         value_enum,

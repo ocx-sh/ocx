@@ -100,7 +100,7 @@ pub struct ToolchainEnv {
     /// triggers autodetection from `$SHELL`/parent process; exit 64 if
     /// undetectable.
     ///
-    /// `--shell=sh` == `--shell=dash` (POSIX strict; C5 alias, no new variant).
+    /// `--shell=sh` is an alias for `--shell=dash` (POSIX strict).
     #[arg(
         long,
         value_enum,

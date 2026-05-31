@@ -65,12 +65,10 @@ pub struct ContextOptions {
     #[arg(long, default_value_t = env::flag(env::keys::OCX_OFFLINE, false))]
     pub offline: bool,
 
-    /// The format to use when outputting information.
+    /// Output format for stdout reports: `plain` (default) or `json`.
     ///
-    /// Output format is a context-only concern (handshake section 3 amended
-    /// 2026-05-19): when omitted, every command defaults to `plain`. No
-    /// subcommand declares its own `--format`. The single default is
-    /// applied by [`Self::build_api`] via `unwrap_or(Format::Plain)`.
+    /// Applies to every command; there is no per-command `--format`. The
+    /// `--shell[=NAME]` output of `env` / `package env` is unaffected.
     #[arg(long, value_enum, value_name = "FORMAT")]
     pub format: Option<options::Format>,
 
