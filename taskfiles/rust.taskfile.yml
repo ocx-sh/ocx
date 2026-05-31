@@ -201,3 +201,30 @@ tasks:
     cmds:
       - task: xwin-build-x86:exec
       - task: xwin-build-arm:exec
+
+  build:windows:x86:
+    desc: Cross-build the x86_64 Windows MSVC release binary via Docker (cargo-xwin, cached)
+    summary: |
+      Single-arch slice of build:windows — produces
+      target/xwin/x86_64-pc-windows-msvc/release/{ocx,ocx-mirror}.exe only.
+      Used by the Windows activation gate (verify:windows-activation) so the
+      local verify loop does not also pay for the aarch64 cross-build.
+    cmds:
+      - task: xwin-build-x86:exec
+
+  verify:windows-activation:
+    desc: Run the Windows shell-activation gate via WSL interop (local-only; needs /mnt/c)
+    summary: |
+      Cross-builds the x86_64 Windows binary (build:windows:x86), then runs
+      test/manual/test-windows-activation.ps1 under Windows PowerShell 5.1 and
+      (if installed) PowerShell 7 through WSL interop. Verifies that the
+      `ocx self activate` stream and the install.ps1-generated env.ps1 parse and
+      activate cleanly on real Windows interpreters — the platform the original
+      parse-error cascade shipped on.
+
+      WSL-on-Windows only: a plain Linux/CI host with no /mnt/c interop skips
+      gracefully (CI covers Windows natively in verify-deep.yml). Override the
+      interpreter paths with OCX_WINPS / OCX_PWSH if they live off the defaults.
+    deps:
+      - task: build:windows:x86
+    cmd: bash {{.ROOT_DIR}}/test/manual/run-windows-activation.sh

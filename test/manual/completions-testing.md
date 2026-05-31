@@ -58,8 +58,10 @@ Key regressions this guards:
   does not error.
 - **PowerShell**: the completion is emitted **first** so its `using namespace`
   leads the stream and `Invoke-Expression` accepts it.
-- **pwsh on Linux/macOS**: `env.ps1` resolves `ocx` via `$IsWindows` + a `$HOME`
-  fallback for the null `$env:USERPROFILE`, with forward-slash paths.
+- **pwsh on Linux/macOS**: `env.ps1` resolves `ocx` via a StrictMode-safe
+  `$env:OS -eq 'Windows_NT'` probe (not `$IsWindows`, which is undefined and
+  throws on WinPS 5.1) plus a `$HOME` fallback for the null `$env:USERPROFILE`,
+  with forward-slash paths.
 
 ### Installing the shells on Fedora / RHEL (dnf)
 
@@ -73,20 +75,41 @@ sudo dnf install -y fish dash ksh busybox elvish
 
 ## 3. Windows leg (the original-bug platform)
 
-The released bug was a Windows PowerShell 5.1 parse-error cascade. From WSL you can
-drive the Windows host's interpreters directly:
+The released bug was a Windows PowerShell 5.1 parse-error cascade (non-ASCII bytes
+in install.ps1 / the generated env.ps1 misread under the console codepage) plus a
+`$IsWindows` StrictMode crash in env.ps1. Verify the fix two ways: the one-shot
+task (drives the real Windows interpreters from WSL) or native PowerShell on a
+Windows host.
+
+### One command from WSL
 
 ```sh
-# Generate the activation stream, then load it under each interpreter.
-ocx self activate --shell=powershell --completion > /tmp/act.ps1
-
-# Windows PowerShell 5.1 (the Win10/11 default) via WSL interop:
-powershell.exe -NoProfile -Command "Invoke-Expression (Get-Content -Raw -Encoding UTF8 '\\wsl.localhost\<distro>\tmp\act.ps1'); 'OK'"
-# Expect: OK, no "Missing ')'" / "using statement" parse errors.
+task rust:verify:windows-activation
 ```
 
-Then in an interactive `powershell.exe` (5.1) and `pwsh` (7): `ocx `<kbd>Tab</kbd>
-completes.
+Cross-builds the x86_64 Windows binary (cargo-xwin, Docker) and runs
+`test/manual/test-windows-activation.ps1` under Windows PowerShell 5.1 and - if
+installed - PowerShell 7, through WSL interop. It asserts that `ocx self activate`
+and the install.ps1-generated `env.ps1` parse and activate cleanly: no parse
+cascade, no `$IsWindows`/null-bind crash, completion stream leads with
+`using namespace` and is `Invoke-Expression`-safe. On a host without `/mnt/c`
+interop it skips with a notice. Override interpreter paths with `OCX_WINPS` /
+`OCX_PWSH`; the wrapper is also runnable directly via
+`bash test/manual/run-windows-activation.sh`.
+
+### Native PowerShell (on a Windows host)
+
+With a Rust + MSVC toolchain on Windows, build and run the gate directly - the
+default `-OcxBin` resolves the native build output:
+
+```powershell
+cargo build --release --locked -p ocx_cli --target x86_64-pc-windows-msvc
+powershell -NoProfile -File .\test\manual\test-windows-activation.ps1   # WinPS 5.1
+pwsh       -NoProfile -File .\test\manual\test-windows-activation.ps1   # PowerShell 7
+```
+
+Then in an interactive `powershell` (5.1) and `pwsh` (7): `ocx `<kbd>Tab</kbd>
+completes with no startup errors.
 
 ## 4. Automated guards (already in CI)
 
@@ -94,7 +117,10 @@ completes.
   `command::self_group::activate::tests::*` (inline generators, zsh compinit guard,
   PowerShell leads with `using namespace`, **completion output is ASCII-only**).
 - `cd test && uv run pytest tests/test_self_activate.py tests/test_install_sh.py`
-  — inline-emission acceptance + env.ps1 cross-platform + `__OCX_TESTING_INSTALL_BINARY`.
+  — inline-emission acceptance + env.ps1 cross-platform (`$env:OS` binary-name
+  probe, no `$IsWindows`) + `__OCX_TESTING_INSTALL_BINARY` +
+  `test_windows_read_surface_is_ascii` (install.ps1 / install.sh / the gate
+  harness must be ASCII-only so WinPS 5.1 cannot misread them).
 
 ## 5. Cleanup
 
