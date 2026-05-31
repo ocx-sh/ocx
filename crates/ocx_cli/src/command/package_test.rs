@@ -29,14 +29,14 @@ pub struct PackageTest {
     #[clap(short, long)]
     metadata: Option<PathBuf>,
 
-    /// Target platform (e.g. `linux/amd64`). Required — parity with `package push`.
+    /// Target platform (e.g. `linux/amd64`). Required - parity with `package push`.
     #[clap(short, long, required = true)]
     platform: oci::Platform,
 
     /// Materialize into DIR instead of an auto-managed temp dir. DIR must not
-    /// exist (created by ocx) or be empty. Implies keep — the dir is never
+    /// exist (created by ocx) or be empty. Implies keep - the dir is never
     /// deleted by ocx. Must reside on the same filesystem as
-    /// `$OCX_HOME/layers/` — hardlink assembly does not fall back to copy.
+    /// `$OCX_HOME/layers/` - hardlink assembly does not fall back to copy.
     #[clap(short = 'o', long, conflicts_with = "keep")]
     output: Option<PathBuf>,
 
@@ -50,7 +50,7 @@ pub struct PackageTest {
     #[clap(long = "self", default_value_t = false)]
     self_view: bool,
 
-    /// Strip ambient parent env before composing — only `OCX_*` config and
+    /// Strip ambient parent env before composing - only `OCX_*` config and
     /// composed package vars reach the child. Mirrors `ocx exec --clean`.
     #[clap(long, default_value_t = false)]
     clean: bool,
@@ -70,7 +70,15 @@ pub struct PackageTest {
     layers: Vec<LayerRef>,
 
     /// Command to execute inside the composed env, with arguments. Required.
-    #[clap(allow_hyphen_values = true, required = true, num_args = 1..)]
+    ///
+    /// `last = true` (mirroring `run.rs`'s `argv`) makes clap parse everything
+    /// before the mandatory `--` into `layers` and everything after into
+    /// `command`. Without it, `command` is an ordinary required positional sitting
+    /// after the optional `layers` (index 1), which trips clap's debug-assert
+    /// "non-required positional with a lower index than a required positional" —
+    /// fatal in debug builds when the command tree is built (e.g. completion
+    /// generation). Requires clap ≥ 4.5.57 (see `run.rs` NOTE).
+    #[clap(allow_hyphen_values = true, last = true, required = true, num_args = 1..)]
     command: Vec<String>,
 }
 

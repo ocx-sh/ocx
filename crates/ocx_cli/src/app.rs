@@ -201,6 +201,23 @@ mod tests {
     use super::should_check_for_update;
     use crate::command::{self, self_group, version};
 
+    // ── CLI definition validity ──────────────────────────────────────────────
+
+    /// The whole `ocx` command tree must satisfy clap's structural invariants.
+    ///
+    /// `clap::Command::debug_assert` runs the same checks clap runs when it
+    /// *builds* the command — which it does on every parse and, crucially,
+    /// inside `clap_complete::generate`. A violation (e.g. an optional
+    /// positional before a required one) panics there only in debug builds, so
+    /// without this test it slips past release CI and detonates the moment a
+    /// developer generates completions from a debug binary. Locking it down here
+    /// turns that latent landmine into a fast, deterministic unit-test failure.
+    #[test]
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory as _;
+        super::Cli::command().debug_assert();
+    }
+
     // ── should_check_for_update skip-list canary ─────────────────────────────
 
     /// `Self_(SelfGroup::Activate(_))` must NOT trigger the background update
