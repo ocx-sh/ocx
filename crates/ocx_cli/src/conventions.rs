@@ -140,7 +140,7 @@ pub fn resolve_shell_arg(shell: Option<Option<Shell>>) -> anyhow::Result<Option<
                     "could not autodetect shell from $SHELL or parent process; \
                      pass --shell=NAME explicitly. \
                      Legal values: bash, zsh, fish, ash, dash, ksh, sh, \
-                     pwsh, elvish, nushell, batch (sh ≡ dash POSIX alias)",
+                     pwsh, elvish, nushell, batch (sh == dash POSIX alias)",
                 )
             })?;
             Ok(Some(s))

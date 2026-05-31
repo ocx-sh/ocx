@@ -75,9 +75,9 @@ pub struct PackageTest {
     /// before the mandatory `--` into `layers` and everything after into
     /// `command`. Without it, `command` is an ordinary required positional sitting
     /// after the optional `layers` (index 1), which trips clap's debug-assert
-    /// "non-required positional with a lower index than a required positional" —
+    /// "non-required positional with a lower index than a required positional" -
     /// fatal in debug builds when the command tree is built (e.g. completion
-    /// generation). Requires clap ≥ 4.5.57 (see `run.rs` NOTE).
+    /// generation). Requires clap >= 4.5.57 (see `run.rs` NOTE).
     #[clap(allow_hyphen_values = true, last = true, required = true, num_args = 1..)]
     command: Vec<String>,
 }

@@ -47,7 +47,7 @@ pub struct ContextOptions {
     /// remote registry instead of the local index.
     ///
     /// Pure queries (`index list`, `index catalog`, `package info`) do
-    /// **not** persist the result to the local index — use
+    /// **not** persist the result to the local index - use
     /// `ocx index update` to refresh the local index explicitly. Implies
     /// network access. Combined with `--offline` the result is
     /// "pinned-only mode": no source contact, and any tag-addressed
@@ -67,7 +67,7 @@ pub struct ContextOptions {
 
     /// The format to use when outputting information.
     ///
-    /// Output format is a context-only concern (handshake §3 amended
+    /// Output format is a context-only concern (handshake section 3 amended
     /// 2026-05-19): when omitted, every command defaults to `plain`. No
     /// subcommand declares its own `--format`. The single default is
     /// applied by [`Self::build_api`] via `unwrap_or(Format::Plain)`.
@@ -88,7 +88,7 @@ pub struct ContextOptions {
     /// neither is set, pulls run unbounded (legacy behavior). Negative values
     /// are rejected at parse time.
     ///
-    /// Caps only the outer dispatch — transitive dependency and layer
+    /// Caps only the outer dispatch - transitive dependency and layer
     /// extraction stay unbounded so they cannot deadlock against an
     /// ancestor's permit.
     #[arg(long, value_name = "N")]

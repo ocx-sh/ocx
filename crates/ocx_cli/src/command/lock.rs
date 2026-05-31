@@ -42,7 +42,7 @@ pub struct Lock {
     /// stored `declaration_hash` against the current config's hash,
     /// and exits 0 if they match (lock is current) or 65 if they
     /// drift (lock is stale). No re-resolution, no writes, no network
-    /// calls — strictly a CI primitive for "is the lock committed and
+    /// calls - strictly a CI primitive for "is the lock committed and
     /// current?" verification. When the lock file is absent, exits 78
     /// (the canonical "lock missing" code shared with `ocx pull`).
     #[arg(long = "check", default_value_t = false)]
@@ -53,7 +53,7 @@ pub struct Lock {
     /// `--pull` is the affirmative form of the default behavior; `--no-pull`
     /// opts out. Both flags use POSIX last-wins semantics (`overrides_with`):
     /// `--pull --no-pull` resolves to no-pull; `--no-pull --pull` resolves
-    /// to pull. Combining the flags is not an error — git `--[no-]verify`
+    /// to pull. Combining the flags is not an error - git `--[no-]verify`
     /// idiom.
     #[arg(long, overrides_with = "no_pull")]
     pub pull: bool,

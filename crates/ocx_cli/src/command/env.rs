@@ -49,7 +49,7 @@ pub struct Env {
     ///
     /// When absent, output uses the context-level format (root `--format` flag;
     /// default plain). Use `ocx --format json package env` for JSON.
-    /// `--shell=sh` ≡ `--shell=dash` (POSIX strict; C5 alias).
+    /// `--shell=sh` == `--shell=dash` (POSIX strict; C5 alias).
     #[arg(
         long,
         value_enum,

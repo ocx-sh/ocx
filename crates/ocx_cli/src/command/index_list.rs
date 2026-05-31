@@ -131,7 +131,7 @@ impl IndexList {
                 .unwrap_or_else(|| "latest".to_string());
 
             if !tags.contains(&tag) {
-                log::warn!("Tag '{}' not found for '{}' — skipping.", tag, package);
+                log::warn!("Tag '{}' not found for '{}' - skipping.", tag, package);
                 platforms_report.insert(package, Vec::new());
                 continue;
             }
@@ -147,7 +147,7 @@ impl IndexList {
                     .map(|p| p.to_string())
                     .collect(),
                 None => {
-                    log::warn!("Manifest not found for '{}:{}' — skipping.", package, tag);
+                    log::warn!("Manifest not found for '{}:{}' - skipping.", package, tag);
                     Vec::new()
                 }
             };

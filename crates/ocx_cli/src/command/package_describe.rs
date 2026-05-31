@@ -52,7 +52,7 @@ impl PackageDescribe {
 
         if !has_updates {
             return Err(anyhow::anyhow!(
-                "nothing to update — provide at least one of --readme, --logo, --title, --description, or --keywords"
+                "nothing to update - provide at least one of --readme, --logo, --title, --description, or --keywords"
             ));
         }
 
@@ -78,7 +78,7 @@ impl PackageDescribe {
                 Some(desc) => (desc.readme.clone(), package::description::Frontmatter::default()),
                 None => {
                     return Err(anyhow::anyhow!(
-                        "no existing description found — --readme is required for the first push"
+                        "no existing description found - --readme is required for the first push"
                     ));
                 }
             },

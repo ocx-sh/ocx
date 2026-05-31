@@ -117,7 +117,7 @@ impl Printable for VerboseVersionData {
             let timestamp = commit
                 .timestamp
                 .as_deref()
-                .map(|ts| theme.aside(format!(" — {ts}")))
+                .map(|ts| theme.aside(format!(" - {ts}")))
                 .unwrap_or_default();
             println!(
                 "{}   {} {}{}",

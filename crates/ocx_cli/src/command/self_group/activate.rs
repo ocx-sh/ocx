@@ -34,11 +34,11 @@ pub struct SelfActivate {
     /// Target shell for activation output.
     ///
     /// Legal values: `bash`, `zsh`, `fish`, `ash`, `dash`, `ksh`, `sh`,
-    /// `pwsh`, `elvish`, `nushell`, `batch` (`sh` ≡ `dash`, POSIX alias).
+    /// `pwsh`, `elvish`, `nushell`, `batch` (`sh` == `dash`, POSIX alias).
     ///
     /// Must be supplied with `=` (`--shell=bash`). Bare `--shell` (no `=`)
     /// triggers autodetection from `$SHELL`/parent process; exit 64 if
-    /// undetectable — pass `--shell=NAME` explicitly to override.
+    /// undetectable - pass `--shell=NAME` explicitly to override.
     ///
     /// When absent, defaults to autodetect (same as bare `--shell`).
     #[arg(

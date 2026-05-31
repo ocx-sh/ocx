@@ -43,7 +43,7 @@ pub struct Add {
     /// `--pull` is the affirmative form of the default behavior; `--no-pull`
     /// opts out. Both flags use POSIX last-wins semantics (`overrides_with`):
     /// `--pull --no-pull` resolves to no-pull; `--no-pull --pull` resolves
-    /// to pull. Combining the flags is not an error — git `--[no-]verify`
+    /// to pull. Combining the flags is not an error - git `--[no-]verify`
     /// idiom.
     #[arg(long, overrides_with = "no_pull")]
     pub pull: bool,

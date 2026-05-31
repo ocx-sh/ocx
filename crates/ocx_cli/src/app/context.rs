@@ -64,7 +64,7 @@ impl Context {
             // any tag-addressed resolution must succeed locally or error.
             // Documented in user-guide §Routing and command-line.md.
             log::info!(
-                "--offline --remote: pinned-only mode — tag and catalog lookups will not contact a source. \
+                "--offline --remote: pinned-only mode - tag and catalog lookups will not contact a source. \
                  Tag-addressed resolution attempts must be satisfied locally or by digest-pinned identifiers."
             );
         }

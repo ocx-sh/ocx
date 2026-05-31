@@ -218,6 +218,89 @@ mod tests {
         super::Cli::command().debug_assert();
     }
 
+    // ── ASCII help guard (WinPS 5.1 mojibake hazard) ─────────────────────────
+
+    /// No clap-facing help text anywhere in the command tree may contain a
+    /// non-ASCII byte.
+    ///
+    /// clap turns the first paragraph of each `///` doc comment into the
+    /// arg/command SHORT help, which `clap_complete` embeds as the completion
+    /// tooltip, and the full doc comment into LONG help, rendered by `--help`.
+    /// Both paths put the text in front of Windows PowerShell 5.1, which decodes
+    /// a captured completion stream (and a piped `--help`) under the console
+    /// codepage — turning a stray Unicode char (em-dash, arrow, ellipsis) into
+    /// mojibake whose bytes can break the parsed completion script outright.
+    ///
+    /// `self_group::activate::tests::completion_output_is_ascii_for_all_shells`
+    /// guards the generated OUTPUT; this guards the SOURCE help tree so a
+    /// non-ASCII char cannot enter via a single-line doc comment in the first
+    /// place. On failure, replace the offender: `->` for `→`, `-` for `—`,
+    /// `...` for `…`.
+    #[test]
+    fn cli_help_text_is_ascii() {
+        use clap::CommandFactory as _;
+
+        fn record(offenders: &mut Vec<String>, here: &str, label: &str, text: &str) {
+            if !text.is_ascii() {
+                offenders.push(format!("[{here}] {label}: {text:?}"));
+            }
+        }
+
+        fn check(cmd: &clap::Command, path: &str, offenders: &mut Vec<String>) {
+            let here = if path.is_empty() {
+                cmd.get_name().to_string()
+            } else {
+                format!("{path} {}", cmd.get_name())
+            };
+            for (label, styled) in [
+                ("about", cmd.get_about()),
+                ("long_about", cmd.get_long_about()),
+                ("before_help", cmd.get_before_help()),
+                ("after_help", cmd.get_after_help()),
+                ("before_long_help", cmd.get_before_long_help()),
+                ("after_long_help", cmd.get_after_long_help()),
+            ] {
+                if let Some(styled) = styled {
+                    record(offenders, &here, label, &styled.to_string());
+                }
+            }
+            for arg in cmd.get_arguments() {
+                let id = arg.get_id().as_str();
+                if let Some(help) = arg.get_help() {
+                    record(offenders, &here, &format!("arg {id} help"), &help.to_string());
+                }
+                if let Some(help) = arg.get_long_help() {
+                    record(offenders, &here, &format!("arg {id} long_help"), &help.to_string());
+                }
+                for value in arg.get_possible_values() {
+                    let name = value.get_name();
+                    record(offenders, &here, &format!("arg {id} value-name"), name);
+                    if let Some(help) = value.get_help() {
+                        record(
+                            offenders,
+                            &here,
+                            &format!("arg {id} value {name} help"),
+                            &help.to_string(),
+                        );
+                    }
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                check(sub, &here, offenders);
+            }
+        }
+
+        let mut offenders = Vec::new();
+        check(&super::Cli::command(), "", &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "clap help text must be ASCII-only (Windows PowerShell 5.1 reads completion \
+             tooltips and piped `--help` under the console codepage and mojibakes non-ASCII). \
+             Replace `->` for `→`, `-` for `—`, `...` for `…`. Offenders:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     // ── should_check_for_update skip-list canary ─────────────────────────────
 
     /// `Self_(SelfGroup::Activate(_))` must NOT trigger the background update

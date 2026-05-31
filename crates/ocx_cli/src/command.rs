@@ -62,7 +62,7 @@ pub enum Command {
     /// Emit the composed environment for the in-scope toolchain.
     ///
     /// Reads `ocx.toml` + `ocx.lock` (project tier) or `$OCX_HOME/ocx.toml`
-    /// (when `--global` is set).  Default output: JSON (backend-first, §3).
+    /// (when `--global` is set).  Default output: JSON (backend-first, section 3).
     /// Use `--format plain` for human inspection (NOT sourceable).
     /// Use `--shell[=NAME]` for the ONLY eval-safe form.
     Env(toolchain_env::ToolchainEnv),

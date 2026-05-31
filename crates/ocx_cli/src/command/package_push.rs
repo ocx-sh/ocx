@@ -66,7 +66,7 @@ pub struct PackagePush {
     ///   - a path to a pre-built archive file (`.tar.gz`, `.tar.xz`), or
     ///   - a digest reference to a layer already present in the target
     ///     registry, written as `sha256:<hex>.<ext>` where `<ext>` declares
-    ///     the original archive format — one of `tar.gz`, `tgz`, `tar.xz`,
+    ///     the original archive format - one of `tar.gz`, `tgz`, `tar.xz`,
     ///     `txz`. The OCI distribution spec does not expose a layer's media
     ///     type via blob HEAD, so the suffix is required: OCX refuses to
     ///     guess.

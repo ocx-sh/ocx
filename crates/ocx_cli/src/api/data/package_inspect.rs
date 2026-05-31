@@ -355,7 +355,7 @@ fn metadata_node(metadata: &Metadata) -> Node {
                 // the invocable name — no noise for the common case where
                 // they coincide.
                 match entry.command() {
-                    Some(cmd) if cmd.as_str() != name.as_str() => node.with_note(format!("→ {cmd}")),
+                    Some(cmd) if cmd.as_str() != name.as_str() => node.with_note(format!("-> {cmd}")),
                     _ => node,
                 }
             })

@@ -7,7 +7,7 @@ use ocx_lib::file_structure::SymlinkKind;
 ///
 /// Used by `find`, `env`, and `shell env`. Without any flag the content-addressed
 /// object store path is used (default). `--candidate` and `--current` are mutually
-/// exclusive and yield a stable symlink path instead — see the
+/// exclusive and yield a stable symlink path instead - see the
 /// [path resolution](https://ocx.sh/docs/reference/command-line#path-resolution)
 /// documentation for details.
 #[derive(clap::Args, Clone, Debug, Default)]
@@ -16,7 +16,7 @@ pub struct ContentPath {
     /// (`~/.ocx/symlinks/<registry>/<repo>/candidates/<tag>`).
     ///
     /// The package must be installed before this flag can be used.
-    /// Digest identifiers are rejected — use a tag-only identifier instead.
+    /// Digest identifiers are rejected - use a tag-only identifier instead.
     /// No auto-install is performed.
     #[clap(long = "candidate", conflicts_with = "current")]
     candidate: bool,
@@ -26,7 +26,7 @@ pub struct ContentPath {
     ///
     /// A version of the package must be selected before this flag can be used.
     /// Digest identifiers are rejected. The tag portion of the identifier is
-    /// not validated against the selected version — only the registry and
+    /// not validated against the selected version - only the registry and
     /// repository are used to locate the symlink.
     /// No auto-install is performed.
     #[clap(long = "current", conflicts_with = "candidate")]
