@@ -1383,14 +1383,19 @@ def test_install_sh_generated_env_ps1_guards_invoke_expression(tmp_path: Path) -
 # Required substrings (all must appear):
 #   1. `$_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }`
 #      — HOME fallback because $env:USERPROFILE is null on Linux pwsh
-#   2. `$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }`
-#      — platform-correct binary name
+#   2. `$_ocxExe = if ($env:OS -eq 'Windows_NT') { 'ocx.exe' } else { 'ocx' }`
+#      — platform-correct binary name. $env:OS is 'Windows_NT' on every Windows
+#      PowerShell and unset on Linux/macOS pwsh; reading an unset $env: var is
+#      StrictMode-safe.
 #   3. The bin path uses `$_ocxExe` (forward-slash form)
 #      — `symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe`
 #
 # Prohibited patterns:
 #   - Hardcoded `bin/ocx.exe` literal (would break Linux/macOS pwsh)
 #   - `Join-Path $env:USERPROFILE '.ocx'` unguarded (null on Linux pwsh)
+#   - `$IsWindows` — undefined on Windows PowerShell 5.1; referencing it *throws*
+#     under Set-StrictMode ("variable cannot be retrieved"), the exact regression
+#     this guards. Use $env:OS instead.
 # ---------------------------------------------------------------------------
 
 
@@ -1400,11 +1405,13 @@ def test_env_ps1_cross_platform_home_fallback_and_binary_name(tmp_path: Path) ->
     The generated file must:
     - Use ``$_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }``
       so that OCX_HOME resolves correctly when ``$env:USERPROFILE`` is null (Linux pwsh).
-    - Use ``$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }``
-      so the binary lookup resolves to the correct name per platform.
+    - Use ``$_ocxExe = if ($env:OS -eq 'Windows_NT') { 'ocx.exe' } else { 'ocx' }``
+      so the binary lookup resolves to the correct name per platform without
+      referencing ``$IsWindows`` (undefined on Windows PowerShell 5.1).
     - Reference ``$_ocxExe`` in the bin path (forward-slash join form).
     - NOT contain a hardcoded ``bin/ocx.exe`` literal.
     - NOT do ``Join-Path $env:USERPROFILE '.ocx'`` without the guard.
+    - NOT reference ``$IsWindows`` — it throws under Set-StrictMode on WinPS 5.1.
 
     These requirements ensure the same env.ps1 activates OCX correctly in
     PowerShell 7 on Linux and macOS, not just Windows PowerShell.
@@ -1434,10 +1441,11 @@ def test_env_ps1_cross_platform_home_fallback_and_binary_name(tmp_path: Path) ->
         f"got:\n{content}"
     )
 
-    # 2. Platform-correct binary name: must select 'ocx' on non-Windows.
-    assert "$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }" in content, (
+    # 2. Platform-correct binary name: must select 'ocx' on non-Windows via the
+    #    StrictMode-safe $env:OS probe (not $IsWindows, which throws on WinPS 5.1).
+    assert "$_ocxExe = if ($env:OS -eq 'Windows_NT') { 'ocx.exe' } else { 'ocx' }" in content, (
         "env.ps1 must derive the binary name per platform "
-        "(`$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }`) "
+        "(`$_ocxExe = if ($env:OS -eq 'Windows_NT') { 'ocx.exe' } else { 'ocx' }`) "
         "so that Linux/macOS pwsh resolves to 'ocx' (no .exe extension); "
         f"got:\n{content}"
     )
@@ -1462,6 +1470,17 @@ def test_env_ps1_cross_platform_home_fallback_and_binary_name(tmp_path: Path) ->
     assert "Join-Path $env:USERPROFILE '.ocx'" not in content, (
         "env.ps1 must NOT call `Join-Path $env:USERPROFILE '.ocx'` without the "
         "USERPROFILE guard — $env:USERPROFILE is null on Linux/macOS pwsh; "
+        f"got:\n{content}"
+    )
+
+    # 6. Must NOT reference $IsWindows. It is undefined on Windows PowerShell 5.1
+    #    (a PS6+ automatic variable); under Set-StrictMode, referencing it throws
+    #    "The variable '$IsWindows' cannot be retrieved because it has not been
+    #    set", breaking dot-source of env.ps1 from any StrictMode profile. The
+    #    $env:OS probe (assertion 2) is the StrictMode-safe replacement.
+    assert "$IsWindows" not in content, (
+        "env.ps1 must NOT reference `$IsWindows` — it is undefined on Windows "
+        "PowerShell 5.1 and throws under Set-StrictMode; use `$env:OS` instead; "
         f"got:\n{content}"
     )
 
@@ -1605,4 +1624,47 @@ def test_real_env_ps1_no_null_bind_error_on_empty_activate(tmp_path: Path) -> No
     )
     assert "Cannot bind argument" not in result.stderr, (
         f"empty activate output must not trigger the null-bind crash; stderr:\n{result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ASCII guard — the Windows-read surface must contain no non-ASCII bytes.
+#
+# Windows PowerShell 5.1 decodes a BOM-less file in the active console codepage
+# (typically Windows-1252), not UTF-8. A single non-ASCII byte (em-dash, ellipsis,
+# arrow) in install.ps1 — or in the env.ps1 here-strings it and install.sh embed —
+# decodes to mojibake; inside a double-quoted string the stray byte closes the
+# string early and triggers a "Missing ')'/'}'" parse-error cascade. That is the
+# exact failure this whole change fixed. The gate harness is read by WinPS 5.1 too.
+#
+# Keep these files pure ASCII: '-' for em-dash, '...' for ellipsis, '->' for arrow.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize(
+    "rel_path",
+    [
+        "website/src/public/install.ps1",
+        "website/src/public/install.sh",
+        "test/manual/test-windows-activation.ps1",
+    ],
+)
+def test_windows_read_surface_is_ascii(rel_path: str) -> None:
+    """install.ps1, install.sh, and the activation gate harness must be ASCII-only.
+
+    A non-ASCII byte in any of these is misread by Windows PowerShell 5.1 under
+    its console codepage and reproduces the parse-error cascade this change fixes
+    (install.ps1 and install.sh embed env.ps1 here-strings that WinPS dot-sources;
+    the gate harness is itself executed by WinPS).
+    """
+    path = _REPO_ROOT / rel_path
+    data = path.read_bytes()
+    offenders = [(offset, byte) for offset, byte in enumerate(data) if byte > 0x7F]
+    assert not offenders, (
+        f"{rel_path} contains {len(offenders)} non-ASCII byte(s) "
+        f"(first at offsets {[off for off, _ in offenders[:10]]}); "
+        "Windows PowerShell 5.1 misreads these under the console codepage. "
+        "Use ASCII: '-' for em-dash, '...' for ellipsis, '->' for arrow."
     )

@@ -1,4 +1,4 @@
-# install.ps1 — OCX installer for Windows
+# install.ps1 - OCX installer for Windows
 # https://ocx.sh
 #
 # Usage:
@@ -14,7 +14,7 @@
 
 # Support Windows PowerShell 5.1+ (the default on Windows 10/11). Zip extraction
 # routes through Expand-ZipSafely, which validates every entry against zip-slip
-# before writing — so we don't depend on Expand-Archive's PS 7.4 hardening.
+# before writing - so we don't depend on Expand-Archive's PS 7.4 hardening.
 #Requires -Version 5.1
 
 Set-StrictMode -Version Latest
@@ -227,7 +227,7 @@ function Get-LatestVersion {
             Err "Failed to fetch latest release from GitHub.`nThis may be a rate-limit issue. Try setting GITHUB_TOKEN:`n  `$env:GITHUB_TOKEN = 'ghp_...'`n  irm https://ocx.sh/install.ps1 | iex"
         }
         else {
-            Err 'Failed to fetch latest release from GitHub — check your internet connection and token.'
+            Err 'Failed to fetch latest release from GitHub - check your internet connection and token.'
         }
     }
 
@@ -250,11 +250,18 @@ function Create-EnvFile {
 
     # Thin shim that delegates to `ocx self activate --shell=powershell` at
     # runtime.  Single-quoted here-string (@'...'@) prevents any PowerShell
-    # expansion at install time — content is byte-identical across users
+    # expansion at install time - content is byte-identical across users
     # regardless of their OcxHome path.
+    #
+    # The exe-name probe below uses $env:OS, not $IsWindows: $IsWindows is a
+    # PowerShell 6+ automatic variable, undefined on Windows PowerShell 5.1, and
+    # referencing it throws under Set-StrictMode. $env:OS ('Windows_NT' on every
+    # Windows PowerShell, unset elsewhere) is StrictMode-safe to read. Keep the
+    # generated shim free of the literal "$IsWindows" token (an ASCII/token guard
+    # in test_install_sh.py enforces this).
     $envContent = @'
-# Managed by ocx installer — do not edit.
-# Double-source guard — prevents PATH duplication on re-source.
+# Managed by ocx installer - do not edit.
+# Double-source guard - prevents PATH duplication on re-source.
 # Set before any side effects so re-source after partial failure also short-circuits.
 if ($env:_OCX_ENV_LOADED) { return }
 $env:_OCX_ENV_LOADED = '1'
@@ -266,13 +273,14 @@ if (-not $env:OCX_HOME) {
     $env:OCX_HOME = Join-Path $_ocxBase '.ocx'
 }
 
-# Binary name is platform-specific. $IsWindows is $null on Windows PowerShell 5.1
-# (so the comparison is false -> 'ocx.exe') and $false on pwsh-Linux/macOS
-# (-> 'ocx'). Forward slashes are accepted by PowerShell on every platform.
-$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }
+# Binary name is platform-specific. $env:OS is 'Windows_NT' on every Windows
+# PowerShell (Desktop 5.1 + Core 7) and unset on Linux/macOS pwsh; reading an
+# unset $env: var is StrictMode-safe (yields $null). Forward slashes are
+# accepted by PowerShell on every platform.
+$_ocxExe = if ($env:OS -eq 'Windows_NT') { 'ocx.exe' } else { 'ocx' }
 $_ocxBin = Join-Path $env:OCX_HOME "symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe"
 if (Test-Path $_ocxBin -PathType Leaf) {
-    # Build args as an array so the completion flag is appended cleanly — never
+    # Build args as an array so the completion flag is appended cleanly - never
     # a $null/empty positional that clap would reject (Windows PowerShell 5.1
     # passes a bare $null arg as an empty string).
     # Request completions only on an interactive PowerShell 5.0+ session: legacy
@@ -319,7 +327,7 @@ function Assert-SafeOcxHome {
     # `(`, `)` can interfere with PowerShell expression / index / sub-expression
     # evaluation when the path is re-interpolated. U+2028 (line separator) and
     # U+2029 (paragraph separator) are tokenized as line breaks by the
-    # PowerShell parser in some hosts — treat them as injection vectors
+    # PowerShell parser in some hosts - treat them as injection vectors
     # (CWE-94 / CWE-78 defence-in-depth).
     if ($Path -match '["`$;\r\n\[\]()]') {
         Err "OCX_HOME contains characters unsafe for shell embedding: $Path"
@@ -329,7 +337,7 @@ function Assert-SafeOcxHome {
 # --- Profile modification ---
 
 # Strip every OCX-managed fragment from profile lines:
-#   - the # BEGIN ocx … # END ocx block (current form),
+#   - the # BEGIN ocx ... # END ocx block (current form),
 #   - the legacy bare `# OCX` marker plus its following source line,
 #   - any stray legacy `ocx shell init`/`profile load` dot-source line.
 # Returns the cleaned line array. Mirrors install.sh remove_legacy_init_lines
@@ -396,7 +404,7 @@ function Modify-Profile {
 
     # Migrate: drop any prior OCX block / legacy marker, then re-append a
     # single canonical block. Stable across re-runs (idempotent by
-    # construction — output converges regardless of prior form).
+    # construction - output converges regardless of prior form).
     $cleaned = @(Remove-OcxProfileLines -Lines $existing)
     while ($cleaned.Count -gt 0 -and [string]::IsNullOrWhiteSpace($cleaned[$cleaned.Count - 1])) {
         if ($cleaned.Count -eq 1) { $cleaned = @() }
@@ -504,7 +512,7 @@ function Finalize-Install {
 # --- Main ---
 
 function Main {
-    # Runtime PS version check — belt-and-suspenders alongside the #Requires
+    # Runtime PS version check - belt-and-suspenders alongside the #Requires
     # directive above. `irm ... | iex` evaluates content as a string and
     # bypasses parser-level #Requires (which only fires when executing a .ps1
     # from disk). 5.1 is the minimum because Expand-ZipSafely uses
@@ -601,10 +609,10 @@ function Main {
             Expand-ZipSafely -Path (Join-Path $tmpDir $archive) -Destination $extractDir
         }
         catch {
-            Err "Failed to extract $archive — $($_.Exception.Message)"
+            Err "Failed to extract $archive - $($_.Exception.Message)"
         }
 
-        # Locate binary — cargo-dist puts it in a target-named subdirectory
+        # Locate binary - cargo-dist puts it in a target-named subdirectory
         $bin = $null
         $candidatePaths = @(
             (Join-Path $extractDir "ocx-$target\ocx.exe"),
@@ -626,11 +634,11 @@ function Main {
             $null = & $bin version 2>$null
         }
         catch {
-            Warn 'Binary failed to execute — it may be blocked by antivirus or execution policy.'
+            Warn 'Binary failed to execute - it may be blocked by antivirus or execution policy.'
         }
 
         # PATH shadowing: warn if a different ocx.exe already exists on PATH.
-        # Use OrdinalIgnoreCase (CWE-178 defence — incorrect case handling):
+        # Use OrdinalIgnoreCase (CWE-178 defence - incorrect case handling):
         # Windows file paths are case-insensitive at the OS layer, but the
         # default `String.StartsWith` is culture-sensitive (e.g. in Turkish
         # locale 'i' and 'I' don't match), which could miss the shadow check
@@ -644,7 +652,7 @@ function Main {
         $ocxHomePrefix = $ocxHome.TrimEnd('\') + '\'
         if ($existingOcx -and -not $existingOcx.Source.StartsWith($ocxHomePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             Warn "An existing ocx was found at $($existingOcx.Source)"
-            Warn 'The new install may be shadowed — check your PATH order.'
+            Warn 'The new install may be shadowed - check your PATH order.'
         }
 
         # Bootstrap: OCX installs itself into its own package store
@@ -666,7 +674,7 @@ function Main {
     }
 }
 
-# Run Main only when executed (irm|iex, & ./install.ps1, iex (irm ...)) — skip
+# Run Main only when executed (irm|iex, & ./install.ps1, iex (irm ...)) - skip
 # when dot-sourced (. ./install.ps1) so tests can call Create-EnvFile directly.
 # InvocationName is '.' only for dot-source; all execution forms give the
 # script name or empty string, never a literal dot.

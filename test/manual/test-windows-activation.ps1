@@ -1,13 +1,20 @@
 #Requires -Version 5.1
-# test-windows-activation.ps1 — Windows shell-activation gate harness.
-# Runnable under Windows PowerShell 5.1 and PowerShell 7.
+# test-windows-activation.ps1 - Windows shell-activation gate harness.
+# Lives at test/manual/; runnable under Windows PowerShell 5.1 and PowerShell 7.
+# ASCII-only by contract: WinPS 5.1 decodes a BOM-less .ps1 in the console
+# codepage, so a stray non-ASCII byte here would reproduce the very parse-error
+# cascade this harness guards against. Keep every byte in 0x00-0x7F.
 #
-# Usage (CI):
-#   powershell -NoProfile -File .github\scripts\test-windows-activation.ps1
-#   pwsh       -NoProfile -File .github\scripts\test-windows-activation.ps1
+# Native Windows (rustup + MSVC toolchain) - default -OcxBin resolves itself:
+#   cargo build --release --locked -p ocx_cli --target x86_64-pc-windows-msvc
+#   powershell -NoProfile -File .\test\manual\test-windows-activation.ps1
+#   pwsh       -NoProfile -File .\test\manual\test-windows-activation.ps1
 #
-# Usage (local):
-#   .\.github\scripts\test-windows-activation.ps1 -OcxBin .\target\x86_64-pc-windows-msvc\release\ocx.exe
+# From WSL against a cargo-xwin cross-build, pass the xwin output explicitly
+# (or just run `task rust:verify:windows-activation`, which wires this up):
+#   task rust:build:windows:x86
+#   powershell.exe -NoProfile -File <unc>\test-windows-activation.ps1 `
+#     -OcxBin <unc>\target\xwin\x86_64-pc-windows-msvc\release\ocx.exe
 
 param(
     # Path to the freshly built release ocx.exe.
@@ -70,7 +77,7 @@ if (-not (Test-Path $envPs1 -PathType Leaf)) {
 Write-Host "  env.ps1 written: $envPs1"
 
 # ---------------------------------------------------------------------------
-# Gap D — null-bind guard:
+# Gap D - null-bind guard:
 # env.ps1 must be dot-sourceable without throwing
 # "Cannot bind argument to parameter 'Command' because it is null".
 # The binary is present, so the `self activate` path runs end-to-end.
@@ -96,10 +103,10 @@ if ($env:OCX_ACTIVATED -ne '1') {
 if ($env:PATH -notlike "*$contentBinDir*") {
     throw "Gap D FAIL: content\bin dir not found on `$env:PATH after activation"
 }
-Write-Host '[Gap D] PASS — env.ps1 dot-sourced cleanly; OCX_ACTIVATED=1; content\bin on PATH'
+Write-Host '[Gap D] PASS - env.ps1 dot-sourced cleanly; OCX_ACTIVATED=1; content\bin on PATH'
 
 # ---------------------------------------------------------------------------
-# Second bug — the --no-completion activation stream (PATH + global env only)
+# Second bug - the --no-completion activation stream (PATH + global env only)
 # must be non-empty and carry no `using namespace`; only the completion block,
 # emitted under --completion, contains it.
 # ---------------------------------------------------------------------------
@@ -109,15 +116,15 @@ Write-Host '[Second bug] --no-completion activation stream using-namespace-free 
 $_stream = (& $ocxBin self activate --shell=powershell --no-completion 2>$null) | Out-String
 
 if (-not $_stream -or $_stream.Trim() -eq '') {
-    throw "Second bug FAIL: activation stream is empty — PATH prepend line must always be emitted"
+    throw "Second bug FAIL: activation stream is empty - PATH prepend line must always be emitted"
 }
 if ($_stream -match '\busing\s+namespace\b') {
-    throw "Second bug FAIL: --no-completion stream contains 'using namespace' — must be using-free; got: $_stream"
+    throw "Second bug FAIL: --no-completion stream contains 'using namespace' - must be using-free; got: $_stream"
 }
-Write-Host '[Second bug] PASS — stream non-empty and using-namespace-free'
+Write-Host '[Second bug] PASS - stream non-empty and using-namespace-free'
 
 # ---------------------------------------------------------------------------
-# Gap E — --completion path (RELEASE binary required; debug panics on clap
+# Gap E - --completion path (RELEASE binary required; debug panics on clap
 # debug-assert).  Completions are emitted INLINE (no file): the stream must
 # LEAD with `using namespace` so Invoke-Expression accepts it, and run cleanly.
 # ---------------------------------------------------------------------------
@@ -138,10 +145,10 @@ try {
 } catch {
     throw "Gap E FAIL: inline completion stream threw under Invoke-Expression: $($_.Exception.Message)"
 }
-Write-Host '[Gap E] PASS — inline completion leads with using-namespace and runs under Invoke-Expression'
+Write-Host '[Gap E] PASS - inline completion leads with using-namespace and runs under Invoke-Expression'
 
 # ---------------------------------------------------------------------------
-# Gap A — empty OCX_HOME: --global env must exit 0 and emit no output when
+# Gap A - empty OCX_HOME: --global env must exit 0 and emit no output when
 # no global toolchain is configured (no packages installed).
 # ---------------------------------------------------------------------------
 Write-Host ''
@@ -163,7 +170,7 @@ if ($_exitCode -ne 0) {
 if ($_globalEnvOut -and $_globalEnvOut.Trim() -ne '') {
     throw "Gap A FAIL: --global env emitted non-empty output with empty OCX_HOME: $_globalEnvOut"
 }
-Write-Host '[Gap A] PASS — --global env exits 0 with empty output on empty OCX_HOME'
+Write-Host '[Gap A] PASS - --global env exits 0 with empty output on empty OCX_HOME'
 
 # ---------------------------------------------------------------------------
 # Done.

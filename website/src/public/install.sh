@@ -1,6 +1,6 @@
 #!/bin/sh
 # shellcheck disable=SC3043  # `local` verified at runtime by has_local()
-# install.sh — OCX installer for Unix and macOS
+# install.sh - OCX installer for Unix and macOS
 # https://ocx.sh
 #
 # Usage:
@@ -73,7 +73,7 @@ get_home() {
     fi
 }
 
-# Ensure HOME is set — some minimal environments (containers, cron) omit it.
+# Ensure HOME is set - some minimal environments (containers, cron) omit it.
 HOME="${HOME:-$(get_home)}"
 
 # Check if running on Windows with POSIX-compliant shell (CYGWIN, MSYS, MINGW)
@@ -98,7 +98,7 @@ to_native_path() {
     fi
 }
 
-# TTY/color detection — bold-only, respects NO_COLOR (https://no-color.org/)
+# TTY/color detection - bold-only, respects NO_COLOR (https://no-color.org/)
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     _bold=$(tput bold 2>/dev/null || echo "")
     _reset=$(tput sgr0 2>/dev/null || echo "")
@@ -111,7 +111,7 @@ fi
 
 usage() {
     cat <<'EOF'
-OCX installer — https://ocx.sh
+OCX installer - https://ocx.sh
 
 USAGE:
     curl -fsSL https://ocx.sh/install.sh | sh
@@ -125,7 +125,7 @@ OPTIONS:
 ENVIRONMENT:
     OCX_HOME              Installation directory (default: ~/.ocx)
     OCX_NO_MODIFY_PATH    Set to 1/true/yes to skip shell profile modification
-    GITHUB_TOKEN          GitHub API token — set this if you hit rate limits
+    GITHUB_TOKEN          GitHub API token - set this if you hit rate limits
                           when resolving the latest version
 EOF
 }
@@ -152,7 +152,7 @@ detect_target() {
     # when the shell runs under Rosetta (which reports x86_64 via uname -m).
     if [ "$_os" = "Darwin" ] && [ "$_arch" = "x86_64" ]; then
         if sysctl -n hw.optional.arm64 2>/dev/null | grep -q '1'; then
-            say "Detected Apple Silicon running under Rosetta — using native arm64 binary."
+            say "Detected Apple Silicon running under Rosetta - using native arm64 binary."
             _arch="aarch64"
         fi
     fi
@@ -187,13 +187,13 @@ detect_target() {
 
 # Detect curl or wget; sets _downloader
 # Snap-packaged curl on Ubuntu has sandbox restrictions that can silently
-# break downloads to /tmp — prefer wget if curl is from snap.
+# break downloads to /tmp - prefer wget if curl is from snap.
 # wget must support --secure-protocol, --https-only AND --header-file
-# (--header-file requires wget >= 1.17, circa 2015 — the binding constraint).
+# (--header-file requires wget >= 1.17, circa 2015 - the binding constraint).
 # On too-old wget without these flags, fail closed: do not silently downgrade
 # to unprotected HTTP, do not silently leak GITHUB_TOKEN via argv.
 _check_wget_tls_flags() {
-    # Probe via --help output — no network call, no side-effects on localhost.
+    # Probe via --help output - no network call, no side-effects on localhost.
     # grep exits 1 on no match; treat that as flags absent (old wget).
     # Cache --help once: separate invocations could see different binaries.
     local _wh
@@ -212,9 +212,9 @@ detect_downloader() {
                     _downloader="wget"
                     return
                 fi
-                warn "wget too old to enforce TLS restrictions — falling back to snap curl"
+                warn "wget too old to enforce TLS restrictions - falling back to snap curl"
             fi
-            warn "no usable wget fallback — continuing with snap curl"
+            warn "no usable wget fallback - continuing with snap curl"
         fi
         _downloader="curl"
     elif check_cmd wget; then
@@ -248,11 +248,11 @@ download() {
     fi
 }
 
-# Download GitHub API URL to stdout — uses GITHUB_TOKEN when set
+# Download GitHub API URL to stdout - uses GITHUB_TOKEN when set
 # curl: token passed via -H @<file> (curl 7.55+) to keep it out of argv/ps list.
 #   A chmod-600 temp file holds the header line; deleted immediately after use.
 # wget: token also passed via --header-file=<file> (wget >= 1.17) for the same
-#   reason — argv is visible in /proc/PID/cmdline and `ps ef` on shared hosts.
+#   reason - argv is visible in /proc/PID/cmdline and `ps ef` on shared hosts.
 download_api() {
     local _url="$1"
 
@@ -264,7 +264,7 @@ download_api() {
             _hdr_file=$(mktemp)
             chmod 600 "$_hdr_file"
             printf 'Authorization: token %s\n' "${GITHUB_TOKEN}" >"$_hdr_file"
-            # Capture return code without relying on set -e — if curl fails,
+            # Capture return code without relying on set -e - if curl fails,
             # bare statement position would exit before the rm -f, leaking the
             # token file on disk.  if/else always executes rm -f regardless.
             local _rc
@@ -309,7 +309,7 @@ verify_checksum() {
     elif check_cmd shasum; then
         _sha_cmd="shasum -a 256"
     else
-        warn "neither sha256sum nor shasum found — SKIPPING CHECKSUM VERIFICATION"
+        warn "neither sha256sum nor shasum found - SKIPPING CHECKSUM VERIFICATION"
         warn "install coreutils or set PATH to include sha256sum for verified downloads"
         return 0
     fi
@@ -347,7 +347,7 @@ get_latest_version() {
     export GITHUB_TOKEN=ghp_...
     curl -fsSL https://ocx.sh/install.sh | sh"
         else
-            err "failed to fetch latest release from GitHub — check your internet connection and token"
+            err "failed to fetch latest release from GitHub - check your internet connection and token"
         fi
     }
 
@@ -368,11 +368,11 @@ get_latest_version() {
 
 # --- Shell environment files ---
 
-# Write $OCX_HOME/env.sh — POSIX fail-safe form.
+# Write $OCX_HOME/env.sh - POSIX fail-safe form.
 # Prepends the OCX bin directory (resolved through the install candidate's
 # `current` symlink) to PATH, then sources the global toolchain env for any
 # additional tools the user has declared in $OCX_HOME/ocx.toml. OCX itself
-# is NOT a global-toolchain entry — its version source is the install
+# is NOT a global-toolchain entry - its version source is the install
 # candidate, updated via `ocx package install --select ocx.sh/ocx/cli:N`
 # or by re-running the install script.
 # Idempotency: PATH `case`-match below dedups within a single session
@@ -389,9 +389,9 @@ create_env_sh() {
     # users regardless of their OCX_HOME path.
     cat >"$_ocx_home/env.sh" <<'EOF'
 #!/bin/sh
-# Managed by ocx installer — do not edit.
+# Managed by ocx installer - do not edit.
 
-# Double-source guard — prevents PATH duplication on re-source (e.g. user
+# Double-source guard - prevents PATH duplication on re-source (e.g. user
 # re-sources .bashrc).  Set before any side effects so that a re-source after
 # a partial failure also short-circuits cleanly.  Idempotent under `set -u`.
 if [ -n "${_OCX_ENV_LOADED:-}" ]; then
@@ -408,7 +408,7 @@ _ocx_bin="$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"
 
 # Detect the real sourcing shell so the right completion backend is chosen.
 # This file is sourced by bash AND zsh (not just /bin/sh); `sh` resolves to
-# Shell::Dash, which has no clap completion backend — so bash/zsh users would
+# Shell::Dash, which has no clap completion backend - so bash/zsh users would
 # get no completions if we hardcoded `--shell=sh`. PATH and global-env-eval
 # output are identical across the POSIX arms, so this only changes the
 # completion extension.
@@ -433,17 +433,17 @@ unset _ocx_bin _ocx_shell
 EOF
 }
 
-# Write $OCX_HOME/env.fish — fish-syntax per-family file.
+# Write $OCX_HOME/env.fish - fish-syntax per-family file.
 # Thin shim that delegates to `ocx self activate --shell=fish` at runtime.
-# File is byte-identical across users — no install-time substitution.
+# File is byte-identical across users - no install-time substitution.
 create_env_fish() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
     cat >"$_ocx_home/env.fish" <<'EOF'
-# Managed by ocx installer — do not edit.
-# Double-source guard — prevents PATH duplication on re-source.
+# Managed by ocx installer - do not edit.
+# Double-source guard - prevents PATH duplication on re-source.
 # Set before any side effects so re-source after partial failure also short-circuits.
 if set -q _OCX_ENV_LOADED
     return
@@ -468,17 +468,24 @@ end
 EOF
 }
 
-# Write $OCX_HOME/env.ps1 — PowerShell per-family file.
+# Write $OCX_HOME/env.ps1 - PowerShell per-family file.
 # Thin shim that delegates to `ocx self activate --shell=powershell` at
-# runtime.  File is byte-identical across users — no install-time substitution.
+# runtime.  File is byte-identical across users - no install-time substitution.
+#
+# Must stay byte-identical to install.ps1's Create-EnvFile here-string. The
+# exe-name probe uses $env:OS, not $IsWindows: $IsWindows is a PowerShell 6+
+# automatic variable, undefined on Windows PowerShell 5.1, and referencing it
+# throws under Set-StrictMode. $env:OS ('Windows_NT' on every Windows
+# PowerShell, unset elsewhere) is StrictMode-safe. Keep the generated shim free
+# of the literal "$IsWindows" token (a token guard in test_install_sh.py enforces it).
 create_env_ps1() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
     cat >"$_ocx_home/env.ps1" <<'EOF'
-# Managed by ocx installer — do not edit.
-# Double-source guard — prevents PATH duplication on re-source.
+# Managed by ocx installer - do not edit.
+# Double-source guard - prevents PATH duplication on re-source.
 # Set before any side effects so re-source after partial failure also short-circuits.
 if ($env:_OCX_ENV_LOADED) { return }
 $env:_OCX_ENV_LOADED = '1'
@@ -490,13 +497,14 @@ if (-not $env:OCX_HOME) {
     $env:OCX_HOME = Join-Path $_ocxBase '.ocx'
 }
 
-# Binary name is platform-specific. $IsWindows is $null on Windows PowerShell 5.1
-# (so the comparison is false -> 'ocx.exe') and $false on pwsh-Linux/macOS
-# (-> 'ocx'). Forward slashes are accepted by PowerShell on every platform.
-$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }
+# Binary name is platform-specific. $env:OS is 'Windows_NT' on every Windows
+# PowerShell (Desktop 5.1 + Core 7) and unset on Linux/macOS pwsh; reading an
+# unset $env: var is StrictMode-safe (yields $null). Forward slashes are
+# accepted by PowerShell on every platform.
+$_ocxExe = if ($env:OS -eq 'Windows_NT') { 'ocx.exe' } else { 'ocx' }
 $_ocxBin = Join-Path $env:OCX_HOME "symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe"
 if (Test-Path $_ocxBin -PathType Leaf) {
-    # Build args as an array so the completion flag is appended cleanly — never
+    # Build args as an array so the completion flag is appended cleanly - never
     # a $null/empty positional that clap would reject (Windows PowerShell 5.1
     # passes a bare $null arg as an empty string).
     # Request completions only on an interactive PowerShell 5.0+ session: legacy
@@ -518,13 +526,13 @@ Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxArgs, _ocxActivate -ErrorAction 
 EOF
 }
 
-# Write $OCX_HOME/env.nu — Nushell per-family file.
+# Write $OCX_HOME/env.nu - Nushell per-family file.
 # Thin shim that delegates to `ocx self activate --shell=nushell` at runtime.
 # Nushell's `source` is parse-time, so activation output is written to a temp
-# file and sourced from there.  File is byte-identical across users — no
+# file and sourced from there.  File is byte-identical across users - no
 # install-time substitution.
 # No completion flag: nushell has no clap_complete backend
-# (completion_target → None), so the flag would be a no-op. PATH + global env
+# (completion_target -> None), so the flag would be a no-op. PATH + global env
 # are the only activation output here, and those are session-independent.
 create_env_nu() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
@@ -532,8 +540,8 @@ create_env_nu() {
     mkdir -p "$_ocx_home"
 
     cat >"$_ocx_home/env.nu" <<'EOF'
-# Managed by ocx installer — do not edit.
-# Double-source guard — prevents PATH duplication on re-source.
+# Managed by ocx installer - do not edit.
+# Double-source guard - prevents PATH duplication on re-source.
 # Set before any side effects so re-source after partial failure also short-circuits.
 if ($env._OCX_ENV_LOADED? | default '') != '' { return }
 $env._OCX_ENV_LOADED = '1'
@@ -551,7 +559,7 @@ EOF
 # Write the Nushell vendor autoload file that sources $OCX_HOME/env.nu.
 # Nushell auto-sources every .nu file under the vendor/autoload directory at
 # startup.  The autoload file sets OCX_HOME via env-var-with-fallback at
-# runtime, then computes the env.nu path from it — no literal substitution.
+# runtime, then computes the env.nu path from it - no literal substitution.
 # Note: the inner `source` inside env.nu still requires a literal path
 # resolved at startup by env.nu itself (via the temp-file pattern).
 create_nu_autoload() {
@@ -561,23 +569,23 @@ create_nu_autoload() {
     mkdir -p "$_nu_autoload_dir"
 
     cat >"$_nu_autoload_dir/ocx.nu" <<'EOF'
-# OCX shell environment — managed by ocx installer.
+# OCX shell environment - managed by ocx installer.
 $env.OCX_HOME = ($env.OCX_HOME? | default ($env.HOME | path join '.ocx'))
 source ($env.OCX_HOME + '/env.nu')
 EOF
 }
 
-# Write $OCX_HOME/env.elv — Elvish per-family file.
+# Write $OCX_HOME/env.elv - Elvish per-family file.
 # Thin shim that delegates to `ocx self activate --shell=elvish` at runtime.
-# File is byte-identical across users — no install-time substitution.
+# File is byte-identical across users - no install-time substitution.
 create_env_elv() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
     mkdir -p "$_ocx_home"
 
     cat >"$_ocx_home/env.elv" <<'EOF'
-# Managed by ocx installer — do not edit.
-# Double-source guard — prevents PATH duplication on re-source.
+# Managed by ocx installer - do not edit.
+# Double-source guard - prevents PATH duplication on re-source.
 # Set before any side effects so re-source after partial failure also short-circuits.
 if (has-env _OCX_ENV_LOADED) {
     return
@@ -590,8 +598,8 @@ if (not (has-env OCX_HOME)) {
 
 var _ocx_bin = (path:join $E:OCX_HOME symlinks/ocx.sh/ocx/cli/current/content/bin/ocx)
 # rc.elv is sourced only for interactive Elvish sessions, so --completion is
-# unconditional here. The hook redirects stderr (2>/dev/null), so the flag —
-# not an isatty(2) probe — is what gates completion work.
+# unconditional here. The hook redirects stderr (2>/dev/null), so the flag -
+# not an isatty(2) probe - is what gates completion work.
 if ?(test -x $_ocx_bin) {
     eval (e:$_ocx_bin self activate --shell=elvish --completion 2>/dev/null | slurp)
 }
@@ -628,7 +636,7 @@ create_fish_config() {
     mkdir -p "$_fish_conf_dir"
 
     cat >"$_fish_conf_dir/ocx.fish" <<'FISHEOF'
-# OCX shell environment — managed by ocx installer.
+# OCX shell environment - managed by ocx installer.
 # Sources $OCX_HOME/env.fish which evaluates the global toolchain env.
 set -l _ocx_env (string join '' (set -q OCX_HOME; and echo $OCX_HOME; or echo $HOME/.ocx) '/env.fish')
 if test -f "$_ocx_env"
@@ -663,22 +671,22 @@ remove_legacy_init_lines() {
         # State machine. state: 0 = pass-through, 1 = saw `# OCX` header
         # (buffered, not yet committed), 2 = inside multi-line legacy guard.
         # Transitions:
-        #   0 → 1   on `# OCX` heading
-        #   1 → 2   on `if [[ -r "..ocx/env" ]] …`  (discard header + opener)
-        #   1 → 0   on any other line (flush buffered header, then print line)
-        #   2 → 0   on `fi`                          (discard closer)
+        #   0 -> 1   on `# OCX` heading
+        #   1 -> 2   on `if [[ -r "..ocx/env" ]] ...`  (discard header + opener)
+        #   1 -> 0   on any other line (flush buffered header, then print line)
+        #   2 -> 0   on `fi`                          (discard closer)
         # Bare dot-source legacy lines drop in any state.
         awk '
             state==0 && /^[[:space:]]*#[[:space:]]*OCX[[:space:]]*$/ {
                 header=$0; state=1; next
             }
             state==1 && /^[[:space:]]*if[[:space:]]+\[\[[[:space:]]*-r[[:space:]]+"[^"]*\.ocx\/env"[[:space:]]*\]\]/ {
-                # Inline single-line form: `… ]]; then . "…"; fi`
+                # Inline single-line form: `... ]]; then . "..."; fi`
                 if ($0 ~ /;[[:space:]]*fi[[:space:]]*$/) { state=0; header=""; next }
                 state=2; next
             }
             state==1 {
-                # Buffered `# OCX` did not introduce a legacy guard — emit it.
+                # Buffered `# OCX` did not introduce a legacy guard - emit it.
                 print header; header=""; state=0
             }
             state==2 && /^[[:space:]]*fi[[:space:]]*$/ { state=0; next }
@@ -700,18 +708,18 @@ remove_legacy_init_lines() {
 
 # --- Shell profile modification ---
 
-# Profile target decision tree — covers BOTH login and interactive rc files
+# Profile target decision tree - covers BOTH login and interactive rc files
 # so the activation block fires regardless of how the terminal is launched.
 # Login-only targets (.zprofile, .bash_profile) miss Linux/WSL/VSCode
 # terminals which open interactive non-login shells; interactive-only
 # targets (.zshrc, .bashrc) miss macOS Terminal's default login shells.
-# Writing to both is safe — env.sh's PATH `case`-match makes the second
+# Writing to both is safe - env.sh's PATH `case`-match makes the second
 # source a no-op (idempotent dedup).
 #
-#   bash → ~/.bash_profile (or ~/.profile if no .bash_profile) + ~/.bashrc
-#   zsh  → ${ZDOTDIR:-$HOME}/.zprofile + ${ZDOTDIR:-$HOME}/.zshrc
-#   fish → ~/.config/fish/conf.d (managed via conf.d — no block needed here)
-#   *    → ~/.profile
+#   bash -> ~/.bash_profile (or ~/.profile if no .bash_profile) + ~/.bashrc
+#   zsh  -> ${ZDOTDIR:-$HOME}/.zprofile + ${ZDOTDIR:-$HOME}/.zshrc
+#   fish -> ~/.config/fish/conf.d (managed via conf.d - no block needed here)
+#   *    -> ~/.profile
 #
 # Returns one path per line.
 detect_profile() {
@@ -730,21 +738,21 @@ detect_profile() {
             ;;
         zsh)
             # Respect ZDOTDIR when set. Reject ZDOTDIR="/" to prevent writing
-            # /.zprofile (CWE-22 defense — filesystem root write guard).
+            # /.zprofile (CWE-22 defense - filesystem root write guard).
             _zdotdir="${ZDOTDIR:-$HOME}"
             if [ "$_zdotdir" = "/" ]; then
-                warn "ZDOTDIR is '/' — refusing to write under /; falling back to \$HOME"
+                warn "ZDOTDIR is '/' - refusing to write under /; falling back to \$HOME"
                 _zdotdir="$HOME"
             fi
             echo "$_zdotdir/.zprofile"
             echo "$_zdotdir/.zshrc"
             ;;
         fish)
-            # Fish uses conf.d — no block-marker profile edit needed
+            # Fish uses conf.d - no block-marker profile edit needed
             echo ""
             ;;
         nu)
-            # Nushell uses vendor/autoload — no block-marker profile edit needed
+            # Nushell uses vendor/autoload - no block-marker profile edit needed
             echo ""
             ;;
         elvish)
@@ -791,7 +799,7 @@ modify_shell_profile() {
     fi
 
     # Always strip legacy OCX activation lines from .zshenv (sourced for
-    # every zsh invocation — most aggressive cleanup target). Older
+    # every zsh invocation - most aggressive cleanup target). Older
     # installers wrote a `[[ -r $HOME/.ocx/env ]] && . ...` block here that
     # silently swallows the missing extensionless env file and leaves ocx
     # off PATH.
@@ -828,7 +836,7 @@ modify_shell_profile() {
 }
 
 # Remove the block-marker section from the profile (uninstall path).
-# Uses POSIX awk — avoids non-portable `sed -i`.
+# Uses POSIX awk - avoids non-portable `sed -i`.
 # Also strips legacy $OCX_HOME/init.* lines (W6).
 remove_shell_profile() {
     local _profiles _profile _ocx_home _tmpfile _shell_name
@@ -1038,7 +1046,7 @@ main() {
     # not contain any ".." components.  Reject early so every downstream use of
     # $_ocx_home is safe.
     case "$_ocx_home" in
-        /*) ;; # absolute path — OK
+        /*) ;; # absolute path - OK
         *) err "OCX_HOME must be an absolute path: $_ocx_home" ;;
     esac
     case "$_ocx_home" in
@@ -1076,7 +1084,7 @@ main() {
         _version=$(get_latest_version)
     fi
 
-    # Validate version format — reject shell metacharacters and suspicious input
+    # Validate version format - reject shell metacharacters and suspicious input
     if echo "$_version" | grep -q '[^0-9a-zA-Z.+-]'; then
         err "invalid version format: $_version (expected semver like 1.2.3 or 1.0.0-rc.1)"
     elif echo "$_version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]'; then
@@ -1123,7 +1131,7 @@ main() {
     #   Pass 1 (entry names): catches absolute paths and ".." traversal in entry names.
     #   Pass 2 (symlink targets): tar -tv lists "link -> target"; awk extracts the
     #     target (last field after "->") and rejects absolute or parent-escaping targets.
-    #     Without -v, tar --list only emits entry names — symlink targets are invisible.
+    #     Without -v, tar --list only emits entry names - symlink targets are invisible.
     local _bad_entry
     _bad_entry=$(tar --list -f "$_tmpdir/$_archive" 2>/dev/null |
         grep -E '(^|/)\.\.(^|/|$)|^/' || true)
@@ -1136,7 +1144,7 @@ main() {
     #   - absolute paths (leading /)
     #   - parent-relative prefix (../...)
     #   - middle-relative escapes (e.g. `subdir/../../etc/passwd`) which the
-    #     prior regex `^(\.\.|/)` missed (CWE-22 / CWE-59 — symlink-target
+    #     prior regex `^(\.\.|/)` missed (CWE-22 / CWE-59 - symlink-target
     #     path traversal).  The awk normalizer walks each '/'-split component
     #     and tracks depth: any '..' that would take depth below zero means
     #     the target resolves outside the extraction root.
@@ -1150,7 +1158,7 @@ main() {
             /->/ {
                 target=""
                 for (i=2; i<=NF; i++) target = target (i==2 ? "" : " -> ") $i
-                # Absolute path — always rejected.
+                # Absolute path - always rejected.
                 if (substr(target, 1, 1) == "/") { print target; next }
                 # Walk components, track resolved depth from extraction root.
                 n = split(target, parts, "/")
@@ -1178,10 +1186,10 @@ main() {
     # directory in $_tmpdir. Flag is standard on GNU tar and BSD tar.
     if ! tar xf "$_tmpdir/$_archive" -C "$_tmpdir" \
         --no-same-owner --no-same-permissions --no-overwrite-dir 2>/dev/null; then
-        err "failed to extract ${_archive} — ensure tar and xz-utils are installed"
+        err "failed to extract ${_archive} - ensure tar and xz-utils are installed"
     fi
 
-    # Locate binary — cargo-dist puts it in a target-named subdirectory
+    # Locate binary - cargo-dist puts it in a target-named subdirectory
     if [ -f "$_tmpdir/ocx-${_target}/ocx" ]; then
         _bin="$_tmpdir/ocx-${_target}/ocx"
     elif [ -f "$_tmpdir/ocx" ]; then
@@ -1192,10 +1200,10 @@ main() {
 
     chmod +x "$_bin"
 
-    # Smoke-test the binary before installing — detects noexec /tmp
+    # Smoke-test the binary before installing - detects noexec /tmp
     if ! "$_bin" version >/dev/null 2>&1; then
         warn "binary failed to execute in temp directory ($(dirname "$_bin"))"
-        warn "your /tmp may be mounted with noexec — try: TMPDIR=\$HOME/.tmp $0"
+        warn "your /tmp may be mounted with noexec - try: TMPDIR=\$HOME/.tmp $0"
     fi
 
     # PATH shadowing: warn if a different `ocx` already exists on PATH
@@ -1203,10 +1211,10 @@ main() {
         local _existing_ocx
         _existing_ocx=$(command -v ocx)
         case "$_existing_ocx" in
-            "${_ocx_home}"/*) ;; # our own install — expected
+            "${_ocx_home}"/*) ;; # our own install - expected
             *)
                 warn "an existing ocx was found at $_existing_ocx"
-                warn "the new install may be shadowed — check your PATH order"
+                warn "the new install may be shadowed - check your PATH order"
                 ;;
         esac
     fi
