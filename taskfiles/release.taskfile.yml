@@ -45,3 +45,4 @@ tasks:
         echo "Release prepared ({{.NEXT_VERSION}}). Review changes, then:"
         echo "  git add -A && git commit -m 'release: {{.NEXT_VERSION}}'"
         echo "  git tag {{.NEXT_VERSION}}"
+        echo "  git push --atomic origin main {{.NEXT_VERSION}}"

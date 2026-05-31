@@ -14,7 +14,6 @@ allow = [
   "CDLA-Permissive-2.0",
   "MIT-0",
   "Zlib",
-  "OpenSSL",
   "EPL-2.0",
   # Required transitively by dirs-sys → option-ext.
   "MPL-2.0",
