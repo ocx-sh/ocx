@@ -99,12 +99,12 @@ if ($env:PATH -notlike "*$contentBinDir*") {
 Write-Host '[Gap D] PASS — env.ps1 dot-sourced cleanly; OCX_ACTIVATED=1; content\bin on PATH'
 
 # ---------------------------------------------------------------------------
-# Second bug — activation stream must be non-empty AND using-namespace-free.
-# `using namespace` belongs only inside the completion file, never in the
-# activation stream itself.
+# Second bug — the --no-completion activation stream (PATH + global env only)
+# must be non-empty and carry no `using namespace`; only the completion block,
+# emitted under --completion, contains it.
 # ---------------------------------------------------------------------------
 Write-Host ''
-Write-Host '[Second bug] Activation stream using-namespace-free ...'
+Write-Host '[Second bug] --no-completion activation stream using-namespace-free ...'
 
 $_stream = (& $ocxBin self activate --shell=powershell --no-completion 2>$null) | Out-String
 
@@ -112,31 +112,33 @@ if (-not $_stream -or $_stream.Trim() -eq '') {
     throw "Second bug FAIL: activation stream is empty — PATH prepend line must always be emitted"
 }
 if ($_stream -match '\busing\s+namespace\b') {
-    throw "Second bug FAIL: activation stream contains 'using namespace' — must be using-free; got: $_stream"
+    throw "Second bug FAIL: --no-completion stream contains 'using namespace' — must be using-free; got: $_stream"
 }
 Write-Host '[Second bug] PASS — stream non-empty and using-namespace-free'
 
 # ---------------------------------------------------------------------------
 # Gap E — --completion path (RELEASE binary required; debug panics on clap
-# debug-assert).  Asserts: completion file written + dot-sources without throw.
+# debug-assert).  Completions are emitted INLINE (no file): the stream must
+# LEAD with `using namespace` so Invoke-Expression accepts it, and run cleanly.
 # ---------------------------------------------------------------------------
 Write-Host ''
-Write-Host '[Gap E] Completion file written and dot-sourceable ...'
+Write-Host '[Gap E] Inline completion leads with using-namespace and is IEX-safe ...'
 
-# Run --completion; capture output (we don't need it here, just trigger the write).
-$null = (& $ocxBin self activate --shell=powershell --completion 2>$null) | Out-String
+$_compStream = (& $ocxBin self activate --shell=powershell --completion 2>$null) | Out-String
 
-$completionFile = Join-Path $env:OCX_HOME 'state\completions\ocx.ps1'
-if (-not (Test-Path $completionFile -PathType Leaf)) {
-    throw "Gap E FAIL: completion file not written at: $completionFile"
+$_firstLine = ($_compStream -split "`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1)
+if (-not $_firstLine -or $_firstLine.Trim() -notmatch '^using namespace') {
+    throw "Gap E FAIL: completion stream must lead with 'using namespace'; got first line: '$_firstLine'"
 }
-
+if ($_compStream -notmatch 'Register-ArgumentCompleter') {
+    throw 'Gap E FAIL: completion stream must inline Register-ArgumentCompleter'
+}
 try {
-    . $completionFile
+    Invoke-Expression $_compStream
 } catch {
-    throw "Gap E FAIL: completion file threw on dot-source: $($_.Exception.Message)"
+    throw "Gap E FAIL: inline completion stream threw under Invoke-Expression: $($_.Exception.Message)"
 }
-Write-Host "[Gap E] PASS — completion file exists and dot-sources cleanly: $completionFile"
+Write-Host '[Gap E] PASS — inline completion leads with using-namespace and runs under Invoke-Expression'
 
 # ---------------------------------------------------------------------------
 # Gap A — empty OCX_HOME: --global env must exit 0 and emit no output when

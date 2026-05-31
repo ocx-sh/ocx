@@ -43,7 +43,7 @@ pub struct ContextOptions {
     #[arg(long, conflicts_with = "project", default_value_t = env::flag(env::keys::OCX_GLOBAL, false))]
     pub global: bool,
 
-    /// Route mutable lookups (tag list, catalog, tag→manifest) to the
+    /// Route mutable lookups (tag list, catalog, tag->manifest) to the
     /// remote registry instead of the local index.
     ///
     /// Pure queries (`index list`, `index catalog`, `package info`) do
@@ -58,7 +58,7 @@ pub struct ContextOptions {
 
     /// Disable all network access.
     ///
-    /// Tag→digest resolution must be satisfied by the local index or a
+    /// Tag->digest resolution must be satisfied by the local index or a
     /// digest-pinned identifier; unpinned tags missing from the local
     /// index will error. Useful for hermetic CI runs and air-gapped
     /// environments. Equivalent env var: `OCX_OFFLINE`.

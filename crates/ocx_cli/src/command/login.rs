@@ -29,7 +29,7 @@ pub struct Login {
     password_stdin: bool,
 
     /// Allow plain HTTP for the registry (overrides default HTTPS).
-    /// Reserved for the future `--verify` Ping path — currently no-op in v1.
+    /// Reserved for the future `--verify` Ping path - currently no-op in v1.
     #[clap(long = "insecure", hide = true)]
     #[allow(dead_code)]
     insecure: bool,
@@ -45,7 +45,7 @@ pub struct Login {
     auth_type: Option<String>,
 
     /// Registry hostname (e.g. `ghcr.io`, `registry.example.com`).
-    /// Optional — falls back to `OCX_DEFAULT_REGISTRY`.
+    /// Optional - falls back to `OCX_DEFAULT_REGISTRY`.
     registry: Option<String>,
 }
 

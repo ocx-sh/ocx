@@ -47,7 +47,7 @@ pub struct PackagePush {
     build_timestamp: Option<BuildTimestampFormat>,
 
     /// Path to the package metadata JSON file. Defaults to a sibling of the
-    /// first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required
+    /// first file layer (e.g. `pkg.tar.gz` -> `pkg-metadata.json`). Required
     /// when no file layers are provided.
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,

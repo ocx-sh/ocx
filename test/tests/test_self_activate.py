@@ -137,28 +137,24 @@ def test_activate_sh_output_prepends_path(
 
 
 @requires_pty
-def test_activate_sources_completion_file_when_interactive(ocx: OcxRunner) -> None:
-    """Interactive `self activate` writes a completion file and sources it.
+def test_activate_inlines_completion_when_interactive(ocx: OcxRunner) -> None:
+    """Interactive `self activate` emits the completion inline in the stream.
 
-    Completions are written to $OCX_HOME/state/completions/ocx.<ext> (a real
-    file, so PowerShell's `using` directives stay valid) and the activation
-    stream just sources it. The script content lives in the file, not stdout.
+    Completions are emitted directly into the eval'd activation stream (no file
+    on disk): the shim already evals the stream, so a `complete -F` block installs
+    completions with nothing to manage. No completion file is written, and the
+    stream carries no `source` directive.
     """
     result = _run_activate_interactive(ocx, "--shell=bash")
     stdout = result.stdout
     assert result.returncode == 0, f"exit must be 0; stderr unavailable (pty)\n{stdout}"
 
-    completion_file = Path(ocx.env["OCX_HOME"]) / "state" / "completions" / "ocx.bash"
-    assert completion_file.is_file(), f"interactive activate must write {completion_file}"
-    assert f"source '{completion_file}'" in stdout, (
-        f"activation must source the completion file; got:\n{stdout}"
+    assert "complete -F" in stdout, (
+        f"interactive bash activation must inline the bash completion; got:\n{stdout}"
     )
-    # The bash completion content lives in the file, not the activation stream.
-    content = completion_file.read_text()
-    assert content.startswith("# ocx-completion-version:"), "completion file must be version-stamped"
-    assert "complete" in content.lower() or "_ocx" in content, (
-        f"completion file must contain bash completion setup; got:\n{content[:200]}"
-    )
+    assert "source '" not in stdout, f"inline model must emit no `source` directive; got:\n{stdout}"
+    completions_dir = Path(ocx.env["OCX_HOME"]) / "state" / "completions"
+    assert not completions_dir.exists(), "inline model must write no completion file"
 
 
 def test_activate_skips_completion_when_non_interactive(ocx: OcxRunner) -> None:
@@ -176,8 +172,6 @@ def test_activate_skips_completion_when_non_interactive(ocx: OcxRunner) -> None:
         f"non-interactive activate must emit no completion; got:\n{stdout}"
     )
     assert "PATH=" in stdout, f"non-interactive activate must still prepend PATH; got:\n{stdout}"
-    completion_file = Path(ocx.env["OCX_HOME"]) / "state" / "completions" / "ocx.bash"
-    assert not completion_file.exists(), "non-interactive activate must not write a completion file"
 
 
 @requires_pty
@@ -189,8 +183,6 @@ def test_activate_excludes_completion_when_opt_out(ocx: OcxRunner) -> None:
     assert "source '" not in stdout and "complete -F" not in stdout and "compdef" not in stdout, (
         f"OCX_NO_COMPLETIONS=1 must emit no completion; got:\n{stdout}"
     )
-    completion_file = Path(ocx.env["OCX_HOME"]) / "state" / "completions" / "ocx.bash"
-    assert not completion_file.exists(), "opt-out must not write a completion file"
 
 
 # ---------------------------------------------------------------------------
@@ -446,20 +438,13 @@ def test_activate_emits_global_env_eval_pwsh(
 
 
 def test_activate_powershell_stream_is_iex_safe(ocx: OcxRunner) -> None:
-    """The pwsh activation stream never carries a `using namespace` directive.
+    """A non-interactive pwsh activation emits no completion (PATH/env only).
 
-    Regression for the released Windows activation bug: ``env.ps1`` runs this
-    output through ``Invoke-Expression``. clap_complete's PowerShell completions
-    open with ``using namespace`` directives, and PowerShell requires ``using``
-    statements to precede every other statement — a rule that holds across
-    Windows PowerShell 5.1 (the Win10/11 default) through PowerShell 7. Inlining
-    completions behind the PATH line violated it ("A 'using' statement must
-    appear before any other statements in a script").
-
-    So the stream carries neither a ``using`` statement nor a
-    ``Register-ArgumentCompleter`` block; completions live in a sourced file.
-    PATH prepend and the global-env eval stay. (Non-interactive here — the
-    completion file is exercised by the interactive test below.)
+    Scripts source the stream without a TTY, so completions are skipped: no
+    ``using namespace``, no ``Register-ArgumentCompleter``. (When interactive the
+    completion is emitted FIRST so its ``using namespace`` leads the stream and
+    ``Invoke-Expression`` accepts it - see the inline test below.) PATH prepend
+    and the global-env eval always stay.
     """
     result = _run_activate(ocx, "--shell=pwsh")
     stdout = result.stdout
@@ -478,28 +463,28 @@ def test_activate_powershell_stream_is_iex_safe(ocx: OcxRunner) -> None:
 
 
 @requires_pty
-def test_activate_powershell_completion_file_keeps_using_directives(ocx: OcxRunner) -> None:
-    """Interactive pwsh activation writes ocx.ps1 (with `using`) and sources it.
+def test_activate_powershell_inlines_completion_first(ocx: OcxRunner) -> None:
+    """Interactive pwsh activation inlines the completion as the FIRST statement.
 
-    The `using namespace` directives are valid at the top of a real .ps1 file
-    (every PowerShell version), so they belong in the sourced file — never the
-    Invoke-Expression'd stream. The stream just dot-sources the file.
+    clap_complete's PowerShell completion opens with ``using namespace``, which
+    ``Invoke-Expression`` (env.ps1's loader) accepts only as the first statement.
+    The activation emits the completion block first so the stream stays IEX-safe
+    on Windows PowerShell 5.1 and PowerShell 7. No completion file is written.
     """
     result = _run_activate_interactive(ocx, "--shell=powershell")
     stdout = result.stdout
     assert result.returncode == 0, f"exit must be 0\n{stdout}"
 
-    completion_file = Path(ocx.env["OCX_HOME"]) / "state" / "completions" / "ocx.ps1"
-    assert completion_file.is_file(), f"interactive pwsh activate must write {completion_file}"
-    assert f". '{completion_file}'" in stdout, f"stream must dot-source the completion file; got:\n{stdout}"
-    assert "using namespace" not in stdout, "the dot-sourced stream must still carry no `using`"
-
-    content = completion_file.read_text()
-    assert content.startswith("# ocx-completion-version:"), "completion file must be version-stamped"
-    assert "using namespace System.Management.Automation" in content, (
-        "completion file must carry clap's unmodified `using namespace` directive"
+    body = stdout.strip()
+    first_line = body.splitlines()[0] if body else ""
+    assert first_line.startswith("using namespace"), (
+        "the pwsh stream must lead with `using namespace` (Invoke-Expression requires it "
+        f"first); got first line:\n{first_line!r}\nfull:\n{stdout}"
     )
-    assert "Register-ArgumentCompleter" in content, "completion file must register the completer"
+    assert "Register-ArgumentCompleter" in stdout, "interactive pwsh activation must inline the completer"
+    assert "$env:PATH" in stdout, "activation must still prepend PATH after the completion"
+    completions_dir = Path(ocx.env["OCX_HOME"]) / "state" / "completions"
+    assert not completions_dir.exists(), "inline model must write no completion file"
 
 
 # ---------------------------------------------------------------------------
@@ -511,43 +496,37 @@ def test_activate_powershell_completion_file_keeps_using_directives(ocx: OcxRunn
 def test_activate_emits_zsh_completion_structure(
     ocx: OcxRunner,
 ) -> None:
-    """The zsh completion file uses zsh-specific markers (`compdef`).
+    """Interactive zsh activation inlines the zsh completion with a compinit guard.
 
-    clap_complete generates zsh completions using `compdef` which is zsh-only.
-    Verifies the zsh backend is used for zsh (not bash). The content lives in
-    the sourced file; only interactive activation generates it.
+    clap_complete's zsh completion ends in `compdef`, which needs `compinit`
+    loaded. The inline block self-loads `compinit` first, so sourcing works even
+    before the user's own `compinit` (e.g. from `.zprofile`). Content is inline;
+    no file is written.
     """
     result = _run_activate_interactive(ocx, "--shell=zsh")
-    assert result.returncode == 0, f"exit code must be 0 for --shell=zsh\n{result.stdout}"
+    stdout = result.stdout
+    assert result.returncode == 0, f"exit code must be 0 for --shell=zsh\n{stdout}"
 
-    completion_file = Path(ocx.env["OCX_HOME"]) / "state" / "completions" / "ocx.zsh"
-    assert completion_file.is_file(), f"interactive zsh activate must write {completion_file}"
-    assert f"source '{completion_file}'" in result.stdout, "stream must source the zsh completion file"
-    # '#compdef' / 'compdef' is the zsh-specific completion registration directive.
-    assert "compdef" in completion_file.read_text(), (
-        f"zsh completion file must contain 'compdef'; got:\n{completion_file.read_text()[:200]}"
-    )
+    # 'compdef' is the zsh-specific completion registration directive.
+    assert "compdef" in stdout, f"zsh activation must inline the zsh completion (`compdef`); got:\n{stdout[:400]}"
+    assert "autoload -Uz compinit" in stdout, "zsh completion must self-load compinit before the compdef call"
+    completions_dir = Path(ocx.env["OCX_HOME"]) / "state" / "completions"
+    assert not completions_dir.exists(), "inline model must write no completion file"
 
 
 @requires_pty
 def test_activate_emits_bash_completion_structure(
     ocx: OcxRunner,
 ) -> None:
-    """The bash completion file uses bash-specific markers (`complete -F`).
-
-    clap_complete generates bash completions using `complete -F`. Verifies the
-    bash backend specifically. Content lives in the sourced file.
-    """
+    """Interactive bash activation inlines the bash completion (`complete -F`)."""
     result = _run_activate_interactive(ocx, "--shell=bash")
-    assert result.returncode == 0, f"exit code must be 0 for --shell=bash\n{result.stdout}"
+    stdout = result.stdout
+    assert result.returncode == 0, f"exit code must be 0 for --shell=bash\n{stdout}"
 
-    completion_file = Path(ocx.env["OCX_HOME"]) / "state" / "completions" / "ocx.bash"
-    assert completion_file.is_file(), f"interactive bash activate must write {completion_file}"
-    # 'complete -F' is the bash-specific function-based completion binding.
+    # 'complete -F' is the bash-specific function-based completion binding;
     # clap_complete always emits 'complete -F _ocx ocx' for bash.
-    assert "complete -F" in completion_file.read_text(), (
-        "bash completion file must contain 'complete -F' (bash-specific completion binding); "
-        f"got:\n{completion_file.read_text()[:200]}"
+    assert "complete -F" in stdout, (
+        f"bash activation must inline `complete -F` (bash-specific binding); got:\n{stdout[:400]}"
     )
 
 
@@ -841,13 +820,9 @@ def test_real_env_sh_loads_bash_completions_when_interactive(ocx_binary: Path, o
         text=True,
         env=env,
     )
-    completion_file = ocx_home / "state" / "completions" / "ocx.bash"
-    assert completion_file.is_file(), (
-        "interactive bash sourcing the real env.sh must materialise ocx.bash; "
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
     assert "_ocx" in result.stdout, (
-        f"`complete -p ocx` must show the registered ocx completion; got:\n{result.stdout!r}"
+        "interactive bash sourcing the real env.sh must inline + register the ocx completion; "
+        f"`complete -p ocx` output:\n{result.stdout!r}\nstderr:\n{result.stderr}"
     )
 
 
@@ -856,13 +831,16 @@ def test_real_env_sh_loads_zsh_completions_when_interactive(ocx_binary: Path, oc
     """zsh variant: env.sh detects ``$ZSH_VERSION`` and selects the zsh
     completion backend, writing ocx.zsh under an interactive zsh."""
     env_sh, env = _generate_real_env_sh(ocx_binary, ocx_home)
-    subprocess.run(
+    result = subprocess.run(
         ["zsh", "-i", "-c", f'. "{env_sh}"'],
         capture_output=True,
         text=True,
         env=env,
     )
-    completion_file = ocx_home / "state" / "completions" / "ocx.zsh"
-    assert completion_file.is_file(), (
-        "interactive zsh sourcing the real env.sh must materialise ocx.zsh"
+    # env.sh is sourced before the user's compinit; the inlined zsh completion
+    # must self-load compinit so clap's trailing `compdef` is defined. The
+    # released regression was `command not found: compdef` here.
+    assert "command not found" not in result.stderr, (
+        f"sourcing env.sh in zsh must not error (compdef must be loaded); stderr:\n{result.stderr}"
     )
+    assert result.returncode == 0, f"zsh sourcing env.sh must exit 0; stderr:\n{result.stderr}"

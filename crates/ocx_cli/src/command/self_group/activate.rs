@@ -95,13 +95,12 @@ impl SelfActivate {
         let file_structure = ocx_lib::file_structure::FileStructure::new();
         let bin_path = ocx_install_bin_path(&file_structure);
 
-        // Materialise the shell-completion file when completions are enabled
-        // for this session (see `Completion::enabled` / `resolve_completion`).
-        // The stderr-TTY probe is the auto signal when neither `--completion`
-        // nor `--no-completion` is passed. The returned path, if any, is
-        // dot-sourced from the activation stream.
+        // Generate the shell-completion script to emit inline when completions
+        // are enabled for this session (see `Completion::enabled`). The
+        // stderr-TTY probe is the auto signal when neither `--completion` nor
+        // `--no-completion` is passed.
         let load_completions = self.completion.enabled(std::io::stderr().is_terminal());
-        let completion = resolve_completion(shell, load_completions, &file_structure).await;
+        let completion = load_completions.then(|| generate_completion_inline(shell)).flatten();
 
         emit_activation(shell, &bin_path, completion.as_deref());
         Ok(ExitCode::SUCCESS)
@@ -120,23 +119,26 @@ fn ocx_install_bin_path(fs: &ocx_lib::file_structure::FileStructure) -> PathBuf 
 
 /// Emit all activation lines to stdout for the given shell.
 ///
-/// `completion_file` is the materialised completion script to dot-source, or
-/// `None` when completions are disabled, the session is non-interactive, or the
-/// shell has no completion backend (see [`resolve_completion`]).
-fn emit_activation(shell: Shell, bin_path: &std::path::Path, completion_file: Option<&std::path::Path>) {
+/// `completion` is the generated completion script to emit inline, or `None`
+/// when completions are disabled, the session is non-interactive, or the shell
+/// has no completion backend (see [`generate_completion_inline`]).
+fn emit_activation(shell: Shell, bin_path: &std::path::Path, completion: Option<&str>) {
+    // ── Shell completions (emitted FIRST) ────────────────────────────────────
+    // The completion block must lead the stream: clap_complete's PowerShell
+    // output opens with `using namespace`, which `Invoke-Expression` (the pwsh
+    // shim's loader) accepts only as the *first* statement — any earlier line
+    // makes pwsh reject the whole script. Other shells are order-insensitive
+    // here, and no completion block references `ocx` at definition time, so
+    // emitting it before the PATH prepend is safe.
+    if let Some(script) = completion {
+        println!("{script}");
+    }
+
     // ── PATH prepend ─────────────────────────────────────────────────────────
     // Use the absolute resolved path — no $VAR references, so Shell::export_path
     // is safe here (escape_value won't transform the path characters since
     // they contain no shell metacharacters).
     emit_path_prepend(shell, bin_path);
-
-    // ── Shell completions ────────────────────────────────────────────────────
-    // Source the generated completion file (if any). The script lives in a real
-    // file so PowerShell's `using namespace` directives are valid; the line
-    // emitted here is just a `source`/`.` directive, safe in every shell.
-    if let Some(path) = completion_file {
-        println!("{}", completion_source_line(shell, path));
-    }
 
     // ── Global toolchain env (guarded) ───────────────────────────────────────
     // Evaluate the global toolchain env once per shell — re-sourcing the user's
@@ -158,110 +160,51 @@ fn emit_path_prepend(shell: Shell, bin_path: &std::path::Path) {
     }
 }
 
-/// Materialise the completion file when `enabled` and the shell has a backend.
-///
-/// Returns the path to dot-source, or `None` when completions are disabled
-/// (`enabled` is false) or the shell has no `clap_complete` backend. The
-/// `enabled` decision is made upstream by [`options::Completion::enabled`],
-/// which folds the `--completion`/`--no-completion` flags, `OCX_NO_COMPLETIONS`,
-/// and the stderr-TTY auto probe into a single boolean.
-///
-/// The completion script is written to a real file (rather than emitted inline)
-/// because clap_complete's PowerShell output opens with `using namespace`
-/// directives, which PowerShell only accepts as the first statements of a
-/// *script file* — not mid-stream under the `Invoke-Expression` that loads
-/// activation output. Sourcing a file is uniform across shells and valid on
-/// every PowerShell version (5.1 through 7).
-async fn resolve_completion(
-    shell: Shell,
-    enabled: bool,
-    file_structure: &ocx_lib::file_structure::FileStructure,
-) -> Option<PathBuf> {
-    if !enabled {
-        return None;
-    }
-    let (clap_shell, extension) = completion_target(shell)?;
-    // A completion-file write failure must never break activation — the
-    // PATH/env lines are what matter, so drop the error and skip completions.
-    ensure_completion_file(file_structure, clap_shell, extension).await.ok()
-}
-
-/// Maps a shell to its `clap_complete` backend and completion-file extension,
-/// or `None` when the shell has no completion backend.
-fn completion_target(shell: Shell) -> Option<(clap_complete::Shell, &'static str)> {
+/// Maps a shell to its `clap_complete` backend, or `None` when the shell has no
+/// completion generator (ash/ksh/dash/batch/nushell).
+fn completion_clap_shell(shell: Shell) -> Option<clap_complete::Shell> {
     use clap_complete::Shell as Clap;
     Some(match shell {
-        Shell::Bash => (Clap::Bash, "bash"),
-        Shell::Zsh => (Clap::Zsh, "zsh"),
-        Shell::Fish => (Clap::Fish, "fish"),
-        Shell::Elvish => (Clap::Elvish, "elv"),
-        Shell::PowerShell => (Clap::PowerShell, "ps1"),
+        Shell::Bash => Clap::Bash,
+        Shell::Zsh => Clap::Zsh,
+        Shell::Fish => Clap::Fish,
+        Shell::Elvish => Clap::Elvish,
+        Shell::PowerShell => Clap::PowerShell,
         // ash/ksh/dash/batch/nushell have no clap_complete backend.
         _ => return None,
     })
 }
 
-/// Materialise the version-stamped completion script and return its path.
+/// Generate the shell-completion script to emit inline into the activation
+/// stream, or `None` when the shell has no completion backend.
 ///
-/// The script's first line is `# ocx-completion-version: {version}`. If a file
-/// with the current stamp already exists it is reused untouched — so the common
-/// path on an interactive shell start is a single small read. Otherwise the
-/// script is regenerated and published atomically (PID-suffixed temp file +
-/// rename), so concurrent shells never observe a torn file and an
-/// `ocx self update` refreshes the script on the next interactive shell.
+/// Emitted directly into the eval'd activation stream rather than written to a
+/// file: the stream is already `eval`/`Invoke-Expression`'d by the shim, so a
+/// `complete -F` / `compdef` / `Register-ArgumentCompleter` block installs
+/// completions with no file to manage, version-stamp, or read.
 ///
-/// The publish goes through `ocx_lib::utility::fs::persist_temp_file` so a
-/// shell holding `ocx.ps1` open on Windows (which would otherwise fail the
-/// rename with `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION`) is retried
-/// instead of silently degrading.
-async fn ensure_completion_file(
-    file_structure: &ocx_lib::file_structure::FileStructure,
-    clap_shell: clap_complete::Shell,
-    extension: &str,
-) -> std::io::Result<PathBuf> {
-    let path = file_structure.state.completion_file(extension);
-    let stamp = format!("# ocx-completion-version: {}", crate::app::version());
-
-    if let Ok(existing) = tokio::fs::read_to_string(&path).await
-        && existing.lines().next() == Some(stamp.as_str())
-    {
-        return Ok(path);
-    }
-
-    let mut script = format!("{stamp}\n").into_bytes();
+/// Two shell-specific shims:
+/// - **PowerShell**: clap_complete's output opens with `using namespace`, which
+///   `Invoke-Expression` accepts only as the *first* statement of the stream;
+///   [`emit_activation`] emits this block first to satisfy that. Verified valid
+///   on Windows PowerShell 5.1 and PowerShell 7.
+/// - **zsh**: the clap script ends in `compdef _ocx ocx`, which needs `compinit`
+///   loaded. A guard self-loads it, so the block is correct wherever the shim
+///   sources it — e.g. from `.zprofile`, before the user's `.zshrc` runs
+///   `compinit` (otherwise `compdef` is undefined → `command not found`).
+fn generate_completion_inline(shell: Shell) -> Option<String> {
+    let clap_shell = completion_clap_shell(shell)?;
+    let mut buf = Vec::new();
     let mut cmd = crate::app::Cli::command();
-    let cmd_name = cmd.get_name().to_string();
-    clap_complete::generate(clap_shell, &mut cmd, cmd_name, &mut script);
-
-    let dir = file_structure.state.completions_dir();
-    tokio::fs::create_dir_all(&dir).await?;
-    // Publish atomically via tempfile + `persist_temp_file` — the shared
-    // primitive that retries on Windows transient lock/access errors (a shell
-    // holding `ocx.ps1` open). It is blocking (sleeps between retries on
-    // Windows), so run it off the async runtime. The version-stamped content is
-    // idempotent, so a racing writer is harmless.
-    let path_for_blocking = path.clone();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
-        std::io::Write::write_all(&mut tmp, &script)?;
-        tmp.as_file().sync_data()?;
-        ocx_lib::utility::fs::persist_temp_file(tmp, &path_for_blocking)
-    })
-    .await
-    .map_err(std::io::Error::other)??;
-    Ok(path)
-}
-
-/// Builds the shell line that loads (`source`/dot-source) the completion file.
-fn completion_source_line(shell: Shell, path: &std::path::Path) -> String {
-    let path = path.to_string_lossy();
-    match shell {
-        // PowerShell and Elvish single-quote strings escape `'` by doubling it.
-        Shell::PowerShell => format!(". '{}'", path.replace('\'', "''")),
-        Shell::Elvish => format!("eval (slurp < '{}')", path.replace('\'', "''")),
-        // POSIX shells escape `'` as `'\''`.
-        _ => format!("source '{}'", path.replace('\'', "'\\''")),
+    let bin_name = cmd.get_name().to_string();
+    clap_complete::generate(clap_shell, &mut cmd, bin_name, &mut buf);
+    // clap_complete always writes valid UTF-8; on the impossible failure, skip
+    // completions rather than break activation.
+    let mut script = String::from_utf8(buf).ok()?;
+    if shell == Shell::Zsh {
+        script = format!("if (( ! $+functions[compdef] )); then\n  autoload -Uz compinit && compinit -C\nfi\n{script}");
     }
+    Some(script)
 }
 
 /// Emit the eval line that loads the global toolchain env, gated on
@@ -356,8 +299,8 @@ mod tests {
     use ocx_lib::shell::Shell;
 
     use super::{
-        completion_source_line, completion_target, emit_path_prepend, format_activated_marker, format_global_env_eval,
-        ocx_install_bin_path,
+        completion_clap_shell, emit_path_prepend, format_activated_marker, format_global_env_eval,
+        generate_completion_inline, ocx_install_bin_path,
     };
 
     // ── PATH prepend: absolute path via Shell::export_path ──────────────────
@@ -503,71 +446,75 @@ mod tests {
         );
     }
 
-    // ── Completion targets + source lines (TODO "Second" bug) ───────────────
+    // ── Inline completion generation ────────────────────────────────────────
 
-    /// Shells with a clap_complete backend map to an extension; the rest opt out.
+    /// Shells with a clap_complete backend produce a non-empty inline script;
+    /// the rest opt out (no backend → no completion emitted).
     #[test]
-    fn completion_target_covers_clap_shells_only() {
-        for (shell, ext) in [
-            (Shell::Bash, "bash"),
-            (Shell::Zsh, "zsh"),
-            (Shell::Fish, "fish"),
-            (Shell::Elvish, "elv"),
-            (Shell::PowerShell, "ps1"),
-        ] {
-            let (_, got) =
-                completion_target(shell).unwrap_or_else(|| panic!("{shell:?} must have a completion target"));
-            assert_eq!(got, ext, "{shell:?} completion extension");
+    fn generate_completion_inline_covers_clap_shells_only() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Elvish, Shell::PowerShell] {
+            let script =
+                generate_completion_inline(shell).unwrap_or_else(|| panic!("{shell:?} must produce a completion"));
+            assert!(!script.is_empty(), "{shell:?} completion must be non-empty");
         }
         for shell in [Shell::Ash, Shell::Ksh, Shell::Dash, Shell::Batch, Shell::Nushell] {
             assert!(
-                completion_target(shell).is_none(),
+                completion_clap_shell(shell).is_none() && generate_completion_inline(shell).is_none(),
                 "{shell:?} has no clap_complete backend and must opt out"
             );
         }
     }
 
-    /// The emitted source line dot-sources the file with the shell's syntax and
-    /// carries no `using` statement (that lives inside the sourced file).
+    /// The zsh completion self-loads `compinit` before clap's trailing
+    /// `compdef`, so it works even when sourced before the user's own
+    /// `compinit` (e.g. from `.zprofile`).
     #[test]
-    fn completion_source_line_uses_shell_syntax() {
-        let path = std::path::Path::new("/home/u/.ocx/state/completions/ocx.bash");
-        assert_eq!(
-            completion_source_line(Shell::Bash, path),
-            "source '/home/u/.ocx/state/completions/ocx.bash'"
-        );
-        let ps = std::path::Path::new("C:\\Users\\u\\.ocx\\state\\completions\\ocx.ps1");
-        let line = completion_source_line(Shell::PowerShell, ps);
+    fn zsh_completion_guards_compinit_before_compdef() {
+        let script = generate_completion_inline(Shell::Zsh).expect("zsh has a backend");
+        let guard = script
+            .find("autoload -Uz compinit")
+            .expect("zsh completion must self-load compinit");
+        let compdef = script
+            .rfind("compdef _ocx ocx")
+            .expect("zsh completion must call compdef");
+        assert!(guard < compdef, "the compinit guard must precede the compdef call");
+    }
+
+    /// The PowerShell completion must lead with `using namespace` so that, when
+    /// emitted first into the activation stream, `Invoke-Expression` accepts it
+    /// (valid only as the first statement; verified on WinPS 5.1 and pwsh 7).
+    #[test]
+    fn powershell_completion_leads_with_using_namespace() {
+        let script = generate_completion_inline(Shell::PowerShell).expect("pwsh has a backend");
+        let first = script.trim_start().lines().next().unwrap_or_default();
         assert!(
-            line.starts_with(". '") && line.contains("ocx.ps1"),
-            "pwsh dot-source; got: {line:?}"
-        );
-        assert!(
-            !line.contains("using namespace"),
-            "source line must carry no `using`; got: {line:?}"
-        );
-        assert!(
-            completion_source_line(Shell::Elvish, std::path::Path::new("/x/ocx.elv")).starts_with("eval (slurp < '"),
-            "elvish must use eval (slurp < ...)"
+            first.starts_with("using namespace"),
+            "pwsh completion must lead with `using namespace`; got: {first:?}"
         );
     }
 
-    /// Single quotes in the path are escaped per shell family so the source
-    /// line stays well-formed.
+    /// No completion output may contain non-ASCII bytes (ASCII guard, G4).
+    ///
+    /// clap embeds CLI help text into every completion script. A stray Unicode
+    /// character (e.g. `→`) is invisible on UTF-8 shells but corrupts on Windows
+    /// PowerShell 5.1, which decodes the captured activation stream with the
+    /// console codepage — turning `→` into mojibake whose stray quote byte breaks
+    /// the surrounding single-quoted PowerShell string. Keeping help ASCII makes
+    /// the inline stream robust on every shell. If this fails, find the offending
+    /// `#[arg]`/`#[command(about=...)]` help text and replace the non-ASCII
+    /// character (e.g. `→` -> `->`).
     #[test]
-    fn completion_source_line_escapes_single_quotes() {
-        let p = std::path::Path::new("/o'x/ocx.bash");
-        assert_eq!(
-            completion_source_line(Shell::Bash, p),
-            r"source '/o'\''x/ocx.bash'",
-            "POSIX escapes ' as '\\''"
-        );
-        let pps = std::path::Path::new("/o'x/ocx.ps1");
-        assert_eq!(
-            completion_source_line(Shell::PowerShell, pps),
-            ". '/o''x/ocx.ps1'",
-            "PowerShell escapes ' by doubling"
-        );
+    fn completion_output_is_ascii_for_all_shells() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Elvish, Shell::PowerShell] {
+            let script = generate_completion_inline(shell).expect("backend present");
+            let bad = script.bytes().position(|byte| !byte.is_ascii());
+            assert!(
+                bad.is_none(),
+                "{shell:?} completion must be ASCII-only; first non-ASCII byte at offset {:?}. \
+                 Find the help text with a non-ASCII char and replace it (e.g. `→` -> `->`).",
+                bad
+            );
+        }
     }
 
     /// CMD must use `if not defined OCX_ACTIVATED` to gate the eval.
@@ -629,8 +576,8 @@ mod tests {
     // ── Completion interactivity gate ──────────────────────────────────────
     //
     // The gate decision (flags + `OCX_NO_COMPLETIONS` + interactivity) now lives
-    // in `options::Completion::enabled` and is unit-tested there. `resolve_completion`
-    // just honours the resolved boolean.
+    // in `options::Completion::enabled` and is unit-tested there. `execute` just
+    // honours the resolved boolean before calling `generate_completion_inline`.
 
     /// `ocx_install_bin_path` must return a path ending with `current/content/bin`.
     #[test]

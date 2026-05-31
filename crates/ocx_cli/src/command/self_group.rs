@@ -16,7 +16,7 @@ pub mod update;
 #[derive(Subcommand)]
 pub enum SelfGroup {
     /// Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the
-    /// current shell. Prepends `$OCX_HOME/symlinks/…/bin` to `PATH`, injects
+    /// current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects
     /// completions (unless `OCX_NO_COMPLETIONS=1`), and evaluates the global
     /// toolchain env. Guarded on `$OCX_ACTIVATED` so re-sourcing is a no-op.
     Activate(activate::SelfActivate),

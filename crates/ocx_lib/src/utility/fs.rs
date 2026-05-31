@@ -169,7 +169,7 @@ mod tests {
     /// Windows: a non-sharing reader holding the destination open makes the
     /// first persist fail with `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION`;
     /// the retry loop must succeed once the handle is released — exactly the
-    /// "a shell holds `ocx.ps1` open" hazard the completion-file publish hits.
+    /// "a process holds a just-published file open" hazard any atomic publish hits.
     /// Mirrors `blob_store::tests::write_blob_retries_on_sharing_violation_then_succeeds`.
     /// Linux/macOS skip it: persist/rename has no sharing-violation semantics there.
     #[cfg(windows)]

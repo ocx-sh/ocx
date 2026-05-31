@@ -11,7 +11,7 @@ use crate::app::ContextOptions;
 
 #[derive(Parser)]
 pub struct Version {
-    /// Emit enriched build provenance — commit, dirty flag, build time,
+    /// Emit enriched build provenance - commit, dirty flag, build time,
     /// target, rustc, CI run URL. JSON output always includes the
     /// populated subset; this flag only affects plain text.
     #[arg(short, long)]

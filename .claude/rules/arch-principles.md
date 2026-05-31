@@ -156,7 +156,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Parallel directory tree walk with pruning decisions | `utility::fs::{DirWalker, WalkDecision}` | `utility/fs/dir_walker.rs` |
 | Lexical path normalize / containment check (no FS I/O) | `utility::fs::path::{lexical_normalize, escapes_root, validate_symlinks_in_dir}` | `utility/fs/path.rs` |
 | Move directory (same-filesystem rename, overwrite-safe) | `utility::fs::move_dir` | `utility/fs.rs` |
-| Atomically publish a written `NamedTempFile` to a target path (Windows transient-lock retry — `ERROR_SHARING_VIOLATION`/`ERROR_ACCESS_DENIED` backoff; single persist off-Windows; blocking — wrap in `spawn_blocking`) | `utility::fs::persist_temp_file` | `utility/fs.rs` (the one atomic-publish primitive; used by `BlobStore::write_blob` and `ocx self activate`'s completion file) |
+| Atomically publish a written `NamedTempFile` to a target path (Windows transient-lock retry — `ERROR_SHARING_VIOLATION`/`ERROR_ACCESS_DENIED` backoff; single persist off-Windows; blocking — wrap in `spawn_blocking`) | `utility::fs::persist_temp_file` | `utility/fs.rs` (the one atomic-publish primitive; used by `BlobStore::write_blob`) |
 | Probe whether path exists, swallow I/O errors as `false` with debug log | `utility::fs::path_exists_lossy` | `utility/fs.rs` |
 | Refuse a destination path whose ancestor chain contains any symlink (security guard) | `utility::fs::refuse_if_symlink_in_path` | `utility/fs/symlink_walk.rs` |
 | Cross-platform same-filesystem check (Unix dev / Win32 GetVolumePathNameW) | `utility::fs::same_filesystem` | `utility/fs/same_filesystem.rs` |

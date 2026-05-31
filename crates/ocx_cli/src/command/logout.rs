@@ -16,7 +16,7 @@ use crate::api::data::login::LogoutResult;
 #[derive(Parser, Clone, Debug)]
 pub struct Logout {
     /// Registry hostname (e.g. `ghcr.io`).
-    /// Optional — falls back to `OCX_DEFAULT_REGISTRY`.
+    /// Optional - falls back to `OCX_DEFAULT_REGISTRY`.
     registry: Option<String>,
 }
 
