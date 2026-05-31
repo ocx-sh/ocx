@@ -1373,6 +1373,202 @@ def test_install_sh_generated_env_ps1_guards_invoke_expression(tmp_path: Path) -
     _assert_env_ps1_guards((ocx_home / "env.ps1").read_text())
 
 
+# ---------------------------------------------------------------------------
+# P4 — env.ps1 cross-platform HOME fallback and platform-correct binary name
+#
+# create_env_ps1 now generates an env.ps1 whose OCX_HOME base resolution
+# works on Linux/macOS pwsh (where $env:USERPROFILE is null) and whose binary
+# name is platform-correct (ocx on Linux/macOS, ocx.exe on Windows).
+#
+# Required substrings (all must appear):
+#   1. `$_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }`
+#      — HOME fallback because $env:USERPROFILE is null on Linux pwsh
+#   2. `$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }`
+#      — platform-correct binary name
+#   3. The bin path uses `$_ocxExe` (forward-slash form)
+#      — `symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe`
+#
+# Prohibited patterns:
+#   - Hardcoded `bin/ocx.exe` literal (would break Linux/macOS pwsh)
+#   - `Join-Path $env:USERPROFILE '.ocx'` unguarded (null on Linux pwsh)
+# ---------------------------------------------------------------------------
+
+
+def test_env_ps1_cross_platform_home_fallback_and_binary_name(tmp_path: Path) -> None:
+    """``create_env_ps1`` generates an env.ps1 with Linux/macOS pwsh support.
+
+    The generated file must:
+    - Use ``$_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }``
+      so that OCX_HOME resolves correctly when ``$env:USERPROFILE`` is null (Linux pwsh).
+    - Use ``$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }``
+      so the binary lookup resolves to the correct name per platform.
+    - Reference ``$_ocxExe`` in the bin path (forward-slash join form).
+    - NOT contain a hardcoded ``bin/ocx.exe`` literal.
+    - NOT do ``Join-Path $env:USERPROFILE '.ocx'`` without the guard.
+
+    These requirements ensure the same env.ps1 activates OCX correctly in
+    PowerShell 7 on Linux and macOS, not just Windows PowerShell.
+    """
+    ocx_home = tmp_path / "ocx"
+    ocx_home.mkdir()
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "OCX_HOME": str(ocx_home),
+        "PATH": "/usr/bin:/bin",
+    }
+    result = _source_install_sh("create_env_ps1", env)
+    assert result.returncode == 0, (
+        f"create_env_ps1 must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    env_ps1 = ocx_home / "env.ps1"
+    assert env_ps1.exists(), f"env.ps1 must be created at {env_ps1}"
+
+    content = env_ps1.read_text()
+
+    # 1. HOME fallback: must guard USERPROFILE with $HOME as fallback.
+    assert "$_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }" in content, (
+        "env.ps1 must use the guarded USERPROFILE-with-HOME-fallback form "
+        "(`$_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }`) "
+        "so Linux/macOS pwsh (where $env:USERPROFILE is null) resolves OCX_HOME correctly; "
+        f"got:\n{content}"
+    )
+
+    # 2. Platform-correct binary name: must select 'ocx' on non-Windows.
+    assert "$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }" in content, (
+        "env.ps1 must derive the binary name per platform "
+        "(`$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }`) "
+        "so that Linux/macOS pwsh resolves to 'ocx' (no .exe extension); "
+        f"got:\n{content}"
+    )
+
+    # 3. Bin path must reference $_ocxExe — forward-slash form so PowerShell
+    #    accepts it on every platform.
+    assert "symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe" in content, (
+        "env.ps1 must build the bin path with forward slashes and `$_ocxExe` "
+        "(e.g. `Join-Path $env:OCX_HOME \"symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe\"`); "
+        f"got:\n{content}"
+    )
+
+    # 4. Must NOT contain a hardcoded 'bin/ocx.exe' literal (would break Linux/macOS).
+    assert "bin/ocx.exe" not in content, (
+        "env.ps1 must NOT contain a hardcoded 'bin/ocx.exe' literal — "
+        "the binary name must be derived via `$_ocxExe`; "
+        f"got:\n{content}"
+    )
+
+    # 5. Must NOT do Join-Path $env:USERPROFILE '.ocx' without the guard
+    #    (null dereference on Linux/macOS pwsh).
+    assert "Join-Path $env:USERPROFILE '.ocx'" not in content, (
+        "env.ps1 must NOT call `Join-Path $env:USERPROFILE '.ocx'` without the "
+        "USERPROFILE guard — $env:USERPROFILE is null on Linux/macOS pwsh; "
+        f"got:\n{content}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P5 — __OCX_TESTING_INSTALL_BINARY test-install mode
+#
+# Setting __OCX_TESTING_INSTALL_BINARY=/path/to/ocx skips the normal
+# download + registry bootstrap path in install.sh and places the given
+# binary directly as the candidate under OCX_HOME.  finalize_install() is
+# still called, so env.sh, env.ps1, and the other activation files are
+# written and the profile is (optionally) modified.
+#
+# This test exercises the full hatch path:
+#   - install.sh exits 0
+#   - candidate binary placed at the expected path and is executable
+#   - env.sh and env.ps1 are written to OCX_HOME
+#   - no network required (OCX_TESTS_NO_REGISTRY=1; installer never calls
+#     detect_downloader / get_latest_version / bootstrap_ocx)
+# ---------------------------------------------------------------------------
+
+
+def test_testing_install_binary_places_candidate_and_writes_env_files(
+    tmp_path: Path,
+) -> None:
+    """``__OCX_TESTING_INSTALL_BINARY`` install mode places binary as candidate.
+
+    Running install.sh with ``__OCX_TESTING_INSTALL_BINARY=/path/to/ocx`` and
+    ``OCX_HOME=<tmp>`` must:
+
+    - Exit with code 0.
+    - Place the binary at
+      ``<OCX_HOME>/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx``
+      and make it executable.
+    - Write ``<OCX_HOME>/env.sh`` and ``<OCX_HOME>/env.ps1``.
+    - Require no network access (the hatch skips download + registry
+      bootstrap entirely).
+
+    The stable prebuilt binary at ``/tmp/ocx-test-bin`` is used as the
+    candidate to avoid network dependency and to ensure the test remains
+    hermetic.
+    """
+    test_binary = Path("/tmp/ocx-test-bin")
+    if not test_binary.exists():
+        pytest.skip("/tmp/ocx-test-bin not available on this runner")
+
+    ocx_home = tmp_path / "ocx_install"
+
+    env = {
+        # Hatch env var — double-underscore prefix = test-only.
+        "__OCX_TESTING_INSTALL_BINARY": str(test_binary),
+        "OCX_HOME": str(ocx_home),
+        "HOME": str(tmp_path / "home"),
+        "PATH": "/usr/bin:/bin",
+        # Signal to test infrastructure that no registry is available.
+        "OCX_TESTS_NO_REGISTRY": "1",
+    }
+
+    result = subprocess.run(
+        ["sh", str(INSTALL_SH), "--no-modify-path"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, (
+        f"install.sh must exit 0 in __OCX_TESTING_INSTALL_BINARY mode; "
+        f"rc={result.returncode}\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+
+    # Candidate binary must exist and be executable at the standard path.
+    candidate = (
+        ocx_home
+        / "symlinks"
+        / "ocx.sh"
+        / "ocx"
+        / "cli"
+        / "current"
+        / "content"
+        / "bin"
+        / "ocx"
+    )
+    assert candidate.exists(), (
+        f"candidate binary must exist at {candidate}; "
+        f"installer stdout:\n{result.stdout}"
+    )
+    assert os.access(candidate, os.X_OK), (
+        f"candidate binary must be executable at {candidate}"
+    )
+
+    # env.sh must be written to OCX_HOME.
+    env_sh = ocx_home / "env.sh"
+    assert env_sh.exists(), (
+        f"env.sh must be written to OCX_HOME ({ocx_home}) by finalize_install; "
+        f"installer stdout:\n{result.stdout}"
+    )
+
+    # env.ps1 must be written to OCX_HOME.
+    env_ps1 = ocx_home / "env.ps1"
+    assert env_ps1.exists(), (
+        f"env.ps1 must be written to OCX_HOME ({ocx_home}) by finalize_install; "
+        f"installer stdout:\n{result.stdout}"
+    )
+
+
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh not available on this runner")
 def test_real_env_ps1_no_null_bind_error_on_empty_activate(tmp_path: Path) -> None:
     """Running the REAL env.ps1 under pwsh against an ocx.exe that emits nothing

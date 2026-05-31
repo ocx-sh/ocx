@@ -259,9 +259,18 @@ function Create-EnvFile {
 if ($env:_OCX_ENV_LOADED) { return }
 $env:_OCX_ENV_LOADED = '1'
 
-if (-not $env:OCX_HOME) { $env:OCX_HOME = Join-Path $env:USERPROFILE '.ocx' }
+if (-not $env:OCX_HOME) {
+    # $env:USERPROFILE is null on Linux/macOS pwsh; fall back to $HOME so this
+    # shim works for PowerShell 7 on every platform, not just Windows.
+    $_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $env:OCX_HOME = Join-Path $_ocxBase '.ocx'
+}
 
-$_ocxBin = Join-Path $env:OCX_HOME 'symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe'
+# Binary name is platform-specific. $IsWindows is $null on Windows PowerShell 5.1
+# (so the comparison is false -> 'ocx.exe') and $false on pwsh-Linux/macOS
+# (-> 'ocx'). Forward slashes are accepted by PowerShell on every platform.
+$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }
+$_ocxBin = Join-Path $env:OCX_HOME "symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe"
 if (Test-Path $_ocxBin -PathType Leaf) {
     # Build args as an array so the completion flag is appended cleanly — never
     # a $null/empty positional that clap would reject (Windows PowerShell 5.1
@@ -281,7 +290,7 @@ if (Test-Path $_ocxBin -PathType Leaf) {
     # `Invoke-Expression $null` throws "Cannot bind argument ... is null".
     if ($_ocxActivate) { Invoke-Expression $_ocxActivate }
 }
-Remove-Variable _ocxBin, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
+Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
 '@
 
     Set-Content -Path $envFile -Value $envContent -NoNewline
@@ -436,6 +445,62 @@ function Print-Success {
 "@
 }
 
+# --- Test-mode install (CI / local dev) ---
+
+# Install a pre-built ocx.exe as the candidate, bypassing download + registry
+# bootstrap. Driven by $env:__OCX_TESTING_INSTALL_BINARY (double-underscore =
+# test-only, never a supported public knob).
+function Install-LocalTestBinary {
+    param([string]$Source, [string]$OcxHome)
+    if (-not (Test-Path $Source -PathType Leaf)) {
+        Err "__OCX_TESTING_INSTALL_BINARY does not point to a file: $Source"
+    }
+    $candDir = Join-Path $OcxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
+    Say 'Test mode: installing local binary as the candidate (no download, no bootstrap).'
+    New-Item -ItemType Directory -Path $candDir -Force | Out-Null
+    Copy-Item -Path $Source -Destination (Join-Path $candDir 'ocx.exe') -Force
+    Say "Installed to $candDir\ocx.exe"
+}
+
+# Shared post-acquisition tail: write env.ps1, optionally modify the profile,
+# export the CI path, and print the banner. Called by both the normal download
+# path and the __OCX_TESTING_INSTALL_BINARY test path so activation wiring is
+# identical regardless of how the candidate was placed.
+function Finalize-Install {
+    param([string]$OcxHome, [string]$InstalledVersion, [string]$OldVersion, [bool]$SkipProfile)
+
+    if (-not (Test-Path $OcxHome)) {
+        New-Item -ItemType Directory -Path $OcxHome -Force | Out-Null
+    }
+    Create-EnvFile -OcxHome $OcxHome
+
+    if ($SkipProfile) {
+        Say 'Skipping profile modification (OCX_NO_MODIFY_PATH).'
+    }
+    else {
+        try {
+            Modify-Profile -OcxHome $OcxHome
+        }
+        catch {
+            Warn "Failed to modify PowerShell profile: $($_.Exception.Message)"
+            Warn 'You can manually add OCX to your profile by running:'
+            Warn "  Add-Content `$PROFILE '`. `"$OcxHome\env.ps1`"'"
+        }
+    }
+
+    if ($env:GITHUB_PATH) {
+        $ghBinPath = Join-Path $OcxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
+        try {
+            Add-Content -Path $env:GITHUB_PATH -Value $ghBinPath
+        }
+        catch {
+            Warn 'Failed to write to $GITHUB_PATH.'
+        }
+    }
+
+    Print-Success -InstalledVersion $InstalledVersion -OldVersion $OldVersion
+}
+
 # --- Main ---
 
 function Main {
@@ -461,8 +526,25 @@ function Main {
         $skipProfile = $true
     }
 
-    $ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { Join-Path $env:USERPROFILE '.ocx' }
+    # $env:USERPROFILE is null on Linux/macOS pwsh; fall back to $HOME so the
+    # default OCX_HOME resolves to an absolute path on every platform (matches
+    # the env.ps1 shim) instead of a relative '.ocx' that Assert-SafeOcxHome rejects.
+    $_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { Join-Path $_ocxBase '.ocx' }
     Assert-SafeOcxHome -Path $ocxHome
+
+    # Test-mode hatch: install a locally-built ocx.exe as the candidate and skip
+    # the download + registry bootstrap (and the network version probe) entirely.
+    # $env:__OCX_TESTING_INSTALL_BINARY is test-only (double-underscore prefix).
+    if ($env:__OCX_TESTING_INSTALL_BINARY) {
+        Install-LocalTestBinary -Source $env:__OCX_TESTING_INSTALL_BINARY -OcxHome $ocxHome
+        $candBin = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe'
+        $testVersion = ''
+        try { $testVersion = (& $candBin version 2>$null | Out-String).Trim() } catch {}
+        if (-not $testVersion) { $testVersion = 'local' }
+        Finalize-Install -OcxHome $ocxHome -InstalledVersion $testVersion -OldVersion '' -SkipProfile $skipProfile
+        return
+    }
 
     # Detect architecture
     $target = Detect-Architecture
@@ -574,39 +656,9 @@ function Main {
         $installDir = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
         Say "Installed to $installDir\ocx.exe"
 
-        # Create environment file
-        if (-not (Test-Path $ocxHome)) {
-            New-Item -ItemType Directory -Path $ocxHome -Force | Out-Null
-        }
-        Create-EnvFile -OcxHome $ocxHome
-
-        # Modify PowerShell profile
-        if ($skipProfile) {
-            Say 'Skipping profile modification (OCX_NO_MODIFY_PATH).'
-        }
-        else {
-            try {
-                Modify-Profile -OcxHome $ocxHome
-            }
-            catch {
-                Warn "Failed to modify PowerShell profile: $($_.Exception.Message)"
-                Warn 'You can manually add OCX to your profile by running:'
-                Warn "  Add-Content `$PROFILE '`. `"$ocxHome\env.ps1`"'"
-            }
-        }
-
-        # Export GitHub Actions path if in CI
-        if ($env:GITHUB_PATH) {
-            $ghBinPath = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
-            try {
-                Add-Content -Path $env:GITHUB_PATH -Value $ghBinPath
-            }
-            catch {
-                Warn 'Failed to write to $GITHUB_PATH.'
-            }
-        }
-
-        Print-Success -InstalledVersion $requestedVersion -OldVersion $oldVersion
+        # Write env.ps1, modify the profile, export the CI path, and print the
+        # banner (shared with the __OCX_TESTING_INSTALL_BINARY test path).
+        Finalize-Install -OcxHome $ocxHome -InstalledVersion $requestedVersion -OldVersion $oldVersion -SkipProfile $skipProfile
     }
     finally {
         # Cleanup temp directory

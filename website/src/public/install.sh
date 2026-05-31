@@ -483,9 +483,18 @@ create_env_ps1() {
 if ($env:_OCX_ENV_LOADED) { return }
 $env:_OCX_ENV_LOADED = '1'
 
-if (-not $env:OCX_HOME) { $env:OCX_HOME = Join-Path $env:USERPROFILE '.ocx' }
+if (-not $env:OCX_HOME) {
+    # $env:USERPROFILE is null on Linux/macOS pwsh; fall back to $HOME so this
+    # shim works for PowerShell 7 on every platform, not just Windows.
+    $_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $env:OCX_HOME = Join-Path $_ocxBase '.ocx'
+}
 
-$_ocxBin = Join-Path $env:OCX_HOME 'symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe'
+# Binary name is platform-specific. $IsWindows is $null on Windows PowerShell 5.1
+# (so the comparison is false -> 'ocx.exe') and $false on pwsh-Linux/macOS
+# (-> 'ocx'). Forward slashes are accepted by PowerShell on every platform.
+$_ocxExe = if ($IsWindows -eq $false) { 'ocx' } else { 'ocx.exe' }
+$_ocxBin = Join-Path $env:OCX_HOME "symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe"
 if (Test-Path $_ocxBin -PathType Leaf) {
     # Build args as an array so the completion flag is appended cleanly — never
     # a $null/empty positional that clap would reject (Windows PowerShell 5.1
@@ -505,7 +514,7 @@ if (Test-Path $_ocxBin -PathType Leaf) {
     # `Invoke-Expression $null` throws "Cannot bind argument ... is null".
     if ($_ocxActivate) { Invoke-Expression $_ocxActivate }
 }
-Remove-Variable _ocxBin, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
+Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
 EOF
 }
 
@@ -924,6 +933,58 @@ cleanup() {
     fi
 }
 
+# --- Test-mode install (CI / local dev) ---
+
+# Install a pre-built ocx binary as the candidate, bypassing download + registry
+# bootstrap. Driven by __OCX_TESTING_INSTALL_BINARY (double-underscore prefix =
+# test-only, never a supported public knob). Lets the cross-shell test harness
+# exercise real activation/completions from a freshly built binary.
+install_local_test_binary() {
+    local _src="$1" _ocx_home="$2" _cand_dir
+    [ -f "$_src" ] || err "__OCX_TESTING_INSTALL_BINARY does not point to a file: $_src"
+    _cand_dir="${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/content/bin"
+    say "Test mode: installing local binary as the candidate (no download, no bootstrap)."
+    mkdir -p "$_cand_dir"
+    cp "$_src" "${_cand_dir}/ocx"
+    chmod +x "${_cand_dir}/ocx"
+    say "Installed to $(tildify "${_cand_dir}/ocx")"
+}
+
+# Shared post-acquisition tail: write the per-family env files, optionally modify
+# the login profile, export the CI path, and print the success banner. Called by
+# both the normal download path and the __OCX_TESTING_INSTALL_BINARY test path so
+# activation wiring is identical regardless of how the candidate was placed.
+# remove_legacy_env_file strips the old extensionless $OCX_HOME/env file written
+# by older installers so upgraders don't source a stale file.
+finalize_install() {
+    local _version="$1" _old_version="$2" _no_modify_path="$3"
+
+    remove_legacy_env_file
+    create_env_sh
+    create_env_fish
+    create_env_ps1
+    create_env_nu
+    create_env_elv
+
+    # Create Fish conf.d / Nushell autoload if those shells are installed
+    # (regardless of the default shell).
+    if check_cmd fish; then
+        create_fish_config
+    fi
+    if check_cmd nu; then
+        create_nu_autoload
+    fi
+
+    if [ "$_no_modify_path" = "1" ]; then
+        say "Skipping shell profile modification (--no-modify-path)."
+    else
+        modify_shell_profile
+    fi
+
+    export_github_path
+    print_success "$_version" "$_old_version"
+}
+
 # --- Main ---
 
 main() {
@@ -992,6 +1053,19 @@ main() {
         *'"'* | *'$'* | *'`'* | *';'* | *'&'* | *'|'* | *'\'* | *'
 '*) err "OCX_HOME contains characters unsafe for shell embedding: $_ocx_home" ;;
     esac
+
+    # Test-mode hatch: install a locally-built binary as the candidate and skip
+    # the download + registry bootstrap (and the network version probe) entirely.
+    # See install_local_test_binary; __OCX_TESTING_INSTALL_BINARY is test-only.
+    if [ -n "${__OCX_TESTING_INSTALL_BINARY:-}" ]; then
+        install_local_test_binary "$__OCX_TESTING_INSTALL_BINARY" "$_ocx_home"
+        # `tr` swallows the exit status of a binary that ran but printed nothing,
+        # so guard the empty case explicitly (no `pipefail` under POSIX sh).
+        _version=$("${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx" version 2>/dev/null | tr -d '\n' || true)
+        [ -n "$_version" ] || _version="local"
+        finalize_install "$_version" "" "$_no_modify_path"
+        return 0
+    fi
 
     _target=$(detect_target)
     say "Detected platform: $_target"
@@ -1141,37 +1215,9 @@ main() {
     bootstrap_ocx "$_bin" "$_version"
     say "Installed to $(tildify "${_ocx_home}/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx")"
 
-    # Create shell environment files (POSIX + per-family variants).
-    # remove_legacy_env_file strips the old extensionless $OCX_HOME/env file
-    # written by older installers so upgraders don't source a stale file.
-    remove_legacy_env_file
-    create_env_sh
-    create_env_fish
-    create_env_ps1
-    create_env_nu
-    create_env_elv
-
-    # Create Fish conf.d config if Fish is installed (regardless of default shell).
-    if check_cmd fish; then
-        create_fish_config
-    fi
-
-    # Create Nushell vendor/autoload if Nushell is installed (regardless of default shell).
-    if check_cmd nu; then
-        create_nu_autoload
-    fi
-
-    # Modify shell profile
-    if [ "$_no_modify_path" = "1" ]; then
-        say "Skipping shell profile modification (--no-modify-path)."
-    else
-        modify_shell_profile
-    fi
-
-    # Export GitHub Actions path if in CI
-    export_github_path
-
-    print_success "$_version" "$_old_version"
+    # Write env files, modify the login profile, export the CI path, and print
+    # the banner (shared with the __OCX_TESTING_INSTALL_BINARY test path).
+    finalize_install "$_version" "$_old_version" "$_no_modify_path"
 }
 
 # Export the OCX bin directory to GITHUB_PATH for GitHub Actions.
