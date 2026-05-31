@@ -52,16 +52,25 @@ impl About {
         // env var, layered config, then compiled fallback (already merged in
         // Context::default_registry).
         let registry = context.default_registry().to_string();
+        // Render each platform's bare os/arch base (no `+os_features` suffix):
+        // the host row derives from `Platform::current()`, whose `Display` now
+        // carries the detected libc, which the dedicated `Libc` row already
+        // shows. `segments()` is the no-features rendering.
         let platforms: Vec<String> = crate::conventions::supported_platforms()
             .iter()
-            .map(oci::Platform::to_string)
+            .map(|platform| platform.segments().join("/"))
             .collect();
         let current_shell = shell::Shell::from_process().map(|s| format!("{s}"));
         let home = file_structure::default_ocx_root()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/.ocx".to_string());
+        // Reuse the libc families the resolution path detected —
+        // `Context::try_init` already ran `HostCapabilities::detect_and_cache()`,
+        // so this reads the populated cache rather than spawning a second probe.
+        // A host may advertise multiple families (e.g. glibc + musl).
+        let libc: Vec<String> = oci::cached_libc_labels();
 
-        let info = crate::api::data::about::About::new(version, registry, platforms, current_shell, home);
+        let info = crate::api::data::about::About::new(version, registry, platforms, libc, current_shell, home);
 
         let data = context.api().data();
         if context.api().is_json() {
@@ -89,6 +98,7 @@ impl About {
         let dim_style = if color { Style::new().dim() } else { Style::new() };
 
         let platforms = info.platforms.join(", ");
+        let libc = info.libc.join(", ");
         let shell_str = info.shell.as_deref().unwrap_or("n/a");
         let commit_summary = info.commit_summary();
 
@@ -106,6 +116,9 @@ impl About {
         }
         info_entries.push(("Registry", &info.registry));
         info_entries.push(("Platform", &platforms));
+        if !info.libc.is_empty() {
+            info_entries.push(("Libc", &libc));
+        }
         info_entries.push(("Shell", shell_str));
         info_entries.push(("Home", &info.home));
 

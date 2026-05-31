@@ -10,6 +10,16 @@
 use super::{Manifest, Platform};
 
 /// Returns `true` if the manifest contains an entry for the given platform.
+///
+/// # Strict equality semantics
+///
+/// This function uses **intentional strict struct-equality** on the serialized
+/// `native::Platform` representation — it is testing exact manifest membership,
+/// not host compatibility. This is **distinct** from `Platform::can_run`,
+/// which uses subset semantics on `os_features` (`other ⊆ self`) for
+/// install-resolution. Never replace this comparison with `can_run` — the
+/// two functions serve different purposes. See `Platform::can_run` for the
+/// subset-matching logic used during index resolution.
 pub fn has_platform(manifest: &Manifest, platform: &Platform) -> bool {
     let Manifest::ImageIndex(index) = manifest else {
         return false;

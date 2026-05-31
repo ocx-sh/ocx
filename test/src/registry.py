@@ -73,3 +73,31 @@ def index_platforms(manifest: dict[str, Any]) -> set[str]:
         if plat:
             platforms.add(f"{plat['os']}/{plat['architecture']}")
     return platforms
+
+
+def index_platforms_with_features(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract the list of platform dicts (including os.features) from an OCI image index.
+
+    Returns a list of dicts each containing at minimum the keys ``os``,
+    ``architecture``, and ``os.features`` (the last may be absent or ``None``
+    if the entry carries no feature tags).  This helper is used by libc-variant
+    cascade tests to assert that both glibc and musl entries are preserved even
+    though they share the same (os, arch) tuple.
+
+    Example return value::
+
+        [
+            {"os": "linux", "architecture": "amd64", "os.features": ["libc.glibc"]},
+            {"os": "linux", "architecture": "amd64", "os.features": ["libc.musl"]},
+        ]
+    """
+    result: list[dict[str, Any]] = []
+    for entry in manifest.get("manifests", []):
+        plat = entry.get("platform")
+        if plat:
+            result.append({
+                "os": plat.get("os"),
+                "architecture": plat.get("architecture"),
+                "os.features": plat.get("os.features"),
+            })
+    return result

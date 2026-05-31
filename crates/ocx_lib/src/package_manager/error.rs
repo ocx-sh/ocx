@@ -175,6 +175,35 @@ pub enum PackageErrorKind {
     #[error("patch discovery error: {0}")]
     PatchDiscovery(#[source] crate::patch::PatchError),
 
+    /// No index entry satisfies the host's detected `os.features` requirements.
+    ///
+    /// Raised by `Index::select` when the host declares a non-empty
+    /// `os.features` set (e.g. `libc.glibc`) but every candidate platform in
+    /// the index sharing the host's os+arch declares an `os_features` set that
+    /// is not a subset of the host's features. This is a general
+    /// `os.features` mismatch — libc is the first such feature, but the
+    /// matcher is not libc-specific.
+    ///
+    /// The user can override by passing `--platform` with an explicit
+    /// `os/arch[+feature...]` matching one of the available entries — the
+    /// available platforms are rendered with their `+feature` suffixes so the
+    /// value is copy-pasteable.
+    ///
+    /// Error string follows API Guidelines: lowercase, no period.
+    #[error(
+        "feature mismatch: host provides {}; available platforms: {}; pass --platform <os/arch[+features]> to override",
+        host_features.join(", "),
+        available.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    FeatureMismatch {
+        /// The `os.features` values the host reported (e.g. `["libc.glibc"]`).
+        host_features: Vec<String>,
+        /// The candidate [`oci::Platform`] values sharing the host os+arch, so
+        /// the user can see which `--platform <os/arch[+features]>` value to
+        /// pass.
+        available: Vec<oci::Platform>,
+    },
+
     /// An underlying internal error (I/O, OCI, network, etc.).
     #[error(transparent)]
     Internal(#[from] crate::Error),
@@ -252,7 +281,8 @@ impl ClassifyExitCode for PackageErrorKind {
             Self::SelectionAmbiguous(_)
             | Self::SymlinkRequiresTag
             | Self::DigestMissing
-            | Self::EntrypointCollision { .. } => ExitCode::DataError,
+            | Self::EntrypointCollision { .. }
+            | Self::FeatureMismatch { .. } => ExitCode::DataError,
             Self::TaskPanicked => ExitCode::Failure,
             // Required companion failure: delegate to the inner error's
             // classification so the exit code reflects the root cause (e.g.

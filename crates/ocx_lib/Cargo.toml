@@ -88,6 +88,8 @@ starlark_derive.workspace = true
 # Host-allocated typed values (`OsValue`, `ArchValue`, `PlatformValue`,
 # `RunResultValue`) implement `allocative::Allocative` directly.
 allocative.workspace = true
+# ELF PT_INTERP parsing — libc-family host detection (os.features).
+elf.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

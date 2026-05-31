@@ -274,7 +274,7 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 0 | Success | — | Successful completion | — |
 | 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
 | 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax | Check the command syntax |
-| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest | Validate identifiers and file contents |
+| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]) | Validate identifiers and file contents; for a feature mismatch or ambiguous selection, override with `--platform` |
 | 69 | Unavailable | EX_UNAVAILABLE | Required resource unavailable: network down, registry unreachable | Retry; check network and registry URL |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
 | 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network | Retry with backoff |
@@ -369,7 +369,7 @@ ocx add [OPTIONS] <IDENTIFIER>...
 | `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
 | `--pull` | — | After writing the lock, materialise the newly added tool into the object store and create its candidate symlink. Default when `--no-pull` is absent. |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. |
-| `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Repeatable and comma-separated (e.g. `-p linux/amd64,linux/arm64`). The lock already pins every shipped platform's leaf, so this only selects which to fetch — the lock stays host-agnostic (an amd64 host can pre-warm an arm64 leaf). Defaults to the current host. A platform the publisher does not ship exits 78. |
+| `--platform <PLATFORM>` | `-p` | Materialise the leaf for each named platform instead of the host. Values use `os/arch[/variant][+feature[+feature...]]` — the optional `+feature` suffix (e.g. `linux/amd64+libc.glibc`) filters by [`os.features`][authoring-libc]. Repeatable and comma-separated (e.g. `-p linux/amd64,linux/arm64`). The lock already pins every shipped platform's leaf, so this only selects which to fetch — the lock stays host-agnostic (an amd64 host can pre-warm an arm64 leaf). Defaults to the current host. A platform the publisher does not ship exits 78. |
 | `--help` | `-h` | Print help information. |
 
 ::: tip Target the global toolchain
@@ -887,7 +887,9 @@ keep their updated tags.
 
 ### `about` {#about}
 
-Prints environment information: the ocx version, default registry, supported platforms, detected shell, and home directory. When build provenance was baked in at compile time, two optional rows appear: `Commit` (short SHA and clean/dirty status) and `Channel` (e.g. `dev`). These rows are absent on local builds and on stable releases without a channel override.
+Prints environment information: the ocx version, default registry, supported platforms, detected libc family (on Linux), detected shell, and home directory. When build provenance was baked in at compile time, two optional rows appear: `Commit` (short SHA and clean/dirty status) and `Channel` (e.g. `dev`). These rows are absent on local builds and on stable releases without a channel override.
+
+The `Libc` row appears only when libc was detected — it is absent on non-Linux hosts and on hosts with no readable dynamic loader (a truly minimal or static-only container). Non-FHS layouts such as [Gentoo Prefix][gentoo-prefix] and Homebrew-on-Linux *are* detected: OCX reads the loader path from a present system binary rather than guessing fixed paths. [NixOS][nixos] is detected when [nix-ld][nix-ld] is active (nix-ld installs an FHS shim the probe finds); without nix-ld the probe binaries are statically linked and detection yields an empty set, so the `Libc` row is absent. The `Platform` row lists the `os.features`-tagged supported set derived from that detection.
 
 In a terminal, `ocx about` renders an isometric logo alongside the info table. In non-interactive contexts (piped output without `--color always`), the plain key-value fallback is used instead.
 
@@ -907,20 +909,22 @@ Version    0.3.2-dev+20260528143045
 Commit     a1b2c3d4 (clean)
 Channel    dev
 Registry   ocx.sh
-Platform   linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
+Platform   linux/amd64, any
+Libc       libc.glibc
 Shell      bash
 Home       /home/user/.ocx
 ```
 
 **JSON output**
 
-`ocx --format json about` emits a flat object. The `commit`, `build`, and `ci` blocks are merged from the [build provenance][version-json-schema] payload and follow the same schema and suppression rules as `ocx --format json version`:
+`ocx --format json about` emits a flat object. The `commit`, `build`, and `ci` blocks are merged from the [build provenance][version-json-schema] payload and follow the same schema and suppression rules as `ocx --format json version`. The `libc` field is an array of detected libc os.feature tags (e.g. `["libc.glibc"]`, `["libc.glibc","libc.musl"]`); empty array `[]` when no libc was detected:
 
 ```json
 {
   "version": "0.3.2",
   "registry": "ocx.sh",
-  "platforms": ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64", "windows/amd64"],
+  "platforms": ["linux/amd64", "any"],
+  "libc": ["libc.glibc"],
   "shell": "bash",
   "home": "/home/user/.ocx",
   "commit": { "sha": "...", "short": "a1b2c3d4", "describe": "...", "dirty": false },
@@ -929,7 +933,7 @@ Home       /home/user/.ocx
 }
 ```
 
-`channel` is present only when baked in (dev-deploy builds). `commit`, `build`, and `ci` blocks are absent on local builds without git or CI context.
+`channel` is present only when baked in (dev-deploy builds). `commit`, `build`, and `ci` blocks are absent on local builds without git or CI context. Use `ocx about` as the first diagnostic when troubleshooting [feature mismatch][faq-gcompat] errors — the `Libc` row shows exactly what the platform detector found.
 
 ### `init` {#init}
 
@@ -1885,7 +1889,7 @@ ocx --format json version
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--verbose` | `-v` | Emit multi-line build provenance: commit SHA, dirty flag, build timestamp, profile, target triple, rustc version, and CI run URL. Absent fields are suppressed — a local build without git shows no commit row; a build outside CI shows no CI row. | off |
+| `--verbose` | `-v` | Emit multi-line build provenance: host platform (OS/arch + detected libc), commit SHA, dirty flag, build timestamp, profile, target triple, rustc version, and CI run URL. Absent fields are suppressed — a local build without git shows no commit row; a build outside CI shows no CI row; the `host:` row is suppressed when OCX's supported platform set does not include the host OS/arch. | off |
 | `-h`, `--help` | | Print help information. | — |
 
 **Plain output — default (no flag)**
@@ -1900,6 +1904,7 @@ The bare semver string is the stable contract for script consumers. No trailing 
 
 ```
 ocx 0.3.2-dev+20260528143045 (cargo: 0.3.1, channel: dev)
+host:     linux/amd64 (libc.glibc)
 commit:   a1b2c3d4 (clean) — 2026-05-28T12:00:00Z
 built:    2026-05-28T14:30:45Z (release)
 target:   x86_64-unknown-linux-gnu
@@ -1907,7 +1912,9 @@ rustc:    1.79.0
 ci:       https://github.com/ocx-sh/ocx/actions/runs/1234567890
 ```
 
-Rows for `commit`, `built`/`target`/`rustc`, and `ci` appear only when the corresponding data was baked in at build time. Local `cargo build` without git shows no `commit` row; builds outside GitHub Actions show no `ci` row.
+The `host:` row shows the detected OS/arch and, when detected, the libc family in parentheses (e.g. `(libc.glibc)` or `(libc.musl)`). It is suppressed when the host OS/arch is not in OCX's supported set. Rows for `commit`, `built`/`target`/`rustc`, and `ci` appear only when the corresponding data was baked in at build time. Local `cargo build` without git shows no `commit` row; builds outside GitHub Actions show no `ci` row.
+
+The `host:` row is plain-output only — it does not add a field to the `version` JSON wire shape, so the self-update parser contract is unaffected. To inspect libc detection programmatically, use [`ocx --format json about`](#about) which includes a `libc` field.
 
 **JSON output**
 
@@ -2309,7 +2316,7 @@ registry/repo:tag@sha256:…
 
 - `79` (`NotFound`) — the tag or digest does not resolve.
 - `81` (`PolicyBlocked`) — a local policy (`--offline` or `--frozen`) refused the resolution: the manifest or config blob is absent from the local cache, or an unpinned tag was not in the local index.
-- `65` (`DataError`) — the resolved metadata is malformed or fails validation.
+- `65` (`DataError`) — the resolved metadata is malformed or fails validation; with `--resolve -p <platform>`, also a platform feature mismatch or an ambiguous dual-libc selection (see [exit codes](#exit-codes)).
 
 #### `describe` {#package-describe}
 
@@ -2380,7 +2387,7 @@ ocx package install [OPTIONS] <PACKAGE>...
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `-p`, `--platform` | | Target platforms to consider. Defaults to the current platform. |
+| `-p`, `--platform` | | Target platform in `os/arch[/variant][+feature[+feature...]]` format (e.g. `linux/amd64`, `linux/amd64+libc.glibc`, `linux/amd64+libc.musl`, `darwin/arm64`). Defaults to the auto-detected current platform. When a feature-tagged value is supplied, OCX selects the manifest whose `os.features` are a subset of the supplied features — use this to force a specific libc variant when you know it will run on the host. If the package ships for the host os/arch but no candidate's `os.features` are a subset of the resolved features (e.g. a glibc-only host against a musl-only entry), install exits [`65`](#exit-codes) (`DataError`) and the error lists the available platforms to override with. |
 | `-s`, `--select` | | After installing, update the [current symlink][fs-symlinks] for each package to point to the newly installed version. |
 | `-h`, `--help` | | Print help information. |
 
@@ -2792,6 +2799,9 @@ ocx --format json patch why java:21
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
 [gnu-parallel-j0]: https://www.gnu.org/software/parallel/parallel.html
 [starlark-lang]: https://github.com/bazelbuild/starlark
+[nixos]: https://nixos.org/
+[nix-ld]: https://github.com/nix-community/nix-ld
+[gentoo-prefix]: https://wiki.gentoo.org/wiki/Project:Prefix
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views
@@ -2881,3 +2891,7 @@ ocx --format json patch why java:21
 [authoring-testing]: ../authoring/testing.md
 [authoring-testing-scripted]: ../authoring/testing.md#scripted-tests
 [authoring-testing-scripted-exit-codes]: ../authoring/testing.md#scripted-tests-exit-codes
+[authoring-libc]: ../authoring/multi-platform.md#libc
+
+<!-- faq -->
+[faq-gcompat]: ../faq.md#linux-gcompat

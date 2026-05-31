@@ -69,6 +69,9 @@ pub use identifier::OCX_SH_REGISTRY;
 pub use identifier::error::{IdentifierError, IdentifierErrorKind};
 pub use identifier::ocx_cli_identifier;
 
+pub mod host_capabilities;
+pub use host_capabilities::{Feature, HostCapabilities, LibcFlavor, cached_libc_labels};
+
 pub mod platform;
 pub use platform::Architecture;
 pub use platform::OperatingSystem;

@@ -106,6 +106,38 @@ When two packages depend on the same tool at *different* digests, both versions 
 
 See [Dependencies][ug-dependencies] in the user guide for the full picture: automatic installation, environment composition, garbage collection, and inspection commands.
 
+## Linux
+
+### Why won't OCX install a glibc binary on Alpine, even with gcompat? {#linux-gcompat}
+
+OCX selects index entries based on identity, not capability. When OCX probes the host's dynamic linker, it reports what the loader *identifies itself as* — not what it can emulate. On [Alpine Linux][alpine] with [gcompat][gcompat] installed, the linker is still the musl loader (`/lib/ld-musl-x86_64.so.1`), and its `--version` output reads `musl libc`. OCX detects `libc.musl` and selects the `libc.musl` manifest entry.
+
+Forcing a glibc binary onto a musl host via gcompat would work most of the time, but it is fragile. gcompat implements a subset of glibc's ABI. Binaries that call glibc functions not covered by gcompat fail at runtime with a symbol-lookup error — a harder-to-diagnose failure than the install failing cleanly.
+
+The predictable rule — "ld.so tells the truth about what it is" — means every install is either correct or fails with a clear feature mismatch error. It never silently installs a binary that might or might not work.
+
+**If you specifically need the glibc binary on a gcompat host**, pass `--platform` with an explicit `+libc.glibc` feature tag — e.g. `ocx package install mytool:1.0.0 --platform linux/amd64+libc.glibc`. This forces selection of the `libc.glibc`-tagged manifest entry — it is a real override, not a bypass. The resulting binary runs only if your gcompat installation covers the glibc symbols that binary calls. Binaries that call glibc functions not in gcompat's subset fail at runtime with a symbol-lookup error. This is an escape hatch for the cases where you know the specific binary works — for example, cross-fetching to bundle elsewhere — not a general workaround. OCX installs the binary; whether `ld.so` loads it is between the binary and your gcompat version.
+
+**The recommended path** is to publish a fully static build alongside the glibc and musl builds. A static binary carries no `os.features` declaration and matches every Linux host — gcompat or not, musl or glibc. See [libc Differentiation — Static binaries][authoring-libc-static] in the multi-platform authoring guide.
+
+### Does OCX detect libc on NixOS, Gentoo Prefix, and other non-FHS hosts? {#linux-non-fhs}
+
+For most non-FHS hosts — yes. OCX does not look for the dynamic loader at a fixed set of [Filesystem Hierarchy Standard][fhs] paths. It reads the loader path straight out of a present system binary: the [`PT_INTERP`][pt-interp] field every dynamically linked ELF carries names the exact loader the kernel will use, wherever it lives. In a [Gentoo Prefix][gentoo-prefix], under Homebrew-on-Linux, or in a custom sysroot, those probe binaries are dynamically linked and point to the prefix loader — detection works.
+
+**[NixOS][nixos] depends on [nix-ld][nix-ld].** With nix-ld active, it installs an FHS shim at the canonical loader path (`/lib/ld-linux-x86-64.so.2`); OCX picks that up and detection works normally. Without nix-ld, the standard probe binaries on NixOS (`/usr/bin/env`, `/bin/sh`, `/bin/ls`) are statically linked and carry no `PT_INTERP`, the directory scan finds nothing at the FHS paths, and the set comes up empty — OCX logs a debug note when `/nix` is present and degrades to matching only entries with no `os.features`.
+
+In any case where detection finds nothing — a truly minimal container, a static-only image, or NixOS without nix-ld — OCX falls back to matching only entries with no `os.features` (the static / universal builds). It never hard-fails; you can always force a variant with `--platform`.
+
+### Does libc detection follow a binary into a container or distrobox? {#linux-namespace-gap}
+
+No — and this is a deliberate, documented limitation. OCX detects the libc of **the host it runs on**, at install time. If you install on one host and then run the binary in a *different* namespace — a [distrobox][distrobox] / toolbox guest, a bind-mounted container, or a copied `~/.ocx` on another machine — that environment may provide a different libc than the one OCX detected.
+
+For the normal flow this never bites: [`ocx package exec`][cmd-package-exec] and [`ocx run`][cmd-run] launch the binary on the same host and kernel that detection ran against. The gap only appears when the run environment is deliberately decoupled from the install environment.
+
+::: warning Install where you run
+When the run environment differs from the install environment (distrobox, a bind-mounted container, a copied store), install *inside* the environment you intend to run in, or pin the variant explicitly with `--platform linux/amd64+libc.glibc`. Exec-time / target-namespace detection is tracked for a future design pass.
+:::
+
 ## macOS
 
 ### Code Signing {#macos-codesign}
@@ -187,6 +219,19 @@ ocx resolves this automatically using the [which][which-crate] crate: before spa
 ::: warning PATHEXT and packaged `.bat`/`.cmd` tools
 This caveat is about a packaged tool that ships as a `.bat`/`.cmd` script — *not* about OCX's own launchers, which are `.exe` and always resolvable. In environments with a minimal set of environment variables (containers, CI runners, custom shells), `PATHEXT` may not be present. Without it, `ocx exec` cannot resolve a packaged `.bat`/`.cmd` tool by bare name. If you see `Could not resolve 'bun' via PATH`, ensure `PATHEXT` is set — the default Windows value is `.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC`.
 :::
+
+<!-- linux -->
+[alpine]: https://alpinelinux.org/
+[gcompat]: https://gitlab.alpinelinux.org/alpine/gcompat
+[nixos]: https://nixos.org/
+[nix-ld]: https://github.com/nix-community/nix-ld
+[gentoo-prefix]: https://wiki.gentoo.org/wiki/Project:Prefix
+[distrobox]: https://distrobox.it/
+[fhs]: https://refspecs.linuxfoundation.org/fhs.shtml
+[pt-interp]: https://refspecs.linuxfoundation.org/elf/elf.pdf
+
+<!-- authoring -->
+[authoring-libc-static]: ./authoring/multi-platform.md#libc-static
 
 <!-- dependencies -->
 [sat-solving]: https://en.wikipedia.org/wiki/Boolean_satisfiability_problem

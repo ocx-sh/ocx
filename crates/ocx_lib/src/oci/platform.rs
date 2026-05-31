@@ -44,9 +44,21 @@ const ANY_STR: &str = "any";
 ///
 /// # String format
 ///
-/// [`Display`] and [`FromStr`] use the human-readable slash-separated format
-/// used in CLI `--platform` flags: `"linux/amd64"`, `"darwin/arm64/v8"`,
-/// or `"any"` for platform-agnostic packages.
+/// [`Display`] is the single canonical string form and the inverse of
+/// [`FromStr`]: it renders the slash-separated core
+/// (`"linux/amd64"`, `"darwin/arm64/v8"`, or `"any"`) and appends each
+/// `os.features` value as a `+`-separated suffix (sorted + deduped, so the
+/// output is canonical and stable): `os/arch[/variant][/os_version][+feature...]`.
+/// This is the form the CLI `--platform` flag accepts. Filesystem paths use
+/// [`segments`](Self::segments) / [`ascii_segments`](Self::ascii_segments)
+/// instead, so carrying features in `Display` does not affect path building.
+///
+/// [`FromStr`] accepts the same core plus the optional `+`-separated
+/// `os.features` suffix: `os/arch[/variant][+feature[+feature...]]`. Examples:
+/// `"linux/amd64+libc.glibc"`, `"linux/amd64/v3+libc.musl"`,
+/// `"linux/amd64+a.x+b.y"`. The trailing features are normalized (sorted +
+/// deduped) so the parsed value is canonical. `"any"` with `+features` is an
+/// error — the agnostic platform carries no features.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Platform {
     /// Platform-agnostic package. Not part of the OCI spec — this is an OCX
@@ -71,8 +83,9 @@ pub enum Platform {
         /// Mandatory OS features required for this image. For Windows, the
         /// OCI spec defines `"win32k"` (image requires `win32k.sys` on the
         /// host, which is missing on Nano Server). For other operating
-        /// systems, values are implementation-defined.
-        os_features: Option<Vec<String>>,
+        /// systems, values are implementation-defined. An empty `Vec` means no
+        /// features are declared (undetected / no libc requirement).
+        os_features: Vec<String>,
         /// Required CPU features, e.g. `["sse4", "aes"]`. Defined by the
         /// [OCI Image Index specification](https://github.com/opencontainers/image-spec/blob/main/image-index.md#image-index-property-descriptions).
         features: Option<Vec<String>>,
@@ -163,22 +176,82 @@ impl Platform {
         }
     }
 
-    /// Checks if this platform is compatible with `other`.
+    /// Returns `true` if `self` can run `other`.
     ///
-    /// Currently this is strict equality. Future versions may implement
-    /// richer matching: `Any` matching any `Specific`, os_version range
-    /// comparisons, or os_features subset checks.
-    pub fn matches(&self, other: &Platform) -> bool {
-        self == other
+    /// `other` is `Any` → `true`. `self` is `Any` → `false`. Both `Specific`:
+    /// equality on `os` + `arch`; strict `variant` equality only when
+    /// `other.variant` is set; strict `os_version` equality only when
+    /// `other.os_version` is set; subset on `os_features`
+    /// (`other.os_features ⊆ self.os_features`).
+    ///
+    /// Subset semantics apply only to `os_features`. `variant` and `os_version`
+    /// are matched by strict equality when the candidate declares them:
+    /// [`current`](Self::current) never populates `os_version`, so a
+    /// version-bearing candidate stays fail-closed (unselectable). Widening
+    /// either to a range/subset rule requires a new ADR
+    /// (adr_platform_libc_os_features.md).
+    pub fn can_run(&self, other: &Platform) -> bool {
+        // An `Any` other runs everywhere — `self` can always run it. Checked
+        // before the `self`-`Any` branch so an `Any` self still runs an `Any`
+        // other.
+        if other.is_any() {
+            return true;
+        }
+
+        // An `Any` `self` cannot run a `Specific` other.
+        let (
+            Self::Specific {
+                os: self_os,
+                arch: self_arch,
+                variant: self_variant,
+                os_version: self_os_version,
+                os_features: self_features,
+                ..
+            },
+            Self::Specific {
+                os: other_os,
+                arch: other_arch,
+                variant: other_variant,
+                os_version: other_os_version,
+                os_features: other_features,
+                ..
+            },
+        ) = (self, other)
+        else {
+            return false;
+        };
+
+        if self_os != other_os || self_arch != other_arch {
+            return false;
+        }
+
+        // Strict equality on `variant` only when `other` declares one.
+        if other_variant.is_some() && other_variant != self_variant {
+            return false;
+        }
+
+        // Strict equality on `os_version` only when `other` declares one.
+        // `Platform::current()` never populates `os_version`, so a
+        // version-bearing candidate was already unselectable under the deleted
+        // strict-equality `matches`; this preserves that fail-closed behaviour
+        // until a version-range ADR supersedes it.
+        if other_os_version.is_some() && other_os_version != self_os_version {
+            return false;
+        }
+
+        // Subset on `os_features`: every feature `other` requires must be
+        // present on `self`. An empty `other` set is a subset of anything.
+        other_features.iter().all(|feature| self_features.contains(feature))
     }
 
     /// Compares only the OS and architecture of two `Specific` platforms,
     /// ignoring `variant`, `os_version`, `os_features`, and `features`.
     ///
     /// [`current`](Self::current) can only ever populate `os`/`arch` (the
-    /// remaining fields are always `None`), so a full-struct [`matches`](Self::matches)
-    /// would wrongly reject a host-runnable image-index entry that merely carries
-    /// an `os_version` or `os_features` refinement. The host-only symlink gate
+    /// remaining fields are always `None`), so a full-struct equality comparison
+    /// (the deleted `matches` semantics) would wrongly reject a host-runnable
+    /// image-index entry that merely carries an `os_version` or `os_features`
+    /// refinement. The host-only symlink gate
     /// (issue #179) therefore compares os+arch only. Two [`Any`](Self::Any)
     /// values compare equal; `Any` vs `Specific` never do.
     pub fn same_os_arch(&self, other: &Platform) -> bool {
@@ -236,6 +309,12 @@ impl Platform {
     /// Delegates to [`OperatingSystem::current`] and [`Architecture::current`]
     /// to map Rust's compile-time target to OCI values. Returns `None` if the
     /// host OS or architecture is not in OCX's supported set.
+    ///
+    /// Note: an unsupported OS or arch returns `None` (no `Platform` at all),
+    /// whereas an undetected libc (non-Linux, NixOS, failed probe) returns
+    /// `Some(Specific { os_features: <empty>, .. })`. The host is known, but
+    /// its libc family is not — subset matching then only matches entries with
+    /// empty `os_features`.
     pub fn current() -> Option<Self> {
         let os = OperatingSystem::current()?;
         let arch = Architecture::current()?;
@@ -244,7 +323,7 @@ impl Platform {
             arch,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: super::host_capabilities::cached_os_features(),
             features: None,
         })
     }
@@ -321,15 +400,46 @@ impl Platform {
         // `os_features`/`features` are appended as explicit, parseable suffixes
         // only when present, so two children differing only in those fields get
         // distinct keys.
-        if let Some(values) = os_features {
+        if !os_features.is_empty() {
             key.push_str(";osf=");
-            key.push_str(&join_feature_values(values));
+            key.push_str(&join_feature_values(os_features));
         }
         if let Some(values) = features {
             key.push_str(";feat=");
             key.push_str(&join_feature_values(values));
         }
         key
+    }
+
+    /// Returns the [`lock_key`](Self::lock_key) this platform would have with an
+    /// empty `os_features` set — its `os/arch[/variant[/os_version]]` base with
+    /// no `;osf=`/`;feat=` suffix.
+    ///
+    /// The V2 lock host lookup uses this as a backward-compatibility tier: a
+    /// libc-detecting host's own key (e.g. `linux/amd64;osf=libc.glibc`) will
+    /// not match a plain `linux/amd64` entry — one keyed before libc detection
+    /// existed, or a deliberately libc-agnostic static-linked build — so the
+    /// lookup falls back to this base key before giving up. See
+    /// [`crate::project::lookup_host_leaf`].
+    pub fn base_lock_key(&self) -> String {
+        match self {
+            Self::Any => self.lock_key(),
+            Self::Specific {
+                os,
+                arch,
+                variant,
+                os_version,
+                ..
+            } => Self::Specific {
+                os: *os,
+                arch: *arch,
+                variant: variant.clone(),
+                os_version: os_version.clone(),
+                os_features: Vec::new(),
+                features: None,
+            }
+            .lock_key(),
+        }
     }
 
     /// Returns the default supported-platform list for the current host.
@@ -382,7 +492,7 @@ impl Platform {
                 arch: Architecture::Amd64,
                 variant: None,
                 os_version: None,
-                os_features: None,
+                os_features: Vec::new(),
                 features: None,
             },
             Self::Specific {
@@ -390,7 +500,7 @@ impl Platform {
                 arch: Architecture::Arm64,
                 variant: None,
                 os_version: None,
-                os_features: None,
+                os_features: Vec::new(),
                 features: None,
             },
             Self::Specific {
@@ -398,7 +508,7 @@ impl Platform {
                 arch: Architecture::Amd64,
                 variant: None,
                 os_version: None,
-                os_features: None,
+                os_features: Vec::new(),
                 features: None,
             },
             Self::Specific {
@@ -406,7 +516,7 @@ impl Platform {
                 arch: Architecture::Arm64,
                 variant: None,
                 os_version: None,
-                os_features: None,
+                os_features: Vec::new(),
                 features: None,
             },
             Self::Specific {
@@ -414,7 +524,7 @@ impl Platform {
                 arch: Architecture::Amd64,
                 variant: None,
                 os_version: None,
-                os_features: None,
+                os_features: Vec::new(),
                 features: None,
             },
             // Trailing platform-agnostic fallback (mirrors `supported_set`): only
@@ -483,6 +593,7 @@ impl std::fmt::Display for Platform {
                 arch,
                 variant,
                 os_version,
+                os_features,
                 ..
             } => {
                 write!(f, "{}/{}", os, arch)?;
@@ -491,6 +602,12 @@ impl std::fmt::Display for Platform {
                 }
                 if let Some(os_version) = os_version {
                     write!(f, "/{}", os_version)?;
+                }
+                // Append each `os.features` value as a `+`-separated suffix,
+                // normalized (sorted + deduped) so the output is canonical and
+                // round-trips through `FromStr`. Empty set → no suffix.
+                for feature in normalize_os_features(os_features) {
+                    write!(f, "+{}", feature)?;
                 }
                 Ok(())
             }
@@ -502,11 +619,36 @@ impl std::str::FromStr for Platform {
     type Err = PlatformError;
 
     fn from_str(value: &str) -> std::result::Result<Self, PlatformError> {
-        if value == ANY_STR {
+        // Split off the optional `+`-separated `os.features` suffix from the
+        // `os/arch[/variant]` core. Anything after the first `+` is a feature
+        // token; an empty feature token (`linux/amd64+`) is rejected as a
+        // malformed format. No suffix → empty feature set.
+        let (core, os_features) = match value.split_once('+') {
+            None => (value, Vec::new()),
+            Some((core, features_str)) => {
+                let features: Vec<String> = features_str.split('+').map(str::to_string).collect();
+                if features.iter().any(|feature| feature.is_empty()) {
+                    return Err(PlatformError {
+                        input: value.to_string(),
+                        kind: PlatformErrorKind::InvalidFormat,
+                    });
+                }
+                (core, features)
+            }
+        };
+
+        if core == ANY_STR {
+            // `any` carries no os.features — mirrors the mirror-resolver rule.
+            if !os_features.is_empty() {
+                return Err(PlatformError {
+                    input: value.to_string(),
+                    kind: PlatformErrorKind::InvalidFormat,
+                });
+            }
             return Ok(Self::Any);
         }
 
-        let parts: Vec<&str> = value.split('/').collect();
+        let parts: Vec<&str> = core.split('/').collect();
         if parts.len() < 2 || parts.len() > 4 {
             return Err(PlatformError {
                 input: value.to_string(),
@@ -517,6 +659,13 @@ impl std::str::FromStr for Platform {
         let os_str = parts[0];
         let arch_str = parts[1];
         if parts.len() == 2 && os_str == ANY_STR && arch_str == ANY_STR {
+            // `any/any` is the agnostic platform; it likewise carries no features.
+            if !os_features.is_empty() {
+                return Err(PlatformError {
+                    input: value.to_string(),
+                    kind: PlatformErrorKind::InvalidFormat,
+                });
+            }
             return Ok(Self::Any);
         }
 
@@ -547,10 +696,28 @@ impl std::str::FromStr for Platform {
             arch,
             variant,
             os_version,
-            os_features: None,
+            // Normalize (sort + dedup) so the parsed value matches the
+            // canonical wire form used everywhere else.
+            os_features: normalize_os_features(&os_features),
             features: None,
         })
     }
+}
+
+/// Sort + dedup `os_features` so the value is canonical.
+///
+/// Returns an empty `Vec` for an empty input. Keeps cascade eviction
+/// (positional `Vec` equality on the wire) and `Display` output deterministic
+/// regardless of the order the caller supplied.
+fn normalize_os_features(os_features: &[String]) -> Vec<String> {
+    // Fast path: 0 or 1 element is already sorted and deduplicated.
+    if os_features.len() <= 1 {
+        return os_features.to_vec();
+    }
+    let mut features = os_features.to_vec();
+    features.sort();
+    features.dedup();
+    features
 }
 
 // --- Native conversion impls ---
@@ -572,15 +739,32 @@ impl From<&Platform> for native::Platform {
                 variant,
                 os_version,
                 os_features,
+                // `features` is RESERVED by OCI v1.1.1 and must never be
+                // serialized — emit `None` regardless of any inner value.
                 features,
-            } => native::Platform {
-                os: (*os).into(),
-                architecture: (*arch).into(),
-                variant: variant.clone(),
-                features: features.clone(),
-                os_version: os_version.clone(),
-                os_features: os_features.clone(),
-            },
+            } => {
+                debug_assert!(
+                    features.is_none(),
+                    "RESERVED platform.features must never be set on Platform::Specific"
+                );
+                // Normalize (sort + dedup) so the wire format is canonical.
+                // Cascade eviction at `oci/client.rs` compares `os_features`
+                // by positional `Vec` equality; a reordered array would
+                // otherwise fail to evict the prior entry and bloat the index.
+                // Convert OCX's empty-`Vec`-means-none to the native
+                // `Option<Vec>` at this boundary so an empty set is omitted
+                // from the serialized JSON (`skip_serializing_if`).
+                let normalized = normalize_os_features(os_features);
+                native::Platform {
+                    os: (*os).into(),
+                    architecture: (*arch).into(),
+                    variant: variant.clone(),
+                    // RESERVED — never serialize (see above).
+                    features: None,
+                    os_version: os_version.clone(),
+                    os_features: if normalized.is_empty() { None } else { Some(normalized) },
+                }
+            }
         }
     }
 }
@@ -617,13 +801,29 @@ impl TryFrom<native::Platform> for Platform {
             kind,
         })?;
 
+        // `features` is RESERVED by OCI v1.1.1. Foreign manifests written by
+        // stale tooling may still carry a value — warn and drop it rather than
+        // hard-erroring, so OCX stays interoperable with such registries.
+        if platform.features.is_some() {
+            tracing::warn!(
+                "dropping RESERVED `features` field from platform '{}' (OCI v1.1.1 reserves it)",
+                input
+            );
+        }
+
         Ok(Self::Specific {
             os,
             arch,
             variant: platform.variant,
             os_version: platform.os_version,
-            os_features: platform.os_features,
-            features: platform.features,
+            // Convert the native `Option<Vec>` to OCX's empty-means-none `Vec`
+            // at this boundary: both `None` and `Some(empty)` become an empty
+            // set. Normalize (sort + dedup) inbound: foreign manifests may carry
+            // duplicated or unordered `os_features`, and selection scores
+            // specificity by `os_features.len()` — an un-deduped array would
+            // inflate that score and skew candidate ranking.
+            os_features: normalize_os_features(&platform.os_features.unwrap_or_default()),
+            features: None,
         })
     }
 }
@@ -707,32 +907,134 @@ mod tests {
         assert!(platform.is_any());
     }
 
-    // --- matches() ---
+    // --- FromStr with os.features (`+feature`) suffix ---
 
     #[test]
-    fn matches_equal_is_true() {
-        let a: Platform = "linux/amd64".parse().unwrap();
-        let b: Platform = "linux/amd64".parse().unwrap();
-        assert!(a.matches(&b));
+    fn fromstr_single_feature() {
+        let platform: Platform = "linux/amd64+libc.glibc".parse().unwrap();
+        match &platform {
+            Platform::Specific { os_features, .. } => {
+                assert_eq!(os_features.as_slice(), &["libc.glibc".to_string()]);
+            }
+            _ => panic!("expected Specific"),
+        }
     }
 
     #[test]
-    fn matches_unequal_is_false() {
-        let a: Platform = "linux/amd64".parse().unwrap();
-        let b: Platform = "darwin/arm64".parse().unwrap();
-        assert!(!a.matches(&b));
+    fn fromstr_feature_with_variant() {
+        let platform: Platform = "linux/amd64/v3+libc.musl".parse().unwrap();
+        match &platform {
+            Platform::Specific {
+                variant, os_features, ..
+            } => {
+                assert_eq!(variant.as_deref(), Some("v3"));
+                assert_eq!(os_features.as_slice(), &["libc.musl".to_string()]);
+            }
+            _ => panic!("expected Specific"),
+        }
     }
 
     #[test]
-    fn matches_any_equals_any() {
-        assert!(Platform::Any.matches(&Platform::Any));
+    fn fromstr_multiple_features_sorted_and_deduped() {
+        // Input order `b.y` before `a.x` plus a duplicate; the parsed value
+        // must be sorted and deduped.
+        let platform: Platform = "linux/amd64+b.y+a.x+a.x".parse().unwrap();
+        match &platform {
+            Platform::Specific { os_features, .. } => {
+                assert_eq!(
+                    os_features.as_slice(),
+                    &["a.x".to_string(), "b.y".to_string()],
+                    "features must be sorted + deduped"
+                );
+            }
+            _ => panic!("expected Specific"),
+        }
     }
 
     #[test]
-    fn matches_any_does_not_match_specific() {
-        let specific: Platform = "linux/amd64".parse().unwrap();
-        assert!(!Platform::Any.matches(&specific));
-        assert!(!specific.matches(&Platform::Any));
+    fn fromstr_dual_libc_features() {
+        // A dual-libc `--platform` override carries both libc tags via repeated
+        // `+`; they parse into a sorted os_features Vec.
+        let platform: Platform = "linux/amd64+libc.glibc+libc.musl".parse().unwrap();
+        match &platform {
+            Platform::Specific { os_features, .. } => {
+                assert_eq!(
+                    os_features.as_slice(),
+                    &["libc.glibc".to_string(), "libc.musl".to_string()],
+                    "both libc features must parse, sorted"
+                );
+            }
+            _ => panic!("expected Specific"),
+        }
+        // Round-trips through Display.
+        let reparsed: Platform = platform.to_string().parse().unwrap();
+        assert_eq!(platform, reparsed, "dual-libc --platform must round-trip");
+    }
+
+    #[test]
+    fn fromstr_feature_roundtrips_via_display() {
+        for case in [
+            "linux/amd64+libc.glibc",
+            "linux/amd64/v3+libc.musl",
+            "linux/amd64+a.x+b.y",
+        ] {
+            let platform: Platform = case.parse().unwrap();
+            let arg = platform.to_string();
+            let reparsed: Platform = arg.parse().unwrap();
+            assert_eq!(platform, reparsed, "round-trip via Display failed for '{case}'");
+        }
+    }
+
+    #[test]
+    fn fromstr_empty_feature_token_is_error() {
+        assert!(
+            "linux/amd64+".parse::<Platform>().is_err(),
+            "trailing + must be rejected"
+        );
+        assert!(
+            "linux/amd64+libc.glibc+".parse::<Platform>().is_err(),
+            "empty trailing feature token must be rejected"
+        );
+    }
+
+    #[test]
+    fn fromstr_any_with_features_is_error() {
+        assert!(
+            "any+libc.glibc".parse::<Platform>().is_err(),
+            "`any` must reject os.features"
+        );
+        assert!(
+            "any/any+libc.glibc".parse::<Platform>().is_err(),
+            "`any/any` must reject os.features"
+        );
+    }
+
+    #[test]
+    fn display_renders_sorted_features() {
+        let platform = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: vec!["b.y".to_string(), "a.x".to_string()],
+            features: None,
+        };
+        assert_eq!(platform.to_string(), "linux/amd64+a.x+b.y");
+    }
+
+    #[test]
+    fn display_without_features_omits_suffix() {
+        let platform: Platform = "linux/amd64".parse().unwrap();
+        assert_eq!(platform.to_string(), "linux/amd64");
+        assert_eq!(Platform::Any.to_string(), "any");
+    }
+
+    #[test]
+    fn display_includes_os_features() {
+        // Display is now the canonical --platform form: it carries the
+        // +features suffix. Filesystem paths use segments()/ascii_segments().
+        let platform: Platform = "linux/amd64+libc.glibc".parse().unwrap();
+        assert_eq!(platform.to_string(), "linux/amd64+libc.glibc");
     }
 
     /// Returns `linux/amd64` with a non-`None` `os_version` — the shape a
@@ -748,7 +1050,7 @@ mod tests {
             arch,
             variant: None,
             os_version: Some("10.0.14393".to_string()),
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         }
     }
@@ -756,9 +1058,8 @@ mod tests {
     #[test]
     fn same_os_arch_ignores_refinement_fields() {
         let plain: Platform = "linux/amd64".parse().unwrap();
-        // os+arch equal, differ only in os_version → same_os_arch, unlike `matches`.
+        // os+arch equal, differ only in os_version → same_os_arch ignores the refinement.
         assert!(plain.same_os_arch(&linux_amd64_with_os_version()));
-        assert!(!plain.matches(&linux_amd64_with_os_version()));
         // Different arch / os → not same.
         assert!(!plain.same_os_arch(&"linux/arm64".parse().unwrap()));
         assert!(!plain.same_os_arch(&"windows/amd64".parse().unwrap()));
@@ -828,7 +1129,7 @@ mod tests {
             arch: Architecture::Arm64,
             variant: Some("V8".to_string()),
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         assert_eq!(platform.ascii_segments(), vec!["linux", "arm64", "v8"]);
@@ -916,7 +1217,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let with_win32k = Platform::Specific {
@@ -924,7 +1225,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: Some(vec!["win32k".to_string()]),
+            os_features: vec!["win32k".to_string()],
             features: None,
         };
         assert_ne!(
@@ -943,7 +1244,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let with_sse4 = Platform::Specific {
@@ -951,7 +1252,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: Some(vec!["sse4".to_string()]),
         };
         assert_ne!(
@@ -974,7 +1275,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: Some(features),
         };
         let one_element_with_comma = with_features(vec!["a,b".to_string()]);
@@ -993,7 +1294,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: Some(vec!["x,y".to_string()]),
+            os_features: vec!["x,y".to_string()],
             features: None,
         };
         let osf_two = Platform::Specific {
@@ -1001,7 +1302,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: Some(vec!["x".to_string(), "y".to_string()]),
+            os_features: vec!["x".to_string(), "y".to_string()],
             features: None,
         };
         assert_ne!(
@@ -1035,7 +1336,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: Some("10;osf=win32k".to_string()),
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         // Platform B: plain os_version `10`, genuine os_features `["win32k"]`.
@@ -1044,7 +1345,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: Some("10".to_string()),
-            os_features: Some(vec!["win32k".to_string()]),
+            os_features: vec!["win32k".to_string()],
             features: None,
         };
         assert_ne!(
@@ -1064,7 +1365,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: Some("v8;feat=sse4".to_string()),
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let genuine = Platform::Specific {
@@ -1072,7 +1373,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: Some("v8".to_string()),
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: Some(vec!["sse4".to_string()]),
         };
         assert_ne!(
@@ -1097,7 +1398,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: Some("v8/10".to_string()),
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         // Platform B: plain variant `v8`, separate os_version `10`.
@@ -1106,7 +1407,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: Some("v8".to_string()),
             os_version: Some("10".to_string()),
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         assert_ne!(
@@ -1128,7 +1429,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: Some("v3".to_string()),
             os_version: Some("10/x".to_string()),
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         // Platform B: variant `v3/10`, os_version `x` — the naive (unescaped)
@@ -1139,7 +1440,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: Some("v3/10".to_string()),
             os_version: Some("x".to_string()),
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         assert_ne!(
@@ -1159,7 +1460,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: Some(vec!["win32k".to_string()]),
+            os_features: vec!["win32k".to_string()],
             features: Some(vec!["sse4".to_string(), "aes".to_string()]),
         };
         assert_eq!(
@@ -1175,7 +1476,7 @@ mod tests {
     /// on.
     #[test]
     fn lock_key_is_injective_over_distinct_platforms() {
-        let win = |os_features: Option<Vec<String>>, features: Option<Vec<String>>| Platform::Specific {
+        let win = |os_features: Vec<String>, features: Option<Vec<String>>| Platform::Specific {
             os: OperatingSystem::Windows,
             arch: Architecture::Amd64,
             variant: None,
@@ -1188,9 +1489,9 @@ mod tests {
             "linux/arm64".parse::<Platform>().unwrap(),
             "darwin/arm64".parse::<Platform>().unwrap(),
             Platform::Any,
-            win(None, None),
-            win(Some(vec!["win32k".to_string()]), None),
-            win(None, Some(vec!["sse4".to_string()])),
+            win(Vec::new(), None),
+            win(vec!["win32k".to_string()], None),
+            win(Vec::new(), Some(vec!["sse4".to_string()])),
         ];
         let mut keys = std::collections::HashSet::new();
         for platform in &platforms {
@@ -1349,7 +1650,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: Some("10.0.14393".to_string()),
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let json = serde_json::to_string(&platform).unwrap();
@@ -1360,27 +1661,12 @@ mod tests {
     }
 
     #[test]
-    fn serde_features_accepted_and_roundtripped() {
-        let json = r#"{"os":"linux","architecture":"amd64","features":["sse4","aes"]}"#;
-        let platform: Platform = serde_json::from_str(json).unwrap();
-        match &platform {
-            Platform::Specific { features, .. } => {
-                assert_eq!(features.as_deref(), Some(&["sse4".to_string(), "aes".to_string()][..]));
-            }
-            _ => panic!("expected Specific"),
-        }
-        let json_out = serde_json::to_string(&platform).unwrap();
-        let reparsed: Platform = serde_json::from_str(&json_out).unwrap();
-        assert_eq!(platform, reparsed);
-    }
-
-    #[test]
     fn serde_os_features_accepted_and_roundtripped() {
         let json = r#"{"os":"windows","architecture":"amd64","os.features":["win32k"]}"#;
         let platform: Platform = serde_json::from_str(json).unwrap();
         match &platform {
             Platform::Specific { os_features, .. } => {
-                assert_eq!(os_features.as_deref(), Some(&["win32k".to_string()][..]));
+                assert_eq!(os_features.as_slice(), &["win32k".to_string()]);
             }
             _ => panic!("expected Specific"),
         }
@@ -1416,7 +1702,7 @@ mod tests {
                     arch: *arch,
                     variant: None,
                     os_version: None,
-                    os_features: None,
+                    os_features: Vec::new(),
                     features: None,
                 };
                 let json = serde_json::to_string(&platform).unwrap();
@@ -1433,7 +1719,7 @@ mod tests {
             arch: Architecture::Arm64,
             variant: Some("v8".to_string()),
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let json = serde_json::to_string(&platform).unwrap();
@@ -1467,7 +1753,7 @@ mod tests {
                 arch: Architecture::Amd64,
                 variant: None,
                 os_version: None,
-                os_features: None,
+                os_features: Vec::new(),
                 features: None,
             }
         );
@@ -1484,7 +1770,7 @@ mod tests {
                 arch: Architecture::Arm64,
                 variant: Some("v8".to_string()),
                 os_version: None,
-                os_features: None,
+                os_features: Vec::new(),
                 features: None,
             }
         );
@@ -1501,32 +1787,8 @@ mod tests {
                 arch: Architecture::Amd64,
                 variant: None,
                 os_version: Some("10.0.14393.1066".to_string()),
-                os_features: None,
+                os_features: Vec::new(),
                 features: None,
-            }
-        );
-    }
-
-    #[test]
-    fn serde_deserialize_platform_with_all_optional_fields() {
-        let json = r#"{
-            "architecture":"amd64",
-            "os":"windows",
-            "variant":"v3",
-            "os.version":"10.0.14393.1066",
-            "os.features":["win32k"],
-            "features":["sse4"]
-        }"#;
-        let platform: Platform = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            platform,
-            Platform::Specific {
-                os: OperatingSystem::Windows,
-                arch: Architecture::Amd64,
-                variant: Some("v3".to_string()),
-                os_version: Some("10.0.14393.1066".to_string()),
-                os_features: Some(vec!["win32k".to_string()]),
-                features: Some(vec!["sse4".to_string()]),
             }
         );
     }
@@ -1555,7 +1817,7 @@ mod tests {
             arch: Architecture::Arm64,
             variant: Some("v8".to_string()),
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let native_plat: native::Platform = platform.clone().into();
@@ -1571,7 +1833,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: Some("10.0.14393.1066".to_string()),
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let native_plat: native::Platform = platform.clone().into();
@@ -1587,7 +1849,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: Some("10.0.14393.1066".to_string()),
-            os_features: Some(vec!["win32k".to_string()]),
+            os_features: vec!["win32k".to_string()],
             features: None,
         };
         let native_plat: native::Platform = platform.clone().into();
@@ -1597,51 +1859,21 @@ mod tests {
     }
 
     #[test]
-    fn native_roundtrip_with_features() {
-        let platform = Platform::Specific {
-            os: OperatingSystem::Linux,
-            arch: Architecture::Amd64,
-            variant: None,
-            os_version: None,
-            os_features: None,
-            features: Some(vec!["sse4".to_string(), "aes".to_string()]),
-        };
-        let native_plat: native::Platform = platform.clone().into();
-        assert_eq!(native_plat.features, Some(vec!["sse4".to_string(), "aes".to_string()]));
-        let back = Platform::try_from(native_plat).unwrap();
-        assert_eq!(platform, back);
-    }
-
-    #[test]
     fn native_roundtrip_with_all_optional_fields() {
+        // `features` is RESERVED — deliberately dropped on conversion (see
+        // `native_features_dropped_in_conversion`). The remaining fields must
+        // survive a native → Platform → native roundtrip.
         let platform = Platform::Specific {
             os: OperatingSystem::Windows,
             arch: Architecture::Amd64,
             variant: Some("v3".to_string()),
             os_version: Some("10.0.14393.1066".to_string()),
-            os_features: Some(vec!["win32k".to_string()]),
-            features: Some(vec!["sse4".to_string()]),
+            os_features: vec!["win32k".to_string()],
+            features: None,
         };
         let native_plat: native::Platform = platform.clone().into();
         let back = Platform::try_from(native_plat).unwrap();
         assert_eq!(platform, back);
-    }
-
-    /// Any valid OCI platform with a supported OS/arch must survive a
-    /// lossless roundtrip: native → Platform → native == original.
-    #[test]
-    fn native_lossless_roundtrip_full_fidelity() {
-        let original = native::Platform {
-            os: native::Os::Windows,
-            architecture: native::Arch::Amd64,
-            variant: Some("v3".to_string()),
-            features: Some(vec!["sse4".to_string(), "aes".to_string()]),
-            os_version: Some("10.0.14393.1066".to_string()),
-            os_features: Some(vec!["win32k".to_string()]),
-        };
-        let ocx = Platform::try_from(original.clone()).unwrap();
-        let roundtripped: native::Platform = ocx.into();
-        assert_eq!(original, roundtripped);
     }
 
     #[test]
@@ -1653,7 +1885,7 @@ mod tests {
                     arch: *arch,
                     variant: None,
                     os_version: None,
-                    os_features: None,
+                    os_features: Vec::new(),
                     features: None,
                 };
                 let native_plat: native::Platform = platform.clone().into();
@@ -1661,6 +1893,494 @@ mod tests {
                 assert_eq!(platform, back, "native roundtrip failed for {}/{}", os, arch);
             }
         }
+    }
+
+    // ── can_run: subset semantics (3.1) ──────────────────────────────
+
+    fn linux_amd64_with_features(features: Vec<String>) -> Platform {
+        Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: features,
+            features: None,
+        }
+    }
+
+    /// Helper: linux/amd64 host carrying `{libc.glibc}`.
+    fn glibc_host() -> Platform {
+        linux_amd64_with_features(vec!["libc.glibc".to_string()])
+    }
+
+    /// Helper: linux/amd64 candidate with `{libc.glibc}`.
+    fn glibc_candidate() -> Platform {
+        linux_amd64_with_features(vec!["libc.glibc".to_string()])
+    }
+
+    /// Helper: linux/amd64 candidate with `{libc.musl}`.
+    fn musl_candidate() -> Platform {
+        linux_amd64_with_features(vec!["libc.musl".to_string()])
+    }
+
+    /// Helper: linux/amd64 with no os_features.
+    fn untagged_amd64() -> Platform {
+        linux_amd64_with_features(Vec::new())
+    }
+
+    // 3.1 — Specific × Specific cases
+
+    #[test]
+    fn can_run_empty_candidate_subset_of_any_host() {
+        // Host linux/amd64 {libc.glibc}, candidate linux/amd64 {} → true (empty ⊆ any)
+        let host = glibc_host();
+        let candidate = untagged_amd64();
+        assert!(
+            host.can_run(&candidate),
+            "empty candidate os_features must match any host"
+        );
+    }
+
+    #[test]
+    fn can_run_same_libc_matches() {
+        // Host {libc.glibc}, candidate {libc.glibc} → true
+        let host = glibc_host();
+        let candidate = glibc_candidate();
+        assert!(host.can_run(&candidate), "matching libc must match");
+    }
+
+    #[test]
+    fn can_run_different_libc_no_match() {
+        // Host {libc.glibc}, candidate {libc.musl} → false
+        let host = glibc_host();
+        let candidate = musl_candidate();
+        assert!(
+            !host.can_run(&candidate),
+            "host with libc.glibc must not match libc.musl candidate"
+        );
+    }
+
+    #[test]
+    fn can_run_host_missing_required_feature() {
+        // Host {}, candidate {libc.glibc} → false (host cannot satisfy requirement)
+        let host = untagged_amd64();
+        let candidate = glibc_candidate();
+        assert!(
+            !host.can_run(&candidate),
+            "host without libc tags must not match libc-tagged candidate"
+        );
+    }
+
+    #[test]
+    fn can_run_multi_libc_host_matches_musl_candidate() {
+        // Host {libc.glibc, libc.musl}, candidate {libc.musl} → true
+        let host = linux_amd64_with_features(vec!["libc.glibc".to_string(), "libc.musl".to_string()]);
+        let candidate = musl_candidate();
+        assert!(host.can_run(&candidate), "multi-libc host must match musl candidate");
+    }
+
+    #[test]
+    fn can_run_different_os_no_match() {
+        // Different os → false regardless of features
+        let host = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: vec!["libc.glibc".to_string()],
+            features: None,
+        };
+        let candidate = Platform::Specific {
+            os: OperatingSystem::Darwin,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: Vec::new(),
+            features: None,
+        };
+        assert!(!host.can_run(&candidate), "different os must not match");
+    }
+
+    #[test]
+    fn can_run_different_arch_no_match() {
+        // Different arch → false regardless of features
+        let host = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: vec!["libc.glibc".to_string()],
+            features: None,
+        };
+        let candidate = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Arm64,
+            variant: None,
+            os_version: None,
+            os_features: Vec::new(),
+            features: None,
+        };
+        assert!(!host.can_run(&candidate), "different arch must not match");
+    }
+
+    #[test]
+    fn can_run_variant_mismatch_no_match() {
+        // variant mismatch (both set) → false (strict equality on variant)
+        let host = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Arm64,
+            variant: Some("v7".to_string()),
+            os_version: None,
+            os_features: Vec::new(),
+            features: None,
+        };
+        let candidate = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Arm64,
+            variant: Some("v8".to_string()),
+            os_version: None,
+            os_features: Vec::new(),
+            features: None,
+        };
+        assert!(!host.can_run(&candidate), "variant mismatch must not match");
+    }
+
+    // 3.1 — os_version strict equality when the candidate declares one.
+    // `Platform::current()` never populates os_version, so a version-bearing
+    // candidate must stay fail-closed until a version-range ADR exists.
+
+    #[test]
+    fn can_run_candidate_os_version_host_none_no_match() {
+        // Host os_version None (the `current()` shape), candidate declares one → false.
+        let host = untagged_amd64();
+        let candidate = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: Some("10.0.14393".to_string()),
+            os_features: Vec::new(),
+            features: None,
+        };
+        assert!(
+            !host.can_run(&candidate),
+            "a version-bearing candidate must not match a host with no os_version"
+        );
+    }
+
+    #[test]
+    fn can_run_differing_os_version_no_match() {
+        // Both declare os_version but they differ → false (strict equality).
+        let host = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: Some("10.0.14393".to_string()),
+            os_features: Vec::new(),
+            features: None,
+        };
+        let candidate = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: Some("10.0.19045".to_string()),
+            os_features: Vec::new(),
+            features: None,
+        };
+        assert!(!host.can_run(&candidate), "differing os_version must not match");
+    }
+
+    #[test]
+    fn can_run_equal_os_version_matches() {
+        // Both declare the same os_version → true.
+        let host = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: Some("10.0.14393".to_string()),
+            os_features: Vec::new(),
+            features: None,
+        };
+        let candidate = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: Some("10.0.14393".to_string()),
+            os_features: Vec::new(),
+            features: None,
+        };
+        assert!(host.can_run(&candidate), "equal os_version must match");
+    }
+
+    #[test]
+    fn can_run_candidate_no_os_version_host_some_matches() {
+        // Candidate declares no os_version (no requirement); host carries one → true.
+        let host = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: Some("10.0.14393".to_string()),
+            os_features: Vec::new(),
+            features: None,
+        };
+        let candidate = untagged_amd64();
+        assert!(
+            host.can_run(&candidate),
+            "a candidate declaring no os_version must match a version-bearing host"
+        );
+    }
+
+    // 3.1 — Any semantics (amended after architect review B1)
+
+    #[test]
+    fn can_run_any_host_any_candidate() {
+        // Host Any × candidate Any → true
+        assert!(
+            Platform::Any.can_run(&Platform::Any),
+            "Any host must support Any candidate"
+        );
+    }
+
+    #[test]
+    fn can_run_specific_host_any_candidate() {
+        // Host Specific × candidate Any → true (Any candidate runs everywhere)
+        let host = glibc_host();
+        assert!(
+            host.can_run(&Platform::Any),
+            "Specific host must support Any candidate (static-musl / scripts / JARs)"
+        );
+    }
+
+    #[test]
+    fn can_run_any_host_specific_candidate() {
+        // Host Any × candidate Specific → false (detection failed; cannot satisfy Specific)
+        let candidate = glibc_candidate();
+        assert!(
+            !Platform::Any.can_run(&candidate),
+            "Any host must not match Specific candidate (host detection failed)"
+        );
+    }
+
+    // ── serde: RESERVED features field rewrites (3.3) ──────────────
+
+    /// REWRITE of serde_features_accepted_and_roundtripped (was: round-tripped; now: dropped on serialize).
+    /// The OCI v1.1.1 `features` field is RESERVED — serializing it is a spec violation.
+    /// After impl, a Platform with populated `features` must serialize WITHOUT a `features` key.
+    #[test]
+    fn serde_features_dropped_on_serialize() {
+        // Populate a Platform with features (via native conversion path to bypass any guards).
+        let native_plat = native::Platform {
+            os: native::Os::Linux,
+            architecture: native::Arch::Amd64,
+            variant: None,
+            features: Some(vec!["sse4".to_string(), "aes".to_string()]),
+            os_version: None,
+            os_features: None,
+        };
+        // The Platform struct may or may not carry the value internally; what matters is the wire format.
+        let platform = Platform::try_from(native_plat.clone()).unwrap();
+        let json = serde_json::to_string(&platform).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // After impl: the RESERVED `features` key must NOT appear in the serialized JSON.
+        assert!(
+            value.get("features").is_none(),
+            "RESERVED `features` field must be absent from serialized Platform JSON; got: {}",
+            json
+        );
+    }
+
+    /// Features key in input JSON is ignored/stripped during deserialization.
+    #[test]
+    fn serde_features_in_input_json_is_ignored() {
+        // A registry may emit a `features` value (stale tooling); we must not error.
+        let json = r#"{"os":"linux","architecture":"amd64","features":["sse4","aes"]}"#;
+        // Deserialization must succeed (warn-and-drop, not hard error).
+        let result = serde_json::from_str::<Platform>(json);
+        assert!(
+            result.is_ok(),
+            "Deserializing a platform with RESERVED `features` must not hard-error; err: {:?}",
+            result.err()
+        );
+        // And serialize back: features must not reappear.
+        let platform = result.unwrap();
+        let json_out = serde_json::to_string(&platform).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_out).unwrap();
+        assert!(
+            value.get("features").is_none(),
+            "`features` reappeared after warn-and-drop deserialization; got: {}",
+            json_out
+        );
+    }
+
+    /// REWRITE of serde_deserialize_platform_with_all_optional_fields.
+    /// `features` is removed from the test JSON; the existing fields must still deserialize.
+    #[test]
+    fn serde_deserialize_platform_with_all_optional_fields_no_features() {
+        // `features` intentionally omitted — it is RESERVED.
+        let json = r#"{
+            "architecture":"amd64",
+            "os":"windows",
+            "variant":"v3",
+            "os.version":"10.0.14393.1066",
+            "os.features":["win32k"]
+        }"#;
+        let platform: Platform = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            platform,
+            Platform::Specific {
+                os: OperatingSystem::Windows,
+                arch: Architecture::Amd64,
+                variant: Some("v3".to_string()),
+                os_version: Some("10.0.14393.1066".to_string()),
+                os_features: vec!["win32k".to_string()],
+                features: None,
+            }
+        );
+    }
+
+    /// REWRITE of native_roundtrip_with_features.
+    /// Any populated `features` in a native::Platform must be dropped (not round-tripped)
+    /// through From<&Platform> for native::Platform because the field is RESERVED.
+    #[test]
+    fn native_features_dropped_in_conversion() {
+        let native_plat = native::Platform {
+            os: native::Os::Linux,
+            architecture: native::Arch::Amd64,
+            variant: None,
+            features: Some(vec!["sse4".to_string(), "aes".to_string()]),
+            os_version: None,
+            os_features: None,
+        };
+        let platform = Platform::try_from(native_plat).unwrap();
+        let roundtripped: native::Platform = native::Platform::from(&platform);
+        // After impl: features must be None on the wire (RESERVED).
+        assert_eq!(
+            roundtripped.features, None,
+            "RESERVED `features` must be emitted as None by From<&Platform> for native::Platform"
+        );
+    }
+
+    /// Extension of serde_os_features_accepted_and_roundtripped with libc.* values (3.3).
+    #[test]
+    fn serde_os_features_libc_values_roundtripped() {
+        // glibc
+        let json_glibc = r#"{"os":"linux","architecture":"amd64","os.features":["libc.glibc"]}"#;
+        let platform: Platform = serde_json::from_str(json_glibc).unwrap();
+        match &platform {
+            Platform::Specific { os_features, .. } => {
+                assert_eq!(
+                    os_features.as_slice(),
+                    &["libc.glibc".to_string()],
+                    "libc.glibc must be preserved"
+                );
+            }
+            _ => panic!("expected Specific platform"),
+        }
+        let json_out = serde_json::to_string(&platform).unwrap();
+        let reparsed: Platform = serde_json::from_str(&json_out).unwrap();
+        assert_eq!(platform, reparsed, "libc.glibc roundtrip failed");
+
+        // musl
+        let json_musl = r#"{"os":"linux","architecture":"amd64","os.features":["libc.musl"]}"#;
+        let platform_musl: Platform = serde_json::from_str(json_musl).unwrap();
+        match &platform_musl {
+            Platform::Specific { os_features, .. } => {
+                assert_eq!(
+                    os_features.as_slice(),
+                    &["libc.musl".to_string()],
+                    "libc.musl must be preserved"
+                );
+            }
+            _ => panic!("expected Specific platform"),
+        }
+        let json_out_musl = serde_json::to_string(&platform_musl).unwrap();
+        let reparsed_musl: Platform = serde_json::from_str(&json_out_musl).unwrap();
+        assert_eq!(platform_musl, reparsed_musl, "libc.musl roundtrip failed");
+    }
+
+    // ── os_features normalization via From<&Platform> for native::Platform (3.7) ──
+
+    /// Roundtrip Platform::Specific with unsorted os_features through native conversion.
+    /// The resulting native::Platform.os_features must be sorted + deduped.
+    #[test]
+    fn native_os_features_sorted_and_deduped_on_conversion() {
+        // Unsorted input: "b.x" before "a.y"
+        let platform = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: vec!["b.x".to_string(), "a.y".to_string()],
+            features: None,
+        };
+        let native_plat: native::Platform = native::Platform::from(&platform);
+        assert_eq!(
+            native_plat.os_features,
+            Some(vec!["a.y".to_string(), "b.x".to_string()]),
+            "os_features must be sorted ascending in native Platform"
+        );
+    }
+
+    /// Deduplication: duplicate os_features entries must be collapsed to one.
+    #[test]
+    fn native_os_features_deduped_on_conversion() {
+        let platform = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: vec!["libc.glibc".to_string(), "libc.glibc".to_string()],
+            features: None,
+        };
+        let native_plat: native::Platform = native::Platform::from(&platform);
+        assert_eq!(
+            native_plat.os_features,
+            Some(vec!["libc.glibc".to_string()]),
+            "duplicate os_features must be deduped"
+        );
+    }
+
+    #[test]
+    fn deserialize_normalizes_duplicate_and_unsorted_os_features() {
+        // A foreign manifest may carry duplicated / unordered os.features.
+        // Selection scores specificity by os_features.len(), so an un-normalized
+        // inbound array would inflate the score and skew candidate ranking.
+        // Deserialization must sort + dedup at the boundary.
+        let json = r#"{"os":"linux","architecture":"amd64","os.features":["libc.musl","libc.glibc","libc.musl"]}"#;
+        let platform: Platform = serde_json::from_str(json).unwrap();
+        match &platform {
+            Platform::Specific { os_features, .. } => assert_eq!(
+                os_features.as_slice(),
+                &["libc.glibc".to_string(), "libc.musl".to_string()],
+                "inbound os_features must be sorted + deduped so specificity scoring is not skewed"
+            ),
+            _ => panic!("expected Specific platform"),
+        }
+    }
+
+    /// UPDATE of native_lossless_roundtrip_full_fidelity.
+    /// `features` is removed from the asserted-lossless set (RESERVED — deliberately dropped).
+    #[test]
+    fn native_lossless_roundtrip_full_fidelity_without_features() {
+        // features is intentionally omitted — it is RESERVED and must not round-trip.
+        let original = native::Platform {
+            os: native::Os::Windows,
+            architecture: native::Arch::Amd64,
+            variant: Some("v3".to_string()),
+            features: None, // RESERVED — must not be asserted lossless
+            os_version: Some("10.0.14393.1066".to_string()),
+            os_features: Some(vec!["win32k".to_string()]),
+        };
+        let ocx = Platform::try_from(original.clone()).unwrap();
+        let roundtripped: native::Platform = ocx.into();
+        // os, architecture, variant, os_version, os_features must all survive.
+        assert_eq!(roundtripped.os, original.os);
+        assert_eq!(roundtripped.architecture, original.architecture);
+        assert_eq!(roundtripped.variant, original.variant);
+        assert_eq!(roundtripped.os_version, original.os_version);
+        // os_features is sorted+deduped; since win32k is already sorted+unique it should match.
+        assert_eq!(roundtripped.os_features, original.os_features);
+        // features must be None (RESERVED, not round-tripped).
+        assert_eq!(roundtripped.features, None, "RESERVED features must not round-trip");
     }
 
     // --- Native rejection ---

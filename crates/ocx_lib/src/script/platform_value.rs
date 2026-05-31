@@ -143,7 +143,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let p = PlatformValue::from_platform(&platform);
@@ -161,7 +161,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         let value = heap.alloc(PlatformValue::from_platform(&platform));
@@ -195,7 +195,7 @@ mod tests {
             arch: Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         assert_eq!(PlatformValue::from_platform(&platform).to_string(), "linux/amd64");

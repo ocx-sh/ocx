@@ -12,6 +12,16 @@ use ocx_lib::oci;
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct Platforms {
     /// Target platforms to consider when resolving packages.
+    ///
+    /// Each value is `os/arch[/variant][+feature[+feature...]]`, for example
+    /// `linux/amd64`, `linux/arm64`, or `linux/amd64+libc.glibc`. The optional
+    /// `+feature` suffix filters by `os.features`: OCX selects the manifest
+    /// whose features are a subset of the value you pass, so `+libc.glibc` or
+    /// `+libc.musl` forces a specific libc variant. Repeat the flag or pass a
+    /// comma-separated list for several platforms. Defaults to the
+    /// auto-detected host platform - see the
+    /// [multi-platform packages](https://ocx.sh/docs/authoring/multi-platform)
+    /// documentation for details.
     #[clap(
         short = 'p',
         long = "platform",

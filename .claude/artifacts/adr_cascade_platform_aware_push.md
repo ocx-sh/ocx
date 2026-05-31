@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Proposed
+**Status:** Accepted / Implemented
 **Date:** 2026-03-11
 **Deciders:** mherwig
 **Beads Issue:** TBD
@@ -367,3 +367,7 @@ for this ADR.
 - `crates/ocx_lib/src/package/version.rs` lines 99–174 — `Version::cascade` and its platform contract note
 - `crates/ocx_lib/src/oci/client.rs` lines 103–121 (`copy_manifest_data`), 397–464 (`update_image_index`)
 - [OCI Image Index specification](https://github.com/opencontainers/image-spec/blob/main/image-index.md)
+
+## See Also
+
+- [`adr_platform_libc_os_features.md`](./adr_platform_libc_os_features.md) — libc family differentiation via `os.features`; the `has_platform` strict-equality semantics used by `merge_platform_into_index` are intentionally distinct from the `host_supports()` subset matcher introduced there (see ADR § `oci/manifest.rs:13 has_platform`).

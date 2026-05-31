@@ -117,6 +117,18 @@ pub enum SelectResult {
     /// No candidates matched the requested platforms (or the package was not
     /// found in the index at all).
     NotFound,
+    /// The host declared non-empty `os.features` but no candidate sharing the
+    /// host's os+arch satisfied subset matching on `os_features`. Distinct
+    /// from [`NotFound`](Self::NotFound) (no os/arch candidates at all): here
+    /// the package ships for this os/arch but only under different
+    /// `os.features` (e.g. a different libc). The caller (package-manager
+    /// layer) maps this to a feature-mismatch error so the user can
+    /// `--platform`-override. `available` lists the candidate platforms the
+    /// user could target.
+    FeatureMismatch {
+        host_features: Vec<String>,
+        available: Vec<oci::Platform>,
+    },
 }
 
 /// Note, some operations are cached and the cache is shared between clones of the index.
@@ -273,20 +285,57 @@ impl Index {
             return Ok(SelectResult::NotFound);
         };
 
+        // Walk the host's priority tiers (`supported_set()`: native platform
+        // first, then `Any`). Within the first tier that yields any match,
+        // keep only the most specific candidates — those declaring the most
+        // `os_features` the host satisfies. A glibc host seeing both a
+        // `libc.glibc` entry and a bare (empty `os_features`) entry prefers the
+        // libc-tagged one; the bare entry is a less specific subset match.
+        // Genuine ambiguity (two equally specific matches) still surfaces as
+        // `Ambiguous`.
         let mut matching_candidates = Vec::new();
         for platform in &platforms {
-            for (identifier, candidate_platform) in &candidates {
-                if platform.matches(candidate_platform) {
-                    matching_candidates.push(identifier.clone());
+            // Collect (specificity, index) pairs for candidates this platform
+            // can run — defer cloning the winner identifiers until after the
+            // specificity filter so we only clone the survivors, not every
+            // candidate that passes can_run.
+            let mut tier_matches: Vec<(usize, usize)> = Vec::new();
+            for (index, (_, candidate_platform)) in candidates.iter().enumerate() {
+                if platform.can_run(candidate_platform) {
+                    tier_matches.push((candidate_os_feature_count(candidate_platform), index));
                 }
             }
-            if !matching_candidates.is_empty() {
+            if let Some(max_specificity) = tier_matches.iter().map(|(count, _)| *count).max() {
+                matching_candidates = tier_matches
+                    .into_iter()
+                    .filter(|&(count, _)| count == max_specificity)
+                    .map(|(_, index)| candidates[index].0.clone())
+                    .collect();
                 break;
             }
         }
 
         let result = match matching_candidates.len() {
-            0 => SelectResult::NotFound,
+            // Distinguish a feature mismatch from a plain not-found. When the
+            // host declared non-empty `os.features` and there exist candidates
+            // sharing the host's os+arch but none satisfied subset matching,
+            // the package ships for this os/arch under different `os.features`
+            // only — surface the dedicated variant so the caller can report a
+            // feature mismatch rather than a generic not-found.
+            0 => match host_os_features(&platforms) {
+                Some(host_features) => {
+                    let available = candidates_sharing_host_os_arch(&platforms, &candidates);
+                    if available.is_empty() {
+                        SelectResult::NotFound
+                    } else {
+                        SelectResult::FeatureMismatch {
+                            host_features,
+                            available,
+                        }
+                    }
+                }
+                None => SelectResult::NotFound,
+            },
             1 => SelectResult::Found(matching_candidates.into_iter().next().expect("len checked above")),
             _ => SelectResult::Ambiguous(matching_candidates),
         };
@@ -301,6 +350,15 @@ impl Index {
                 identifier,
                 candidates.len()
             ),
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => log::debug!(
+                "feature mismatch for '{}': host provides {:?}; {} candidate(s) share os+arch but differ on os.features.",
+                identifier,
+                host_features,
+                available.len()
+            ),
         }
 
         Ok(result)
@@ -311,6 +369,823 @@ impl Clone for Index {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.box_clone(),
+        }
+    }
+}
+
+/// Count the `os_features` a candidate platform declares.
+///
+/// Used as the specificity score when several candidates match the same host
+/// tier: the candidate satisfying the most host-provided features wins. `Any`
+/// and bare (empty `os_features`) candidates score `0`.
+fn candidate_os_feature_count(candidate: &oci::Platform) -> usize {
+    match candidate {
+        oci::Platform::Specific { os_features, .. } => os_features.len(),
+        oci::Platform::Any => 0,
+    }
+}
+
+/// Extract the host's declared `os_features` from the requested platform
+/// list, if any `Specific` host platform carries a non-empty set.
+///
+/// `supported_set()` always passes the host-native `Platform::current()` first,
+/// then `Platform::any()`. A non-empty `os_features` set (e.g. a detected
+/// libc, or an explicit `--platform linux/amd64+libc.musl`) is the signal that
+/// a no-match is a feature mismatch rather than a plain not-found.
+fn host_os_features(platforms: &[oci::Platform]) -> Option<Vec<String>> {
+    platforms.iter().find_map(|platform| match platform {
+        oci::Platform::Specific { os_features, .. } if !os_features.is_empty() => Some(os_features.clone()),
+        _ => None,
+    })
+}
+
+/// Collect the candidate platforms that share os+arch with a `Specific` host
+/// platform from the requested list.
+///
+/// These are the entries the user could target with `--platform` — the package
+/// ships for this os/arch, just under a different libc. Returns them sorted by
+/// display string for deterministic error output.
+fn candidates_sharing_host_os_arch(
+    platforms: &[oci::Platform],
+    candidates: &[(oci::Identifier, oci::Platform)],
+) -> Vec<oci::Platform> {
+    let host_os_arch: Vec<(&oci::OperatingSystem, &oci::Architecture)> = platforms
+        .iter()
+        .filter_map(|platform| match platform {
+            oci::Platform::Specific { os, arch, .. } => Some((os, arch)),
+            oci::Platform::Any => None,
+        })
+        .collect();
+
+    let mut matched: Vec<oci::Platform> = candidates
+        .iter()
+        .filter_map(|(_, candidate)| match candidate {
+            oci::Platform::Specific { os, arch, .. }
+                if host_os_arch
+                    .iter()
+                    .any(|(host_os, host_arch)| host_os == &os && host_arch == &arch) =>
+            {
+                Some(candidate.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    matched.sort_by_key(|platform| platform.to_string());
+    matched.dedup();
+    matched
+}
+
+// ── Index::select integration tests with multi-libc ImageIndex (Step 3.4) ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci::{self, Digest, Identifier, Manifest, Platform};
+    use async_trait::async_trait;
+
+    // ── Minimal mock IndexImpl returning a fixed ImageIndex ──────────
+
+    /// A mock `IndexImpl` that always returns the same pre-built `ImageIndex`
+    /// manifest so `Index::select` can be exercised without a real registry.
+    struct MultiLibcIndex {
+        manifest: oci::ImageIndex,
+    }
+
+    impl MultiLibcIndex {
+        /// Build a mock image index with three linux/amd64 entries:
+        ///   entry 0 — libc.glibc (digest sha256:glibc_entry…)
+        ///   entry 1 — libc.musl  (digest sha256:musl_entry…)
+        ///   entry 2 — no os.features (digest sha256:untagged_entry…)
+        fn new() -> Self {
+            fn platform_with_features(features: Option<Vec<String>>) -> oci::native::Platform {
+                oci::native::Platform {
+                    os: oci::native::Os::Linux,
+                    architecture: oci::native::Arch::Amd64,
+                    variant: None,
+                    features: None,
+                    os_version: None,
+                    os_features: features,
+                }
+            }
+
+            let glibc_entry = oci::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size: 100,
+                platform: Some(platform_with_features(Some(vec!["libc.glibc".to_string()]))),
+                artifact_type: None,
+                annotations: None,
+            };
+            let musl_entry = oci::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{}", "b".repeat(64)),
+                size: 100,
+                platform: Some(platform_with_features(Some(vec!["libc.musl".to_string()]))),
+                artifact_type: None,
+                annotations: None,
+            };
+            let untagged_entry = oci::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{}", "c".repeat(64)),
+                size: 100,
+                platform: Some(platform_with_features(None)),
+                artifact_type: None,
+                annotations: None,
+            };
+
+            Self {
+                manifest: oci::ImageIndex {
+                    schema_version: oci::INDEX_SCHEMA_VERSION,
+                    media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+                    artifact_type: None,
+                    manifests: vec![glibc_entry, musl_entry, untagged_entry],
+                    annotations: None,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for MultiLibcIndex {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(Some(vec!["1.0".to_string()]))
+        }
+
+        async fn fetch_manifest(
+            &self,
+            _identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> crate::Result<Option<(Digest, Manifest)>> {
+            let digest = Digest::Sha256("0".repeat(64));
+            Ok(Some((digest, Manifest::ImageIndex(self.manifest.clone()))))
+        }
+
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            Ok(Some(Digest::Sha256("0".repeat(64))))
+        }
+
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(MultiLibcIndex {
+                manifest: self.manifest.clone(),
+            })
+        }
+    }
+
+    fn test_id() -> Identifier {
+        Identifier::new_registry("test/tool", "example.com").clone_with_tag("1.0")
+    }
+
+    fn glibc_host_platform() -> Platform {
+        Platform::Specific {
+            os: oci::OperatingSystem::Linux,
+            arch: oci::Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: vec!["libc.glibc".to_string()],
+            features: None,
+        }
+    }
+
+    fn musl_host_platform() -> Platform {
+        Platform::Specific {
+            os: oci::OperatingSystem::Linux,
+            arch: oci::Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: vec!["libc.musl".to_string()],
+            features: None,
+        }
+    }
+
+    fn no_libc_host_platform() -> Platform {
+        // Represents a host where libc was undetected (empty os_features).
+        Platform::Specific {
+            os: oci::OperatingSystem::Linux,
+            arch: oci::Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: Vec::new(),
+            features: None,
+        }
+    }
+
+    // 3.4 — glibc host selects the libc.glibc entry
+
+    #[tokio::test]
+    async fn select_glibc_host_picks_glibc_entry() {
+        let index = Index::from_impl(MultiLibcIndex::new());
+        let glibc_digest = format!("sha256:{}", "a".repeat(64));
+
+        let result = index
+            .select(
+                &test_id(),
+                vec![glibc_host_platform(), Platform::any()],
+                IndexOperation::Query,
+            )
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::Found(id) => {
+                assert_eq!(
+                    id.digest().map(|d| d.to_string()),
+                    Some(glibc_digest),
+                    "glibc host must select the libc.glibc index entry"
+                );
+            }
+            SelectResult::NotFound => panic!("glibc host should find a matching entry"),
+            SelectResult::Ambiguous(candidates) => panic!("expected single match, got ambiguous: {:?}", candidates),
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => panic!(
+                "expected single match, got feature mismatch: host {:?}, available {:?}",
+                host_features, available
+            ),
+        }
+    }
+
+    // 3.4 — musl host selects the libc.musl entry
+
+    #[tokio::test]
+    async fn select_musl_host_picks_musl_entry() {
+        let index = Index::from_impl(MultiLibcIndex::new());
+        let musl_digest = format!("sha256:{}", "b".repeat(64));
+
+        let result = index
+            .select(
+                &test_id(),
+                vec![musl_host_platform(), Platform::any()],
+                IndexOperation::Query,
+            )
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::Found(id) => {
+                assert_eq!(
+                    id.digest().map(|d| d.to_string()),
+                    Some(musl_digest),
+                    "musl host must select the libc.musl index entry"
+                );
+            }
+            SelectResult::NotFound => panic!("musl host should find a matching entry"),
+            SelectResult::Ambiguous(candidates) => panic!("expected single match, got ambiguous: {:?}", candidates),
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => panic!(
+                "expected single match, got feature mismatch: host {:?}, available {:?}",
+                host_features, available
+            ),
+        }
+    }
+
+    // 3.4 — host with no detected libc selects the untagged entry
+
+    #[tokio::test]
+    async fn select_no_libc_host_picks_untagged_entry() {
+        let index = Index::from_impl(MultiLibcIndex::new());
+        let untagged_digest = format!("sha256:{}", "c".repeat(64));
+
+        let result = index
+            .select(
+                &test_id(),
+                vec![no_libc_host_platform(), Platform::any()],
+                IndexOperation::Query,
+            )
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::Found(id) => {
+                assert_eq!(
+                    id.digest().map(|d| d.to_string()),
+                    Some(untagged_digest),
+                    "host with no libc must select the un-tagged (empty os.features) entry"
+                );
+            }
+            SelectResult::NotFound => panic!("no-libc host should find the untagged entry"),
+            SelectResult::Ambiguous(candidates) => panic!("expected single match, got ambiguous: {:?}", candidates),
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => panic!(
+                "expected single match, got feature mismatch: host {:?}, available {:?}",
+                host_features, available
+            ),
+        }
+    }
+
+    // ── Dual-libc host can select either tagged entry (deterministic tiebreak) ──
+    //
+    // A host advertising {libc.glibc, libc.musl} (Ubuntu + musl-tools, or a
+    // multi-target CI runner) satisfies BOTH the libc.glibc and libc.musl index
+    // entries. Each declares exactly one os.feature, so both are equally
+    // specific (specificity 1) and the untagged entry (specificity 0) loses.
+    // With two equally specific matches the resolver surfaces `Ambiguous`,
+    // ordered by manifest order — glibc entry first, musl entry second — so the
+    // caller (or an explicit `--platform`) can deterministically pick either.
+
+    fn dual_libc_host_platform() -> Platform {
+        Platform::Specific {
+            os: oci::OperatingSystem::Linux,
+            arch: oci::Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: vec!["libc.glibc".to_string(), "libc.musl".to_string()],
+            features: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn select_dual_libc_host_can_select_either_tagged_entry() {
+        let index = Index::from_impl(MultiLibcIndex::new());
+        let glibc_digest = format!("sha256:{}", "a".repeat(64));
+        let musl_digest = format!("sha256:{}", "b".repeat(64));
+
+        let result = index
+            .select(
+                &test_id(),
+                vec![dual_libc_host_platform(), Platform::any()],
+                IndexOperation::Query,
+            )
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::Ambiguous(candidates) => {
+                let digests: Vec<String> = candidates
+                    .iter()
+                    .filter_map(|id| id.digest().map(|d| d.to_string()))
+                    .collect();
+                // Both libc-tagged entries match; the untagged entry is less
+                // specific and excluded. Order follows manifest order
+                // (deterministic): glibc first, musl second.
+                assert_eq!(
+                    digests,
+                    vec![glibc_digest, musl_digest],
+                    "dual-libc host must match both tagged entries in deterministic manifest order"
+                );
+            }
+            SelectResult::Found(id) => panic!("expected ambiguity between glibc+musl entries, got single: {id}"),
+            SelectResult::NotFound => panic!("dual-libc host must match the tagged entries"),
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => panic!(
+                "expected ambiguity, got feature mismatch: host {:?}, available {:?}",
+                host_features, available
+            ),
+        }
+    }
+
+    // ── Discriminating test: proves subset semantics, NOT just equality (3.4) ────
+    //
+    // This test FAILS under a strict-equality matcher and only passes under
+    // `can_run()`'s subset semantics.
+    //
+    // Setup: index contains ONLY an untagged entry (empty os_features).
+    //        Host is a glibc host (os_features = ["libc.glibc"]).
+    //
+    // Under strict equality:
+    //   host {os_features: ["libc.glibc"]} != candidate {os_features: []}
+    //   → SelectResult::NotFound  (test assertion fails here — proving it drives impl)
+    //
+    // Under subset semantics (can_run):
+    //   candidate.os_features = []  (empty set)
+    //   {} ⊆ {libc.glibc}  → true
+    //   → SelectResult::Found(untagged entry)  (test passes)
+    //
+    // This is the "static-musl / legacy untagged package on a libc-aware host"
+    // scenario: a glibc host should still be able to install a package that
+    // declares no libc requirement (empty os_features = "runs everywhere").
+
+    /// Mock index with only a single untagged linux/amd64 entry.
+    struct UntaggedOnlyIndex {
+        manifest: oci::ImageIndex,
+    }
+
+    impl UntaggedOnlyIndex {
+        fn new() -> Self {
+            let untagged_entry = oci::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{}", "d".repeat(64)),
+                size: 100,
+                platform: Some(oci::native::Platform {
+                    os: oci::native::Os::Linux,
+                    architecture: oci::native::Arch::Amd64,
+                    variant: None,
+                    features: None,
+                    os_version: None,
+                    os_features: None, // empty — declares no libc requirement
+                }),
+                artifact_type: None,
+                annotations: None,
+            };
+            Self {
+                manifest: oci::ImageIndex {
+                    schema_version: oci::INDEX_SCHEMA_VERSION,
+                    media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+                    artifact_type: None,
+                    manifests: vec![untagged_entry],
+                    annotations: None,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for UntaggedOnlyIndex {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(Some(vec!["1.0".to_string()]))
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<(Digest, Manifest)>> {
+            let digest = Digest::Sha256("0".repeat(64));
+            Ok(Some((digest, Manifest::ImageIndex(self.manifest.clone()))))
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            Ok(Some(Digest::Sha256("0".repeat(64))))
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(UntaggedOnlyIndex {
+                manifest: self.manifest.clone(),
+            })
+        }
+    }
+
+    // ── B2: FeatureMismatch path coverage ────────────────────────────────────
+    //
+    // This is the keystone error-path test: when the host detected a libc but
+    // the index has entries for this os+arch under a DIFFERENT libc only, the
+    // result must be `SelectResult::FeatureMismatch` (not `NotFound`).
+    //
+    // Setup: index contains ONLY a `linux/amd64 + os_features:[libc.musl]` entry.
+    //        Host is a glibc host (`os_features: ["libc.glibc"]`).
+    //
+    // Expected: `FeatureMismatch { host_features: ["libc.glibc"], available: [linux/amd64+musl] }`.
+
+    /// Mock index with only a single musl-tagged linux/amd64 entry.
+    struct MuslOnlyIndex {
+        manifest: oci::ImageIndex,
+    }
+
+    impl MuslOnlyIndex {
+        fn new() -> Self {
+            let musl_entry = oci::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{}", "e".repeat(64)),
+                size: 100,
+                platform: Some(oci::native::Platform {
+                    os: oci::native::Os::Linux,
+                    architecture: oci::native::Arch::Amd64,
+                    variant: None,
+                    features: None,
+                    os_version: None,
+                    os_features: Some(vec!["libc.musl".to_string()]),
+                }),
+                artifact_type: None,
+                annotations: None,
+            };
+            Self {
+                manifest: oci::ImageIndex {
+                    schema_version: oci::INDEX_SCHEMA_VERSION,
+                    media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+                    artifact_type: None,
+                    manifests: vec![musl_entry],
+                    annotations: None,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for MuslOnlyIndex {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(Some(vec!["1.0".to_string()]))
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<(Digest, Manifest)>> {
+            let digest = Digest::Sha256("0".repeat(64));
+            Ok(Some((digest, Manifest::ImageIndex(self.manifest.clone()))))
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            Ok(Some(Digest::Sha256("0".repeat(64))))
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(MuslOnlyIndex {
+                manifest: self.manifest.clone(),
+            })
+        }
+    }
+
+    /// B2 keystone: glibc host + musl-only index → FeatureMismatch with correct
+    /// `host_features` and `available` fields.
+    #[tokio::test]
+    async fn select_glibc_host_musl_only_index_returns_feature_mismatch() {
+        let index = Index::from_impl(MuslOnlyIndex::new());
+
+        let result = index
+            .select(
+                &test_id(),
+                vec![glibc_host_platform(), Platform::any()],
+                IndexOperation::Query,
+            )
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => {
+                assert_eq!(
+                    host_features,
+                    vec!["libc.glibc".to_string()],
+                    "host_features must report the glibc host tag"
+                );
+                assert_eq!(available.len(), 1, "exactly one available platform expected");
+                let avail = &available[0];
+                match avail {
+                    Platform::Specific {
+                        os, arch, os_features, ..
+                    } => {
+                        assert_eq!(os.to_string(), "linux");
+                        assert_eq!(arch.to_string(), "amd64");
+                        assert_eq!(
+                            os_features.as_slice(),
+                            &["libc.musl".to_string()],
+                            "available entry must carry libc.musl"
+                        );
+                    }
+                    _ => panic!("available entry must be Specific, got {:?}", avail),
+                }
+            }
+            SelectResult::NotFound => {
+                panic!("expected FeatureMismatch (index has linux/amd64+musl, host is glibc), got NotFound")
+            }
+            SelectResult::Found(id) => panic!("expected FeatureMismatch, got Found({id})"),
+            SelectResult::Ambiguous(ids) => panic!("expected FeatureMismatch, got Ambiguous({ids:?})"),
+        }
+    }
+
+    // ── Explicit --platform override selects feature-tagged manifest (D4) ────
+    //
+    // An explicit `--platform linux/amd64+libc.musl` must select the musl
+    // manifest even when host *detection* would baseline to glibc. The parsed
+    // platform carries `os_features: ["libc.musl"]`, so `can_run` admits
+    // only the musl-tagged candidate. This proves the `+features` syntax flows
+    // through `Index::select` end to end.
+
+    #[tokio::test]
+    async fn select_explicit_musl_platform_picks_musl_entry_over_glibc_baseline() {
+        let index = Index::from_impl(MultiLibcIndex::new());
+        let musl_digest = format!("sha256:{}", "b".repeat(64));
+
+        // Explicit override parsed from the CLI `--platform` syntax. No `Any`
+        // fallback and no glibc tier — only the musl-tagged platform.
+        let explicit: Platform = "linux/amd64+libc.musl".parse().unwrap();
+
+        let result = index
+            .select(&test_id(), vec![explicit], IndexOperation::Query)
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::Found(id) => {
+                assert_eq!(
+                    id.digest().map(|d| d.to_string()),
+                    Some(musl_digest),
+                    "explicit --platform linux/amd64+libc.musl must select the libc.musl entry"
+                );
+            }
+            SelectResult::NotFound => panic!("expected Found(musl entry), got NotFound"),
+            SelectResult::Ambiguous(ids) => panic!("expected Found(musl entry), got Ambiguous({ids:?})"),
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => panic!(
+                "expected Found(musl entry), got FeatureMismatch: host {host_features:?}, available {available:?}"
+            ),
+        }
+    }
+
+    // ── Discriminating test: proves subset semantics, NOT just equality (3.4) ────
+    //
+    // This test FAILS under a strict-equality matcher and only passes under
+    // `can_run()`'s subset semantics.
+    //
+    // Setup: index contains ONLY an untagged entry (empty os_features).
+    //        Host is a glibc host (os_features = ["libc.glibc"]).
+    //
+    // Under strict equality:
+    //   host {os_features: ["libc.glibc"]} != candidate {os_features: []}
+    //   → SelectResult::NotFound  (test assertion fails here — proving it drives impl)
+    //
+    // Under subset semantics (can_run):
+    //   candidate.os_features = []  (empty set)
+    //   {} ⊆ {libc.glibc}  → true
+    //   → SelectResult::Found(untagged entry)  (test passes)
+    //
+    // This is the "static-musl / legacy untagged package on a libc-aware host"
+    // scenario: a glibc host should still be able to install a package that
+    // declares no libc requirement (empty os_features = "runs everywhere").
+
+    /// Discriminating test: glibc host, index has ONLY untagged entry.
+    ///
+    /// - Fails under strict equality  (NotFound, not Found)
+    /// - Passes under `can_run()` subset semantics  (empty ⊆ glibc-host)
+    ///
+    /// This is the load-bearing case that proves subset semantics are actually
+    /// exercised, not just equality-by-coincidence.
+    #[tokio::test]
+    async fn select_glibc_host_picks_untagged_entry_when_only_untagged_present() {
+        let index = Index::from_impl(UntaggedOnlyIndex::new());
+        let untagged_digest = format!("sha256:{}", "d".repeat(64));
+
+        // Glibc host (os_features = ["libc.glibc"]) + Any fallback.
+        // The only index entry has empty os_features.
+        // Subset: {} ⊆ {libc.glibc} → must match.
+        let result = index
+            .select(
+                &test_id(),
+                vec![glibc_host_platform(), Platform::any()],
+                IndexOperation::Query,
+            )
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::Found(id) => {
+                assert_eq!(
+                    id.digest().map(|d| d.to_string()),
+                    Some(untagged_digest),
+                    "glibc host must match untagged entry via subset semantics (empty ⊆ glibc-host)"
+                );
+            }
+            SelectResult::NotFound => panic!(
+                "glibc host failed to select untagged entry — strict equality rejected \
+                 empty-set ⊆ {{libc.glibc}}; this test drives implementation of \
+                 can_run() subset semantics"
+            ),
+            SelectResult::Ambiguous(candidates) => panic!("expected single match, got ambiguous: {:?}", candidates),
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => panic!(
+                "expected single match, got feature mismatch: host {:?}, available {:?}",
+                host_features, available
+            ),
+        }
+    }
+
+    // ── NotFound vs FeatureMismatch boundary (review finding #9) ────────────
+    //
+    // `SelectResult::FeatureMismatch` is only correct when the host reported a
+    // non-empty `os_features` AND at least one candidate shares its os+arch.
+    // Both surrounding conditions collapse to plain `NotFound` instead. The two
+    // tests below each pin one of those conditions independently of the other.
+
+    /// A no-libc host (empty `os_features`, detection found nothing) must
+    /// surface a plain `NotFound` against a musl-only index — never
+    /// `FeatureMismatch`. `host_os_features()` returns `None` for an empty
+    /// `os_features` platform, so the `0`-match arm takes the `None` branch
+    /// straight to `NotFound` without ever computing `available`.
+    #[tokio::test]
+    async fn select_no_libc_host_musl_only_index_returns_not_found() {
+        let index = Index::from_impl(MuslOnlyIndex::new());
+
+        let result = index
+            .select(
+                &test_id(),
+                vec![no_libc_host_platform(), Platform::any()],
+                IndexOperation::Query,
+            )
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::NotFound => {}
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => panic!(
+                "no-libc host must yield NotFound (host_os_features is None), \
+                 got FeatureMismatch: host {host_features:?}, available {available:?}"
+            ),
+            SelectResult::Found(id) => panic!("expected NotFound, got Found({id})"),
+            SelectResult::Ambiguous(ids) => panic!("expected NotFound, got Ambiguous({ids:?})"),
+        }
+    }
+
+    /// Mock index with only a single `windows/amd64` entry — no os+arch
+    /// overlap with a linux glibc host.
+    struct WindowsOnlyIndex {
+        manifest: oci::ImageIndex,
+    }
+
+    impl WindowsOnlyIndex {
+        fn new() -> Self {
+            let windows_entry = oci::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{}", "f".repeat(64)),
+                size: 100,
+                platform: Some(oci::native::Platform {
+                    os: oci::native::Os::Windows,
+                    architecture: oci::native::Arch::Amd64,
+                    variant: None,
+                    features: None,
+                    os_version: None,
+                    os_features: None,
+                }),
+                artifact_type: None,
+                annotations: None,
+            };
+            Self {
+                manifest: oci::ImageIndex {
+                    schema_version: oci::INDEX_SCHEMA_VERSION,
+                    media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+                    artifact_type: None,
+                    manifests: vec![windows_entry],
+                    annotations: None,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for WindowsOnlyIndex {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(Some(vec!["1.0".to_string()]))
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<(Digest, Manifest)>> {
+            let digest = Digest::Sha256("0".repeat(64));
+            Ok(Some((digest, Manifest::ImageIndex(self.manifest.clone()))))
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            Ok(Some(Digest::Sha256("0".repeat(64))))
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(WindowsOnlyIndex {
+                manifest: self.manifest.clone(),
+            })
+        }
+    }
+
+    /// A glibc host has non-empty `os_features` (`host_os_features()` returns
+    /// `Some`), but a windows/amd64-only index shares no os+arch with the
+    /// linux host — `candidates_sharing_host_os_arch` returns empty, so the
+    /// `available.is_empty()` sub-branch must still resolve to `NotFound`,
+    /// never `FeatureMismatch`.
+    #[tokio::test]
+    async fn select_glibc_host_windows_only_index_returns_not_found() {
+        let index = Index::from_impl(WindowsOnlyIndex::new());
+
+        let result = index
+            .select(
+                &test_id(),
+                vec![glibc_host_platform(), Platform::any()],
+                IndexOperation::Query,
+            )
+            .await
+            .unwrap();
+
+        match result {
+            SelectResult::NotFound => {}
+            SelectResult::FeatureMismatch {
+                host_features,
+                available,
+            } => panic!(
+                "no os+arch overlap must yield NotFound (available.is_empty()), \
+                 got FeatureMismatch: host {host_features:?}, available {available:?}"
+            ),
+            SelectResult::Found(id) => panic!("expected NotFound, got Found({id})"),
+            SelectResult::Ambiguous(ids) => panic!("expected NotFound, got Ambiguous({ids:?})"),
         }
     }
 }

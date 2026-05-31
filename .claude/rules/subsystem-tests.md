@@ -161,6 +161,17 @@ Task targets: `task test:bench:setup`, `task test:bench`, `task test:bench:basel
 profile is isolated — `task test` never starts toxiproxy. See `test/bench/README.md`
 for full usage.
 
+## Test-Only Seams (`__testing` feature + `__OCX_*` env overrides)
+
+When an acceptance test must force internal state that production code derives at runtime (the running self-image, the detected host libc, …), **do not invent a new env var or a plain `cfg(test)` gate.** There is one canonical project convention — reuse it:
+
+1. **Cargo feature `__testing`** — declared `__testing = []` in `crates/ocx_lib/Cargo.toml`, re-exported `__testing = ["ocx_lib/__testing"]` in `crates/ocx_cli/Cargo.toml`. Follows the Rust-ecosystem `__name` convention (axum `__private`, reqwest `__tls`): internal, no stability guarantee, never enabled by downstream code.
+2. **Gate every seam** `#[cfg(any(test, feature = "__testing"))]` — `test` covers unit tests, `feature = "__testing"` covers the acceptance binary. **Release artifacts physically lack the code path.**
+3. **Env-var name is double-underscore-prefixed `__OCX_*`** (e.g. `__OCX_SELF_IMAGE`, `__OCX_TEST_LIBC`) — the prefix signals "private test seam, not user-facing config." These are NOT documented in `website/src/docs/reference/environment.md` and are NOT forwarded via `Env::apply_ocx_config`.
+4. **Defense-in-depth assert inside the gate** where misuse is dangerous — e.g. `__OCX_SELF_IMAGE` asserts the override targets a loopback registry, so even a build with the feature on cannot be coerced against a real registry.
+
+The acceptance harness already builds with the feature: `test/taskfile.yml` and `taskfiles/rust.taskfile.yml` pass `--features ocx/__testing`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_lib/src/package_manager/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
+
 ## Quality Gate
 
 During review-fix loops, run `task test:parallel` — not full `task verify`. Acceptance tests only; no Rust rebuild needed with `--no-build`.

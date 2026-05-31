@@ -45,6 +45,13 @@ tasks:
       # copied test/bin/ocx-shim{exe} makes test_windows_shim.py a live gate
       # on windows-latest and a no-op skip elsewhere (module is skipif Win32).
       OCX_SHIM_BINARY: "{{.OCX_SHIM_BINARY}}"
+      # Mirror tests that call subprocess.run with {**os.environ, ...} need
+      # OCX_INSECURE_REGISTRIES to reach the plain-HTTP test registry.
+      # MirrorRunner sets it per-process; this env propagates it to tests that
+      # use subprocess directly (test_mirror_os_features.py). The test registry
+      # always runs on localhost:5000 (docker compose default); CI inherits the
+      # REGISTRY env var if set.
+      OCX_INSECURE_REGISTRIES: "localhost:5000"
 
   quick:
     desc: Run acceptance tests in parallel without rebuilding the binary

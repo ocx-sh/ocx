@@ -57,6 +57,13 @@ impl Context {
 
         log::debug!("Creating context with options: {:?}", options);
 
+        // Detect the host libc once and populate the process-wide cache that
+        // `Platform::current()` reads during index resolution. One-shot CLI
+        // assumption (see `host_capabilities` module doc). Detection failure is
+        // not fatal — an undetected libc caches as `None`, a valid state that
+        // restricts matching to entries with empty `os.features`.
+        oci::HostCapabilities::detect_and_cache().await;
+
         if options.offline && options.remote {
             // `--offline --remote` = pinned-only mode. Both flags accepted
             // together because the routing matrix collapses cleanly:

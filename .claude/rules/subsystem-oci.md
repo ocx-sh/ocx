@@ -101,9 +101,15 @@ Key methods: `list_tags()`, `fetch_manifest()`, `fetch_candidates()`, `select(id
 pub enum SelectResult {
     Found(Identifier),           // Exactly one match
     Ambiguous(Vec<Identifier>),  // Multiple matches
-    NotFound,                    // No candidates
+    NotFound,                    // No candidates (no os/arch match, or package absent)
+    FeatureMismatch {            // os/arch present, but no candidate's os_features ⊆ host
+        host_features: Vec<String>,
+        available: Vec<Platform>,
+    },
 }
 ```
+
+`FeatureMismatch` is distinct from `NotFound`: the package ships for this os/arch but only under `os.features` the host does not satisfy (e.g. a different libc). The package-manager layer maps it to `PackageErrorKind::FeatureMismatch` → `ExitCode::DataError` (65); `available` lists candidate platforms the user can `--platform`-override to.
 
 ### IndexImpl Trait (private)
 
@@ -134,9 +140,45 @@ File-backed snapshot of registry metadata. Three public entry points, each narro
 ### Platform
 
 - `Platform::any()` — platform-agnostic packages (Java, text tools)
-- `Platform::current()` — auto-detect OS/arch
-- `platform.matches(other)` — currently strict equality (no fuzzy matching)
+- `Platform::current()` — auto-detect OS/arch; populates `os_features` from `HostCapabilities::detect()` cached at context init
+- `self.can_run(other)` — subset semantics on `os_features` + equality on `os` + `arch`; strict equality on `variant`/`os_version` only when the candidate declares them (fail-closed: `current()` never populates `os_version`); "can `self` run `other`"
+- `Platform::Specific.os_features` — `Vec<String>` carrying `libc.*` tags (e.g. `["libc.glibc"]`); empty `Vec` means no libc requirement declared
+- `Display` is the single canonical string (`os/arch[/variant][/os_version][+feature...]`, features sorted+deduped) — the `--platform` arg form, round-trips via `FromStr`. Filesystem paths use `segments()`/`ascii_segments()`, not `Display`.
 - Supported: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
+
+### libc Differentiation
+
+OCX encodes libc family in the OCI `platform.os.features` field using the `libc.*` namespace (`libc.glibc`, `libc.musl`). At install time `Platform::current()` discovers and identifies the host's dynamic loaders (discovery-then-identify; see Host detection below), populates `os_features`, and `Index::select` applies `can_run()` to pick the manifest whose `os_features` are a subset of the host's features.
+
+**ADR:** `adr_platform_libc_os_features.md`
+
+**`can_run` subset rule** (`self` = host, `other` = candidate index entry):
+
+```
+other.os_features ⊆ self.os_features
+```
+
+- `other.os_features` empty → matches every host (static-musl / scripts / bare-manifest fallback).
+- `other` is `Platform::Any` → always matches (scripts, JARs, data bundles).
+- `self` is `Platform::Any` (detection failed entirely) → never matches a `Specific` candidate.
+- `os` + `arch` equality required before the subset check runs.
+- `variant` mismatch (when `other` declares it) → no match; strict equality on variant preserved.
+
+**Invariant — subset scope is narrowly `os_features` only:**
+
+Subset semantics apply **only** to `os_features`. Extending subset or any non-equality semantics to `variant`, `os_version`, or `features` requires a new ADR — this matcher's narrow shape is load-bearing for predictable single-pass index resolution.
+
+**Wire format normalization:**
+
+`From<&Platform> for native::Platform` sorts and deduplicates `os_features` before emitting to JSON. Cascade eviction at `oci/client.rs` compares platform entries by `native::Platform` struct equality (positional `Vec`); unnormalized arrays would silently duplicate entries in the image index.
+
+**Host detection:**
+
+`HostCapabilities::detect()` (module `oci/host_capabilities.rs`) uses **discovery-then-identify**. *Discovery* builds a deduped candidate-loader set from three sources (priority order): (1) the `PT_INTERP` of a fixed system-binary allowlist (`INTERP_PROBE_BINARIES`, read via the `elf` crate) — the host's exact native loader wherever it lives, so non-FHS hosts (NixOS `/nix/store`, Gentoo Prefix, custom sysroots) resolve; (2) an arch-filtered scan of canonical loader dirs (+ immediate multiarch subdirs); (3) the hardcoded `GLIBC_LOADERS`/`MUSL_LOADERS` allowlist (fallback). *Identification* then classifies each loader **purely by its `--version` banner** (table-driven over `LIBC_FAMILIES`), unioning every positive into a sorted `BTreeSet<LibcFlavor>` via a concurrent `JoinSet` (no first-wins; deterministic by construction). A host may advertise multiple families (e.g. glibc + musl on Ubuntu + `musl-tools`), giving `os_features = ["libc.glibc","libc.musl"]`, so `can_run` admits both a `libc.glibc` and a `libc.musl` candidate. Detection is Linux-only; macOS and Windows return an empty set without spawning subprocesses. Banner classification (`GNU libc`/`GLIBC` → glibc; Ubuntu 20.04 quirk: exit 127 → `{loader} /bin/true`; `musl libc` → musl, exit status ignored) makes the **gcompat → musl** case fall out by construction — the gcompat stub at the glibc path prints the musl banner, classified musl (identity, not equivalence; no special-case exclusion). Empty set → empty `os_features`; subset matching then accepts only entries with empty `os_features`. A minimal host with no readable loader yields the empty set (debug-logged when `/nix` exists). **Known limitation:** detect-env ≠ exec-env (distrobox/container/install-here-run-there) — deferred to a future ADR. Research: `.claude/artifacts/research_libc_detection_robustness.md` (v2), `research_libc_detection_methods.md` (v1).
+
+**RESERVED `features` field:**
+
+`Platform::Specific.features` (OCI v1.1.1 RESERVED field) is never serialized. Inbound values from foreign manifests are warn-and-dropped.
 
 ### Manifest Types
 

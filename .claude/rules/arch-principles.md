@@ -63,7 +63,7 @@ CLI command (clap parse)
 | **Digest** | SHA-256 content hash — immutable identity of package version |
 | **Tag** | Mutable alias to digest (e.g., `3.28`, `latest`) |
 | **Cascade** | Publisher convention: push `3.28.1` and auto-update `3.28`, `3`, `latest` tags |
-| **Platform** | OS/arch pair (e.g., `linux/amd64`) for multi-platform manifest resolution |
+| **Platform** | OS/arch pair (e.g., `linux/amd64`) for multi-platform manifest resolution; optionally carries ABI features (libc family on Linux via `os.features`, e.g. `libc.glibc`). Resolution uses subset semantics via `can_run()` — not strict equality. Host libc detected per-host by `HostCapabilities::detect` via discovery-then-identify (a system binary's `PT_INTERP` + arch-filtered loader scan + allowlist fallback, then `--version` banner classification). ADR: `adr_platform_libc_os_features.md`. |
 | **Slug** | Filesystem-safe encoding: `to_relaxed_slug()` preserves `[a-zA-Z0-9._-]`, replaces rest with `_` |
 | **Identifier** | Parsed OCI reference: `registry/repo:tag@digest` with default registry fallback |
 | **Manifest** | OCI image manifest or image index (multi-platform) |
@@ -75,6 +75,7 @@ CLI command (clap parse)
 | ADR | Decision |
 |-----|----------|
 | `adr_cascade_platform_aware_push.md` | Per-platform version filtering + index merging |
+| `adr_platform_libc_os_features.md` | libc family differentiation via `os.features` + `libc.*` namespace; `can_run()` subset matcher |
 | `adr_codesign_inside_out_signing.md` | Recursive inside-out Mach-O signing |
 | `adr_codesign_per_file_signing.md` | Per-file signing replace bundle signing |
 | `adr_custom_oci_identifier.md` | Custom identifier parser replace `oci_spec::Reference` |
@@ -106,6 +107,7 @@ Project-wide conventions enforced by reviewer:
 | **Type names** | Full descriptive names (`OperatingSystem`, `Architecture`), not abbreviations (`Os`, `Arch`) | Abbreviated type names |
 | **Module structure** | One concept per file, deep nested modules (`platform/operating_system.rs`) — no `mod.rs`, use named module files | Monolithic files, `mod.rs` files |
 | **Internal enum exhaustiveness** | Omit `#[non_exhaustive]` on internal non-error enums so matches stay total across workspace. Binary = only consumer — no stable lib API ship. Error enums exempt: grow routinely and `#[non_exhaustive]` still aid safe expansion. | `#[non_exhaustive]` on closed internal enum |
+| **Test-only seams** | Force test state via the canonical seam pattern, never a bespoke override: gate `#[cfg(any(test, feature = "__testing"))]`, name env vars `__OCX_*` (double-underscore), keep them out of user docs + `apply_ocx_config`. Full convention + reference impl in [`subsystem-tests.md`](./subsystem-tests.md) "Test-Only Seams". | New `cfg(test)`-only override or a non-`__OCX_` env var for a test seam |
 
 ## Where Features Land
 

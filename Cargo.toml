@@ -139,6 +139,10 @@ sysinfo = "0.39.2"
 
 # Platform
 libc = "0.2"
+# Pure-Rust ELF parser (zero runtime deps, zero `unsafe`, dual MIT/Apache).
+# Used by host libc detection to read a system binary's `PT_INTERP` — the
+# host's exact native loader path — for discovery-then-identify libc probing.
+elf = "0.8"
 junction = "2.0.0"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",

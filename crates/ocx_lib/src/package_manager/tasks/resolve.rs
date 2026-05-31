@@ -282,6 +282,15 @@ impl PackageManager {
                     }
                     Ok(SelectResult::Ambiguous(v)) => return Err(PackageErrorKind::SelectionAmbiguous(v)),
                     Ok(SelectResult::NotFound) => return Err(PackageErrorKind::NotFound),
+                    Ok(SelectResult::FeatureMismatch {
+                        host_features,
+                        available,
+                    }) => {
+                        return Err(PackageErrorKind::FeatureMismatch {
+                            host_features,
+                            available,
+                        });
+                    }
                     Err(e) => return Err(PackageErrorKind::Internal(e)),
                 };
 
@@ -1013,6 +1022,7 @@ impl PackageManager {
                         SelectResult::Found(id) => id,
                         SelectResult::NotFound => return Ok(None),
                         SelectResult::Ambiguous(_) => return Ok(None),
+                        SelectResult::FeatureMismatch { .. } => return Ok(None),
                     };
                     match oci::PinnedIdentifier::try_from(selected_id) {
                         Ok(id) => id,
@@ -1312,7 +1322,9 @@ impl PackageManager {
                         .await
                     {
                         Ok(SelectResult::Found(id)) => id,
-                        Ok(SelectResult::NotFound | SelectResult::Ambiguous(_)) => {
+                        Ok(
+                            SelectResult::NotFound | SelectResult::Ambiguous(_) | SelectResult::FeatureMismatch { .. },
+                        ) => {
                             log::debug!(
                                 "resolve-site-patch-roots: could not select platform for companion '{}'; skipping",
                                 companion_id

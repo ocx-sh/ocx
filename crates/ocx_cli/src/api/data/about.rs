@@ -10,16 +10,23 @@ use crate::app::build_info::Provenance;
 ///
 /// Plain format: colored logo with key-value pairs alongside.
 ///
-/// JSON format: flat object with version + registry + platforms + shell +
-/// home plus optional `channel`, `commit`, `build`, `ci` blocks merged
-/// from [`Provenance::current`]. The build-provenance fields are absent
-/// on local `cargo build` without git, matching `ocx version --format
-/// json` behaviour.
+/// JSON format: flat object with version + registry + platforms + libc +
+/// shell + home plus optional `channel`, `commit`, `build`, `ci` blocks
+/// merged from [`Provenance::current`]. The build-provenance fields are
+/// absent on local `cargo build` without git, matching `ocx version
+/// --format json` behaviour. `libc` is a JSON array of the detected libc
+/// `os.features` tags (e.g. `["libc.glibc"]`, `["libc.glibc","libc.musl"]`),
+/// empty when none were detected (non-Linux host, NixOS, or a failed probe).
 #[derive(Serialize)]
 pub struct About {
     pub version: String,
     pub registry: String,
     pub platforms: Vec<String>,
+    /// Detected host libc `os.features` tags (e.g. `["libc.glibc"]`,
+    /// `["libc.glibc","libc.musl"]`), empty when none detected (non-Linux,
+    /// NixOS, failed probe). Reflects the same host detection the
+    /// index-resolution path uses; a host may advertise multiple families.
+    pub libc: Vec<String>,
     pub shell: Option<String>,
     pub home: String,
     #[serde(flatten)]
@@ -27,11 +34,19 @@ pub struct About {
 }
 
 impl About {
-    pub fn new(version: String, registry: String, platforms: Vec<String>, shell: Option<String>, home: String) -> Self {
+    pub fn new(
+        version: String,
+        registry: String,
+        platforms: Vec<String>,
+        libc: Vec<String>,
+        shell: Option<String>,
+        home: String,
+    ) -> Self {
         Self {
             version,
             registry,
             platforms,
+            libc,
             shell,
             home,
             provenance: Provenance::current(),
@@ -60,6 +75,9 @@ impl Printable for About {
         }
         println!("Registry:  {}", self.registry);
         println!("Platforms: {}", self.platforms.join(", "));
+        if !self.libc.is_empty() {
+            println!("Libc:      {}", self.libc.join(", "));
+        }
         println!("Shell:     {}", self.shell.as_deref().unwrap_or("n/a"));
         println!("Home:      {}", self.home);
     }
@@ -75,10 +93,50 @@ mod tests {
             version: "1.0.0".to_owned(),
             registry: "registry.example.com".to_owned(),
             platforms: vec!["linux/amd64".to_owned()],
+            libc: Vec::new(),
             shell: None,
             home: "/home/user/.ocx".to_owned(),
             provenance,
         }
+    }
+
+    /// The `libc` field is a JSON array of detected libc `os.features` tags —
+    /// one entry, two entries (dual-libc host), or empty when undetected. The
+    /// full `libc.*` tag is emitted (not the bare family name) so `about`
+    /// matches the `version` host row and the resolver's wire form.
+    #[test]
+    fn libc_field_serialized_in_json() {
+        let mut about = make_about_with_provenance(Provenance {
+            channel: None,
+            commit: None,
+            build: None,
+            ci: None,
+        });
+        about.libc = vec!["libc.glibc".to_owned()];
+        let value = serde_json::to_value(&about).unwrap();
+        assert_eq!(
+            value.get("libc").and_then(|v| v.as_array()),
+            Some(&vec![serde_json::Value::from("libc.glibc")])
+        );
+
+        about.libc = vec!["libc.glibc".to_owned(), "libc.musl".to_owned()];
+        let value = serde_json::to_value(&about).unwrap();
+        assert_eq!(
+            value.get("libc").and_then(|v| v.as_array()),
+            Some(&vec![
+                serde_json::Value::from("libc.glibc"),
+                serde_json::Value::from("libc.musl")
+            ]),
+            "dual-libc host must serialize both full tags as a JSON array"
+        );
+
+        about.libc = Vec::new();
+        let value = serde_json::to_value(&about).unwrap();
+        assert_eq!(
+            value.get("libc").and_then(|v| v.as_array()),
+            Some(&Vec::new()),
+            "undetected libc must serialize as an empty array"
+        );
     }
 
     /// `commit_summary` returns `None` when no git metadata is baked in.

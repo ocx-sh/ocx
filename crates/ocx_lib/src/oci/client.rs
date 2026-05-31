@@ -3911,4 +3911,109 @@ mod tests {
             "no manifest must be pushed when the descriptor is malformed"
         );
     }
+
+    // ── Cascade normalization regression: os_features re-push eviction (Step 3.7) ──
+
+    mod cascade_normalization {
+        use super::*;
+
+        fn stub_with_capture(data: &StubTransportData) -> Client {
+            data.write().capture_pushes = true;
+            Client::with_transport(Box::new(StubTransport::new(data.clone())))
+        }
+
+        fn test_id(tag: &str) -> Identifier {
+            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        }
+
+        fn read_pushed_index(data: &StubTransportData, tag: &str) -> oci::ImageIndex {
+            let id = test_id(tag);
+            let inner = data.read();
+            let (bytes, _) = inner
+                .manifests
+                .get(&id.canonical_reference().to_string())
+                .expect("no pushed manifest");
+            let manifest: oci::Manifest = serde_json::from_slice(bytes).unwrap();
+            match manifest {
+                oci::Manifest::ImageIndex(idx) => idx,
+                _ => panic!("expected ImageIndex"),
+            }
+        }
+
+        /// Two re-pushes of linux/amd64 with the SAME os_features set but in DIFFERENT
+        /// array order must produce exactly ONE entry in the merged index.
+        ///
+        /// This is the B2 regression test from the architect review.
+        ///
+        /// ## Why identical-value tests do NOT catch this bug
+        ///
+        /// `merge_platform_into_index` evicts the prior entry by comparing
+        /// `entry.platform != platform` (positional `Vec` equality on the native
+        /// `native::Platform` struct).  When both pushes carry exactly the same
+        /// `os_features` bytes, eviction works by coincidence.
+        ///
+        /// The bug surfaces when a re-push arrives with `os_features` in a different
+        /// array order:
+        ///   first push:  os_features = ["libc.glibc", "libc.x"]
+        ///   second push: os_features = ["libc.x", "libc.glibc"]  (same set, reordered)
+        ///
+        /// Under current code (no normalization):
+        ///   `["libc.glibc","libc.x"] != ["libc.x","libc.glibc"]`  (positional inequality)
+        ///   → `retain` keeps the first entry  → index has 2 entries  (BUG: index bloat)
+        ///   → this test FAILS (asserts 1, gets 2)
+        ///
+        /// After Step 4.6 normalization (sort+dedup in `From<&Platform> for native::Platform`):
+        ///   both serialize as  ["libc.glibc", "libc.x"]  (sorted, ascending)
+        ///   → `retain` evicts the first  → index has 1 entry  → this test passes
+        #[tokio::test]
+        async fn repush_same_platform_different_feature_order_produces_one_entry() {
+            let data = StubTransportData::new();
+            let client = stub_with_capture(&data);
+            let id = test_id("3.28");
+
+            // First push: os_features = ["libc.glibc", "libc.x"]  (glibc < x — already sorted)
+            let first_platform = oci::Platform::Specific {
+                os: oci::OperatingSystem::Linux,
+                arch: oci::Architecture::Amd64,
+                variant: None,
+                os_version: None,
+                os_features: vec!["libc.glibc".to_string(), "libc.x".to_string()],
+                features: None,
+            };
+            client
+                .merge_platform_into_index(&id, "3.28", &first_platform, "sha256:first_push", 100)
+                .await
+                .unwrap();
+
+            // Second push: os_features = ["libc.x", "libc.glibc"]  (SAME SET, reverse order)
+            // Without normalization: positional Vec inequality → retain keeps both → 2 entries (BUG)
+            // With normalization:    both sort to ["libc.glibc","libc.x"] → retain evicts first → 1 entry
+            let second_platform = oci::Platform::Specific {
+                os: oci::OperatingSystem::Linux,
+                arch: oci::Architecture::Amd64,
+                variant: None,
+                os_version: None,
+                os_features: vec!["libc.x".to_string(), "libc.glibc".to_string()],
+                features: None,
+            };
+            client
+                .merge_platform_into_index(&id, "3.28", &second_platform, "sha256:second_push", 200)
+                .await
+                .unwrap();
+
+            let index = read_pushed_index(&data, "3.28");
+            assert_eq!(
+                index.manifests.len(),
+                1,
+                "re-push with reordered os_features must evict the prior entry (normalization \
+                 collapses both to the same sorted form); got {} entries — this fails today \
+                 (positional Vec inequality) and passes after Step 4.6 sort+dedup normalization",
+                index.manifests.len()
+            );
+            assert_eq!(
+                index.manifests[0].digest, "sha256:second_push",
+                "latest push must win after normalization-enabled eviction"
+            );
+        }
+    }
 }

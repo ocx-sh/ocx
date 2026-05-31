@@ -49,6 +49,12 @@ impl Version {
         let data = VersionData::enriched(crate::app::version(), env!("CARGO_PKG_VERSION"));
         let api = options.build_api(color_config);
         if self.verbose {
+            // `ocx version` runs on the static bypass, so `Context::try_init`
+            // (which normally caches host capabilities) has not run. Populate
+            // the host-libc cache here so the verbose `host:` row can report
+            // the detected family. Only the verbose plain path needs it; the
+            // bare/JSON path stays pure for the self-update subprocess parser.
+            ocx_lib::oci::HostCapabilities::detect_and_cache().await;
             api.report(&VerboseVersionData(data))?;
         } else {
             api.report(&data)?;

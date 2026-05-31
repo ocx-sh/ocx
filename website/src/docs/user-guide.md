@@ -164,6 +164,8 @@ A single OCX identifier covers what / which version / how built / which platform
 
 For *build flavor* — debug, PGO, slim — use a [variant prefix][in-depth-versioning-variants]: `python:debug-3.12`. For *exact reproducibility regardless of any tag*, use a digest: `cmake@sha256:abc123…`. Platform is auto-detected; override with `-p, --platform` only for cross-arch installs.
 
+On Linux, platform detection also identifies the libc family: OCX probes the host's dynamic linker once at startup and selects among glibc-tagged, musl-tagged, and untagged entries accordingly. A package that ships distinct glibc and musl builds under one tag co-locates them in the same image index; OCX picks the right one automatically. Run [`ocx about`][cmd-about] to inspect the detected libc and supported-platform set. For verbose build context including the host row, run [`ocx version -v`][cmd-version]. See [libc Differentiation][authoring-libc] for the publisher side of this workflow.
+
 `ocx index list cmake --variants` shows available variants without downloading anything.
 
 <Terminal src="/casts/user-guide/variants.cast" title="Working with variants" collapsed />
@@ -820,6 +822,9 @@ For [direnv][direnv]-driven repos, use [`ocx direnv init`][cmd-direnv-init] to w
 
 The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable now accept any path, not just files named `ocx.toml`. The CWD walk still only looks for files named exactly `ocx.toml`.
 
+<!-- authoring -->
+[authoring-libc]: ./authoring/multi-platform.md#libc
+
 <!-- external -->
 [github-releases-ocx]: https://github.com/ocx-sh/ocx/releases
 [artifactory]: https://jfrog.com/artifactory/
@@ -893,6 +898,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-pull]: ./reference/command-line.md#pull
 [cmd-direnv-export]: ./reference/command-line.md#direnv-export
 [cmd-direnv-init]: ./reference/command-line.md#direnv-init
+[cmd-about]: ./reference/command-line.md#about
+[cmd-version]: ./reference/command-line.md#version
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-offline]: ./reference/command-line.md#arg-offline
 [arg-frozen]: ./reference/command-line.md#arg-frozen

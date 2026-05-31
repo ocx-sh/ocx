@@ -85,11 +85,15 @@ impl Printable for VersionData {
 /// summary showing build provenance alongside the version token.
 ///
 /// Plain format: `ocx <version>` header with optional cargo/channel
-/// qualifiers, followed by commit, build, and CI rows for the fields
-/// that were baked into the binary at build time.
+/// qualifiers, followed by a `host:` row (os/arch + detected libc) and the
+/// commit, build, and CI rows for the fields that were baked into the binary
+/// at build time. The `host:` row is suppressed when the host OS/arch is not
+/// in OCX's supported set.
 ///
 /// JSON format: delegates to the inner `VersionData` — identical wire
-/// shape whether verbose or not.
+/// shape whether verbose or not. The host row is plain-output only; it does
+/// NOT add a field to the `version` JSON wire shape (self-update parser
+/// contract).
 pub struct VerboseVersionData(pub VersionData);
 
 impl Printable for VerboseVersionData {
@@ -110,6 +114,25 @@ impl Printable for VerboseVersionData {
             header.push_str(&format!(" ({})", extras.join(", ")));
         }
         println!("{header}");
+
+        // ── Host row: os/arch + detected libc families ──────────────
+        // Plain-output only — never added to the `version` JSON wire shape.
+        // Suppressed when the host OS/arch is not in OCX's supported set. A
+        // host may advertise multiple libc families (e.g. glibc + musl).
+        if let Some(platform) = ocx_lib::oci::Platform::current() {
+            // Render the bare os/arch base (no `+os_features` suffix); the
+            // detected libc is shown separately in the parenthetical below, so
+            // `Display` here would duplicate it.
+            let base = platform.segments().join("/");
+            let tags = ocx_lib::oci::cached_libc_labels();
+            let host = if tags.is_empty() {
+                base
+            } else {
+                let joined = tags.join(", ");
+                format!("{base} {}", theme.aside(format!("({joined})")))
+            };
+            println!("{}    {host}", theme.label("host:"));
+        }
 
         // ── Commit row ──────────────────────────────────────────────
         if let Some(commit) = &inner.provenance.commit {
@@ -225,5 +248,37 @@ mod tests {
             !version_str.contains('\x1b'),
             "version must contain no ANSI when color disabled"
         );
+    }
+
+    /// The verbose plain-text render adds a `host:` row (os/arch + detected
+    /// libc), but the JSON wire shape must stay identical to plain
+    /// `VersionData` — no `libc` or `host` key leaks in. The
+    /// `query_installed_version` subprocess parser in
+    /// `ocx_lib::package_manager::tasks::update_check` only ever reads
+    /// `version` out of this payload; a stray key would still be harmless to
+    /// that parser today, but its absence is the documented self-update
+    /// wire contract and must not silently drift.
+    #[test]
+    fn verbose_json_wire_shape_has_no_libc_or_host_keys() {
+        let data = VersionData::enriched("1.2.3", "1.2.3");
+        let verbose = VerboseVersionData(data);
+
+        let value = serde_json::to_value(&verbose).unwrap();
+        let object = value.as_object().expect("wire shape must be a JSON object");
+
+        assert!(
+            !object.contains_key("libc"),
+            "JSON wire shape must not carry a libc key"
+        );
+        assert!(
+            !object.contains_key("host"),
+            "JSON wire shape must not carry a host key"
+        );
+        for key in object.keys() {
+            assert!(
+                ["version", "cargo_pkg_version", "channel", "commit", "build", "ci"].contains(&key.as_str()),
+                "unexpected top-level key {key:?} in verbose version JSON wire shape"
+            );
+        }
     }
 }

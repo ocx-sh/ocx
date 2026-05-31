@@ -679,12 +679,32 @@ fn guard_unique_key(map: &mut BTreeMap<String, Digest>, key: String, digest: Dig
 
 /// Shared host → `"any"` lookup over a V2 `platforms` map.
 ///
-/// Tries the host platform's [`Platform::lock_key`] first, then the `"any"`
-/// key (flat `Manifest::Image` packages). Returns the matching leaf
-/// [`Digest`], or `None` when neither key is present (the caller raises a
-/// clean pre-network "no <host> leaf" error).
+/// Tries three keys in order:
+///
+/// 1. the host platform's exact [`Platform::lock_key`] — matches a package
+///    that declared the host's libc (e.g. host `linux/amd64;osf=libc.glibc`
+///    against a `libc.glibc`-tagged entry);
+/// 2. the host's [`Platform::base_lock_key`] — the same os/arch/variant with
+///    empty `os_features`. This is the backward-compat tier: a libc-detecting
+///    host must still resolve a plain `linux/amd64` entry keyed before libc
+///    detection existed, or a deliberately libc-agnostic static-linked build.
+///    Without it, `Platform::current()` populating real `os_features` would
+///    turn every legacy per-platform lock into a spurious `NoHostLeaf`;
+/// 3. the `"any"` key (flat `Manifest::Image` packages).
+///
+/// Tier 2 keys on the *empty-features* base only, so it never falsely matches a
+/// different libc's entry: a `libc.musl`-only entry is not the plain
+/// `linux/amd64` key, so a glibc host will not resolve it here. Cross-libc
+/// subset selection is [`crate::oci::Index::select`]'s job, not this exact-key
+/// lookup's.
+///
+/// Returns the matching leaf [`Digest`], or `None` when no tier matches (the
+/// caller raises a clean pre-network "no <host> leaf" error).
 pub fn lookup_host_leaf<'a>(platforms: &'a BTreeMap<String, Digest>, host: &Platform) -> Option<&'a Digest> {
-    platforms.get(&host.lock_key()).or_else(|| platforms.get(ANY_KEY))
+    platforms
+        .get(&host.lock_key())
+        .or_else(|| platforms.get(&host.base_lock_key()))
+        .or_else(|| platforms.get(ANY_KEY))
 }
 
 /// Run the retry chain: up to `retry_attempts` retries on
@@ -2720,6 +2740,71 @@ gamma = "{r}/gamma:1"
             lookup_host_leaf(&platforms, &host).is_none(),
             "neither the host key nor `any` is present → None"
         );
+    }
+
+    /// Backward compat: a libc-detecting host (its `lock_key` carries
+    /// `;osf=libc.glibc`) must still resolve a plain `linux/amd64` entry keyed
+    /// before libc detection existed. Without the base-key tier this regresses
+    /// to a spurious `NoHostLeaf` on every legacy per-platform lock.
+    #[test]
+    fn lookup_host_leaf_falls_back_to_legacy_base_key() {
+        let host: Platform = "linux/amd64+libc.glibc".parse().unwrap();
+        let mut platforms = BTreeMap::new();
+        platforms.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
+
+        let leaf = lookup_host_leaf(&platforms, &host).expect("legacy base key present");
+        assert_eq!(
+            *leaf,
+            Digest::Sha256("a".repeat(64)),
+            "a glibc host resolves the plain (empty-os_features) entry"
+        );
+    }
+
+    /// The exact libc key wins over the legacy base key when both are present:
+    /// tier order is exact → base → any.
+    #[test]
+    fn lookup_host_leaf_prefers_exact_libc_key_over_base() {
+        let host: Platform = "linux/amd64+libc.glibc".parse().unwrap();
+        let mut platforms = BTreeMap::new();
+        platforms.insert(host.lock_key(), Digest::Sha256("g".repeat(64)));
+        platforms.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
+
+        let leaf = lookup_host_leaf(&platforms, &host).expect("exact libc key present");
+        assert_eq!(
+            *leaf,
+            Digest::Sha256("g".repeat(64)),
+            "the exact libc.glibc leaf wins over the plain base entry"
+        );
+    }
+
+    /// A dual-libc host against a map that carries only feature-specific keys
+    /// (`libc.glibc` and `libc.musl`, no combined key, no plain base) resolves
+    /// to `None` — the base-key tier keys on empty-os_features only, so it never
+    /// falsely matches one libc's entry for a host that requested both.
+    #[test]
+    fn lookup_host_leaf_dual_libc_no_false_match_on_feature_specific_keys() {
+        let host: Platform = "linux/amd64+libc.glibc+libc.musl".parse().unwrap();
+        let glibc: Platform = "linux/amd64+libc.glibc".parse().unwrap();
+        let musl: Platform = "linux/amd64+libc.musl".parse().unwrap();
+        let mut platforms = BTreeMap::new();
+        platforms.insert(glibc.lock_key(), Digest::Sha256("g".repeat(64)));
+        platforms.insert(musl.lock_key(), Digest::Sha256("m".repeat(64)));
+
+        assert!(
+            lookup_host_leaf(&platforms, &host).is_none(),
+            "a dual-libc host must not falsely match a single feature-specific entry"
+        );
+    }
+
+    /// The same dual-libc host resolves its exact combined key when present.
+    #[test]
+    fn lookup_host_leaf_dual_libc_matches_exact_combined_key() {
+        let host: Platform = "linux/amd64+libc.glibc+libc.musl".parse().unwrap();
+        let mut platforms = BTreeMap::new();
+        platforms.insert(host.lock_key(), Digest::Sha256("d".repeat(64)));
+
+        let leaf = lookup_host_leaf(&platforms, &host).expect("exact combined key present");
+        assert_eq!(*leaf, Digest::Sha256("d".repeat(64)), "exact dual-libc key wins");
     }
 
     // ── transcribe_v1_to_v2 ─────────────────────────────────────────────────

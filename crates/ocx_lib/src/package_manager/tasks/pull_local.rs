@@ -593,7 +593,7 @@ mod tests {
             arch: oci::Architecture::Amd64,
             variant: None,
             os_version: None,
-            os_features: None,
+            os_features: Vec::new(),
             features: None,
         };
         Info {

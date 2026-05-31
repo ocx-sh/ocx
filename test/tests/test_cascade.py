@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src import OcxRunner, make_package
-from src.registry import fetch_manifest_from_registry, index_platforms
+from src.registry import fetch_manifest_from_registry, index_platforms, index_platforms_with_features
 
 
 def test_cascade_preserves_platforms(
@@ -554,4 +554,65 @@ def test_three_variants_independent(
     unique_major = set(major_digests.values())
     assert len(unique_major) == 4, (
         f"Expected 4 unique major digests, got {len(unique_major)}: {major_digests}"
+    )
+
+
+# ── libc os.features cascade tests (Step 3.5) ────────────────────────────────
+
+
+def test_cascade_libc_variants_preserved(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """Cascade push preserves BOTH libc variants (glibc + musl) under linux/amd64
+    on all rolling tags.
+
+    Regression spec: when two entries share the same (os, arch) but differ in
+    os.features, cascade must not evict either — they are distinct index entries
+    distinguished by the ``os.features`` field, not by platform string alone.
+
+    Assertion tightened to ``== 2``: the ``>= 1`` form would pass even under the
+    eviction bug this test guards.  Two genuinely differentiated pushes (one
+    ``linux/amd64+libc.glibc``, one ``linux/amd64+libc.musl``) must both survive
+    through the cascade merge step.
+    """
+    # Push glibc variant for linux/amd64 at version 1.0.0 with explicit libc tag.
+    # The __OCX_TEST_LIBC env var is NOT set in this test — we are pushing to the
+    # registry with explicit platform metadata via the ``--platform`` flag; we are
+    # NOT testing host detection here.  The libc variants appear in the image
+    # index as explicit ``os.features`` values set during publish.
+    make_package(
+        ocx, unique_repo, "1.0.0", tmp_path / "glibc",
+        platform="linux/amd64+libc.glibc", new=True,
+    )
+    make_package(
+        ocx, unique_repo, "1.0.0", tmp_path / "musl",
+        platform="linux/amd64+libc.musl", new=False,
+    )
+
+    # Rolling tag "1.0" must contain BOTH linux/amd64 libc entries.
+    manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, "1.0")
+    platforms = index_platforms(manifest)
+    assert "linux/amd64" in platforms, f"linux/amd64 missing from 1.0: {platforms}"
+
+    entries_with_features = index_platforms_with_features(manifest)
+    linux_amd64_entries = [
+        e for e in entries_with_features
+        if e["os"] == "linux" and e["architecture"] == "amd64"
+    ]
+    # Strict == 2: both the glibc and musl entries must survive the cascade merge.
+    # A count of 1 would indicate the eviction bug this test guards against.
+    assert len(linux_amd64_entries) == 2, (
+        f"Expected exactly 2 linux/amd64 entries in 1.0 after cascade (one glibc, one musl); "
+        f"got {len(linux_amd64_entries)}: {linux_amd64_entries}"
+    )
+
+    # Both distinct os.features sets must be present.
+    features_sets = {
+        tuple(sorted(e.get("os.features") or [])) for e in linux_amd64_entries
+    }
+    assert ("libc.glibc",) in features_sets, (
+        f"glibc entry must survive cascade; got features_sets={features_sets}"
+    )
+    assert ("libc.musl",) in features_sets, (
+        f"musl entry must survive cascade; got features_sets={features_sets}"
     )

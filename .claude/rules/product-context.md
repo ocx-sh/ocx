@@ -77,6 +77,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | 7 | Private distribution first-class | Internal tools simple as `docker push` |
 | 8 | Declarative env metadata | Multi-package env composition without shell scripts |
 | 9 | First-class corporate / air-gapped mirror support | Explicit `[mirrors]` config routes OCI read traffic to Artifactory/Nexus/Harbor with host+repo-key path-prefix rewrite, replace semantics (no egress fallback), content-address verified; a gap mise/asdf/ORAS do not close. Reinforces Principle #7 (Private-first). |
+| 10 | Automatic libc/ABI resolution | glibc vs musl selected per-host from one OCI index; no `-musl` tag suffixes, no separate repos |
 
 ## Competitive Positioning
 
@@ -100,6 +101,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 - **"Why not mise/asdf?"** — consume binaries but can't publish; each tool need maintained plugin
 - **"Why not ORAS?"** — push/pull only; no install, no version switching, no env management
 - **"Why not `curl | sh`?"** — security-conscious CI personas refuse to pipe network shell into an interpreter. OCX ships a self-contained binary on GitHub Releases; download it, run `ocx self setup`, and reach identical state to the install script without any shell script involved. The loose binary bootstraps the managed copy, writes env shims, and wires shell profiles atomically. This is the direct answer to the "I won't curl-pipe" objection: one binary, one command, verified.
+- **"Why not just `-musl`-suffixed tags?"** — separate tags or repos require manual selection per host; no two-libc host support; N repos to maintain per tool. OCX uses one OCI index for all variants; host-side subset match on `os.features` selects automatically; a dual-libc host (e.g. Ubuntu + `musl-tools`) resolves either variant without any tag disambiguation
 
 ## Use Cases
 
