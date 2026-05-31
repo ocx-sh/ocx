@@ -860,6 +860,30 @@ def test_modify_shell_profile_elvish_block(tmp_path: Path) -> None:
     )
 
 
+def test_detect_profile_wires_both_bash_and_zsh(tmp_path: Path) -> None:
+    """A POSIX login shell (bash OR zsh) must wire BOTH shells' entry points.
+
+    Regression for the multi-shell gap: the installer previously wired only the
+    detected ``$SHELL``, so a zsh user who dropped into bash got no completions
+    (env.sh was never sourced there). Both shells source the same env.sh, so
+    wiring both is safe and keeps activation + completions working in either.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    for shell in ("/usr/bin/zsh", "/bin/bash"):
+        result = _source_install_sh(
+            "detect_profile",
+            {"HOME": str(home), "SHELL": shell, "PATH": "/usr/bin:/bin"},
+        )
+        assert result.returncode == 0, f"detect_profile ({shell}) failed: {result.stderr}"
+        lines = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        # bash interactive + zsh login/interactive must all be present, whatever $SHELL is.
+        for required in (f"{home}/.bashrc", f"{home}/.zprofile", f"{home}/.zshrc"):
+            assert required in lines, (
+                f"detect_profile must wire {required} for SHELL={shell}; got {lines!r}"
+            )
+
+
 def test_modify_shell_profile_posix_block_unchanged(tmp_path: Path) -> None:
     """Regression: POSIX sh/bash/zsh block form must remain byte-identical to the
     expected form — ``\\n# BEGIN ocx\\n. "<root>/env.sh"\\n# END ocx\\n``.

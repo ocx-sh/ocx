@@ -720,18 +720,25 @@ remove_legacy_init_lines() {
 
 # --- Shell profile modification ---
 
-# Profile target decision tree - covers BOTH login and interactive rc files
-# so the activation block fires regardless of how the terminal is launched.
-# Login-only targets (.zprofile, .bash_profile) miss Linux/WSL/VSCode
-# terminals which open interactive non-login shells; interactive-only
-# targets (.zshrc, .bashrc) miss macOS Terminal's default login shells.
-# Writing to both is safe - env.sh's PATH `case`-match makes the second
-# source a no-op (idempotent dedup).
+# Profile target decision tree - covers BOTH login and interactive rc files so
+# the activation block fires regardless of how the terminal is launched. The
+# block sources the shared POSIX `$OCX_HOME/env.sh`, which detects bash vs zsh
+# at runtime - so for any POSIX login shell we wire BOTH the bash and zsh entry
+# points unconditionally. That way a user who switches shells, or drops from
+# zsh into a bash subshell, keeps PATH and completions in either. env.sh applies
+# PATH + global-env once per shell (the `_OCX_ENV_LOADED` guard) and re-injects
+# completions per interactive source, and each block is shell-gated, so the copy
+# that fires in a shell you do not use is a harmless no-op.
 #
-#   bash -> ~/.bash_profile (or ~/.profile if no .bash_profile) + ~/.bashrc
-#   zsh  -> ${ZDOTDIR:-$HOME}/.zprofile + ${ZDOTDIR:-$HOME}/.zshrc
-#   fish -> ~/.config/fish/conf.d (managed via conf.d - no block needed here)
-#   *    -> ~/.profile
+# Login-only targets (.zprofile, .bash_profile) miss Linux/WSL/VSCode
+# interactive non-login shells; interactive-only targets (.zshrc, .bashrc) miss
+# macOS Terminal's default login shells - so both are written for each shell.
+#
+#   bash + zsh : ~/.bash_profile (or ~/.profile) + ~/.bashrc
+#                ${ZDOTDIR:-$HOME}/.zprofile + ${ZDOTDIR:-$HOME}/.zshrc
+#   fish       : ~/.config/fish/conf.d (managed via conf.d - no block here)
+#   nu         : vendor/autoload (no block here)
+#   elvish     : ~/.config/elvish/rc.elv (own env.elv syntax)
 #
 # Returns one path per line.
 detect_profile() {
@@ -739,42 +746,41 @@ detect_profile() {
 
     _shell_name=$(basename "${SHELL:-sh}")
 
+    # fish/nushell have dedicated activation (conf.d / vendor-autoload) and
+    # cannot source the POSIX env.sh; elvish uses its own rc.elv + env.elv.
+    # These opt out of the shared bash+zsh wiring below.
     case "$_shell_name" in
-        bash)
-            if [ -f "$HOME/.bash_profile" ]; then
-                echo "$HOME/.bash_profile"
-            else
-                echo "$HOME/.profile"
-            fi
-            echo "$HOME/.bashrc"
-            ;;
-        zsh)
-            # Respect ZDOTDIR when set. Reject ZDOTDIR="/" to prevent writing
-            # /.zprofile (CWE-22 defense - filesystem root write guard).
-            _zdotdir="${ZDOTDIR:-$HOME}"
-            if [ "$_zdotdir" = "/" ]; then
-                warn "ZDOTDIR is '/' - refusing to write under /; falling back to \$HOME"
-                _zdotdir="$HOME"
-            fi
-            echo "$_zdotdir/.zprofile"
-            echo "$_zdotdir/.zshrc"
-            ;;
-        fish)
-            # Fish uses conf.d - no block-marker profile edit needed
+        fish | nu)
             echo ""
-            ;;
-        nu)
-            # Nushell uses vendor/autoload - no block-marker profile edit needed
-            echo ""
+            return
             ;;
         elvish)
-            # Elvish uses rc.elv as the login profile
             echo "${XDG_CONFIG_HOME:-$HOME/.config}/elvish/rc.elv"
-            ;;
-        *)
-            echo "$HOME/.profile"
+            return
             ;;
     esac
+
+    # Shared bash+zsh wiring for any POSIX login shell. Both source the same
+    # env.sh; the runtime shell detection inside it picks the completion backend.
+
+    # bash: login (.bash_profile, or .profile when absent - also the generic
+    # POSIX login file for sh/dash/ksh) + interactive (.bashrc).
+    if [ -f "$HOME/.bash_profile" ]; then
+        echo "$HOME/.bash_profile"
+    else
+        echo "$HOME/.profile"
+    fi
+    echo "$HOME/.bashrc"
+
+    # zsh: login (.zprofile) + interactive (.zshrc). Respect ZDOTDIR; reject
+    # ZDOTDIR="/" to prevent writing /.zprofile (CWE-22 filesystem-root guard).
+    _zdotdir="${ZDOTDIR:-$HOME}"
+    if [ "$_zdotdir" = "/" ]; then
+        warn "ZDOTDIR is '/' - refusing to write under /; falling back to \$HOME"
+        _zdotdir="$HOME"
+    fi
+    echo "$_zdotdir/.zprofile"
+    echo "$_zdotdir/.zshrc"
 }
 
 # Append a block-marker idempotent section to each profile target.
