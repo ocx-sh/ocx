@@ -34,7 +34,29 @@ impl ShellCompletion {
             }
         };
         log::debug!("Generating completions for shell: {}", shell);
-        clap_complete::generate(shell, &mut cmd, cmd_name, &mut std::io::stdout());
+        print!("{}", render_completion_script(&mut cmd, &cmd_name, shell));
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// Render the completion script for `shell`, adding the zsh `compinit` guard so
+/// the output registers wherever it is sourced.
+///
+/// clap_complete's zsh script ends in `compdef _ocx ocx`, which requires
+/// `compinit` to have run. The guard self-loads it, so the script is correct
+/// even when sourced before the user's `.zshrc` runs `compinit` (e.g. from
+/// `.zprofile`) — otherwise `compdef` is undefined and registration fails.
+///
+/// Shared by `ocx shell completion` (this command) and the inline completion
+/// stream of `ocx self activate`, so both emit identical, self-sufficient
+/// scripts.
+pub(crate) fn render_completion_script(cmd: &mut clap::Command, cmd_name: &str, shell: clap_complete::Shell) -> String {
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, cmd, cmd_name.to_string(), &mut buf);
+    // clap_complete always writes valid UTF-8.
+    let script = String::from_utf8_lossy(&buf).into_owned();
+    if shell == clap_complete::Shell::Zsh {
+        return format!("if (( ! $+functions[compdef] )); then\n  autoload -Uz compinit && compinit -C\nfi\n{script}");
+    }
+    script
 }

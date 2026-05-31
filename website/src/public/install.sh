@@ -375,9 +375,11 @@ get_latest_version() {
 # is NOT a global-toolchain entry - its version source is the install
 # candidate, updated via `ocx package install --select ocx.sh/ocx/cli:N`
 # or by re-running the install script.
-# Idempotency: PATH `case`-match below dedups within a single session
-# without needing a top-level guard variable (which can survive shell
-# state across reinstalls and silently no-op the source).
+# Idempotency: the `_OCX_ENV_LOADED` guard applies the PATH prepend and the
+# global-env eval once per shell. Completions are deliberately OUTSIDE that
+# guard - they re-inject on every interactive source so a later `compinit`
+# (e.g. oh-my-zsh from `.zshrc`, after `.zprofile` already sourced this file)
+# cannot permanently wipe them.
 create_env_sh() {
     local _ocx_home="${OCX_HOME:-$HOME/.ocx}"
 
@@ -391,15 +393,6 @@ create_env_sh() {
 #!/bin/sh
 # Managed by ocx installer - do not edit.
 
-# Double-source guard - prevents PATH duplication on re-source (e.g. user
-# re-sources .bashrc).  Set before any side effects so that a re-source after
-# a partial failure also short-circuits cleanly.  Idempotent under `set -u`.
-if [ -n "${_OCX_ENV_LOADED:-}" ]; then
-    return 0 2>/dev/null || exit 0
-fi
-_OCX_ENV_LOADED=1
-export _OCX_ENV_LOADED
-
 # OCX_HOME env-var-with-fallback. Assigns and exports only when unset or empty.
 : "${OCX_HOME:=$HOME/.ocx}"
 export OCX_HOME
@@ -411,7 +404,7 @@ _ocx_bin="$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"
 # Shell::Dash, which has no clap completion backend - so bash/zsh users would
 # get no completions if we hardcoded `--shell=sh`. PATH and global-env-eval
 # output are identical across the POSIX arms, so this only changes the
-# completion extension.
+# completion backend.
 _ocx_shell=sh
 if [ -n "${BASH_VERSION:-}" ]; then
     _ocx_shell=bash
@@ -419,16 +412,35 @@ elif [ -n "${ZSH_VERSION:-}" ]; then
     _ocx_shell=zsh
 fi
 
-# Decide completions here, where interactivity is known ($- carries `i` for an
-# interactive shell), and pass the explicit --completion/--no-completion flag.
-# stderr is still redirected (2>/dev/null) to suppress startup diagnostics, but
-# the gate no longer depends on the binary probing isatty(2).
-if [ -x "$_ocx_bin" ]; then
-    case "$-" in
-        *i*) eval "$("$_ocx_bin" self activate --shell="$_ocx_shell" --completion 2>/dev/null)" || true ;;
-        *) eval "$("$_ocx_bin" self activate --shell="$_ocx_shell" --no-completion 2>/dev/null)" || true ;;
-    esac
+# PATH + global toolchain env: apply once per shell. The `_OCX_ENV_LOADED`
+# guard keeps the PATH prepend and the (subprocess-spawning) global-env eval
+# from repeating when the user re-sources their profile. `--no-completion`
+# keeps completions out of this one-shot block; they are handled separately
+# below so they survive a completion system that initializes later.
+if [ -z "${_OCX_ENV_LOADED:-}" ]; then
+    _OCX_ENV_LOADED=1
+    export _OCX_ENV_LOADED
+    if [ -x "$_ocx_bin" ]; then
+        eval "$("$_ocx_bin" self activate --shell="$_ocx_shell" --no-completion 2>/dev/null)" || true
+    fi
 fi
+
+# Shell completions: re-inject on EVERY interactive source, NOT once. zsh's
+# `compinit` rebuilds its completion table from scratch; oh-my-zsh (and many
+# frameworks) run it from `.zshrc`, AFTER a login shell has already sourced
+# this file from `.zprofile`. A one-shot guard would register completions
+# pre-`compinit` only to have them wiped with no second chance; re-running the
+# generator on the post-`compinit` source re-registers them. `$-` carries `i`
+# for an interactive shell; `sh`/Dash has no completion backend so it is
+# skipped. Output is completion-only (no PATH/env), so repeating it is cheap
+# and side-effect-free.
+case "$-" in
+    *i*)
+        if [ -x "$_ocx_bin" ] && [ "$_ocx_shell" != sh ]; then
+            eval "$("$_ocx_bin" shell completion --shell="$_ocx_shell" 2>/dev/null)" || true
+        fi
+        ;;
+esac
 unset _ocx_bin _ocx_shell
 EOF
 }

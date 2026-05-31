@@ -183,28 +183,20 @@ fn completion_clap_shell(shell: Shell) -> Option<clap_complete::Shell> {
 /// `complete -F` / `compdef` / `Register-ArgumentCompleter` block installs
 /// completions with no file to manage, version-stamp, or read.
 ///
-/// Two shell-specific shims:
-/// - **PowerShell**: clap_complete's output opens with `using namespace`, which
-///   `Invoke-Expression` accepts only as the *first* statement of the stream;
-///   [`emit_activation`] emits this block first to satisfy that. Verified valid
-///   on Windows PowerShell 5.1 and PowerShell 7.
-/// - **zsh**: the clap script ends in `compdef _ocx ocx`, which needs `compinit`
-///   loaded. A guard self-loads it, so the block is correct wherever the shim
-///   sources it — e.g. from `.zprofile`, before the user's `.zshrc` runs
-///   `compinit` (otherwise `compdef` is undefined → `command not found`).
+/// Delegates to [`crate::command::shell_completion::render_completion_script`]
+/// — the single generator shared with `ocx shell completion`, which adds the
+/// zsh `compinit` guard so the script registers wherever it is sourced. The one
+/// activation-specific concern is order: PowerShell's `using namespace` must be
+/// the first statement of the stream, which [`emit_activation`] guarantees by
+/// emitting this block before the PATH prepend (verified on Windows PowerShell
+/// 5.1 and PowerShell 7).
 fn generate_completion_inline(shell: Shell) -> Option<String> {
     let clap_shell = completion_clap_shell(shell)?;
-    let mut buf = Vec::new();
     let mut cmd = crate::app::Cli::command();
-    let bin_name = cmd.get_name().to_string();
-    clap_complete::generate(clap_shell, &mut cmd, bin_name, &mut buf);
-    // clap_complete always writes valid UTF-8; on the impossible failure, skip
-    // completions rather than break activation.
-    let mut script = String::from_utf8(buf).ok()?;
-    if shell == Shell::Zsh {
-        script = format!("if (( ! $+functions[compdef] )); then\n  autoload -Uz compinit && compinit -C\nfi\n{script}");
-    }
-    Some(script)
+    let cmd_name = cmd.get_name().to_string();
+    Some(crate::command::shell_completion::render_completion_script(
+        &mut cmd, &cmd_name, clap_shell,
+    ))
 }
 
 /// Emit the eval line that loads the global toolchain env, gated on

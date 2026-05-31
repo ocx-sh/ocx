@@ -366,22 +366,28 @@ def test_remove_shell_profile_strips_block_and_legacy(tmp_path: Path) -> None:
 
 
 def test_env_sh_same_session_guard_prevents_double_apply(tmp_path: Path) -> None:
-    """Sourcing env.sh twice in the same shell session must not re-run activation
-    (the ``_OCX_ENV_LOADED`` guard prevents double-apply).
+    """Sourcing env.sh twice in the same shell session must not re-run the
+    PATH/global-env activation (the ``_OCX_ENV_LOADED`` guard prevents
+    double-apply).
 
-    Current env.sh guard shape (fires unconditionally before OCX_HOME assignment):
+    Current env.sh guard shape (gates the PATH + global-env block; completions
+    are re-injected separately, OUTSIDE this guard, on every interactive
+    source):
 
     .. code-block:: sh
 
-        if [ -n "${_OCX_ENV_LOADED:-}" ]; then
-            return 0 2>/dev/null || exit 0
+        if [ -z "${_OCX_ENV_LOADED:-}" ]; then
+            _OCX_ENV_LOADED=1
+            export _OCX_ENV_LOADED
+            if [ -x "$_ocx_bin" ]; then
+                eval "$("$_ocx_bin" self activate --shell="$_ocx_shell" --no-completion ...)"
+            fi
         fi
-        _OCX_ENV_LOADED=1
-        export _OCX_ENV_LOADED
 
-    The guard runs at the top of env.sh, outside and before the
-    ``if [ -x "$_ocx_bin" ]`` block, so a fake binary is created to
-    reach the activation path and confirm ``_OCX_ENV_LOADED`` is set.
+    ``_OCX_ENV_LOADED`` is set on the first source regardless of whether the
+    binary exists; a fake binary is still created so the activation path is
+    reachable. This test runs ``sh`` non-interactively (``$-`` has no ``i``),
+    so the separate completion re-inject block is skipped here.
     """
     ocx_home = tmp_path / "ocx"
     ocx_home.mkdir()
@@ -512,6 +518,76 @@ printf '%s' "$PATH"
         f"found {occurrence_count} occurrence(s).\n"
         f"bin_dir={ocx_bin_path!r}\n"
         f"PATH={path_value!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (g) zsh completion survives a compinit that runs AFTER env.sh is sourced
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not installed")
+def test_env_sh_zsh_completion_survives_late_compinit(tmp_path: Path, ocx_binary: Path) -> None:
+    """zsh completion must survive a ``compinit`` that runs after env.sh sources.
+
+    Regression for the oh-my-zsh activation bug: env.sh is sourced from
+    ``.zprofile`` (login, before ``.zshrc``), registering ocx completion via an
+    early ``compinit -C``. oh-my-zsh then runs ``compinit`` from ``.zshrc``,
+    reinitializing ``_comps`` and wiping that registration. The one-shot
+    ``_OCX_ENV_LOADED`` guard turned the second (``.zshrc``, post-compinit)
+    source into a no-op, so completion was never re-registered — completions
+    worked only via a manual ``eval "$(ocx self activate)"`` afterward.
+
+    The fix re-injects completion on every interactive source (decoupled from
+    the one-shot PATH/env guard), so the post-compinit source re-registers.
+    This drives the real ``ocx`` binary through the generated env.sh under the
+    broken ordering and asserts ``_comps[ocx]`` survives.
+    """
+    system_path = os.environ.get("PATH", "/usr/bin:/bin")
+    ocx_home = tmp_path / "ocx"
+    ocx_home.mkdir()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    _source_install_sh(
+        "create_env_sh",
+        {"HOME": str(fake_home), "OCX_HOME": str(ocx_home), "PATH": system_path},
+    )
+    env_sh = ocx_home / "env.sh"
+    assert env_sh.exists()
+
+    # Place the real ocx binary at the install path env.sh resolves through.
+    bin_dir = ocx_home / "symlinks" / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin"
+    bin_dir.mkdir(parents=True)
+    shutil.copy2(ocx_binary, bin_dir / "ocx")
+
+    # Simulate the broken ordering in an isolated zsh:
+    #   source env.sh (pre-compinit, .zprofile) -> compinit (oh-my-zsh) ->
+    #   source env.sh (post-compinit, .zshrc).
+    zdot = tmp_path / "zdot"
+    zdot.mkdir()
+    (zdot / ".zshrc").write_text(
+        "autoload -Uz compinit\n"
+        f'source "{env_sh}"\n'
+        "compinit -u\n"
+        f'source "{env_sh}"\n'
+        'print "COMPS=${_comps[ocx]:-MISSING}"\n'
+    )
+    result = subprocess.run(
+        ["zsh", "-i", "-c", "true"],
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(fake_home),
+            "OCX_HOME": str(ocx_home),
+            "ZDOTDIR": str(zdot),
+            "PATH": system_path,
+        },
+    )
+    assert "COMPS=_ocx" in result.stdout, (
+        "zsh completion must survive a post-source compinit (it must be "
+        "re-injected on the interactive .zshrc source).\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
 
