@@ -31,6 +31,7 @@ pub enum Package {
     Install(super::install::Install),
     /// Downloads packages into the local object store without creating install symlinks.
     Pull(super::package_pull::PackagePull),
+    /// Publish a package's layers and metadata to a registry.
     Push(super::package_push::PackagePush),
     /// Set the current version of one or more packages.
     Select(super::select::Select),
