@@ -448,6 +448,7 @@ impl Client {
         let blob_total_size = u64::try_from(layer.size).unwrap_or(0);
 
         let image = self.transport_reference(identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
         let layer_digest = Digest::try_from(layer.digest.as_str())
             .map_err(|e| ClientError::InvalidManifest(format!("layer digest '{}' is malformed: {e}", layer.digest)))?;
@@ -603,6 +604,7 @@ impl Client {
 
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let image = package_info.identifier.canonical_reference();
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
 
         let total_layers = layers.len();
         // Upload file layers and verify digest layers concurrently, preserving
@@ -1760,6 +1762,59 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn pull_blob_authenticates_with_pull() {
+            let data = StubTransportData::new();
+            let client = stub(&data);
+            let blob_ref = test_pinned("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+            // Stub returns empty bytes, but auth must precede the fetch.
+            let _ = client.pull_blob(&blob_ref).await;
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        #[tokio::test]
+        async fn head_blob_authenticates_with_pull() {
+            let data = StubTransportData::new();
+            let client = stub(&data);
+            let id = test_identifier("1.0");
+            let digest = oci::Digest::Sha256("a".repeat(64));
+
+            // Will fail (blob absent), but auth should precede the HEAD.
+            let _ = client.head_blob(&id, &digest).await;
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        /// Regression guard for the 401-on-default-mode bug: `pull_layer` must
+        /// authenticate before the layer blob fetch. `pull_blob_to_file` sends a
+        /// token only if one is already cached, and a cache-resolved manifest
+        /// never seeds it, so without this the fetch is anonymous (401).
+        #[tokio::test]
+        async fn pull_layer_authenticates_with_pull() {
+            let data = StubTransportData::new();
+            let client = stub(&data);
+            let id = test_pinned("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            let layer = oci::Descriptor {
+                media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size: 0,
+                urls: None,
+                annotations: None,
+            };
+            let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+
+            // Outcome is irrelevant — auth must precede the blob fetch either way.
+            let _ = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+            let calls = auth_calls(&data);
+            assert_eq!(calls.len(), 1);
+            assert!(matches!(calls[0].1, RegistryOperation::Pull));
+        }
+
+        #[tokio::test]
         async fn push_package_authenticates_with_push() {
             let data = StubTransportData::new();
             data.write().capture_pushes = true;
@@ -1832,6 +1887,43 @@ mod tests {
                 .await;
             let calls = auth_calls(&data);
             assert!(!calls.is_empty(), "merge_platform_into_index must call ensure_auth");
+            assert!(matches!(calls[0].1, RegistryOperation::Push));
+        }
+
+        /// Regression guard: `push_multi_layer_manifest` is `pub(crate)` and
+        /// contacts the registry (push_blob / head_blob / push_manifest_raw),
+        /// so — like every other registry-contacting Client method — it must
+        /// authenticate before its first transport call. Without it a standalone
+        /// invocation issues anonymous requests and a registry requiring auth
+        /// returns 401 (the same class of bug `pull_layer` had). The auth is
+        /// idempotent on a token-cache hit, so it costs nothing when the caller
+        /// (`push_manifest_and_merge_tags`) already authenticated.
+        #[tokio::test]
+        async fn push_multi_layer_manifest_authenticates_with_push() {
+            let layer_digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+            let data = StubTransportData::new();
+            data.write().blobs.insert(layer_digest.to_string(), vec![0u8; 16]);
+            let client = stub_with_capture(&data);
+
+            let info = Info {
+                identifier: test_identifier("1.0"),
+                metadata: metadata::Metadata::Bundle(package::metadata::bundle::Bundle {
+                    version: package::metadata::bundle::Version::V1,
+                    strip_components: None,
+                    env: Default::default(),
+                    dependencies: Default::default(),
+                    entrypoints: Default::default(),
+                }),
+                platform: "linux/amd64".parse().unwrap(),
+            };
+            let layers = [crate::publisher::LayerRef::Digest {
+                digest: oci::Digest::try_from(layer_digest).unwrap(),
+                media_type: crate::publisher::ArchiveMediaType::TarGz,
+            }];
+
+            let _ = client.push_multi_layer_manifest(&info, &layers).await;
+            let calls = auth_calls(&data);
+            assert!(!calls.is_empty(), "push_multi_layer_manifest must call ensure_auth");
             assert!(matches!(calls[0].1, RegistryOperation::Push));
         }
 
