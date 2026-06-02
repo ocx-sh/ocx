@@ -200,7 +200,7 @@ pub async fn push_with_cascade(
     layers: &[crate::publisher::LayerRef],
     other_versions: BTreeSet<Version>,
     version: &Version,
-) -> Result<()> {
+) -> Result<(oci::Digest, Vec<String>)> {
     let (cascade_tags, _) = resolve_cascade_tags(
         client,
         &package_info.identifier,
@@ -210,11 +210,11 @@ pub async fn push_with_cascade(
     )
     .await?;
 
-    client
+    let (manifest_digest, _index) = client
         .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags)
         .await?;
 
-    Ok(())
+    Ok((manifest_digest, cascade_tags))
 }
 
 /// Checks blockers sequentially, returning `true` on first platform match.

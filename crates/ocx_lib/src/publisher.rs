@@ -31,6 +31,19 @@ pub struct Publisher {
     client: oci::Client,
 }
 
+/// Outcome of a successful package push.
+///
+/// Surfaced so callers (notably the `ocx package push` command) can emit a
+/// structured report; `ocx-mirror pipeline push` parses this report to record
+/// the cascade tags written and to distinguish a real publish from a no-op.
+pub struct PushOutcome {
+    /// Digest of the pushed multi-platform image index.
+    pub manifest_digest: oci::Digest,
+    /// Rolling cascade tags written in addition to the primary version tag
+    /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push.
+    pub cascade_tags: Vec<String>,
+}
+
 impl Publisher {
     pub fn new(client: oci::Client) -> Self {
         Self { client }
@@ -58,11 +71,14 @@ impl Publisher {
     /// [`Version`] and the build segment is attached before push. Errors if
     /// the tag does not parse, lacks `X.Y.Z` form, or already carries build
     /// metadata.
-    pub async fn push(&self, info: Info, layers: &[LayerRef], build_meta: Option<&str>) -> Result<()> {
+    pub async fn push(&self, info: Info, layers: &[LayerRef], build_meta: Option<&str>) -> Result<PushOutcome> {
         let info = apply_build_meta(info, build_meta)?;
         log::info!("pushing package with identifier {}", info.identifier);
-        self.client.push_package(info, layers).await?;
-        Ok(())
+        let (manifest_digest, _manifest) = self.client.push_package(info, layers).await?;
+        Ok(PushOutcome {
+            manifest_digest,
+            cascade_tags: Vec::new(),
+        })
     }
 
     /// Push a package with cascade tag management.
@@ -77,13 +93,18 @@ impl Publisher {
         layers: &[LayerRef],
         existing_versions: BTreeSet<Version>,
         build_meta: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<PushOutcome> {
         let info = apply_build_meta(info, build_meta)?;
         log::info!("pushing package with identifier {} (cascade)", info.identifier);
         let version = Version::parse(info.identifier.tag_or_latest())
             .ok_or_else(|| crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string()))?;
 
-        package::cascade::push_with_cascade(&self.client, info, layers, existing_versions, &version).await
+        let (manifest_digest, cascade_tags) =
+            package::cascade::push_with_cascade(&self.client, info, layers, existing_versions, &version).await?;
+        Ok(PushOutcome {
+            manifest_digest,
+            cascade_tags,
+        })
     }
 
     /// Push a complete description artifact to the `__ocx.desc` tag.

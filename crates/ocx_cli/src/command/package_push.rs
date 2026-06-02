@@ -106,7 +106,7 @@ impl PackagePush {
 
         let build_meta: Option<String> = self.build_timestamp.as_ref().and_then(build_timestamp);
 
-        if self.cascade {
+        let outcome = if self.cascade {
             let existing_tags = match publisher.list_tags(identifier.clone()).await {
                 Ok(tags) => tags,
                 Err(err) => {
@@ -125,10 +125,19 @@ impl PackagePush {
             let existing_versions = Publisher::parse_versions(&existing_tags);
             publisher
                 .push_cascade(info, &self.layers, existing_versions, build_meta.as_deref())
-                .await?;
+                .await?
         } else {
-            publisher.push(info, &self.layers, build_meta.as_deref()).await?;
-        }
+            publisher.push(info, &self.layers, build_meta.as_deref()).await?
+        };
+
+        // Emit the structured push report. Plain output is a one-row table
+        // (identifier, digest, cascade tags); `--format json` serializes the
+        // report consumed by `ocx-mirror pipeline push`.
+        context.api().report(&crate::api::data::push::PushReport::new(
+            identifier.to_string(),
+            outcome.manifest_digest.to_string(),
+            outcome.cascade_tags,
+        ))?;
 
         Ok(ExitCode::SUCCESS)
     }
