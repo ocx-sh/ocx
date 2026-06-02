@@ -3,3 +3,13 @@ services:
     image: registry:2
     ports:
       - "5000:5000"
+
+  # Mirror registry — a second registry:2 instance used by test_mirror.py to
+  # simulate a corporate artifact-manager remote/proxy repository.  Session-
+  # scoped via the `mirror_registry` fixture in test/conftest.py.  Gated
+  # behind the same OCX_TESTS_NO_REGISTRY skip flag so a single-registry
+  # or Windows runner that never starts docker-compose is not broken.
+  mirror-registry:
+    image: registry:2
+    ports:
+      - "5001:5000"

@@ -46,7 +46,11 @@ impl Sync {
         // Authenticate with target registry before starting progress bars.
         // This ensures any credential prompt (e.g., GPG for Docker credential helpers)
         // appears on a clean terminal, not interleaved with indicatif output.
-        let publisher = Publisher::new(ClientBuilder::from_env());
+        // A malformed or insecure forwarded `OCX_MIRRORS` aborts here rather
+        // than degrading to an identity map (which would route reads to the
+        // firewall-blocked origin — the anti-goal replace semantics prevent).
+        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let publisher = Publisher::new(client);
         let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
         log::debug!("[{}] Fetching existing tags from {}", spec.name, identifier);
         let all_tags: Vec<String> = publisher.list_tags(identifier.clone()).await.unwrap_or_default();

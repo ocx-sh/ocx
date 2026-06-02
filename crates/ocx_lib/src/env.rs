@@ -40,6 +40,12 @@ pub mod keys {
     pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
+    /// JSON object mapping an upstream registry host to its mirror `url`
+    /// (e.g. `{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}`).
+    /// Resolution-affecting → forwarded to child ocx processes. A single JSON
+    /// object is used (not a comma/`=` list) because mirror values are
+    /// structured URLs with no delimiter-safe separator.
+    pub const OCX_MIRRORS: &str = "OCX_MIRRORS";
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -82,6 +88,12 @@ pub struct OcxConfigView {
     /// contract is fully pinned at the unit layer.
     pub global: bool,
     pub index: Option<PathBuf>,
+    /// Per-upstream-host registry mirrors, as `(host, url)` pairs. Resolution-
+    /// affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`] as the single JSON object [`keys::OCX_MIRRORS`].
+    /// The resolved map merges `[mirrors]` config with the inherited
+    /// `OCX_MIRRORS` env, env winning per-host key.
+    pub mirrors: Vec<(String, String)>,
 }
 
 impl OcxConfigView {
@@ -94,6 +106,7 @@ impl OcxConfigView {
             project: None,
             global: false,
             index: None,
+            mirrors: Vec::new(),
         }
     }
 }
@@ -234,6 +247,10 @@ impl Env {
         match &cfg.index {
             Some(path) => self.set(keys::OCX_INDEX, path.as_os_str()),
             None => self.remove(keys::OCX_INDEX),
+        }
+        match encode_mirrors(&cfg.mirrors) {
+            Some(json) => self.set(keys::OCX_MIRRORS, json),
+            None => self.remove(keys::OCX_MIRRORS),
         }
     }
 
@@ -423,6 +440,65 @@ pub fn insecure_registries() -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Serializes a `(host, url)` mirror list into the single JSON object written
+/// to [`keys::OCX_MIRRORS`].
+///
+/// Returns `None` for an empty list so [`Env::apply_ocx_config`] removes any
+/// inherited value rather than setting an empty object.
+fn encode_mirrors(mirrors: &[(String, String)]) -> Option<String> {
+    if mirrors.is_empty() {
+        return None;
+    }
+    let object: serde_json::Map<String, serde_json::Value> = mirrors
+        .iter()
+        .map(|(host, url)| (host.clone(), serde_json::Value::String(url.clone())))
+        .collect();
+    match serde_json::to_string(&serde_json::Value::Object(object)) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            log::warn!("failed to encode OCX_MIRRORS: {e}");
+            None
+        }
+    }
+}
+
+/// Parses [`keys::OCX_MIRRORS`] (a JSON object of upstream-host → mirror url)
+/// into a list of `(host, url)` pairs.
+///
+/// An absent or empty value yields an empty list. A present-but-broken value is
+/// a hard error: silently degrading a forwarded `OCX_MIRRORS` to an identity map
+/// would route reads to the firewall-blocked origin instead of the mirror — the
+/// exact failure mode replace semantics exist to prevent.
+///
+/// # Errors
+///
+/// Returns [`MirrorConfigError::MalformedEnvJson`] when the value is not valid
+/// JSON, and [`MirrorConfigError::NonStringEnvValue`] (naming the offending host)
+/// when a per-host value is not a string.
+///
+/// [`MirrorConfigError::MalformedEnvJson`]: crate::config::mirror::MirrorConfigError::MalformedEnvJson
+/// [`MirrorConfigError::NonStringEnvValue`]: crate::config::mirror::MirrorConfigError::NonStringEnvValue
+pub fn mirrors() -> Result<Vec<(String, String)>, crate::config::mirror::MirrorConfigError> {
+    use crate::config::mirror::MirrorConfigError;
+
+    let Some(raw) = var(keys::OCX_MIRRORS) else {
+        return Ok(Vec::new());
+    };
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
+        .map_err(|source| MirrorConfigError::MalformedEnvJson { source })?;
+    let mut pairs = Vec::with_capacity(object.len());
+    for (host, value) in object {
+        let url = value
+            .as_str()
+            .ok_or_else(|| MirrorConfigError::NonStringEnvValue { host: host.clone() })?;
+        pairs.push((host, url.to_string()));
+    }
+    Ok(pairs)
 }
 
 #[cfg(test)]
@@ -726,6 +802,151 @@ mod tests {
     }
 
     // ── resolve_command ──────────────────────────────────────────────────
+
+    // ── Step 3.1 specification tests: OCX_MIRRORS round-trip ──────────────────
+
+    /// `mirrors()` parses what `apply_ocx_config`/`encode_mirrors` emits —
+    /// a basic round-trip for the simplest case.
+    ///
+    /// Traces: plan Testing Strategy — "`OCX_MIRRORS` JSON round-trip
+    /// (mirrors() parses what apply_ocx_config/encode_mirrors emits)"; ADR
+    /// review A3.
+    #[test]
+    fn ocx_mirrors_json_roundtrip_basic() {
+        let env = crate::test::env::lock();
+        let input = vec![("ghcr.io".to_string(), "https://corp.jfrog.io/ghcr-remote".to_string())];
+        // encode_mirrors is private; drive it through apply_ocx_config so we
+        // test the public contract (encode → set in env → mirrors() parses).
+        let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        cfg.mirrors = input.clone();
+        let mut child_env = Env::clean();
+        child_env.apply_ocx_config(&cfg);
+
+        // Retrieve the encoded value and inject it via the test env override
+        // so mirrors() reads it.
+        let encoded = child_env
+            .get(keys::OCX_MIRRORS)
+            .expect("OCX_MIRRORS must be set when mirrors is non-empty")
+            .to_str()
+            .expect("OCX_MIRRORS must be valid UTF-8")
+            .to_string();
+        env.set(keys::OCX_MIRRORS, encoded);
+
+        let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
+        assert_eq!(parsed.len(), 1, "parsed mirrors must have one entry");
+        assert_eq!(parsed[0].0, "ghcr.io");
+        assert_eq!(parsed[0].1, "https://corp.jfrog.io/ghcr-remote");
+    }
+
+    /// `mirrors()` round-trip including a `localhost:5000` host key and a url
+    /// with a query string — specifically tests the delimiter-safety guarantee.
+    ///
+    /// Traces: plan Testing Strategy — "including a `localhost:5000` host key
+    /// and a url with a query string"; ADR review A3 (JSON not comma/`=`).
+    #[test]
+    fn ocx_mirrors_json_roundtrip_localhost_and_query_string() {
+        let env = crate::test::env::lock();
+        let input = vec![
+            (
+                "localhost:5000".to_string(),
+                "https://corp.mirror.io/proxy?region=eu".to_string(),
+            ),
+            ("ghcr.io".to_string(), "https://corp.jfrog.io/ghcr-remote".to_string()),
+        ];
+        let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        cfg.mirrors = input.clone();
+        let mut child_env = Env::clean();
+        child_env.apply_ocx_config(&cfg);
+
+        let encoded = child_env
+            .get(keys::OCX_MIRRORS)
+            .expect("OCX_MIRRORS must be set when mirrors is non-empty")
+            .to_str()
+            .expect("OCX_MIRRORS must be valid UTF-8")
+            .to_string();
+        env.set(keys::OCX_MIRRORS, encoded);
+
+        let mut parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
+        // Sort for deterministic comparison (HashMap iteration order may differ).
+        parsed.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(parsed.len(), 2, "parsed mirrors must have two entries");
+
+        // Find each entry regardless of order.
+        let localhost = parsed.iter().find(|(h, _)| h == "localhost:5000");
+        let ghcr = parsed.iter().find(|(h, _)| h == "ghcr.io");
+
+        assert!(localhost.is_some(), "localhost:5000 entry must survive round-trip");
+        assert_eq!(
+            localhost.unwrap().1,
+            "https://corp.mirror.io/proxy?region=eu",
+            "url with query string must survive verbatim"
+        );
+        assert!(ghcr.is_some(), "ghcr.io entry must survive round-trip");
+    }
+
+    /// Empty mirrors list → `encode_mirrors` returns `None` → `apply_ocx_config`
+    /// removes any stale `OCX_MIRRORS` value.
+    ///
+    /// Traces: ADR — empty list means no mirror configured, must remove the key.
+    #[test]
+    fn empty_mirrors_removes_ocx_mirrors_key() {
+        let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        cfg.mirrors = vec![];
+
+        let mut env = Env::clean();
+        // Pre-set a stale value to confirm it is removed.
+        env.set(keys::OCX_MIRRORS, r#"{"ghcr.io":"https://old.corp/remote"}"#);
+        env.apply_ocx_config(&cfg);
+
+        assert!(
+            env.get(keys::OCX_MIRRORS).is_none(),
+            "empty mirrors must remove OCX_MIRRORS from the child env"
+        );
+    }
+
+    /// Malformed JSON in `OCX_MIRRORS` → `mirrors()` is a HARD error.
+    ///
+    /// Silently degrading a forwarded mirror map to an identity map would route
+    /// reads to the firewall-blocked origin instead of the mirror — the exact
+    /// anti-goal replace semantics exist to prevent. So a present-but-broken
+    /// value must abort, not warn-and-empty.
+    ///
+    /// Traces: review Cluster-1 fail-loud — malformed forwarded `OCX_MIRRORS`
+    /// is a hard error on both parent and child paths.
+    #[test]
+    fn malformed_ocx_mirrors_is_hard_error() {
+        use crate::config::mirror::MirrorConfigError;
+
+        let env = crate::test::env::lock();
+        env.set(keys::OCX_MIRRORS, "this is not valid json {{{");
+
+        let result = mirrors();
+        assert!(
+            matches!(result, Err(MirrorConfigError::MalformedEnvJson { .. })),
+            "malformed OCX_MIRRORS must yield MalformedEnvJson, got: {result:?}"
+        );
+    }
+
+    /// A non-string per-host value in `OCX_MIRRORS` → `mirrors()` is a HARD error
+    /// naming the offending host. A silent `filter_map` drop would degrade the
+    /// map for that host, so the entry must abort instead.
+    ///
+    /// Traces: review Cluster-1 fail-loud — non-string env value names the host.
+    #[test]
+    fn non_string_ocx_mirrors_value_is_hard_error() {
+        use crate::config::mirror::MirrorConfigError;
+
+        let env = crate::test::env::lock();
+        // ghcr.io maps to a number, not a string url.
+        env.set(keys::OCX_MIRRORS, r#"{"ghcr.io":42}"#);
+
+        let result = mirrors();
+        assert!(
+            matches!(result, Err(MirrorConfigError::NonStringEnvValue { ref host }) if host == "ghcr.io"),
+            "non-string OCX_MIRRORS value must yield NonStringEnvValue naming ghcr.io, got: {result:?}"
+        );
+    }
 
     /// `resolve_command` must find a well-known binary that exists on PATH.
     #[cfg(unix)]

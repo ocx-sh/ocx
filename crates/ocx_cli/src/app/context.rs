@@ -83,6 +83,19 @@ impl Context {
         })
         .await?;
 
+        // Resolve the per-host mirror map once via the lib resolver
+        // (`ocx_lib::resolve_mirror_map`): `[mirrors]` config merged with the
+        // inherited `OCX_MIRRORS` env (env wins per-host key), every entry parsed
+        // and the plain-HTTP gate enforced in one place. The same resolved set
+        // feeds both the OCI client (transport rewrite) and the `OcxConfigView`
+        // (subprocess forwarding), so parent and forwarded children agree on the
+        // mirror map. The lib `thiserror` error is re-wrapped into `anyhow` at
+        // this CLI boundary.
+        let (mirror_entries, mirror_pairs) =
+            ocx_lib::resolve_mirror_map(&config, env::mirrors()?, &env::insecure_registries())
+                .map_err(anyhow::Error::new)?;
+        let mirror_map = oci::MirrorMap::new(mirror_entries);
+
         let printer = Printer::new(color_config.stdout, color_config.stderr);
         let ui = UserInterface::new(printer, console::Term::stderr().is_term(), options.quiet);
         // `ContextOptions::build_api` owns the printer + format-default +
@@ -96,7 +109,18 @@ impl Context {
         let (remote_client, remote_index) = if options.offline {
             (None, None)
         } else {
-            let client = oci::ClientBuilder::from_env_with_progress(progress.clone());
+            // Explicit builder (not `from_env_with_progress`) so the
+            // config-derived `MirrorMap` is threaded in; `OCX_MIRRORS` env
+            // precedence is already folded into `mirror_map` by
+            // `resolve_mirrors`. A plain-HTTP mirror requires its host in
+            // `OCX_INSECURE_REGISTRIES` (the mirror host is what gets contacted)
+            // — composition with the existing plain-HTTP set, no implicit
+            // scheme-driven opt-out (ADR F2).
+            let client = oci::ClientBuilder::new()
+                .plain_http_registries(env::insecure_registries())
+                .mirrors(mirror_map)
+                .progress(progress.clone())
+                .build();
             (
                 Some(client.clone()),
                 Some(index::RemoteIndex::new(index::RemoteConfig { client })),
@@ -160,7 +184,10 @@ impl Context {
             log::warn!("Could not resolve current exe: {e}");
             std::path::PathBuf::from("ocx")
         });
-        let config_view = options.as_view(self_exe);
+        let mut config_view = options.as_view(self_exe);
+        // Feed the same resolved mirror map into the forwarding view so a child
+        // ocx inherits `OCX_MIRRORS` matching the parent's transport rewrite.
+        config_view.mirrors = mirror_pairs;
         check_global_project_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);
 

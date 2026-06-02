@@ -140,6 +140,11 @@ impl ContextOptions {
             project: self.project.clone(),
             global: self.global,
             index: self.index.clone(),
+            // The resolved mirror map is not derivable from `ContextOptions`
+            // alone — it merges `[mirrors]` config with the inherited
+            // `OCX_MIRRORS` env. `Context::try_init` builds it and populates
+            // this field on the returned view; the parser tier starts empty.
+            mirrors: Vec::new(),
         }
     }
 }

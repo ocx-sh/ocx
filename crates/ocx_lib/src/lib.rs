@@ -10,6 +10,7 @@ mod media_type;
 /// variant.
 pub use config::error::Error as ConfigError;
 pub use config::loader::{ConfigInputs, ConfigLoader};
+pub use config::mirror::{MirrorConfig, MirrorConfigError, ParsedMirror, ResolvedMirrors, resolve_mirror_map};
 pub use config::{Config, RegistryConfig, RegistryDefaults};
 
 #[cfg(test)]

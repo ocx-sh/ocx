@@ -210,6 +210,30 @@ export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
 This variable disables TLS for the listed registries. Only use it for local development registries that do not support HTTPS.
 :::
 
+### `OCX_MIRRORS` {#ocx-mirrors}
+
+A JSON object that maps upstream registry hostnames to mirror endpoints. Each key is an upstream hostname; each value is the mirror `url` in the form `scheme://host[/repo-key-prefix]`.
+
+```sh
+export OCX_MIRRORS='{"ghcr.io":"https://company.jfrog.io/ghcr-remote","docker.io":"https://company.jfrog.io/dockerhub-remote"}'
+```
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same mirror map.
+
+`OCX_MIRRORS` overrides the [`[mirrors."<host>"]`][config-mirrors] config key on a per-host basis. A host present in `OCX_MIRRORS` replaces the config entry for that host; hosts absent from `OCX_MIRRORS` still come from `[mirrors]` in the config file.
+
+::: warning Malformed values abort at startup
+A malformed `OCX_MIRRORS` value is a **hard startup error**. OCX aborts with an error message naming the problem:
+
+- The value is not valid JSON
+- A per-host value is not a string URL
+- A mirror `url` starts with `http://` but the mirror host is not listed in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries-ref]
+
+OCX never silently continues with an empty mirror map when `OCX_MIRRORS` is set — falling back to no mirrors would silently route reads to the firewall-blocked origin, which is the exact failure replace semantics are designed to prevent.
+:::
+
+For the full mirror semantics (replace behavior, auth, lockfile portability, interaction with `--offline`), see the [`[mirrors."<host>"]`][config-mirrors] configuration reference.
+
 ### `OCX_LOG` {#ocx-log}
 
 The log level for OCX.
@@ -445,9 +469,11 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- reference -->
 [config-ref]: ./configuration.md
 [config-home-tier]: ../in-depth/configuration.md#tier-ocx-home
+[config-mirrors]: ./configuration.md#keys-mirrors
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote
+[env-insecure-registries-ref]: #ocx-insecure-registries
 
 <!-- reference -->
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation

@@ -520,6 +520,67 @@ On a fresh machine, [`ocx package install cmake:3.28`][cmd-package-install] does
 [Versioning In Depth → Locking][in-depth-versioning-locking] — why offline snapshots are also a lock.
 :::
 
+## Route traffic through a corporate mirror {#mirrors}
+
+In many corporate and air-gapped networks, external registries — `ghcr.io`, `docker.io`, `quay.io`, `ocx.sh` — are firewall-blocked. The organization runs an artifact manager ([JFrog Artifactory][artifactory], [Sonatype Nexus][nexus], [Harbor][harbor]) with proxy/remote repositories that cache those upstreams. OCX needs to route its registry traffic to the mirror without changing the canonical package identity or the content-addressed digest.
+
+The `[mirrors."<upstream-host>"]` config table maps each upstream hostname to its mirror endpoint. OCX appends the upstream repository path after the mirror's repo-key prefix and contacts only the mirror. No origin fallback — in a firewall-controlled network, falling through to the internet is the opposite of intent.
+
+```toml
+# ~/.ocx/config.toml  (or $XDG_CONFIG_HOME/ocx/config.toml)
+[mirrors."ghcr.io"]
+url = "https://company.jfrog.io/ghcr-remote"
+
+[mirrors."docker.io"]
+url = "https://company.jfrog.io/dockerhub-remote"
+```
+
+With this config, `ocx package install ghcr.io/owner/tool:1.2` fetches the manifest and blobs from `company.jfrog.io/ghcr-remote/owner/tool`. The canonical identifier — `ghcr.io/owner/tool:1.2` — is never changed.
+
+### Relation to the default registry {#mirrors-default-registry}
+
+[`[registry] default`][config-registry-default] and `[mirrors]` are independent and compose. Default injection expands a bare identifier (e.g. `cmake:3.28` → `ocx.sh/cmake:3.28`) at parse time, before any mirror rewrite. If you also configure `[mirrors."ocx.sh"]`, that default-injected identifier is then mirrored. A fully air-gapped setup can mirror every registry the project uses, including the default one.
+
+### Lockfile portability {#mirrors-lockfile}
+
+OCX stores the **canonical upstream host and digest** in `ocx.lock` — never the mirror host. A lock file produced behind a corporate mirror is valid on a machine with direct internet egress, and vice versa. The mirror is a transport detail; the identity of the content is unchanged.
+
+:::info Why the mirror host never appears in the lock
+OCX derives every on-disk path — blob store, package store, tag store, symlinks — from the canonical identifier. The mirror only changes which server is contacted; the local object store is keyed the same way with or without a mirror configured. This is what makes the lock portable: `sha256:abc123…` identifies the same bytes regardless of which server served them.
+:::
+
+### Unpinned tags and the trust model {#mirrors-trust}
+
+When you install a package with an unpinned tag (e.g. `cmake:3.28`), OCX trusts the mirror's tag→digest resolution the same way it would trust the origin registry's. The mirror could, in principle, map the tag to different content. After resolution, OCX verifies the blob digest against the manifest — a tampered blob is rejected. But the manifest itself came from the mirror's tag resolution.
+
+For tamper-proof installs, pin with [`ocx lock`][cmd-lock]: once a digest is recorded in `ocx.lock`, the tag is never re-resolved and the mirror cannot substitute a different manifest undetected.
+
+Publisher-signature verification (e.g. [cosign][cosign], [Notation][notation]) adds an additional trust layer that validates the publisher's identity independent of the mirror. This is deferred for a post-v1 release.
+
+### Auth for the mirror {#mirrors-auth}
+
+Authenticate against the **mirror** host, not the upstream. Set `OCX_AUTH_<mirror_slug>_*` (replacing non-alphanumeric characters with underscores) or run `ocx login <mirror-host>`. The upstream's credentials are never used on the read path.
+
+```sh
+export OCX_AUTH_company_jfrog_io_TYPE=bearer
+export OCX_AUTH_company_jfrog_io_TOKEN="<artifactory-token>"
+```
+
+### Set mirrors in CI via `OCX_MIRRORS` {#mirrors-env}
+
+For CI or container setups where the command line is not controlled, set mirrors via [`OCX_MIRRORS`][env-mirrors] instead of a config file. The value is a JSON object:
+
+```sh
+export OCX_MIRRORS='{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}'
+```
+
+`OCX_MIRRORS` wins over `[mirrors]` on a per-host basis and is forwarded to every subprocess `ocx` spawns, so nested invocations — generated launchers, `ocx run` — see the same mirror map automatically.
+
+::: tip Learn more
+[Configuration reference → `[mirrors."<host>"]`][config-mirrors] — full schema, auth, interaction table, plain-HTTP note.
+[Environment reference → `OCX_MIRRORS`][env-mirrors] — JSON encoding, per-host precedence, subprocess forwarding.
+:::
+
 ## Configure OCX defaults {#configuration}
 
 OCX behavior is controlled at three layers: config files, environment variables, and CLI flags. Higher layers always win — CLI flags override env vars, which override config files.
@@ -643,6 +704,11 @@ For [direnv][direnv]-driven repos, use [`ocx direnv init`][cmd-direnv-init] to w
 The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable now accept any path, not just files named `ocx.toml`. The CWD walk still only looks for files named exactly `ocx.toml`.
 
 <!-- external -->
+[artifactory]: https://jfrog.com/artifactory/
+[nexus]: https://www.sonatype.com/products/sonatype-nexus-repository
+[harbor]: https://goharbor.io/
+[cosign]: https://docs.sigstore.dev/cosign/overview/
+[notation]: https://notaryproject.dev/
 [volta]: https://volta.sh/
 [mise]: https://mise.jdx.dev/
 [asdf]: https://asdf-vm.com/
@@ -731,6 +797,9 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 
 <!-- reference pages -->
 [config-ref]: ./reference/configuration.md
+[config-registry-default]: ./reference/configuration.md#keys-registry-default
+[config-mirrors]: ./reference/configuration.md#keys-mirrors
+[env-mirrors]: ./reference/environment.md#ocx-mirrors
 [env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation
 [getting-started]: ./getting-started.md
 

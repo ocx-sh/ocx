@@ -108,6 +108,90 @@ url = "ghcr.io"
 Only `url` is defined in v1. The `[registries.<name>]` table is reserved for per-registry settings — future fields (`insecure`, `location` rewrite, `timeout`, auth) will slot into the same entry without breaking existing configs. Unknown fields inside an entry are rejected (typo protection); unknown top-level sections are silently ignored (forward compatibility).
 :::
 
+### `[mirrors."<host>"]` {#keys-mirrors}
+
+A mirror replaces the network endpoint for one upstream registry host. OCX appends the upstream repository path verbatim after the mirror's path prefix and contacts only the mirror — the upstream origin is never contacted on the read path.
+
+This is a **source-replacement model**: if a mirror is configured for a host, all read traffic for that host goes to the mirror. There is no origin fallback. A mirror that is unreachable is a hard error — in firewall-controlled networks, fallback to the open internet would silently defeat the point.
+
+```toml
+[mirrors."ghcr.io"]
+url = "https://company.jfrog.io/ghcr-remote"
+
+[mirrors."docker.io"]
+url = "https://company.jfrog.io/dockerhub-remote"
+```
+
+#### `url` {#keys-mirrors-url}
+
+**Type**: string  
+**Required at startup**: a missing or empty `url` is a hard error when OCX resolves the mirror map — same enforcement point as the [`[registries]`](#keys-registries) v1 scope.  
+**Overridden by**: [`OCX_MIRRORS`][env-mirrors] — per-host key wins when both are set
+
+The mirror endpoint: `scheme://host[/repo-key-prefix]`. OCX builds the full pull path as `<mirror-host>/<prefix>/<upstream-repo>`.
+
+```toml
+# Artifactory path-based routing (repository-path method):
+# ghcr.io/owner/tool:1.2  →  company.jfrog.io/ghcr-remote/owner/tool:1.2
+[mirrors."ghcr.io"]
+url = "https://company.jfrog.io/ghcr-remote"
+
+# Subdomain / host-only form (empty prefix):
+# ghcr.io/owner/tool:1.2  →  ghcr-remote.company.jfrog.io/owner/tool:1.2
+[mirrors."ghcr.io"]
+url = "https://ghcr-remote.company.jfrog.io"
+```
+
+**Artifactory note.** The `url` is the Docker/OCI *pull* path: `<host>/<repo-key>`. This is not the Artifactory admin REST path (`/artifactory/api/docker/<repo-key>`) — that path is for administrative operations and is not a valid Docker pull URL. The pull path is what you would use with `docker pull` or `oras pull`.
+
+**[Nexus][nexus-docs] 3.83+ path-based routing** uses the same `<host>/<repo-key>` shape as Artifactory — the repo-key alone, without any prefix:
+
+```toml
+# Nexus Repository 3.83+ path-based routing (repo-key only, no /repository/ prefix):
+# ghcr.io/owner/tool:1.2  →  nexus.corp/docker-proxy/owner/tool:1.2
+[mirrors."ghcr.io"]
+url = "https://nexus.corp/docker-proxy"
+```
+
+::: warning Nexus legacy form
+The legacy `/repository/<name>` URL form (e.g. `https://nexus.corp/repository/docker-proxy`) is **not** used with Nexus 3.83+ path routing. Use the repo-key alone as the path prefix, matching the Artifactory convention above.
+:::
+
+Older Nexus deployments expose each repository on a per-repository port. Those use the host-only mirror form (`https://nexus.corp:8082` — no path prefix).
+
+**Harbor** follows the same `<host>/<project-name>/<image>` shape for its project-level proxy caches.
+
+**Docker Hub `library/` images.** OCX appends the repository path verbatim and does not expand Docker Hub short names. For Docker Hub official images, use the fully-qualified form (`docker.io/library/alpine`) so the mirror URL resolves to `<mirror>/<prefix>/library/alpine`.
+
+**Scheme default.** When `url` has no `scheme://` prefix (e.g., `"nexus.corp/docker-proxy"`), OCX defaults to `https`. Explicit `https://` is recommended for clarity.
+
+**Plain-HTTP mirrors.** A `url` starting with `http://` requires the mirror host to be listed in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. If the mirror host is absent, OCX exits at startup with an actionable error naming the variable and the mirror host — it does not silently downgrade TLS. The check runs before any network activity.
+
+::: info Typo protection
+`[mirrors."<host>"]` uses `deny_unknown_fields` — a typo such as `urll = "..."` is a TOML parse error, not a silent no-op. This matches the `[registries.<name>]` behavior.
+:::
+
+#### Merge behavior {#keys-mirrors-merge}
+
+`[mirrors."<host>"]` entries are merged key-by-key across config tiers, following the same nearest-wins rule as [`[registries.<name>]`](#keys-registries). A higher-precedence tier that sets `[mirrors."ghcr.io"]` replaces the lower-tier entry for that host; hosts not mentioned in the higher tier are untouched.
+
+[`OCX_MIRRORS`][env-mirrors] overrides on a per-host basis: a host key present in `OCX_MIRRORS` replaces the config entry for that host; hosts absent from `OCX_MIRRORS` still come from `[mirrors]`.
+
+#### Auth {#keys-mirrors-auth}
+
+Credentials are resolved against the **mirror** host, not the upstream. Configure them with `OCX_AUTH_<mirror_slug>_*` or via [`docker login`][docker-login] against the mirror host. The upstream's credentials are never consulted on the read path.
+
+#### Interactions {#keys-mirrors-interactions}
+
+| Concern | Behavior |
+|---------|----------|
+| `[registry] default` / `OCX_DEFAULT_REGISTRY` | Default injection runs before mirror rewrite. A bare identifier expanded to the default registry is then mirrored if that registry has a `[mirrors]` entry. |
+| `--offline` | No network activity at all; mirrors are not consulted. |
+| `--remote` | Mutable lookups (tag list, tag→digest resolution) hit the **mirror**, not the origin. |
+| `ocx.lock` | Stores the canonical upstream host and digest — not the mirror host. A lock made behind a mirror is valid on a machine with direct egress, and vice versa. |
+| `push` | Push is not mirror-redirected. The canonical upstream host is contacted. Remote/proxy repositories are read-only; redirecting push would fail confusingly. |
+| `ocx index catalog` | Against a proxy-type mirror, the catalog lists only repositories the proxy has cached. This is a registry-side constraint, not an OCX behavior. |
+
 ## Environment Variable Override Table {#env-overrides}
 
 This table shows which OCX environment variables map to config file fields. Variables not listed here have no config equivalent.
@@ -115,6 +199,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 | Environment Variable | Config Equivalent | Notes |
 |---------------------|-------------------|-------|
 | [`OCX_DEFAULT_REGISTRY`][env-default-registry] | `[registry] default` | Env var wins when both are set |
+| [`OCX_MIRRORS`][env-mirrors] | `[mirrors."<host>"] url` | Env var wins per-host key when both are set; hosts absent from env var still come from config |
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
 | [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
 | [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; cannot be represented in a config file by definition |
@@ -187,6 +272,8 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cargo-registries]: https://doc.rust-lang.org/cargo/reference/registries.html
 [taplo]: https://taplo.tamasfe.dev/
 [yaml-ls]: https://github.com/redhat-developer/yaml-language-server
+[nexus-docs]: https://help.sonatype.com/en/proxy-repository.html
+[docker-login]: https://docs.docker.com/reference/cli/docker/login/
 
 <!-- schemas -->
 [schema-config]: https://ocx.sh/schemas/config/v1.json
@@ -209,6 +296,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-offline]: ./environment.md#ocx-offline
 [env-remote]: ./environment.md#ocx-remote
 [env-insecure-registries]: ./environment.md#ocx-insecure-registries
+[env-mirrors]: ./environment.md#ocx-mirrors
 [env-no-update-check]: ./environment.md#ocx-no-update-check
 [env-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-binary-pin]: ./environment.md#ocx-binary-pin

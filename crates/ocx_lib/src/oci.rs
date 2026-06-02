@@ -47,6 +47,7 @@ pub mod annotations;
 pub mod client;
 pub use client::Client;
 pub use client::ClientBuilder;
+pub use client::MirrorMap;
 
 pub mod index;
 pub use index::Index;

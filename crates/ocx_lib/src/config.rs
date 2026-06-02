@@ -3,12 +3,14 @@
 
 pub mod error;
 pub mod loader;
+pub mod mirror;
 pub mod registry;
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 
+pub use self::mirror::MirrorConfig;
 pub use self::registry::RegistryConfig;
 
 /// Root configuration struct.
@@ -34,6 +36,16 @@ pub struct Config {
     /// location rewrite, timeout, auth) drop into the same entry struct
     /// without breaking existing configs.
     pub registries: Option<HashMap<String, RegistryConfig>>,
+
+    /// Per-upstream-host registry mirrors (`[mirrors."<host>"]`).
+    ///
+    /// Maps a canonical upstream registry host (e.g. `"ghcr.io"`) to a
+    /// replacement endpoint so OCX routes read traffic to a corporate mirror
+    /// instead of the firewall-blocked origin. Replace semantics: no origin
+    /// fallback. The canonical identifier and content-addressed digest stay
+    /// unchanged, so an `ocx.lock` produced behind the mirror remains valid
+    /// with direct egress and vice versa.
+    pub mirrors: Option<HashMap<String, MirrorConfig>>,
 }
 
 /// Global registry-subsystem settings (`[registry]` section).
@@ -71,6 +83,12 @@ impl Config {
             let map = self.registries.get_or_insert_with(HashMap::new);
             for (name, entry) in other_registries {
                 map.entry(name).or_default().merge(entry);
+            }
+        }
+        if let Some(other_mirrors) = other.mirrors {
+            let map = self.mirrors.get_or_insert_with(HashMap::new);
+            for (host, entry) in other_mirrors {
+                map.entry(host).or_default().merge(entry);
             }
         }
     }

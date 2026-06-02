@@ -23,7 +23,7 @@ const DOCKER_HUB_DOMAINS: &[&str] = &["docker.io", "index.docker.io"];
 /// via [`IdentifierError`].
 ///
 /// Conversion to `native::Reference` (for OCI transport calls) is available via
-/// `From<&Identifier>`.
+/// the `pub(crate)` [`Identifier::canonical_reference`] constructor.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Identifier {
     registry: String,
@@ -172,6 +172,35 @@ impl Identifier {
     pub fn digest(&self) -> Option<Digest> {
         self.digest.clone()
     }
+
+    /// Builds the **canonical** transport reference for this identifier — host,
+    /// repository, tag and digest exactly as stored, with no mirror rewrite.
+    ///
+    /// This is the push seam. The push path calls it directly because
+    /// remote/proxy mirrors are read-only. The read path must **not** call it:
+    /// read-path reference construction goes through
+    /// [`Client::transport_reference`](crate::oci::Client) /
+    /// `transport_registry`, which apply the mirror map.
+    ///
+    /// There is no PUBLIC bypass — the `From<&Identifier> for native::Reference`
+    /// impl is removed, so no external read site has a canonical conversion
+    /// symbol to reach for. This method is `pub(crate)`, so it is still callable
+    /// in-crate; the discipline that in-crate read paths route through
+    /// `Client::transport_reference` / `transport_registry` rather than calling
+    /// this directly is enforced by the structural test plus the behavioural
+    /// backstop, **not** by the compiler.
+    pub(crate) fn canonical_reference(&self) -> native::Reference {
+        let registry = self.registry.clone();
+        let repository = self.repository.clone();
+        match (&self.tag, &self.digest) {
+            (Some(tag), Some(digest)) => {
+                native::Reference::with_tag_and_digest(registry, repository, tag.clone(), digest.to_string())
+            }
+            (Some(tag), None) => native::Reference::with_tag(registry, repository, tag.clone()),
+            (None, Some(digest)) => native::Reference::with_digest(registry, repository, digest.to_string()),
+            (None, None) => native::Reference::with_tag(registry, repository, "latest".into()),
+        }
+    }
 }
 
 impl std::fmt::Display for Identifier {
@@ -215,19 +244,20 @@ impl<'de> Deserialize<'de> for Identifier {
 }
 
 // ── Conversion to native::Reference ──────────────────────────────────
-
-impl From<&Identifier> for native::Reference {
-    fn from(id: &Identifier) -> Self {
-        let reg = id.registry.clone();
-        let repo = id.repository.clone();
-        match (&id.tag, &id.digest) {
-            (Some(t), Some(d)) => native::Reference::with_tag_and_digest(reg, repo, t.clone(), d.to_string()),
-            (Some(t), None) => native::Reference::with_tag(reg, repo, t.clone()),
-            (None, Some(d)) => native::Reference::with_digest(reg, repo, d.to_string()),
-            (None, None) => native::Reference::with_tag(reg, repo, "latest".into()),
-        }
-    }
-}
+//
+// There is deliberately NO `impl From<&Identifier> for native::Reference`.
+// ADR `adr_oci_registry_mirror.md` Axis B1: the canonical
+// `Identifier → native::Reference` conversion is the `pub(crate)`
+// `Identifier::canonical_reference` method (push path, mirror-free); the read
+// path builds references through `Client::transport_reference` /
+// `transport_registry`, which apply the mirror map.
+//
+// Removing the blanket `From` impl closes the PUBLIC bypass: no external caller
+// has a canonical conversion symbol to reach for. It does NOT make an in-crate
+// read-path leak a compile error — `canonical_reference` stays `pub(crate)` and
+// callable in-crate. The "read paths route through the transport seams"
+// invariant is enforced by the structural test plus the behavioural backstop,
+// not by the compiler.
 
 // ── Conversion from native::Reference ────────────────────────────────
 
@@ -631,7 +661,7 @@ mod tests {
     #[test]
     fn identifier_to_reference_roundtrip() {
         let id: Identifier = "test.com/repo:tag".parse().unwrap();
-        let reference = native::Reference::from(&id);
+        let reference = id.canonical_reference();
         assert_eq!(reference.registry(), "test.com");
         assert_eq!(reference.repository(), "repo");
         assert_eq!(reference.tag(), Some("tag"));
@@ -640,7 +670,7 @@ mod tests {
     #[test]
     fn identifier_without_tag_becomes_latest_in_reference() {
         let id: Identifier = "test.com/repo".parse().unwrap();
-        let reference = native::Reference::from(&id);
+        let reference = id.canonical_reference();
         assert_eq!(reference.tag(), Some("latest"));
     }
 

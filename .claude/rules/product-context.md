@@ -76,6 +76,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | 6 | Language-agnostic, toolchain-free | One binary install any binary |
 | 7 | Private distribution first-class | Internal tools simple as `docker push` |
 | 8 | Declarative env metadata | Multi-package env composition without shell scripts |
+| 9 | First-class corporate / air-gapped mirror support | Explicit `[mirrors]` config routes OCI read traffic to Artifactory/Nexus/Harbor with host+repo-key path-prefix rewrite, replace semantics (no egress fallback), content-address verified; a gap mise/asdf/ORAS do not close. Reinforces Principle #7 (Private-first). |
 
 ## Competitive Positioning
 

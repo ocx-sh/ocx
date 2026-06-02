@@ -21,6 +21,7 @@ const LAYER_PUSH_CONCURRENCY: usize = 4;
 
 mod builder;
 pub mod error;
+mod mirror_map;
 pub(crate) mod native_transport;
 mod progress_writer;
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub(crate) mod test_transport;
 mod transport;
 
 pub use builder::ClientBuilder;
+pub use mirror_map::MirrorMap;
 pub use transport::OciTransport;
 
 use error::ClientError;
@@ -88,6 +90,10 @@ pub struct Client {
     /// Shared progress manager for download/upload bars. Cheap to clone
     /// (an `Arc` handle or a disabled no-op).
     progress: crate::cli::progress::ProgressManager,
+    /// Per-upstream-host mirror map. Applied on the read path only, via
+    /// [`Client::transport_reference`] / [`Client::transport_registry`].
+    /// Empty = identity (no host mirrored). Cheap to clone.
+    pub(super) mirrors: MirrorMap,
 }
 
 impl Clone for Client {
@@ -98,6 +104,7 @@ impl Clone for Client {
             tag_chunk_size: self.tag_chunk_size,
             repository_chunk_size: self.repository_chunk_size,
             progress: self.progress.clone(),
+            mirrors: self.mirrors.clone(),
         }
     }
 }
@@ -115,7 +122,74 @@ impl Client {
             tag_chunk_size: 100,
             repository_chunk_size: 100,
             progress: crate::cli::progress::ProgressManager::disabled(),
+            mirrors: MirrorMap::default(),
         }
+    }
+
+    // ── Mirror transform (single read-path rewrite seam) ───────────
+
+    /// Builds the transport reference for a **read-path** operation, applying
+    /// the mirror map.
+    ///
+    /// When `self.mirrors` has an entry for `identifier.registry()`, the
+    /// returned reference targets the mirror host with the repository rewritten
+    /// to `<path-prefix>/<repository>` (tag and digest copied verbatim). When
+    /// no mirror is configured, the result is identical to the canonical
+    /// reference. The returned reference is transport-only and is never
+    /// converted back into an [`Identifier`] for storage.
+    ///
+    /// This is one of the two read seams — every read site builds references
+    /// through here (or [`transport_registry`](Self::transport_registry)). There
+    /// is no PUBLIC bypass: the `From<&Identifier> for native::Reference` impl is
+    /// removed, so no read site can reach for a canonical conversion without
+    /// naming an in-crate seam. In-crate read paths must still route through
+    /// these seams rather than the `pub(crate)`
+    /// [`Identifier::canonical_reference`] (which stays callable in-crate) — that
+    /// discipline is enforced by the structural test plus the behavioural
+    /// backstop, not by the compiler.
+    fn transport_reference(&self, identifier: &Identifier) -> native::Reference {
+        let Some((host, repository)) = self
+            .mirrors
+            .rewrite_repository(identifier.registry(), identifier.repository())
+        else {
+            // No mirror for this host: identical to the canonical reference.
+            return identifier.canonical_reference();
+        };
+        // Tag and digest are copied verbatim from the canonical identifier; only
+        // the host and repository are rewritten. The returned reference is
+        // transport-only and never round-trips into storage.
+        match (identifier.tag(), identifier.digest()) {
+            (Some(tag), Some(digest)) => {
+                native::Reference::with_tag_and_digest(host, repository, tag.to_string(), digest.to_string())
+            }
+            (Some(tag), None) => native::Reference::with_tag(host, repository, tag.to_string()),
+            (None, Some(digest)) => native::Reference::with_digest(host, repository, digest.to_string()),
+            (None, None) => native::Reference::with_tag(host, repository, "latest".into()),
+        }
+    }
+
+    /// Builds the transport reference for a registry-scoped read operation
+    /// (the catalog `list_repositories` call), applying the mirror map to the
+    /// registry host.
+    ///
+    /// Sibling of [`transport_reference`](Self::transport_reference) for the
+    /// case where there is no full identifier — only a registry string and a
+    /// placeholder repository.
+    fn transport_registry(&self, registry: &str) -> native::Reference {
+        // The catalog **URL** is built from `registry()` alone (`/v2/_catalog`),
+        // so the repository never reaches the path. The catalog **auth scope**,
+        // however, is `repository:<repository>:pull` (oci-client `_auth`), so the
+        // repository value still has to be well-formed. An empty repository (no
+        // mirror) keeps the host verbatim and the repository empty; when a mirror
+        // exists, the host is rewritten and the placeholder repository becomes the
+        // mirror's path prefix verbatim — `rewrite_repository` returns the prefix
+        // with no trailing slash for the empty-repository case, so the auth scope
+        // is `repository:<prefix>:pull`, not the malformed `repository:<prefix>/:pull`.
+        let (host, repository) = self
+            .mirrors
+            .rewrite_repository(registry, "")
+            .unwrap_or_else(|| (registry.to_string(), String::new()));
+        native::Reference::with_tag(host, repository, "latest".into())
     }
 
     // ── Authentication ─────────────────────────────────────────────
@@ -126,8 +200,25 @@ impl Client {
     /// Call at the start of a command or task to fail fast on credential
     /// issues (expired tokens, GPG agent prompts, missing env vars)
     /// before beginning any real work.
+    ///
+    /// `ensure_auth` is shared by the read path and the push path. A `Push`
+    /// scope authenticates against the **canonical** host (remote/proxy mirrors
+    /// are read-only, ADR Q5), so it builds the reference via
+    /// [`Identifier::canonical_reference`]; every other scope is a read and
+    /// keys auth off the mirror host via
+    /// [`transport_reference`](Self::transport_reference).
     pub async fn ensure_auth(&self, identifier: &Identifier, operation: oci::RegistryOperation) -> Result<()> {
-        let image = native::Reference::from(identifier);
+        // Exhaustive over `RegistryOperation` so a future upstream variant is a
+        // compile error here, forcing an explicit routing decision rather than
+        // silently inheriting the read (mirror-aware) path. `Push` authenticates
+        // against the canonical host (remote/proxy mirrors are read-only, ADR Q5);
+        // `Pull` is a read and routes through the mirror-aware
+        // `transport_reference`. Coupled to the upstream enum in
+        // `external/rust-oci-client/src/token_cache.rs`.
+        let image = match operation {
+            oci::RegistryOperation::Push => identifier.canonical_reference(),
+            oci::RegistryOperation::Pull => self.transport_reference(identifier),
+        };
         self.transport.ensure_auth(&image, operation).await?;
         Ok(())
     }
@@ -137,7 +228,7 @@ impl Client {
     /// Lists the tags for the given image reference.
     /// There is no validation that the tags correspond to valid package versions.
     pub async fn list_tags(&self, identifier: Identifier) -> Result<Vec<String>> {
-        let image = native::Reference::from(&identifier);
+        let image = self.transport_reference(&identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
         let chunk_size = self.tag_chunk_size;
         let tags = paginate(chunk_size, |cs, last| self.transport.list_tags(&image, cs, last)).await?;
@@ -147,7 +238,7 @@ impl Client {
 
     pub async fn list_repositories(&self, registry: impl Into<String>) -> Result<Vec<String>> {
         let registry = registry.into();
-        let image = oci::native::Reference::with_tag(registry.clone(), "n/a".into(), "latest".into());
+        let image = self.transport_registry(&registry);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
         let chunk_size = self.repository_chunk_size;
         let repositories = paginate(chunk_size, |cs, last| self.transport.catalog(&image, cs, last)).await?;
@@ -157,7 +248,7 @@ impl Client {
 
     /// Fetches the digest of a manifest from the remote, trying to avoid pulling the entire manifest if possible.
     pub async fn fetch_manifest_digest(&self, identifier: &Identifier) -> Result<oci::Digest> {
-        let ref_ = native::Reference::from(identifier);
+        let ref_ = self.transport_reference(identifier);
         self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
         let digest = self.transport.fetch_manifest_digest(&ref_).await?;
         log::trace!("Fetched manifest digest for {}: {}", identifier, digest);
@@ -166,7 +257,7 @@ impl Client {
 
     /// Fetches the manifest for the given image reference, returning both the manifest and its digest.
     pub async fn fetch_manifest(&self, identifier: &Identifier) -> Result<(Digest, oci::Manifest)> {
-        let ref_ = native::Reference::from(identifier);
+        let ref_ = self.transport_reference(identifier);
         self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
         let (manifest, digest_str) = self.fetch_manifest_raw(&ref_).await?;
         let digest = digest_str.try_into()?;
@@ -192,7 +283,8 @@ impl Client {
         manifest_size: i64,
     ) -> Result<(Digest, oci::ImageIndex)> {
         let target_identifier = source_identifier.clone_with_tag(target_tag);
-        let ref_ = native::Reference::from(&target_identifier);
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let ref_ = target_identifier.canonical_reference();
         self.transport.ensure_auth(&ref_, oci::RegistryOperation::Push).await?;
         let platform = Some(platform.clone().into());
 
@@ -274,7 +366,7 @@ impl Client {
     /// OCI descriptor has the same size as the manifest produced by
     /// `package push`.
     pub async fn head_blob(&self, identifier: &Identifier, digest: &Digest) -> Result<u64> {
-        let image = native::Reference::from(identifier);
+        let image = self.transport_reference(identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
         let size = self.transport.head_blob(&image, digest).await?;
         Ok(size)
@@ -300,7 +392,7 @@ impl Client {
         identifier: &oci::PinnedIdentifier,
     ) -> std::result::Result<oci::ImageManifest, ClientError> {
         let expected_digest = identifier.digest().to_string();
-        let image = native::Reference::from(&**identifier);
+        let image = self.transport_reference(identifier);
 
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
@@ -326,7 +418,7 @@ impl Client {
     /// — no media-type validation, no parsing. Caller is responsible for
     /// content interpretation.
     pub async fn pull_blob(&self, blob_ref: &oci::PinnedIdentifier) -> std::result::Result<Vec<u8>, ClientError> {
-        let image = native::Reference::from(&**blob_ref);
+        let image = self.transport_reference(blob_ref);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
         self.transport.pull_blob(&image, &blob_ref.digest()).await
     }
@@ -355,7 +447,7 @@ impl Client {
         let blob_path = content_path.with_added_extension(blob_file_ext);
         let blob_total_size = u64::try_from(layer.size).unwrap_or(0);
 
-        let image = native::Reference::from(&**identifier);
+        let image = self.transport_reference(identifier);
 
         let layer_digest = Digest::try_from(layer.digest.as_str())
             .map_err(|e| ClientError::InvalidManifest(format!("layer digest '{}' is malformed: {e}", layer.digest)))?;
@@ -458,7 +550,8 @@ impl Client {
             layers.len()
         );
 
-        let image = native::Reference::from(&package_info.identifier);
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let image = package_info.identifier.canonical_reference();
         self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
 
         let (_manifest, manifest_data, manifest_sha256) = self.push_multi_layer_manifest(package_info, layers).await?;
@@ -508,7 +601,8 @@ impl Client {
     ) -> std::result::Result<(oci::ImageManifest, Vec<u8>, String), ClientError> {
         use crate::publisher::LayerRef;
 
-        let image = native::Reference::from(&package_info.identifier);
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let image = package_info.identifier.canonical_reference();
 
         let total_layers = layers.len();
         // Upload file layers and verify digest layers concurrently, preserving
@@ -653,7 +747,8 @@ impl Client {
         description: &package::description::Description,
     ) -> std::result::Result<(), ClientError> {
         let desc_identifier = identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
-        let image = super::native::Reference::from(&desc_identifier);
+        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        let image = desc_identifier.canonical_reference();
         self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
 
         let config_data = b"{}".to_vec();
@@ -734,7 +829,7 @@ impl Client {
         temp_dir: &std::path::Path,
     ) -> std::result::Result<Option<package::description::Description>, ClientError> {
         let desc_identifier = identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
-        let image = super::native::Reference::from(&desc_identifier);
+        let image = self.transport_reference(&desc_identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
         let (manifest, _digest) = match self.fetch_manifest_raw(&image).await {
@@ -1239,6 +1334,73 @@ mod tests {
         );
     }
 
+    /// T-A4: `pull_layer` rejects a tampered blob even when the client has a
+    /// non-empty `MirrorMap` configured for the identifier's registry.
+    ///
+    /// This pins the security invariant that the mirror transform (host + repo
+    /// rewrite) does NOT bypass `verify_blob_digest`. A compromised or
+    /// misbehaving mirror that serves different bytes for the declared digest
+    /// must be caught by the same CWE-345 gate that catches a compromised
+    /// canonical registry.
+    ///
+    /// Setup mirrors the existing `pull_layer_rejects_bytes_not_matching_descriptor_digest`
+    /// test, then adds a `MirrorMap` for `example.com` before calling `pull_layer`.
+    #[tokio::test]
+    async fn pull_layer_rejects_tampered_blob_under_configured_mirror() {
+        use crate::config::mirror::ParsedMirror;
+
+        let claimed_digest = format!("sha256:{}", "a".repeat(64));
+        let evil_bytes = b"bytes that definitely do not hash to all-a".to_vec();
+
+        let data = StubTransportData::new();
+        data.write().blobs.insert(claimed_digest.clone(), evil_bytes);
+        let mut client = stub(&data);
+
+        // Install a non-empty MirrorMap pointing example.com (the test
+        // identifier's registry) to a corporate mirror. This proves that the
+        // mirror rewrite path also funnels through verify_blob_digest.
+        client.mirrors = MirrorMap::new([(
+            "example.com".to_string(),
+            ParsedMirror {
+                protocol: "https".to_string(),
+                host: "mirror.corp".to_string(),
+                path_prefix: "oci-proxy".to_string(),
+            },
+        )]);
+
+        let id = test_pinned("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: claimed_digest.clone(),
+            size: 0,
+            urls: None,
+            annotations: None,
+        };
+        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        match result {
+            Err(ClientError::DigestMismatch { expected, actual }) => {
+                assert_eq!(
+                    expected, claimed_digest,
+                    "DigestMismatch must report the declared (claimed) digest"
+                );
+                assert_ne!(
+                    actual, claimed_digest,
+                    "DigestMismatch actual must differ from the claimed digest"
+                );
+            }
+            other => panic!("expected DigestMismatch from pull_layer under mirror, got {other:?}"),
+        }
+
+        let blob_path = dir.path().join("content.tar.gz");
+        assert!(
+            !blob_path.exists(),
+            "tampered layer blob must be unlinked even when a MirrorMap is configured"
+        );
+    }
+
     // ── TempStore tests ─────────────────────────────────────────────
 
     #[tokio::test]
@@ -1314,7 +1476,7 @@ mod tests {
             let inner = data.read();
             let (bytes, _) = inner
                 .manifests
-                .get(&native::Reference::from(&id).to_string())
+                .get(&id.canonical_reference().to_string())
                 .expect("no pushed manifest");
             let manifest: oci::Manifest = serde_json::from_slice(bytes).unwrap();
             match manifest {
@@ -1363,10 +1525,9 @@ mod tests {
             };
             let existing_bytes = serde_json::to_vec(&oci::Manifest::ImageIndex(existing)).unwrap();
             let existing_digest = oci::Algorithm::Sha256.hash(&existing_bytes).to_string();
-            data.write().manifests.insert(
-                native::Reference::from(&id).to_string(),
-                (existing_bytes, existing_digest),
-            );
+            data.write()
+                .manifests
+                .insert(id.canonical_reference().to_string(), (existing_bytes, existing_digest));
 
             let client = stub_with_capture(&data);
             client
@@ -1401,10 +1562,9 @@ mod tests {
             };
             let existing_bytes = serde_json::to_vec(&oci::Manifest::ImageIndex(existing)).unwrap();
             let existing_digest = oci::Algorithm::Sha256.hash(&existing_bytes).to_string();
-            data.write().manifests.insert(
-                native::Reference::from(&id).to_string(),
-                (existing_bytes, existing_digest),
-            );
+            data.write()
+                .manifests
+                .insert(id.canonical_reference().to_string(), (existing_bytes, existing_digest));
 
             let client = stub_with_capture(&data);
             client
@@ -1438,7 +1598,7 @@ mod tests {
             let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
             let manifest_digest = oci::Algorithm::Sha256.hash(&manifest_bytes).to_string();
             data.write().manifests.insert(
-                native::Reference::from(&id).to_string(),
+                id.canonical_reference().to_string(),
                 (manifest_bytes.clone(), manifest_digest.clone()),
             );
 
@@ -1938,5 +2098,452 @@ mod tests {
             ];
             assert_eq!(relevant, expected, "cascade calls must follow input tag order");
         }
+    }
+
+    // ── construction-gating backstop + Step 3.1 specification tests ──────────
+    //
+    // The PRIMARY guarantee is the compile-time construction-gating from
+    // Step 1.3: the read-path `Identifier → native::Reference` conversion has
+    // no public `From` impl, so a bypassing read site fails to compile. This
+    // behavioural module is defence-in-depth only — it pins
+    // `transport_reference` identity-when-empty / rewrite-when-set and the
+    // push-path-unchanged invariant.
+    mod transport_reference {
+        use super::*;
+        use crate::config::mirror::ParsedMirror;
+        use crate::oci::client::MirrorMap;
+
+        fn make_id_with_tag(registry: &str, repo: &str, tag: &str) -> Identifier {
+            Identifier::new_registry(repo, registry).clone_with_tag(tag)
+        }
+
+        /// A 64-hex SHA-256 digest for the pinned-install path tests.
+        fn test_digest(hex_seed: char) -> oci::Digest {
+            oci::Digest::Sha256(std::iter::repeat_n(hex_seed, 64).collect())
+        }
+
+        fn make_id_with_digest(registry: &str, repo: &str, digest: oci::Digest) -> Identifier {
+            Identifier::new_registry(repo, registry).clone_with_digest(digest)
+        }
+
+        fn make_id_with_tag_and_digest(registry: &str, repo: &str, tag: &str, digest: oci::Digest) -> Identifier {
+            Identifier::new_registry(repo, registry)
+                .clone_with_tag(tag)
+                .clone_with_digest(digest)
+        }
+
+        fn make_mirror_map(upstream: &str, mirror_host: &str, prefix: &str) -> MirrorMap {
+            MirrorMap::new([(
+                upstream.to_string(),
+                ParsedMirror {
+                    protocol: "https".to_string(),
+                    host: mirror_host.to_string(),
+                    path_prefix: prefix.to_string(),
+                },
+            )])
+        }
+
+        /// `transport_reference` with an empty (identity) map returns a
+        /// reference whose host equals the canonical registry.
+        ///
+        /// Traces: plan Testing Strategy — "identity when no mirror".
+        #[test]
+        fn transport_reference_is_identity_when_no_mirror() {
+            let client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            let id = make_id_with_tag("ghcr.io", "owner/tool", "1.0");
+            let reference = client.transport_reference(&id);
+            assert_eq!(
+                reference.registry(),
+                "ghcr.io",
+                "empty MirrorMap must leave registry unchanged"
+            );
+            assert_eq!(reference.repository(), "owner/tool");
+        }
+
+        /// `transport_reference` with a mirrored host rewrites to the mirror
+        /// host + path-prefix-joined repository.
+        ///
+        /// Traces: plan Testing Strategy — "transport_reference rewrites a
+        /// mirrored read identifier (host+repo+tag/digest verbatim)".
+        #[test]
+        fn transport_reference_rewrites_mirrored_host_and_repository() {
+            let mut client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            client.mirrors = make_mirror_map("ghcr.io", "company.jfrog.io", "ghcr-remote");
+
+            let id = make_id_with_tag("ghcr.io", "owner/tool", "1.0");
+            let reference = client.transport_reference(&id);
+            assert_eq!(
+                reference.registry(),
+                "company.jfrog.io",
+                "registry must be rewritten to the mirror host"
+            );
+            assert_eq!(
+                reference.repository(),
+                "ghcr-remote/owner/tool",
+                "repository must be <prefix>/<upstream-repo>"
+            );
+        }
+
+        /// The returned reference's `registry()` is the MIRROR host — this
+        /// proves that auth keys off the mirror host, not the upstream.
+        ///
+        /// Traces: plan Testing Strategy — "the returned `native::Reference`
+        /// `registry()` is the MIRROR host (proves auth keys off mirror)";
+        /// ADR F1/R5.
+        #[test]
+        fn transport_reference_registry_is_mirror_host_for_auth() {
+            let mut client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            client.mirrors = make_mirror_map("ghcr.io", "enterprise.artifactory.corp", "ghcr-proxy");
+
+            let id = make_id_with_tag("ghcr.io", "my-org/my-tool", "v2.0");
+            let reference = client.transport_reference(&id);
+
+            // This is the host that NativeTransport::auth_for keys off — it
+            // must be the mirror host so mirror credentials are used, not
+            // upstream credentials.
+            assert_eq!(
+                reference.registry(),
+                "enterprise.artifactory.corp",
+                "reference.registry() must be the mirror host so auth resolves against it"
+            );
+        }
+
+        /// Tag is copied verbatim from the original identifier.
+        ///
+        /// Traces: plan Testing Strategy — "host+repo+tag/digest verbatim".
+        #[test]
+        fn transport_reference_tag_copied_verbatim() {
+            let mut client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            client.mirrors = make_mirror_map("ghcr.io", "mirror.corp", "proxy");
+
+            let id = make_id_with_tag("ghcr.io", "owner/tool", "3.28.1");
+            let reference = client.transport_reference(&id);
+            assert_eq!(
+                reference.tag(),
+                Some("3.28.1"),
+                "tag must be copied verbatim to the mirror reference"
+            );
+        }
+
+        // ── Pinned-install (digest) paths — security-critical ───────────────
+        //
+        // A pinned install resolves through a digest. The transport reference
+        // MUST carry the digest verbatim so `verify_blob_digest` checks the
+        // bytes against the SAME digest the caller pinned — under both the
+        // mirror and no-mirror paths. A dropped or altered digest here would
+        // silently weaken the tamper gate.
+
+        /// Digest-only identifier (pinned install, no tag): the digest is
+        /// preserved verbatim in the transport reference under a mirror.
+        ///
+        /// Traces: coverage gap #3 — digest-only pinned-install path (mirror).
+        #[test]
+        fn transport_reference_digest_only_preserves_digest_under_mirror() {
+            let mut client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            client.mirrors = make_mirror_map("ghcr.io", "company.jfrog.io", "ghcr-remote");
+
+            let digest = test_digest('a');
+            let id = make_id_with_digest("ghcr.io", "owner/tool", digest.clone());
+            let reference = client.transport_reference(&id);
+
+            assert_eq!(reference.registry(), "company.jfrog.io", "host must be the mirror");
+            assert_eq!(
+                reference.repository(),
+                "ghcr-remote/owner/tool",
+                "repo must be prefixed"
+            );
+            assert_eq!(
+                reference.digest(),
+                Some(digest.to_string().as_str()),
+                "digest must be preserved verbatim — the pinned tamper gate keys off it"
+            );
+            assert_eq!(reference.tag(), None, "a digest-only identifier carries no tag");
+        }
+
+        /// Digest-only identifier with no mirror: identity reference still
+        /// preserves the digest verbatim.
+        ///
+        /// Traces: coverage gap #3 — digest-only pinned-install path (no mirror).
+        #[test]
+        fn transport_reference_digest_only_preserves_digest_no_mirror() {
+            let client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+
+            let digest = test_digest('b');
+            let id = make_id_with_digest("ghcr.io", "owner/tool", digest.clone());
+            let reference = client.transport_reference(&id);
+
+            assert_eq!(reference.registry(), "ghcr.io", "no mirror → canonical host");
+            assert_eq!(reference.repository(), "owner/tool", "no mirror → canonical repo");
+            assert_eq!(
+                reference.digest(),
+                Some(digest.to_string().as_str()),
+                "digest must be preserved verbatim on the no-mirror identity path"
+            );
+        }
+
+        /// Tag+digest identifier: BOTH the tag and the digest are preserved
+        /// verbatim under a mirror (the digest is what pins the install).
+        ///
+        /// Traces: coverage gap #3 — tag+digest pinned-install path (mirror).
+        #[test]
+        fn transport_reference_tag_and_digest_preserved_under_mirror() {
+            let mut client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            client.mirrors = make_mirror_map("ghcr.io", "company.jfrog.io", "ghcr-remote");
+
+            let digest = test_digest('c');
+            let id = make_id_with_tag_and_digest("ghcr.io", "owner/tool", "3.28.1", digest.clone());
+            let reference = client.transport_reference(&id);
+
+            assert_eq!(reference.registry(), "company.jfrog.io", "host must be the mirror");
+            assert_eq!(
+                reference.repository(),
+                "ghcr-remote/owner/tool",
+                "repo must be prefixed"
+            );
+            assert_eq!(reference.tag(), Some("3.28.1"), "tag must be preserved verbatim");
+            assert_eq!(
+                reference.digest(),
+                Some(digest.to_string().as_str()),
+                "digest must be preserved verbatim alongside the tag"
+            );
+        }
+
+        /// Tag+digest identifier with no mirror: identity reference preserves
+        /// both tag and digest verbatim.
+        ///
+        /// Traces: coverage gap #3 — tag+digest pinned-install path (no mirror).
+        #[test]
+        fn transport_reference_tag_and_digest_preserved_no_mirror() {
+            let client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+
+            let digest = test_digest('d');
+            let id = make_id_with_tag_and_digest("ghcr.io", "owner/tool", "3.28.1", digest.clone());
+            let reference = client.transport_reference(&id);
+
+            assert_eq!(reference.registry(), "ghcr.io", "no mirror → canonical host");
+            assert_eq!(reference.repository(), "owner/tool", "no mirror → canonical repo");
+            assert_eq!(reference.tag(), Some("3.28.1"), "tag must be preserved verbatim");
+            assert_eq!(
+                reference.digest(),
+                Some(digest.to_string().as_str()),
+                "digest must be preserved verbatim on the no-mirror identity path"
+            );
+        }
+
+        /// `transport_registry` rewrites a catalog registry to the mirror host.
+        ///
+        /// Traces: plan Testing Strategy — "transport_registry rewrites the
+        /// catalog registry".
+        #[test]
+        fn transport_registry_rewrites_catalog_registry() {
+            let mut client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            client.mirrors = make_mirror_map("ghcr.io", "catalog-mirror.corp", "ghcr-catalog");
+
+            let reference = client.transport_registry("ghcr.io");
+            assert_eq!(
+                reference.registry(),
+                "catalog-mirror.corp",
+                "transport_registry must rewrite the catalog registry to the mirror host"
+            );
+            // Pin the empty-repository fix (finding #5): the placeholder
+            // repository for a registry-scoped catalog call must be the mirror's
+            // path prefix VERBATIM — never `"ghcr-catalog/"` with a trailing
+            // slash. oci-client's `_auth` stamps `repository()` into the token
+            // scope (`repository:<repository>:pull`); a trailing slash there
+            // produces a malformed scope that can break catalog auth against a
+            // mirror keying tokens off the repo-key path segment.
+            assert_eq!(
+                reference.repository(),
+                "ghcr-catalog",
+                "catalog repository must be the path prefix with no trailing slash"
+            );
+        }
+
+        /// `transport_registry` is identity when no mirror configured.
+        ///
+        /// Traces: plan Testing Strategy — "identity when no mirror".
+        #[test]
+        fn transport_registry_is_identity_when_no_mirror() {
+            let client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            let reference = client.transport_registry("quay.io");
+            assert_eq!(
+                reference.registry(),
+                "quay.io",
+                "empty MirrorMap must leave catalog registry unchanged"
+            );
+            assert_eq!(
+                reference.repository(),
+                "",
+                "no-mirror catalog repository stays empty (auth scope keys off the registry only)"
+            );
+        }
+
+        /// T-A3: bare identifier (no tag, no digest) under a configured mirror.
+        ///
+        /// The `(None, None)` arm in `transport_reference` emits
+        /// `native::Reference::with_tag(host, repository, "latest")`. This test
+        /// verifies that:
+        /// - the host is rewritten to the mirror host (not the canonical registry), and
+        /// - the returned reference carries `tag() == Some("latest")` (the OCI default).
+        ///
+        /// A bare identifier arises when a user runs `ocx package install cmake`
+        /// (no pin, no explicit tag). Under a mirror the reference must point at
+        /// the mirror and still carry "latest" so the registry fetch resolves
+        /// the correct tag.
+        #[test]
+        fn transport_reference_bare_identifier_resolves_to_latest_under_mirror() {
+            let mut client = Client::with_transport(Box::new(test_transport::StubTransport::new(
+                test_transport::StubTransportData::new(),
+            )));
+            client.mirrors = make_mirror_map("ghcr.io", "company.jfrog.io", "ghcr-remote");
+
+            // Bare identifier: no tag, no digest.
+            let bare_id = Identifier::new_registry("owner/tool", "ghcr.io");
+            assert!(bare_id.tag().is_none(), "pre-condition: bare id has no tag");
+            assert!(bare_id.digest().is_none(), "pre-condition: bare id has no digest");
+
+            let reference = client.transport_reference(&bare_id);
+
+            assert_eq!(
+                reference.registry(),
+                "company.jfrog.io",
+                "bare identifier under mirror must use the mirror host, not ghcr.io"
+            );
+            assert_eq!(
+                reference.repository(),
+                "ghcr-remote/owner/tool",
+                "bare identifier under mirror must prefix the repository"
+            );
+            assert_eq!(
+                reference.tag(),
+                Some("latest"),
+                "bare identifier (no tag, no digest) must resolve to 'latest'"
+            );
+            assert!(
+                reference.digest().is_none(),
+                "bare identifier must carry no digest in the transport reference"
+            );
+        }
+
+        /// Push path uses `canonical_reference()` — not `transport_reference`.
+        /// The canonical reference is NEVER mirrored, even when the client
+        /// has a mirror map for the registry.
+        ///
+        /// Traces: plan Testing Strategy — "push distinct"; ADR Q5 (push not
+        /// mirror-redirected).
+        #[test]
+        fn push_path_uses_canonical_reference_not_mirror() {
+            // canonical_reference() is pub(crate); call it directly on the
+            // identifier (as push sites do) and confirm it targets the
+            // canonical host, not the mirror.
+            let id = make_id_with_tag("ghcr.io", "owner/tool", "1.0");
+            let canonical = id.canonical_reference();
+            assert_eq!(
+                canonical.registry(),
+                "ghcr.io",
+                "canonical_reference must always target the upstream host, never the mirror"
+            );
+        }
+    }
+
+    // ── T-arch-A1: structural gating test ────────────────────────────────────
+    //
+    // `canonical_reference` is `pub(crate)` and intentionally callable in-crate,
+    // but the in-crate discipline is: read paths must route through
+    // `Client::transport_reference` / `transport_registry` (the mirror seams), not
+    // call `canonical_reference` directly. The compiler cannot enforce this for
+    // in-crate call sites, so we promote it to a source-scanning structural test.
+    //
+    // Any NEW call site of `canonical_reference` outside the allow-list below must
+    // fail this test, forcing an explicit decision: either update the allow-list
+    // (with a justification comment) or reroute through the mirror seam.
+    //
+    // Allow-list rationale (only files that ACTUALLY reference the symbol —
+    // adding a file that does not use it would create a latent hole, silently
+    // permitting a future read-path call there):
+    // - `oci/identifier.rs`  — definition + test helpers (canonical home).
+    // - `oci/client.rs`      — the two gated seams + `ensure_auth` push path +
+    //                          the manifest-cache keys (cache keyed off the
+    //                          canonical identity, mirror-independent by design)
+    //                          + test helpers in the `transport_reference` module.
+    // - `package/cascade.rs` — push-path cascade test spies keying a manifest
+    //                          map by canonical reference (test-only).
+    #[test]
+    fn canonical_reference_only_used_in_allowed_files() {
+        use std::fs;
+        use std::path::Path;
+
+        // Allow-list: file paths (relative to the ocx_lib src root) that are
+        // permitted to reference `canonical_reference`.
+        const ALLOWED_SUFFIXES: &[&str] = &["oci/identifier.rs", "oci/client.rs", "package/cascade.rs"];
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let src_root = Path::new(manifest_dir).join("src");
+
+        // Recursively collect all `.rs` files under the src root.
+        fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut rs_files = Vec::new();
+        collect_rs_files(&src_root, &mut rs_files);
+        assert!(
+            !rs_files.is_empty(),
+            "source scanner found no .rs files under {}",
+            src_root.display()
+        );
+
+        let mut offenders: Vec<String> = Vec::new();
+        for file_path in &rs_files {
+            let content = fs::read_to_string(file_path).unwrap_or_default();
+            if !content.contains("canonical_reference") {
+                continue;
+            }
+
+            // Check whether this file is in the allow-list.
+            let path_str = file_path.to_string_lossy();
+            let allowed = ALLOWED_SUFFIXES.iter().any(|suffix| {
+                // Normalise separators so the check works on all platforms.
+                path_str.replace('\\', "/").ends_with(suffix)
+            });
+            if !allowed {
+                offenders.push(path_str.into_owned());
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "T-arch-A1: `canonical_reference` found in file(s) outside the allow-list \
+             (read paths must route through Client::transport_reference / transport_registry):\n  {}",
+            offenders.join("\n  ")
+        );
     }
 }

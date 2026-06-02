@@ -585,7 +585,7 @@ mod tests {
             let digest = oci::Algorithm::Sha256.hash(&manifest_data).to_string();
             data.write()
                 .manifests
-                .insert(oci::native::Reference::from(&id).to_string(), (manifest_data, digest));
+                .insert(id.canonical_reference().to_string(), (manifest_data, digest));
         }
 
         // ── has_blocking_platform ───────────────────────────────
@@ -663,7 +663,7 @@ mod tests {
             let digest = oci::Algorithm::Sha256.hash(&manifest_data).to_string();
             data.write()
                 .manifests
-                .insert(oci::native::Reference::from(&id).to_string(), (manifest_data, digest));
+                .insert(id.canonical_reference().to_string(), (manifest_data, digest));
             let client = test_client(&data);
             let result = has_blocking_platform(&client, &test_identifier(), &[blocker], &platform("linux/amd64")).await;
             assert!(!result.unwrap());
