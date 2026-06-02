@@ -7,7 +7,7 @@ paths:
 
 Thin CLI shell. Use clap at `crates/ocx_cli/src/`. One file per subcommand. Output format via `Printable` trait.
 
-> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The command taxonomy below reflects that signed handshake. Any description of `ocx shell hook`, `ocx shell init`, `ocx shell env`, root `ocx install/uninstall/select/exec/deselect/which/deps`, or `ocx ci` describes the **deleted** model — do not implement it.
+> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The command taxonomy below reflects that signed handshake. Any description of `ocx shell hook`, `ocx shell init`, `ocx shell env`, root `ocx install/uninstall/select/exec/deselect/which/deps`, or `ocx ci` (the **command**) describes the **deleted** model — do not implement it. The CI-export capability is NOT a command: it is the `--ci[=provider]` flag on `ocx env` / `ocx package env` (handshake §6, ADR `adr_ci_env_export_flag.md`).
 
 ## High-Level vs OCI-Tier Layering
 
@@ -24,7 +24,7 @@ Per-package, identifier-driven, no `ocx.toml` at any tier:
 - `ocx package select <id>` — set `current` symlink
 - `ocx package deselect <id>` — clear `current` symlink
 - `ocx package exec <id> -- cmd` — run package binary, clean env
-- `ocx package env <ids...> [--shell[=NAME]]` — composed env for the named packages (reuses `env.rs`)
+- `ocx package env <ids...> [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH]` — composed env for the named packages (reuses `env.rs`); `--ci` writes to a CI sink (see below)
 - `ocx package which <ids...>` — resolve installed packages to paths (`--candidate`/`--current` for stable symlink anchor)
 - `ocx package deps <ids...>` — show dependency tree/flat/why for installed packages (`--flat`/`--why`/`--depth`/`--self`)
 
@@ -34,7 +34,7 @@ Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx
 Canonical form: `ocx --global <subcommand>`.
 - `ocx [--global] add <id>`, `ocx [--global] remove <name>`, `ocx [--global] lock`, `ocx [--global] upgrade`
 - `ocx [--global] run -- cmd` — compose toolchain env for child process only; never mutates parent shell
-- `ocx [--global] env [--shell[=NAME]]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel
+- `ocx [--global] env [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel; `--ci` writes to a CI sink (see below)
 
 ### `ocx shell` — reduced to one survivor
 - `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)
@@ -49,7 +49,7 @@ Canonical form: `ocx --global <subcommand>`.
 
 ### Removed root commands (handshake §7 — exit 64 if invoked)
 - `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect`, `ocx which`, `ocx deps` → moved to `ocx package`; ocx maps clap usage errors → EX_USAGE 64 (see `app.rs:112-119`)
-- `ocx ci` → removed
+- `ocx ci` → removed (the **command**). The CI-export capability returns as the `--ci[=PROVIDER]` flag on `ocx env` / `ocx package env` — see "Cross-Cutting: CI Env Export (`--ci`)" below.
 
 ## Design Rationale
 
@@ -85,6 +85,32 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 `require_equals=true` guarantees a following positional (`ocx package env --shell ripgrep`) is never swallowed.
 
 `--shell=sh` resolves to `Shell::Dash` via a `PossibleValue::new("sh")` alias — **no new enum variant**, zero new match arms (handshake C5).
+
+## Cross-Cutting: CI Env Export (`--ci`)
+
+`--ci[=PROVIDER]` is a third emit branch on `ocx env` and `ocx package env`,
+beside `--shell` and the structured report. It writes the composed env into a
+CI system's persistence channel so tool dirs/vars reach **later** pipeline
+steps (`--shell` only affects the current step). Realizes handshake §6; ADR
+`adr_ci_env_export_flag.md`. Library half lives in `ocx_lib::ci` (`CiFlavor`,
+`Flavor`, `github_flavor.rs`, `gitlab_flavor.rs`); the CLI wiring is two shared
+helpers in `conventions.rs` (`resolve_ci_arg`, `export_ci`).
+
+- Declared `Option<Option<CiFlavor>>` with `num_args=0..=1, require_equals=true,
+  conflicts_with = "shell"` (same grammar as `--shell`). Bare `--ci` autodetects
+  from `$GITHUB_ACTIONS` / `$GITLAB_CI`; usage error (exit 64) if none detected.
+- Values: `github` (alias `github-actions`), `gitlab` (alias `gitlab-ci`).
+- `--ci` ⟂ `--shell` (clap `conflicts_with`, exit 64). At most one applies.
+- `--export-file PATH` is `requires = "ci"` (exit 64 without it). GitLab-only:
+  rejected for `--ci=github` (exit 64) in `export_ci`.
+- **GitHub** (`--ci=github`): inferred two-file sink — appends to `$GITHUB_PATH`
+  (path entries) and `$GITHUB_ENV` (everything else). An explicit `--ci=github`
+  outside GitHub Actions fails `from_env()` with exit 78 (`ConfigError`) — the
+  global-lenient contract covers *resolution* failures only, not an explicit
+  misconfigured channel.
+- **GitLab** (`--ci=gitlab`): JSON-lines `{"name","value"}`, one per key, to
+  `--export-file` or stdout. No path channel: `PATH` and every path var are
+  flattened (prepend package values to existing, join with `PATH_SEPARATOR`).
 
 ## `ContextOptions.format` — `Option<Format>` (single format authority)
 

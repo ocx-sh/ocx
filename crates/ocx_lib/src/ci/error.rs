@@ -18,13 +18,17 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    /// A file I/O error occurred while writing to a CI export stream that has
+    /// no associated path (e.g. the GitLab JSON-lines stdout sink).
+    #[error("failed to write CI export stream: {0}")]
+    Write(#[source] std::io::Error),
 }
 
 impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
             Self::MissingEnv(_) => ExitCode::ConfigError,
-            Self::File { .. } => ExitCode::IoError,
+            Self::File { .. } | Self::Write(_) => ExitCode::IoError,
         })
     }
 }

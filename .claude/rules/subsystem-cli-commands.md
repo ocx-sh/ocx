@@ -68,7 +68,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--pull/--no-pull` |
 | `upgrade PKGS...` | Re-resolve advisory tags in lock | `-g/--group`, `--pull/--no-pull` |
 | `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env | `-g/--group`, `--clean`, `--self` |
-| `env [--shell[=NAME]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe | `--shell[=NAME]` |
+| `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file` |
 | `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |
 
 ### OCI-Tier Commands (`ocx package`)
@@ -80,7 +80,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package select PKGS...` | Set `current` symlink | `-p` |
 | `package deselect PKGS...` | Remove `current` symlink | — |
 | `package exec PKGS... -- CMD` | Run command with package env (hermetic) | `--clean`, `-p`, `--self` |
-| `package env PKGS... [--shell[=NAME]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe | `--shell[=NAME]`, `--self` |
+| `package env PKGS... [--shell[=NAME]] [--ci[=PROVIDER]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step) | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--self` |
 | `package pull PKGS...` | Download to object store only | `-p` |
 | `package create PATH` | Bundle directory into archive | `-o`, `-m`, `-l`, `-j`, `--force` |
 | `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp` |
@@ -139,7 +139,7 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | `ocx exec` | `ocx package exec` |
 | `ocx which` | `ocx package which` |
 | `ocx deps` | `ocx package deps` |
-| `ocx ci` | Removed (deferred extension point) |
+| `ocx ci` | Removed as a command; CI export is the `--ci[=PROVIDER]` flag on `ocx env` / `ocx package env` |
 | `ocx shell hook` | Removed (activation via `$OCX_HOME/env.sh` + `ocx --global env --shell=sh`) |
 | `ocx shell init` | Removed (OCX install script owns profile modification) |
 | `ocx shell env` | `ocx env` (toolchain) or `ocx package env` (per-package) |
@@ -156,12 +156,14 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | Per-package env, default | `ocx package env <ids...>` | plain table (context default) |
 | Per-package env, machine-readable | `ocx --format json package env <ids...>` | JSON |
 | Per-package env, eval-safe | `ocx package env <ids...> --shell[=NAME]` | Shell export lines |
+| Either, CI sink (later-step) | `ocx [--global] env --ci=github` / `ocx package env <ids...> --ci=gitlab [--export-file PATH]` | GitHub two-file sink / GitLab JSON-lines |
 
 Rules:
 - `--shell` is the **only eval-safe form**. Plain/JSON are NOT sourceable.
 - `eval "$(ocx env)"` is a user error. `eval "$(ocx env --shell=bash)"` is correct.
 - `--shell=sh` ≡ `--shell=dash` (POSIX strict; `sh` is a `PossibleValue` alias on `Shell::Dash` — no new enum variant).
 - `ocx package env` reuses `env.rs::execute` which auto-installs via `find_or_install_all` — deliberate (handshake §2).
+- `--ci` writes to a CI persistence channel for **later** steps (vs `--shell` = current step). `--ci` ⟂ `--shell` (exit 64). `--ci=github` infers `$GITHUB_ENV`/`$GITHUB_PATH` (rejects `--export-file`, exit 64); `--ci=gitlab` writes JSON-lines to `--export-file` or stdout. Bare `--ci` autodetects (`$GITHUB_ACTIONS`/`$GITLAB_CI`); exit 64 if undetected. Explicit `--ci=github` outside GitHub Actions → exit 78. ADR `adr_ci_env_export_flag.md`.
 
 ---
 

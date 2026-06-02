@@ -60,12 +60,7 @@ impl GitHubFlavor {
             append_line(&self.path_file, &entry)?;
         }
         for (key, values) in self.buffered_paths.drain(..) {
-            let existing = crate::env::var(&key).unwrap_or_default();
-            let mut parts: Vec<&str> = values.iter().map(String::as_str).collect();
-            if !existing.is_empty() {
-                parts.push(&existing);
-            }
-            let full = parts.join(crate::env::PATH_SEPARATOR);
+            let full = super::prepend_existing(&key, &values);
             append_env_var(&self.env_file, &key, &full)?;
         }
         for (key, value) in self.buffered_constants.drain(..) {
@@ -77,8 +72,23 @@ impl GitHubFlavor {
 
 impl Flavor for GitHubFlavor {
     fn write_entry(&mut self, key: &str, value: &str, kind: &ModifierKind) -> crate::Result<()> {
+        // Gate the key slot before any branch buffers it: a key bearing a
+        // newline would inject a second `KEY=value` line into `$GITHUB_ENV`
+        // (CWE-77), and a non-identifier charset corrupts the var name.
+        if !crate::env::is_valid_env_key(key) {
+            warn!("skipping invalid env-var key {key:?} for CI export");
+            return Ok(());
+        }
         match kind {
             ModifierKind::Path if key == "PATH" => {
+                // `$GITHUB_PATH` entries are written one raw value per line,
+                // unquoted. A value containing `\n`/`\r` would inject extra
+                // PATH directories (CWE-426/77); a real PATH dir never has a
+                // newline, so reject it.
+                if value.contains('\n') || value.contains('\r') {
+                    warn!("skipping PATH value with embedded newline for CI export: {value:?}");
+                    return Ok(());
+                }
                 self.path_entries.push(value.to_string());
             }
             ModifierKind::Path => {
@@ -370,6 +380,106 @@ mod tests {
                 "LD_LIBRARY_PATH=/pkg1/lib{0}/pkg2/lib{0}/existing/lib\n",
                 crate::env::PATH_SEPARATOR
             )
+        );
+    }
+
+    #[test]
+    fn key_with_newline_skipped() {
+        // A constant key bearing a newline would inject a second `KEY=value`
+        // line into `$GITHUB_ENV` (Finding 2, CWE-77). The entry is dropped,
+        // so the env file stays empty — no injected second variable.
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+
+        targets
+            .write_entry("FOO\nINJECTED=evil", "value", &ModifierKind::Constant)
+            .unwrap();
+        targets.flush().unwrap();
+
+        let content = read(&targets.env_file);
+        assert_eq!(content, "", "invalid key must not write any line to $GITHUB_ENV");
+        assert!(
+            !content.contains("INJECTED"),
+            "no injected second variable must appear: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn path_value_with_newline_rejected() {
+        // A `$GITHUB_PATH` value with an embedded newline would inject extra
+        // PATH directories (Finding 1, CWE-426/77). The value is rejected, so
+        // the path file does not contain the injected dir.
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+
+        targets
+            .write_entry("PATH", "/pkg/bin\n/injected/evil", &ModifierKind::Path)
+            .unwrap();
+        targets.flush().unwrap();
+
+        let content = read(&targets.path_file);
+        assert_eq!(content, "", "newline-bearing PATH value must not be written");
+        assert!(
+            !content.contains("/injected/evil"),
+            "injected PATH dir must not appear: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn key_with_invalid_charset_skipped() {
+        // Keys containing `=` or spaces are not valid env-var identifiers.
+        // They must be rejected before reaching `$GITHUB_ENV` to prevent
+        // corrupting the KEY=value line format (parity with GitLab charset test).
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+
+        targets
+            .write_entry("FOO=BAR", "value", &ModifierKind::Constant)
+            .unwrap();
+        targets
+            .write_entry("FOO BAR", "value", &ModifierKind::Constant)
+            .unwrap();
+        targets.flush().unwrap();
+
+        let content = read(&targets.env_file);
+        assert_eq!(
+            content, "",
+            "invalid-charset keys must not write any line to $GITHUB_ENV"
+        );
+    }
+
+    #[test]
+    fn drop_flushes_buffered_entries() {
+        // The Drop impl flushes any buffered entries that were never explicitly
+        // flushed. GitHubFlavor writes to files, so we observe the output by
+        // reading the env file after the flavor is dropped.
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let env_file = tmp.path().join("github_env");
+        let path_file = tmp.path().join("github_path");
+        std::fs::write(&path_file, "").unwrap();
+        std::fs::write(&env_file, "").unwrap();
+        env.set("GITHUB_ACTIONS", "true");
+        env.set("GITHUB_PATH", path_file.to_str().unwrap());
+        env.set("GITHUB_ENV", env_file.to_str().unwrap());
+
+        {
+            let mut targets = super::GitHubFlavor::from_env().unwrap();
+            targets
+                .write_entry("DROP_TEST", "drop-value", &ModifierKind::Constant)
+                .unwrap();
+            // Intentionally NO flush() call — drop must flush instead.
+            drop(targets);
+        }
+
+        // The Drop impl should have written the buffered constant to disk.
+        let content = read(&env_file);
+        assert_eq!(
+            content, "DROP_TEST=drop-value\n",
+            "Drop must flush buffered entries without an explicit flush() call"
         );
     }
 

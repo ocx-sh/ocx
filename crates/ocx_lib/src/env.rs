@@ -433,6 +433,34 @@ pub fn string(key: impl AsRef<str>, default: String) -> String {
     }
 }
 
+/// Validates that `key` matches the POSIX environment-variable name grammar
+/// (`[A-Za-z_][A-Za-z0-9_]*`).
+///
+/// Reject anything else. Without this gate, attacker-controlled package
+/// metadata could inject syntax through the *key* slot of an emitted
+/// assignment line that value-escaping does not protect against:
+///
+/// - shell emitters (`Shell::export_path` / `export_constant` / `unset`) — a
+///   key like `KEY="; rm -rf $HOME; X` would break out of `export KEY=VAL`;
+/// - CI exporters — a key containing a newline (`KEY\nINJECTED=evil`) would
+///   inject a second variable into the GitHub `$GITHUB_ENV` file (CWE-77), and
+///   non-identifier charsets corrupt the GitLab JSON-lines key field.
+///
+/// Lives in `crate::env` so every consumer that writes env-var keys — the
+/// `shell` emitters and the `ci` flavors — validates through one source of
+/// truth.
+pub fn is_valid_env_key(key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    let mut bytes = key.bytes();
+    let Some(first) = bytes.next() else { return false };
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Parses `OCX_INSECURE_REGISTRIES` into a list of registry hostnames.
 pub fn insecure_registries() -> Vec<String> {
     string("OCX_INSECURE_REGISTRIES", String::new())
@@ -526,6 +554,46 @@ mod tests {
             assert_ne!(lower, mixed);
             assert_ne!(upper, mixed);
         }
+    }
+
+    // ── is_valid_env_key (shared key validator) ──────────────────────────
+
+    #[test]
+    fn is_valid_env_key_accepts_identifiers() {
+        assert!(is_valid_env_key("FOO"));
+        assert!(is_valid_env_key("_x"));
+        assert!(is_valid_env_key("A1"));
+        assert!(is_valid_env_key("_OCX_INTERNAL"));
+        assert!(is_valid_env_key("PATH"));
+    }
+
+    #[test]
+    fn is_valid_env_key_rejects_empty() {
+        assert!(!is_valid_env_key(""));
+    }
+
+    #[test]
+    fn is_valid_env_key_rejects_leading_digit() {
+        assert!(!is_valid_env_key("1A"));
+    }
+
+    #[test]
+    fn is_valid_env_key_rejects_space() {
+        assert!(!is_valid_env_key("A B"));
+    }
+
+    #[test]
+    fn is_valid_env_key_rejects_newline() {
+        // A newline in the key slot is the CI key-injection vector
+        // (GitHub `$GITHUB_ENV` second-variable injection, CWE-77).
+        assert!(!is_valid_env_key("A\nB"));
+        assert!(!is_valid_env_key("A\rB"));
+    }
+
+    #[test]
+    fn is_valid_env_key_rejects_equals() {
+        // `=` would split the key/value framing of an assignment line.
+        assert!(!is_valid_env_key("A=B"));
     }
 
     #[test]

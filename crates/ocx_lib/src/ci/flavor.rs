@@ -3,6 +3,14 @@
 
 use crate::package::metadata::env::modifier::ModifierKind;
 
+// Conflict tracking at this layer is value-only. The `entry::Entry` stream
+// passed to `write_entry` is already resolved and carries no package
+// attribution, so both flavors call `ConstantTracker::track("", key, value)`
+// with an empty package label. A conflict warning therefore identifies the
+// key and the two values, not which packages set them — package attribution
+// would have to be threaded down from the composer, which the CI export
+// surface does not currently do.
+
 /// Trait that each CI flavor must implement to export environment variables
 /// into its runtime files.
 pub(super) trait Flavor {

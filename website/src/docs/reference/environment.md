@@ -381,17 +381,38 @@ To disable the check entirely rather than adjusting its frequency, use [`OCX_NO_
 When set to a [truthy value](#truthy-values), OCX suppresses the update check on startup.
 Most CI systems (GitHub Actions, GitLab CI, Travis, etc.) set this automatically.
 
+### CI Integration Variables {#external-ci-integration}
+
+`ocx env --ci` and `ocx package env --ci` read a small set of runner-provided variables to locate the CI system's persistence channel. These variables are **read by OCX from the runner environment** — they are not OCX configuration and carry no `OCX_` prefix.
+
+| Variable | Provider | Purpose |
+|----------|----------|---------|
+| [`GITHUB_ACTIONS`](#external-github-actions) | [GitHub Actions][github-actions-docs] | Provider auto-detection |
+| [`GITHUB_ENV`](#external-github-env) | [GitHub Actions][github-actions-docs] | Sink for non-`PATH` entries |
+| [`GITHUB_PATH`](#external-github-path) | [GitHub Actions][github-actions-docs] | Sink for `PATH`-type entries |
+| [`GITLAB_CI`](#external-gitlab-ci) | [GitLab CI/CD][gitlab-ci-docs] | Provider auto-detection |
+
+::: warning These variables are not forwarded to child `ocx` processes
+OCX's config-forwarding set propagates only `OCX_*` resolution-affecting variables to subprocesses (launchers, nested `ocx run`). The runner variables above are **not** in that set — a child `ocx` invocation will not inherit them. This is intentional: the CI sink files are runner-managed paths and must not propagate through forked environments.
+:::
+
 ### `GITHUB_ACTIONS` {#external-github-actions}
 
-Set to `true` by [GitHub Actions][github-actions-docs] runners. OCX uses this variable to suppress the update check on startup. It was previously also used by the removed `ocx ci export` command — that command has been removed; see [`ocx ci`][cmd-ci] for the replacement pattern.
+Set to `true` by [GitHub Actions][github-actions-docs] runners. OCX reads this variable to auto-detect the CI provider when `--ci` is passed without an explicit provider value, and to suppress the update check on startup.
 
 ### `GITHUB_PATH` {#external-github-path}
 
-Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps may append `PATH` entries to this file to make tools available in subsequent steps. The removed `ocx ci export` command previously wrote to this file automatically; use `ocx --format json package env` with `jq` or `ocx run` instead.
+Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps append one directory per line to this file; each appended directory is **prepended** to `PATH` for all later steps. `ocx env --ci=github` and `ocx package env --ci=github` write only the literal `PATH` variable here — one directory per line, in prepend order — so OCX-installed tool directories land leftmost (highest priority) in `PATH` for every subsequent step, regardless of when the step runs.
+
+All other path-type variables (such as `LD_LIBRARY_PATH`, `MANPATH`, `PKG_CONFIG_PATH`) are written to [`GITHUB_ENV`](#external-github-env) as `KEY=value`, not to this file.
 
 ### `GITHUB_ENV` {#external-github-env}
 
-Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps may append non-`PATH` environment variables to this file using `KEY=value` syntax (or [heredoc delimiters][github-multiline-env] for multiline values). The removed `ocx ci export` command previously wrote to this file automatically; use `ocx --format json package env` with `jq` instead.
+Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps append environment variables to this file using `KEY=VALUE` syntax (or [heredoc delimiters][github-multiline-env] for multiline values); the runner exports each entry to all later steps. `ocx env --ci=github` and `ocx package env --ci=github` write all non-`PATH` entries here: constant-type variables as `KEY=VALUE`, and path-type variables other than `PATH` (such as `LD_LIBRARY_PATH`) as `KEY=<prepended-value>` with OCX-provided directories prepended to the existing value.
+
+### `GITLAB_CI` {#external-gitlab-ci}
+
+Set to `true` by [GitLab CI/CD][gitlab-ci-docs] runners. OCX reads this variable to auto-detect the CI provider when `--ci` is passed without an explicit provider value.
 
 ### `DOCKER_CONFIG` {#external-docker-config}
 
@@ -433,7 +454,9 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [mach-o]: https://en.wikipedia.org/wiki/Mach-O
 [oh-my-zsh]: https://ohmyz.sh/
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[github-actions-workflow-commands]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions
 [github-multiline-env]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strings
+[gitlab-ci-docs]: https://docs.gitlab.com/ee/ci/
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 [xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/
@@ -442,7 +465,6 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- commands -->
 [cmd-ref]: command-line.md
-[cmd-ci]: command-line.md#ci
 [cmd-direnv]: command-line.md#direnv
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config

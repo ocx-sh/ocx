@@ -58,10 +58,36 @@ pub struct Env {
         require_equals = true
     )]
     shell: Option<Option<Shell>>,
+
+    /// Write the composed environment into a CI system's persistence channel.
+    ///
+    /// `--ci=github` appends tool dirs and vars to `$GITHUB_PATH` /
+    /// `$GITHUB_ENV`; `--ci=gitlab` writes JSON-lines to `--export-file` (or
+    /// stdout). Bare `--ci` autodetects the provider from CI environment
+    /// variables; exit 64 if none is detected. Must be supplied with `=`
+    /// (`--ci=github`).
+    ///
+    /// Unlike `--shell` (which affects only the current step), the CI channel
+    /// makes the environment available to later pipeline steps. Conflicts with
+    /// `--shell`.
+    #[arg(long, value_enum, value_name = "PROVIDER", num_args = 0..=1, require_equals = true, conflicts_with = "shell")]
+    ci: Option<Option<ocx_lib::ci::CiFlavor>>,
+
+    /// Write the GitLab export to this file instead of stdout.
+    ///
+    /// Requires `--ci`. Rejected for `--ci=github`, which infers its sink from
+    /// `$GITHUB_PATH` / `$GITHUB_ENV`. Point this at GitLab's export file.
+    #[arg(long, value_name = "PATH", requires = "ci")]
+    export_file: Option<std::path::PathBuf>,
 }
 
 impl Env {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Resolve `--ci` early so a bare-`--ci` autodetect failure surfaces as a
+        // usage error before the (potentially slow) find-or-install resolution.
+        // `--ci` is mutually exclusive with `--shell` (clap `conflicts_with`).
+        let ci = resolve_ci_arg(self.ci)?;
+
         let platforms = platforms_or_default(self.platforms.as_slice());
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
@@ -78,6 +104,12 @@ impl Env {
         let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             info.into_iter().map(std::sync::Arc::new).collect();
         let entries = manager.resolve_env(&info, self.self_view).await?;
+        // `--ci=<provider>` → CI sink path (persists env for later pipeline
+        // steps). Branch BEFORE consuming `entries` via `into_iter()`.
+        if let Some(provider) = ci {
+            export_ci(provider, self.export_file.clone(), &entries)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         // `--shell[=NAME]` → eval-safe emit path (handshake §3, C5).
         // Shared bare-shell autodetect + identical UsageError (conventions).
         // Branch BEFORE consuming `entries` via `into_iter()`.

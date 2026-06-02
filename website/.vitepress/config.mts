@@ -87,6 +87,7 @@ export default defineConfig({
             { text: "Configuration", link: "/docs/in-depth/configuration" },
             { text: "Environments", link: "/docs/in-depth/environments" },
             { text: "Entry Points", link: "/docs/in-depth/entry-points" },
+            { text: "CI Integration", link: "/docs/in-depth/ci" },
           ],
         },
         {

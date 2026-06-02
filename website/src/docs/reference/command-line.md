@@ -514,12 +514,18 @@ ocx env [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`, `nushell`, `elvish`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) autodetects from `$SHELL`. | *(unset — uses `--format`)* |
+| `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`, `nushell`, `elvish`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) autodetects from `$SHELL`. Mutually exclusive with `--ci`. | *(unset — uses `--format`)* |
+| `--ci[=PROVIDER]` | — | Write the composed environment into the CI system's persistence channel so the exported variables and paths are available to **later pipeline steps**. `PROVIDER` is one of `github` (alias `github-actions`) or `gitlab` (alias `gitlab-ci`). The equals-form is required (`--ci=github`, not `--ci github`). Bare `--ci` (no `=PROVIDER`) auto-detects from [`GITHUB_ACTIONS`][env-github-actions] and [`GITLAB_CI`][env-gitlab-ci]; no provider detected exits 64. Mutually exclusive with `--shell`. | *(unset)* |
+| `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
 | `-h`, `--help` | | Print help information. | — |
 
 ::: tip Target the global toolchain
 Pass `--global` **before** the subcommand to target `$OCX_HOME/ocx.toml`: `ocx --global env --shell=bash`.
 See [`--global`][global-flag] for the full root-flag reference.
+:::
+
+::: warning `--ci=gitlab` requires GitLab Functions / step runner
+`--ci=gitlab` writes JSON-lines (`{"name":"…","value":"…"}`), which is the format consumed by the [GitLab step runner][gitlab-step-runner-docs] via `${{ export_file }}`. This is an **experimental** feature for `run:` keyword jobs. It does **not** work with traditional `script:` jobs, which use [`artifacts: reports: dotenv`][gitlab-ci-dotenv] (`KEY=VALUE` format) for cross-job variable passing. See [CI Integration][in-depth-ci] for a full step-runner example.
 :::
 
 **Examples**
@@ -539,6 +545,15 @@ eval "$(ocx --global env --shell=sh)"
 
 # Sourced from $OCX_HOME/env.sh (written by the installer):
 eval "$(ocx --global env --shell=sh)"
+
+# Persist toolchain env to GitHub Actions (reads $GITHUB_ENV / $GITHUB_PATH):
+ocx env --ci=github
+
+# Persist toolchain env to GitLab step runner (experimental; run: keyword jobs only):
+ocx env --ci=gitlab --export-file="${{ export_file }}"
+
+# Or redirect stdout when --export-file is omitted:
+ocx env --ci=gitlab >> "${{ export_file }}"
 ```
 
 ::: warning Plain and JSON output are not sourceable
@@ -550,9 +565,9 @@ eval "$(ocx --global env --shell=sh)"
 | Code | Meaning |
 |------|---------|
 | 0 | Success. Under `--global`, any unusable global toolchain — not configured, or a corrupt/stale `$OCX_HOME/ocx.lock` — is a valid empty environment, not an error (report path and `--shell` path alike). The global tier is lenient. |
-| 64 | `--shell NAME` passed as two tokens (use `--shell=NAME`); or `--global` combined with `--project`; or no `ocx.toml` in scope (project tier). |
+| 64 | `--shell NAME` passed as two tokens (use `--shell=NAME`); `--ci` and `--shell` used together; `--export-file` given without `--ci` or combined with `--ci=github`; bare `--ci` (auto-detect) used outside a recognized CI environment; `--global` combined with `--project`; or no `ocx.toml` in scope (project tier). |
 | 65 | `ocx.lock` is stale — run `ocx lock` (project tier). |
-| 78 | `ocx.toml` or `ocx.lock` parse error (project tier). |
+| 78 | `ocx.toml` or `ocx.lock` parse error (project tier); or `--ci=github` used outside [GitHub Actions][github-actions-workflow-commands] where [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path] are unset. |
 
 The global tier is lenient: `ocx --global env` never fails on an unconfigured or corrupt global toolchain — it exports an empty environment. This is one predictable rule that does not depend on `--shell` (which only selects the output format, never whether the command errors). A corrupt global lock surfaces instead via the commands that rewrite it — `ocx --global lock`, `ocx --global add`, `ocx --global upgrade`. The project tier stays strict (a missing/stale/corrupt `ocx.lock` errors). A useful consequence of the lenient global rule: the installer's `env.sh`/`env.ps1`, which source `ocx --global env --shell=…` on every shell start, can never be broken by global toolchain state.
 
@@ -588,7 +603,9 @@ ocx package env [OPTIONS] <PACKAGE>...
 - `-p`, `--platform`: Target platforms to consider when resolving packages.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
-- `--shell[=NAME]`: Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root).
+- `--shell[=NAME]`: Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`.
+- `--ci[=PROVIDER]`: Write the resolved environment into the CI system's persistence channel so later pipeline steps see the exported paths and variables. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects from [`GITHUB_ACTIONS`][env-github-actions] / [`GITLAB_CI`][env-gitlab-ci] (exits 64 if neither detected). Equals-form required. Mutually exclusive with `--shell`. See [CI Integration][in-depth-ci] for full walkthrough.
+- `--export-file=PATH`: Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines output to `PATH`. Requires `--ci=gitlab`; rejected with exit 64 for `--ci=github` or when given without `--ci`.
 - `-h`, `--help`: Print help information.
 
 ### `exec` {#exec}
@@ -1691,9 +1708,9 @@ The `version` key is the only field the [self update](#self-update) parser reads
 
 ### `ci` {#ci}
 
-> **REMOVED** — exits 64. The `ocx ci` command group has been removed. `ocx ci export` is a deferred extension point; it is not available in the current release.
+> **REMOVED** — exits 64. The `ocx ci` command group has been removed.
 >
-> For CI workflows, use [`ocx pull`](#pull) (project-tier) or [`ocx package pull`](#package-pull) (OCI-tier) to pre-warm the object store, then use [`ocx run`](#run) or [`ocx package env`](#package-env) to compose the environment. For [GitHub Actions][github-actions-docs], write the `ocx --format json package env` output through `jq` to `$GITHUB_PATH` and `$GITHUB_ENV` manually, or use `ocx run -- <cmd>` to execute within the composed env directly.
+> CI environment export is available as the `--ci[=PROVIDER]` flag on [`ocx env`](#env-root) (toolchain-tier) and [`ocx package env`](#package-env) (OCI-tier). See [CI Integration][in-depth-ci] for full examples.
 
 #### `export` {#ci-export}
 
@@ -2178,8 +2195,14 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 | `-p`, `--platform` | | Target platforms to consider. |
 | `--candidate`, `--current` | | Path resolution mode — see [Path Resolution](#path-resolution). |
 | `--self` | | Self view: emits `private` + `public` entries. Default: consumer view (`public` + `interface`). |
-| `--shell[=NAME]` | | Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). |
+| `--shell[=NAME]` | | Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`. |
+| `--ci[=PROVIDER]` | | Write the resolved environment into the CI system's persistence channel for later pipeline steps. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects. Equals-form required. Mutually exclusive with `--shell`. |
+| `--export-file=PATH` | | Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines to `PATH`. Requires `--ci=gitlab`; exit 64 for `--ci=github` or without `--ci`. |
 | `-h`, `--help` | | Print help information. |
+
+::: warning `--ci=gitlab` requires GitLab Functions / step runner
+`--ci=gitlab` writes JSON-lines (`{"name":"…","value":"…"}`), which is the format consumed by the [GitLab step runner][gitlab-step-runner-docs] via `${{ export_file }}` (experimental, `run:` keyword jobs only). It does **not** work with traditional `script:` jobs. See [CI Integration][in-depth-ci] for a full step-runner example.
+:::
 
 ::: info Windows: synthetic `PATHEXT ⊳ .CMD`
 On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the host shell's `PATHEXT` does not already include it. Generated entrypoint launchers are `.cmd` files; this lets callers that adopt the printed env find launchers by bare name without further configuration.
@@ -2187,6 +2210,10 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 
 <!-- external -->
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[github-actions-workflow-commands]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions
+[gitlab-ci-export-docs]: https://docs.gitlab.com/ee/ci/variables/#pass-an-environment-variable-to-another-job
+[gitlab-step-runner-docs]: https://docs.gitlab.com/ci/functions/create/
+[gitlab-ci-dotenv]: https://docs.gitlab.com/ee/ci/yaml/artifacts_reports.html#artifactsreportsdotenv
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
@@ -2197,6 +2224,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [env-composition-forwarding]: ../in-depth/environments.md#ocx-forwarding
 [in-depth-project-running]: ../in-depth/project.md#running
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
+[in-depth-ci]: ../in-depth/ci.md
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global
@@ -2215,6 +2243,10 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [env-ocx-no-completions]: ./environment.md#ocx-no-completions
 [env-ocx-env-loaded]: ./environment.md#ocx-env-loaded
 [env-ocx-update-check-interval]: ./environment.md#ocx-update-check-interval
+[env-github-actions]: ./environment.md#external-github-actions
+[env-github-env]: ./environment.md#external-github-env
+[env-github-path]: ./environment.md#external-github-path
+[env-gitlab-ci]: ./environment.md#external-gitlab-ci
 
 <!-- external: completions -->
 [clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/

@@ -53,6 +53,8 @@ OCX is a **backend tool** (`product-context.md`: automation-first). Output is sp
 
 **Deleted exception:** `shell hook` / `shell env` emit paths are deleted. `ocx env --shell[=NAME]` and `ocx package env --shell[=NAME]` use the shared `emit_lines(shell, &[Entry])` helper in `conventions.rs` — the single emit path for all eval-safe shell output.
 
+**Known exception:** `export_ci` in `conventions.rs` (the `--ci[=PROVIDER]` flag on `ocx env` / `ocx package env`) writes outside the `Api` entirely — through `ocx_lib::ci::CiFlavor::export`, which appends to the CI runner's files (`$GITHUB_ENV`/`$GITHUB_PATH`) or writes JSON-lines to `--export-file` / stdout. Sibling to the `emit_lines` exception: the destination is a CI persistence channel with a provider-defined wire format, not a `DataInterface` table/JSON document. The library half already does file I/O (the GitHub flavor); the GitLab writer is injectable so tests never touch real stdout/disk. ADR `adr_ci_env_export_flag.md`.
+
 ## `emit_lines` helper
 
 `conventions.rs` contains the shared `emit_lines(shell: Shell, entries: &[Entry])` helper consumed by:
@@ -116,8 +118,10 @@ Status values, category tags, bounded sets = enums with `Display` and `Serialize
 
 `command/toolchain_env.rs` is the toolchain-tier composed-env command (`ocx [--global] env`); `command/env.rs` is the OCI-tier per-package one (`ocx package env`). Both:
 1. Resolve entries (toolchain: `load_project_with_lock` / global resolver → `compose_tool_set` / `resolve_env`; package: `find_or_install_all` → `resolve_env`)
-2. For `--shell[=NAME]` output: call `emit_lines(shell, &entries)` — eval-safe, the only sourceable form
-3. For default (no `--shell`): call `context.api().report(&env_data)` — format is the context concern (root `--format`, default plain). **No subcommand `--format`, no local `Api`, no JSON default.**
+2. Resolve `--ci` early via `resolve_ci_arg` (bare-flag autodetect failure surfaces before the slow entry resolution); `--ci` ⟂ `--shell` (clap `conflicts_with`)
+3. For `--ci=<provider>` output: call `export_ci(provider, export_file, &entries)` — CI sink, persists for later steps (sibling emit path to `emit_lines`, outside the `Api` — see "Known exception" above)
+4. For `--shell[=NAME]` output: call `emit_lines(shell, &entries)` — eval-safe, the only sourceable form
+5. For default (no `--ci`/`--shell`): call `context.api().report(&env_data)` — format is the context concern (root `--format`, default plain). **No subcommand `--format`, no local `Api`, no JSON default.**
 
 `toolchain_env.rs` never reads `ocx.toml` directly — it goes through the project resolution path via `Context`.
 

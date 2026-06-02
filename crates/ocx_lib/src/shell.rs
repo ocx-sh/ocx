@@ -124,7 +124,7 @@ impl Shell {
     /// path-of-least-impact safety guard.
     pub fn export_path(self, key: impl AsRef<str>, value: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
-        if !is_valid_env_key(key) {
+        if !env::is_valid_env_key(key) {
             return None;
         }
         let value = self.escape_value(value);
@@ -149,7 +149,7 @@ impl Shell {
     /// name. See [`Self::export_path`] for the rationale.
     pub fn export_constant(self, key: impl AsRef<str>, value: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
-        if !is_valid_env_key(key) {
+        if !env::is_valid_env_key(key) {
             return None;
         }
         let value = self.escape_value(value.as_ref());
@@ -170,7 +170,7 @@ impl Shell {
     /// `key` is not a valid POSIX environment-variable name.
     pub fn unset(self, key: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
-        if !is_valid_env_key(key) {
+        if !env::is_valid_env_key(key) {
             return None;
         }
         Some(match self {
@@ -249,27 +249,6 @@ impl Shell {
                 .replace('|', "^|"),
         }
     }
-}
-
-/// Validates that `key` matches the POSIX environment-variable name grammar
-/// (`[A-Za-z_][A-Za-z0-9_]*`).
-///
-/// Reject anything else: malicious package metadata could otherwise inject
-/// shell syntax via the *key* slot of an `export KEY=VAL` line (e.g.
-/// `KEY="; rm -rf $HOME; X"`), which `escape_value` does not protect against.
-/// Validation lives at the emitter layer (`export_path`, `export_constant`,
-/// `unset`) so every consumer — `ocx env`, `ocx package env`,
-/// `ocx direnv export` — gets the protection automatically.
-fn is_valid_env_key(key: &str) -> bool {
-    if key.is_empty() {
-        return false;
-    }
-    let mut bytes = key.bytes();
-    let Some(first) = bytes.next() else { return false };
-    if !(first.is_ascii_alphabetic() || first == b'_') {
-        return false;
-    }
-    bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 impl std::fmt::Display for Shell {

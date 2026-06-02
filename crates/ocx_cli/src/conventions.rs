@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_lib::{
+    ci::CiFlavor,
     cli::{MetadataResolutionError, UsageError},
     oci,
     package::metadata::env::entry::Entry,
@@ -147,9 +148,57 @@ pub fn resolve_shell_arg(shell: Option<Option<Shell>>) -> anyhow::Result<Option<
         }
     }
 }
+
+/// Resolve a `--ci` clap argument to an explicit [`CiFlavor`], or `None` when
+/// the flag is absent and the caller should take the non-CI path.
+///
+/// `--ci` is declared as `Option<Option<CiFlavor>>` with
+/// `num_args=0..=1, require_equals=true` (mirroring `--shell`):
+///
+/// - `None` (flag absent) → `Ok(None)`: caller uses the structured-report /
+///   `--shell` path.
+/// - `Some(None)` (bare `--ci`) → autodetect from CI env vars
+///   (`$GITHUB_ACTIONS`, `$GITLAB_CI`); a [`UsageError`] (exit 64) when no
+///   provider is detected.
+/// - `Some(Some(provider))` (explicit `--ci=NAME`) → `Ok(Some(provider))`.
+///
+/// Shared by `ocx env` and `ocx package env` so the bare-`--ci` autodetect and
+/// its identical undetectable-provider `UsageError` exist exactly once.
+pub fn resolve_ci_arg(ci: Option<Option<CiFlavor>>) -> anyhow::Result<Option<CiFlavor>> {
+    match ci {
+        None => Ok(None),
+        Some(Some(provider)) => Ok(Some(provider)),
+        Some(None) => {
+            let provider = CiFlavor::detect()
+                .ok_or_else(|| UsageError::new("could not autodetect CI provider; pass --ci=github or --ci=gitlab"))?;
+            Ok(Some(provider))
+        }
+    }
+}
+
+/// Export resolved env entries into a CI system's persistence channel.
+///
+/// Shared by `ocx env` and `ocx package env`. Rejects `--export-file` for
+/// GitHub Actions (which infers its two-file sink from `$GITHUB_ENV` /
+/// `$GITHUB_PATH`); GitLab uses `export_file` as its output path, falling back
+/// to stdout when `None`.
+pub fn export_ci(provider: CiFlavor, export_file: Option<std::path::PathBuf>, entries: &[Entry]) -> anyhow::Result<()> {
+    if provider == CiFlavor::GitHubActions && export_file.is_some() {
+        return Err(UsageError::new(
+            "--export-file is not supported with --ci=github; GitHub infers $GITHUB_ENV/$GITHUB_PATH",
+        )
+        .into());
+    }
+    provider.export(entries, export_file)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_shell_arg;
+    use super::{export_ci, resolve_ci_arg, resolve_shell_arg};
+    use ocx_lib::ci::CiFlavor;
+    use ocx_lib::cli::UsageError;
+    use ocx_lib::package::metadata::env::{entry::Entry, modifier::ModifierKind};
     use ocx_lib::shell::Shell;
 
     #[test]
@@ -161,5 +210,55 @@ mod tests {
     fn shell_arg_explicit_is_passed_through() {
         let resolved = resolve_shell_arg(Some(Some(Shell::Bash))).expect("explicit is ok");
         assert!(matches!(resolved, Some(Shell::Bash)));
+    }
+
+    #[test]
+    fn ci_arg_absent_is_none() {
+        assert!(resolve_ci_arg(None).expect("absent is ok").is_none());
+    }
+
+    #[test]
+    fn ci_arg_explicit_is_passed_through() {
+        // Both providers pass through deterministically (no env reads). The
+        // bare-`--ci` autodetect branch reads real CI env vars and is exercised
+        // by the acceptance suite, not here (cf. `resolve_shell_arg`).
+        assert_eq!(
+            resolve_ci_arg(Some(Some(CiFlavor::GitHubActions))).expect("explicit is ok"),
+            Some(CiFlavor::GitHubActions)
+        );
+        assert_eq!(
+            resolve_ci_arg(Some(Some(CiFlavor::GitLab))).expect("explicit is ok"),
+            Some(CiFlavor::GitLab)
+        );
+    }
+
+    #[test]
+    fn export_ci_github_rejects_export_file() {
+        let result = export_ci(
+            CiFlavor::GitHubActions,
+            Some(std::path::PathBuf::from("/tmp/whatever")),
+            &[],
+        );
+        let error = result.expect_err("github + --export-file must be rejected");
+        assert!(
+            error.downcast_ref::<UsageError>().is_some(),
+            "rejection must be a UsageError (exit 64), got: {error:#}"
+        );
+    }
+
+    #[test]
+    fn export_ci_gitlab_writes_json_lines_to_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let export = tmp.path().join("export.env");
+        let entries = vec![Entry {
+            key: "JAVA_HOME".to_string(),
+            value: "/pkg/java".to_string(),
+            kind: ModifierKind::Constant,
+        }];
+
+        export_ci(CiFlavor::GitLab, Some(export.clone()), &entries).expect("gitlab export ok");
+
+        let content = std::fs::read_to_string(&export).expect("read export");
+        assert_eq!(content, "{\"name\":\"JAVA_HOME\",\"value\":\"/pkg/java\"}\n");
     }
 }

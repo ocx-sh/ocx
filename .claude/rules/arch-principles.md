@@ -91,6 +91,7 @@ CLI command (clap parse)
 | `adr_global_toolchain_tier.md` | Explicit `--global` toolchain tier, strict isolation, no implicit home fallback (supersedes Amendment C of `adr_project_toolchain_config.md`) |
 | `handshake_toolchain_cli.md` | **AUTHORITY for current CLI model** — `ocx package` group (OCI tier), root `ocx [--global] env [--shell]` (`--global` is a root flag before the subcommand), `ocx shell` reduced to `{completion}`, root `install/uninstall/select/exec/deselect/which/deps/ci/shell hook/init/env` removed (exit 64), activation via `$OCX_HOME/env.sh` block-marker, no PATH strip. Decisions 3/4/6/7 of `adr_global_toolchain_tier.md` superseded here. Per-command `--global` and `with_command_global` seam deleted 2026-05-17 (root-only collapse). |
 | `adr_progress_architecture.md` | Span-free progress: `cli::progress::ProgressManager` owns `indicatif::MultiProgress`; RAII guards (`Spinner`/`BytesBar`) instead of `tracing-indicatif` span-attached bars. Kills the concurrent sharded-registry clone-after-close panic by construction. `tracing-indicatif` dropped; fmt logs route through `ProgressManager::writer()` (suspend-coordinated). |
+| `adr_ci_env_export_flag.md` | Realize handshake §6 CI export as `--ci[=provider]` flag on `ocx env`/`ocx package env` (not a command); GitHub autodetected two-file sink (rejects `--export-file`); GitLab JSON-lines, stdout default / `--export-file`; `--ci` ⟂ `--shell`; GitLab flavor added. |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 
@@ -130,8 +131,8 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 |--------|---------|---------|
 | `archive/` | Tar/zip extraction + bundling with pluggable backends | Mirror pipeline, package creation |
 | `auth/` | `AuthType` enum with env var + docker cred fallback | OCI Client |
-| `ci/` | CI flavor dispatch (GitHub Actions export) | **Removed** — `ocx ci` command deleted; CI export is a deferred extension point (`handshake_toolchain_cli.md` §6). Module kept in `ocx_lib` as a library; CLI surface gone. |
-| `shell/` | `Shell` export helpers (`export_path`/`export_constant`/`unset`) + `conventions::emit_lines` — shell-specific export gen | `ocx env`, `ocx package env`, `ocx direnv export`; `shell hook`/`init`/`env` commands removed |
+| `ci/` | CI flavor dispatch — `CiFlavor` enum + `Flavor` trait; GitHub Actions (`$GITHUB_ENV`/`$GITHUB_PATH` two-file sink) and GitLab CI/CD (`gitlab_flavor.rs`, JSON-lines `{"name","value"}`, no path channel, stdout/`--export-file`) flavors; `detect()` autodetect. Both flavors gate env-var keys via the shared `env::is_valid_env_key` (same validator as the shell emitters) and skip invalid keys; GitHub additionally rejects newline-bearing `$GITHUB_PATH` values (env-injection class, CWE-77 / CWE-426). Shared path-prepend semantics live in `ci::prepend_existing`. Wired into the CLI via the `--ci[=provider]` flag on `ocx env` / `ocx package env` (NOT the deleted `ocx ci` command). ADR `adr_ci_env_export_flag.md`, `handshake_toolchain_cli.md` §6. | `ocx env`, `ocx package env` (via `conventions::export_ci`) |
+| `shell/` | `Shell` export helpers (`export_path`/`export_constant`/`unset`) + `conventions::emit_lines` — shell-specific export gen; env-var key validation delegated to the shared `env::is_valid_env_key` (also used by `ci/`) | `ocx env`, `ocx package env`, `ocx direnv export`; `shell hook`/`init`/`env` commands removed |
 | `utility/` | Extension traits + async + fs helpers — see [Utility Catalog](#utility-catalog) below | Everywhere (prelude for extension traits) |
 | `compression/` | Compression level config | Archive, OCI push |
 | `codesign/` | macOS ad-hoc code signing for Mach-O binaries | Package extraction |

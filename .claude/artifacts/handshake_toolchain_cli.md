@@ -103,8 +103,9 @@ Project-only direnv adapter. Out of scope for this handshake.
 - `ocx deps` → moved under `ocx package` (amendment 2026-05-18). Same
   rationale: identifier-driven OCI-tier query that never reads `ocx.toml`;
   leaving it at root contradicted the tier split. Same clean-break terms.
-- `ocx ci` → removed. CI export is a deferred extension point (§6), not a
-  command.
+- `ocx ci` → removed, and stays removed. CI export was realized (2026-06-02)
+  as the `--ci[=provider]` flag on `ocx env` / `ocx package env` (§6), never as
+  a resurrected command. ADR `adr_ci_env_export_flag.md`.
 - Implicit `$OCX_HOME/ocx.toml` discovery → stays deleted (`a4211591`).
 
 ---
@@ -215,14 +216,17 @@ no `project_guarded` shell-script `ocx.toml` walk. Those are deleted (§7).
 
 Recorded so the grammar stays forward-compatible; **no code now**:
 
-- **CI export.** GitHub Actions (`$GITHUB_ENV`/`$GITHUB_PATH`, `KEY=VALUE`,
-  autodetected sink, current-job) and GitLab CI/CD Functions (JSON-lines
-  `{"name","value"}`, path from `${{ export_file }}` passed explicitly,
-  no path channel, string/number/boolean only, *later-step* scope) differ
-  enough that the destination/provider must be explicit value-flags
-  (`--ci=<provider>`, an explicit out-path), never positionals or
-  subcommands (package tier has variadic positional ids). **GitLab not
-  supported now.** Same-step tool availability is always `--shell`, not CI.
+- **CI export. — REALIZED 2026-06-02** (ADR `adr_ci_env_export_flag.md`).
+  GitHub Actions (`$GITHUB_ENV`/`$GITHUB_PATH`, `KEY=VALUE`, autodetected
+  sink, current-job) and GitLab CI/CD (JSON-lines `{"name","value"}`, path
+  from `${{ export_file }}` passed explicitly, no path channel,
+  *later-step* scope) differ enough that the destination/provider is an
+  explicit value-flag (`--ci=<provider>`) plus an explicit out-path
+  (`--export-file`), never positionals or subcommands (package tier has
+  variadic positional ids). Built exactly as designed here: `--ci=github`
+  (autodetected two-file sink, `--export-file` rejected), `--ci=gitlab`
+  (JSON-lines, stdout default or `--export-file`), bare `--ci` autodetects,
+  `--ci` ⟂ `--shell`. Same-step tool availability is always `--shell`, not CI.
 - **File / profile export.** A future destination axis: write the exporter
   output to a file/profile instead of stdout. Not named `--ci`/`--out`
   today; added only when built. No dead surface now.

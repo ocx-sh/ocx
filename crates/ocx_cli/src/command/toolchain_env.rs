@@ -59,7 +59,7 @@ use ocx_lib::{
 use crate::{
     api,
     app::project_context::load_project_with_lock,
-    conventions::{emit_lines, platforms_or_default, resolve_shell_arg},
+    conventions::{emit_lines, export_ci, platforms_or_default, resolve_ci_arg, resolve_shell_arg},
 };
 
 /// Emit the composed environment for the in-scope toolchain.
@@ -109,12 +109,38 @@ pub struct ToolchainEnv {
         require_equals = true
     )]
     shell: Option<Option<ocx_lib::shell::Shell>>,
+
+    /// Write the composed environment into a CI system's persistence channel.
+    ///
+    /// `--ci=github` appends tool dirs and vars to `$GITHUB_PATH` /
+    /// `$GITHUB_ENV`; `--ci=gitlab` writes JSON-lines to `--export-file` (or
+    /// stdout). Bare `--ci` autodetects the provider from CI environment
+    /// variables; exit 64 if none is detected. Must be supplied with `=`
+    /// (`--ci=github`).
+    ///
+    /// Unlike `--shell` (which affects only the current step), the CI channel
+    /// makes the environment available to later pipeline steps. Conflicts with
+    /// `--shell`.
+    #[arg(long, value_enum, value_name = "PROVIDER", num_args = 0..=1, require_equals = true, conflicts_with = "shell")]
+    ci: Option<Option<ocx_lib::ci::CiFlavor>>,
+
+    /// Write the GitLab export to this file instead of stdout.
+    ///
+    /// Requires `--ci`. Rejected for `--ci=github`, which infers its sink from
+    /// `$GITHUB_PATH` / `$GITHUB_ENV`. Point this at GitLab's export file.
+    #[arg(long, value_name = "PATH", requires = "ci")]
+    export_file: Option<std::path::PathBuf>,
 }
 
 impl ToolchainEnv {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // `None` → default-format path; `Some(s)` → eval-safe emit.
         let shell = resolve_shell_arg(self.shell)?;
+        // Resolve `--ci` early so a bare-`--ci` autodetect failure surfaces as a
+        // usage error before the (potentially slow) entry resolution. `--ci` is
+        // mutually exclusive with `--shell` (clap `conflicts_with`), so at most
+        // one of these is set.
+        let ci = resolve_ci_arg(self.ci)?;
 
         // ── Resolve entries: one global path, one project path ───────────────
         // Root `--global` / `OCX_GLOBAL` (already folded into the context via
@@ -169,6 +195,15 @@ impl ToolchainEnv {
         };
 
         // ── Emit ─────────────────────────────────────────────────────────────
+        if let Some(provider) = ci {
+            // CI sink: persist the composed env for later pipeline steps. An
+            // explicit `--ci=github` outside GitHub Actions legitimately fails
+            // `from_env()` (the global-lenient contract covers *resolution*
+            // failures only, not an explicit-channel misconfiguration).
+            export_ci(provider, self.export_file.clone(), &entries)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+
         if let Some(s) = shell {
             // Eval-safe: delegate to shared emit helper (C5).
             emit_lines(s, &entries);
