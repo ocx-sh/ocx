@@ -70,6 +70,10 @@ pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomp
                     && v.minor() == version.minor()
                     && v.patch() == version.patch()
                     && v.prerelease() == version.prerelease()
+                    // Exclude the build-less rolling parent: Ord sorts it above its
+                    // build-tagged children, so without this it would block its own
+                    // cascade and freeze the floating tag at the first build.
+                    && v.has_build()
             })
             .cloned()
             .collect();
@@ -431,6 +435,40 @@ mod tests {
 
         assert!(d.levels.is_empty());
         assert!(!d.latest_eligible);
+    }
+
+    #[test]
+    fn decompose_prerelease_rolling_parent_does_not_self_block() {
+        // The rolling parent prerelease (1.0.0-beta, build-less) must never appear
+        // as a blocker of its own build-tagged child. `Version` Ord sorts a no-build
+        // version above an otherwise-equal with-build version, so an unbounded blocker
+        // range pulled the parent in and froze the floating tag at the first build.
+        let v = Version::new_prerelease_with_build(1, 0, 0, "beta", "b2");
+        let parent = Version::new_prerelease(1, 0, 0, "beta");
+        let others: BTreeSet<_> = [parent.clone()].into();
+        let d = decompose(&v, &others);
+
+        assert_eq!(d.levels.len(), 1);
+        assert_eq!(d.levels[0].target, parent);
+        assert!(
+            d.levels[0].blockers.is_empty(),
+            "rolling parent must not block its own cascade, got {:?}",
+            d.levels[0].blockers
+        );
+        assert!(!d.latest_eligible);
+    }
+
+    #[test]
+    fn cascade_advances_rolling_parent_prerelease() {
+        // A second (and every later) build must still advance the floating
+        // `<core>-<prerelease>` tag even though it already exists in `others`.
+        let v = Version::new_prerelease_with_build(1, 0, 0, "beta", "b2");
+        let parent = Version::new_prerelease(1, 0, 0, "beta");
+        let others: BTreeSet<_> = [parent.clone()].into();
+        let (versions, is_latest) = cascade(&v, others);
+
+        assert_eq!(versions, vec![v, parent]);
+        assert!(!is_latest);
     }
 
     #[test]
