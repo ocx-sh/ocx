@@ -5,11 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.5] - 2026-06-02
 
 ### Added
 
-- Client-declared OCI registry mirrors via `[mirrors."<host>"]` config table and `OCX_MIRRORS` env var — routes read traffic for firewall-blocked upstream hosts to Artifactory/Nexus/Harbor remotes with host+repo-key path-prefix rewrite, replace semantics (no egress fallback), and digest verification *(oci)*
+- Client-declared registry mirrors via [mirrors] config *(oci)*
+- CI env export via --ci on env / package env *(cli,oci)*
+- Ocx package push emits a structured push report *(cli)*
+
+### Fixed
+
+- Keep zsh completions alive across a late compinit *(install)*
+- Wire both bash and zsh profiles, not just $SHELL *(install)*
+- Authenticate before every registry operation *(oci)*
+- Add short description to package push subcommand *(cli)*
+- Git-style plugin dispatch + correct not-found hint *(cli)*
+- Advance floating prerelease tag on every cascade build *(package)*
 
 ## [0.3.4] - 2026-05-31
 
@@ -25,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform pwsh env.ps1 + local test-install mode *(install)*
 - Make Windows installers ASCII- and StrictMode-safe *(install)*
 - Keep shell-completion help text ASCII-safe for PowerShell *(cli)*
+
+### Release
+
+- V0.3.4
 
 ## [0.3.3] - 2026-05-31
 
@@ -390,6 +405,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.3.5]: https://github.com/ocx-sh/ocx/compare/v0.3.4..v0.3.5
 [0.3.4]: https://github.com/ocx-sh/ocx/compare/v0.3.3..v0.3.4
 [0.3.3]: https://github.com/ocx-sh/ocx/compare/v0.3.2..v0.3.3
 [0.3.2]: https://github.com/ocx-sh/ocx/compare/v0.3.1..v0.3.2
