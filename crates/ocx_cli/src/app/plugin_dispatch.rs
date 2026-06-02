@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Git/cargo-style plugin dispatch for `ocx <name>` → `ocx-<name>` on PATH.
+//! Git-style plugin dispatch for `ocx <name>` → `ocx-<name>` on PATH.
+//!
+//! "Git-style" specifically in the argument convention: the subcommand name is
+//! dropped, not re-passed (`ocx mirror sync` → `ocx-mirror sync`), so a plugin
+//! is just a normal CLI. See `build_plugin_command`.
 //!
 //! Wired from [`crate::app::App::run`] before `Context::try_init` to bypass
 //! library context setup that plugins don't need. See
@@ -89,15 +93,28 @@ pub async fn dispatch(argv: Vec<OsString>, opts: &ContextOptions) -> anyhow::Res
     let binary = tokio::task::spawn_blocking(move || which::which(bin_name))
         .await?
         .ok()
-        .ok_or_else(|| {
-            UsageError::new(format!(
-                "unknown subcommand '{name_str}'; install with: ocx --global add ocx-sh/ocx-{name_str}"
-            ))
-        })?;
+        .ok_or_else(|| UsageError::new(unknown_subcommand_hint(&name_str)))?;
 
     let mut cmd = build_plugin_command(&binary, &argv, opts)?;
     let status = cmd.status().await?;
     Ok(propagate_exit_code(status))
+}
+
+/// Build the not-found hint shown when `ocx <name>` matches no built-in and no
+/// `ocx-<name>` binary is on PATH.
+///
+/// Deliberately does not over-promise: only first-party plugins are published
+/// at `ocx.sh/ocx/<name>`, so the `add` form is framed as the official-plugin
+/// path, with the generic PATH convention as the fallback for third-party
+/// plugins. The OCI registry is `ocx.sh` and the identifier is three-segment
+/// (`ocx.sh/ocx/<name>`) — distinct from the `ocx-sh` GitHub org slug and from
+/// the `ocx-<name>` binary name.
+fn unknown_subcommand_hint(name: &str) -> String {
+    format!(
+        "unknown subcommand '{name}'; if `ocx-{name}` is an official OCX plugin, \
+         install it with `ocx --global add ocx.sh/ocx/{name}`, otherwise put an \
+         `ocx-{name}` binary on your PATH"
+    )
 }
 
 /// Rewrite `[help, X]` → `[X, --help]`; otherwise return `argv` unchanged.
@@ -115,9 +132,14 @@ fn rewrite_help_invocation(argv: Vec<OsString>) -> Vec<OsString> {
 
 /// Build a `tokio::process::Command` for the resolved plugin binary.
 ///
-/// Sets argv[0]=binary, argv[1]=subcommand name, argv[2..]=rest (cargo
-/// convention). Applies `Env::apply_ocx_config` for resolution-affecting
-/// environment forwarding. Inherits stdio.
+/// Git-style argument convention: the subcommand name (`argv[0]`) is dropped,
+/// so the plugin receives only the user args (`argv[1..]`). `ocx mirror sync`
+/// and `ocx help mirror` reach `ocx-mirror` as `sync` and `--help` — identical
+/// to running the standalone binary directly. (Cargo re-passes the name as
+/// `argv[1]`; OCX deliberately does not, so a plain clap plugin like
+/// `ocx-mirror` needs no `mirror` wrapper subcommand to avoid rejecting its own
+/// name.) Applies `Env::apply_ocx_config` for resolution-affecting environment
+/// forwarding. Inherits stdio.
 fn build_plugin_command(
     binary: &Path,
     argv: &[OsString],
@@ -140,10 +162,13 @@ fn build_plugin_command(
     env.apply_ocx_config(&config_view);
 
     let mut cmd = tokio::process::Command::new(binary);
-    // Cargo convention: argv[1] = subcommand name, argv[2..] = rest. The OS
-    // sets argv[0] = binary path automatically via Command::new, so we push
-    // argv[0] (name) as the first explicit arg, then the remainder.
-    cmd.args(argv);
+    // Git convention: drop the subcommand name (argv[0]) and forward only the
+    // user args (argv[1..]). `Command::new` sets the OS argv[0] to the binary
+    // path, so the plugin sees `ocx-mirror <user args>` — identical to a direct
+    // invocation. Re-passing the name (cargo style) would make a plain clap
+    // plugin reject its own name as an unrecognized subcommand. `get(1..)`
+    // tolerates an empty argv defensively (the caller guarantees argv[0]).
+    cmd.args(argv.get(1..).unwrap_or(&[]));
     cmd.envs(env);
 
     Ok(cmd)
@@ -151,10 +176,60 @@ fn build_plugin_command(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser as _;
+
     use super::*;
 
     fn osvec(items: &[&str]) -> Vec<OsString> {
         items.iter().map(|s| OsString::from(*s)).collect()
+    }
+
+    fn opts() -> ContextOptions {
+        ContextOptions::parse_from(["ocx"])
+    }
+
+    /// Regression: git-style dispatch drops the subcommand name so the plugin
+    /// receives only the user args. `ocx help mirror` rewrites to
+    /// `["mirror", "--help"]`, which must reach `ocx-mirror` as `["--help"]`
+    /// (i.e. `ocx-mirror --help`), NOT `ocx-mirror mirror --help` (cargo style),
+    /// which clap rejects because `ocx-mirror` has no `mirror` subcommand.
+    #[test]
+    fn plugin_command_drops_subcommand_name() {
+        let argv = osvec(&["mirror", "--help"]);
+        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(args, vec![std::ffi::OsStr::new("--help")]);
+    }
+
+    /// `ocx mirror sync --exact-version` forwards every user arg after the name.
+    #[test]
+    fn plugin_command_forwards_user_args_after_name() {
+        let argv = osvec(&["mirror", "sync", "--exact-version"]);
+        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            vec![std::ffi::OsStr::new("sync"), std::ffi::OsStr::new("--exact-version")]
+        );
+    }
+
+    /// Bare `ocx mirror` forwards zero args; the plugin then prints its own
+    /// missing-subcommand help, identical to running `ocx-mirror` directly.
+    #[test]
+    fn plugin_command_bare_name_forwards_no_args() {
+        let argv = osvec(&["mirror"]);
+        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
+        assert_eq!(cmd.as_std().get_args().count(), 0);
+    }
+
+    /// Regression: the not-found hint uses the three-segment OCI registry form
+    /// `ocx.sh/ocx/<name>`, never the `ocx-sh` GitHub org slug or the old wrong
+    /// `ocx-sh/ocx-<name>` identifier.
+    #[test]
+    fn unknown_subcommand_hint_uses_registry_identifier() {
+        let hint = unknown_subcommand_hint("mirror");
+        assert!(hint.contains("ocx.sh/ocx/mirror"), "hint = {hint}");
+        assert!(!hint.contains("ocx-sh"), "must not use github-org slug: {hint}");
     }
 
     /// `[help, X]` rewrites to `[X, --help]` so `ocx help foo` dispatches to

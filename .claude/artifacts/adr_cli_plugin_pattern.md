@@ -20,7 +20,7 @@ This decision is reversible pre-1.0 but becomes a one-way door for the **public 
 ### Triggers
 
 - Increasing adjacent-tool surface (mirror today, MCP server / SBOM / signing tomorrow)
-- Desire for dogfood: install `ocx-mirror` *via* OCX (`ocx --global add ocx-sh/ocx-mirror`)
+- Desire for dogfood: install `ocx-mirror` *via* OCX (`ocx --global add ocx.sh/ocx/mirror`)
 - User question: "is this a 1-hour scripting job or real work?" — answer depends on scope choices baked in this ADR
 
 ### Non-goals
@@ -50,13 +50,13 @@ This decision is reversible pre-1.0 but becomes a one-way door for the **public 
 
 3. **Dispatch** — handle `External` in `App::run()` **before** `Context::try_init()` (joining the four existing static-bypass paths). Resolve binary, build child `std::process::Command`, forward env via `Env::apply_ocx_config(ctx.config_view())`, exec, propagate exit code.
 
-4. **Argument convention** — cargo pattern: `argv[0] = "ocx-<name>"`, `argv[1] = "<name>"`, `argv[2..] = user args`. Plugin can ignore `argv[1]` or use it for dual-mode (standalone vs plugin).
+4. **Argument convention** — git pattern: `argv[0] = "ocx-<name>"` (the OS argv[0], set by exec to the binary path), `argv[1..] = user args`. The subcommand name is **dropped**, not re-passed, so `ocx mirror sync` and `ocx help mirror` reach `ocx-mirror` as `sync` and `--help` — identical to invoking the standalone binary directly. (Amended from the original cargo pattern, which re-passed the name as `argv[1]`: a plain clap plugin like `ocx-mirror` — subcommands `sync`/`check`/`validate`, no `mirror` wrapper — would reject its own name as an unrecognized subcommand. Git convention needs no plugin restructuring and matches this ADR's title.)
 
 5. **Help integration** — defer. `ocx --help` lists built-ins only. `ocx <plugin> --help` exec-forwards to the plugin. **No** `ocx plugin list` subcommand in v1. Re-evaluate after 3 months of dogfood.
 
 6. **Shell completions** — known gap; same limitation as cargo/kubectl/pixi. Plugins absent from `clap_complete` output. Accept.
 
-7. **Dogfood roll-out** — package `ocx-mirror` as `ocx-sh/ocx-mirror` on the production registry **after** the dispatch is in place, gated by removing the explicit gate comment in `post-release-oci-publish.yml`. Co-versioned with `ocx` (same release train), no independent cadence.
+7. **Dogfood roll-out** — package `ocx-mirror` as `ocx.sh/ocx/mirror` on the production registry **after** the dispatch is in place, gated by removing the explicit gate comment in `post-release-oci-publish.yml`. Co-versioned with `ocx` (same release train), no independent cadence.
 
 ### What this does NOT decide
 
@@ -148,7 +148,7 @@ OCX choosing Option 1 puts it in the same family as cargo/pixi — high familiar
 - **PATH exec security** — anything named `ocx-foo` on PATH is exec'd. Mitigation: built-ins always win (no shadowing of core commands); log resolved plugin path at debug level. No new attack surface vs. existing `ocx run` / `ocx package exec` which also exec PATH binaries.
 - **Plugin process env = OCX trust boundary.** Plugins inherit the parent env (auth tokens, registry credentials, PATH, HOME) verbatim. This matches cargo / git / kubectl plugin conventions: plugins are first-party or user-vetted extensions of `ocx`, NOT arbitrary user packages. For clean-env semantics use `ocx exec` / `ocx run` which call `child_process::exec` with a constructed env. The trade-off (CWE-214 latent risk) is accepted for plugin discovery UX; users control which plugins they install via `ocx --global add`.
 - **`ocx-mirror` distribution change** — must publish to `ocx.sh` (currently gated to `dev.ocx.sh`). Mitigation: explicit phase 3 step; gate stays closed until dispatch lands.
-- **Plugin authors depend on argv convention** — `argv[1]` repeats subcommand name. Mitigation: document; matches cargo convention; minimal risk.
+- **Plugin authors depend on argv convention** — git convention drops the subcommand name, so a plugin is just a normal CLI invoked as `ocx-<name> <user args>`; no `argv[1]` name-repeat dependency. Mitigation: document; matches git convention; minimal risk.
 
 ### Operational
 
@@ -165,7 +165,7 @@ OCX choosing Option 1 puts it in the same family as cargo/pixi — high familiar
 | **Availability** | Unchanged | Plugin failure isolated to plugin exit code |
 | **Security** | Slight increase | PATH exec, mitigated by built-in shadow rule + debug log of resolved path |
 | **Cost** | None | No new infra |
-| **Operability** | Slight increase | One more thing to teach: "ocx mirror = ocx-mirror plugin". Mitigated by familiar cargo pattern |
+| **Operability** | Slight increase | One more thing to teach: "ocx mirror = ocx-mirror plugin". Mitigated by familiar git pattern |
 
 ---
 
@@ -182,7 +182,7 @@ For the eventual `plan_*` artifact / handoff to `/builder`:
    ```
 2. **`crates/ocx_cli/src/app.rs`** — add a fifth static-bypass branch after the existing `Self_::Activate` arm (lines ~144-153), **before** `Context::try_init`:
    - Resolve `ocx-{argv[0]}` on PATH (use `which` crate already in workspace, or `std::env::split_paths`)
-   - If not found → emit a "did you mean / install via `ocx package install ocx-sh/ocx-<name>`" message; exit `EX_USAGE = 64`
+   - If not found → emit a hint framing `ocx --global add ocx.sh/ocx/<name>` as the official-plugin path, with a generic "put `ocx-<name>` on PATH" fallback for third-party plugins; exit `EX_USAGE = 64`
    - If found → build `std::process::Command`, call `Env::apply_ocx_config(ctx.config_view())`, set argv as cargo does (`[plugin_path, name, ...rest]`), spawn, `propagate_exit_code`
 3. **No `Context::try_init`** for `External` — confirms by adding to the same `match` block as the existing bypasses
 4. **Plugin not-found message** should mention the canonical install incantation so users self-recover
@@ -198,7 +198,7 @@ For the eventual `plan_*` artifact / handoff to `/builder`:
 ### Phase 3 — Dogfood `ocx-mirror` (≈2-4h, after Phase 1 lands)
 
 - In `post-release-oci-publish.yml`, change `variants: '[""]'` → `variants: '["", "mirror"]'`; remove the gating comment
-- Write `ocx-mirror`'s `metadata.json` so its `bin/` enters PATH after `ocx --global add ocx-sh/ocx-mirror`
+- Write `ocx-mirror`'s `metadata.json` so its `bin/` enters PATH after `ocx --global add ocx.sh/ocx/mirror`
 - Update `website/src/docs/reference/command-line.md` with "Plugins" section
 - Add subsystem-cli.md cross-reference
 
@@ -245,7 +245,7 @@ Post-1.0: the contract becomes stable; changes ratchet only by adding (new env v
 
 ## Open Questions
 
-1. **Plugin not-found UX** — should `ocx mirror` (unknown) suggest `ocx package install ocx-sh/ocx-mirror`, or generic install help? **Lean:** specific suggestion when name matches a known first-party plugin convention (`ocx-sh/ocx-*`).
+1. **Plugin not-found UX** — should `ocx mirror` (unknown) suggest `ocx --global add ocx.sh/ocx/mirror`, or generic install help? **Resolved:** the hint frames `ocx --global add ocx.sh/ocx/<name>` as the official-plugin path (first-party plugins publish under `ocx.sh/ocx/*`) and falls back to "put an `ocx-<name>` binary on your PATH" for third-party plugins — no registry probe, since dispatch bypasses OCI-client init and only the official namespace is knowable.
 2. **Reserved names** — should we maintain an explicit reserved-name list (`package`, `self`, `shell`, ...) and refuse a plugin that shadows them? Today clap's built-in dispatch shadows naturally. **Lean:** rely on clap; no explicit list until shadowing causes confusion.
 3. **`ocx help <plugin>`** — should it forward to `ocx-<plugin> --help`? **Lean:** yes, free behavior — `ocx help foo` parses as `External(["help", "foo"])` today which is wrong. Needs a small special case in dispatch to handle `argv[0] == "help" && argv.len() == 2`. Add in Phase 1.
 4. **Plugin-API version env** — defer per above, but record as a 1.0 deliverable.

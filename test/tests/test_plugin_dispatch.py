@@ -134,25 +134,32 @@ def test_unknown_subcommand_execs_plugin(
     Context::try_init).  The plugin is exec'd and its stdout contains the
     expected ARGV layout.
 
-    Contract: argv[0]=<path-to-ocx-fixture>, argv[1]=fixture, argv[2..]=user args
-    (cargo convention, ADR decision 4).
+    Contract (ADR decision 4, git convention): argv[0]=<path-to-ocx-fixture>,
+    user args follow with the subcommand name DROPPED — so the plugin sees
+    ``--foo bar`` (NOT ``fixture --foo bar``), identical to running the
+    standalone binary directly.  The fixture echoes ``ARGV:<argv0>|<space-joined
+    user args>``, so parsing the portion after ``|`` locks the convention; a
+    bare substring check would not (``fixture`` also appears in argv0's path).
     """
     result = _run_ocx(ocx, "fixture", "--foo", "bar", extra_path_dir=plugin_bin_dir)
     assert result.returncode == 0, (
         f"expected exit 0 from plugin, got {result.returncode}\n"
         f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
     )
-    # ARGV line must be present and contain fixture as the subcommand name
     assert "ARGV:" in result.stdout, f"expected ARGV: line in stdout; got {result.stdout!r}"
     argv_line = next(
         (line for line in result.stdout.splitlines() if line.startswith("ARGV:")), ""
     )
-    # The remainder after argv[0] should contain "fixture --foo bar" as space-separated args
-    assert "fixture" in argv_line, (
-        f"expected 'fixture' in ARGV line; got {argv_line!r}"
+    argv0, _, forwarded = argv_line.removeprefix("ARGV:").partition("|")
+    # argv0 is the resolved plugin binary path (proves the right plugin ran).
+    assert argv0.endswith("ocx-fixture"), (
+        f"expected argv0 to be the ocx-fixture binary path; got {argv0!r}"
     )
-    assert "--foo" in argv_line, f"expected '--foo' forwarded to plugin; got {argv_line!r}"
-    assert "bar" in argv_line, f"expected 'bar' forwarded to plugin; got {argv_line!r}"
+    # Git convention: only the user args reach the plugin, name dropped.
+    assert forwarded.split() == ["--foo", "bar"], (
+        f"git convention: plugin must receive only user args ['--foo', 'bar'], "
+        f"not the subcommand name; got forwarded args {forwarded!r}"
+    )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="bash plugin scripts require POSIX shell")
@@ -270,9 +277,18 @@ def test_plugin_not_found(ocx: OcxRunner) -> None:
     assert "ocx --global add" in combined_output, (
         f"expected install hint mentioning 'ocx --global add'; got {combined_output!r}"
     )
-    # Message style: lowercase, semicolon separator (not period + sentence-case)
-    assert "install with:" in combined_output.lower(), (
-        f"expected 'install with:' (lowercase) in output; got {combined_output!r}"
+    # Correct three-segment OCI identifier (registry/namespace/package), not the
+    # GitHub org slug. First-party plugins publish under ocx.sh/ocx/<name>.
+    assert "ocx.sh/ocx/nonexistent-plugin-xyz-12345" in combined_output, (
+        f"expected 'ocx.sh/ocx/<name>' identifier in hint; got {combined_output!r}"
+    )
+    assert "ocx-sh/ocx-" not in combined_output, (
+        f"hint must not use the GitHub org slug 'ocx-sh/ocx-'; got {combined_output!r}"
+    )
+    # Honest framing: the add form is the official-plugin path, with a generic
+    # PATH fallback for third-party plugins — not an unconditional promise.
+    assert "official ocx plugin" in combined_output.lower(), (
+        f"expected official-plugin framing in hint; got {combined_output!r}"
     )
 
 
@@ -344,10 +360,12 @@ def test_builtin_shadow_guard_at_subcommand_depth(
 def test_help_forwarding(
     ocx: OcxRunner, plugin_bin_dir: Path
 ) -> None:
-    """``ocx fixture --help`` → exec'd plugin receives ``--help`` in argv.
+    """``ocx fixture --help`` → exec'd plugin receives only ``--help`` in argv.
 
-    ADR decision 5 (``ocx <plugin> --help`` exec-forwards to the plugin).
-    The ARGV line from the fixture script must contain ``--help``.
+    ADR decision 5 (``ocx <plugin> --help`` exec-forwards to the plugin) +
+    decision 4 (git convention): the plugin must see exactly ``--help``, never
+    ``fixture --help`` — a clap plugin would reject its own name as an unknown
+    subcommand.  Regression guard for the bug where the name was passed through.
     """
     result = _run_ocx(ocx, "fixture", "--help", extra_path_dir=plugin_bin_dir)
     assert result.returncode == 0, (
@@ -357,8 +375,10 @@ def test_help_forwarding(
     argv_line = next(
         (line for line in result.stdout.splitlines() if line.startswith("ARGV:")), ""
     )
-    assert "--help" in argv_line, (
-        f"expected '--help' forwarded to plugin; got {argv_line!r}"
+    _, _, forwarded = argv_line.removeprefix("ARGV:").partition("|")
+    assert forwarded.split() == ["--help"], (
+        f"git convention: 'ocx fixture --help' must forward only ['--help'], "
+        f"not the subcommand name; got forwarded args {forwarded!r}"
     )
 
 
@@ -383,8 +403,11 @@ def test_help_subcommand_form(
     argv_line = next(
         (line for line in result.stdout.splitlines() if line.startswith("ARGV:")), ""
     )
-    assert "--help" in argv_line, (
-        f"expected '--help' in ARGV line after help-subcommand rewrite; got {argv_line!r}"
+    _, _, forwarded = argv_line.removeprefix("ARGV:").partition("|")
+    # Rewrite + git convention: 'ocx help fixture' dispatches 'ocx-fixture --help'.
+    assert forwarded.split() == ["--help"], (
+        f"'ocx help fixture' must dispatch 'ocx-fixture --help' (only ['--help'] "
+        f"forwarded); got forwarded args {forwarded!r}"
     )
 
 
@@ -439,7 +462,7 @@ def test_help_builtin_form_not_mistaken_for_plugin(ocx: OcxRunner) -> None:
     Without the fix, ``ocx help package`` is routed through External as
     ``["package", "--help"]`` after the rewrite, then ``resolve_plugin_binary``
     finds no ``ocx-package`` on PATH and emits the misleading install hint
-    ``Install with: ocx --global add ocx-sh/ocx-package``.
+    ``ocx --global add ocx.sh/ocx/package``.
 
     With the fix, ``find_subcommand("package")`` recognises the built-in and
     clap's own help printer is called directly, exiting 0 with the subcommand
