@@ -5,6 +5,9 @@ import { useClipboard } from '@vueuse/core'
 const props = defineProps<{
   code: string
   label?: string
+  /** Fill the available width and truncate the command on one line
+   *  (the full string is still copied). */
+  fill?: boolean
 }>()
 
 const { copy } = useClipboard()
@@ -22,9 +25,9 @@ async function handleCopy() {
 </script>
 
 <template>
-  <span class="copy-snippet" @click="handleCopy">
+  <span class="copy-snippet" :class="{ fill }" @click="handleCopy">
     <span v-if="label" class="snippet-label">{{ label }}</span>
-    <code class="snippet-code">{{ code }}</code>
+    <code class="snippet-code" :title="code">{{ code }}</code>
     <button class="snippet-btn" :title="copied ? 'Copied!' : 'Copy to clipboard'">
       <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
@@ -55,10 +58,17 @@ async function handleCopy() {
   border-color: var(--vp-c-brand);
 }
 
+/* Fill mode: span the row, keep one line, truncate the command. */
+.copy-snippet.fill {
+  display: flex;
+  width: 100%;
+}
+
 .snippet-label {
   color: var(--vp-c-text-3);
   font-size: 0.8rem;
   user-select: none;
+  flex-shrink: 0;
 }
 
 .snippet-code {
@@ -68,6 +78,18 @@ async function handleCopy() {
   background: none;
   border: none;
   padding: 0;
+}
+
+.copy-snippet.fill .snippet-code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-snippet.fill .snippet-btn {
+  flex-shrink: 0;
 }
 
 .snippet-btn {

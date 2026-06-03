@@ -19,6 +19,7 @@ import DependencyExplorer from './components/DependencyExplorer.vue'
 import CopySnippet from './components/CopySnippet.vue'
 import PackageCatalog from './components/PackageCatalog.vue'
 import PackageDetail from './components/PackageDetail.vue'
+import PlatformIcons from './components/PlatformIcons.vue'
 import TagBadge from './components/TagBadge.vue'
 import VersionTree from './components/VersionTree.vue'
 import RoadmapTimeline from './components/RoadmapTimeline.vue'
@@ -49,6 +50,7 @@ export default {
     app.component('CopySnippet', CopySnippet)
     app.component('PackageCatalog', PackageCatalog)
     app.component('PackageDetail', PackageDetail)
+    app.component('PlatformIcons', PlatformIcons)
     app.component('TagBadge', TagBadge)
     app.component('VersionTree', VersionTree)
     app.component('RoadmapTimeline', RoadmapTimeline)
