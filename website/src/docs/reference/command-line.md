@@ -794,7 +794,7 @@ as a tag filter on the returned list.
 
 **Options**
 
-- `--platforms`: Shows which platforms are available for the package. Uses the tag from the identifier, or `latest` if none specified.
+- `--platforms`: Show the platforms (`os/arch`) the package publishes, read from its image index manifest. Uses the tag from the identifier, or `latest` if none specified. Resolved live from the registry under [`--remote`](#arg-remote); otherwise read from the local index.
 - `--variants`: Lists unique variant names found in the tags.
 - `-h`, `--help`: Print help information.
 
