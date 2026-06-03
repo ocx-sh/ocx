@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vitepress'
 import CopySnippet from './CopySnippet.vue'
 import VersionTree from './VersionTree.vue'
+import PlatformIcons from './PlatformIcons.vue'
 
 interface PackageInfo {
   name: string
@@ -45,13 +46,13 @@ const latestVersion = computed(() => info.value?.latestVersion || info.value?.la
 const addProjectCmd = computed(() => {
   if (!info.value) return ''
   const tag = latestVersion.value ? `:${latestVersion.value}` : ''
-  return `ocx --remote add ${qualifiedName.value}${tag}`
+  return `ocx add ${qualifiedName.value}${tag}`
 })
 
 const addGlobalCmd = computed(() => {
   if (!info.value) return ''
   const tag = latestVersion.value ? `:${latestVersion.value}` : ''
-  return `ocx --remote --global add ${qualifiedName.value}${tag}`
+  return `ocx --global add ${qualifiedName.value}${tag}`
 })
 
 onMounted(async () => {
@@ -110,41 +111,34 @@ onMounted(async () => {
         <div class="header-text">
           <h1 class="header-title">{{ info.title }}</h1>
           <code v-if="qualifiedName" class="header-repo">{{ qualifiedName }}</code>
-          <p v-if="info.description" class="header-desc">
-            {{ info.description }}
-          </p>
-          <div class="header-meta">
-            <div v-if="info.keywords.length" class="meta-group">
-              <span class="meta-label">Keywords</span>
-              <div class="meta-badges">
-                <span v-for="kw in info.keywords" :key="kw" class="keyword">{{ kw }}</span>
+          <div class="header-body">
+            <div class="header-body-main">
+              <p v-if="info.description" class="header-desc">
+                {{ info.description }}
+              </p>
+              <div v-if="info.keywords.length" class="meta-group">
+                <span class="meta-label">Keywords</span>
+                <div class="meta-badges">
+                  <span v-for="kw in info.keywords" :key="kw" class="keyword">{{ kw }}</span>
+                </div>
               </div>
             </div>
-            <div v-if="info.platforms.length" class="meta-group">
+            <div v-if="info.platforms.length" class="meta-group header-platforms">
               <span class="meta-label">Supported Platforms</span>
-              <div class="meta-badges">
-                <span
-                  v-for="platform in info.platforms"
-                  :key="platform"
-                  class="platform-badge"
-                >{{ platform }}</span>
-              </div>
+              <PlatformIcons :platforms="info.platforms" mode="os-arch" />
             </div>
           </div>
-        </div>
-      </div>
 
-      <!-- Install Snippets -->
-      <div class="snippets">
-        <h3 class="snippets-title">Add</h3>
-        <div class="snippet-list">
-          <div class="snippet-row">
-            <span class="snippet-label">Project</span>
-            <CopySnippet label="$" :code="addProjectCmd" />
-          </div>
-          <div class="snippet-row">
-            <span class="snippet-label">Global</span>
-            <CopySnippet label="$" :code="addGlobalCmd" />
+          <div class="header-add">
+            <span class="meta-label">Add</span>
+            <div class="add-row">
+              <span class="add-scope">Project</span>
+              <CopySnippet label="$" :code="addProjectCmd" fill />
+            </div>
+            <div class="add-row">
+              <span class="add-scope">Global</span>
+              <CopySnippet label="$" :code="addGlobalCmd" fill />
+            </div>
           </div>
         </div>
       </div>
@@ -245,14 +239,27 @@ onMounted(async () => {
 .header-desc {
   font-size: 0.95rem;
   color: var(--vp-c-text-2);
-  margin: 0 0 0.5rem;
+  margin: 0;
   line-height: 1.5;
 }
 
-.header-meta {
+/* Description + keywords on the left, supported platforms in a right column. */
+.header-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5rem;
+}
+
+.header-body-main {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+}
+
+.header-platforms {
+  flex-shrink: 0;
 }
 
 .meta-group {
@@ -283,54 +290,24 @@ onMounted(async () => {
   color: var(--vp-c-brand-dark);
 }
 
-.platform-badge {
-  display: inline-flex;
-  align-items: center;
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.75rem;
-  padding: 0.15rem 0.5rem;
-  background: var(--vp-c-bg-soft);
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 4px;
-  color: var(--vp-c-text-2);
-}
-
-/* Install Snippets */
-.snippets {
-  margin-bottom: 1.5rem;
-  padding: 1rem 1.25rem;
-  background: var(--vp-c-bg-soft);
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 8px;
-}
-
-.snippets-title {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--vp-c-text-2);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  margin: 0 0 0.75rem;
-  border: none;
-  padding: 0;
-}
-
-.snippet-list {
+/* Add commands — full-width single-line snippets below the header meta. */
+.header-add {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.35rem;
+  margin-top: 0.9rem;
 }
 
-.snippet-row {
+.add-row {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.6rem;
 }
 
-.snippet-label {
-  font-size: 0.8rem;
+.add-scope {
+  font-size: 0.75rem;
   color: var(--vp-c-text-3);
-  min-width: 100px;
+  min-width: 3.5rem;
   flex-shrink: 0;
 }
 
@@ -409,17 +386,23 @@ onMounted(async () => {
     text-align: center;
   }
 
+  .header-body {
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 100%;
+  }
+
   .meta-badges {
     justify-content: center;
   }
 
-  .snippet-row {
+  .add-row {
     flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 0.25rem;
   }
 
-  .snippet-label {
+  .add-scope {
     min-width: 0;
   }
 }

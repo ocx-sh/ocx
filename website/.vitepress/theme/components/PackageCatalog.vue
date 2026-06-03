@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vitepress'
 import CopySnippet from './CopySnippet.vue'
+import PlatformIcons from './PlatformIcons.vue'
 
 interface PackageSummary {
   name: string
@@ -42,19 +43,6 @@ const filteredPackages = computed(() => {
     || pkg.keywords.some(k => k.toLowerCase().includes(query)),
   )
 })
-
-function uniqueOsLabels(platforms: string[]): string[] {
-  const seen = new Set<string>()
-  const result: string[] = []
-  for (const p of platforms) {
-    const os = p.split('/')[0]
-    if (!seen.has(os)) {
-      seen.add(os)
-      result.push(os)
-    }
-  }
-  return result
-}
 
 const router = useRouter()
 
@@ -136,18 +124,12 @@ onMounted(async () => {
           </p>
 
           <div class="card-meta">
-            <span class="card-platforms">
-              <span
-                v-for="os in uniqueOsLabels(pkg.platforms)"
-                :key="os"
-                class="platform-badge"
-              >{{ os }}</span>
-            </span>
+            <PlatformIcons :platforms="pkg.platforms" mode="os" />
             <span class="card-tags">{{ pkg.tagCount }} version{{ pkg.tagCount !== 1 ? 's' : '' }}</span>
           </div>
 
           <div class="card-install" @click.stop>
-            <CopySnippet label="$" :code="`ocx --remote --global add ${pkg.registry || data?.registry || ''}/${pkg.name}`" />
+            <CopySnippet label="$" fill :code="`ocx add ${pkg.registry || data?.registry || ''}/${pkg.name}`" />
           </div>
         </div>
       </div>
@@ -290,21 +272,6 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.75rem;
-}
-
-.card-platforms {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.platform-badge {
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.7rem;
-  padding: 0.1rem 0.4rem;
-  background: var(--vp-c-bg);
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 3px;
-  color: var(--vp-c-text-3);
 }
 
 .card-tags {

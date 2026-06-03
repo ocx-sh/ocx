@@ -22,15 +22,15 @@ const { copy } = useClipboard()
 const copied = ref(false)
 
 function addProjectCmd() {
-  return `ocx --remote add ${props.qualifiedName}:${props.tag}`
+  return `ocx add ${props.qualifiedName}:${props.tag}`
 }
 
 function addGlobalCmd() {
-  return `ocx --remote --global add ${props.qualifiedName}:${props.tag}`
+  return `ocx --global add ${props.qualifiedName}:${props.tag}`
 }
 
 function inspectCmd() {
-  return `ocx --remote package inspect ${props.qualifiedName}:${props.tag}`
+  return `ocx package inspect ${props.qualifiedName}:${props.tag}`
 }
 
 async function copyText(text: string) {
