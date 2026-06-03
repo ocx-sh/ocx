@@ -190,6 +190,51 @@ impl ChainedIndex {
         // All sources either replied Ok(false) or there were no sources.
         Ok(())
     }
+
+    /// Remote-mode pure-query manifest read: consult the source chain directly
+    /// and return the first hit **without persisting**.
+    ///
+    /// `--remote` is a read-through-to-source flag, not a write-through cache
+    /// fill, so a tag-addressed `Query` must reach the live registry (the same
+    /// routing `list_tags` already uses in Remote mode) yet never mutate the
+    /// local index. First `Some` wins; if every source errors the failure is
+    /// propagated rather than masked as a clean miss (trust boundary — a
+    /// registry outage must not look like "not found"). See
+    /// `adr_index_routing_semantics.md`.
+    async fn query_sources_manifest(
+        &self,
+        identifier: &oci::Identifier,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
+        let mut last_error: Option<crate::Error> = None;
+        for source in &self.sources {
+            match source.fetch_manifest(identifier, IndexOperation::Query).await {
+                Ok(Some(result)) => return Ok(Some(result)),
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("Remote-mode fetch_manifest failed for '{}': {e}", identifier);
+                    last_error = Some(e);
+                }
+            }
+        }
+        last_error.map_or(Ok(None), Err)
+    }
+
+    /// Digest counterpart to [`Self::query_sources_manifest`] — same Remote-mode
+    /// read-through-without-persist contract.
+    async fn query_sources_manifest_digest(&self, identifier: &oci::Identifier) -> Result<Option<oci::Digest>> {
+        let mut last_error: Option<crate::Error> = None;
+        for source in &self.sources {
+            match source.fetch_manifest_digest(identifier, IndexOperation::Query).await {
+                Ok(Some(digest)) => return Ok(Some(digest)),
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("Remote-mode fetch_manifest_digest failed for '{}': {e}", identifier);
+                    last_error = Some(e);
+                }
+            }
+        }
+        last_error.map_or(Ok(None), Err)
+    }
 }
 
 #[async_trait]
@@ -272,6 +317,14 @@ impl index_impl::IndexImpl for ChainedIndex {
                 }
             }
         }
+        // Remote-mode pure queries read through to the source without
+        // persisting — `--remote` forces a live lookup for mutable
+        // (tag-addressed) reads, the same as `list_tags`, but a query must
+        // never write the local index. Digest-addressed reads stay local-first
+        // (handled above) because immutable content cannot be wrong.
+        if self.mode == ChainMode::Remote && op == IndexOperation::Query && !is_digest_addressed {
+            return self.query_sources_manifest(identifier).await;
+        }
         // Pure queries never walk the chain. The local index's role is to
         // cache resolved data; populating it on a query call would silently
         // mutate state from a read-only command.
@@ -301,6 +354,9 @@ impl index_impl::IndexImpl for ChainedIndex {
                     );
                 }
             }
+        }
+        if self.mode == ChainMode::Remote && op == IndexOperation::Query && !is_digest_addressed {
+            return self.query_sources_manifest_digest(identifier).await;
         }
         match op {
             IndexOperation::Query => Ok(None),
@@ -796,23 +852,26 @@ mod chain_refs_tests {
     // ── routing invariant: Op::Query never walks the source chain ────────
 
     /// `IndexOperation::Query` is the contract for pure-read callers
-    /// (`index list`, `index catalog`, `package info`). The contract holds
-    /// only if `ChainedIndex::fetch_manifest` never invokes `walk_chain`
-    /// on cache miss for a `Query` call. This test asserts that contract
-    /// across every `ChainMode` using a spy source that records every
-    /// invocation: zero calls means no chain walk happened, which means
-    /// no write-through could have happened either.
+    /// (`index list`, `index catalog`, `package info`). The invariant this
+    /// routing split exists to protect is *no query-path writes to the local
+    /// index* in any mode — never a chain walk, never a tag-pointer commit.
+    ///
+    /// In `Default` and `Offline` modes a tag-addressed cache miss returns
+    /// `None` without touching the source. In `Remote` mode a `Query` reads
+    /// *through* to the source — a live `--remote` lookup, the same routing
+    /// `list_tags` uses — and returns `Some`, but still must not persist: the
+    /// tag store stays untouched. A spy source records every invocation and
+    /// the tag-store directory must never be created. See
+    /// `adr_index_routing_semantics.md`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn op_query_never_walks_source_in_any_mode() {
-        for mode in [ChainMode::Default, ChainMode::Remote, ChainMode::Offline] {
+    async fn op_query_never_writes_local_index_in_any_mode() {
+        // Default / Offline: tag-addressed cache miss → None, source untouched.
+        for mode in [ChainMode::Default, ChainMode::Offline] {
             let cache_dir = TempDir::new().unwrap();
             let cache = make_local_index(&cache_dir);
             let (spy, src_idx) = make_source(TAG, digest_a());
             let chained = Index::from_chained(cache, vec![src_idx], mode);
 
-            // Tag-addressed lookup with cache miss — the path that *would*
-            // walk the chain under `Resolve`. Under `Query` it must short-
-            // circuit to `None` without touching the source.
             let result = chained
                 .fetch_manifest(&tagged_id(), super::IndexOperation::Query)
                 .await
@@ -827,14 +886,40 @@ mod chain_refs_tests {
                 "Op::Query must not call source in mode {mode:?}; got {} call(s)",
                 spy.calls()
             );
-
-            // Tag store must be untouched.
-            let tags_root = cache_dir.path().join("tags");
             assert!(
-                !tags_root.join(REGISTRY).exists(),
+                !cache_dir.path().join("tags").join(REGISTRY).exists(),
                 "Op::Query in mode {mode:?} must not create the tag store"
             );
         }
+
+        // Remote: a Query reads through to the source (Some) but never persists.
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Remote);
+
+        let manifest = chained
+            .fetch_manifest(&tagged_id(), super::IndexOperation::Query)
+            .await
+            .unwrap();
+        assert!(
+            manifest.is_some(),
+            "Op::Query in Remote mode must read through to the source"
+        );
+        let digest = chained
+            .fetch_manifest_digest(&tagged_id(), super::IndexOperation::Query)
+            .await
+            .unwrap();
+        assert_eq!(
+            digest,
+            Some(digest_a()),
+            "Op::Query digest in Remote mode must read through to the source"
+        );
+        assert!(spy.calls() > 0, "Op::Query in Remote mode must consult the source");
+        assert!(
+            !cache_dir.path().join("tags").join(REGISTRY).exists(),
+            "Op::Query in Remote mode must not create the tag store (no write-through)"
+        );
     }
 
     // ── pinned-id pull: tag+digest identifier must skip tag-pointer commit ──

@@ -147,7 +147,7 @@ impl IndexList {
                     .map(|p| p.to_string())
                     .collect(),
                 None => {
-                    log::warn!("Manifest not found for '{}:{}' - skipping.", package, tag);
+                    log::warn!("Manifest not found for '{}' - skipping.", tag_identifier);
                     Vec::new()
                 }
             };
