@@ -72,9 +72,12 @@ All registered globally in `theme/index.mts` — use in `.md` files, no imports.
 
 | Component | Data Source | Purpose |
 |-----------|-----------|---------|
-| `<PackageCatalog>` | `/data/catalog/catalog.json` | Searchable package grid with platform badges |
-| `<PackageDetail>` | `/data/catalog/packages/{name}/info.json` | Individual package view with tag selector |
+| `<PackageCatalog>` | `/data/catalog/catalog.json` | Searchable package grid with OS platform icons (per-card, OS only) |
+| `<PackageDetail>` | `/data/catalog/packages/{name}/info.json` | Individual package view with tag selector + OS/arch platform breakdown |
 | `<DependencyExplorer>` | `/data/dependencies.json` | SBOM viewer with license breakdown |
+| `<PlatformIcons>` | *(props: `platforms: string[]`, `mode: 'os' \| 'os-arch'`)* | Renders `os/arch` lists as OS glyphs (`os`) or glyph + name + arch chips (`os-arch`); used by the two catalog components |
+
+`<PlatformIcons>` glyphs are **inline single-colour SVG** (Linux/Tux + Apple from [Simple Icons](https://simpleicons.org/), CC0-1.0; Windows a trademark-neutral four-pane window), filled with `currentColor` so tint + light/dark follow the surrounding text colour. They are **not** part of the licensed Icons8 pipeline below — unknown OS strings fall back to a small text badge.
 
 ### VNode Introspection Pattern
 

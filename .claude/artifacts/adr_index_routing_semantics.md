@@ -63,7 +63,28 @@ Naming: `Resolve` (not `Persist`) describes caller intent — "resolve this iden
 
 ### 3. Structural invariant test
 
-`chained_index::chain_refs_tests::op_query_never_walks_source_in_any_mode` asserts that `ChainedIndex::fetch_manifest(_, Op::Query)` returns `None` on cache miss across every `ChainMode` without invoking the source. A spy with a call counter catches regressions through any future write path, not just `walk_chain`.
+`chained_index::chain_refs_tests::op_query_never_writes_local_index_in_any_mode`
+asserts the real invariant this split protects: a `Query` never **writes** the
+local index in any `ChainMode`. In `Default` / `Offline` a tag-addressed cache
+miss returns `None` without invoking the source; in `Remote` the query reads
+*through* to the source (returning `Some`) but the tag store stays untouched. A
+spy with a call counter catches regressions through any future write path.
+
+> **Amendment 2026-06-02.** The original test
+> (`op_query_never_walks_source_in_any_mode`) over-constrained the invariant: it
+> asserted `None` + zero source calls in **every** mode, including `--remote`.
+> That contradicted both the user mental model (`--remote` = "source only" for
+> mutable lookups) and the routing matrix below (which already lists
+> `fetch_manifest` tag+`Op::Query` under `--remote` as "source only, no write",
+> in the same row as `list_tags`). The defect was user-visible: `ocx index list
+> --platforms --remote` always returned an empty platform set because
+> `ChainedIndex::fetch_manifest` short-circuited every `Query` to `None`, so the
+> website catalog generator could never populate platform data. The protected
+> invariant was always *no query-path **write***, not *no query-path source
+> read* — Remote-mode `list_tags` already read through to the source without
+> writing. `ChainedIndex::{fetch_manifest,fetch_manifest_digest}` now do the same
+> for tag-addressed `Query` via `query_sources_manifest{,_digest}` (read-through,
+> no persist), and the test was renamed and split to match.
 
 ### 4. `--offline --remote` accepted as pinned-only mode
 
@@ -77,7 +98,7 @@ The combination is not rejected at clap parse time. Both flags set means: no sou
 
 ### Behaviour changes (contract breaks)
 
-- **Pure-query `index list --platforms` no longer fills the local tag store.** Use `ocx index update` to refresh the local index explicitly. The catalog generator workaround `unset OCX_INDEX` is now dead code.
+- **Pure-query `index list --platforms` no longer fills the local tag store.** With `--remote` it reads the manifest through to the source live (no write); without `--remote` it reads the persisted local index only, so use `ocx index update` (or a prior install/pull) to populate it for offline/default use. The catalog generator workaround `unset OCX_INDEX` is now dead code. *(Amended 2026-06-02 — see Decision #3 amendment: the `--remote` read-through was the documented behaviour all along but was not implemented; it is now.)*
 - **Pinned-id pull (`tag+digest`) no longer commits a tag pointer.** `ocx.lock` is the canonical record. The local tag store is optional once a project is locked. Existing tag pointers are preserved (no destructive migration).
 - **`ocx index list <pkg>@<digest>` is now a usage error.** Migration: drop the `@digest` suffix, or use `ocx package info`.
 
