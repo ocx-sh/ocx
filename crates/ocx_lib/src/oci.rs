@@ -61,6 +61,7 @@ pub use identifier::DEFAULT_REGISTRY;
 pub use identifier::Identifier;
 pub use identifier::OCX_SH_REGISTRY;
 pub use identifier::error::{IdentifierError, IdentifierErrorKind};
+pub use identifier::ocx_cli_identifier;
 
 pub mod platform;
 pub use platform::Architecture;
