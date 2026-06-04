@@ -48,6 +48,33 @@ def test_install_select_creates_current_symlink(
     assert_symlink_exists(current)
 
 
+def test_install_select_reports_current_path(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """ocx install -s <pkg> reports the current path, not the candidate.
+
+    --select is the explicit opt-in to move the current pointer, so the
+    reported path must surface `current`, the alias the user just set.
+    """
+    pkg = published_package
+    result = ocx.json("package", "install", "-s", pkg.short)
+
+    reported = Path(result[pkg.short]["path"])
+    assert reported.name == "current"
+
+
+def test_install_without_select_reports_candidate_path(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """ocx install <pkg> reports the tag-pinned candidate path."""
+    pkg = published_package
+    result = ocx.json("package", "install", pkg.short)
+
+    reported = Path(result[pkg.short]["path"])
+    assert reported.name == pkg.tag
+    assert reported.parent.name == "candidates"
+
+
 def test_install_cleans_temp_directory(
     ocx: OcxRunner, published_package: PackageInfo
 ):

@@ -65,7 +65,13 @@ impl Install {
             .zip(oci_packages.iter())
             .zip(install_infos.iter())
             .map(|((raw, oci_pkg), info)| {
-                let path = fs.symlinks.candidate(oci_pkg);
+                // `--select` moves the `current` pointer, so surface that path; a
+                // plain install only writes the tag-pinned candidate.
+                let path = if self.select {
+                    fs.symlinks.current(oci_pkg)
+                } else {
+                    fs.symlinks.candidate(oci_pkg)
+                };
                 (
                     raw.raw().to_string(),
                     api::data::install::InstallEntry {
