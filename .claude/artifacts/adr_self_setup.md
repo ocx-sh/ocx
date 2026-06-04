@@ -301,12 +301,20 @@ write the new v1 marker. Idempotent thereafter.
   canonical bytes WITHOUT warning, discarding any manual edits a user made to
   those files. This is intended (ocx owns env.*), but it must be stated plainly
   rather than dressed up as "safe" — the setup success message says so.
+- **Dedicated-shell files are ocx-owned, like `env.*`.** fish `conf.d/ocx.fish`
+  and nushell `vendor/autoload/ocx.nu` live in tool-managed auto-load dirs and
+  are full-rewritten on drift (diff-gated, no fence, no `--force` gate). The
+  no-clobber-without-`--force` bar applies ONLY to the managed block inside a
+  user's OWN RC files. (Cross-model review 2026-06-04 flagged the asymmetry;
+  resolution: documented as intended ownership, mirroring conda/rustup vendor
+  files.)
 
 **Risks:**
 - *Clobbering user dotfiles.* Mitigation: atomic writes, diff-gate, dirty-state warn-and-skip, `--dry-run`, `--no-modify-path` parity with the env var.
 - *Bootstrap chicken-and-egg* (setup runs from a not-yet-installed binary). Mitigation: 2A populates the CAS first, then writes shims pointing at `current`; the loose binary is single-use.
 - *Marker parse edge cases* (user reflows the line, CRLF, multiple blocks). Mitigation: tolerant regex + golden tests; on ambiguity, treat as dirty and skip.
 - *Hash-discipline regressions.* Mitigation: a unit test asserting the embedded canonical hash equals the hash of the emitted block.
+- *Bootstrap installs the registry's live latest-published tag, not a release-bound immutable digest* (cross-model review 2026-06-04). The store install is OCI-content-addressed (verified blobs), but Decision 2A resolves "latest" at setup time, so a moved tag / publish skew between the install-script checksum-verify and the registry resolve can change what lands. Accepted for v1 (2A + the never-pin rule); the digest-pin / signed release→OCI mapping is tracked as follow-up #150.
 
 ## Technical Details
 
