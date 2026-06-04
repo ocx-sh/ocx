@@ -52,6 +52,10 @@ pub enum ExitCode {
     /// Offline mode blocked a network operation.
     /// Distinct from `Unavailable`: the failure is deliberate policy, not a fault.
     OfflineBlocked = 81,
+    /// A managed shell-integration block carries user edits and was left
+    /// untouched (`ocx self setup` without `--force`).
+    /// OCX-specific; script-discoverable so a rerun with `--force` is easy.
+    DirtyRcBlock = 82,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -137,6 +141,14 @@ mod tests {
     fn exit_code_offline_blocked_is_81() {
         // OCX-specific; distinct from Unavailable (deliberate policy, not a fault)
         assert_eq!(ExitCode::OfflineBlocked as u8, 81);
+    }
+
+    #[test]
+    fn exit_code_dirty_rc_block_is_82() {
+        // OCX-specific; script-discoverable dirty-RC-skip outcome (plan D3).
+        // Distinct from ConfigError (78) so a refused managed block is not
+        // conflated with a bad-config failure.
+        assert_eq!(ExitCode::DirtyRcBlock as u8, 82);
     }
 
     #[test]

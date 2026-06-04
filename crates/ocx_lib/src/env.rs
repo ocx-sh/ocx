@@ -46,6 +46,11 @@ pub mod keys {
     /// object is used (not a comma/`=` list) because mirror values are
     /// structured URLs with no delimiter-safe separator.
     pub const OCX_MIRRORS: &str = "OCX_MIRRORS";
+    /// Boolean — when truthy, `ocx self setup` writes the env shims but does
+    /// NOT modify any shell profile. Mirrors `--no-modify-path`. Not a
+    /// resolution-affecting flag (not forwarded to child ocx); the opt-out is
+    /// not remembered between runs.
+    pub const OCX_NO_MODIFY_PATH: &str = "OCX_NO_MODIFY_PATH";
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -532,6 +537,32 @@ pub fn mirrors() -> Result<Vec<(String, String)>, crate::config::mirror::MirrorC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `OCX_NO_MODIFY_PATH` is read through `flag` (the same `BooleanString`
+    /// path as `--remote`/`--offline`), so both `=1` and `=true` set it true and
+    /// an unset var is the `false` default (contract 8, item 7).
+    #[test]
+    fn ocx_no_modify_path_flag_is_truthy_for_one_and_true() {
+        let env = crate::test::env::lock();
+
+        env.set(keys::OCX_NO_MODIFY_PATH, "1");
+        assert!(
+            flag(keys::OCX_NO_MODIFY_PATH, false),
+            "OCX_NO_MODIFY_PATH=1 must be true"
+        );
+
+        env.set(keys::OCX_NO_MODIFY_PATH, "true");
+        assert!(
+            flag(keys::OCX_NO_MODIFY_PATH, false),
+            "OCX_NO_MODIFY_PATH=true must be true"
+        );
+
+        env.remove(keys::OCX_NO_MODIFY_PATH);
+        assert!(
+            !flag(keys::OCX_NO_MODIFY_PATH, false),
+            "unset OCX_NO_MODIFY_PATH must fall back to the false default"
+        );
+    }
 
     #[test]
     fn env_key_case_insensitive() {
