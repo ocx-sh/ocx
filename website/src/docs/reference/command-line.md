@@ -1462,6 +1462,42 @@ ocx shell completion --shell powershell | Out-String | Invoke-Expression
 
 The `ocx self` group manages the OCX installation itself: PATH activation, shell-completion injection, and binary self-update.
 
+#### `self setup` {#self-setup}
+
+Complete a bare-binary install: bootstrap the latest published OCX into the content store, write the per-shell env shims (`$OCX_HOME/env.*`), and add a managed activation block to the detected shell profiles.
+
+This is the answer to "I won't pipe `curl` into a shell": download the standalone `ocx` binary from GitHub Releases, run `ocx self setup`, and reach the same state the install script produces — no shell script involved. The loose binary bootstraps the managed copy, writes the shims, and wires shell profiles in one command.
+
+Setup runs three things in a hard order: **bootstrap first** (install the latest published `ocx.sh/ocx/cli` so the shims have a `current` to point at — a no-op when an install already exists), then the five `env.*` shims, then the profile activation blocks. A failed bootstrap stops the run before any shim or profile is touched.
+
+Re-running is safe. The shims and the managed block are diff-gated: an unchanged setup is a no-op. A stale ocx-authored block is rewritten in place (format upgrade); a legacy `# BEGIN ocx` block is migrated to the versioned fence. A block the user edited by hand is reported dirty and left untouched (exit 82) unless `--force` is passed.
+
+**Usage**
+
+```shell
+ocx self setup [--no-modify-path] [--profile PATH]... [--dry-run] [--force]
+```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--no-modify-path` | — | Write the env shims only; skip every shell profile. Equivalent env var: [`OCX_NO_MODIFY_PATH`][env-ocx-no-modify-path] (truthy). The opt-out is not remembered between runs. | off |
+| `--profile PATH` | — | Override the auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name. | *(autodetect)* |
+| `--dry-run` | — | Report what would change and write nothing. Never returns exit 82. | off |
+| `--force` | — | Overwrite a managed block that carries user edits (the dirty state). | off |
+| `-h`, `--help` | | Print help information. | — |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Setup completed, no-op, or migrated; or a dry-run (including over a dirty profile). |
+| 69 | Registry unreachable while bootstrapping. |
+| 74 | I/O error writing a shim or profile. |
+| 81 | Offline mode blocked the bootstrap and no install was present. |
+| 82 | A managed activation block carried user edits and `--force` was not passed. Scripts can `case $? in 82)` to detect this and re-run with `--force`. |
+
 #### `self activate` {#self-activate}
 
 Emit eval-safe shell activation lines for the current OCX installation.
@@ -2245,6 +2281,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [env-ocx-jobs]: ./environment.md#ocx-jobs
 [env-docker-config]: ./environment.md#external-docker-config
 [env-ocx-home]: ./environment.md#ocx-home
+[env-ocx-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-no-completions]: ./environment.md#ocx-no-completions
 [env-ocx-env-loaded]: ./environment.md#ocx-env-loaded
 [env-ocx-update-check-interval]: ./environment.md#ocx-update-check-interval

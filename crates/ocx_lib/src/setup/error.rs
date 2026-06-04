@@ -30,6 +30,12 @@ pub enum Error {
         source: std::io::Error,
     },
     /// A profile-detection subprocess (PowerShell `$PROFILE` / exec-policy probe) failed.
+    ///
+    // reserved: no current caller — the PowerShell probes in `profiles.rs`
+    // degrade subprocess failure to `None` / `false` by contract (PowerShell
+    // absence is non-fatal), so this variant is never constructed today. Kept
+    // because plan contract 6 declares it with a `Subprocess → 69` classify
+    // mapping for a future probe site that surfaces the failure as a typed error.
     #[error("profile subprocess failed")]
     Subprocess(#[source] std::io::Error),
 }
@@ -40,6 +46,9 @@ impl ClassifyExitCode for Error {
             // Delegate to the inner package-manager error so the existing
             // ladder decides (offline → 81, registry → 69, …). Returning
             // `None` lets the chain walker reach the inner cause via `source()`.
+            // `Bootstrap` wraps the inner package_manager error via `#[from]`
+            // (see the variant above), so `source()` exposes it for the walk —
+            // do not "fix" this by returning a specific code here.
             Error::Bootstrap(_) => None,
             Error::Io { .. } => Some(ExitCode::IoError),
             Error::Subprocess(_) => Some(ExitCode::Unavailable),

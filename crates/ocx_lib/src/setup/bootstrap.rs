@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+use crate::file_structure::FileStructure;
 use crate::package_manager::concurrency::Concurrency;
 use crate::package_manager::error::{Error, PackageError, PackageErrorKind};
 use crate::package_manager::{PackageManager, SkippedReason, UpdateCheckResult};
@@ -77,7 +78,11 @@ enum Decision {
 ///
 /// Offline **and** already installed returns [`BootstrapOutcome::AlreadyPresent`]
 /// so re-runs on an installed machine work offline.
-pub async fn ensure_self_installed(manager: &PackageManager, dry_run: bool) -> Result<BootstrapOutcome, Error> {
+pub async fn ensure_self_installed(
+    manager: &PackageManager,
+    file_structure: &FileStructure,
+    dry_run: bool,
+) -> Result<BootstrapOutcome, Error> {
     let identifier = oci::ocx_cli_identifier();
 
     // `Some(Duration::ZERO)` bypasses the throttle and performs a live tag
@@ -88,7 +93,15 @@ pub async fn ensure_self_installed(manager: &PackageManager, dry_run: bool) -> R
         .await
         .map_err(|kind| Error::InstallFailed(vec![PackageError::new(identifier.clone(), kind)]))?;
 
-    let decision = decide(check, manager.is_offline());
+    // Probe whether the `current` install actually resolves. `try_exists`
+    // follows the symlink, so a dangling or absent `current` reads as `false`.
+    // This is the only signal that can distinguish offline-and-installed (re-run
+    // works offline) from offline-and-empty-CAS (exit 81): `check_update`
+    // collapses both to `Skipped(Offline)`.
+    let current = file_structure.symlinks.current(&identifier);
+    let already_installed = crate::utility::fs::path_exists_lossy(&current).await;
+
+    let decision = decide(check, already_installed);
 
     match decision {
         Decision::AlreadyPresent => Ok(BootstrapOutcome::AlreadyPresent),
@@ -116,9 +129,10 @@ pub async fn ensure_self_installed(manager: &PackageManager, dry_run: bool) -> R
 
 /// Maps an [`UpdateCheckResult`] to a [`Decision`] without side effects.
 ///
-/// `offline` is `manager.is_offline()` — used only to distinguish the two
-/// offline skip cases (already present vs. cannot proceed).
-fn decide(check: UpdateCheckResult, offline: bool) -> Decision {
+/// `already_installed` is whether the `current` install symlink resolves on
+/// disk — used only to distinguish the two offline skip cases (already present
+/// vs. cannot proceed).
+fn decide(check: UpdateCheckResult, already_installed: bool) -> Decision {
     match check {
         // The `current` symlink already resolves to a version >= latest
         // published — skip the install.
@@ -131,29 +145,25 @@ fn decide(check: UpdateCheckResult, offline: bool) -> Decision {
                 None => Decision::Fail(registry_unavailable("latest release identifier has no tag")),
             }
         }
-        UpdateCheckResult::Skipped(reason) => map_skipped(reason, offline),
+        UpdateCheckResult::Skipped(reason) => map_skipped(reason, already_installed),
     }
 }
 
 /// Maps a [`SkippedReason`] to a [`Decision`].
 ///
-/// `Offline` is the only reason that is offline-tolerant: if the package is
-/// already installed (`offline` is set and the local CAS resolves), setup can
-/// re-run offline. Every other skip reason means no published target could be
-/// resolved, so bootstrap fails.
-fn map_skipped(reason: SkippedReason, offline: bool) -> Decision {
+/// `Offline` is the only reason that is offline-tolerant: if the `current`
+/// install actually resolves (`already_installed`), setup can re-run offline.
+/// An offline machine with an empty CAS cannot proceed → exit 81. Every other
+/// skip reason means no published target could be resolved, so bootstrap fails.
+fn map_skipped(reason: SkippedReason, already_installed: bool) -> Decision {
     match reason {
         // Offline: `check_update` returns this when there is no client. The
-        // local CAS may still hold an install. We cannot tell from here
-        // whether `current` resolves, so the contract is: offline & present
-        // → AlreadyPresent; offline & not present → exit 81. The caller's
-        // `is_offline()` confirms the offline cause; presence is checked by
-        // the orchestrator before relying on the shims, but bootstrap must
-        // not hard-fail an installed offline machine. Treat offline as
-        // already-present so re-runs work; a genuinely empty CAS surfaces
-        // later when the shims resolve nothing.
-        SkippedReason::Offline if offline => {
-            log::debug!("self-setup bootstrap: offline; assuming an existing install (skip pull)");
+        // local CAS may already hold an install — `already_installed` is the
+        // probe of the `current` symlink. Offline & present → AlreadyPresent
+        // (re-runs work offline); offline & empty CAS → exit 81 (setup cannot
+        // wire shims at a non-existent `current`).
+        SkippedReason::Offline if already_installed => {
+            log::debug!("self-setup bootstrap: offline with a resolved `current` install (skip pull)");
             Decision::AlreadyPresent
         }
         SkippedReason::Offline => Decision::Fail(offline_blocked()),
@@ -232,8 +242,8 @@ mod tests {
         }
     }
 
-    /// Offline + present (offline flag set) → `AlreadyPresent` (re-runs work
-    /// offline on an installed machine).
+    /// Offline + `current` resolves (`already_installed = true`) → `AlreadyPresent`
+    /// (re-runs work offline on an installed machine).
     #[test]
     fn offline_and_present_is_already_present() {
         assert!(matches!(
@@ -242,11 +252,14 @@ mod tests {
         ));
     }
 
-    /// Offline + not present (no offline cause confirmed) → exit 81.
+    /// Offline + empty CAS (`already_installed = false`) → exit 81. This is the
+    /// reachable path now that presence is probed from the `current` symlink
+    /// rather than inferred from `is_offline()` (which always agreed with the
+    /// offline cause, making the exit-81 arm dead).
     #[test]
     fn offline_and_not_present_classifies_offline_blocked() {
         let Decision::Fail(error) = decide(UpdateCheckResult::Skipped(SkippedReason::Offline), false) else {
-            panic!("expected Fail for offline + not present");
+            panic!("expected Fail for offline + empty CAS");
         };
         assert_eq!(classify_error(&error), ExitCode::OfflineBlocked);
     }

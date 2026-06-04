@@ -27,19 +27,21 @@ use crate::api::data::self_setup::SelfSetupData;
 /// On Windows, a `Restricted` execution policy makes the profile block inert;
 /// setup prints how to relax it but never changes the policy itself.
 ///
-/// See https://ocx.sh/docs/reference/environment for the full setup model.
+/// See https://ocx.sh/docs/user-guide#install-bare-binary for the full setup
+/// walkthrough.
 ///
 /// # Exit codes
 ///
 /// | Outcome | Exit |
 /// |---|---|
 /// | completed / no-op / migrated | 0 |
+/// | bootstrap blocked (offline, not installed) | 81 |
 /// | a profile was dirty and skipped (no `--force`) | 82 |
 #[derive(Parser)]
 pub struct SelfSetup {
     /// Write the env shims but do not modify any shell profile.
     ///
-    /// A truthy `OCX_NO_MODIFY_PATH` (`1`/`true`/`yes`/`on`) sets this too. The
+    /// A truthy `OCX_NO_MODIFY_PATH` (`1`/`y`/`yes`/`on`/`true`) sets this too. The
     /// opt-out is not remembered between runs - repeat the flag (or keep the env
     /// var set) each invocation.
     #[arg(long, default_value_t = env::flag(env::keys::OCX_NO_MODIFY_PATH, false))]

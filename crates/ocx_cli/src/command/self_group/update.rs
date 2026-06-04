@@ -88,29 +88,62 @@ async fn refresh_shims_after_swap(context: &crate::app::Context) {
     let ocx_home = context.file_structure().root().to_path_buf();
     let result = tokio::task::spawn_blocking(move || setup::shims::refresh_shims(&ocx_home)).await;
 
-    match result {
-        Ok(Ok(rewritten)) if rewritten.is_empty() => {
+    match classify_refresh(&result) {
+        RefreshAdvisory::None => {
             // Shims already current — nothing changed, no advisory.
         }
-        Ok(Ok(_)) => {
+        RefreshAdvisory::Drift => {
             // The shims drifted (a contract change reached this user) — advise.
-            context
-                .ui()
-                .status("Setup", "run 'ocx self setup' to refresh shell integration");
+            advise_run_setup(context);
         }
-        Ok(Err(error)) => {
-            context.ui().warn(format!("failed to refresh ocx shims: {error}"));
-            context
-                .ui()
-                .status("Setup", "run 'ocx self setup' to refresh shell integration");
+        RefreshAdvisory::WriteFailed => {
+            if let Ok(Err(error)) = &result {
+                context.ui().warn(format!("failed to refresh ocx shims: {error}"));
+            }
+            advise_run_setup(context);
         }
-        Err(join) => {
-            // The blocking task panicked; the swap still succeeded.
-            context.ui().warn(format!("ocx shim refresh task failed: {join}"));
-            context
-                .ui()
-                .status("Setup", "run 'ocx self setup' to refresh shell integration");
+        RefreshAdvisory::TaskPanicked => {
+            if let Err(join) = &result {
+                // The blocking task panicked; the swap still succeeded.
+                context.ui().warn(format!("ocx shim refresh task failed: {join}"));
+            }
+            advise_run_setup(context);
         }
+    }
+}
+
+/// Emit the "run `ocx self setup`" advisory once on stderr.
+fn advise_run_setup(context: &crate::app::Context) {
+    context
+        .ui()
+        .status("Setup", "run 'ocx self setup' to refresh shell integration");
+}
+
+/// What the post-swap shim refresh should tell the user (Decision 4C, D.1.1
+/// item 10b: the advisory fires on drift AND on either failure arm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshAdvisory {
+    /// Shims already current — nothing changed, stay silent.
+    None,
+    /// One or more shims drifted and were rewritten — advise.
+    Drift,
+    /// A shim could not be written — warn + advise.
+    WriteFailed,
+    /// The blocking refresh task panicked — warn + advise.
+    TaskPanicked,
+}
+
+/// Decide the advisory from the joined refresh result. Pure so the
+/// advisory-on-refresh-error policy (item 10b) is unit-testable without a live
+/// `Context`.
+fn classify_refresh(
+    result: &Result<Result<Vec<std::path::PathBuf>, setup::error::Error>, tokio::task::JoinError>,
+) -> RefreshAdvisory {
+    match result {
+        Ok(Ok(rewritten)) if rewritten.is_empty() => RefreshAdvisory::None,
+        Ok(Ok(_)) => RefreshAdvisory::Drift,
+        Ok(Err(_)) => RefreshAdvisory::WriteFailed,
+        Err(_) => RefreshAdvisory::TaskPanicked,
     }
 }
 
@@ -135,8 +168,46 @@ mod tests {
     use ocx_lib::cli::ExitCode as OcxExitCode;
     use ocx_lib::package_manager::{SelfUpdateResult, SkippedReason, UpdateCheckResult};
 
-    use super::{exit_code_for_check, exit_code_for_update};
+    use super::{RefreshAdvisory, classify_refresh, exit_code_for_check, exit_code_for_update};
+    use std::path::PathBuf;
     use std::process::ExitCode;
+
+    // ── 4C shim-refresh advisory classification (D.1.1 item 10b) ────────────
+
+    #[test]
+    fn classify_refresh_no_advisory_when_nothing_drifted() {
+        let result = Ok(Ok(Vec::<PathBuf>::new()));
+        assert_eq!(classify_refresh(&result), RefreshAdvisory::None);
+    }
+
+    #[test]
+    fn classify_refresh_drift_advises() {
+        let result = Ok(Ok(vec![PathBuf::from("/ocx/env.sh")]));
+        assert_eq!(classify_refresh(&result), RefreshAdvisory::Drift);
+    }
+
+    #[test]
+    fn classify_refresh_write_failure_advises() {
+        // A write-permission failure (Ok(Err)) must still surface the advisory.
+        let result = Ok(Err(ocx_lib::setup::error::Error::Io {
+            path: PathBuf::from("/ocx/env.sh"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        }));
+        assert_eq!(classify_refresh(&result), RefreshAdvisory::WriteFailed);
+    }
+
+    #[tokio::test]
+    async fn classify_refresh_task_panic_advises() {
+        // A blocking-task panic (Err(join)) must still surface the advisory.
+        let join_error = tokio::task::spawn_blocking(|| -> Result<Vec<PathBuf>, ocx_lib::setup::error::Error> {
+            panic!("simulated refresh panic")
+        })
+        .await
+        .expect_err("the spawned task panics, so the join must fail");
+        let result: Result<Result<Vec<PathBuf>, ocx_lib::setup::error::Error>, tokio::task::JoinError> =
+            Err(join_error);
+        assert_eq!(classify_refresh(&result), RefreshAdvisory::TaskPanicked);
+    }
 
     /// `EX_TEMPFAIL` (sysexits 75) — the canonical numeric value reused across
     /// `Skipped` outcome tests.
