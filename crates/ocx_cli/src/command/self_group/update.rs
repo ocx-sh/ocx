@@ -7,6 +7,7 @@ use std::time::Duration;
 use clap::Parser;
 use ocx_lib::cli::ExitCode as OcxExitCode;
 use ocx_lib::package_manager::{SelfUpdateResult, UpdateCheckResult};
+use ocx_lib::setup;
 
 use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 
@@ -56,9 +57,59 @@ impl SelfUpdate {
             Ok(exit)
         } else {
             let result = context.manager().self_update().await?;
+            // After a successful binary swap, refresh the ocx-owned env.* shims
+            // so a shim-contract change reaches existing users (Decision 4C).
+            // This never touches user RC — only the diff-gated env.* files.
+            if let SelfUpdateResult::Installed { .. } = result {
+                refresh_shims_after_swap(&context).await;
+            }
             let exit = exit_code_for_update(&result);
             context.api().report(&SelfUpdateData::from_result(&result))?;
             Ok(exit)
+        }
+    }
+}
+
+/// Refresh the ocx-owned `env.*` shims after `self update` swapped the binary
+/// (Decision 4C).
+///
+/// Diff-gated and destructive-by-design for `$OCX_HOME/env.*` only — it
+/// overwrites those files to the current canonical bytes without warning,
+/// discarding any manual edits to them. User RC profiles are never touched.
+///
+/// Emits the `run 'ocx self setup'` advisory when EITHER (a) the refresh
+/// actually rewrote a shim (the on-disk shim contract drifted from what this
+/// binary now writes) OR (b) the refresh failed (the swap succeeded but the
+/// shims could not be refreshed — the user should re-run setup). A refresh
+/// failure is non-fatal to the update itself.
+async fn refresh_shims_after_swap(context: &crate::app::Context) {
+    // `refresh_shims` is blocking I/O — offload it off the async executor, as
+    // `setup::run` does for `write_shims`.
+    let ocx_home = context.file_structure().root().to_path_buf();
+    let result = tokio::task::spawn_blocking(move || setup::shims::refresh_shims(&ocx_home)).await;
+
+    match result {
+        Ok(Ok(rewritten)) if rewritten.is_empty() => {
+            // Shims already current — nothing changed, no advisory.
+        }
+        Ok(Ok(_)) => {
+            // The shims drifted (a contract change reached this user) — advise.
+            context
+                .ui()
+                .status("Setup", "run 'ocx self setup' to refresh shell integration");
+        }
+        Ok(Err(error)) => {
+            context.ui().warn(format!("failed to refresh ocx shims: {error}"));
+            context
+                .ui()
+                .status("Setup", "run 'ocx self setup' to refresh shell integration");
+        }
+        Err(join) => {
+            // The blocking task panicked; the swap still succeeded.
+            context.ui().warn(format!("ocx shim refresh task failed: {join}"));
+            context
+                .ui()
+                .status("Setup", "run 'ocx self setup' to refresh shell integration");
         }
     }
 }

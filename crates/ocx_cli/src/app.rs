@@ -479,25 +479,30 @@ mod tests {
         // variant requires adding a matching row here AND extending the
         // exhaustive match below — the compiler enforces both.
         let activate = self_group::activate::SelfActivate::parse_from(["self-activate"]);
+        let setup = self_group::setup::SelfSetup::parse_from(["self-setup"]);
         let update = self_group::update::SelfUpdate::parse_from(["self-update"]);
 
         // Exhaustive enumeration of `SelfGroup`.  This match has no wildcard;
         // adding a new variant breaks the build until updated.
         let all_variants: Vec<self_group::SelfGroup> = vec![
             self_group::SelfGroup::Activate(activate),
+            self_group::SelfGroup::Setup(setup),
             self_group::SelfGroup::Update(update),
         ];
         for variant in &all_variants {
             // Exhaustiveness guard: forces the contributor to make a deliberate
             // skip-list decision when adding a new variant.
             match variant {
-                self_group::SelfGroup::Activate(_) | self_group::SelfGroup::Update(_) => {}
+                self_group::SelfGroup::Activate(_)
+                | self_group::SelfGroup::Setup(_)
+                | self_group::SelfGroup::Update(_) => {}
             }
         }
 
         for (idx, variant) in all_variants.into_iter().enumerate() {
             let label = match &variant {
                 self_group::SelfGroup::Activate(_) => "SelfGroup::Activate",
+                self_group::SelfGroup::Setup(_) => "SelfGroup::Setup",
                 self_group::SelfGroup::Update(_) => "SelfGroup::Update",
             };
             let cmd = Some(command::Command::Self_(variant));
