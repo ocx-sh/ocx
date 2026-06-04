@@ -94,9 +94,18 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
+| `self setup` | Complete a bare-binary install: bootstrap ocx, write env shims, add managed activation block to shell profiles | `--no-modify-path`, `--profile PATH`, `--dry-run`, `--force` |
 | `self activate` | Emit eval-safe PATH prepend + completions + global env eval for the detected shell | `--shell[=NAME]` |
 | `self update` | Check and install the latest released ocx version | — |
 | `self update --check` | Query registry for newer version; no install | `--check` |
+
+**`self setup` notes:**
+- `--no-modify-path` (or `OCX_NO_MODIFY_PATH` truthy) — writes env shims only, skips profile modification. `OCX_NO_MODIFY_PATH` is read through `ocx_lib::env::flag` + `BooleanString`: truthy = `1`/`y`/`yes`/`on`/`true`; falsy = `0`/`n`/`no`/`off`/`false`; unrecognised non-empty value → WARN + default (`false`). The opt-out is not remembered between runs.
+- `--profile PATH` — override auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name.
+- `--dry-run` — report what would change; write nothing. Never returns exit 82.
+- `--force` — overwrite a managed block that carries user edits (the dirty state).
+- Exit 82 (`DirtyRcBlock`) — at least one profile contained a managed block with user edits and `--force` was not passed. Scripts: `case $? in 82)`.
+- All `Self_` variants (including `self setup`) are in the `should_check_for_update` skip list.
 
 **`self activate` notes:**
 - `--shell` absent or bare → autodetect from `$SHELL`/parent process; exit 64 if undetectable. Differs from `ocx env --shell` where absent means "structured report path".
@@ -141,7 +150,7 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | `ocx deps` | `ocx package deps` |
 | `ocx ci` | Removed as a command; CI export is the `--ci[=PROVIDER]` flag on `ocx env` / `ocx package env` |
 | `ocx shell hook` | Removed (activation via `$OCX_HOME/env.sh` + `ocx --global env --shell=sh`) |
-| `ocx shell init` | Removed (OCX install script owns profile modification) |
+| `ocx shell init` | Removed (`ocx self setup` owns profile modification) |
 | `ocx shell env` | `ocx env` (toolchain) or `ocx package env` (per-package) |
 
 ---

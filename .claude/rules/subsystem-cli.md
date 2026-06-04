@@ -41,11 +41,18 @@ Canonical form: `ocx --global <subcommand>`.
 - `ocx shell hook`, `ocx shell init`, `ocx shell env` — **DELETED** (handshake §7)
 
 ### `ocx self` — installation management group
+- `ocx self setup [--no-modify-path] [--profile PATH]... [--dry-run] [--force]` — complete a bare-binary install: bootstrap latest published ocx into the content store, write per-shell env shims (`$OCX_HOME/env.*`) and add a managed activation block to detected shell profiles. Re-running is safe (shims and blocks are diff-gated). A dirty managed block (user edits inside the fence) is skipped with exit 82; `--force` rewrites it. `--no-modify-path` (or `OCX_NO_MODIFY_PATH` truthy) writes shims only, skipping profiles. The opt-out is not remembered between runs.
 - `ocx self activate [--shell[=NAME]] [--completion | --no-completion]` — emit eval-safe PATH prepend + completion injection + global env eval. Absent or bare `--shell` → autodetect; explicit `--shell=bash` → named shell. Completions are emitted **inline** in the activation stream (no file): the completion block leads the stream so PowerShell's `using namespace` is the first statement, which `Invoke-Expression` requires (verified on WinPS 5.1 + pwsh 7); zsh self-loads `compinit` before clap's trailing `compdef`. Gated by `options::Completion` (`options/completion.rs`): paired `--completion`/`--no-completion` flags (`overrides_with`, last-wins) → `OCX_NO_COMPLETIONS` → stderr-TTY auto fallback, resolved by `Completion::enabled(interactive)`. The `env.sh`/`env.ps1` shim decides interactivity itself (`$-`/`status is-interactive`/`[Environment]::UserInteractive`) and passes the explicit flag, so the gate never depends on probing a stderr the shim has redirected; the auto path serves only a direct in-terminal `ocx self activate`. The shim also picks the real sourcing shell (`bash`/`zsh`, not `sh` → `Dash` which has no completion backend) so the right completion backend is selected. `OCX_NO_COMPLETIONS=1` suppresses completion injection. Intended to be called from `$OCX_HOME/env.sh` at shell startup.
 - `ocx self update` — check + install latest version; always bypasses throttle (explicit intent).
 - `ocx self update --check` — query only, no install; always bypasses throttle.
 
-`Self_` is in the auto-check **skip list** (`app.rs` `should_check_for_update`): `self activate` runs on every shell startup and must not trigger the background update-check. The skip applies to all `Self_` variants.
+`Self_` is in the auto-check **skip list** (`app.rs` `should_check_for_update`): `self activate` runs on every shell startup and must not trigger the background update-check. The skip applies to all `Self_` variants — including `self setup`.
+
+**`OCX_NO_MODIFY_PATH` boolean semantics.** Read through `ocx_lib::env::flag` + `BooleanString`. Truthy values: `1`, `y`, `yes`, `on`, `true` (case-insensitive). Falsy values: `0`, `n`, `no`, `off`, `false`. Any other non-empty value emits a `WARN` log and falls back to the default (`false`). Unset → default. "Any non-empty string = true" is NOT the contract.
+
+**`ocx self setup` 4C advisory (after `self update`).** After a successful binary swap, `self update` calls `setup::shims::refresh_shims`. The advisory "run `ocx self setup`" fires when the refresh actually rewrote one or more shims (on-disk contract drifted) OR when the refresh failed. No literal `SHIM_CONTRACT_VERSION` comparison is done; drift is detected by the diff-gate in `refresh_shims` itself.
+
+**Exit-82 (`DirtyRcBlock`).** `ocx self setup` exits 82 when any shell profile contains a managed activation block that carries user edits inside the fence and `--force` was not passed. Scripts can `case $? in 82)` to detect this and re-run with `--force`.
 
 ### Removed root commands (handshake §7 — exit 64 if invoked)
 - `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect`, `ocx which`, `ocx deps` → moved to `ocx package`; ocx maps clap usage errors → EX_USAGE 64 (see `app.rs:112-119`)
@@ -161,7 +168,7 @@ Strict isolation rules:
 - No implicit `$OCX_HOME/ocx.toml` discovery: project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
 - `ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64). `--global` is NOT on any `ocx package` subcommand.
 
-Activation (new model): the OCX install script writes `$OCX_HOME/env.sh` containing `eval "$(ocx --global env --shell=sh)"` and appends a block-marker idempotent line to the user's login profile. No `$OCX_HOME/init.<shell>` static files. No `ocx shell hook`/`shell init`.
+Activation (new model): `ocx self setup` writes `$OCX_HOME/env.sh` (and per-family siblings for fish/nu/elvish/PowerShell) and appends a managed activation block to the user's login profile. The OCX install script bootstraps the binary and then delegates to `ocx self setup`; it no longer contains the profile-modification logic itself. No `$OCX_HOME/init.<shell>` static files. No `ocx shell hook`/`shell init`.
 
 ADR: `adr_global_toolchain_tier.md`.
 

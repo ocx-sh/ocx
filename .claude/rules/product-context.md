@@ -99,6 +99,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 - **"Why not Nix?"** — need learn functional language; OCX work with any binary, flat learning curve
 - **"Why not mise/asdf?"** — consume binaries but can't publish; each tool need maintained plugin
 - **"Why not ORAS?"** — push/pull only; no install, no version switching, no env management
+- **"Why not `curl | sh`?"** — security-conscious CI personas refuse to pipe network shell into an interpreter. OCX ships a self-contained binary on GitHub Releases; download it, run `ocx self setup`, and reach identical state to the install script without any shell script involved. The loose binary bootstraps the managed copy, writes env shims, and wires shell profiles atomically. This is the direct answer to the "I won't curl-pipe" objection: one binary, one command, verified.
 
 ## Use Cases
 
