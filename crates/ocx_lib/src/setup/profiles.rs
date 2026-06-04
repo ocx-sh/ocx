@@ -18,7 +18,7 @@
 //! execution-policy probe [`execution_policy_is_restricted`] surfaces a
 //! non-fatal advisory when a `$PROFILE` fence would be inert.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 /// How a profile target carries its OCX activation payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,18 +87,33 @@ impl HomeEnv {
             .unwrap_or_else(|| self.home.join(".local/share"))
     }
 
-    /// `$ZDOTDIR`, or `$HOME` when unset. Rejects `ZDOTDIR="/"` to avoid writing
-    /// `/.zprofile` — a filesystem-root escape (CWE-22), ported from
-    /// `install.sh:776-781`.
+    /// `$ZDOTDIR`, or `$HOME` when unset. Rejects unsafe values — non-absolute,
+    /// containing a `..` parent component, or the filesystem root — to prevent an
+    /// environment-driven path-traversal/clobber of the auto-detected zsh RC
+    /// files (CWE-22). Hardens `install.sh:776-781`, which only rejected `/`. An
+    /// unsafe `ZDOTDIR` falls back to `$HOME`; a user wanting an arbitrary
+    /// location passes `--profile` explicitly.
     fn zsh_dir(&self) -> PathBuf {
         match &self.zdotdir {
-            Some(dir) if dir != std::path::Path::new("/") => dir.clone(),
-            Some(_) => {
-                tracing::warn!("ZDOTDIR is '/' — refusing to write under /; falling back to $HOME");
+            Some(dir) if Self::is_safe_zdotdir(dir) => dir.clone(),
+            Some(dir) => {
+                tracing::warn!(
+                    "ZDOTDIR {dir:?} is unsafe (non-absolute, contains '..', or is '/'); \
+                     refusing to write under it and falling back to $HOME"
+                );
                 self.home.clone()
             }
             None => self.home.clone(),
         }
+    }
+
+    /// A `$ZDOTDIR` is safe to write under only when it is absolute, is not the
+    /// filesystem root, and carries no `..` (parent-dir) component — so a
+    /// relative or escaping value cannot redirect the auto-detect write path.
+    fn is_safe_zdotdir(dir: &Path) -> bool {
+        dir.is_absolute()
+            && dir != Path::new("/")
+            && !dir.components().any(|component| component == Component::ParentDir)
     }
 
     /// Lowercased basename of `$SHELL` (`/usr/bin/fish` → `fish`); `sh` when unset.
@@ -378,6 +393,36 @@ mod tests {
             "ZDOTDIR=/ must not write /.zprofile"
         );
         assert!(!detected.contains(&PathBuf::from("/.zshrc")));
+        assert!(detected.contains(&PathBuf::from("/home/dev/.zprofile")));
+        assert!(detected.contains(&PathBuf::from("/home/dev/.zshrc")));
+    }
+
+    #[test]
+    fn zdotdir_relative_is_rejected_and_falls_back_to_home() {
+        let mut env = home_env("/home/dev", "/usr/bin/zsh");
+        env.zdotdir = Some(PathBuf::from("relative/zsh"));
+        let detected = paths(&detect_targets(&env));
+
+        // A relative ZDOTDIR must not be trusted as a write root (CWE-22).
+        assert!(
+            !detected.iter().any(|path| path.starts_with("relative")),
+            "relative ZDOTDIR must not be trusted: {detected:?}"
+        );
+        assert!(detected.contains(&PathBuf::from("/home/dev/.zprofile")));
+        assert!(detected.contains(&PathBuf::from("/home/dev/.zshrc")));
+    }
+
+    #[test]
+    fn zdotdir_with_parent_escape_is_rejected_and_falls_back_to_home() {
+        let mut env = home_env("/home/dev", "/usr/bin/zsh");
+        env.zdotdir = Some(PathBuf::from("/home/dev/../../etc/zsh"));
+        let detected = paths(&detect_targets(&env));
+
+        // A `..`-escaping ZDOTDIR must not redirect the auto-detect write path.
+        assert!(
+            !detected.iter().any(|path| path.to_string_lossy().contains("..")),
+            "'..'-escaping ZDOTDIR must not be trusted: {detected:?}"
+        );
         assert!(detected.contains(&PathBuf::from("/home/dev/.zprofile")));
         assert!(detected.contains(&PathBuf::from("/home/dev/.zshrc")));
     }

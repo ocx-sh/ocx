@@ -267,7 +267,14 @@ async fn apply_fence(path: &Path, body: &str, force: bool, dry_run: bool) -> Res
 /// Fully rewrite a dedicated-file shell target (fish/nushell), diff-gated.
 ///
 /// The file is ocx-owned (no inline fence), so a byte-identical file is a no-op
-/// and any drift is overwritten with the canonical body.
+/// and any drift is overwritten with the canonical body. This is intentional and
+/// mirrors the `env.*` shims: these paths live in tool-managed auto-load dirs
+/// (`fish/conf.d`, `nushell/vendor/autoload`) that OCX owns outright, exactly as
+/// conda/rustup own their vendor files. The "no clobber without `--force`" bar
+/// applies only to the managed block inside a user's OWN RC files (handled by
+/// `apply_fence`), never to these regenerated files — user customization belongs
+/// in the user's RC, not here. (Cross-model review 2026-06-04 flagged the
+/// asymmetry; resolution: documented intended ownership.)
 async fn rewrite_dedicated(path: &Path, body: &str, dry_run: bool) -> Result<ProfileOutcome, error::Error> {
     let content = read_to_string_or_empty(path).await?;
     if content == body {
