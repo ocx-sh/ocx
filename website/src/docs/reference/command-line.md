@@ -1879,8 +1879,8 @@ See the [testing locally guide][authoring-testing] for a full pre-push workflow 
 Inspects what sits at a package reference — nothing is installed and no symlinks are created. It is not strictly free of local writes: default mode resolves the tag through the index, so a tag cache miss may populate the local index / blob cache (a `Resolve`-class read). The output adapts to the reference shape:
 
 - **Default, image-index reference** (the usual multi-platform tag): lists the platform **candidates** — for each child manifest the platform, child digest, media type, and size. No metadata is loaded and no platform is selected.
-- **Default, single-manifest reference** (a flat tag or an `@digest` pointing directly at an image manifest): emits the declared **metadata** (bundle version, `strip_components`, env vars, dependencies, entrypoints). No resolution chain.
-- **`--resolve`**: platform-selects through the index, then emits metadata plus the OCI **resolution** chain.
+- **Default, single-manifest reference** (a flat tag or an `@digest` pointing directly at an image manifest): emits the declared **metadata** (bundle version, `strip_components`, env vars, dependencies, entrypoints) plus the manifest's **layers** (digest, media type, size). No resolution chain.
+- **`--resolve`**: platform-selects through the index, then emits metadata and layers plus the OCI **resolution** chain (the walk-order `index` → `manifest` → `config` blobs).
 
 Unlike [`package test`][cmd-package-test], the identifier accepts an explicit `@digest` (a tag or digest both resolve).
 
@@ -1897,7 +1897,7 @@ ocx package inspect [OPTIONS] <IDENTIFIER>
 **Options**
 
 - `-p`, `--platform <PLATFORM>`: Platform to select. Applies **only** with `--resolve`; ignored in default mode (the candidate list always shows every platform).
-- `--resolve`: Platform-select through the index and emit metadata plus the resolution chain — the pinned identifier, the walk-order chain blob descriptors (index → platform manifest → config blob, each with its `role`, media type, and size), and the platform-selected manifest's layer descriptors.
+- `--resolve`: Platform-select through the index and emit the resolution chain — the pinned identifier and the walk-order chain blob descriptors (index → platform manifest → config blob, each with its `role`, media type, and size) — alongside the metadata and layers (the layers are shown for the selected manifest in both default and `--resolve` mode).
 - `-h`, `--help`: Print help information.
 
 Honors the global [`--offline`][arg-offline], [`--remote`][arg-remote], and [`--format`][arg-format] flags. JSON is the primary consumer surface.
@@ -1916,17 +1916,18 @@ Default, image index — candidate listing:
 }
 ```
 
-Default, single manifest (`@digest` or flat tag) — metadata only:
+Default, single manifest (`@digest` or flat tag) — metadata plus layers:
 
 ```json
 {
   "identifier": "registry/repo@sha256:…",
   "pinned_digest": "sha256:…",
-  "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} }
+  "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} },
+  "layers": [{ "digest": "sha256:…", "media_type": "…", "size": 123 }]
 }
 ```
 
-`--resolve` — platform-selected metadata + chain:
+`--resolve` — platform-selected metadata and layers + chain:
 
 ```json
 {
@@ -1934,14 +1935,14 @@ Default, single manifest (`@digest` or flat tag) — metadata only:
   "pinned_digest": "sha256:…",
   "platforms": ["linux/amd64"],
   "metadata": { "type": "bundle", "version": 1, "env": [], "dependencies": [], "entrypoints": {} },
+  "layers": [{ "digest": "sha256:…", "media_type": "…", "size": 123 }],
   "resolution": {
     "pinned": "registry/repo:tag@sha256:…",
     "chain": [
       { "digest": "sha256:…", "role": "index", "media_type": "…", "size": 429 },
       { "digest": "sha256:…", "role": "manifest", "media_type": "…", "size": 448 },
       { "digest": "sha256:…", "role": "config", "media_type": "…", "size": 244 }
-    ],
-    "layers": [{ "digest": "sha256:…", "media_type": "…", "size": 123 }]
+    ]
   }
 }
 ```
@@ -1961,30 +1962,34 @@ ocx --format json package inspect --resolve -p linux/arm64 mytool:1.0.0 | jq .re
 
 **Plain output**
 
-With `--format plain` (the default) the report renders as a tree rooted at the pinned identifier. The candidate listing shows one node per platform child; the metadata view shows `env`, `dependencies`, and `entrypoints` branches. Under `entrypoints`, an entry whose dispatch command diverges from its invocable name carries a `→ <command>` annotation; entries whose command matches the name (the common case) are shown without annotation:
+With `--format plain` (the default) the report renders as a tree rooted at the pinned identifier. The candidate listing shows one node per platform child; the single-manifest view shows the `metadata` branch (`env`, `dependencies`, and `entrypoints`) followed by a `layers` branch listing each layer by index, annotated with media type and a human-readable size. Under `entrypoints`, an entry whose dispatch command diverges from its invocable name carries a `→ <command>` annotation; entries whose command matches the name (the common case) are shown without annotation:
 
 ```text
-registry/repo:tag@sha256:…
-└─ metadata
-   └─ entrypoints
-      ├─ fmt → cargo-fmt
-      └─ build
+registry/repo@sha256:…
+├─ metadata
+│  └─ entrypoints
+│     ├─ fmt → cargo-fmt
+│     └─ build
+└─ layers
+   └─ [0] · sha256:… · application/vnd.oci.image.layer.v1.tar+xz · 192 B
 ```
 
 Here `fmt` dispatches to the `cargo-fmt` binary while `build` dispatches to a binary named `build`.
 
-With `--resolve`, the `resolution` branch lists each chain blob by its `role` (`index`, `manifest`, `config`) and each layer by index, both annotated with media type and a human-readable size:
+With `--resolve`, a `resolution` branch is added alongside `metadata` and `layers`, listing each chain blob by its `role` (`index`, `manifest`, `config`), annotated with media type and a human-readable size. The layers stay under the manifest — they are content the manifest references, not steps in the walk:
 
 ```text
 registry/repo:tag@sha256:…
+├─ metadata
+│  └─ …
+├─ layers
+│  └─ [0] · sha256:… · application/vnd.oci.image.layer.v1.tar+xz · 192 B
 └─ resolution
    ├─ pinned · registry/repo:tag@sha256:…
-   ├─ chain
-   │  ├─ index · sha256:… · application/vnd.oci.image.index.v1+json · 429 B
-   │  ├─ manifest · sha256:… · application/vnd.oci.image.manifest.v1+json · 448 B
-   │  └─ config · sha256:… · application/vnd.sh.ocx.package.v1+json · 244 B
-   └─ layers
-      └─ [0] · sha256:… · application/vnd.oci.image.layer.v1.tar+xz · 192 B
+   └─ chain
+      ├─ index · sha256:… · application/vnd.oci.image.index.v1+json · 429 B
+      ├─ manifest · sha256:… · application/vnd.oci.image.manifest.v1+json · 448 B
+      └─ config · sha256:… · application/vnd.sh.ocx.package.v1+json · 244 B
 ```
 
 **Exit codes**

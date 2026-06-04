@@ -49,11 +49,13 @@ impl SemanticAnnotation {
 /// - **candidates** (default mode, ref is an image index): the available
 ///   platform children — `{ identifier, pinned_digest, candidates: [...] }`.
 /// - **metadata** (default mode, ref is a single manifest): the declared
-///   metadata document — `{ identifier, pinned_digest, metadata }`.
-/// - **resolution** (`--resolve`): platform-selected metadata plus the OCI
-///   resolution chain — `{ identifier, pinned_digest, platforms, metadata,
-///   resolution }`. Each `resolution.chain` entry carries `{ digest, role,
-///   media_type, size }` (role ∈ `index` | `manifest` | `config`).
+///   metadata document plus the manifest's layers —
+///   `{ identifier, pinned_digest, metadata, layers }`.
+/// - **resolution** (`--resolve`): platform-selected metadata and layers plus
+///   the OCI resolution chain — `{ identifier, pinned_digest, platforms,
+///   metadata, layers, resolution }`. Each `resolution.chain` entry carries
+///   `{ digest, role, media_type, size }` (role ∈ `index` | `manifest` |
+///   `config`); the layers live at the top level, not inside `resolution`.
 ///
 /// Plain format: a tree rooted at the pinned identifier (inked with the
 /// active theme like every other identifier) with the shape-appropriate
@@ -73,11 +75,13 @@ enum Body {
     Manifest {
         pinned: oci::PinnedIdentifier,
         metadata: Metadata,
+        layers: Vec<Layer>,
     },
     Resolved {
         pinned: oci::PinnedIdentifier,
         platforms: Vec<oci::Platform>,
         metadata: Metadata,
+        layers: Vec<Layer>,
         resolution: Resolution,
     },
 }
@@ -91,12 +95,13 @@ struct CandidateOut {
     size: i64,
 }
 
-/// The OCI resolution chain for the selected platform.
+/// The OCI resolution chain for the selected platform. Carries only the walk
+/// (`index` → `manifest` → `config`); the platform-selected manifest's layers
+/// are rendered alongside the metadata, not inside the chain.
 #[derive(Serialize)]
 struct Resolution {
     pinned: String,
     chain: Vec<ChainOut>,
-    layers: Vec<Layer>,
 }
 
 /// One blob in the resolution chain. Same descriptor surface as a layer
@@ -110,12 +115,28 @@ struct ChainOut {
     size: i64,
 }
 
-/// A single layer descriptor from the platform-selected manifest.
+/// A single layer descriptor from the inspected manifest (default mode) or the
+/// platform-selected manifest (`--resolve`).
 #[derive(Serialize)]
 struct Layer {
     digest: String,
     media_type: String,
     size: i64,
+}
+
+impl Layer {
+    /// Projects raw OCI layer descriptors onto the report surface, shared by
+    /// the default-manifest and resolved views.
+    fn from_descriptors(descriptors: &[oci::Descriptor]) -> Vec<Self> {
+        descriptors
+            .iter()
+            .map(|descriptor| Layer {
+                digest: descriptor.digest.clone(),
+                media_type: descriptor.media_type.clone(),
+                size: descriptor.size,
+            })
+            .collect()
+    }
 }
 
 impl PackageInspect {
@@ -141,12 +162,17 @@ impl PackageInspect {
                         .collect(),
                 },
             },
-            InspectResult::Manifest { pinned, metadata } => Self {
+            InspectResult::Manifest {
+                pinned,
+                metadata,
+                layers,
+            } => Self {
                 identifier,
                 pinned_digest: pinned.digest().to_string(),
                 body: Body::Manifest {
                     pinned,
                     metadata: metadata.into(),
+                    layers: Layer::from_descriptors(&layers),
                 },
             },
             InspectResult::Resolved {
@@ -160,6 +186,7 @@ impl PackageInspect {
                     pinned,
                     platforms,
                     metadata: metadata.into(),
+                    layers: Layer::from_descriptors(&chain.final_manifest.layers),
                     resolution: Resolution::from_chain(&chain),
                 },
             },
@@ -181,16 +208,6 @@ impl Resolution {
                     size: blob.size,
                 })
                 .collect(),
-            layers: chain
-                .final_manifest
-                .layers
-                .iter()
-                .map(|d| Layer {
-                    digest: d.digest.clone(),
-                    media_type: d.media_type.clone(),
-                    size: d.size,
-                })
-                .collect(),
         }
     }
 }
@@ -201,8 +218,8 @@ impl Serialize for PackageInspect {
         // always present.
         let len = 2 + match &self.body {
             Body::Candidates { .. } => 1,
-            Body::Manifest { .. } => 1,
-            Body::Resolved { .. } => 3,
+            Body::Manifest { .. } => 2,
+            Body::Resolved { .. } => 4,
         };
         let mut s = serializer.serialize_struct("PackageInspect", len)?;
         s.serialize_field("identifier", &self.identifier)?;
@@ -211,17 +228,20 @@ impl Serialize for PackageInspect {
             Body::Candidates { candidates, .. } => {
                 s.serialize_field("candidates", candidates)?;
             }
-            Body::Manifest { metadata, .. } => {
+            Body::Manifest { metadata, layers, .. } => {
                 s.serialize_field("metadata", metadata)?;
+                s.serialize_field("layers", layers)?;
             }
             Body::Resolved {
                 platforms,
                 metadata,
+                layers,
                 resolution,
                 ..
             } => {
                 s.serialize_field("platforms", platforms)?;
                 s.serialize_field("metadata", metadata)?;
+                s.serialize_field("layers", layers)?;
                 s.serialize_field("resolution", resolution)?;
             }
         }
@@ -379,11 +399,29 @@ fn candidates_node(candidates: &[CandidateOut]) -> Node {
     Node::branch("candidates", entries)
 }
 
+/// Renders the manifest's layer descriptors as a `layers` branch — one indexed
+/// `[i]` leaf per layer with digest / media type / human size. Shared by the
+/// default-manifest and resolved views.
+fn layers_node(layers: &[Layer]) -> Node {
+    let entries = layers
+        .iter()
+        .enumerate()
+        .map(|(i, layer)| {
+            Node::leaf(format!("[{i}]"))
+                .with_digest(layer.digest.clone())
+                .with_note(layer.media_type.clone())
+                .with_note(human_bytes(layer.size))
+        })
+        .collect();
+    Node::branch("layers", entries)
+}
+
 fn resolution_node(resolution: &Resolution) -> Node {
-    // Chain entries render exactly like layers — role label, then digest /
-    // media type / size annotations — so the OCI walk (index → manifest →
-    // config) is legible instead of an opaque positional digest list. The
-    // role doubles as the walk-order marker the bare `[i]` used to carry.
+    // Chain entries render like layers — role label, then digest / media type /
+    // size annotations — so the OCI walk (index → manifest → config) is legible
+    // instead of an opaque positional digest list. The role doubles as the
+    // walk-order marker the bare `[i]` used to carry. Layers are not part of
+    // the walk; they render under the manifest itself, not here.
     let chain = resolution
         .chain
         .iter()
@@ -394,23 +432,11 @@ fn resolution_node(resolution: &Resolution) -> Node {
                 .with_note(human_bytes(c.size))
         })
         .collect();
-    let layers = resolution
-        .layers
-        .iter()
-        .enumerate()
-        .map(|(i, l)| {
-            Node::leaf(format!("[{i}]"))
-                .with_digest(l.digest.clone())
-                .with_note(l.media_type.clone())
-                .with_note(human_bytes(l.size))
-        })
-        .collect();
     Node::branch(
         "resolution",
         vec![
             Node::leaf("pinned".to_string()).with_digest(resolution.pinned.clone()),
             Node::branch("chain", chain),
-            Node::branch("layers", layers),
         ],
     )
 }
@@ -421,13 +447,25 @@ impl Printable for PackageInspect {
     fn print_plain(&self, data: &DataInterface) {
         let (pinned, sections) = match &self.body {
             Body::Candidates { pinned, candidates } => (pinned, vec![candidates_node(candidates)]),
-            Body::Manifest { pinned, metadata } => (pinned, vec![metadata_node(metadata)]),
+            Body::Manifest {
+                pinned,
+                metadata,
+                layers,
+            } => (pinned, vec![metadata_node(metadata), layers_node(layers)]),
             Body::Resolved {
                 pinned,
                 metadata,
+                layers,
                 resolution,
                 ..
-            } => (pinned, vec![metadata_node(metadata), resolution_node(resolution)]),
+            } => (
+                pinned,
+                vec![
+                    metadata_node(metadata),
+                    layers_node(layers),
+                    resolution_node(resolution),
+                ],
+            ),
         };
         let root = Node::identifier_branch(pinned.as_identifier().clone(), sections);
         data.print_tree(&root);

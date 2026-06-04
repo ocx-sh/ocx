@@ -17,11 +17,12 @@ use crate::{conventions::platforms_or_default, options};
 ///   no platform is selected.
 /// - Default, reference is a single image manifest (flat tag or `@digest`):
 ///   emit the declared **metadata** (bundle version, strip_components, env
-///   vars, dependencies, entrypoints). No resolution chain.
+///   vars, dependencies, entrypoints) plus the manifest's **layers**. No
+///   resolution chain.
 /// - `--resolve`: platform-select through the index (honoring
-///   `-p/--platform`), then emit metadata plus the **resolution** chain —
-///   the pinned identifier, the walk-order chain blob digests, and the
-///   platform-selected manifest's layers.
+///   `-p/--platform`), then emit metadata and layers plus the **resolution**
+///   chain — the pinned identifier and the walk-order chain blob digests
+///   (index, manifest, config).
 ///
 /// `-p/--platform` applies only with `--resolve`. Honors the global
 /// `--offline` / `--remote` / `--format` flags. JSON is the primary consumer
@@ -31,9 +32,9 @@ pub struct PackageInspect {
     #[clap(flatten)]
     platforms: options::Platforms,
 
-    /// Platform-select through the index and emit metadata plus the OCI
-    /// resolution chain (pinned identifier, walk-order chain digests, and the
-    /// platform-selected manifest's layers). Without this, an image-index
+    /// Platform-select through the index and emit the OCI resolution chain
+    /// (pinned identifier and walk-order chain digests: index, manifest,
+    /// config) alongside the metadata and layers. Without this, an image-index
     /// reference lists its platform candidates instead.
     #[clap(long)]
     resolve: bool,
