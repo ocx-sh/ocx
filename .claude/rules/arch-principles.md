@@ -59,7 +59,7 @@ CLI command (clap parse)
 | **Candidate** | Symlink at `symlinks/{registry}/{repo}/candidates/{tag}` — pinned at install time |
 | **Current** | Floating symlink at `symlinks/{registry}/{repo}/current` — set by `ocx select` |
 | **Project ledger** | Flat symlink store at `$OCX_HOME/projects/` — one symlink per registered project, name = 16-hex SHA-256 of canonical project dir, target = project dir. GC roots for multi-project clean. Self-link for the global toolchain is prohibited (global file's project dir is `$OCX_HOME`); instead `clean::collect_project_roots` adds an **implicit `$OCX_HOME/ocx.lock` root** so global lock-pinned packages are GC roots without a ledger entry (ADR `adr_global_toolchain_tier.md` D5 amended 2026-05-19). ADR: `adr_project_gc_symlink_ledger.md`. |
-| **Global toolchain** | `$OCX_HOME/ocx.toml` + `$OCX_HOME/ocx.lock`, reachable only via explicit root `--global` flag (before the subcommand) or `OCX_GLOBAL` env var. `--global` is defined once on `ContextOptions` (peer of `--project`); per-command `--global` flags do not exist. Strict isolation: never composes into project resolution; `run`/`exec` are always hermetic. Env resolution = **lock-pinned digests, offline** (`resolve_global_pinned_env`) — the project tier with a different load site; the `current` symlink is a separate install/uninstall/select-only abstraction and is NOT consulted, so `ocx --global upgrade` takes effect with no select step (ADR D5 amended 2026-05-19). Shell-exposed via `$OCX_HOME/env.sh` sourced from the login profile (block-marker idempotent line written by the in-repo installer; runs `eval "$(ocx --global env --shell=sh)"`). No static `$OCX_HOME/init.<shell>`, no per-prompt hook, no PATH strip — isolation by PATH precedence. ADRs: `adr_global_toolchain_tier.md`, `handshake_toolchain_cli.md`. |
+| **Global toolchain** | `$OCX_HOME/ocx.toml` + `$OCX_HOME/ocx.lock`, reachable only via explicit root `--global` flag (before the subcommand) or `OCX_GLOBAL` env var. `--global` is defined once on `ContextOptions` (peer of `--project`); per-command `--global` flags do not exist. Strict isolation: never composes into project resolution; `run`/`exec` are always hermetic. Env resolution = **lock-pinned digests, offline** (`resolve_global_pinned_env`) — the project tier with a different load site; the `current` symlink is a separate install/uninstall/select-only abstraction and is NOT consulted, so `ocx --global upgrade` takes effect with no select step (ADR D5 amended 2026-05-19). Shell-exposed via `$OCX_HOME/env.sh` sourced from the login profile (managed activation block written by `ocx self setup`; runs `eval "$(ocx --global env --shell=sh)"`). No static `$OCX_HOME/init.<shell>`, no per-prompt hook, no PATH strip — isolation by PATH precedence. ADRs: `adr_global_toolchain_tier.md`, `handshake_toolchain_cli.md`, `adr_self_setup.md`. |
 | **Digest** | SHA-256 content hash — immutable identity of package version |
 | **Tag** | Mutable alias to digest (e.g., `3.28`, `latest`) |
 | **Cascade** | Publisher convention: push `3.28.1` and auto-update `3.28`, `3`, `latest` tags |
@@ -68,6 +68,7 @@ CLI command (clap parse)
 | **Identifier** | Parsed OCI reference: `registry/repo:tag@digest` with default registry fallback |
 | **Manifest** | OCI image manifest or image index (multi-platform) |
 | **Refs** | Reference sub-dirs inside `packages/.../refs/`: `symlinks/` (GC roots from install symlinks), `deps/` (forward-refs to other packages), `layers/` (forward-refs to layers), `blobs/` (forward-refs to blobs) |
+| **DirtyRcBlock (exit 82)** | `ExitCode::DirtyRcBlock = 82` — `ocx self setup` exits 82 when a managed activation block in a shell profile carries user edits inside the fence and `--force` was not passed. Scripts can `case $? in 82)` to detect and re-run with `--force`. Distinct from `ConfigError` (78): the RC content is valid but intentionally modified by the user. |
 
 ## ADR Index
 
@@ -92,6 +93,7 @@ CLI command (clap parse)
 | `handshake_toolchain_cli.md` | **AUTHORITY for current CLI model** — `ocx package` group (OCI tier), root `ocx [--global] env [--shell]` (`--global` is a root flag before the subcommand), `ocx shell` reduced to `{completion}`, root `install/uninstall/select/exec/deselect/which/deps/ci/shell hook/init/env` removed (exit 64), activation via `$OCX_HOME/env.sh` block-marker, no PATH strip. Decisions 3/4/6/7 of `adr_global_toolchain_tier.md` superseded here. Per-command `--global` and `with_command_global` seam deleted 2026-05-17 (root-only collapse). |
 | `adr_progress_architecture.md` | Span-free progress: `cli::progress::ProgressManager` owns `indicatif::MultiProgress`; RAII guards (`Spinner`/`BytesBar`) instead of `tracing-indicatif` span-attached bars. Kills the concurrent sharded-registry clone-after-close panic by construction. `tracing-indicatif` dropped; fmt logs route through `ProgressManager::writer()` (suspend-coordinated). |
 | `adr_ci_env_export_flag.md` | Realize handshake §6 CI export as `--ci[=provider]` flag on `ocx env`/`ocx package env` (not a command); GitHub autodetected two-file sink (rejects `--export-file`); GitLab JSON-lines, stdout default / `--export-file`; `--ci` ⟂ `--shell`; GitLab flavor added. |
+| `adr_self_setup.md` | `ocx self setup` — bare-binary install complement to the install script: bootstrap + env shim write + managed RC-block (`# >>> ocx v1 <hash> >>>`) in user shell profiles; `ExitCode::DirtyRcBlock` (82) for user-edited blocks; `ocx self update` refreshes shims post-swap (4C). |
 
 ADRs live in `.claude/artifacts/adr_*.md`. Read relevant ADRs before decisions in same domain.
 
@@ -122,6 +124,7 @@ Project-wide conventions enforced by reviewer:
 | New metadata field | `crates/ocx_lib/src/package/metadata/` | Update types + schema + docs |
 | New acceptance test | `test/tests/test_*.py` | Use fixtures, maintain test isolation |
 | Project config mutation | `crates/ocx_lib/src/project/mutate.rs` | `add_binding` / `remove_binding` / `init_project` — atomic read-modify-write under in-place exclusive flock on `ocx.toml` via `acquire_project_lock` |
+| Shell integration (env shims + RC blocks) | `crates/ocx_lib/src/setup/` | `ocx self setup` orchestrator; sub-modules: `bootstrap` (latest-published install), `rc_block` (fence state machine + diff-gate), `shims` (env.* file consts + atomic write), `profiles` (target detection), `error` |
 
 ## Cross-Cutting Modules
 

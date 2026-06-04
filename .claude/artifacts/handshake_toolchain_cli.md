@@ -173,24 +173,27 @@ runs (§4). `--global` (root flag) and `--shell` are independent and combine fre
    eval "$(ocx --global env --shell=sh)"
    ```
 
-2. The **in-repo OCX install script** appends one `source`/`.` line to the
-   user's login profile (`.profile`/`.zshrc`/PowerShell profile/…) pointing
-   at the matching file, guarded so re-running the installer is idempotent.
-   There is **no separate `setup.ocx.sh` website repo** — that does not
-   exist and is not planned now; the install script in this repo owns the
-   profile modification.
+2. **`ocx self setup`** (the binary) appends a managed activation block to the
+   user's login profile (`.profile`/`.zshrc`/PowerShell profile/…), guarded by
+   a content-hash fence so re-running is idempotent. The block fence format is
+   `# >>> ocx v1 <hash8> >>>` (opener) / `# <<< ocx v1 <<<` (closer). The
+   in-repo OCX install script bootstraps the binary (download + checksum verify)
+   and then delegates to `ocx self setup` for all profile modification — it no
+   longer contains profile-writing logic itself. There is **no separate
+   `setup.ocx.sh` website repo** — the install script in this repo owns the
+   bootstrap, and `ocx self setup` owns the profile modification.
+   **[AMENDED post-sign-off 2026-06-04: the binary now writes the block-marker,
+   not the installer shell script.]**
 
 3. Every new login shell sources it → `ocx --global env --shell=sh` runs
    fresh → the global toolchain is on `PATH`.
 
 4. **rc/profile content is single-sourced through `ocx`, not hand-written
-   in the installer.** Preferred: `ocx env` (or an `ocx env`-adjacent
-   subcommand) emits the rc/profile snippet for a given shell (the concept
-   of "rc" generalises to a PowerShell profile script, fish conf, etc.) so
-   the installer just calls `ocx` and writes the output — one source of
-   truth, no shell logic duplicated in the installer. **This generator MAY
-   be deferred** (installer ships the fixed `eval` line directly at first);
-   recorded so it is designed-for, not invented later ad-hoc.
+   in the installer.** `ocx self setup` is the realized form of this design:
+   the installer calls `ocx self setup` and the binary writes the profile
+   snippet for each detected shell — one source of truth, no shell logic
+   duplicated in the installer. **[AMENDED post-sign-off 2026-06-04:
+   `ocx self setup` is now built and ships; "MAY be deferred" removed.]**
 
 The env file is fixed; the `eval` runs each shell start, so it is **always
 current** — there is no stale per-tool static render, no `$OCX_HOME/init.*`,
@@ -271,8 +274,11 @@ grammar break.
 
 - `direnv_export.rs` → delegates to the shared `emit_lines` (behaviour
   unchanged: project, stateless)
-- the OCX installer → generates the per-shell `$OCX_HOME/env.<shell>` file
-  and appends the profile `source` line (replaces `ocx shell init`)
+- `ocx self setup` (the binary) → generates the per-shell `$OCX_HOME/env.*`
+  files and appends the managed activation block to shell profiles (realized
+  form of the §4 generator design; replaces `ocx shell init` and the former
+  in-installer shell-function generators). The OCX installer bootstraps the
+  binary then delegates to `ocx self setup`. **[AMENDED 2026-06-04.]**
 
 **Keep unchanged from `a4211591`:**
 
