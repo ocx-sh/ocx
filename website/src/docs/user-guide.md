@@ -29,6 +29,88 @@ To run a tool *once* without keeping it installed, skip the install step entirel
 [Entry Points In Depth][in-depth-entry-points] — what generated launchers do under `ocx package exec`.
 :::
 
+## Install without curl | sh {#install-bare-binary}
+
+Some CI environments and security policies forbid piping a network request directly into a shell interpreter. OCX supports a fully equivalent setup path: download the binary from [GitHub Releases][github-releases-ocx], then run `ocx self setup` from the downloaded file. The result is identical to running the install script.
+
+The goal here is getting from "I have a trusted binary" to "shell integration is complete" without any shell script involved.
+
+### What the setup command does {#install-bare-binary-what}
+
+`ocx self setup` performs three steps in strict order:
+
+1. **Bootstraps itself** — installs the latest published `ocx.sh/ocx/cli` into the [content-addressed package store][in-depth-storage-packages] and wires the `current` symlink. The loose binary you downloaded is only needed to run this step; after it completes, the managed copy in `~/.ocx/` takes over.
+2. **Writes the env shims** — creates `$OCX_HOME/env.sh`, `env.fish`, `env.ps1`, `env.nu`, and `env.elv`. These files are byte-identical across users; no install-time substitution occurs.
+3. **Injects a source line** — adds a fenced block-marker to each detected shell profile (`.bash_profile`, `.zprofile`, `.bashrc`, `.zshrc`, `$PROFILE`, and the equivalent files for fish, nushell, and elvish). The fence is idempotent: re-running `ocx self setup` is safe.
+
+If the bootstrap fails (for example, the registry is unreachable), the command returns a non-zero exit code and writes nothing — no partial state.
+
+### POSIX (Linux, macOS) {#install-bare-binary-posix}
+
+```sh
+# 1. Download the binary for your platform from GitHub Releases.
+#    Example: Linux x86_64.
+curl -fSL https://github.com/ocx-sh/ocx/releases/latest/download/ocx-linux-amd64 \
+     -o /tmp/ocx
+chmod +x /tmp/ocx
+
+# 2. Run setup. The binary bootstraps the managed copy and wires shell profiles.
+/tmp/ocx self setup
+
+# 3. Reload your shell (or open a new terminal).
+source ~/.bash_profile   # bash — or ~/.zprofile for zsh
+```
+
+After step 2, the managed `ocx` binary is in `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/`. The temporary binary at `/tmp/ocx` can be deleted.
+
+### Windows (PowerShell) {#install-bare-binary-windows}
+
+```powershell
+# 1. Download the binary.
+Invoke-WebRequest -Uri https://github.com/ocx-sh/ocx/releases/latest/download/ocx-windows-amd64.exe `
+    -OutFile "$env:TEMP\ocx.exe"
+
+# 2. Run setup. Writes env.ps1 and a fenced block-marker to $PROFILE.
+& "$env:TEMP\ocx.exe" self setup
+
+# 3. Reload your profile.
+. $PROFILE
+```
+
+::: warning Windows execution policy
+If PowerShell's execution policy is set to `Restricted`, the sourced `env.ps1` file will not run even after `ocx self setup` completes. The command reports a non-fatal advisory when it detects this. To fix it:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+`ocx self setup` never changes the execution policy automatically — that is a user security decision.
+:::
+
+### Options {#install-bare-binary-options}
+
+| Flag | Effect |
+|------|--------|
+| `--no-modify-path` | Write shims only; do not touch any shell profile. Equivalent to setting [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path] for that invocation. |
+| `--profile PATH` | Target an explicit profile file instead of auto-detecting. Repeatable. |
+| `--dry-run` | Show what would be written without writing anything. Useful to preview which profiles are detected. |
+| `--force` | Overwrite a fenced block whose contents have been manually edited. |
+
+If you plan to manage your own PATH (CI jobs, container images, package-manager installs), pass `--no-modify-path` to stop `ocx self setup` from touching any profile:
+
+```sh
+/tmp/ocx self setup --no-modify-path
+# Then add ~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin to PATH yourself.
+```
+
+Note that `--no-modify-path` is **not remembered** between invocations. If you run `ocx self setup` again later without the flag, profiles will be modified. Set `OCX_NO_MODIFY_PATH=1` persistently in your environment or pass the flag each time to prevent that. See the [environment reference][env-no-modify-path] for the full semantics.
+
+::: tip Learn more
+[Shell Activation Files reference][env-shell-activation-files] — what the env shim files contain and how each shell sources them.
+[`OCX_NO_MODIFY_PATH` reference][env-no-modify-path] — truthy semantics, per-invocation behavior.
+[`OCX_HOME` reference][env-ocx-home] — choose a non-default install root before running setup.
+:::
+
 ## Choose between versions {#versions}
 
 Once two or more versions are installed, [`ocx package select`][cmd-package-select] picks the one that becomes "current":
@@ -704,6 +786,7 @@ For [direnv][direnv]-driven repos, use [`ocx direnv init`][cmd-direnv-init] to w
 The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable now accept any path, not just files named `ocx.toml`. The CWD walk still only looks for files named exactly `ocx.toml`.
 
 <!-- external -->
+[github-releases-ocx]: https://github.com/ocx-sh/ocx/releases
 [artifactory]: https://jfrog.com/artifactory/
 [nexus]: https://www.sonatype.com/products/sonatype-nexus-repository
 [harbor]: https://goharbor.io/
@@ -742,6 +825,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 <!-- commands -->
 [cmd-add-global]: ./reference/command-line.md#global-flag
 [cmd-self-activate]: ./reference/command-line.md#self-activate
+[cmd-self-setup]: ./reference/command-line.md#self-setup
 [cmd-self-update]: ./reference/command-line.md#self-update
 [cmd-version]: ./reference/command-line.md#version
 [cmd-logout]: ./reference/command-line.md#logout
@@ -785,6 +869,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-ocx-index]: ./reference/environment.md#ocx-index
 [env-config]: ./reference/environment.md#ocx-config
 [env-no-config]: ./reference/environment.md#ocx-no-config
+[env-no-modify-path]: ./reference/environment.md#ocx-no-modify-path
 [env-project]: ./reference/environment.md#ocx-project
 [env-auth-type]: ./reference/environment.md#ocx-auth-registry-type
 [env-auth-user]: ./reference/environment.md#ocx-auth-registry-user
@@ -792,6 +877,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-docker-config]: ./reference/environment.md#external-docker-config
 [env-ocx-no-update-check]: ./reference/environment.md#ocx-no-update-check
 [env-ocx-update-check-interval]: ./reference/environment.md#ocx-update-check-interval
+[env-shell-activation-files]: ./reference/environment.md#shell-activation-files
 [xdg-basedir]: ./reference/environment.md#external-xdg-config-home
 [env-ref]: ./reference/environment.md
 
