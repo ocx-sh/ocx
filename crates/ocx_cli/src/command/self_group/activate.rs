@@ -113,7 +113,7 @@ impl SelfActivate {
 /// file structure's symlink store.  The path is derived from the runtime-known
 /// `OCX_HOME`, not from a shell variable reference.
 fn ocx_install_bin_path(fs: &ocx_lib::file_structure::FileStructure) -> PathBuf {
-    let ocx_cli_id = oci::Identifier::new_registry("ocx/cli", oci::OCX_SH_REGISTRY);
+    let ocx_cli_id = oci::ocx_cli_identifier();
     fs.symlinks.current(&ocx_cli_id).join("content").join("bin")
 }
 

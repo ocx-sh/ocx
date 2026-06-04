@@ -229,7 +229,7 @@ impl PackageManager {
         &self,
         throttle: Option<Duration>,
     ) -> Result<UpdateCheckResult, package_manager::error::PackageErrorKind> {
-        let ocx_id = ocx_cli_identifier();
+        let ocx_id = oci::ocx_cli_identifier();
 
         // Throttle gate first — on the hot path (every non-static CLI invocation)
         // the check is throttled ~24/25 times. Avoid the subprocess round-trip
@@ -299,7 +299,7 @@ impl PackageManager {
     pub async fn self_update(&self) -> Result<SelfUpdateResult, package_manager::error::Error> {
         use package_manager::concurrency::Concurrency;
 
-        let ocx_id = ocx_cli_identifier();
+        let ocx_id = oci::ocx_cli_identifier();
 
         // Query the installed version via subprocess before the check so we can
         // populate `from` in SelfUpdateResult::Installed.  Returns None when
@@ -309,7 +309,7 @@ impl PackageManager {
 
         let check_result = self.self_check_update(Some(Duration::ZERO)).await.map_err(|kind| {
             package_manager::error::Error::SelfCheckFailed(Box::new(package_manager::error::PackageError {
-                identifier: oci::Identifier::new_registry("ocx/cli", oci::OCX_SH_REGISTRY),
+                identifier: oci::ocx_cli_identifier(),
                 kind,
             }))
         })?;
@@ -345,61 +345,6 @@ impl PackageManager {
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────
-
-/// Returns the well-known OCX CLI identifier used by self-update operations.
-///
-/// Always resolves to `ocx.sh/ocx/cli` — self-update is canonical and opinionated
-/// about its registry. The seam below is a **private test-only** override, gated
-/// behind `cfg(test)` or the `__testing` Cargo feature so release artifacts
-/// physically lack the code path.
-fn ocx_cli_identifier() -> oci::Identifier {
-    #[cfg(any(test, feature = "__testing"))]
-    {
-        if let Ok(spec) = std::env::var("__OCX_SELF_IMAGE")
-            && let Some((registry, repo)) = parse_self_image_spec(&spec)
-        {
-            // Defense-in-depth: even with the seam compiled in, refuse any
-            // override that does not point at a loopback registry. Asserts
-            // loudly in tests; release builds never link this branch.
-            assert!(
-                is_loopback_registry(registry),
-                "__OCX_SELF_IMAGE override must target a loopback registry; got `{registry}`"
-            );
-            return oci::Identifier::new_registry(repo, registry);
-        }
-    }
-    oci::Identifier::new_registry("ocx/cli", oci::OCX_SH_REGISTRY)
-}
-
-/// Parses the `__OCX_SELF_IMAGE` test-only seam value.
-///
-/// Format: `<registry>/<repo>` where the first `/` separates registry from
-/// repo (registry may contain `:port`, repo may contain further `/` segments).
-/// Returns `None` on malformed input.
-#[cfg(any(test, feature = "__testing"))]
-fn parse_self_image_spec(spec: &str) -> Option<(&str, &str)> {
-    spec.split_once('/').filter(|(r, p)| !r.is_empty() && !p.is_empty())
-}
-
-/// Loopback-registry check for the `__OCX_SELF_IMAGE` seam.
-///
-/// Accepts `localhost`, `127.0.0.1`, and the IPv6 loopback `::1` (with or
-/// without bracketed `[::1]` host syntax), each with an optional `:port`.
-#[cfg(any(test, feature = "__testing"))]
-fn is_loopback_registry(registry: &str) -> bool {
-    // Bracketed IPv6 form: `[host]` or `[host]:port`. Extract the host inside.
-    let host = if let Some(stripped) = registry.strip_prefix('[') {
-        match stripped.split_once(']') {
-            Some((inner, _)) => inner,
-            None => return false,
-        }
-    } else {
-        // Bare host or `host:port`. IPv4 / DNS names never contain `:` so the
-        // first `:` always splits host from port.
-        registry.split_once(':').map_or(registry, |(host, _)| host)
-    };
-    host == "localhost" || host == "127.0.0.1" || host == "::1"
-}
 
 /// Maximum wall-clock time the subprocess `ocx --format json version` query
 /// is allowed before it is treated as bootstrap.
@@ -618,10 +563,7 @@ mod tests {
         package_manager::PackageManager,
     };
 
-    use super::{
-        find_latest_version, is_loopback_registry, is_throttled, ocx_cli_identifier, parse_self_image_spec,
-        query_installed_version, touch_state_atomic,
-    };
+    use super::{find_latest_version, is_throttled, query_installed_version, touch_state_atomic};
 
     /// Build a minimal offline [`PackageManager`] for unit tests.
     fn make_offline_manager(ocx_home: &Path) -> PackageManager {
@@ -632,59 +574,6 @@ mod tests {
         });
         let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
         PackageManager::new(fs, index, None, "ocx.sh")
-    }
-
-    // ── URI-1 private seam ───────────────────────────────────────────────────
-
-    /// Without the `__OCX_SELF_IMAGE` env var, the canonical identifier wins.
-    #[test]
-    fn ocx_cli_identifier_defaults_to_canonical() {
-        // Defensive: ensure no leftover env state from a sibling test.
-        // SAFETY: tests in this module never read this var concurrently;
-        // serial scope of `#[test]` provides the ordering guarantee.
-        unsafe { std::env::remove_var("__OCX_SELF_IMAGE") };
-        let id = ocx_cli_identifier();
-        assert_eq!(id.registry(), oci::OCX_SH_REGISTRY);
-        assert_eq!(id.repository(), "ocx/cli");
-    }
-
-    /// Parser accepts `<registry>/<repo>` shape with port + multi-segment repo.
-    #[test]
-    fn parse_self_image_spec_accepts_loopback_with_port() {
-        let (registry, repo) = parse_self_image_spec("localhost:5000/ocx/cli").unwrap();
-        assert_eq!(registry, "localhost:5000");
-        assert_eq!(repo, "ocx/cli");
-    }
-
-    /// Empty registry or empty repo → `None`.
-    #[test]
-    fn parse_self_image_spec_rejects_empty_halves() {
-        assert!(parse_self_image_spec("/ocx/cli").is_none());
-        assert!(parse_self_image_spec("localhost:5000/").is_none());
-        assert!(parse_self_image_spec("no-slash").is_none());
-    }
-
-    /// Loopback gate accepts the loopback host set, rejects anything else.
-    #[test]
-    fn is_loopback_registry_accepts_loopback_set() {
-        assert!(is_loopback_registry("localhost"));
-        assert!(is_loopback_registry("localhost:5000"));
-        assert!(is_loopback_registry("127.0.0.1"));
-        assert!(is_loopback_registry("127.0.0.1:443"));
-        assert!(is_loopback_registry("[::1]"));
-        assert!(is_loopback_registry("[::1]:5000"));
-    }
-
-    /// Loopback gate refuses public registries even with the seam compiled in.
-    #[test]
-    fn is_loopback_registry_rejects_public_hosts() {
-        assert!(!is_loopback_registry("ocx.sh"));
-        assert!(!is_loopback_registry("ghcr.io"));
-        assert!(!is_loopback_registry("registry.example.com:5000"));
-        assert!(!is_loopback_registry("192.168.0.1"));
-        // Spoof attempts: hostnames that merely embed "localhost".
-        assert!(!is_loopback_registry("evil-localhost.example.com"));
-        assert!(!is_loopback_registry("localhost.evil.com"));
     }
 
     // ── find_latest_version (ported verbatim from app/update_check.rs) ───────
