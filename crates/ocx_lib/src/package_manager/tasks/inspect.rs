@@ -31,7 +31,8 @@ pub struct Candidate {
 /// - [`Candidates`](InspectResult::Candidates) — default mode, the ref is an
 ///   image index: list the platform children, no metadata loaded.
 /// - [`Manifest`](InspectResult::Manifest) — default mode, the ref is a single
-///   image manifest (flat tag or `@digest`): metadata only, no chain.
+///   image manifest (flat tag or `@digest`): metadata plus the manifest's
+///   layer descriptors, no resolution chain.
 /// - [`Resolved`](InspectResult::Resolved) — `--resolve`: platform-select
 ///   through the index, then metadata plus the full resolution chain.
 ///
@@ -50,6 +51,10 @@ pub enum InspectResult {
         /// The manifest digest at the reference.
         pinned: oci::PinnedIdentifier,
         metadata: ValidMetadata,
+        /// The manifest's layer descriptors (digest, media type, size).
+        /// Already carried by the fetched manifest — surfaced so a default
+        /// inspect shows the package's content without forcing `--resolve`.
+        layers: Vec<oci::Descriptor>,
     },
     Resolved {
         /// The platform-selected pinned identifier.
@@ -72,8 +77,8 @@ impl PackageManager {
     /// `resolve == false` (default): the manifest at the reference is fetched
     /// **without** platform selection. An image index yields
     /// [`InspectResult::Candidates`] (the available platforms); a single image
-    /// manifest yields [`InspectResult::Manifest`] (its declared metadata).
-    /// `-p/--platform` does not apply here.
+    /// manifest yields [`InspectResult::Manifest`] (its declared metadata and
+    /// layer descriptors). `-p/--platform` does not apply here.
     ///
     /// `resolve == true`: the identifier is resolved through the index with
     /// platform selection (honoring `platforms`), returning
@@ -114,6 +119,7 @@ impl PackageManager {
                 Ok(InspectResult::Manifest {
                     pinned: top_pinned,
                     metadata,
+                    layers: img.layers,
                 })
             }
             oci::Manifest::ImageIndex(index) => {
@@ -182,6 +188,7 @@ mod spec_tests {
     const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const HEX_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const HEX_D: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
     const METADATA_JSON: &str = r#"{"type":"bundle","version":1,"env":[{"key":"PATH","type":"path","value":"${installPath}/bin","visibility":"public"}],"dependencies":[],"entrypoints":{}}"#;
 
@@ -223,14 +230,16 @@ mod spec_tests {
 
     fn image_manifest_json(config_digest: &Digest) -> String {
         format!(
-            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config_digest}","size":{size}}},"layers":[]}}"#,
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{MEDIA_TYPE_PACKAGE_METADATA_V1}","digest":"{config_digest}","size":{size}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{layer}","size":4096}}]}}"#,
             size = METADATA_JSON.len(),
+            layer = digest(HEX_D),
         )
     }
 
-    /// Default mode against a flat image manifest returns metadata only.
+    /// Default mode against a flat image manifest returns metadata plus the
+    /// manifest's layer descriptors — no `--resolve` needed.
     #[tokio::test(flavor = "multi_thread")]
-    async fn inspect_default_flat_manifest_returns_metadata() {
+    async fn inspect_default_flat_manifest_returns_metadata_and_layers() {
         let dir = TempDir::new().unwrap();
         let tag_store = TagStore::new(dir.path().join("tags"));
         write_tag_lock(&tag_store.tags(&tagged_id()), &digest(HEX_A));
@@ -241,9 +250,16 @@ mod spec_tests {
         let result = mgr.inspect(&tagged_id(), vec![linux_amd64()], false).await.unwrap();
 
         match result {
-            InspectResult::Manifest { pinned, metadata } => {
+            InspectResult::Manifest {
+                pinned,
+                metadata,
+                layers,
+            } => {
                 assert_eq!(pinned.digest(), digest(HEX_A));
                 assert_eq!(metadata.env().expect("env").into_iter().count(), 1);
+                assert_eq!(layers.len(), 1, "manifest layer surfaced in default mode");
+                assert_eq!(layers[0].digest, format!("sha256:{HEX_D}"));
+                assert_eq!(layers[0].size, 4096);
             }
             other => panic!("expected Manifest, got {other:?}"),
         }

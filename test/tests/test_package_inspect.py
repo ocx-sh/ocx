@@ -4,8 +4,10 @@
 
 Read-only, ref-shape adaptive:
   * default + image-index ref → platform ``candidates`` (no metadata).
-  * default + single-manifest / ``@digest`` ref → ``metadata`` (no chain).
-  * ``--resolve`` → platform-selected ``metadata`` + ``resolution`` chain.
+  * default + single-manifest / ``@digest`` ref → ``metadata`` + ``layers``
+    (no chain).
+  * ``--resolve`` → platform-selected ``metadata`` + ``layers`` +
+    ``resolution`` chain (layers live at the top level, not inside the chain).
 
 ``-p/--platform`` applies only with ``--resolve``. Honors global
 ``--offline`` / ``--format``.
@@ -37,6 +39,7 @@ def test_inspect_default_lists_index_candidates(
 
     assert "metadata" not in data, "candidate listing must not load metadata"
     assert "resolution" not in data
+    assert "layers" not in data, "an index candidate listing selects no manifest"
     candidates = data["candidates"]
     assert len(candidates) >= 1
     c = candidates[0]
@@ -61,6 +64,13 @@ def test_inspect_digest_manifest_shows_metadata(
     assert data["metadata"]["version"] == 1
     env_keys = {v["key"] for v in data["metadata"]["env"]}
     assert "PATH" in env_keys, f"expected PATH env var, got {env_keys}"
+    # Default-mode manifest inspect surfaces the manifest's layers directly,
+    # no --resolve required.
+    assert len(data["layers"]) >= 1, "default manifest inspect must show layers"
+    layer = data["layers"][0]
+    assert layer["digest"].startswith("sha256:")
+    assert layer["media_type"]
+    assert isinstance(layer["size"], int)
 
 
 def test_inspect_resolve_adds_metadata_and_chain(
@@ -74,6 +84,7 @@ def test_inspect_resolve_adds_metadata_and_chain(
     assert data["metadata"]["version"] == 1
     resolution = data["resolution"]
     assert resolution["pinned"]
+    assert "layers" not in resolution, "layers moved out of the resolution chain"
     chain = resolution["chain"]
     assert len(chain) >= 2, chain
     # Every chain entry is a descriptor object, not a bare digest string:
@@ -87,8 +98,10 @@ def test_inspect_resolve_adds_metadata_and_chain(
     roles = [e["role"] for e in chain]
     assert roles[-1] == "config", roles
     assert "manifest" in roles, roles
-    assert len(resolution["layers"]) >= 1
-    layer = resolution["layers"][0]
+    # Layers render alongside metadata (same surface as default mode), not
+    # inside the resolution chain.
+    assert len(data["layers"]) >= 1
+    layer = data["layers"][0]
     assert layer["digest"].startswith("sha256:")
     assert layer["media_type"]
     assert isinstance(layer["size"], int)
@@ -246,6 +259,7 @@ def test_inspect_default_flat_tag_shows_metadata_no_chain(
     assert "candidates" not in data, "flat-tag manifest must not list candidates"
     assert "resolution" not in data, "default mode must not add a resolution chain"
     assert data["metadata"]["version"] == 1
+    assert len(data["layers"]) >= 1, "flat-tag manifest inspect must show layers"
     env_keys = {v["key"] for v in data["metadata"]["env"]}
     assert "PATH" in env_keys, f"expected PATH env var, got {env_keys}"
 
