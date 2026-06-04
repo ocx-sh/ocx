@@ -85,16 +85,18 @@ impl Deps {
             //     edges). This is the full self-runtime view used by generated
             //     launchers.
             //
-            // Before listing, scan the surface-projected union TC for digest
+            // Before listing, scan the surface-projected union TC for version
             // conflicts on the same `registry/repo` so users see a
             // `conflicting` warning when multiple roots pull incompatible
             // versions of the same package that actually contribute to the
-            // active surface (W11 contract — see
-            // test_deps_flat_conflicting_digests_reports_error). Sealed-edge
-            // TC entries that cannot collide at runtime are excluded.
+            // active surface (see test_deps_flat_conflicting_digests_reports_error).
+            // Sealed-edge TC entries that cannot collide at runtime are excluded.
             //
-            // Reuse the composer's helper so env-time and deps-time conflict
-            // detection follow the same first-seen-wins rule under the same
+            // `deps` is a diagnostic listing, so the conflict is non-fatal here:
+            // `env`/`exec`/`run` hard-error on the same collision (see
+            // composer::check_repo_digest_conflicts), but the dependency tree
+            // must stay inspectable precisely so the user can see why. Both
+            // paths share the composer's detection helper under the same
             // surface gate.
             let info_arcs: Vec<Arc<InstallInfo>> = infos.iter().cloned().map(Arc::new).collect();
             composer::warn_repo_digest_conflicts(&info_arcs, self.self_view);

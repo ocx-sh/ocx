@@ -358,8 +358,8 @@ mod tests {
     fn dependency_conflict_maps_to_data_error() {
         // Plan taxonomy: DependencyError::Conflict → DataError (65)
         let err = DependencyError::Conflict {
-            repository: "pkg".into(),
-            digests: vec![],
+            repository: crate::oci::Repository::new("example.com", "pkg"),
+            identifiers: vec![],
         };
         assert_eq!(classify(err), ExitCode::DataError);
     }

@@ -178,11 +178,14 @@ fn format_batch(verb: &str, errors: &[PackageError]) -> String {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DependencyError {
-    /// Two transitive dependencies resolve to different digests for the same repository.
-    #[error("conflicting digests for {repository}: {}", digests.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))]
+    /// Two or more packages on the active surface resolve the same repository to
+    /// different digests. A single environment cannot expose multiple versions
+    /// of one package, so composition fails. The identifiers name the conflicting
+    /// versions (tag and digest) so the user can tell which were involved.
+    #[error("conflicting versions for {repository}: {}", identifiers.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "))]
     Conflict {
-        repository: String,
-        digests: Vec<oci::Digest>,
+        repository: oci::Repository,
+        identifiers: Vec<oci::PinnedIdentifier>,
     },
     /// Dependency setup coordination failed (capacity, timeout, or abandoned leader).
     #[error("dependency setup failed: {0}")]

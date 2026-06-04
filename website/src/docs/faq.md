@@ -69,7 +69,7 @@ This tradeoff matches the [Nix][nix] model: a security patch means rebuilding ev
 
 When multiple installed packages depend on the same package at the same digest, the dependency is stored once in the [object store][fs-objects] (content-addressed deduplication). Each dependent creates a back-reference, so the shared dependency is not garbage collected until all dependents are removed.
 
-When two packages depend on the same tool at *different* digests, both versions are installed as separate objects. If both contribute to the same environment, scalar variables follow last-writer-wins semantics and ocx emits a warning. Use [`ocx package deps --flat`][cmd-deps] to see the evaluation order and [`ocx package deps --why`][cmd-deps] to trace conflicting paths.
+When two packages depend on the same tool at *different* digests, both versions are installed as separate objects. If both would contribute to the same environment — through `ocx package env`, `ocx env`, `ocx package exec`, or `ocx run` — composition fails: a single environment cannot expose two versions of one package, since `PATH` resolves only one. The error names the conflicting repository and the versions involved. Two tags that resolve to the *same* digest are the same version and never conflict. Use [`ocx package deps --flat`][cmd-deps] to see the evaluation order and [`ocx package deps --why`][cmd-deps] to trace the conflicting paths — `deps` reports the conflict as a non-fatal warning so the tree stays inspectable.
 
 See [Dependencies][ug-dependencies] in the user guide for the full picture: automatic installation, environment composition, garbage collection, and inspection commands.
 

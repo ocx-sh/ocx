@@ -32,7 +32,7 @@ use crate::{
         },
         resolved_package::ResolvedPackage,
     },
-    package_manager::error::PackageErrorKind,
+    package_manager::error::{DependencyError, PackageErrorKind},
 };
 
 use super::tasks::common;
@@ -58,9 +58,11 @@ type DepLoadResult = (
 /// # Errors
 ///
 /// Returns `Err` if any required package metadata cannot be loaded from the
-/// store during composition, or if two or more roots' interface projections
+/// store during composition, if two or more roots' interface projections
 /// collide on an entrypoint name (multi-root collision gate — see
-/// [`check_entrypoints`]).
+/// [`check_entrypoints`]), or if the active surface resolves a single
+/// repository to two or more distinct digests (version conflict — see
+/// [`check_repo_digest_conflicts`]).
 pub async fn compose(roots: &[Arc<InstallInfo>], store: &PackageStore, self_view: bool) -> crate::Result<Vec<Entry>> {
     // Multi-root collision gate. Single-root case is already covered at
     // install time by `check_entrypoints`; cross-root collisions can only
@@ -71,15 +73,16 @@ pub async fn compose(roots: &[Arc<InstallInfo>], store: &PackageStore, self_view
         check_entrypoints(roots, store).await?;
     }
 
-    // Warn on conflicting digests for the same `registry/repo` across the
-    // surface-projected union TC (and roots themselves). Non-fatal: env
-    // composition continues with first-seen wins by topological/iteration
-    // order. Acceptance contract (`test_public_conflicting_deps_error`,
-    // `test_deep_conflict_at_depth_two`) checks for the literal
-    // `"conflicting"` token in stderr. Sealed/private-edge TC entries that
-    // do not enter the active surface are excluded — they cannot collide
-    // at runtime (`test_sealed_conflicting_deps_coexist`).
-    warn_repo_digest_conflicts(roots, self_view);
+    // Fail on conflicting versions of the same `registry/repo` across the
+    // surface-projected union TC (and roots themselves). A single environment
+    // cannot expose two versions of one package — PATH resolves only one — so
+    // a surface-visible collision is a hard error, not a best-effort pick.
+    // Two tags that resolve to the same digest are not a conflict.
+    // Sealed/private-edge TC entries that do not enter the active surface are
+    // excluded — they cannot collide at runtime
+    // (`test_sealed_conflicting_deps_coexist`). The diagnostic `deps` command
+    // keeps a non-fatal warning so the conflicting tree stays inspectable.
+    check_repo_digest_conflicts(roots, self_view)?;
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen: HashSet<oci::PinnedIdentifier> = HashSet::new();
@@ -464,70 +467,97 @@ fn emit_root_path_block(
     Ok(())
 }
 
-/// Emits `tracing::warn!` for every `registry/repo` that appears with two or
-/// more distinct digests across the **surface-projected** union TC of the
-/// supplied roots (including the roots themselves).
+/// Returns `Err(DependencyError::Conflict)` for the first `registry/repo` that
+/// appears with two or more distinct digests across the **surface-projected**
+/// union TC of the supplied roots (including the roots themselves).
+///
+/// This is the fatal gate used by [`compose`]: a single environment cannot
+/// expose two versions of one package — PATH resolves only one — so a
+/// surface-visible version collision aborts composition. The error names the
+/// conflicting identifiers (tag and digest) so the user can tell which
+/// versions collided.
 ///
 /// `self_view` selects the surface that gates TC entries: `false` (default
 /// exec) keeps only entries whose effective visibility has the interface
 /// axis (`has_interface()`); `true` (`--self`) keeps only those with the
-/// private axis (`has_private()`). Roots themselves always participate —
-/// explicit roots emit unconditionally during compose.
+/// private axis (`has_private()`). Roots themselves always participate.
+/// Sealed/private-edge TC entries that do not enter the active surface cannot
+/// collide at runtime — they are excluded from the scan
+/// (`test_sealed_conflicting_deps_coexist`). Two tags that resolve to the same
+/// digest are not a conflict.
 ///
-/// Mirrors the pre-refactor `check_exported` first-seen-wins semantics: when
-/// two roots' transitive closures pull incompatible versions of the same
-/// dependency through the active surface, env composition and `--flat`
-/// listing continue with the first-seen digest, but a warning is logged so
-/// users notice the conflict. Sealed/private-edge TC entries that do not
-/// enter the active surface cannot collide at runtime — they are excluded
-/// from the scan. The flag string `"conflicting"` is part of the stable
-/// acceptance-test contract — see
+/// # Errors
+///
+/// Returns `Err(DependencyError::Conflict { repository, identifiers })` when a
+/// surface-visible repository carries two or more distinct digests.
+pub fn check_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) -> Result<(), DependencyError> {
+    if let Some(conflict) = collect_repo_digest_conflicts(roots, self_view).into_iter().next() {
+        return Err(DependencyError::Conflict {
+            repository: conflict.repository,
+            identifiers: conflict.identifiers,
+        });
+    }
+    Ok(())
+}
+
+/// Emits `tracing::warn!` for every `registry/repo` that appears with two or
+/// more distinct digests across the **surface-projected** union TC.
+///
+/// Non-fatal counterpart to [`check_repo_digest_conflicts`], used only by the
+/// diagnostic `deps` command: listing a conflicting tree must stay possible
+/// precisely so the user can inspect the collision that blocks `env`/`exec`.
+/// Same surface-gating and same-digest tolerance as the fatal gate. The token
+/// `"conflicting"` is part of the stable acceptance-test contract — see
 /// `test_deps_flat_conflicting_digests_reports_error`,
-/// `test_public_conflicting_deps_error`, `test_deep_conflict_at_depth_two`,
-/// `test_sealed_conflicting_deps_coexist`.
+/// `test_deep_conflict_at_depth_two`.
 pub fn warn_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) {
     for conflict in collect_repo_digest_conflicts(roots, self_view) {
         tracing::warn!(
-            "conflicting digests for {}: keeping {}, ignoring {}",
-            conflict.repo,
-            conflict.kept,
-            conflict.ignored,
+            "conflicting versions for {}: {}",
+            conflict.repository,
+            conflict
+                .identifiers
+                .iter()
+                .map(|identifier| identifier.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
         );
     }
 }
 
-/// A single `registry/repo` conflict surfaced by [`warn_repo_digest_conflicts`].
+/// A single `registry/repo` version conflict: the repository resolved to two or
+/// more distinct digests on the active surface.
 ///
-/// Pure-data return shape so unit tests can assert conflict detection without
-/// a `tracing` subscriber. The `kept` digest is the first one observed in
-/// iteration order; the `ignored` digest is the colliding one that follows.
+/// Pure-data return shape so unit tests can assert conflict detection without a
+/// `tracing` subscriber. `identifiers` holds the distinct-digest identifiers in
+/// first-seen order (always length >= 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DigestConflict {
-    pub repo: oci::Repository,
-    pub kept: oci::Digest,
-    pub ignored: oci::Digest,
+    pub repository: oci::Repository,
+    pub identifiers: Vec<oci::PinnedIdentifier>,
 }
 
-/// Collects digest conflicts across the surface-projected union TC.
+/// Collects version conflicts across the surface-projected union TC.
 ///
-/// Pure function: no logging, no I/O. Used by [`warn_repo_digest_conflicts`]
-/// and by unit tests. See that function for the surface-gating contract.
-///
-/// The returned `Vec` is allocated lazily — when there are no conflicts (the
-/// common case) no heap allocation occurs beyond the `first_seen` map.
+/// Pure function: no logging, no I/O. Used by [`check_repo_digest_conflicts`],
+/// [`warn_repo_digest_conflicts`], and unit tests. A repository is reported
+/// only when it carries two or more distinct digests on the active surface;
+/// the per-repo identifier list preserves first-seen order. Iteration over the
+/// `BTreeMap` makes the returned order deterministic by repository.
 pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) -> Vec<DigestConflict> {
-    let mut first_seen: HashMap<oci::Repository, oci::PinnedIdentifier> = HashMap::new();
-    let mut conflicts: Vec<DigestConflict> = Vec::new();
+    // Per repository, the distinct-digest identifiers observed on the active
+    // surface, in first-seen order. A repository with two or more entries is a
+    // version conflict.
+    let mut by_repository: BTreeMap<oci::Repository, Vec<oci::PinnedIdentifier>> = BTreeMap::new();
     for root in roots {
         // Roots themselves always participate — explicit roots emit
-        // unconditionally during compose, so a digest collision between
-        // roots (or between a root and any surface-visible TC entry) is
-        // always real at runtime.
-        record_repo_digest(root.identifier(), &mut first_seen, &mut conflicts);
+        // unconditionally during compose, so a collision between roots (or
+        // between a root and any surface-visible TC entry) is real at runtime.
+        record_repo_identifier(root.identifier(), &mut by_repository);
         for dep in &root.resolved().dependencies {
-            // Surface gate: a TC entry that does not contribute to the
-            // active surface cannot collide at runtime under that surface.
-            // Mirrors the gate applied in `compose` itself.
+            // Surface gate: a TC entry that does not contribute to the active
+            // surface cannot collide at runtime under that surface. Mirrors the
+            // gate applied in `compose` itself.
             let on_surface = if self_view {
                 dep.visibility.has_private()
             } else {
@@ -536,29 +566,32 @@ pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_vie
             if !on_surface {
                 continue;
             }
-            record_repo_digest(&dep.identifier, &mut first_seen, &mut conflicts);
+            record_repo_identifier(&dep.identifier, &mut by_repository);
         }
     }
-    conflicts
+    by_repository
+        .into_iter()
+        .filter(|(_, identifiers)| identifiers.len() >= 2)
+        .map(|(repository, identifiers)| DigestConflict {
+            repository,
+            identifiers,
+        })
+        .collect()
 }
 
-fn record_repo_digest(
+fn record_repo_identifier(
     id: &oci::PinnedIdentifier,
-    first_seen: &mut HashMap<oci::Repository, oci::PinnedIdentifier>,
-    conflicts: &mut Vec<DigestConflict>,
+    by_repository: &mut BTreeMap<oci::Repository, Vec<oci::PinnedIdentifier>>,
 ) {
-    let repo = oci::Repository::from(&**id);
-    if let Some(existing) = first_seen.get(&repo) {
-        if existing.digest() != id.digest() {
-            conflicts.push(DigestConflict {
-                repo,
-                kept: existing.digest().clone(),
-                ignored: id.digest().clone(),
-            });
-        }
+    let repository = oci::Repository::from(&**id);
+    let seen = by_repository.entry(repository).or_default();
+    // Dedup by digest: the same version reached via two paths — or a tagged and
+    // a bare reference to the same digest, or two tags that resolve to the same
+    // digest — is not a conflict.
+    if seen.iter().any(|existing| existing.digest() == id.digest()) {
         return;
     }
-    first_seen.insert(repo, id.clone());
+    seen.push(id.clone());
 }
 
 /// Construct the synthetic `PATH ⊳ <pkg_root>/entrypoints` entry for `pkg`.
@@ -604,8 +637,8 @@ mod tests {
     };
 
     use super::{
-        DigestConflict, check_entrypoints, collect_repo_digest_conflicts, compose, emit_dep_path_block,
-        emit_root_path_block,
+        DependencyError, DigestConflict, check_entrypoints, check_repo_digest_conflicts, collect_repo_digest_conflicts,
+        compose, emit_dep_path_block, emit_root_path_block,
     };
 
     const REGISTRY: &str = "example.com";
@@ -865,13 +898,14 @@ mod tests {
         );
     }
 
-    // ─ Repo-conflict (same repo, different digest — first-seen wins) ───────────
+    // ─ Repo-conflict (same repo, different digest — fatal) ─────────────────────
 
-    /// Same repository with two different digests in two roots: first-seen wins.
-    ///
-    /// Plan §3.1 — repo-conflict cell.
+    /// Same repository with two different digests across two roots' interface
+    /// surfaces is a fatal version conflict: a single environment cannot expose
+    /// two versions of one package, so `compose` returns
+    /// `Err(Dependency(Conflict))`.
     #[tokio::test]
-    async fn compose_same_repo_conflicting_digest_first_seen_wins() {
+    async fn compose_same_repo_conflicting_digest_errors() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
 
@@ -896,12 +930,17 @@ mod tests {
         let a = Arc::new(make_install_info("a", 'a', a_resolved));
         let b = Arc::new(make_install_info("b", 'b', b_resolved));
 
-        // No env vars / no entrypoints — env is empty. The dedup happens by
-        // stripped identifier (registry/repo/digest), so different digests
-        // for the same repo are NOT collapsed: each digest is a distinct
-        // pinned identifier. Both are visited, both contribute nothing.
-        let env = compose(&[a, b], &store, false).await.unwrap();
-        assert!(env.is_empty());
+        match compose(&[a, b], &store, false).await {
+            Err(crate::Error::Dependency(DependencyError::Conflict {
+                repository,
+                identifiers,
+            })) => {
+                assert_eq!(repository, crate::oci::Repository::from(&*dep_v1));
+                assert_eq!(identifiers, vec![dep_v1, dep_v2]);
+            }
+            Err(other) => panic!("expected Dependency(Conflict), got {other:?}"),
+            Ok(_) => panic!("expected Err(Dependency(Conflict)), got Ok"),
+        }
     }
 
     // ─ Edge filter: has_interface() vs has_private() ──────────────────────────
@@ -2365,9 +2404,8 @@ mod tests {
         assert_eq!(
             conflicts,
             vec![DigestConflict {
-                repo: expected_repo,
-                kept: d_v1.digest().clone(),
-                ignored: d_v2.digest().clone(),
+                repository: expected_repo,
+                identifiers: vec![d_v1.clone(), d_v2.clone()],
             }],
         );
     }
@@ -2411,11 +2449,71 @@ mod tests {
         assert_eq!(
             collect_repo_digest_conflicts(&[a, b], true),
             vec![DigestConflict {
-                repo: expected_repo,
-                kept: d_v1.digest().clone(),
-                ignored: d_v2.digest().clone(),
+                repository: expected_repo,
+                identifiers: vec![d_v1.clone(), d_v2.clone()],
             }],
         );
+    }
+
+    /// Two tags of the same repository that resolve to the **same** digest are
+    /// not a conflict — `check_repo_digest_conflicts` returns `Ok`. Guards the
+    /// `test_env_same_digest_roots_ok` acceptance contract.
+    #[test]
+    fn same_digest_is_not_a_conflict() {
+        // Same repo "d", same digest '1' — two references to one version.
+        let one = Arc::new(make_install_info("d", '1', ResolvedPackage::new()));
+        let two = Arc::new(make_install_info("d", '1', ResolvedPackage::new()));
+
+        assert!(
+            collect_repo_digest_conflicts(&[one.clone(), two.clone()], false).is_empty(),
+            "two references to the same digest must not be reported as a conflict"
+        );
+        assert!(check_repo_digest_conflicts(&[one, two], false).is_ok());
+    }
+
+    /// Two explicit roots for the same repository at different digests are a
+    /// version conflict — `check_repo_digest_conflicts` returns
+    /// `Err(DependencyError::Conflict)` naming both identifiers. This is the
+    /// root-vs-root case the user reported (e.g. `cmake:4.1 cmake:4`).
+    #[test]
+    fn conflicting_roots_are_fatal() {
+        let d_v1 = pinned("d", '1');
+        let d_v2 = pinned("d", '2');
+        let expected_repo = crate::oci::Repository::from(&*d_v1);
+
+        let a = Arc::new(make_install_info("d", '1', ResolvedPackage::new()));
+        let b = Arc::new(make_install_info("d", '2', ResolvedPackage::new()));
+
+        match check_repo_digest_conflicts(&[a, b], false) {
+            Err(DependencyError::Conflict {
+                repository,
+                identifiers,
+            }) => {
+                assert_eq!(repository, expected_repo);
+                assert_eq!(identifiers, vec![d_v1, d_v2]);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    /// End-to-end: `compose` aborts with `Error::Dependency(Conflict)` when two
+    /// roots collide on the same repository at different digests. Locks the
+    /// behaviour behind `package env`/`exec`/`run`.
+    #[tokio::test]
+    async fn compose_errors_on_conflicting_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let a = Arc::new(make_install_info("d", '1', ResolvedPackage::new()));
+        let b = Arc::new(make_install_info("d", '2', ResolvedPackage::new()));
+
+        match compose(&[a, b], &store, false).await {
+            Err(crate::Error::Dependency(DependencyError::Conflict { identifiers, .. })) => {
+                assert_eq!(identifiers.len(), 2, "both colliding versions must be named");
+            }
+            Err(other) => panic!("expected Dependency(Conflict), got {other:?}"),
+            Ok(_) => panic!("expected Err(Dependency(Conflict)), got Ok"),
+        }
     }
 
     // ─ Item #10 — root-as-TC-dep emitted exactly once ─────────────────────────

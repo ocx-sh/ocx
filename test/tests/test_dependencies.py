@@ -12,6 +12,7 @@ from src.registry import fetch_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
 EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE); ocx maps clap errors here
+EXIT_DATA_ERR = 65  # DataError (sysexits EX_DATAERR); version conflict maps here
 
 
 # ---------------------------------------------------------------------------
@@ -1102,7 +1103,11 @@ def test_sealed_conflicting_deps_coexist(
 def test_public_conflicting_deps_error(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    """A depends on D v1 (exported), B depends on D v2 (exported): env A B warns."""
+    """A depends on D v1 (exported), B depends on D v2 (exported): env A B errors.
+
+    A single environment cannot expose two versions of D, so composition fails
+    with a DataError (65) naming the conflicting repository.
+    """
     d_repo = f"{unique_repo}_d"
     d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
     d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
@@ -1120,11 +1125,100 @@ def test_public_conflicting_deps_error(
     ocx.json("package", "install", "--select", b.short)
 
     result = ocx.run("package", "env", a.short, b.short, check=False)
-    assert result.returncode == 0, (
-        f"conflicting digests should warn, not error; got rc={result.returncode}: {result.stderr!r}"
+    assert result.returncode == EXIT_DATA_ERR, (
+        f"conflicting versions in one env must error with {EXIT_DATA_ERR}; "
+        f"got rc={result.returncode}: {result.stderr!r}"
     )
-    assert "conflicting" in result.stderr.lower(), (
-        f"expected 'conflicting' warning in stderr; got: {result.stderr!r}"
+    assert "conflicting versions" in result.stderr.lower(), (
+        f"expected 'conflicting versions' error in stderr; got: {result.stderr!r}"
+    )
+    assert d_repo in result.stderr, (
+        f"error must name the conflicting repository {d_repo!r}; got: {result.stderr!r}"
+    )
+
+
+def test_env_diamond_conflict_errors(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """A->B->D v1 and A->C->D v2 (all exported): `package env A` errors.
+
+    The single root A pulls two versions of D into one environment through the
+    diamond. Composition is fatal — this is the case the user flagged for
+    transitive deps resolved into the environment.
+    """
+    d_repo = f"{unique_repo}_d"
+    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
+    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
+
+    b = _push_with_deps(
+        ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, visibility="public")]
+    )
+    c = _push_with_deps(
+        ocx, f"{unique_repo}_c", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v2, visibility="public")]
+    )
+    a = _push_with_deps(
+        ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
+        deps=[_dep_entry(ocx, b, visibility="public"), _dep_entry(ocx, c, visibility="public")],
+    )
+
+    ocx.json("package", "install", "--select", a.short)
+
+    result = ocx.run("package", "env", a.short, check=False)
+    assert result.returncode == EXIT_DATA_ERR, (
+        f"diamond version conflict in one env must error with {EXIT_DATA_ERR}; "
+        f"got rc={result.returncode}: {result.stderr!r}"
+    )
+    assert "conflicting versions" in result.stderr.lower(), (
+        f"expected 'conflicting versions' error in stderr; got: {result.stderr!r}"
+    )
+
+
+def test_env_conflicting_roots_error(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """Two roots for one repo at different versions (e.g. `cmake:4.1 cmake:4`) error.
+
+    Regression for the reported bug: a misleading "ignoring" warning while both
+    versions were emitted. The two floating tags resolve to different digests,
+    so a single environment cannot expose both — composition fails with a
+    DataError (65) naming the repository.
+    """
+    repo = f"{unique_repo}_tool"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True)  # cascade -> 1.0.0, 1.0, 1, latest
+    make_package(ocx, repo, "2.0.0", tmp_path, new=False)  # cascade -> 2.0.0, 2.0, 2, latest
+
+    # `repo:1` and `repo:2` are distinct digests.
+    result = ocx.run("package", "env", f"{repo}:1", f"{repo}:2", check=False)
+    assert result.returncode == EXIT_DATA_ERR, (
+        f"two versions of one repo as roots must error with {EXIT_DATA_ERR}; "
+        f"got rc={result.returncode}: {result.stderr!r}"
+    )
+    assert "conflicting versions" in result.stderr.lower(), (
+        f"expected 'conflicting versions' error in stderr; got: {result.stderr!r}"
+    )
+    assert repo in result.stderr, (
+        f"error must name the conflicting repository {repo!r}; got: {result.stderr!r}"
+    )
+
+
+def test_env_same_digest_roots_ok(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """Two tags of one repo that resolve to the SAME digest compose without error.
+
+    `repo:1.0.0` and `repo:1` both point at the v1 digest (cascade), so they are
+    the same version — not a conflict.
+    """
+    repo = f"{unique_repo}_tool"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True)  # cascade -> 1.0.0, 1.0, 1, latest (same digest)
+
+    result = ocx.run("package", "env", f"{repo}:1.0.0", f"{repo}:1", check=False)
+    assert result.returncode == 0, (
+        f"two tags resolving to the same digest must not conflict; "
+        f"got rc={result.returncode}: {result.stderr!r}"
+    )
+    assert "conflicting" not in result.stderr.lower(), (
+        f"same-digest tags must not produce a conflict message; got: {result.stderr!r}"
     )
 
 
