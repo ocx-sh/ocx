@@ -1,6 +1,13 @@
 # install.ps1 - OCX installer for Windows
 # https://ocx.sh
 #
+# This is a thin bootstrap: it detects the architecture, downloads the
+# published release archive, verifies its checksum, and then hands off to the
+# downloaded binary's `ocx self setup`. `ocx self setup` owns everything that
+# touches the machine - the self-install into the package store, the per-shell
+# env shims under $OcxHome, and the managed PowerShell-profile activation
+# block. Run `ocx self setup --help` for the full setup contract.
+#
 # Usage:
 #   irm https://ocx.sh/install.ps1 | iex
 #   $env:OCX_NO_MODIFY_PATH = '1'; irm https://ocx.sh/install.ps1 | iex
@@ -241,75 +248,13 @@ function Get-LatestVersion {
     Err 'Could not determine latest version from GitHub.'
 }
 
-# --- Environment file creation ---
-
-function Create-EnvFile {
-    param([string]$OcxHome)
-
-    $envFile = Join-Path $OcxHome 'env.ps1'
-
-    # Thin shim that delegates to `ocx self activate --shell=powershell` at
-    # runtime.  Single-quoted here-string (@'...'@) prevents any PowerShell
-    # expansion at install time - content is byte-identical across users
-    # regardless of their OcxHome path.
-    #
-    # The exe-name probe below uses $env:OS, not $IsWindows: $IsWindows is a
-    # PowerShell 6+ automatic variable, undefined on Windows PowerShell 5.1, and
-    # referencing it throws under Set-StrictMode. $env:OS ('Windows_NT' on every
-    # Windows PowerShell, unset elsewhere) is StrictMode-safe to read. Keep the
-    # generated shim free of the literal "$IsWindows" token (an ASCII/token guard
-    # in test_install_sh.py enforces this).
-    $envContent = @'
-# Managed by ocx installer - do not edit.
-# Double-source guard - prevents PATH duplication on re-source.
-# Set before any side effects so re-source after partial failure also short-circuits.
-if ($env:_OCX_ENV_LOADED) { return }
-$env:_OCX_ENV_LOADED = '1'
-
-if (-not $env:OCX_HOME) {
-    # $env:USERPROFILE is null on Linux/macOS pwsh; fall back to $HOME so this
-    # shim works for PowerShell 7 on every platform, not just Windows.
-    $_ocxBase = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
-    $env:OCX_HOME = Join-Path $_ocxBase '.ocx'
-}
-
-# Binary name is platform-specific. $env:OS is 'Windows_NT' on every Windows
-# PowerShell (Desktop 5.1 + Core 7) and unset on Linux/macOS pwsh; reading an
-# unset $env: var is StrictMode-safe (yields $null). Forward slashes are
-# accepted by PowerShell on every platform.
-$_ocxExe = if ($env:OS -eq 'Windows_NT') { 'ocx.exe' } else { 'ocx' }
-$_ocxBin = Join-Path $env:OCX_HOME "symlinks/ocx.sh/ocx/cli/current/content/bin/$_ocxExe"
-if (Test-Path $_ocxBin -PathType Leaf) {
-    # Build args as an array so the completion flag is appended cleanly - never
-    # a $null/empty positional that clap would reject (Windows PowerShell 5.1
-    # passes a bare $null arg as an empty string).
-    # Request completions only on an interactive PowerShell 5.0+ session: legacy
-    # Windows PowerShell <5.0 cannot run clap's `using namespace` /
-    # `Register-ArgumentCompleter -Native` completion output, so it opts out with
-    # --no-completion while still emitting PATH + global env.
-    $_ocxArgs = @('self', 'activate', '--shell=powershell')
-    if ([Environment]::UserInteractive -and $PSVersionTable.PSVersion.Major -ge 5) {
-        $_ocxArgs += '--completion'
-    } else {
-        $_ocxArgs += '--no-completion'
-    }
-    $_ocxActivate = (& $_ocxBin @_ocxArgs 2>$null) | Out-String
-    # Guard $null/empty: Out-String of empty/failed output yields $null, and
-    # `Invoke-Expression $null` throws "Cannot bind argument ... is null".
-    if ($_ocxActivate) { Invoke-Expression $_ocxActivate }
-}
-Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
-'@
-
-    Set-Content -Path $envFile -Value $envContent -NoNewline
-}
-
 # --- OCX_HOME validation ---
 
-# Defence-in-depth: $OcxHome is embedded literally into env.ps1 and the
-# PowerShell profile inside double-quoted strings. Reject a path that is not
-# absolute, contains '..' components, or carries characters that could break
-# out of that quoting context (CWE-22 / CWE-78). Mirrors install.sh guards.
+# Defence-in-depth: $OcxHome reaches the env.ps1 shim and the PowerShell
+# profile activation block written by `ocx self setup`, embedded inside
+# double-quoted strings. Reject a path that is not absolute, contains '..'
+# components, or carries characters that could break out of that quoting
+# context (CWE-22 / CWE-78). Mirrors install.sh guards.
 function Assert-SafeOcxHome {
     param([string]$Path)
 
@@ -334,130 +279,37 @@ function Assert-SafeOcxHome {
     }
 }
 
-# --- Profile modification ---
+# --- Hand off to `ocx self setup` ---
 
-# Strip every OCX-managed fragment from profile lines:
-#   - the # BEGIN ocx ... # END ocx block (current form),
-#   - the legacy bare `# OCX` marker plus its following source line,
-#   - any stray legacy `ocx shell init`/`profile load` dot-source line.
-# Returns the cleaned line array. Mirrors install.sh remove_legacy_init_lines
-# + the block-strip awk, adapted to the marker shape older install.ps1 wrote.
-function Remove-OcxProfileLines {
-    param([string[]]$Lines)
-
-    $out = New-Object 'System.Collections.Generic.List[string]'
-    $inBlock = $false
-    $skipNext = $false
-
-    foreach ($line in $Lines) {
-        $trimmed = $line.Trim()
-
-        if ($trimmed -eq '# BEGIN ocx') { $inBlock = $true; continue }
-        if ($trimmed -eq '# END ocx') { $inBlock = $false; continue }
-        if ($inBlock) { continue }
-
-        if ($skipNext) {
-            $skipNext = $false
-            if ($trimmed -match '\.ocx[\\/](env|init)\.') { continue }
-        }
-
-        # Legacy bare marker written by older install.ps1; the OCX source line
-        # followed it directly.
-        if ($trimmed -eq '# OCX') { $skipNext = $true; continue }
-
-        # Defensive: a legacy ocx env/init dot-source that lost its marker.
-        if ($trimmed -match '\.ocx[\\/](env|init)\.[a-z0-9]+["'']?\s*\}?\s*$' -and
-            $trimmed -match '(^\.\s|Test-Path)') {
-            continue
-        }
-
-        $out.Add($line)
-    }
-
-    return , $out.ToArray()
-}
-
-function Modify-Profile {
-    param([string]$OcxHome)
-
-    $profilePath = $PROFILE.CurrentUserCurrentHost
-
-    # Source line guarded with Test-Path so deleting $OcxHome never makes the
-    # PowerShell profile error on startup (nvm fail-safe pattern).
-    if ($OcxHome -eq (Join-Path $env:USERPROFILE '.ocx')) {
-        $sourceLine = 'if (Test-Path "$env:USERPROFILE\.ocx\env.ps1") { . "$env:USERPROFILE\.ocx\env.ps1" }'
-    }
-    else {
-        $sourceLine = "if (Test-Path `"$OcxHome\env.ps1`") { . `"$OcxHome\env.ps1`" }"
-    }
-
-    $profileDir = Split-Path $profilePath -Parent
-    if ($profileDir -and -not (Test-Path $profileDir)) {
-        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
-    }
-
-    $existing = @()
-    if (Test-Path $profilePath) {
-        $raw = Get-Content $profilePath -ErrorAction SilentlyContinue
-        if ($null -ne $raw) { $existing = @($raw) }
-    }
-
-    # Migrate: drop any prior OCX block / legacy marker, then re-append a
-    # single canonical block. Stable across re-runs (idempotent by
-    # construction - output converges regardless of prior form).
-    $cleaned = @(Remove-OcxProfileLines -Lines $existing)
-    while ($cleaned.Count -gt 0 -and [string]::IsNullOrWhiteSpace($cleaned[$cleaned.Count - 1])) {
-        if ($cleaned.Count -eq 1) { $cleaned = @() }
-        else { $cleaned = $cleaned[0..($cleaned.Count - 2)] }
-    }
-
-    $block = @('', '# BEGIN ocx', $sourceLine, '# END ocx')
-    $final = @($cleaned) + $block
-
-    Set-Content -Path $profilePath -Value $final -Encoding UTF8
-    Say "Configured OCX in $profilePath"
-}
-
-# --- Success message ---
-
-function Print-Success {
+# Run the downloaded binary's `ocx self setup`, which owns the package-store
+# self-install, the per-shell env shims under $OcxHome, and the managed
+# PowerShell-profile activation block. The installer never writes those files
+# itself - `ocx self setup` is the single source of truth (see its --help).
+#
+# Global flags (e.g. --offline) precede the subcommand; subcommand flags (e.g.
+# --no-modify-path) follow it - clap parses them at different levels.
+function Invoke-SelfSetup {
     param(
-        [string]$InstalledVersion,
-        [string]$OldVersion = ''
+        [string]$Bin,
+        [string[]]$PreArgs = @(),
+        [string[]]$PostArgs = @()
     )
 
-    $ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { Join-Path $env:USERPROFILE '.ocx' }
-
-    Write-Host ''
-    if ($OldVersion -and $OldVersion -ne $InstalledVersion) {
-        Write-Host "  ocx upgraded: $OldVersion -> $InstalledVersion" -ForegroundColor Green
+    Say 'Running ocx self setup...'
+    $argList = @($PreArgs) + @('self', 'setup') + @($PostArgs)
+    & $Bin @argList
+    if ($LASTEXITCODE -ne 0) {
+        Err "'ocx self setup' failed - see the output above for details"
     }
-    else {
-        Write-Host "  ocx $InstalledVersion installed successfully!" -ForegroundColor Green
-    }
-
-    Write-Host @"
-
-  To get started, restart your shell or run:
-
-    . "$ocxHome\env.ps1"
-
-  Then verify with:
-
-    ocx about
-
-  To uninstall, remove the OCX home directory:
-
-    Remove-Item -Recurse -Force "$ocxHome"
-
-"@
 }
 
 # --- Test-mode install (CI / local dev) ---
 
 # Install a pre-built ocx.exe as the candidate, bypassing download + registry
 # bootstrap. Driven by $env:__OCX_TESTING_INSTALL_BINARY (double-underscore =
-# test-only, never a supported public knob).
+# test-only, never a supported public knob). After the candidate is placed,
+# `ocx self setup --offline` writes the env shims against it (offline because
+# no registry is reachable and the candidate is present).
 function Install-LocalTestBinary {
     param([string]$Source, [string]$OcxHome)
     if (-not (Test-Path $Source -PathType Leaf)) {
@@ -468,45 +320,6 @@ function Install-LocalTestBinary {
     New-Item -ItemType Directory -Path $candDir -Force | Out-Null
     Copy-Item -Path $Source -Destination (Join-Path $candDir 'ocx.exe') -Force
     Say "Installed to $candDir\ocx.exe"
-}
-
-# Shared post-acquisition tail: write env.ps1, optionally modify the profile,
-# export the CI path, and print the banner. Called by both the normal download
-# path and the __OCX_TESTING_INSTALL_BINARY test path so activation wiring is
-# identical regardless of how the candidate was placed.
-function Finalize-Install {
-    param([string]$OcxHome, [string]$InstalledVersion, [string]$OldVersion, [bool]$SkipProfile)
-
-    if (-not (Test-Path $OcxHome)) {
-        New-Item -ItemType Directory -Path $OcxHome -Force | Out-Null
-    }
-    Create-EnvFile -OcxHome $OcxHome
-
-    if ($SkipProfile) {
-        Say 'Skipping profile modification (OCX_NO_MODIFY_PATH).'
-    }
-    else {
-        try {
-            Modify-Profile -OcxHome $OcxHome
-        }
-        catch {
-            Warn "Failed to modify PowerShell profile: $($_.Exception.Message)"
-            Warn 'You can manually add OCX to your profile by running:'
-            Warn "  Add-Content `$PROFILE '`. `"$OcxHome\env.ps1`"'"
-        }
-    }
-
-    if ($env:GITHUB_PATH) {
-        $ghBinPath = Join-Path $OcxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
-        try {
-            Add-Content -Path $env:GITHUB_PATH -Value $ghBinPath
-        }
-        catch {
-            Warn 'Failed to write to $GITHUB_PATH.'
-        }
-    }
-
-    Print-Success -InstalledVersion $InstalledVersion -OldVersion $OldVersion
 }
 
 # --- Main ---
@@ -530,7 +343,7 @@ function Main {
 
     $noModifyPath = $env:OCX_NO_MODIFY_PATH
     $skipProfile = $false
-    if ($noModifyPath -match '^(1|true|yes)$') {
+    if ($noModifyPath -match '^(1|true|yes|on)$') {
         $skipProfile = $true
     }
 
@@ -541,16 +354,21 @@ function Main {
     $ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { Join-Path $_ocxBase '.ocx' }
     Assert-SafeOcxHome -Path $ocxHome
 
+    # Subcommand flags handed to `ocx self setup` (after the subcommand).
+    $postArgs = @()
+    if ($skipProfile) { $postArgs += '--no-modify-path' }
+
     # Test-mode hatch: install a locally-built ocx.exe as the candidate and skip
     # the download + registry bootstrap (and the network version probe) entirely.
+    # `ocx self setup --offline` then writes the env shims against that candidate.
     # $env:__OCX_TESTING_INSTALL_BINARY is test-only (double-underscore prefix).
     if ($env:__OCX_TESTING_INSTALL_BINARY) {
         Install-LocalTestBinary -Source $env:__OCX_TESTING_INSTALL_BINARY -OcxHome $ocxHome
         $candBin = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe'
-        $testVersion = ''
-        try { $testVersion = (& $candBin version 2>$null | Out-String).Trim() } catch {}
-        if (-not $testVersion) { $testVersion = 'local' }
-        Finalize-Install -OcxHome $ocxHome -InstalledVersion $testVersion -OldVersion '' -SkipProfile $skipProfile
+        Invoke-SelfSetup -Bin $candBin -PreArgs @('--offline') -PostArgs $postArgs
+        if ($env:GITHUB_PATH) {
+            Export-GitHubPath -OcxHome $ocxHome
+        }
         return
     }
 
@@ -567,13 +385,6 @@ function Main {
     # Validate version format
     if ($requestedVersion -notmatch '^\d+\.\d+\.\d+') {
         Err "Invalid version format: $requestedVersion (expected semver like 1.2.3)"
-    }
-
-    # Detect existing installation for upgrade messaging
-    $oldVersion = ''
-    $existingBin = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe'
-    if (Test-Path $existingBin) {
-        try { $oldVersion = & $existingBin version 2>$null } catch {}
     }
 
     Say "Installing ocx v$requestedVersion..."
@@ -655,18 +466,16 @@ function Main {
             Warn 'The new install may be shadowed - check your PATH order.'
         }
 
-        # Bootstrap: OCX installs itself into its own package store
-        Say 'Bootstrapping OCX into its own package store...'
-        & $bin --remote package install --select "ocx.sh/ocx/cli:$requestedVersion"
-        if ($LASTEXITCODE -ne 0) {
-            Err "Bootstrap failed: 'ocx --remote package install --select ocx.sh/ocx/cli:$requestedVersion'`nEnsure ocx v$requestedVersion is published to the ocx.sh registry."
-        }
-        $installDir = Join-Path $ocxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
-        Say "Installed to $installDir\ocx.exe"
+        # Hand off to `ocx self setup`: it self-installs the latest published
+        # ocx into the package store, writes the env.ps1 shim under $ocxHome,
+        # and (unless --no-modify-path) adds the managed activation block to the
+        # PowerShell profile. The downloaded archive binary drives its own
+        # bootstrap.
+        Invoke-SelfSetup -Bin $bin -PostArgs $postArgs
 
-        # Write env.ps1, modify the profile, export the CI path, and print the
-        # banner (shared with the __OCX_TESTING_INSTALL_BINARY test path).
-        Finalize-Install -OcxHome $ocxHome -InstalledVersion $requestedVersion -OldVersion $oldVersion -SkipProfile $skipProfile
+        if ($env:GITHUB_PATH) {
+            Export-GitHubPath -OcxHome $ocxHome
+        }
     }
     finally {
         # Cleanup temp directory
@@ -674,8 +483,21 @@ function Main {
     }
 }
 
+# Export the OCX bin directory to $GITHUB_PATH for GitHub Actions (Decision D2:
+# the CI sink stays in the installer, not `ocx self setup`).
+function Export-GitHubPath {
+    param([string]$OcxHome)
+    $ghBinPath = Join-Path $OcxHome 'symlinks\ocx.sh\ocx\cli\current\content\bin'
+    try {
+        Add-Content -Path $env:GITHUB_PATH -Value $ghBinPath
+    }
+    catch {
+        Warn 'Failed to write to $GITHUB_PATH.'
+    }
+}
+
 # Run Main only when executed (irm|iex, & ./install.ps1, iex (irm ...)) - skip
-# when dot-sourced (. ./install.ps1) so tests can call Create-EnvFile directly.
-# InvocationName is '.' only for dot-source; all execution forms give the
-# script name or empty string, never a literal dot.
+# when dot-sourced (. ./install.ps1) so tests can call helper functions
+# directly. InvocationName is '.' only for dot-source; all execution forms give
+# the script name or empty string, never a literal dot.
 if ($MyInvocation.InvocationName -ne '.') { Main }
