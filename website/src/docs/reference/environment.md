@@ -299,12 +299,28 @@ OCX_NO_PROJECT=1 ocx --project /ci/ocx.toml exec -- cmake --version
 
 `OCX_NO_PROJECT` is available only as an environment variable. A `--no-project` CLI flag would duplicate surface without solving a new problem — the hermetic-CI use case is best expressed via env vars, matching the [`OCX_NO_CONFIG`](#ocx-no-config) pattern.
 
+### `OCX_HOME` role in setup {#ocx-home-setup}
+
+When you run [`ocx self setup`][cmd-self-setup], it uses `OCX_HOME` (default `~/.ocx`) as the root for two things: the location it writes the five env shim files (`env.sh`, `env.fish`, `env.ps1`, `env.nu`, `env.elv`), and the directory that the shims themselves resolve at runtime via shell-native assign-if-unset syntax (e.g. `: "${OCX_HOME:=$HOME/.ocx}"`). Setting `OCX_HOME` to a non-default path before running `ocx self setup` puts all shims and the object store under that path consistently. See [`OCX_HOME`](#ocx-home) for the full data-directory reference.
+
 ### `OCX_NO_MODIFY_PATH` {#ocx-no-modify-path}
 
-When set to a [truthy value](#truthy-values), the install scripts (`install.sh` and `install.ps1`) will skip modifying shell profile files.
-Use this in CI environments or when you manage your `PATH` manually.
+When set to a [truthy value](#truthy-values), [`ocx self setup`][cmd-self-setup] writes the env shim files to `$OCX_HOME` but skips modifying any shell profile. Use this in CI environments or when you manage your `PATH` manually.
 
-The command line option `--no-modify-path` on the install scripts has the same effect.
+The equivalent CLI flag is `--no-modify-path` on `ocx self setup`.
+
+::: warning Truthy values follow `BooleanString` — not "any non-empty"
+`OCX_NO_MODIFY_PATH` is read through `ocx_lib::env::flag` using the same `BooleanString` parser as [`OCX_OFFLINE`](#ocx-offline) and [`OCX_REMOTE`](#ocx-remote). Only the values in the [truthy list](#truthy-values) (`1`, `y`, `yes`, `on`, `true`, case-insensitive) enable the flag. An unrecognized value (e.g. `OCX_NO_MODIFY_PATH=skip`) logs a warning and is treated as the default (`false` — profiles are modified). An empty string is also treated as false.
+:::
+
+**The opt-out is not remembered between runs.** A user who ran `ocx self setup --no-modify-path` once, then runs `ocx self setup` again without the flag, will have profiles modified. To make the opt-out persistent, either:
+
+- Export `OCX_NO_MODIFY_PATH=1` in your environment before every `ocx self setup` invocation, or
+- Pass `--no-modify-path` each time.
+
+A `$OCX_HOME/state/no-modify-path` sentinel file that persists the preference automatically is planned for a future release.
+
+**Profile-indirection limitation.** Shell activation through `$OCX_HOME/env.*` only takes effect inside interactive PowerShell and POSIX shell sessions that source the login profile. It does not register `OCX_HOME/bin` with Windows `HKCU\Environment` — `cmd.exe` sessions and GUI applications launched from the desktop do not inherit the PATH update until you open a new PowerShell or bash session and source the profile. If you need OCX tools visible to `cmd.exe` or GUI apps, set `PATH` via System Properties or a Group Policy, or use `ocx self setup` alongside a separate `HKCU\Environment` update.
 
 ### `OCX_NO_CODESIGN` {#ocx-no-codesign}
 
@@ -479,6 +495,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-index-update]: command-line.md#index-update
 [cmd-pinned-only-mode]: command-line.md#pinned-only-mode
 [cmd-self-activate]: command-line.md#self-activate
+[cmd-self-setup]: command-line.md#self-setup
 [cmd-self-update]: command-line.md#self-update
 [cmd-shell-completion]: command-line.md#shell-completion
 [indices-routing]: ../user-guide.md#indices-routing
