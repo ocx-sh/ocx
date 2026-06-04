@@ -23,7 +23,9 @@
 //! |---|---|---|---|---|
 //! | — | absent | — | `Fresh` | append fresh block |
 //! | = | = | = | `Current` | no-op |
+//! | = | absent | = | `Current` | no-op (hashless opener treated as v0-clean) |
 //! | ≠ | = (or different `v\d+`) | = | `FormatUpgraded` | rewrite to canonical v1 |
+//! | ≠ | absent | ≠ canonical | `FormatUpgraded` | silent overwrite — no marker means user edits undetectable |
 //! | any | present | ≠ marker | `Dirty` | skip unless `--force` |
 //!
 //! Line scanning is manual (O(n), CRLF-tolerant, collapses duplicates); the
@@ -123,9 +125,12 @@ fn dominant_is_crlf(content: &str) -> bool {
         return false;
     }
     // Count bare LF (LF not preceded by CR) to compare against CRLF runs.
+    // Strict `>`: a file with *more* CRLF than bare LF is CRLF-dominant. An
+    // equal-count mixed file defaults to LF (the else branch in
+    // `apply_line_ending`), matching the spec's "more `\r\n` than bare `\n`".
     let total_lf = content.matches('\n').count();
     let bare_lf = total_lf.saturating_sub(crlf);
-    crlf >= bare_lf
+    crlf > bare_lf
 }
 
 /// Find the (first) ocx-versioned fence in `content`.
@@ -508,6 +513,33 @@ mod tests {
         assert_eq!(parsed.marker.as_deref(), Some(canonical_hash(POSIX_BODY).as_str()));
     }
 
+    #[test]
+    fn no_marker_opener_with_canonical_body_is_current() {
+        // A hashless opener (regex captures the hash as optional, so None marker)
+        // whose body already matches what this binary writes → Current (no-op).
+        // Corresponds to truth-table row: canonical=  marker=absent  actual= → Current.
+        let content = format!("# >>> ocx v1 >>>\n{POSIX_BODY}\n{CLOSER}\n");
+        assert_eq!(classify(&content, POSIX_BODY), BlockState::Current);
+        // No write needed.
+        assert_eq!(apply(&content, POSIX_BODY, false).unwrap(), None);
+    }
+
+    #[test]
+    fn no_marker_opener_with_different_body_is_format_upgraded() {
+        // A hashless opener whose body does NOT match the canonical payload →
+        // FormatUpgraded: body was not user-edited (no marker to compare against),
+        // so silent rewrite is the safe action.
+        // Corresponds to truth-table row: canonical≠  marker=absent  actual≠canonical → FormatUpgraded.
+        let old_body = r#". "$OCX_HOME/old-env.sh""#;
+        let content = format!("# >>> ocx v1 >>>\n{old_body}\n{CLOSER}\n");
+        assert_eq!(classify(&content, POSIX_BODY), BlockState::FormatUpgraded);
+        let rewritten = apply(&content, POSIX_BODY, false).unwrap().expect("upgrade rewrite");
+        let parsed = find_block(&rewritten).unwrap();
+        assert_eq!(parsed.body, POSIX_BODY);
+        // After rewrite the opener carries the canonical hash.
+        assert_eq!(parsed.marker.as_deref(), Some(canonical_hash(POSIX_BODY).as_str()));
+    }
+
     // ── CRLF preservation (item 9b) ─────────────────────────────────
 
     #[test]
@@ -526,6 +558,29 @@ mod tests {
         let content = "export PATH=/bin\n";
         let result = apply(content, POSIX_BODY, false).unwrap().expect("append");
         assert!(!result.contains('\r'), "LF file must not gain CR");
+    }
+
+    #[test]
+    fn dominant_is_crlf_strict_tiebreak_on_equal_counts() {
+        // Equal counts of `\r\n` and bare `\n` must NOT be classified CRLF: the
+        // spec is "more `\r\n` than bare `\n`" (strict `>`), so an equal-count
+        // mixed file defaults to LF on write-back.
+        let content = "a\r\nb\nc\r\nd\n";
+        assert_eq!(content.matches("\r\n").count(), 2);
+        assert_eq!(content.matches('\n').count() - content.matches("\r\n").count(), 2);
+        assert!(
+            !dominant_is_crlf(content),
+            "equal CRLF/LF counts must not be CRLF-dominant"
+        );
+    }
+
+    #[test]
+    fn dominant_is_crlf_true_when_crlf_outnumbers_bare_lf() {
+        let content = "a\r\nb\r\nc\n";
+        assert!(
+            dominant_is_crlf(content),
+            "more CRLF than bare LF must be CRLF-dominant"
+        );
     }
 
     #[test]

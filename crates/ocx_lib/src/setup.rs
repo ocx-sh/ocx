@@ -38,12 +38,11 @@ const ELVISH_BODY: &str = r#"eval (slurp < "$OCX_HOME/env.elv")"#;
 /// an override-driven install works the same as the POSIX body.
 const POWERSHELL_BODY: &str = "$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { \"$env:USERPROFILE\\.ocx\" }\nif (Test-Path \"$_ocxHome\\env.ps1\") { . \"$_ocxHome\\env.ps1\" }";
 
-/// Version of the env shim contract this binary writes.
-///
-/// `ocx self update` compares this against the contract the on-disk shims
-/// declared; an advance prints the "run `ocx self setup`" advisory so existing
-/// users refresh their shell integration (Decision 4C).
-pub const SHIM_CONTRACT_VERSION: u32 = 1;
+// Version of the env shim contract this binary writes.
+// Reserved for Decision 4C (shim-contract compare in `ocx self update`);
+// not yet consumed at runtime.
+#[allow(dead_code)]
+const SHIM_CONTRACT_VERSION: u32 = 1;
 
 /// Options controlling a single `ocx self setup` run.
 #[derive(Debug, Clone, Default)]
@@ -113,7 +112,7 @@ pub async fn run(
 ) -> Result<SetupOutcome, error::Error> {
     // ── Phase 1: bootstrap (hard gate, runs first) ────────────────────────────
     // On `Err`, propagate now — zero shims written, zero profiles touched.
-    let bootstrap = bootstrap::ensure_self_installed(manager, options.dry_run).await?;
+    let bootstrap = bootstrap::ensure_self_installed(manager, file_structure, options.dry_run).await?;
 
     // ── Phase 2: env.* shims ─────────────────────────────────────────────────
     let ocx_home = file_structure.root();
@@ -151,14 +150,23 @@ pub async fn run(
     // ── Phase 5: best-effort conflicting-ocx scan (never fails setup) ─────────
     let conflicting_ocx = conflicting_ocx_on_path(file_structure).await;
 
+    // The "re-source your profile" hint only makes sense when this run actually
+    // changed something: a shim was (re)written, or a profile gained/upgraded a
+    // managed block. A pure no-op re-run (all shims current, every profile
+    // already Current) suppresses it so the user is not told to reload an
+    // unchanged machine.
+    let reload_hint = !shims_written.is_empty()
+        || profiles
+            .iter()
+            .any(|(_, outcome)| matches!(outcome, ProfileOutcome::Completed | ProfileOutcome::Migrated));
+
     Ok(SetupOutcome {
         bootstrap,
         shims_written,
         profiles,
         exec_policy_warning,
         conflicting_ocx,
-        // First-time activation always needs a re-source of the profile.
-        reload_hint: true,
+        reload_hint,
     })
 }
 
@@ -290,10 +298,14 @@ async fn read_to_string_or_empty(path: &Path) -> Result<String, error::Error> {
 async fn write_profile(path: &Path, content: &str) -> Result<(), error::Error> {
     let path = path.to_path_buf();
     let content = content.to_string();
+    // Clone the path for the join-error arm: the closure moves `path`, but a
+    // join error means the closure never ran, so its captured copy is gone —
+    // the error context must carry the path explicitly, not an empty one.
+    let join_path = path.clone();
     tokio::task::spawn_blocking(move || write_profile_blocking(&path, &content))
         .await
         .map_err(|join| error::Error::Io {
-            path: PathBuf::new(),
+            path: join_path,
             source: std::io::Error::other(join.to_string()),
         })?
 }
@@ -474,6 +486,41 @@ mod tests {
         let written = read(&path);
         assert!(written.contains("# >>> ocx v1"), "migration writes the v1 fence");
         assert!(!written.contains("# BEGIN ocx"), "the legacy block must be removed");
+    }
+
+    #[tokio::test]
+    async fn apply_fence_dirty_v1_fence_with_legacy_block_skips_dirty() {
+        // A profile that carries BOTH a dirty v1 fence (marker disagrees with
+        // the on-disk body) AND a legacy `# BEGIN ocx` block. `apply_fence`
+        // checks the dirty state BEFORE the legacy-strip detour, so without
+        // --force the run is a SkippedDirty no-op and the legacy block is left
+        // in place; with --force it falls through to the legacy path and
+        // migrates (legacy stripped, canonical v1 fence written).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+
+        let marker = rc_block::canonical_hash(POSIX_BODY);
+        let seeded = format!(
+            "# BEGIN ocx\n. \"$OCX_HOME/env.sh\"\n# END ocx\n# >>> ocx v1 {marker} >>>\n. \"$OCX_HOME/EDITED.sh\"\n# <<< ocx <<<\n"
+        );
+        std::fs::write(&path, &seeded).unwrap();
+
+        // Without --force: dirty wins; the file (legacy block included) is untouched.
+        let skipped = apply_fence(&path, POSIX_BODY, false, false).await.unwrap();
+        assert_eq!(skipped, ProfileOutcome::SkippedDirty);
+        assert_eq!(
+            read(&path),
+            seeded,
+            "a dirty v1 fence must short-circuit before the legacy strip (no --force)"
+        );
+
+        // With --force: the legacy path runs; the block is migrated to canonical.
+        let migrated = apply_fence(&path, POSIX_BODY, true, false).await.unwrap();
+        assert_eq!(migrated, ProfileOutcome::Migrated);
+        let written = read(&path);
+        assert!(!written.contains("# BEGIN ocx"), "--force must strip the legacy block");
+        assert!(!written.contains("EDITED.sh"), "--force must replace the dirty body");
+        assert!(written.contains(POSIX_BODY), "--force must write the canonical body");
     }
 
     #[tokio::test]

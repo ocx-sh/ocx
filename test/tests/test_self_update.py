@@ -184,6 +184,131 @@ _skip_on_windows = pytest.mark.skipif(
 )
 
 
+# The five per-shell env shims `ocx self setup` / the 4C refresh hook writes
+# into $OCX_HOME (mirrors `_ENV_SHIMS` in test_self_setup.py).
+_ENV_SHIMS = ("env.sh", "env.fish", "env.ps1", "env.nu", "env.elv")
+
+
+def _publish_two_versions(ocx: OcxRunner, repo: str, tmp_path: Path) -> None:
+    """Publish stand-in ``<repo>:0.0.1`` and ``<repo>:0.0.2`` and index them.
+
+    Each stand-in ``bin/ocx`` answers ``--format json version`` with its own
+    version so ``query_installed_version`` can resolve the running version.
+    """
+    make_package(
+        ocx, repo, "0.0.1", tmp_path,
+        new=True, cascade=False, bins=["ocx"],
+        outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.1"})}},
+    )
+    make_package(
+        ocx, repo, "0.0.2", tmp_path,
+        new=False, cascade=False, bins=["ocx"],
+        outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.2"})}},
+    )
+    ocx.plain("index", "update", repo)
+
+
+def _run_self_update_via_seam(ocx: OcxRunner, repo: str) -> subprocess.CompletedProcess[str]:
+    """Run ``ocx --format json self update`` with the ``__OCX_SELF_IMAGE`` seam."""
+    env = dict(ocx.env)
+    env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
+    return subprocess.run(
+        [str(ocx.binary), "--format", "json", "self", "update"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+@_skip_on_windows
+def test_self_update_refreshes_env_shims(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    unique_repo: str,
+) -> None:
+    """After ``self update`` installs a newer version, the env.* shims exist.
+
+    Decision 4C behavior 1: a successful binary swap calls
+    ``setup::shims::refresh_shims``, which writes the five ``$OCX_HOME/env.*``
+    loader files (diff-gated). On a fresh OCX_HOME none exist before the update,
+    so all five must be present afterwards.
+    """
+    repo = unique_repo
+    _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    for shim in _ENV_SHIMS:
+        assert not (ocx_home / shim).exists(), f"{shim} must not exist before the update"
+
+    result = _run_self_update_via_seam(ocx, repo)
+    assert result.returncode == 0, (
+        f"self update must exit 0; rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert json.loads(result.stdout).get("status") == "installed", (
+        f"self update must report status='installed'; got: {result.stdout!r}"
+    )
+
+    for shim in _ENV_SHIMS:
+        assert (ocx_home / shim).is_file(), f"4C refresh must write {shim} after the binary swap"
+
+
+@_skip_on_windows
+def test_self_update_advisory_fires_on_shim_drift(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    unique_repo: str,
+) -> None:
+    """The ``run 'ocx self setup'`` advisory fires when a shim drifted.
+
+    Decision 4C behavior 3: pre-seed a stale ``env.sh`` whose bytes differ from
+    the canonical shim. The 4C refresh hook diff-gate detects the drift, rewrites
+    the shim, and emits the advisory on stderr.
+    """
+    repo = unique_repo
+    _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    ocx_home.mkdir(parents=True, exist_ok=True)
+    (ocx_home / "env.sh").write_text("# stale shim content that will be rewritten\n")
+
+    result = _run_self_update_via_seam(ocx, repo)
+    assert result.returncode == 0, (
+        f"self update must exit 0; rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "ocx self setup" in result.stderr, (
+        f"a drifted shim must trigger the 'run ocx self setup' advisory on stderr; got:\n{result.stderr}"
+    )
+
+
+@_skip_on_windows
+def test_self_update_does_not_touch_user_rc(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    unique_repo: str,
+) -> None:
+    """``self update`` never modifies a user shell profile.
+
+    Decision 4C behavior 2: the 4C refresh hook touches only the ocx-owned
+    ``$OCX_HOME/env.*`` shims; it must leave any user RC profile byte-identical.
+    """
+    repo = unique_repo
+    _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+
+    profile = tmp_path / "user_profile"
+    original = "# user content\nexport KEEP=1\n. \"$OCX_HOME/env.sh\"\n"
+    profile.write_text(original)
+
+    result = _run_self_update_via_seam(ocx, repo)
+    assert result.returncode == 0, (
+        f"self update must exit 0; rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    assert profile.read_text() == original, "self update must leave the user RC profile byte-identical"
+
+
 @_skip_on_windows
 def test_self_update_installs_newer_version(
     ocx: OcxRunner,

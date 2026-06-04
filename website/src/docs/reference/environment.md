@@ -36,15 +36,15 @@ The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by 
 
 ### Shell Activation Files {#shell-activation-files}
 
-The installer writes one thin shim file per supported shell family into `$OCX_HOME`. Each shim calls [`ocx self activate`][cmd-self-activate] at shell start, which delegates runtime logic to the binary: `PATH` prepend, completion injection, and global toolchain env eval. Shim files are byte-identical across users — no install-time substitution occurs.
+The `ocx self setup` command writes one thin shim file per supported shell family into `$OCX_HOME`. Each shim calls [`ocx self activate`][cmd-self-activate] at shell start, which delegates runtime logic to the binary: `PATH` prepend, completion injection, and global toolchain env eval. Shim files are byte-identical across users — no install-time substitution occurs.
 
 | File | Shell | Mechanism | Wired by |
 |------|-------|-----------|----------|
-| `$OCX_HOME/env.sh` | bash, zsh, dash, ash, ksh | `. "$OCX_HOME/env.sh"` in login profile (block-marker) | Installer writes block-marker to `~/.bash_profile`, `~/.zprofile`, or `~/.profile` |
-| `$OCX_HOME/env.fish` | fish | `source "$OCX_HOME/env.fish"` from `conf.d` | Installer writes `~/.config/fish/conf.d/ocx.fish` |
-| `$OCX_HOME/env.nu` | nushell | Nushell autoload via `vendor/autoload/` | Installer writes `~/.local/share/nushell/vendor/autoload/ocx.nu` (auto-sourced) |
-| `$OCX_HOME/env.elv` | elvish | `eval (slurp < "$OCX_HOME/env.elv")` block-marker | Installer writes block-marker to `~/.config/elvish/rc.elv` |
-| `$OCX_HOME/env.ps1` | PowerShell | `. "$OCX_HOME/env.ps1"` in `$PROFILE` | Installer writes source line to `$PROFILE` |
+| `$OCX_HOME/env.sh` | bash, zsh, dash, ash, ksh | `. "$OCX_HOME/env.sh"` in login profile (block-marker) | `ocx self setup` writes block-marker to `~/.bash_profile`, `~/.zprofile`, or `~/.profile` |
+| `$OCX_HOME/env.fish` | fish | `source "$OCX_HOME/env.fish"` from `conf.d` | `ocx self setup` writes `~/.config/fish/conf.d/ocx.fish` |
+| `$OCX_HOME/env.nu` | nushell | Nushell autoload via `vendor/autoload/` | `ocx self setup` writes `~/.local/share/nushell/vendor/autoload/ocx.nu` (auto-sourced) |
+| `$OCX_HOME/env.elv` | elvish | `eval (slurp < "$OCX_HOME/env.elv")` block-marker | `ocx self setup` writes block-marker to `~/.config/elvish/rc.elv` |
+| `$OCX_HOME/env.ps1` | PowerShell | `. "$OCX_HOME/env.ps1"` in `$PROFILE` | `ocx self setup` writes source line to `$PROFILE` |
 
 Each shim resolves `OCX_HOME` at runtime using shell-native assign-if-unset syntax (e.g. `: "${OCX_HOME:=$HOME/.ocx}"`), so activation works in fresh shells where `OCX_HOME` has not been exported.
 
@@ -309,8 +309,8 @@ When set to a [truthy value](#truthy-values), [`ocx self setup`][cmd-self-setup]
 
 The equivalent CLI flag is `--no-modify-path` on `ocx self setup`.
 
-::: warning Truthy values follow `BooleanString` — not "any non-empty"
-`OCX_NO_MODIFY_PATH` is read through `ocx_lib::env::flag` using the same `BooleanString` parser as [`OCX_OFFLINE`](#ocx-offline) and [`OCX_REMOTE`](#ocx-remote). Only the values in the [truthy list](#truthy-values) (`1`, `y`, `yes`, `on`, `true`, case-insensitive) enable the flag. An unrecognized value (e.g. `OCX_NO_MODIFY_PATH=skip`) logs a warning and is treated as the default (`false` — profiles are modified). An empty string is also treated as false.
+::: warning Truthy values only — not "any non-empty"
+`OCX_NO_MODIFY_PATH` follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline) and [`OCX_REMOTE`](#ocx-remote). Only the values in the [truthy list](#truthy-values) (`1`, `y`, `yes`, `on`, `true`, case-insensitive) enable the flag. An unrecognized non-empty value (e.g. `OCX_NO_MODIFY_PATH=skip`) logs a warning and is treated as the default (`false` — profiles are modified). An empty string is also treated as false.
 :::
 
 **The opt-out is not remembered between runs.** A user who ran `ocx self setup --no-modify-path` once, then runs `ocx self setup` again without the flag, will have profiles modified. To make the opt-out persistent, either:
