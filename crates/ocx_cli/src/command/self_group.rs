@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::Subcommand;
 
 pub mod activate;
+pub mod setup;
 pub mod update;
 
 /// Subcommands for managing the OCX installation itself.
@@ -20,6 +21,12 @@ pub enum SelfGroup {
     /// completions (unless `OCX_NO_COMPLETIONS=1`), and evaluates the global
     /// toolchain env. Guarded on `$OCX_ACTIVATED` so re-sourcing is a no-op.
     Activate(activate::SelfActivate),
+    /// Create or refresh ocx shell integration. Installs the latest published
+    /// ocx into the content store, writes the per-shell env shims, and adds a
+    /// managed activation block to your shell profiles. Safe to re-run; pass
+    /// `--dry-run` to preview, `--no-modify-path` to skip profile edits, and
+    /// `--force` to overwrite a block you have edited (otherwise exit 82).
+    Setup(setup::SelfSetup),
     /// Update ocx itself to the latest released version. Without `--check`,
     /// installs the new binary if one is available. With `--check`, queries only
     /// and reports the result without installing. Both forms always bypass the
@@ -39,6 +46,7 @@ impl SelfGroup {
                     "SelfGroup::Activate is always dispatched via app.rs::App::run before Context::try_init — see should_check_for_update bypass list"
                 )
             }
+            SelfGroup::Setup(setup) => setup.execute(context).await,
             SelfGroup::Update(update) => update.execute(context).await,
         }
     }
