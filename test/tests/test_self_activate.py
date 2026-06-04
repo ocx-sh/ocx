@@ -760,23 +760,16 @@ echo '# noop'
 # `--completion` flag left installed bash/zsh users with no completions.
 # ---------------------------------------------------------------------------
 
-INSTALL_SH = Path(__file__).resolve().parents[2] / "website" / "src" / "public" / "install.sh"
-
-
-def _install_sh_functions() -> str:
-    """install.sh body with the trailing ``main "$@"`` invocation stripped, so
-    sourcing loads the helper functions without running the network installer."""
-    lines = INSTALL_SH.read_text().splitlines()
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if lines and lines[-1].strip().startswith("main"):
-        lines.pop()
-    return "\n".join(lines)
-
-
 def _generate_real_env_sh(ocx_binary: Path, ocx_home: Path) -> tuple[Path, dict[str, str]]:
     """Symlink the real ocx binary into the install layout, run the REAL
-    install.sh ``create_env_sh``, and return ``(env.sh path, clean source env)``.
+    ``ocx self setup`` to write the env shims, and return
+    ``(env.sh path, clean source env)``.
+
+    Runs ``ocx --offline self setup --no-modify-path``: the symlinked binary is
+    recognised as already installed (offline bootstrap = AlreadyPresent), so
+    setup writes the env.* shims without touching the network or any RC file.
+    This is the production path for env.sh generation after the install scripts
+    were slimmed to delegate scaffold creation to the binary.
 
     The returned env carries only HOME/OCX_HOME/PATH — deliberately NOT
     ``_OCX_ENV_LOADED``, whose presence would make env.sh's double-source guard
@@ -793,12 +786,12 @@ def _generate_real_env_sh(ocx_binary: Path, ocx_home: Path) -> tuple[Path, dict[
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
     }
     gen = subprocess.run(
-        ["sh", "-c", f"{_install_sh_functions()}\ncreate_env_sh"],
+        [str(ocx_binary), "--offline", "self", "setup", "--no-modify-path"],
         capture_output=True,
         text=True,
         env=env,
     )
-    assert gen.returncode == 0, f"create_env_sh must succeed; stderr:\n{gen.stderr}"
+    assert gen.returncode == 0, f"ocx self setup must succeed; stderr:\n{gen.stderr}"
     env_sh = ocx_home / "env.sh"
     assert env_sh.is_file(), f"env.sh must be generated at {env_sh}"
     return env_sh, env
