@@ -90,6 +90,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::package::error::Error as PackageError;
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::project::error::Error as ProjectError;
+    use crate::setup::error::Error as SetupError;
     use crate::utility::fs::{EmptyOrAbsentError, SameFilesystemError, SymlinkWalkError};
     use crate::utility::singleflight::Error as SingleflightError;
 
@@ -127,6 +128,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(PackageError);
     try_downcast!(ProjectError);
     try_downcast!(SingleflightError);
+    try_downcast!(SetupError);
 
     // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
     // for it (orphan rule). Only `PermissionDenied` maps to a specific code;
@@ -440,6 +442,37 @@ mod tests {
             ExitCode::TempFail,
             "CapacityExceeded must map to TempFail(75)"
         );
+    }
+
+    // ── setup::error::Error routing ──────────────────────────────────────────
+
+    #[test]
+    fn setup_io_error_maps_to_io_error() {
+        // Plan contract 6: setup::Error::Io → IoError (74).
+        let err = crate::setup::error::Error::Io {
+            path: PathBuf::from("/home/dev/.bashrc"),
+            source: std::io::Error::other("write failure"),
+        };
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    #[test]
+    fn setup_subprocess_error_maps_to_unavailable() {
+        // Plan contract 6: setup::Error::Subprocess → Unavailable (69).
+        let err = crate::setup::error::Error::Subprocess(std::io::Error::other("pwsh failed"));
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    #[test]
+    fn setup_bootstrap_error_delegates_to_inner_offline() {
+        // Plan contract 6: setup::Error::Bootstrap delegates to the inner
+        // package-manager error. An offline-mode bootstrap failure classifies
+        // to OfflineBlocked (81) via the inner cause, not a setup-specific code.
+        let identifier = crate::oci::Identifier::new_registry("ocx/cli", "ocx.sh");
+        let inner = PackageError::new(identifier, PackageErrorKind::Internal(crate::Error::OfflineMode));
+        let pm_err = crate::package_manager::error::Error::InstallFailed(vec![inner]);
+        let err = crate::setup::error::Error::Bootstrap(pm_err);
+        assert_eq!(classify(err), ExitCode::OfflineBlocked);
     }
 
     // ── Fall-through lock-in ─────────────────────────────────────────────────
