@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6] - 2026-06-07
+
+### Added
+
+- Show platform icons in package catalog *(website)*
+- Show manifest layers in default package inspect *(cli)*
+- Add setup module for shell scaffold ownership *(lib)*
+- Add ocx self setup command + self-update shim refresh *(cli)*
+
+### Changed
+
+- Share canonical ocx_cli_identifier helper *(oci)*
+- Slim install scripts to delegate to ocx self setup *(install)*
+
+### Documentation
+
+- Document ocx self setup + bare-binary install path *(self-setup)*
+
+### Fixed
+
+- Read remote tag queries through to source *(oci)*
+- Address review-fix loop findings *(self-setup)*
+- Harden ZDOTDIR + document ocx-owned dedicated files *(self-setup)*
+- Report current path on install --select *(cli)*
+- Error on conflicting versions in one environment *(package)*
+
 ## [0.3.5] - 2026-06-02
 
 ### Added
@@ -21,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add short description to package push subcommand *(cli)*
 - Git-style plugin dispatch + correct not-found hint *(cli)*
 - Advance floating prerelease tag on every cascade build *(package)*
+
+### Release
+
+- V0.3.5
 
 ## [0.3.4] - 2026-05-31
 
@@ -405,6 +435,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.3.6]: https://github.com/ocx-sh/ocx/compare/v0.3.5..v0.3.6
 [0.3.5]: https://github.com/ocx-sh/ocx/compare/v0.3.4..v0.3.5
 [0.3.4]: https://github.com/ocx-sh/ocx/compare/v0.3.3..v0.3.4
 [0.3.3]: https://github.com/ocx-sh/ocx/compare/v0.3.2..v0.3.3
