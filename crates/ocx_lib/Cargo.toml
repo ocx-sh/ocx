@@ -73,13 +73,6 @@ starlark_derive.workspace = true
 # Host-allocated typed values (`OsValue`, `ArchValue`, `PlatformValue`,
 # `RunResultValue`) implement `allocative::Allocative` directly.
 allocative.workspace = true
-# `anyhow` is the CLI-boundary error carrier: `cli::classify_error` takes an
-# `&anyhow::Error` to map error chains to exit codes (the documented
-# library/CLI boundary pattern in quality-rust-errors), and the `script`
-# engine firewall uses it for the starlark evaluator boundary payload.
-# ocx_lib's PUBLIC error API stays `thiserror` (`ScriptError` /
-# `ScriptOutcomeKind`); anyhow never appears in a public structured-error type.
-anyhow = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -87,6 +80,16 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 junction.workspace = true
 windows-sys.workspace = true
+
+[dev-dependencies]
+# Test-only. `engine::classify` unit tests construct starlark `ErrorKind`
+# variants to lock the variant -> outcome table; every variant field is an
+# `anyhow::Error` (starlark_syntax 0.13 API), so the tests must name `anyhow` to
+# build them. Kept out of `[dependencies]` on purpose: ocx_lib's runtime error
+# surface is `thiserror` (quality-rust-errors.md), and a dev-dependency makes any
+# runtime `use anyhow` a compile error. Placement locked by
+# `script::dependency_hygiene_tests::anyhow_is_dev_dependency_only`.
+anyhow.workspace = true
 
 [lints]
 workspace = true

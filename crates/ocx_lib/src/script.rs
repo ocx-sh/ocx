@@ -317,3 +317,39 @@ mod firewall_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod dependency_hygiene_tests {
+    // ── anyhow stays test-only ───────────────────────────────────────────────
+    //
+    // The only code in ocx_lib that names `anyhow` is `engine::classify`'s unit
+    // tests: starlark's `ErrorKind` variants are all `anyhow::Error`-typed
+    // (starlark_syntax 0.13), so building them to exercise the variant -> outcome
+    // mapping requires `anyhow`. The library's runtime error surface is
+    // `thiserror` (quality-rust-errors.md: libs use thiserror, not anyhow).
+    //
+    // Keeping `anyhow` in `[dev-dependencies]` makes any runtime `use anyhow` a
+    // compile error — the strongest possible guard. This test locks the
+    // *placement* so a future edit cannot quietly promote it back to a normal
+    // dependency (where runtime use would compile again).
+
+    #[test]
+    fn anyhow_is_dev_dependency_only() {
+        let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .expect("read ocx_lib Cargo.toml");
+        let parsed: toml::Value = toml::from_str(&manifest).expect("parse ocx_lib Cargo.toml");
+
+        let in_runtime = parsed.get("dependencies").and_then(|t| t.get("anyhow")).is_some();
+        assert!(
+            !in_runtime,
+            "anyhow must not be a runtime dependency of ocx_lib; keep it in \
+             [dev-dependencies] (libs use thiserror — quality-rust-errors.md)"
+        );
+
+        let in_dev = parsed.get("dev-dependencies").and_then(|t| t.get("anyhow")).is_some();
+        assert!(
+            in_dev,
+            "anyhow should be a [dev-dependencies] entry (used by engine::classify tests)"
+        );
+    }
+}
