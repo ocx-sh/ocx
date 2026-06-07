@@ -127,6 +127,14 @@ When extending shell scenarios, reuse the harness in `test/src/scenarios/__init_
 
 A behaviour assertion belongs in **one** harness, not both. If a pytest case can be expressed verbatim as a shell scenario, prefer the scenario; if it needs structured output parsing or Windows-specific paths, keep it in pytest.
 
+## Shell-Activation Matrix (Docker)
+
+`test/tests/test_shell_activation.py` is a self-contained (stdlib + pytest only) module that proves `ocx self setup` activation survives an **unset `OCX_HOME`** in every login shell — the durable net for a regression class where the managed block sources `env.*` to locate ocx but `env.*` is what sets `OCX_HOME`. It runs the real activation path per shell in a "shell zoo" container and asserts: exit 0, no missing-`env.*` error, the ocx bin dir lands on `PATH`, and (for POSIX/fish/pwsh) a second source does not duplicate it.
+
+- **Files:** `test/docker/shells.Dockerfile` (Debian/glibc + nu/elvish/pwsh) and `test/docker/shells.alpine.Dockerfile` (Alpine/musl, busybox `ash`); `.github/workflows/shell-activation.yml` (build a static musl ocx once → run both image legs); the local entrypoint is `task test:shells` (Docker required).
+- **Self-contained:** resolves the binary from `$OCX_ACTIVATION_BINARY` / `$OCX_COMMAND` / `test/bin/ocx`, uses `shutil.which` to **skip-if-absent**, so a host `uv run pytest` stays green while the container runs the full matrix. It needs a clean child env (no `_OCX_ENV_LOADED` / `OCX_*` leakage) or env.sh's double-source guard short-circuits the prepend.
+- **Known gaps (xfail/skip, tracked separately):** nushell `source (expr)` is rejected at parse time (autoload limitation); the elvish "empty global toolchain" `slurp | eval` arity error is an orthogonal `self activate` template issue.
+
 ## Quality Gate
 
 During review-fix loops, run `task test:parallel` — not full `task verify`. Acceptance tests only; no Rust rebuild needed with `--no-build`.

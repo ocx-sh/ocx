@@ -1,0 +1,85 @@
+name: Shell Activation
+
+# Proves `ocx self setup` shell activation survives an unset OCX_HOME in every
+# supported login shell (bash/zsh/sh(dash)/ash/fish/nu/elvish/pwsh). The managed
+# block must source env.* to locate ocx, but env.* is what sets OCX_HOME — a
+# regression there breaks every shell start silently. This matrix runs the real
+# activation path in a "shell zoo" container per shell. Enforcement is PR (paths)
+# + push-to-main; it is intentionally NOT part of the release pipeline.
+#
+# The binary is built ONCE as a static musl artifact — that is what the OCI
+# release publishes and what `ocx self setup` actually pulls, and a static musl
+# binary runs on any Linux base regardless of glibc, so the same artifact drives
+# both the Debian and Alpine shell-zoo legs.
+
+on:
+  pull_request:
+    paths:
+      - crates/ocx_lib/src/setup.rs
+      - crates/ocx_lib/src/setup/**
+      - crates/ocx_lib/src/shim.rs
+      - test/tests/test_shell_activation.py
+      - test/docker/**
+      - test/taskfile.yml
+      - website/src/public/install.sh
+      - website/src/public/install.ps1
+      - .github/workflows/shell-activation.yml
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: Build ocx (musl)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Build ocx (x86_64-unknown-linux-musl)
+        uses: ./.github/actions/build-rust
+        with:
+          target: x86_64-unknown-linux-musl
+          use_zigbuild: "true"
+
+  activation:
+    name: ${{ matrix.image }}
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian-shells
+            dockerfile: docker/shells.Dockerfile
+          - image: alpine-shells
+            dockerfile: docker/shells.alpine.Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Download ocx binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ocx-x86_64-unknown-linux-musl
+          path: ocx-bin
+      - name: Make binary executable
+        run: chmod +x ocx-bin/ocx-x86_64-unknown-linux-musl
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Run all-shell activation matrix
+        run: |
+          task test:shells \
+            SKIP_BUILD=true \
+            SHELLS_IMAGE=${{ matrix.image }} \
+            SHELLS_DOCKERFILE=${{ matrix.dockerfile }} \
+            SHELLS_OCX_BINARY="${{ github.workspace }}/ocx-bin/ocx-x86_64-unknown-linux-musl"

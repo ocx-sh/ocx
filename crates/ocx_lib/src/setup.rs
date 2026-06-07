@@ -28,15 +28,45 @@ pub mod shims;
 pub use bootstrap::BootstrapOutcome;
 
 /// POSIX fence payload — sources the POSIX env shim.
-const POSIX_BODY: &str = r#". "$OCX_HOME/env.sh""#;
+///
+/// `$OCX_HOME` is *not* exported yet when the login profile runs this block:
+/// `env.sh` is the file that sets and exports it (`: "${OCX_HOME:=…}"`). So the
+/// fence cannot rely on `$OCX_HOME` to locate `env.sh` — a fresh login shell has
+/// it empty, and a bare `. "$OCX_HOME/env.sh"` then sources `. "/env.sh"` and
+/// fails ("No such file or directory") on every shell start. The
+/// `${OCX_HOME:-$HOME/.ocx}` form resolves the path *without* assigning or
+/// exporting (env.sh still owns the canonical `:=`/`export`), and the `-f`
+/// existence guard keeps the block silent when ocx is not installed.
+const POSIX_BODY: &str = r#"if [ -f "${OCX_HOME:-$HOME/.ocx}/env.sh" ]; then
+    . "${OCX_HOME:-$HOME/.ocx}/env.sh"
+fi"#;
 
 /// Elvish fence payload — slurps and evaluates the elvish env shim.
-const ELVISH_BODY: &str = r#"eval (slurp < "$OCX_HOME/env.elv")"#;
+///
+/// Mirrors the POSIX guard in elvish idiom. Elvish reads env vars via
+/// `$E:OCX_HOME` (it does NOT interpolate `$OCX_HOME` inside double quotes), so
+/// the value is resolved explicitly with `has-env` and plain string
+/// concatenation (`$E:HOME/.ocx`) before the `?(test -f …)` existence guard —
+/// the same chicken-and-egg fix: `env.elv` is what sets `OCX_HOME`, so the fence
+/// must locate it without depending on it. Concatenation is used instead of
+/// `path:join` because the latter needs a `use path` import that does not carry
+/// into the `eval`-ed shim scope.
+const ELVISH_BODY: &str = r#"var _ocx_home = (if (has-env OCX_HOME) { put $E:OCX_HOME } else { put $E:HOME/.ocx })
+if ?(test -f $_ocx_home/env.elv) {
+    eval (slurp < $_ocx_home/env.elv)
+}"#;
 
-/// PowerShell fence payload (plan contract 4). Keys off `$env:OCX_HOME` with a
-/// `$env:USERPROFILE\.ocx` fallback (PowerShell has no `:=` default-assign), so
-/// an override-driven install works the same as the POSIX body.
-const POWERSHELL_BODY: &str = "$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { \"$env:USERPROFILE\\.ocx\" }\nif (Test-Path \"$_ocxHome\\env.ps1\") { . \"$_ocxHome\\env.ps1\" }";
+/// PowerShell fence payload (plan contract 4). Resolves the ocx home *without*
+/// depending on `OCX_HOME` (the env.ps1 shim is what sets it), then existence-
+/// guards the source — the same chicken-and-egg fix as the POSIX body.
+///
+/// `$env:USERPROFILE` is null on Linux/macOS PowerShell 7, so it falls back to
+/// `$HOME` (mirroring the env.ps1 shim's `$_ocxBase`) — otherwise an unset
+/// `OCX_HOME` on non-Windows pwsh would resolve the home to `\.ocx` and never
+/// activate. `Join-Path` keeps the path separator correct on every platform.
+const POWERSHELL_BODY: &str = r#"$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ocx' } else { Join-Path $HOME '.ocx' }
+$_ocxEnv = Join-Path $_ocxHome 'env.ps1'
+if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 
 // Version of the env shim contract this binary writes.
 // Reserved for Decision 4C (shim-contract compare in `ocx self update`);
@@ -68,6 +98,29 @@ pub enum ProfileOutcome {
     Migrated,
     /// The managed block was edited by the user and left untouched (no `--force`).
     SkippedDirty,
+}
+
+/// True when a setup/heal run changed at least one managed block: a fresh or
+/// upgraded block was written ([`ProfileOutcome::Completed`]) or a legacy
+/// footprint was migrated ([`ProfileOutcome::Migrated`]).
+///
+/// Single source for the "re-source your profile" reload hint — consumed by the
+/// `self setup` run summary and the `self update` post-swap heal alike.
+pub fn profiles_changed(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
+    profiles
+        .iter()
+        .any(|(_, outcome)| matches!(outcome, ProfileOutcome::Completed | ProfileOutcome::Migrated))
+}
+
+/// True when at least one profile carried user edits inside the managed fence
+/// and was left untouched ([`ProfileOutcome::SkippedDirty`]).
+///
+/// Single source for the dirty signal — drives the `self setup` exit code (82)
+/// and the `self update` "run `ocx self setup --force`" advisory.
+pub fn profiles_dirty(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
+    profiles
+        .iter()
+        .any(|(_, outcome)| matches!(outcome, ProfileOutcome::SkippedDirty))
 }
 
 /// Aggregate result of an `ocx self setup` run.
@@ -136,7 +189,7 @@ pub async fn run(
 
     let mut profiles = Vec::with_capacity(targets.len());
     for target in targets {
-        let outcome = apply_target(&target, options.force, options.dry_run).await?;
+        let outcome = apply_target(&target, options.force, false, options.dry_run).await?;
         profiles.push((target.path, outcome));
     }
 
@@ -155,10 +208,7 @@ pub async fn run(
     // managed block. A pure no-op re-run (all shims current, every profile
     // already Current) suppresses it so the user is not told to reload an
     // unchanged machine.
-    let reload_hint = !shims_written.is_empty()
-        || profiles
-            .iter()
-            .any(|(_, outcome)| matches!(outcome, ProfileOutcome::Completed | ProfileOutcome::Migrated));
+    let reload_hint = !shims_written.is_empty() || profiles_changed(&profiles);
 
     Ok(SetupOutcome {
         bootstrap,
@@ -208,18 +258,56 @@ async fn resolve_targets(ocx_home: &Path, overrides: &[PathBuf]) -> Vec<ProfileT
 /// Fence targets run the RC-block state machine (with a legacy-migration
 /// detour); dedicated-file targets (fish/nushell) are fully rewritten with a
 /// diff-gate. On `dry_run`, the outcome is computed but nothing is written.
-async fn apply_target(target: &ProfileTarget, force: bool, dry_run: bool) -> Result<ProfileOutcome, error::Error> {
+///
+/// `heal_only` is the `ocx self update` post-swap mode (Decision 4C): it heals
+/// an existing ocx-owned block (FormatUpgraded rewrites, dirty stays skipped)
+/// but never *introduces* one — a profile with no ocx footprint is left alone,
+/// and an absent dedicated file is not created. This makes the update refresh
+/// implicitly respect an original `--no-modify-path` install.
+async fn apply_target(
+    target: &ProfileTarget,
+    force: bool,
+    heal_only: bool,
+    dry_run: bool,
+) -> Result<ProfileOutcome, error::Error> {
     match target.kind {
-        ProfileKind::PosixFence => apply_fence(&target.path, POSIX_BODY, force, dry_run).await,
-        ProfileKind::ElvishFence => apply_fence(&target.path, ELVISH_BODY, force, dry_run).await,
-        ProfileKind::PowerShellFence => apply_fence(&target.path, POWERSHELL_BODY, force, dry_run).await,
+        ProfileKind::PosixFence => apply_fence(&target.path, POSIX_BODY, force, heal_only, dry_run).await,
+        ProfileKind::ElvishFence => apply_fence(&target.path, ELVISH_BODY, force, heal_only, dry_run).await,
+        ProfileKind::PowerShellFence => apply_fence(&target.path, POWERSHELL_BODY, force, heal_only, dry_run).await,
         ProfileKind::DedicatedFile(DedicatedShell::Fish) => {
-            rewrite_dedicated(&target.path, shims::fish_conf_body(), dry_run).await
+            rewrite_dedicated(&target.path, shims::fish_conf_body(), heal_only, dry_run).await
         }
         ProfileKind::DedicatedFile(DedicatedShell::Nushell) => {
-            rewrite_dedicated(&target.path, shims::nu_autoload_body(), dry_run).await
+            rewrite_dedicated(&target.path, shims::nu_autoload_body(), heal_only, dry_run).await
         }
     }
+}
+
+/// Re-apply the managed activation block to every detected profile in
+/// **heal-only** mode, for the `ocx self update` post-swap hook (Decision 4C).
+///
+/// `ocx self setup` owns the managed RC block, so `ocx self update` must heal it
+/// after a binary swap — not only refresh the `env.*` shims. Heal-only means an
+/// already-present block whose body drifted (e.g. an old, pre-fix fence) is
+/// rewritten to canonical ([`ProfileOutcome::Completed`] / `Migrated`), a
+/// user-edited block is left untouched ([`ProfileOutcome::SkippedDirty`]), and a
+/// profile that never carried an ocx block is left exactly as-is
+/// ([`ProfileOutcome::NoOp`]) — so a `--no-modify-path` install stays untouched.
+///
+/// Auto-detects targets from the real environment (no `--profile` overrides),
+/// never forces over a dirty block, and never runs as a dry run.
+///
+/// # Errors
+///
+/// Returns [`error::Error`] if a profile read or write fails.
+pub async fn refresh_profiles(ocx_home: &Path) -> Result<Vec<(PathBuf, ProfileOutcome)>, error::Error> {
+    let targets = resolve_targets(ocx_home, &[]).await;
+    let mut profiles = Vec::with_capacity(targets.len());
+    for target in targets {
+        let outcome = apply_target(&target, false, true, false).await?;
+        profiles.push((target.path, outcome));
+    }
+    Ok(profiles)
 }
 
 /// Run the fence state machine against one profile file.
@@ -228,7 +316,13 @@ async fn apply_target(target: &ProfileTarget, force: bool, dry_run: bool) -> Res
 /// fence, upgrades the format, migrates a legacy footprint, skips a dirty block,
 /// or no-ops. Legacy artifacts (`# BEGIN ocx`, `shell init`, extensionless env)
 /// are stripped before the fresh fence is written → [`ProfileOutcome::Migrated`].
-async fn apply_fence(path: &Path, body: &str, force: bool, dry_run: bool) -> Result<ProfileOutcome, error::Error> {
+async fn apply_fence(
+    path: &Path,
+    body: &str,
+    force: bool,
+    heal_only: bool,
+    dry_run: bool,
+) -> Result<ProfileOutcome, error::Error> {
     let content = read_to_string_or_empty(path).await?;
     let state = rc_block::classify(&content, body);
 
@@ -238,8 +332,18 @@ async fn apply_fence(path: &Path, body: &str, force: bool, dry_run: bool) -> Res
         return Ok(ProfileOutcome::SkippedDirty);
     }
 
+    let has_legacy = rc_block::has_legacy_artifacts(&content);
+
+    // Heal-only (self update post-swap): never INTRODUCE a managed block where
+    // none exists. Only a profile that carries no ocx footprint at all (Fresh
+    // and no legacy artifacts) is skipped — a present-but-drifted block still
+    // heals (FormatUpgraded below), a legacy footprint still migrates.
+    if heal_only && state == rc_block::BlockState::Fresh && !has_legacy {
+        return Ok(ProfileOutcome::NoOp);
+    }
+
     // Legacy migration: strip the pre-v1 footprint, then append the fresh fence.
-    if rc_block::has_legacy_artifacts(&content) {
+    if has_legacy {
         let stripped = rc_block::strip_block(&content);
         if let Some(new_content) = rc_block::apply(&stripped, body, force)? {
             if !dry_run {
@@ -275,7 +379,19 @@ async fn apply_fence(path: &Path, body: &str, force: bool, dry_run: bool) -> Res
 /// `apply_fence`), never to these regenerated files — user customization belongs
 /// in the user's RC, not here. (Cross-model review 2026-06-04 flagged the
 /// asymmetry; resolution: documented intended ownership.)
-async fn rewrite_dedicated(path: &Path, body: &str, dry_run: bool) -> Result<ProfileOutcome, error::Error> {
+async fn rewrite_dedicated(
+    path: &Path,
+    body: &str,
+    heal_only: bool,
+    dry_run: bool,
+) -> Result<ProfileOutcome, error::Error> {
+    // Heal-only (self update post-swap): a dedicated file is ocx-owned, so an
+    // existing one is refreshed, but an ABSENT one is never created — a setup
+    // that never wrote it (e.g. --no-modify-path, or a different shell) stays
+    // untouched on update.
+    if heal_only && !crate::utility::fs::path_exists_lossy(path).await {
+        return Ok(ProfileOutcome::NoOp);
+    }
     let content = read_to_string_or_empty(path).await?;
     if content == body {
         return Ok(ProfileOutcome::NoOp);
@@ -421,7 +537,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".bashrc");
 
-        let outcome = apply_fence(&path, POSIX_BODY, false, false).await.unwrap();
+        let outcome = apply_fence(&path, POSIX_BODY, false, false, false).await.unwrap();
         assert_eq!(outcome, ProfileOutcome::Completed);
 
         let written = read(&path);
@@ -434,10 +550,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".bashrc");
 
-        apply_fence(&path, POSIX_BODY, false, false).await.unwrap();
+        apply_fence(&path, POSIX_BODY, false, false, false).await.unwrap();
         let first = read(&path);
 
-        let outcome = apply_fence(&path, POSIX_BODY, false, false).await.unwrap();
+        let outcome = apply_fence(&path, POSIX_BODY, false, false, false).await.unwrap();
         assert_eq!(outcome, ProfileOutcome::NoOp);
         assert_eq!(read(&path), first, "an idempotent re-run must not change the file");
     }
@@ -452,7 +568,7 @@ mod tests {
         let dirty = format!("# >>> ocx v1 {marker} >>>\n. \"$OCX_HOME/EDITED.sh\"\n# <<< ocx <<<\n");
         std::fs::write(&path, &dirty).unwrap();
 
-        let outcome = apply_fence(&path, POSIX_BODY, false, false).await.unwrap();
+        let outcome = apply_fence(&path, POSIX_BODY, false, false, false).await.unwrap();
         assert_eq!(outcome, ProfileOutcome::SkippedDirty);
         assert_eq!(
             read(&path),
@@ -470,7 +586,7 @@ mod tests {
         let dirty = format!("# >>> ocx v1 {marker} >>>\n. \"$OCX_HOME/EDITED.sh\"\n# <<< ocx <<<\n");
         std::fs::write(&path, &dirty).unwrap();
 
-        let outcome = apply_fence(&path, POSIX_BODY, true, false).await.unwrap();
+        let outcome = apply_fence(&path, POSIX_BODY, true, false, false).await.unwrap();
         assert_eq!(outcome, ProfileOutcome::Completed);
         let written = read(&path);
         assert!(
@@ -488,7 +604,7 @@ mod tests {
         // A legacy `# BEGIN ocx` / `# END ocx` block (format v0).
         std::fs::write(&path, "# BEGIN ocx\n. \"$HOME/.ocx/env.sh\"\n# END ocx\n").unwrap();
 
-        let outcome = apply_fence(&path, POSIX_BODY, false, false).await.unwrap();
+        let outcome = apply_fence(&path, POSIX_BODY, false, false, false).await.unwrap();
         assert_eq!(outcome, ProfileOutcome::Migrated);
         let written = read(&path);
         assert!(written.contains("# >>> ocx v1"), "migration writes the v1 fence");
@@ -513,7 +629,7 @@ mod tests {
         std::fs::write(&path, &seeded).unwrap();
 
         // Without --force: dirty wins; the file (legacy block included) is untouched.
-        let skipped = apply_fence(&path, POSIX_BODY, false, false).await.unwrap();
+        let skipped = apply_fence(&path, POSIX_BODY, false, false, false).await.unwrap();
         assert_eq!(skipped, ProfileOutcome::SkippedDirty);
         assert_eq!(
             read(&path),
@@ -522,7 +638,7 @@ mod tests {
         );
 
         // With --force: the legacy path runs; the block is migrated to canonical.
-        let migrated = apply_fence(&path, POSIX_BODY, true, false).await.unwrap();
+        let migrated = apply_fence(&path, POSIX_BODY, true, false, false).await.unwrap();
         assert_eq!(migrated, ProfileOutcome::Migrated);
         let written = read(&path);
         assert!(!written.contains("# BEGIN ocx"), "--force must strip the legacy block");
@@ -535,9 +651,107 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".bashrc");
 
-        let outcome = apply_fence(&path, POSIX_BODY, false, true).await.unwrap();
+        let outcome = apply_fence(&path, POSIX_BODY, false, false, true).await.unwrap();
         assert_eq!(outcome, ProfileOutcome::Completed);
         assert!(!path.exists(), "dry-run must not create the profile file");
+    }
+
+    // ── heal-only mode (self update post-swap, Decision 4C) ──────────────────
+
+    #[tokio::test]
+    async fn apply_fence_heal_only_fresh_profile_is_noop() {
+        // self update must never INTRODUCE a managed block: a profile with no ocx
+        // footprint is left exactly as-is, so an original --no-modify-path install
+        // stays untouched on update.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+        std::fs::write(&path, "export PATH=/bin\n").unwrap();
+
+        let outcome = apply_fence(&path, POSIX_BODY, false, true, false).await.unwrap();
+        assert_eq!(outcome, ProfileOutcome::NoOp);
+        assert_eq!(
+            read(&path),
+            "export PATH=/bin\n",
+            "heal-only must not add a block to a fresh profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_fence_heal_only_absent_profile_is_noop_and_uncreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+
+        let outcome = apply_fence(&path, POSIX_BODY, false, true, false).await.unwrap();
+        assert_eq!(outcome, ProfileOutcome::NoOp);
+        assert!(!path.exists(), "heal-only must not create an absent profile");
+    }
+
+    #[tokio::test]
+    async fn apply_fence_heal_only_heals_drifted_block() {
+        // A present, ocx-authored block whose body drifted from canonical (the
+        // old pre-fix fence, marker matches its own stale body) is the
+        // FormatUpgraded state — heal-only rewrites it to the guarded body. This
+        // is the 0.3.7+ self-update heal path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+        let old_body = ". \"$OCX_HOME/env.sh\"";
+        let marker = rc_block::canonical_hash(old_body);
+        std::fs::write(&path, format!("# >>> ocx v1 {marker} >>>\n{old_body}\n# <<< ocx <<<\n")).unwrap();
+
+        let outcome = apply_fence(&path, POSIX_BODY, false, true, false).await.unwrap();
+        assert_eq!(outcome, ProfileOutcome::Completed);
+        let written = read(&path);
+        assert!(
+            written.contains(POSIX_BODY),
+            "heal-only must rewrite a drifted block to the guarded body"
+        );
+        assert!(
+            !written.contains(". \"$OCX_HOME/env.sh\""),
+            "the old unguarded body must be replaced"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_fence_heal_only_dirty_block_stays_skipped() {
+        // A user-edited block is never clobbered, even under heal-only (no force).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+        let marker = rc_block::canonical_hash(POSIX_BODY);
+        let dirty = format!("# >>> ocx v1 {marker} >>>\n{POSIX_BODY}\necho injected\n# <<< ocx <<<\n");
+        std::fs::write(&path, &dirty).unwrap();
+
+        let outcome = apply_fence(&path, POSIX_BODY, false, true, false).await.unwrap();
+        assert_eq!(outcome, ProfileOutcome::SkippedDirty);
+        assert_eq!(read(&path), dirty, "heal-only must not clobber a user-edited block");
+    }
+
+    #[tokio::test]
+    async fn rewrite_dedicated_heal_only_absent_file_is_noop_and_uncreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conf.d").join("ocx.fish");
+
+        let outcome = rewrite_dedicated(&path, shims::fish_conf_body(), true, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ProfileOutcome::NoOp);
+        assert!(!path.exists(), "heal-only must not create an absent dedicated file");
+    }
+
+    #[tokio::test]
+    async fn rewrite_dedicated_heal_only_refreshes_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ocx.fish");
+        std::fs::write(&path, "# stale\n").unwrap();
+
+        let outcome = rewrite_dedicated(&path, shims::fish_conf_body(), true, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ProfileOutcome::Completed);
+        assert_eq!(
+            read(&path),
+            shims::fish_conf_body(),
+            "heal-only refreshes a present, ocx-owned dedicated file"
+        );
     }
 
     // ── rewrite_dedicated (fish/nushell full-rewrite) ────────────────────────
@@ -548,7 +762,7 @@ mod tests {
         let path = dir.path().join("conf.d").join("ocx.fish");
         let body = shims::fish_conf_body();
 
-        let first = rewrite_dedicated(&path, body, false).await.unwrap();
+        let first = rewrite_dedicated(&path, body, false, false).await.unwrap();
         assert_eq!(first, ProfileOutcome::Completed);
         assert_eq!(
             read(&path),
@@ -556,7 +770,7 @@ mod tests {
             "the dedicated file is fully written with the canonical body"
         );
 
-        let second = rewrite_dedicated(&path, body, false).await.unwrap();
+        let second = rewrite_dedicated(&path, body, false, false).await.unwrap();
         assert_eq!(second, ProfileOutcome::NoOp, "a byte-identical file is a no-op");
     }
 
@@ -565,9 +779,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ocx.nu");
 
-        let outcome = rewrite_dedicated(&path, shims::nu_autoload_body(), true).await.unwrap();
+        let outcome = rewrite_dedicated(&path, shims::nu_autoload_body(), false, true)
+            .await
+            .unwrap();
         assert_eq!(outcome, ProfileOutcome::Completed);
         assert!(!path.exists(), "dry-run must not create the dedicated file");
+    }
+
+    // ── profiles_changed / profiles_dirty predicates ────────────────────────
+
+    fn profile(outcome: ProfileOutcome) -> (PathBuf, ProfileOutcome) {
+        (PathBuf::from("/home/u/.bashrc"), outcome)
+    }
+
+    #[test]
+    fn profiles_changed_only_for_completed_or_migrated() {
+        assert!(profiles_changed(&[profile(ProfileOutcome::Completed)]));
+        assert!(profiles_changed(&[profile(ProfileOutcome::Migrated)]));
+        assert!(!profiles_changed(&[profile(ProfileOutcome::NoOp)]));
+        assert!(!profiles_changed(&[profile(ProfileOutcome::SkippedDirty)]));
+        assert!(!profiles_changed(&[]));
+    }
+
+    #[test]
+    fn profiles_dirty_only_for_skipped_dirty() {
+        assert!(profiles_dirty(&[profile(ProfileOutcome::SkippedDirty)]));
+        assert!(!profiles_dirty(&[profile(ProfileOutcome::Completed)]));
+        assert!(!profiles_dirty(&[profile(ProfileOutcome::NoOp)]));
+        assert!(!profiles_dirty(&[]));
+    }
+
+    #[test]
+    fn profiles_predicates_scan_all_entries() {
+        let mixed = [
+            profile(ProfileOutcome::NoOp),
+            profile(ProfileOutcome::Completed),
+            profile(ProfileOutcome::SkippedDirty),
+        ];
+        assert!(profiles_changed(&mixed), "a Completed anywhere counts as changed");
+        assert!(profiles_dirty(&mixed), "a SkippedDirty anywhere counts as dirty");
     }
 
     // ── home_env_from_environment ────────────────────────────────────────────

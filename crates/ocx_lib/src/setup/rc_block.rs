@@ -7,7 +7,9 @@
 //!
 //! ```text
 //! # >>> ocx v1 a1b2c3d4 >>>
-//! . "$OCX_HOME/env.sh"
+//! if [ -f "${OCX_HOME:-$HOME/.ocx}/env.sh" ]; then
+//!     . "${OCX_HOME:-$HOME/.ocx}/env.sh"
+//! fi
 //! # <<< ocx <<<
 //! ```
 //!
@@ -416,9 +418,16 @@ fn is_legacy_env_line(line: &str) -> bool {
 mod tests {
     use super::*;
 
-    const POSIX_BODY: &str = r#". "$OCX_HOME/env.sh""#;
-    const ELVISH_BODY: &str = r#"eval (slurp < "$OCX_HOME/env.elv")"#;
-    const POWERSHELL_BODY: &str = "$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { \"$env:USERPROFILE\\.ocx\" }\nif (Test-Path \"$_ocxHome\\env.ps1\") { . \"$_ocxHome\\env.ps1\" }";
+    const POSIX_BODY: &str = r#"if [ -f "${OCX_HOME:-$HOME/.ocx}/env.sh" ]; then
+    . "${OCX_HOME:-$HOME/.ocx}/env.sh"
+fi"#;
+    const ELVISH_BODY: &str = r#"var _ocx_home = (if (has-env OCX_HOME) { put $E:OCX_HOME } else { put $E:HOME/.ocx })
+if ?(test -f $_ocx_home/env.elv) {
+    eval (slurp < $_ocx_home/env.elv)
+}"#;
+    const POWERSHELL_BODY: &str = r#"$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ocx' } else { Join-Path $HOME '.ocx' }
+$_ocxEnv = Join-Path $_ocxHome 'env.ps1'
+if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 
     // ── canonical_hash ──────────────────────────────────────────────
 
@@ -590,7 +599,9 @@ mod tests {
         let rewritten = apply(&content, POSIX_BODY, false).unwrap().expect("rewrite");
         assert!(rewritten.contains("\r\n"));
         assert_eq!(rewritten.matches('\n').count(), rewritten.matches("\r\n").count());
-        assert!(rewritten.contains(POSIX_BODY));
+        // The multi-line body is re-emitted with the file's dominant CRLF endings,
+        // so its internal `\n` separators become `\r\n` — assert the CRLF form.
+        assert!(rewritten.contains(&POSIX_BODY.replace('\n', "\r\n")));
     }
 
     // ── duplicate / forward-version collapse (item 9a) ──────────────
@@ -711,6 +722,32 @@ mod tests {
         assert!(!has_legacy_artifacts("export PATH=/usr/bin\n"));
     }
 
+    #[test]
+    fn guarded_posix_body_is_not_matched_by_legacy_strippers() {
+        // Regression guard for the `$OCX_HOME`-unset fence fix: the new guarded
+        // POSIX body sources `${OCX_HOME:-$HOME/.ocx}/env.sh`, which must NOT
+        // collide with the legacy `\.ocx/env"?$` / `\.ocx/init\.` strippers — the
+        // `}` between `.ocx` and `/env.sh` breaks the `\.ocx/env` literal. If it
+        // did match, every clean re-run would be misclassified as a legacy
+        // migration instead of a no-op.
+        for line in POSIX_BODY.lines() {
+            assert!(
+                !is_legacy_env_line(line),
+                "guarded POSIX body line must not look like a legacy env source: {line:?}"
+            );
+            assert!(
+                !is_legacy_init_line(line),
+                "guarded POSIX body line must not look like a legacy init source: {line:?}"
+            );
+        }
+        // A profile carrying the freshly written guarded fence is not legacy.
+        let content = apply("", POSIX_BODY, false).unwrap().unwrap();
+        assert!(
+            !has_legacy_artifacts(&content),
+            "the guarded v1 fence must not trigger legacy migration"
+        );
+    }
+
     // ── reflowed-opener degradation ─────────────────────────────────
 
     #[test]
@@ -732,7 +769,8 @@ mod tests {
         let content = apply("", ELVISH_BODY, false).unwrap().unwrap();
         let parsed = find_block(&content).unwrap();
         assert_eq!(parsed.body, ELVISH_BODY);
-        assert!(content.contains(r#"eval (slurp < "$OCX_HOME/env.elv")"#));
+        assert!(content.contains("eval (slurp < $_ocx_home/env.elv)"));
+        assert!(content.contains("has-env OCX_HOME"));
         assert_eq!(classify(&content, ELVISH_BODY), BlockState::Current);
     }
 

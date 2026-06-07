@@ -76,6 +76,30 @@ tasks:
         vars:
           CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
 
+  shells:
+    desc: >-
+      Build the shell-zoo Docker image and run the all-shell activation matrix
+      (test_shell_activation.py) in-container — proves `ocx self setup` activation
+      survives an unset OCX_HOME in every shell. Requires Docker. Defaults to the
+      Debian/glibc image + the local glibc binary; CI overrides the vars for the
+      Alpine/musl leg.
+    vars:
+      SHELLS_IMAGE: '{{.SHELLS_IMAGE | default "ocx-shells-debian"}}'
+      SHELLS_DOCKERFILE: '{{.SHELLS_DOCKERFILE | default "docker/shells.Dockerfile"}}'
+      SHELLS_OCX_BINARY: '{{.SHELLS_OCX_BINARY | default .OCX_BINARY}}'
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - docker build -f {{.TASKFILE_DIR}}/{{.SHELLS_DOCKERFILE}} -t {{.SHELLS_IMAGE}} {{.TASKFILE_DIR}}/docker
+      - >-
+        docker run --rm
+        -v "{{.SHELLS_OCX_BINARY}}:/work/ocx:ro"
+        -v "{{.TASKFILE_DIR}}/tests/test_shell_activation.py:/work/test_shell_activation.py:ro"
+        -e OCX_ACTIVATION_BINARY=/work/ocx
+        {{.SHELLS_IMAGE}}
+        python3 -m pytest -v -p no:cacheprovider /work/test_shell_activation.py
+
   doc-scripts:list:
     desc: Print the doc-script discovery export as JSON (PT6 seam for website publish task)
     dir: '{{.TASKFILE_DIR}}'

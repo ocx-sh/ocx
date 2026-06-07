@@ -181,15 +181,15 @@ if (has-env _OCX_ENV_LOADED) {
 set-env _OCX_ENV_LOADED 1
 
 if (not (has-env OCX_HOME)) {
-    set-env OCX_HOME (path:join $E:HOME .ocx)
+    set-env OCX_HOME $E:HOME/.ocx
 }
 
-var _ocx_bin = (path:join $E:OCX_HOME symlinks/ocx.sh/ocx/cli/current/content/bin/ocx)
+var _ocx_bin = $E:OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx
 # rc.elv is sourced only for interactive Elvish sessions, so --completion is
 # unconditional here. The hook redirects stderr (2>/dev/null), so the flag -
 # not an isatty(2) probe - is what gates completion work.
 if ?(test -x $_ocx_bin) {
-    eval (e:$_ocx_bin self activate --shell=elvish --completion 2>/dev/null | slurp)
+    eval ($_ocx_bin self activate --shell=elvish --completion 2>/dev/null | slurp)
 }
 "#;
 
@@ -367,8 +367,7 @@ mod tests {
             "env.nu must fall back to a computed OCX_HOME at runtime"
         );
         assert!(
-            ENV_ELV.contains("(not (has-env OCX_HOME))")
-                && ENV_ELV.contains("set-env OCX_HOME (path:join $E:HOME .ocx)"),
+            ENV_ELV.contains("(not (has-env OCX_HOME))") && ENV_ELV.contains("set-env OCX_HOME $E:HOME/.ocx"),
             "env.elv must fall back to $HOME/.ocx at runtime"
         );
     }

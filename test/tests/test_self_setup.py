@@ -53,7 +53,16 @@ pytestmark = pytest.mark.skipif(
 _CANDIDATE_REL = Path("symlinks") / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin" / "ocx"
 
 # The canonical fenced-block body `ocx self setup` writes on POSIX.
-_FENCE_BODY = '. "$OCX_HOME/env.sh"'
+#
+# Byte-for-byte identical to `ocx_lib::setup::POSIX_BODY`. The block resolves
+# OCX_HOME with a `${OCX_HOME:-$HOME/.ocx}` fallback and an existence guard so a
+# fresh login shell (where OCX_HOME is not yet exported — env.sh is what exports
+# it) never sources `. "/env.sh"` and fails on startup.
+_FENCE_BODY = (
+    'if [ -f "${OCX_HOME:-$HOME/.ocx}/env.sh" ]; then\n'
+    '    . "${OCX_HOME:-$HOME/.ocx}/env.sh"\n'
+    "fi"
+)
 
 # The five env shims `ocx self setup` writes into $OCX_HOME.
 _ENV_SHIMS = ("env.sh", "env.fish", "env.ps1", "env.nu", "env.elv")

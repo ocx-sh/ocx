@@ -58,10 +58,11 @@ impl SelfUpdate {
         } else {
             let result = context.manager().self_update().await?;
             // After a successful binary swap, refresh the ocx-owned env.* shims
-            // so a shim-contract change reaches existing users (Decision 4C).
-            // This never touches user RC — only the diff-gated env.* files.
+            // AND heal the managed RC block in the user's shell profiles
+            // (Decision 4C). `ocx self setup` writes that block, so `ocx self
+            // update` must keep it current — not only the diff-gated env.* files.
             if let SelfUpdateResult::Installed { .. } = result {
-                refresh_shims_after_swap(&context).await;
+                refresh_shell_integration_after_swap(&context).await;
             }
             let exit = exit_code_for_update(&result);
             context.api().report(&SelfUpdateData::from_result(&result))?;
@@ -70,25 +71,35 @@ impl SelfUpdate {
     }
 }
 
-/// Refresh the ocx-owned `env.*` shims after `self update` swapped the binary
-/// (Decision 4C).
+/// Refresh ocx's shell integration after `self update` swapped the binary
+/// (Decision 4C): the ocx-owned `env.*` shims AND the managed RC block in the
+/// user's shell profiles.
 ///
-/// Diff-gated and destructive-by-design for `$OCX_HOME/env.*` only — it
-/// overwrites those files to the current canonical bytes without warning,
-/// discarding any manual edits to them. User RC profiles are never touched.
+/// **Shims** (`$OCX_HOME/env.*`) are diff-gated and destructive-by-design — they
+/// are overwritten to the current canonical bytes without warning. **Profiles**
+/// are healed in heal-only mode ([`setup::refresh_profiles`]): a drifted
+/// ocx-authored block is rewritten, a user-edited block is left alone, and a
+/// profile with no ocx block is never given one (so a `--no-modify-path` install
+/// stays untouched).
 ///
-/// Emits the `run 'ocx self setup'` advisory when EITHER (a) the refresh
-/// actually rewrote a shim (the on-disk shim contract drifted from what this
-/// binary now writes) OR (b) the refresh failed (the swap succeeded but the
-/// shims could not be refreshed — the user should re-run setup). A refresh
-/// failure is non-fatal to the update itself.
-async fn refresh_shims_after_swap(context: &crate::app::Context) {
-    // `refresh_shims` is blocking I/O — offload it off the async executor, as
-    // `setup::run` does for `write_shims`.
+/// Both steps are best-effort: a failure warns and advises re-running setup but
+/// never fails the update itself.
+///
+/// **Timing caveat:** this runs in the *old* binary still in memory, so the hop
+/// that swaps in a binary carrying a new block body does not heal via this path;
+/// the heal lands on the *next* `self update` (or a `self setup` re-run).
+async fn refresh_shell_integration_after_swap(context: &crate::app::Context) {
     let ocx_home = context.file_structure().root().to_path_buf();
-    let result = tokio::task::spawn_blocking(move || setup::shims::refresh_shims(&ocx_home)).await;
 
-    match classify_refresh(&result) {
+    // 1) env.* shims — `refresh_shims` is blocking I/O, offload it off the async
+    //    executor as `setup::run` does for `write_shims`.
+    let shim_result = tokio::task::spawn_blocking({
+        let ocx_home = ocx_home.clone();
+        move || setup::shims::refresh_shims(&ocx_home)
+    })
+    .await;
+
+    match classify_refresh(&shim_result) {
         RefreshAdvisory::None => {
             // Shims already current — nothing changed, no advisory.
         }
@@ -97,16 +108,43 @@ async fn refresh_shims_after_swap(context: &crate::app::Context) {
             advise_run_setup(context);
         }
         RefreshAdvisory::WriteFailed => {
-            if let Ok(Err(error)) = &result {
+            if let Ok(Err(error)) = &shim_result {
                 context.ui().warn(format!("failed to refresh ocx shims: {error}"));
             }
             advise_run_setup(context);
         }
         RefreshAdvisory::TaskPanicked => {
-            if let Err(join) = &result {
+            if let Err(join) = &shim_result {
                 // The blocking task panicked; the swap still succeeded.
                 context.ui().warn(format!("ocx shim refresh task failed: {join}"));
             }
+            advise_run_setup(context);
+        }
+    }
+
+    // 2) Managed RC block — heal-only, never introduces a block (Decision 4C).
+    // The two outcome predicates are the lib's single source (shared with
+    // `self setup`); a healed block and a dirty block can both occur in one run,
+    // so the advisories are independent, not mutually exclusive.
+    match setup::refresh_profiles(&ocx_home).await {
+        Ok(profiles) => {
+            if setup::profiles_changed(&profiles) {
+                context.ui().status(
+                    "Setup",
+                    "shell integration updated; re-source your profile or restart your shell",
+                );
+            }
+            if setup::profiles_dirty(&profiles) {
+                context.ui().status(
+                    "Setup",
+                    "a shell profile has local edits in the ocx block; run 'ocx self setup --force' to update it",
+                );
+            }
+        }
+        Err(error) => {
+            context
+                .ui()
+                .warn(format!("failed to refresh ocx shell profiles: {error}"));
             advise_run_setup(context);
         }
     }
@@ -208,6 +246,10 @@ mod tests {
             Err(join_error);
         assert_eq!(classify_refresh(&result), RefreshAdvisory::TaskPanicked);
     }
+
+    // The profile-heal advisory is no longer a bespoke enum: `self update`
+    // calls the shared `setup::profiles_changed` / `setup::profiles_dirty`
+    // predicates directly. Those predicates are unit-tested in `ocx_lib::setup`.
 
     /// `EX_TEMPFAIL` (sysexits 75) — the canonical numeric value reused across
     /// `Skipped` outcome tests.

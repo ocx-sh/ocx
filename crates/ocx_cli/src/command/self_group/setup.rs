@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::cli::ExitCode as OcxExitCode;
 use ocx_lib::env;
-use ocx_lib::setup::{self, ProfileOutcome, SetupOptions, SetupOutcome};
+use ocx_lib::setup::{self, SetupOptions, SetupOutcome};
 
 use crate::api::data::self_setup::SelfSetupData;
 
@@ -114,11 +114,7 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome) {
 /// rewrites the block (so no profile is `SkippedDirty`) and `dry_run` only
 /// reports would-skip — neither returns 82.
 fn exit_code_for(outcome: &SetupOutcome, force: bool, dry_run: bool) -> ExitCode {
-    let any_dirty = outcome
-        .profiles
-        .iter()
-        .any(|(_, profile_outcome)| *profile_outcome == ProfileOutcome::SkippedDirty);
-    if any_dirty && !force && !dry_run {
+    if setup::profiles_dirty(&outcome.profiles) && !force && !dry_run {
         return OcxExitCode::DirtyRcBlock.into();
     }
     ExitCode::SUCCESS

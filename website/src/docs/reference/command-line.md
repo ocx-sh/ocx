@@ -1599,6 +1599,8 @@ Queries the registry for the latest `major.minor.patch` release tag (rolling tag
 - **Installed** — a newer version was downloaded and selected.
 - **Skipped** — a soft failure (registry unreachable, version unparseable) prevented the check; the running binary is unchanged.
 
+After a successful install, `ocx self update` also refreshes the shell integration that `ocx self setup` owns: it regenerates the `$OCX_HOME/env.*` shims and re-applies the managed activation block in your shell profiles when its body has drifted from the current form. This refresh only *heals* an existing block — it never adds one where you have none (so a `--no-modify-path` install stays untouched) and never overwrites a block you have edited (it advises `ocx self setup --force` instead). When a block or shim is updated, it prints a one-line hint to re-source your profile.
+
 **Behavior with `--check`**
 
 Same registry probe, no installation. Exits 0 when the probe completes (including "already up to date" and "update available") — the result is printed to stdout. Exits 75 when the check is skipped (registry unreachable, version unparseable, throttled). Use `ocx --format json self update --check` for machine-readable output.

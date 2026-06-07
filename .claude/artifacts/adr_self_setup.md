@@ -241,12 +241,17 @@ write the new v1 marker. Idempotent thereafter.
 |------|------|
 | Always fresh | Reproduces uv#7319: surprising RC edits in a non-interactive update; clobber risk |
 
-**4C — Split: update rewrites ocx-owned shims, never touches user RC; advises if the contract changed.** (CHOSEN) `self update`, after the binary swap, idempotently rewrites `$OCX_HOME/env.*` (ocx owns them, no user edits expected). It never modifies user RC profiles. If the RC indirection contract version advanced, it prints one line: `run 'ocx self setup' to refresh shell integration`.
+**4C — Split: update rewrites ocx-owned shims AND heals the managed RC block; advises if anything changed.** (CHOSEN) `self update`, after the binary swap, idempotently rewrites `$OCX_HOME/env.*` (ocx owns them, no user edits expected).
+
+**Amended 2026-06-07 — heal the managed block, not only the shims.** `self setup` writes the managed RC block, so `self update` must keep it current — otherwise a profile carrying an old, broken block body (e.g. the pre-fix unguarded fence) is never healed by an update. The post-swap refresh now also re-applies the block in **heal-only** mode (`setup::refresh_profiles`): a present-but-drifted ocx-authored block is rewritten (FormatUpgraded), a user-edited block is left untouched (`SkippedDirty` → advise `ocx self setup --force`), and a profile with no ocx block is never given one — so a `--no-modify-path` install stays untouched. On a heal (or a shim drift / refresh failure) it prints a one-line advisory to re-source the profile.
+
+**Timing caveat (no overclaim).** The post-swap refresh runs in the *old* binary still in memory, so the hop that first ships a new block body does not heal via `self update` alone; that body lands by re-running `ocx self setup` (the curl|sh re-run delegates to it; `FormatUpgraded` rewrites the old body). Heal-on-update benefits subsequent upgrades.
 
 | Pros | Cons |
 |------|------|
-| Dynamic logic already rides the swap (env.sh → new `self activate`) | A rare RC-contract change needs an explicit user action |
+| Dynamic logic already rides the swap (env.sh → new `self activate`) | The very hop that introduces a new block body heals on the *next* update, not this one (old binary runs the refresh) |
 | Static shims refreshed safely (ocx-owned, diff-gated) | |
+| Managed block self-heals on update; dirty blocks never clobbered | |
 | Sidesteps uv#7319 entirely; matches research norm | |
 
 ## Decision Outcome
@@ -364,14 +369,26 @@ Exit codes: sysexits-aligned (ExitCode enum). Dirty-skip without --force → Exi
 
 ```sh
 # >>> ocx v1 a1b2c3d4 >>>
-. "$OCX_HOME/env.sh"
+if [ -f "${OCX_HOME:-$HOME/.ocx}/env.sh" ]; then
+    . "${OCX_HOME:-$HOME/.ocx}/env.sh"
+fi
 # <<< ocx <<<
 ```
 
 - Fence header carries `v1` (format version, for upgrade decisions) and
   `a1b2c3d4` (content hash of the block body, for dirty detection). Body is
   full-replaced between fences; `actual` hash recomputed from the body lines.
-- elvish: same fence around `eval (slurp < "$OCX_HOME/env.elv")`.
+- **Unset-`OCX_HOME` guard (amended 2026-06-07).** The body resolves
+  `${OCX_HOME:-$HOME/.ocx}` and existence-guards the source. The block sources
+  `env.sh`, which is the file that *sets/exports* `OCX_HOME` — so a bare
+  `. "$OCX_HOME/env.sh"` in a fresh login shell (where `OCX_HOME` is empty)
+  sources `. "/env.sh"` and fails on every shell start. The fallback resolves
+  the path *without* assigning/exporting (`env.sh` keeps the canonical `:=`).
+- elvish: same fence around `eval (slurp < $_ocx_home/env.elv)`, where
+  `_ocx_home` is resolved with `has-env`/string-concat (`$E:HOME/.ocx`) — elvish
+  reads env via `$E:` and `path:join` needs an import that does not cross the
+  `eval` boundary. The `env.elv` shim was repaired the same way (drop `path:join`
+  and the `e:$var` external-exec form, which does not interpolate).
 - Windows `$PROFILE`: same fence (PowerShell `# >>> … >>>` / `# <<< … <<<`
   comment lines) around an `$env:OCX_HOME`-rooted source line (item 4 — honors
   an `OCX_HOME` override, consistent with the POSIX body that also keys off
@@ -379,12 +396,16 @@ Exit codes: sysexits-aligned (ExitCode enum). Dirty-skip without --force → Exi
   local fallback for an unset `OCX_HOME`:
 
   ```powershell
-  $_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } else { "$env:USERPROFILE\.ocx" }
-  if (Test-Path "$_ocxHome\env.ps1") { . "$_ocxHome\env.ps1" }
+  $_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ocx' } else { Join-Path $HOME '.ocx' }
+  $_ocxEnv = Join-Path $_ocxHome 'env.ps1'
+  if (Test-Path $_ocxEnv) { . $_ocxEnv }
   ```
 
-  (Earlier draft used a hardcoded `$env:USERPROFILE\.ocx\env.ps1` — superseded by
-  the `$env:OCX_HOME`-with-fallback form so an override-driven install works.)
+  (Earlier draft used a hardcoded `$env:USERPROFILE\.ocx\env.ps1`, then an
+  `$env:USERPROFILE`-only fallback. Amended 2026-06-07: `$env:USERPROFILE` is
+  null on Linux/macOS PowerShell 7, so it now falls back to `$HOME` — mirroring
+  the `env.ps1` shim's `$_ocxBase` — and uses `Join-Path` for cross-platform
+  separators, so pwsh activates with `OCX_HOME` unset on every platform.)
 - fish / nushell: dedicated file, full-rewrite, no inline fence.
 
 ### Data / invariants
