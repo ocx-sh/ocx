@@ -1,0 +1,73 @@
+# Mirror spec: all 6 declared platforms (linux/{amd64,arm64} + darwin/{amd64,arm64}
+# + windows/{amd64,arm64}), all native — container legs were dropped after the
+# setup-ocx + `ocx run --` migration. Per-platform tests on windows.
+name: cmake
+target:
+  registry: ocx.sh
+  repository: cmake
+
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "cmake-.*-linux-x86_64\\.tar\\.gz"
+  linux/arm64:
+    - "cmake-.*-linux-aarch64\\.tar\\.gz"
+  darwin/amd64:
+    - "cmake-.*-macos-universal\\.tar\\.gz"
+  darwin/arm64:
+    - "cmake-.*-macos-universal\\.tar\\.gz"
+  windows/amd64:
+    - "cmake-.*-windows-x86_64\\.zip"
+  windows/arm64:
+    - "cmake-.*-windows-arm64\\.zip"
+
+asset_type:
+  type: archive
+  strip_components: 1
+
+skip_prereleases: true
+cascade: true
+
+tests:
+  - name: version
+    command: cmake --version
+  - name: smoke
+    command: bash ./tests/smoke.sh
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+  linux/arm64:
+    runner: ubuntu-24.04-arm
+  darwin/arm64:
+    runner: macos-latest
+    shell: bash
+  darwin/amd64:
+    runner: macos-latest
+    prefix: ["arch", "-x86_64"]
+  windows/amd64:
+    runner: windows-latest
+    shell: pwsh
+    tests:
+      - name: version
+        command: cmake.exe --version
+      - name: smoke
+        command: pwsh -File ./tests/smoke.ps1
+  windows/arm64:
+    runner: windows-latest
+    shell: pwsh
+    tests:
+      - name: version
+        command: cmake.exe --version
+
+ocx_mirror:
+  release_tag: v0.7.2
+
+notify:
+  discord:
+    webhook_secret: DISCORD_WEBHOOK_URL

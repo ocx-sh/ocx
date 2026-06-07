@@ -290,7 +290,7 @@ impl Sync {
 }
 
 /// Extract platform entries from an OCI manifest.
-fn extract_platforms(manifest: &ocx_lib::oci::Manifest) -> Vec<Platform> {
+pub(crate) fn extract_platforms(manifest: &ocx_lib::oci::Manifest) -> Vec<Platform> {
     match manifest {
         ocx_lib::oci::Manifest::ImageIndex(index) => index
             .manifests
@@ -302,7 +302,7 @@ fn extract_platforms(manifest: &ocx_lib::oci::Manifest) -> Vec<Platform> {
 }
 
 /// List upstream versions from the configured source.
-async fn list_upstream_versions(
+pub(crate) async fn list_upstream_versions(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
 ) -> Result<Vec<source::VersionInfo>, MirrorError> {

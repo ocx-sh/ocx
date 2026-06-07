@@ -9,3 +9,6 @@ version.workspace = true
 ocx_lib.workspace = true
 schemars.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

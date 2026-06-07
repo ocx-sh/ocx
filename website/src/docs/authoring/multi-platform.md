@@ -39,7 +39,17 @@ The recording also runs [`ocx index update`][cmd-index-update] and [`ocx package
 
 The default and recommended pattern: ship one `metadata.json` that covers every platform. Env entries, dependencies, entrypoints — all of them apply uniformly. The platform-specific bits live in the archive, not in the metadata.
 
-When platforms genuinely diverge — say, Windows needs different env keys, or a platform has different entry-point names — the [`ocx_mirror`][in-tree-mirror-spec] spec accepts a per-platform metadata override. Hand-driven publishers can pass `--metadata <path>` per push and use a different file each time. See [`mirrors/cmake/mirror.yml`][mirror-cmake]'s `metadata.platforms` block for the canonical example.
+When platforms genuinely diverge — say, Windows needs different env keys, or a platform has different entry-point names — the [`ocx_mirror`][in-tree-mirror-spec] spec accepts a per-platform metadata override. Hand-driven publishers can pass `--metadata <path>` per push and use a different file each time. In a spec, the `metadata` block names the default plus per-platform overrides:
+
+```yaml
+metadata:
+  default: metadata.json
+  platforms:
+    darwin/amd64: metadata-darwin.json
+    darwin/arm64: metadata-darwin.json
+    windows/amd64: metadata-windows.json
+    windows/arm64: metadata-windows.json
+```
 
 ## The Image Index Is Stable {#stability}
 
@@ -55,8 +65,7 @@ Each per-platform manifest's digest depends only on its own bytes. Push the *sam
 
 <!-- external -->
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
-[mirror-cmake]: https://github.com/ocx-sh/ocx/blob/main/mirrors/cmake/mirror.yml
-[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx/tree/main/mirrors
+[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
 
 <!-- commands -->
 [cmd-package-create]: ../reference/command-line.md#package-create
@@ -76,4 +85,4 @@ Each per-platform manifest's digest depends only on its own bytes. Push the *sam
 [authoring-bundle-sidecars]: ./bundle-anatomy.md#sidecars
 
 <!-- mirror pipeline -->
-[mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/mirrors
+[mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror

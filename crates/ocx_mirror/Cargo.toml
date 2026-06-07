@@ -23,12 +23,15 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
 schemars = { workspace = true, optional = true }
+chrono.workspace = true
 regex.workspace = true
 url.workspace = true
 octocrab.workspace = true
+quick-junit.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 hex.workspace = true
+tracing.workspace = true
 rustls.workspace = true
 
 [dev-dependencies]

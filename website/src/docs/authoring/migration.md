@@ -39,7 +39,51 @@ metadata:
   default: metadata.json
 ```
 
-`cascade` defaults to `true`; set `cascade: false` only for repositories that should not advance rolling tags. The in-tree examples under [`mirrors/`][in-tree-mirrors] cover every field the schema accepts. [`mirrors/cmake/mirror.yml`][mirror-cmake] is the canonical worked example: it covers the multi-platform asset matrix, version-range filtering, and per-platform metadata overrides for a non-trivial upstream.
+`cascade` defaults to `true`; set `cascade: false` only for repositories that should not advance rolling tags. A non-trivial worked example covers the multi-platform asset matrix, version-range filtering, and per-platform metadata overrides for a single upstream:
+
+```yaml
+name: cmake
+target:
+  registry: ocx.sh
+  repository: cmake
+
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+# Multi-platform asset matrix: each platform lists one or more regexes;
+# the union must resolve to exactly one asset filename per release.
+assets:
+  linux/amd64:
+    - "cmake-.*-linux-x86_64\\.tar\\.gz"      # >= 3.20.0
+    - "cmake-.*-Linux-x86_64\\.tar\\.gz"      # < 3.20.0
+  darwin/arm64:
+    - "cmake-.*-macos-universal\\.tar\\.gz"   # universal fat binary
+  windows/amd64:
+    - "cmake-.*-windows-x86_64\\.zip"         # >= 3.20.0
+    - "cmake-.*-win64-x64\\.zip"              # < 3.20.0
+
+asset_type:
+  type: archive
+  strip_components: 1
+
+# Per-platform metadata overrides for a non-trivial upstream.
+metadata:
+  default: metadata.json
+  platforms:
+    darwin/arm64: metadata-darwin.json
+    windows/amd64: metadata-windows.json
+
+# Version-range filtering: only mirror releases >= 3.31.0, max 10 per run.
+versions:
+  min: "3.31.0"
+  new_per_run: 10
+
+skip_prereleases: true
+cascade: true
+```
 
 ## Repackaging GitHub Releases {#github-releases}
 
@@ -53,7 +97,7 @@ linux/amd64:
   - "cmake-.*-Linux-x86_64\\.tar\\.gz"      # < 3.20.0
 ```
 
-The pipeline applies every regex and requires the union of matches to resolve to exactly one asset filename per release; ambiguous matches abort with `Ambiguous`. Two regexes that match the same upstream filename are fine; two regexes that match different filenames are an error. See [the CMake spec][mirror-cmake] for the full matrix.
+The pipeline applies every regex and requires the union of matches to resolve to exactly one asset filename per release; ambiguous matches abort with `Ambiguous`. Two regexes that match the same upstream filename are fine; two regexes that match different filenames are an error. See the CMake worked example [above](#mirror) for the full matrix.
 
 ## Repackaging Homebrew Formulae {#homebrew}
 
@@ -86,7 +130,6 @@ The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package des
 
 - [`ocx package describe` reference][cmd-package-describe]
 - [`ocx package info` reference][cmd-package-info]
-- [`mirrors/cmake/mirror.yml`][mirror-cmake] — the canonical worked example
 - [Building & pushing][authoring-building-pushing] — when running mirror commands by hand
 
 <!-- external -->
@@ -97,9 +140,7 @@ The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package des
 [cmake]: https://cmake.org/
 [apt-repos]: https://wiki.debian.org/DebianRepository/Format
 [oci-image-spec]: https://github.com/opencontainers/image-spec
-[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx/tree/main/mirrors
-[in-tree-mirrors]: https://github.com/ocx-sh/ocx/tree/main/mirrors
-[mirror-cmake]: https://github.com/ocx-sh/ocx/blob/main/mirrors/cmake/mirror.yml
+[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
 
 <!-- commands -->
 [cmd-package-describe]: ../reference/command-line.md#package-describe

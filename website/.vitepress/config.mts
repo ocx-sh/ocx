@@ -99,6 +99,7 @@ export default defineConfig({
             { text: "Configuration", link: "/docs/reference/configuration" },
             { text: "Environment", link: "/docs/reference/environment" },
             { text: "Metadata", link: "/docs/reference/metadata" },
+            { text: "mirror.yml", link: "/docs/reference/mirror-yml" },
           ],
         },
         {
