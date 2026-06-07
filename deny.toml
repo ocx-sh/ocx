@@ -2,6 +2,14 @@
 db-urls = ["https://github.com/rustsec/advisory-db"]
 version = 2
 yanked = "warn"
+ignore = [
+  # REMOVE when 'cargo tree -i derivative' is empty after a starlark family bump — transitive via starlark_lsp, RUSTSEC-2024-0388 informational-only.
+  "RUSTSEC-2024-0388",
+  # REMOVE when 'cargo tree -i paste' is empty after a starlark family bump — paste unmaintained (transitive via starlark), RUSTSEC-2024-0436 informational-only, no safe upgrade.
+  "RUSTSEC-2024-0436",
+  # REMOVE when 'cargo tree -i fxhash' is empty after a starlark family bump — fxhash unmaintained (transitive via starlark_map), RUSTSEC-2025-0057 informational-only.
+  "RUSTSEC-2025-0057",
+]
 
 [licenses]
 allow = [
@@ -17,6 +25,14 @@ allow = [
   "EPL-2.0",
   # Required transitively by dirs-sys → option-ext.
   "MPL-2.0",
+  # Permissive (OSI-approved, FSF Free/Libre). Required transitively via the
+  # starlark family: starlark → rustyline → clipboard-win → error-code.
+  # REMOVE when 'cargo tree -i error-code' is empty after a starlark family bump.
+  "BSL-1.0",
+  # Permissive (OSI-approved, FSF Free/Libre). Required transitively via the
+  # starlark family: starlark → debugserver-types → schemafy → Inflector.
+  # REMOVE when 'cargo tree -i inflector' is empty after a starlark family bump.
+  "BSD-2-Clause",
 ]
 confidence-threshold = 0.8
 
