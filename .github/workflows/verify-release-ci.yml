@@ -1,0 +1,62 @@
+name: Verify Release CI
+
+# Forbids manual edits to the cargo-dist-generated `release.yml`.
+#
+# `release.yml` is GENERATED from `dist-workspace.toml` (see
+# .claude/rules/workflow-release.md "Generated Workflows: Never Edit, Always
+# Regenerate"). Hand edits silently desync and are lost on the next
+# `dist generate`. This job runs `dist generate --check`, which regenerates the
+# CI in-memory and fails if the committed file differs.
+#
+# OPT-OUT (discouraged): set `allow-dirty = ["ci"]` in `dist-workspace.toml`.
+# cargo-dist then stops managing `release.yml` and this check passes regardless.
+# Only do this if release.yml is being maintained by hand on purpose — you lose
+# config-driven regeneration. It is intentionally NOT set in this repo.
+
+on:
+  pull_request:
+    paths:
+      - dist-workspace.toml
+      - .github/workflows/release.yml
+      - "**/Cargo.toml"
+  push:
+    branches: [main]
+    paths:
+      - dist-workspace.toml
+      - .github/workflows/release.yml
+      - "**/Cargo.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check-generated-ci:
+    name: dist generate --check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          # `dist generate` runs `cargo metadata`; the [patch.crates-io] entries
+          # point at git submodules, so the trees must be present to resolve.
+          submodules: recursive
+      - name: Install dist
+        # Pinned to the SAME version as `dist-workspace.toml` cargo-dist-version
+        # and the generated release.yml installer. A version skew would change
+        # the generated output and fail this check spuriously. Bump all three
+        # together. curl installer (not an action) matches the generated
+        # workflow's own install step exactly.
+        shell: bash
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+      - name: Check release.yml is in sync with dist-workspace.toml
+        shell: bash
+        run: |
+          if ! dist generate --check --mode ci; then
+            echo "::error::release.yml is out of sync with dist-workspace.toml. Do not edit release.yml by hand — edit dist-workspace.toml and run 'dist generate', then commit both."
+            exit 1
+          fi

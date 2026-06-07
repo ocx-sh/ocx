@@ -40,6 +40,11 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           matcher: true
+          # Defer warning-denial to [workspace.lints.rust]. The action's default
+          # RUSTFLAGS=-D warnings is global and also denies the path-vendored
+          # starlark fork (Cargo auto-caps registry/git deps, not path deps),
+          # turning its upstream lints into hard build errors.
+          rustflags: ""
       - name: Rust Cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
