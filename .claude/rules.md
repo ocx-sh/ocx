@@ -50,6 +50,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | CLI exit code design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) |
 | Env composition / visibility / entrypoints | [subsystem-package-manager.md](./rules/subsystem-package-manager.md), [subsystem-package.md](./rules/subsystem-package.md), website `reference/env-composition.md` |
 | Mirror / bundling | [subsystem-mirror.md](./rules/subsystem-mirror.md) |
+| Starlark host API (`ocx package test --script`, typed values) | [subsystem-script.md](./rules/subsystem-script.md), [subsystem-tests.md](./rules/subsystem-tests.md) |
 | Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
 | Releases | [workflow-release.md](./rules/workflow-release.md) |
 
@@ -76,6 +77,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | CLI commands/API | [subsystem-cli.md](./rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
 | Mirror tool | [subsystem-mirror.md](./rules/subsystem-mirror.md) | `crates/ocx_mirror/**` |
 | Acceptance tests | [subsystem-tests.md](./rules/subsystem-tests.md) | `test/**` |
+| Script host API | [subsystem-script.md](./rules/subsystem-script.md) | `crates/ocx_lib/src/script/**` |
 | Website/docs | [subsystem-website.md](./rules/subsystem-website.md) | `website/**` |
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md) | `.github/workflows/**` |
 | Dependencies | [subsystem-deps.md](./rules/subsystem-deps.md) | `Cargo.toml`, `deny.toml`, `.licenserc.toml` |
@@ -90,12 +92,13 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `Cargo.toml`, `crates/*/Cargo.toml`, `deny.toml`, `.licenserc.toml` | [subsystem-deps.md](./rules/subsystem-deps.md) |
 | `crates/ocx_lib/src/oci/**` | + [subsystem-oci.md](./rules/subsystem-oci.md) |
 | `crates/ocx_lib/src/file_structure/**`, `file_structure.rs`, `reference_manager.rs`, `symlink.rs` | + [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
+| `crates/ocx_lib/src/script/**`, `test/tests/test_package_test_script.py` | + [subsystem-script.md](./rules/subsystem-script.md) |
 | `crates/ocx_lib/src/package/**`, `package.rs` | + [subsystem-package.md](./rules/subsystem-package.md) |
 | `crates/ocx_lib/src/package_manager/**`, `package_manager.rs` | + [subsystem-package-manager.md](./rules/subsystem-package-manager.md) |
 | `crates/ocx_lib/src/package/metadata/**`, `crates/ocx_schema/**` | + [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
 | `crates/ocx_cli/src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [quality-cli-help.md](./rules/quality-cli-help.md) |
 | `crates/ocx_cli/src/api/**`, `command/**` | + [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
-| `crates/ocx_mirror/**`, `mirrors/**` | + [subsystem-mirror.md](./rules/subsystem-mirror.md) |
+| `crates/ocx_mirror/**` | + [subsystem-mirror.md](./rules/subsystem-mirror.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md) |
 | `website/**` | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), [product-context.md](./rules/product-context.md) |
@@ -134,6 +137,7 @@ Exempt from overlap detection (intended broad coupling):
 | `product-context.md` + `workflow-feature.md` | `.claude/artifacts/**` |
 | `subsystem-cli-api.md` + `subsystem-cli-commands.md` | `crates/ocx_cli/src/command/**` |
 | `workflow-feature.md` + `workflow-swarm.md` | `.claude/agents/**`, `.claude/skills/swarm-*/**` |
+| `subsystem-script.md` + `subsystem-tests.md` | `test/tests/test_package_test_script.py` |
 
 ## Skills by task topic
 
@@ -151,7 +155,6 @@ Exempt from overlap detection (intended broad coupling):
 | Adversarial review | `swarm-review` |
 | Releases | (see [workflow-release.md](./rules/workflow-release.md)) |
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
-| Mirror configuration | `ocx-create-mirror` |
 | Roadmap sync | `ocx-sync-roadmap` |
 | Commits (working phase) | `commit` |
 | Finalize branch for merge onto main | `finalize` |

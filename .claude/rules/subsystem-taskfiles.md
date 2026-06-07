@@ -21,7 +21,6 @@ paths:
 | `taskfiles/coverage.taskfile.yml` | cross-cutting | `coverage:` |
 | `taskfiles/duplo.taskfile.yml` | cross-cutting | `duplo:` |
 | `taskfiles/release.taskfile.yml` | cross-cutting | `release:` |
-| `taskfiles/mirror.taskfile.yml` | cross-cutting | `mirror:` |
 | `.claude/taskfile.yml` | `.claude/` subsystem | `claude:` |
 | `test/taskfile.yml` | acceptance tests | `test:` |
 | `website/taskfile.yml` | website | `website:` (includes schema, sbom, catalog, recordings internally) |
@@ -29,7 +28,6 @@ paths:
 | `website/sbom.taskfile.yml` | website | `website:sbom:` -- SBOM generation |
 | `website/catalog.taskfile.yml` | website | `website:catalog:` -- catalog generation |
 | `website/recordings.taskfile.yml` | website | `website:recordings:` -- terminal recordings |
-| `mirror-sdk-py/taskfile.yml` | mirror SDK | `mirror-sdk:` |
 
 ## Two-Phase Verify
 

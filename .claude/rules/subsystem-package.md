@@ -35,8 +35,7 @@ Tagged enum metadata (`Metadata::Bundle`) supports future format versions, no br
 | `bundle.rs` | `BundleBuilder`: tar archive creation with configurable compression |
 | `cascade.rs` | Cascade algebra: `decompose()`, `cascade()`, `resolve_cascade_tags()`, `push_with_cascade()` |
 | `tag.rs` | `Tag` enum: Latest, Internal(InternalTag), Version, Canonical, Other |
-| `version.rs` | `Version` struct: semver-inspired with build + prerelease, rolling tag support; `with_build(seg)` attaches a build-metadata segment (errors if no `X.Y.Z` core or build already present); re-exports `BuildTimestampFormat` + `build_timestamp` from `version/build_meta.rs` |
-| `version/build_meta.rs` | `BuildTimestampFormat` enum (`Datetime` / `Date` / `None`); `build_timestamp(format)` returns the UTC stamp string or `None`; `BuildMetaError` enum (`NoPatch` / `AlreadyPresent`) |
+| `version.rs` | `Version` struct: semver-inspired with build + prerelease, rolling tag support |
 | `install_info.rs` | `InstallInfo`: identifier + metadata + content path |
 | `description.rs` | Package description metadata (title, description, keywords, README, logo) |
 

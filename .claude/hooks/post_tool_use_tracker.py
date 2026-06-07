@@ -113,11 +113,6 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "the cargo-deny config",
     ),
     (
-        "mirrors/mirror-*.yml",
-        "- .claude/rules/subsystem-mirror.md (Mirror Configs section)",
-        "a mirror configuration",
-    ),
-    (
         ".claude/rules/subsystem-*.md",
         "- .claude/rules/arch-principles.md (Design Principles table, Cross-Cutting Modules)",
         "a subsystem context rule — verify architecture principles are still accurate",

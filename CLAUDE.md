@@ -47,6 +47,7 @@ Subsystem rules auto-load on path match. Read relevant one before work on that a
 | Package manager | [subsystem-package-manager.md](./.claude/rules/subsystem-package-manager.md) | `crates/ocx_lib/src/package_manager/**` |
 | CLI commands/API | [subsystem-cli.md](./.claude/rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
 | Mirror tool | [subsystem-mirror.md](./.claude/rules/subsystem-mirror.md) | `crates/ocx_mirror/**` |
+| Script host API | [subsystem-script.md](./.claude/rules/subsystem-script.md) | `crates/ocx_lib/src/script/**` |
 | Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
 | Website/docs | [subsystem-website.md](./.claude/rules/subsystem-website.md) | `website/**` |
 

@@ -97,6 +97,15 @@ tasks:
       - mkdir -p {{.ROOT_DIR}}/.claude/hooks/.state
       - date +%s > {{.ROOT_DIR}}/.claude/hooks/.state/commit-verified
 
+  verify:mark:
+    desc: |
+      Mark current tree state as verified (5-min TTL). Use after `task verify`
+      passed and only cherry-pick / rebase merge-context changed (no semantic
+      diff). Lets the pre-commit hook accept the commit without re-running
+      the full verify pipeline.
+    cmds:
+      - task: .verify:mark
+
   .verify:lint:
     internal: true
     deps:

@@ -25,9 +25,12 @@ All three run in CI via `.github/workflows/verify-licenses.yml`. Part of `task v
 ### Allowed Licenses (`deny.toml`)
 
 ```
-Apache-2.0, MIT, BSD-3-Clause, ISC, Unicode-3.0, CC0-1.0,
-CDLA-Permissive-2.0, MIT-0, Zlib, OpenSSL, EPL-2.0
+Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, CC0-1.0,
+CDLA-Permissive-2.0, MIT-0, Zlib, OpenSSL, EPL-2.0, MPL-2.0, BSL-1.0
 ```
+
+`MPL-2.0` (dirs-sys → option-ext), `BSL-1.0` + `BSD-2-Clause` (starlark
+family transitive) carry scoped REMOVE-condition comments in `deny.toml`.
 
 Confidence threshold: 0.8. Unknown registries denied, unknown git allowed (need for patched `oci-client`).
 
@@ -66,6 +69,18 @@ tokio = { version = "1", features = ["full"] }
 tokio = { workspace = true }
 ```
 
+## Manually-tracked exact pins
+
+Most deps use caret (`"1.2"`) ranges. A small set is **exact-pinned** (`=X.Y.Z`)
+because upstream does not promise API stability between releases. Treat any
+bump as a **breaking change**: it requires a manual review pass AND re-running
+the engine-isolation test (`crates/ocx_lib/src/script` firewall) before merge.
+
+| Crates | Pin | Reason / upgrade tripwire |
+|--------|-----|---------------------------|
+| `starlark`, `starlark_syntax`, `starlark_map`, `starlark_derive` | `=0.13.0` | starlark-rust has no API-stability promise between releases. The whole family is co-versioned and must move together. Sourced from crates.io. Any bump = breaking review + re-run the `script/` engine-isolation test + re-confirm the starlark-transitive advisory skips in `deny.toml` — `derivative` (RUSTSEC-2024-0388), `paste` (RUSTSEC-2024-0436), `fxhash` (RUSTSEC-2025-0057) — removing each whose `cargo tree -i <crate>` is then empty. |
+| `allocative` | `=0.3.4` | Part of starlark's public API surface, not a free choice: `StarlarkValue` is a sealed trait whose supertrait bound is `allocative::Allocative`, so every host-allocated typed value (`script/*_value.rs`) implements it against the exact allocative version the starlark family links. crates.io starlark 0.13.0 links allocative 0.3.4; this pin must track whatever the starlark family links — bump only together with the starlark family above; mismatch = the sealed-trait bound stops resolving. |
+
 ## Updating
 
 ```bash
@@ -85,7 +100,18 @@ Dependabot groups: `actions` (GitHub Actions), `rust-deps` (Cargo crates). PRs u
 
 ## Patched Dependencies
 
-`oci-client` patched to local git submodule at `external/rust-oci-client`. Submodule changes need upstream PRs. See memory note `feedback_submodule_upstream_pr.md`.
+Two deps are `[patch.crates-io]`'d to local git submodules under `external/`:
+
+| Crate(s) | Submodule | Why |
+|---|---|---|
+| `oci-client` | `external/rust-oci-client` | OCX-specific fixes; changes need upstream PRs (see `feedback_submodule_upstream_pr.md`) |
+| `docker_credential` | `external/docker_credential` | Credential-helper fixes |
+
+Each submodule is also in the root `[workspace] exclude` (so cargo can run each fork's own test suite without the outer workspace claiming ownership) and registered in `.gitmodules`.
+
+The starlark family (`starlark`, `starlark_syntax`, `starlark_map`, `starlark_derive`, `allocative`) is sourced from crates.io — no fork. The embedded evaluator (`ocx package test --script`) uses stock starlark; the former `ocx-sh/starlark-rust` fork existed only for an LSP server (`ocx lsp`) that has since been removed.
+
+**Path-patch lint gotcha.** Cargo applies `--cap-lints allow` only to registry/git deps, **not path deps**. A blanket `RUSTFLAGS=-D warnings` (e.g. `actions-rust-lang/setup-rust-toolchain`'s default) therefore promotes a vendored fork's upstream warnings to hard errors. OCX scopes warning-denial to `[workspace.lints.rust] warnings = "deny"` (members only) and sets `rustflags: ""` on the `setup-rust-toolchain` steps that compile the path-vendored forks (`verify-basic`, `build-windows-shims` gate, `deploy-website`). Adding another path-patched fork with warnings = same fix.
 
 ## Detecting Unused Dependencies
 
