@@ -101,6 +101,7 @@ def make_package(
     bins: list[str] | None = None,
     env: list[dict] | None = None,
     outputs: dict[str, dict[str, str]] | None = None,
+    bin_scripts: dict[str, str] | None = None,
     dependencies: list[dict] | None = None,
 ) -> PackageInfo:
     """Create, bundle, push, and index a test package.
@@ -128,6 +129,12 @@ def make_package(
         Maps binary name to ``{args: output}`` pairs.  When provided, the
         trap binary uses a ``case`` block to reproduce exact command output
         for specific argument patterns.  Multi-line output uses heredocs.
+    bin_scripts:
+        Maps binary name to a literal shell script body.  When provided for
+        a name, the exact content is written verbatim (and made executable)
+        instead of the generated trap script.  Takes precedence over
+        ``outputs`` for the same name.  Ignored on Windows (``outputs``
+        behaviour is Windows-incompatible anyway).
     """
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
@@ -147,9 +154,13 @@ def make_package(
     for name in bin_names:
         script = bin_dir / name
         bin_outputs = (outputs or {}).get(name)
+        bin_body = (bin_scripts or {}).get(name)
         if sys.platform == "win32":
             script = script.with_suffix(".bat")
             script.write_text(f"@echo {marker}\n")
+        elif bin_body is not None:
+            script.write_text(bin_body)
+            script.chmod(script.stat().st_mode | stat.S_IEXEC)
         elif bin_outputs:
             script.write_text(_build_trap_script(bin_outputs, marker))
             script.chmod(script.stat().st_mode | stat.S_IEXEC)

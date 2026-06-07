@@ -104,6 +104,7 @@ symlink = "0.1.0"
 dunce = "1.0.5"
 dirs = "6.0.0"
 which = "8.0.2"
+glob = "0.3"
 
 # Data structures + utility
 bytes = "1.11.1"
@@ -132,6 +133,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Threading",
     "Win32_Security",
 ] }
+
+# Testing
+quick-junit = "0.6"
 
 # Embedded Starlark interpreter for `ocx package test --script`.
 #

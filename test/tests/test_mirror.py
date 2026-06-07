@@ -227,6 +227,85 @@ def test_check_shows_would_mirror(
 
 
 # ---------------------------------------------------------------------------
+# Tests: pipeline prepare — per-platform version applicability
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_prepare_drops_excluded_platform(
+    mirror: MirrorRunner, tmp_path: Path, registry: str,
+    unique_mirror_repo: str, asset_server,
+):
+    """A platform with a ``broken`` exclude for a version is never prepared.
+
+    Declares two platforms (the host platform and the opposite arch) and marks
+    the non-host platform as ``broken`` for version 1.0.0. ``pipeline prepare``
+    must produce a bundle for the host platform only — the excluded
+    ``(version, platform)`` pair is never resolved, downloaded, or bundled.
+    """
+    tarball = _make_tarball(tmp_path, "test-tool", "marker-applicability")
+    host = current_platform()
+    host_os, host_arch = host.split("/")
+    other_arch = "arm64" if host_arch == "amd64" else "amd64"
+    other = f"{host_os}/{other_arch}"
+
+    host_asset = f"test-tool-{host_arch}.tar.gz"
+    other_asset = f"test-tool-{other_arch}.tar.gz"
+    shutil.copy(tarball, asset_server.dir / host_asset)
+    shutil.copy(tarball, asset_server.dir / other_asset)
+
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
+    spec_path = tmp_path / "mirror-applicability.yaml"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "name: test-tool",
+                "source:",
+                "  type: url_index",
+                "  versions:",
+                '    "1.0.0":',
+                "      assets:",
+                f'        "{host_asset}": "{asset_server.url(host_asset)}"',
+                f'        "{other_asset}": "{asset_server.url(other_asset)}"',
+                "assets:",
+                f'  "{host}":',
+                f"    - '^test-tool-{host_arch}\\.tar\\.gz$'",
+                f'  "{other}":',
+                f"    - '^test-tool-{other_arch}\\.tar\\.gz$'",
+                "target:",
+                f'  registry: "{registry}"',
+                f'  repository: "{unique_mirror_repo}"',
+                "metadata:",
+                f'  default: "{metadata_path}"',
+                "build_timestamp: none",
+                "platforms:",
+                f"  {host}:",
+                "    runner: ubuntu-latest",
+                f"  {other}:",
+                "    runner: ubuntu-latest",
+                "    exclude:",
+                '      - version: "1.0.0"',
+                '        reason: "known broken on this release"',
+                "        severity: broken",
+            ]
+        )
+        + "\n"
+    )
+
+    work_dir = mirror.temp_dir / "prep"
+    mirror.run("pipeline", "prepare", "--spec", str(spec_path), "--version", "1.0.0", "--work-dir", str(work_dir))
+
+    version_dir = work_dir / "1.0.0"
+    host_slug = host.replace("/", "_")
+    other_slug = other.replace("/", "_")
+    assert (version_dir / host_slug / "bundle.tar.xz").exists(), (
+        f"host platform {host} must be prepared; dir contents: {list(version_dir.iterdir())}"
+    )
+    assert not (version_dir / other_slug).exists(), (
+        f"excluded platform {other} must NOT be prepared (broken exclude for 1.0.0)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tests: sync — full lifecycle
 # ---------------------------------------------------------------------------
 

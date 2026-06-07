@@ -72,8 +72,7 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 
 <!-- external -->
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
-[mirror-cmake]: https://github.com/ocx-sh/ocx/blob/main/mirrors/cmake/mirror.yml
-[mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/mirrors
+[mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
 
 <!-- commands -->
 [cmd-package-create]: ../reference/command-line.md#package-create

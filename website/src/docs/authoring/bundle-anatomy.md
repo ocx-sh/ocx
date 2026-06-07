@@ -11,7 +11,7 @@ Most upstream toolchains ship a single root directory inside their archive — `
 
 OCX leaves the choice in your hands. Either pre-flatten the tree before bundling, or keep the upstream layout and tell OCX to strip the wrapper at install time via [`strip_components`][strip-components]. Repackaging upstream archives unchanged — the [migration patterns guide][authoring-migration] walks the most common transformations — avoids re-bundling cost and keeps your release pipeline as a thin wrapper over the upstream artifact.
 
-OCX assembles every installed package under `content/` ([three-tier storage][in-depth-storage]) — that is the post-install layout, not a publisher-side archive requirement. What goes inside the archive is up to you. The convention most archive-based mirrors follow is `bin/` (executables) plus any data the tool reads at runtime; pair that with `strip_components: 1` for upstreams that ship a single wrapper directory. Pre-built single binaries can ship without any wrapper at all (see `mirrors/lychee/` for the `strip_components: 0` case, or [`type: binary`][reference-bundle-binary] for sidecar-style downloads).
+OCX assembles every installed package under `content/` ([three-tier storage][in-depth-storage]) — that is the post-install layout, not a publisher-side archive requirement. What goes inside the archive is up to you. The convention most archive-based mirrors follow is `bin/` (executables) plus any data the tool reads at runtime; pair that with `strip_components: 1` for upstreams that ship a single wrapper directory. Pre-built single binaries can ship without any wrapper at all — set `strip_components: 0` so the binary lands at the archive root, or use [`type: binary`][reference-bundle-binary] for sidecar-style downloads.
 
 ## Stable Archives {#stable}
 
@@ -101,7 +101,7 @@ When repackaging upstream archives, [`strip_components`][strip-components] mirro
 - [Migration patterns][authoring-migration] — repackaging Homebrew, GitHub Releases, raw tarballs
 
 <!-- external -->
-[in-tree-mirrors]: https://github.com/ocx-sh/ocx/tree/main/mirrors
+[in-tree-mirrors]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
 [gnu-tar-strip]: https://www.gnu.org/software/tar/manual/html_section/transform.html
 
 <!-- commands -->
