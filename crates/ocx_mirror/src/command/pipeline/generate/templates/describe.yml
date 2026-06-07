@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - uses: ocx-sh/setup-ocx@v1
+      - uses: ocx-sh/setup-ocx@8cd2f38eed07c9b79aaed22e61f9ba6b36e967a3  # v1.2.2
       # Detect whether registry credentials are configured.
       # GitHub does not allow `secrets.*` in job-level `if:`, so we probe at
       # step level via env-var injection (secret value never echoed to logs).
