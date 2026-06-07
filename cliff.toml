@@ -71,5 +71,5 @@ sort_commits = "oldest"
 
 [bump]
 initial_tag = "v0.1.0"
-features_always_bump_minor = false # pre-1.0: features bump patch, not minor
+features_always_bump_minor = true
 breaking_always_bump_major = false # stay pre-1.0 until intentional
