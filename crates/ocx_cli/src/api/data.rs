@@ -16,6 +16,7 @@ pub mod paths;
 pub mod pull_dry_run;
 pub mod push;
 pub mod removed;
+pub mod script_run;
 pub mod self_setup;
 pub mod self_update;
 pub mod tag;
