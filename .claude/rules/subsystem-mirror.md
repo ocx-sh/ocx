@@ -153,6 +153,8 @@ concurrency:
 
 `pipeline generate ci` emits a third workflow, `.github/workflows/verify-generated.yml`, alongside `mirror.yml` + `describe.yml`. On `pull_request` + push to `main` it runs `ocx-mirror pipeline generate ci --check` (called directly — setup-ocx activates the project toolchain onto PATH), which re-renders from `mirror.yml` and exits 65 on drift — so a hand-edit to any generated workflow fails CI (forbids manual edits to the generated surface). The guard checks all rendered files, including itself.
 
+**Pins are mirror-repo-owned.** Before diffing, `check_drift` normalizes every `uses: owner/action@<ref>` line (`normalize_for_drift` in `ci.rs`), stripping the `@<ref>` digest/tag and any trailing `# vX` comment. A downstream Renovate/Dependabot bump of an action pin therefore does **not** trip the guard — the mirror repo owns its pins. The `owner/action` identity is preserved, so swapping in a *different* action, or any change to step logic, still reds. Templates ship a known-good seed pin (incl. `ocx-sh/setup-ocx`, SHA-pinned) for the first render.
+
 Opt-out (discouraged): top-level `allow_manual_edits: true` in `mirror.yml`. When set, the renderer omits `verify-generated.yml` and `execute()` prints a stderr note so the disabled guard is never silent. Use only when a repo deliberately maintains its workflows by hand. Field lives on `MirrorSpec` (`spec.rs`), defaults `false`.
 
 ### Cross-references
