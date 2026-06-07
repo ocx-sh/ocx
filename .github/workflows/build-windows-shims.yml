@@ -67,6 +67,12 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          # The gate compiles ocx_lib, which pulls the path-vendored starlark
+          # fork; the action's default RUSTFLAGS=-D warnings denies its upstream
+          # lints (Cargo does not auto-cap path deps). Denial is scoped to
+          # [workspace.lints.rust] instead.
+          rustflags: ""
       # actions-rust-lang/setup-rust-toolchain does NOT ship cargo-nextest;
       # the repo provisions it via taiki-e/install-action everywhere it runs
       # nextest in CI (verify-basic.yml, verify-deep.yml). Without this the

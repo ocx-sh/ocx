@@ -38,6 +38,12 @@ jobs:
           submodules: true
       - name: Install Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          # `cargo build -p ocx` below compiles ocx_lib + the path-vendored
+          # starlark fork; the action's default RUSTFLAGS=-D warnings denies its
+          # upstream lints (Cargo does not auto-cap path deps). Scope denial to
+          # [workspace.lints.rust] instead.
+          rustflags: ""
       - name: Rust Cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
