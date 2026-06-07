@@ -98,7 +98,7 @@ Default (untagged) = normal priority. No `priority/medium` — become dumping gr
 | `breaking-change` | API or behavior change requiring version bump; surfaces in changelog |
 | `regression` | Worked before, broken by recent change; elevates triage |
 | `flaky-test` | CI reliability, distinct from product bugs |
-| `dependencies` | Dependabot and manual dep bumps (auto-applied) |
+| `dependencies` | Renovate and manual dep bumps (auto-applied) |
 
 ### Domain / triage labels
 

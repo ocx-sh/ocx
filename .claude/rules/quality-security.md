@@ -2,7 +2,7 @@
 paths:
   - ".github/workflows/**"
   - ".github/actions/**"
-  - "dependabot.yml"
+  - "renovate.json"
 ---
 
 # Security Standards

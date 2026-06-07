@@ -105,7 +105,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md) |
 | `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) |
-| `.github/workflows/**`, `.github/actions/**`, `dependabot.yml` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
+| `.github/workflows/**`, `.github/actions/**`, `renovate.json` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
 | `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md) |
 | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |

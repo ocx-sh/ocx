@@ -16,9 +16,9 @@ Rust dep, license, audit config for OCX.
 |------|---------|--------|------|
 | `cargo-deny` | License allowlist + ban dup versions + source audit | `deny.toml` | `task license:deps` |
 | `hawkeye` | SPDX header enforce on source files | `.licenserc.toml` | `task license:check` |
-| `dependabot` | Auto dep update PRs | `.github/dependabot.yml` | (GitHub) |
+| `renovate` | Auto dep update PRs (cargo, npm, actions) + custom regex for baked-template action pins | `renovate.json` | (Renovate App) |
 
-All three run in CI via `.github/workflows/verify-licenses.yml`. Part of `task verify`.
+`cargo-deny` and `hawkeye` run in CI via `.github/workflows/verify-licenses.yml` (part of `task verify`); `renovate` runs as a hosted GitHub App on a weekly schedule (not a CI step).
 
 ## License Policy
 
@@ -90,7 +90,7 @@ cargo deny check                # Verify licenses + advisories after update
 task verify                     # Full verification
 ```
 
-Dependabot groups: `actions` (GitHub Actions), `rust-deps` (Cargo crates). PRs use `chore(deps):` commit prefix.
+Renovate groups: `actions` (GitHub Actions) prefixes `ci(deps)`; `rust-deps` (Cargo) and `npm-deps` (website + the `setup-ocx` action) prefix `chore(deps)`. A `customManager` (regex, `github-tags` datasource) also bumps SHA-pinned actions embedded in `crates/ocx_mirror/.../templates/*.yml`, which the built-in managers cannot see.
 
 ## Bans + Sources Policy
 

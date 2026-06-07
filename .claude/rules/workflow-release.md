@@ -54,9 +54,9 @@ When publishing OCX to own registry (`ocx.sh/ocx/cli`), archive must contain `bi
 
 The in-repo installer (`website/src/public/install.sh` / `install.ps1`) writes thin shims `$OCX_HOME/env.{sh,fish,ps1}` and appends a `# BEGIN ocx`/`# END ocx` block to the login profile that sources the shim. Each shim runs `eval "$(ocx --global env --shell=<sh|fish|pwsh>)"` live on every shell start — the `ocx` binary is resolved via the literal install root embedded at install time, `[ -x ]`-guarded, with `|| true` so a broken/absent binary never breaks the shell. There is no static `~/.ocx/env` PATH export and no `ocx shell env` command (deleted — see `handshake_toolchain_cli.md` §4/§7).
 
-### Existing Dependabot Config
+### Dependency Update Config
 
-Current `.github/dependabot.yml` uses dependency groups (`actions`, `rust-deps`). When adding `commit-message.prefix: "chore(deps)"` + npm ecosystem entry, **preserve existing groups**.
+Dependency updates run via **Renovate** (`renovate.json`, replaced Dependabot). Groups: `actions`, `rust-deps`, `npm-deps`. `release.yml` is cargo-dist-generated and is excluded from action bumps (it floats by design).
 
 ### New Environment Variables
 
