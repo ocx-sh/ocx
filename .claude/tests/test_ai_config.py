@@ -634,8 +634,6 @@ class TestRuleCatalog:
         fragments. Replace with `task claude:lint:links` (lychee) once lychee
         is mirrored via OCX, installed across dev + CI, and wired into
         the `claude:tests` task. At that point delete this test.
-        Tracking: the `mirrors/lychee/` config exists but has not yet
-        been sync'd to a registry.
         """
         # Candidate directories for resolving a bare filename
         search_dirs = [
@@ -1094,7 +1092,7 @@ class TestAiConfigOverhaulPhase1:
           on `**/*.rs`, `**/*.py`, etc. (e.g., quality-rust.md + subsystem-oci.md
           on `**/*.rs` is intended).
         - `workflow-bugfix.md`, `workflow-refactor.md` — source-work-surface
-          scope (`crates/**`, `test/**`, `website/**`, `mirrors/**`, `.claude/**`)
+          scope (`crates/**`, `test/**`, `website/**`, `.claude/**`)
           per adr_ai_config_path_scope_correction.md. Co-firing with subsystem
           rules on their respective scopes is the intended coupling.
         """
@@ -1169,7 +1167,6 @@ class TestAiConfigOverhaulPhase2:
         "commit": True,
         "finalize": True,
         "meta-maintain-config": True,
-        "ocx-create-mirror": True,
         "ocx-sync-roadmap": True,
         # Owner-unlocked for autonomous multi-agent workflows (2026-05-16):
         # the swarm pipeline + Codex gate are model-invocable so an

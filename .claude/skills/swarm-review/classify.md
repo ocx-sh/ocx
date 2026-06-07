@@ -50,7 +50,7 @@ introducing new crate.
 | Marker | Tier impact |
 |---|---|
 | New `crates/*/Cargo.toml` | → **max** (new crate) |
-| New top-level directory under `crates/` or `mirrors/` | → **max** |
+| New top-level directory under `crates/` | → **max** |
 | `.github/workflows/**` changes | Adds `--breadth=full` minimum; security review required |
 | `crates/ocx_lib/src/oci/**` | Adds `--breadth=full`; `--codex` auto-on at high (security-sensitive) |
 | `crates/ocx_lib/src/package_manager/**` | Adds `--breadth=adversarial` at high+ |

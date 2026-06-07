@@ -34,6 +34,8 @@ Key config fields in `dist-workspace.toml`:
 
 Reusable workflows themselves (e.g., `verify-version.yml`, `post-release-oci-publish.yml`) hand-written, edit directly — only `release.yml` generated.
 
+**Enforced in CI.** `verify-release-ci.yml` (hand-written) runs `dist generate --check` on PRs/pushes touching `dist-workspace.toml`, `release.yml`, or any `Cargo.toml`, failing if the committed `release.yml` drifts from a fresh regeneration. Opt-out (discouraged): set `allow-dirty = ["ci"]` in `dist-workspace.toml` so cargo-dist stops managing `release.yml` and the check passes — intentionally unset; only use if `release.yml` is deliberately hand-maintained (you lose config-driven regen).
+
 ### Version Source of Truth
 
 `[workspace.package] version` in root `Cargo.toml` = single source of truth. Both crates inherit via `version.workspace = true`. Version compiled in via `env!("CARGO_PKG_VERSION")`.

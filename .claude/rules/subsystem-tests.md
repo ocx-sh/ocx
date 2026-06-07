@@ -114,6 +114,8 @@ For shell-friendly assertions (exec output, file existence, exit-code branches),
 
 19 test files cover: install, find, select, uninstall, purge, clean, offline, env, exec, package lifecycle, cascade, package pull, describe, package info, index, color, mirror, CI export, shell profile.
 
+Acceptance coverage for the embedded Starlark host API (`ocx.*`, `expect.*`, the `ocx.os.*` / `ocx.arch.*` typed enum namespaces, and `RunResult`/`Platform` typed values) lives in `test/tests/test_package_test_script.py`. See [subsystem-script.md](./subsystem-script.md) for the host-API style rule those tests pin.
+
 ## Platform Split
 
 Two complementary harnesses with different platform reach:
