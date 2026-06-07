@@ -22,7 +22,6 @@ pub async fn extract_and_bundle(
     asset_path: &Path,
     content_dir: &Path,
     bundle_path: &Path,
-    metadata: &Metadata,
     asset_type: &AssetType,
     asset_name: &str,
     compression_threads: u32,
@@ -39,10 +38,6 @@ pub async fn extract_and_bundle(
             place_binary(asset_path, content_dir, name, asset_name).await?;
         }
     }
-
-    let metadata_path = content_dir.join("metadata.json");
-    let metadata_json = serde_json::to_string_pretty(metadata)?;
-    tokio::fs::write(&metadata_path, metadata_json).await?;
 
     BundleBuilder::from_path(content_dir)
         .with_compression(ocx_lib::compression::CompressionOptions::default().with_threads(compression_threads))
@@ -137,6 +132,45 @@ mod tests {
             .unwrap();
 
         assert!(content_dir.join("shfmt.exe").exists());
+    }
+
+    #[tokio::test]
+    async fn extract_and_bundle_excludes_metadata_from_content() {
+        use ocx_lib::archive::Archive;
+
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let asset = dir.path().join("shfmt_v3.13.0_linux_amd64");
+        std::fs::write(&asset, b"fake binary").unwrap();
+
+        let content_dir = dir.path().join("content");
+        std::fs::create_dir(&content_dir).unwrap();
+
+        let bundle_path = dir.path().join("bundle.tar.xz");
+        let asset_type = AssetType::Binary { name: "shfmt".into() };
+
+        extract_and_bundle(
+            &asset,
+            &content_dir,
+            &bundle_path,
+            &asset_type,
+            "shfmt_v3.13.0_linux_amd64",
+            1,
+        )
+        .await
+        .unwrap();
+
+        // Extract the published bundle and inspect its contents. The bundle is a
+        // tar of `content_dir`'s entries at the archive root (the `content/`
+        // prefix is added by install, not the mirror).
+        let extracted = dir.path().join("extracted");
+        Archive::extract(&bundle_path, &extracted).await.unwrap();
+
+        assert!(extracted.join("shfmt").exists(), "tool payload missing from bundle");
+        assert!(
+            !extracted.join("metadata.json").exists(),
+            "metadata.json must not be baked into bundle content",
+        );
     }
 
     #[test]

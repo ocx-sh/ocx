@@ -483,7 +483,6 @@ pub(crate) async fn prepare_task(
         let ap = archive_path.clone();
         let cd = content_dir.clone();
         let bp = bundle_path.clone();
-        let md = metadata.clone();
         let an = task.asset_name.clone();
         tokio::task::spawn_blocking(move || {
             tokio::runtime::Handle::current().block_on(async {
@@ -491,7 +490,7 @@ pub(crate) async fn prepare_task(
                     let _ = tokio::fs::remove_dir_all(&cd).await;
                 }
                 tokio::fs::create_dir_all(&cd).await?;
-                package::extract_and_bundle(&ap, &cd, &bp, &md, &asset_type, &an, compression_threads).await?;
+                package::extract_and_bundle(&ap, &cd, &bp, &asset_type, &an, compression_threads).await?;
                 let _ = tokio::fs::remove_dir_all(&cd).await;
                 Ok::<_, anyhow::Error>(())
             })
