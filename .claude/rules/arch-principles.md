@@ -77,6 +77,7 @@ CLI command (clap parse)
 | **Manifest** | OCI image manifest or image index (multi-platform) |
 | **Refs** | Reference sub-dirs inside `packages/.../refs/`: `symlinks/` (GC roots from install symlinks), `deps/` (forward-refs to other packages), `layers/` (forward-refs to layers), `blobs/` (forward-refs to blobs) |
 | **DirtyRcBlock (exit 82)** | `ExitCode::DirtyRcBlock = 82` — `ocx self setup` exits 82 when a managed activation block in a shell profile carries user edits inside the fence and `--force` was not passed. Scripts can `case $? in 82)` to detect and re-run with `--force`. Distinct from `ConfigError` (78): the RC content is valid but intentionally modified by the user. |
+| **State** | Ephemeral, registry-scoped or subsystem-scoped runtime state at `state/{subsystem}/{key}.json`; TTL-bound; not GC-walked. Example: `state/referrers/<registry>.json` for OCI Referrers API capability cache. See `adr_oci_referrers_signing_v1.md` Amendment 3. |
 
 ## ADR Index
 
@@ -90,6 +91,8 @@ CLI command (clap parse)
 | `adr_custom_oci_identifier.md` | Custom identifier parser replace `oci_spec::Reference` |
 | `adr_mirror_source_generators.md` | Generator-based URL index for mirror sources |
 | `adr_oci_artifact_enrichment.md` | Signatures, SBOMs, descriptive metadata on OCI artifacts |
+| `adr_oci_referrers_discovery.md` | OCI Referrers API for signature + SBOM discovery (superseded by v2) |
+| `adr_oci_referrers_signing_v1.md` | Keyless Sigstore signing via OCI Referrers (Slice 1 — sign + verify) |
 | `adr_ocx_mirror.md` | Standalone binary mirroring tool design |
 | `adr_release_install_strategy.md` | Release + install phased strategy |
 | `adr_sbom_strategy.md` | SBOM gen approach |

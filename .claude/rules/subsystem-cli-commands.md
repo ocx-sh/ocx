@@ -87,6 +87,8 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package describe ID` | Push description metadata | `--readme`, `--logo`, `--title` |
 | `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); keyed object for multiple | `--resolve`, `-p` |
 | `package info PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
+| `package sign IDENTIFIER` | Keyless Sigstore sign via OCI Referrers | `-p/--platform` (required), `--fulcio-url`, `--rekor-url`, `--identity-token-file`, `--identity-token-stdin`, `--no-tty`, `--no-cache` |
+| `package verify IDENTIFIER` | Keyless Sigstore verify via OCI Referrers | `-p/--platform` (required), `--certificate-identity` (required), `--certificate-oidc-issuer` (required), `--rekor-url`, `--no-cache` |
 | `package test -i ID LAYERS... -- CMD` | Materialise + exec locally (no registry) | `-i`, `-p`, `-m`, `--keep`, `-o`, `--self`, `--clean` |
 | `package which PKGS...` | Resolve installed packages to paths (package-root or stable symlink anchor) | `--candidate`, `--current`, `-p` |
 | `package deps PKGS...` | Show dependency tree/flat/why | `--flat`, `--why`, `--depth`, `--self`, `-p` |

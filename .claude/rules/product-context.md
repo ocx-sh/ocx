@@ -79,6 +79,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | 9 | First-class corporate / air-gapped mirror support | Explicit `[mirrors]` config routes OCI read traffic to Artifactory/Nexus/Harbor with host+repo-key path-prefix rewrite, replace semantics (no egress fallback), content-address verified; a gap mise/asdf/ORAS do not close. Reinforces Principle #7 (Private-first). |
 | 10 | Automatic libc/ABI resolution | glibc vs musl selected per-host from one OCI index; no `-musl` tag suffixes, no separate repos |
 | 11 | Centrally managed corporate config as ordinary OCX package | `[managed]` config tier syncs mirrors/patches-pointer/default-registry settings from one operator-published `config.toml` package per fleet (`ocx config push` — versioned tags, cascades, per-host pins/rollbacks/pause reuse the package machinery); identity-gated local snapshot means config resolution stays network-free on every ordinary command, refresh never blocks, required-but-absent snapshot fails closed. Deliberately pull-based and console-free: fleet visibility is `ocx config update --check --format json` in existing inventory tooling. Rolls out a fleet-wide config change without re-provisioning every host — a gap mise/asdf/ORAS do not close either. Reinforces Principle #7 (Private-first). |
+| 12 | Supply-chain-ready out of the box | Keyless Sigstore sign + verify via OCI Referrers — standards-based, no separate signing server |
 
 ## Competitive Positioning
 
@@ -122,6 +123,10 @@ ocx exec cmake:3.28 -- cmake --version   # Run with clean environment
 ocx env cmake:3.28                  # Print resolved environment variables
 ocx select cmake:3.28               # Set "current" to this version
 ocx package push my/cmake:3.28 cmake.tar.xz --cascade  # Publish
+ocx package sign -p linux/amd64 my/cmake:3.28            # Keyless Sigstore sign via OCI Referrers
+ocx package verify -p linux/amd64 my/cmake:3.28 \        # Keyless Sigstore verify
+  --certificate-identity you@example.com \
+  --certificate-oidc-issuer https://github.com/login/oauth
 ocx clean                           # GC all unreferenced objects
 ocx index catalog                   # List known repositories
 ```
