@@ -11,10 +11,6 @@ includes:
   coverage: ./taskfiles/coverage.taskfile.yml
   duplo: ./taskfiles/duplo.taskfile.yml
   release: ./taskfiles/release.taskfile.yml
-  mirror: ./taskfiles/mirror.taskfile.yml
-  mirror-sdk:
-    taskfile: ./mirror-sdk-py/taskfile.yml
-    dir: ./mirror-sdk-py
   claude:
     taskfile: ./.claude/taskfile.yml
     dir: ./.claude

@@ -33,7 +33,7 @@ Single source of truth: `.claude/rules/product-tech-strategy.md`. Latest stable 
 
 ## Build / Task runner
 
-- `task` (Taskfile v3) is the entrypoint. Root `taskfile.yml` includes per-subsystem files under `taskfiles/` and tool wrappers via `taskfiles/ocx.taskfile.yml` (shellcheck, shfmt, bats, hawkeye, actionlint, lychee). Per-subsystem includes: `rust`, `shell`, `coverage`, `duplo`, `release`, `mirror`, `mirror-sdk`, `claude`, `test`, `recordings`, `schema`, `website`.
+- `task` (Taskfile v3) is the entrypoint. Root `taskfile.yml` includes per-subsystem files under `taskfiles/` and tool wrappers via `taskfiles/ocx.taskfile.yml` (shellcheck, shfmt, bats, hawkeye, actionlint, lychee). Per-subsystem includes: `rust`, `shell`, `coverage`, `duplo`, `release`, `claude`, `test`, `recordings`, `schema`, `website`.
 - Internal helpers dot-prefixed (`.ensure-cargo-tool` etc.) — GitLab-style hidden jobs convention.
 
 ## Infra / CI
