@@ -156,6 +156,26 @@ export OCX_HOME="/opt/ocx"
 
 OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [OCX home tier in the Configuration in-depth page][config-home-tier].
 
+### `OCX_IDENTITY_TOKEN` {#ocx-identity-token}
+
+OIDC identity token for [`ocx package sign`][cmd-package-sign]. Provides the lowest-precedence token source when no explicit override is given — used only if `--identity-token-file` and `--identity-token-stdin` are both absent. Useful in CI systems that inject OIDC tokens via environment rather than files.
+
+The value must be a short-lived JWT issued by a supported OIDC provider (GitHub Actions, Google Cloud, etc.). The token is consumed once and never logged or written to disk.
+
+**NOT forwarded to subprocess children.** OCX reads `OCX_IDENTITY_TOKEN` directly via `std::env::var` inside `ocx package sign` and never places it in a child process environment via `OcxConfigView`. Security rationale: OIDC tokens are short-lived bearer credentials — forwarding them into every subprocess child env would broaden the attack surface unnecessarily.
+
+Token precedence for `ocx package sign` (highest to lowest):
+
+1. `--identity-token-file <PATH>` — file must have mode `0600` or tighter
+2. `--identity-token-stdin`
+3. `OCX_IDENTITY_TOKEN`
+4. Ambient CI detection (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, `GOOGLE_OAUTH_TOKEN`, etc.)
+5. Interactive browser OAuth (suppressed with `--no-tty`)
+
+::: warning Short-lived tokens only
+OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a token in a long-lived environment or secret manager entry — fetch a fresh token immediately before calling `ocx package sign`.
+:::
+
 ### `OCX_INDEX` {#ocx-index}
 
 Override the path to the [local index][fs-index] directory.
@@ -188,6 +208,18 @@ This variable is resolution-affecting and is forwarded to child ocx processes (s
 entrypoint launchers) so they resolve the same frozen companion digests as the parent.
 Unset to disable snapshot-pinning and fall back to live lookups.
 
+### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
+
+A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
+
+```sh
+export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
+```
+
+::: warning
+This variable disables TLS for the listed registries. Only use it for local development registries that do not support HTTPS.
+:::
+
 ### `OCX_JOBS` {#ocx-jobs}
 
 Caps the number of root packages pulled in parallel — applies to every command
@@ -204,18 +236,6 @@ values are ignored with a warning. Unset = unbounded (legacy default).
 
 The command line option [`--jobs`][arg-jobs] takes precedence over this
 variable.
-
-### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
-
-A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
-
-```sh
-export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
-```
-
-::: warning
-This variable disables TLS for the listed registries. Only use it for local development registries that do not support HTTPS.
-:::
 
 ### `OCX_MIRRORS` {#ocx-mirrors}
 
@@ -414,16 +434,6 @@ See the [FAQ][faq-codesign] for details on why this is necessary and how it work
 
 This variable has no effect on non-macOS systems.
 
-### `OCX_QUIET` {#ocx-quiet}
-
-When set to a [truthy value](#truthy-values), OCX suppresses the structured
-stdout report that every command emits — tables in plain mode, the JSON
-document in `--format json` mode. Errors, warnings, and progress on stderr are
-unaffected.
-
-The command line option [`--quiet`][arg-quiet] takes precedence over this
-variable.
-
 ### `OCX_OFFLINE` {#ocx-offline}
 
 When set to a [truthy value](#truthy-values), OCX disables all network access. Tag→digest resolution must be satisfied by the local index or by a digest-pinned identifier; unpinned tags missing from the local index error immediately. Useful for hermetic CI runs and air-gapped environments. The command line option [`--offline`][arg-offline] takes precedence over this variable.
@@ -445,6 +455,16 @@ Precedence: `--project` > `OCX_PROJECT` > CWD walk. [`OCX_NO_PROJECT=1`](#ocx-no
 **Escape hatch**: setting this to the empty string (`OCX_PROJECT=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
 
 **Symlink policy**: explicit paths (this variable and `--project`) follow symlinks. The CWD walk rejects symlinked `ocx.toml` candidates — use `--project` or `OCX_PROJECT` to opt in.
+
+### `OCX_QUIET` {#ocx-quiet}
+
+When set to a [truthy value](#truthy-values), OCX suppresses the structured
+stdout report that every command emits — tables in plain mode, the JSON
+document in `--format json` mode. Errors, warnings, and progress on stderr are
+unaffected.
+
+The command line option [`--quiet`][arg-quiet] takes precedence over this
+variable.
 
 ### `OCX_REMOTE` {#ocx-remote}
 
@@ -613,6 +633,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- commands -->
 [cmd-ref]: command-line.md
 [cmd-direnv]: command-line.md#direnv
+[cmd-package-sign]: command-line.md#package-sign
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config
 [arg-global]: command-line.md#global-flag

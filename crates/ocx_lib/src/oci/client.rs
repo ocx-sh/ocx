@@ -80,6 +80,15 @@ impl Client {
         self.lock_timeout
     }
 
+    /// Returns a reference to the inner transport.
+    ///
+    /// Exposed for pipeline consumers (sign/verify) that need to issue
+    /// transport-level calls (e.g., capability probes) without going through
+    /// the higher-level `Client` methods.
+    pub fn transport(&self) -> &dyn OciTransport {
+        &*self.transport
+    }
+
     #[cfg(test)]
     pub(crate) fn with_transport(transport: Box<dyn OciTransport>) -> Self {
         Client {
@@ -2646,6 +2655,24 @@ mod tests {
                 data: self.bytes_before_error.clone(),
                 pos: 0,
             }))
+        }
+
+        async fn push_referrer_manifest(
+            &self,
+            _image: &oci::native::Reference,
+            _subject_digest: &oci::Digest,
+            _manifest_bytes: &[u8],
+            _media_type: &str,
+        ) -> super::transport::Result<oci::Descriptor> {
+            unimplemented!("not needed for the streaming-interruption test")
+        }
+
+        async fn list_referrers(
+            &self,
+            _image: &oci::native::Reference,
+            _subject_digest: &oci::Digest,
+        ) -> super::transport::Result<Vec<oci::Descriptor>> {
+            unimplemented!("not needed for the streaming-interruption test")
         }
 
         fn box_clone(&self) -> Box<dyn super::OciTransport> {

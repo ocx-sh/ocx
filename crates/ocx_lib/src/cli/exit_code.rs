@@ -58,6 +58,20 @@ pub enum ExitCode {
     /// untouched (`ocx self setup` without `--force`).
     /// OCX-specific; script-discoverable so a rerun with `--force` is easy.
     DirtyRcBlock = 82,
+    /// Rekor transparency log service unavailable.
+    ///
+    /// Used by the sign path (Rekor upload failure) AND the verify path
+    /// (Rekor-required verification cannot complete: SET absent + TSA absent,
+    /// Rekor SET verification fails against known Rekor public key, or Rekor
+    /// lookup returns 5xx/timeout). OCX-specific; distinct from `Unavailable`
+    /// to let operators distinguish "registry down" (retry likely helps) from
+    /// "Rekor down" (sign cannot complete, verify of existing v0.3 bundles
+    /// fails if Rekor is needed for SET verification).
+    RekorUnavailable = 83,
+    /// Registry does not implement the OCI Referrers API and has no fallback-tag
+    /// referrers index. The operation cannot proceed — discovery fails hard rather
+    /// than silently returning empty results. OCX-specific.
+    ReferrersUnsupported = 84,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -153,6 +167,19 @@ mod tests {
         // Distinct from ConfigError (78) so a refused managed block is not
         // conflated with a bad-config failure.
         assert_eq!(ExitCode::DirtyRcBlock as u8, 82);
+    }
+
+    #[test]
+    fn exit_code_rekor_unavailable_is_83() {
+        // Tool-specific; distinct from Unavailable — Rekor is a separate,
+        // non-retryable supply-chain dependency (vs registry transient faults).
+        assert_eq!(ExitCode::RekorUnavailable as u8, 83);
+    }
+
+    #[test]
+    fn exit_code_referrers_unsupported_is_84() {
+        // Tool-specific; registry lacks OCI 1.1 referrers — no fallback.
+        assert_eq!(ExitCode::ReferrersUnsupported as u8, 84);
     }
 
     #[test]

@@ -60,6 +60,12 @@ pub mod manifest;
 pub mod manifest_builder;
 pub use manifest_builder::{ManifestArtifacts, ManifestBuilder};
 
+pub mod referrer;
+
+pub mod sign;
+
+pub mod verify;
+
 pub mod identifier;
 pub use identifier::DEFAULT_REGISTRY;
 pub use identifier::Identifier;

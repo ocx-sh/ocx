@@ -816,6 +816,45 @@ When reporting a bug, run [`ocx version --verbose`][cmd-version] to capture comm
 [Environment reference → `OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval] — adjust the background check frequency.
 :::
 
+## Supply-Chain Integrity {#supply-chain}
+
+Knowing that a binary was downloaded from the right registry is not the same as knowing it was built by the right person at the right time. Anyone with push access to a registry — or the ability to intercept traffic to it — could substitute a different binary under the same tag. Signatures provide tamper evidence: they bind a specific binary digest to a specific signer identity via a publicly verifiable log entry.
+
+OCX integrates [Sigstore][sigstore] keyless signing. You do not manage signing keys. [Fulcio][fulcio] issues a short-lived certificate binding an ephemeral key to your OIDC identity, and [Rekor][rekor] records the entry in a public, append-only transparency log.
+
+:::info How keyless signing compares to GPG
+Traditional GPG signing requires generating, distributing, and revoking a long-lived key pair — a human process that organizations frequently skip. [Sigstore][sigstore] keyless signing replaces the key management ceremony with short-lived OIDC credentials your CI system already provisions. The [Rekor][rekor] transparency log plays the role of a public key server, but with an immutable audit log rather than a mutable key ring.
+:::
+
+### Sign a release {#supply-chain-signing}
+
+[`ocx package sign`][cmd-package-sign] publishes a [Sigstore bundle][sigstore-bundle] as a referrer of the target manifest. In a GitHub Actions workflow with `id-token: write` permission, ambient OIDC detection works with no extra configuration:
+
+```shell
+ocx package sign -p linux/amd64 registry.example/pkg:1.0
+```
+
+### Verify what you install {#supply-chain-verification}
+
+[`ocx package verify`][cmd-package-verify] checks a previously published signature. You must supply the expected certificate identity and OIDC issuer — there are no defaults, because verification is meaningless without specifying whose signature you trust:
+
+```shell
+ocx package verify \
+  -p linux/amd64 \
+  --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  registry.example/pkg:1.0
+```
+
+:::warning Auto-verify during install is not yet enabled
+`ocx package verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx package verify` explicitly in CI before deploying a package to a production environment.
+:::
+
+::: tip Learn more
+[Signing In Depth][in-depth-signing] — trust root mechanics, OCI 1.1 referrers hard-fail policy, Sigstore bundle storage, slice boundaries, and offline semantics.
+[`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify] — flags, exit codes, and CI examples.
+:::
+
 ## Remove and clean up {#cleanup}
 
 [`ocx package uninstall cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary if no [other reference][in-depth-storage-gc] remains.
@@ -918,6 +957,19 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [pnpm]: https://pnpm.io/
 [pnpm-install]: https://pnpm.io/cli/install
 [product-context]: ./getting-started.md
+[sigstore]: https://www.sigstore.dev/
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[sigstore-bundle]: https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_bundle.proto
+[oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
+[concourse-registry]: https://github.com/concourse/registry-image-resource
+[nix]: https://nixos.org/
+[go-modules]: https://go.dev/ref/mod
+[sdkman]: https://sdkman.io/
+[homebrew]: https://brew.sh/
+[docker-images]: https://hub.docker.com/search?image_filter=official
+[semver]: https://semver.org/
+[oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
@@ -952,6 +1004,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-which]: ./reference/command-line.md#which
 [cmd-exec]: ./reference/command-line.md#package-exec
+[cmd-package-sign]: ./reference/command-line.md#package-sign
+[cmd-package-verify]: ./reference/command-line.md#package-verify
 [cmd-launcher-exec]: ./reference/command-line.md#exec
 [cmd-package-install]: ./reference/command-line.md#package-install
 [cmd-package-select]: ./reference/command-line.md#package-select
@@ -986,6 +1040,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-ocx-no-completions]: ./reference/environment.md#ocx-no-completions
 [env-ocx-binary-pin]: ./reference/environment.md#ocx-binary-pin
 [env-ocx-home]: ./reference/environment.md#ocx-home
+[env-identity-token]: ./reference/environment.md#ocx-identity-token
 [env-ocx-index]: ./reference/environment.md#ocx-index
 [env-config]: ./reference/environment.md#ocx-config
 [env-no-config]: ./reference/environment.md#ocx-no-config
@@ -1044,3 +1099,4 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [in-depth-project]: ./in-depth/project.md
 [in-depth-project-multi-project-retention]: ./in-depth/project.md#multi-project-retention
 [in-depth-project-running]: ./in-depth/project.md#running
+[in-depth-signing]: ./in-depth/signing.md

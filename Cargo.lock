@@ -3013,6 +3013,7 @@ dependencies = [
  "clap_complete",
  "console",
  "futures",
+ "libc",
  "ocx_lib",
  "secrecy",
  "serde",
@@ -3023,6 +3024,7 @@ dependencies = [
  "tracing",
  "vergen-gix",
  "which",
+ "zeroize",
 ]
 
 [[package]]
@@ -3055,6 +3057,7 @@ dependencies = [
  "liblzma",
  "lzma-rust2",
  "oci-client",
+ "pem",
  "regex",
  "rpassword",
  "schemars",
@@ -3080,9 +3083,11 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "url",
  "webpki-root-certs",
  "which",
  "windows-sys 0.61.2",
+ "zeroize",
  "zip",
  "zstd",
 ]
@@ -3167,6 +3172,16 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64",
+ "serde_core",
+]
 
 [[package]]
 name = "percent-encoding"

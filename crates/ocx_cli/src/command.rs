@@ -37,6 +37,7 @@ pub mod package_info;
 pub mod package_inspect;
 pub mod package_pull;
 pub mod package_push;
+pub mod package_sign;
 pub mod package_test;
 pub mod patch;
 pub mod patch_common;
@@ -56,6 +57,7 @@ pub mod shell_completion;
 pub mod toolchain_env;
 pub mod uninstall;
 pub mod update;
+pub mod verify;
 pub mod version;
 pub mod which;
 

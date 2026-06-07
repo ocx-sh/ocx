@@ -545,6 +545,22 @@ impl Context {
     pub fn managed_config_snapshot(&self) -> Option<&ocx_lib::managed_config::ManagedConfigSnapshot> {
         self.managed_config_snapshot.as_ref()
     }
+
+    /// Returns the default [`Index`] paired with the online [`oci::Client`].
+    ///
+    /// This is the single accessor for commands that *require* network access
+    /// (sign, verify, publish, …). It returns [`ocx_lib::Error::OfflineMode`]
+    /// when the context was built with `--offline`, routing to exit code 81
+    /// (`PolicyBlocked`) via [`ocx_lib::cli::classify_error`].
+    ///
+    /// Commands that optionally fall back to online mode should continue to
+    /// use [`Self::default_index`] + [`Self::remote_client`] separately; the
+    /// paired accessor is for commands where both are always required.
+    #[allow(dead_code)] // Consumed by `command/package_sign.rs` and `command/verify.rs` in Phase 5.
+    pub fn online_context(&self) -> ocx_lib::Result<(&oci::index::Index, &oci::Client)> {
+        let client = self.remote_client.as_ref().ok_or(ocx_lib::Error::OfflineMode)?;
+        Ok((&self.default_index, client))
+    }
 }
 
 /// Resolves `--jobs` / `OCX_JOBS` into a `Concurrency` value.

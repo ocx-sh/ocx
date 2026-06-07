@@ -263,10 +263,10 @@ OCX exposes a stable, typed exit-code taxonomy so scripts can discriminate failu
 
 Most package tools return 0 on success and 1 on any failure. That forces downstream scripts to either ignore the error category or grep stderr — both are fragile. A CI wrapper cannot distinguish "registry unreachable, retry in 30 seconds" from "package not found, fail the build" without parsing error text that can change.
 
-OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–81 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
+OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–84 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
 
 :::info
-The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–81.
+The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–84.
 :::
 
 | Code | Name | Mnemonic | When used | Recovery |
@@ -274,15 +274,18 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 0 | Success | — | Successful completion | — |
 | 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
 | 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax | Check the command syntax |
-| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]) | Validate identifiers and file contents; for a feature mismatch or ambiguous selection, override with `--platform` |
+| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]) | Validate identifiers and file contents; for a feature mismatch or ambiguous selection, override with `--platform` |
 | 69 | Unavailable | EX_UNAVAILABLE | Required resource unavailable: network down, registry unreachable | Retry; check network and registry URL |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
 | 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network | Retry with backoff |
-| 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM | Refresh credentials or adjust filesystem permissions |
-| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure | Inspect the config file at the printed path |
-| 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent | Pin a different version or correct the path |
-| 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials | Refresh or set registry credentials |
+| 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM, offline sign refused, OIDC pre-check failed | Refresh credentials or adjust filesystem permissions |
+| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable | Inspect the config file at the printed path |
+| 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent, no signatures found for target | Pin a different version or correct the path |
+| 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials, Fulcio OIDC token rejected | Refresh or set registry credentials |
 | 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first (e.g. `ocx index update`) |
+| 82 | DirtyRcBlock | OCX | A managed shell-integration block carried user edits and `ocx self setup` ran without `--force`; the block was left untouched. Distinct from ConfigError (78): the content is valid but intentionally user-modified | Re-run with `--force`, or edit the block manually and re-run |
+| 83 | RekorUnavailable | OCX | Rekor transparency log unreachable during sign or verify (5xx/timeout, or SET absent with only TSA present) | Retry later; check Rekor endpoint |
+| 84 | ReferrersUnsupported | OCX | Registry does not implement the OCI Referrers API — sign and verify require OCI 1.1 referrers support | Use a registry with OCI 1.1 referrers support |
 
 Scripts can `case $?` on these stable values:
 
@@ -297,6 +300,9 @@ case $? in
     79) echo "not found; pin a different version" ;;
     80) echo "auth failed; refresh credentials" ;;
     81) echo "policy blocked (offline/frozen); loosen the flag or update the index" ;;
+    82) echo "managed shell rc block left dirty; rerun with --force" ;;
+    83) echo "Rekor unavailable; retry signing or verification later" ;;
+    84) echo "registry lacks OCI referrers support; use a compatible registry" ;;
     *)  echo "unexpected failure (exit $?)"; exit 1 ;;
 esac
 ```
@@ -2421,6 +2427,304 @@ ocx package describe [OPTIONS] <IDENTIFIER>
 
 At least one of the above metadata options must be provided.
 
+#### `sign` {#package-sign}
+
+Publishes a [Sigstore][sigstore] keyless signature for a package manifest as an [OCI Referrers][oci-referrers-spec] artifact. The signing flow uses an ephemeral ECDSA P-256 keypair: [Fulcio][fulcio] issues a short-lived certificate binding the key to your OIDC identity, the manifest digest is signed, and the entry is logged to [Rekor][rekor]. The resulting [Sigstore bundle v0.3][sigstore-bundle] is pushed to the registry as a referrer of the target manifest, where it can be discovered and verified by `ocx package verify` and by [`cosign verify`][cosign].
+
+Signing requires network access — `--offline` is rejected with exit 77.
+
+**Usage**
+
+```shell
+ocx package sign [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier to sign (`registry/repo:tag[@digest]`).
+
+**Options**
+
+| Name | Short | Default | Purpose |
+|------|-------|---------|---------|
+| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index to sign |
+| `--fulcio-url` | — | `https://fulcio.sigstore.dev` | [Fulcio][fulcio] CA endpoint (override for private deployments) |
+| `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
+| `--identity-token-file` | — | — | Read the OIDC identity token from this file (highest precedence). File must be owner-readable only (`chmod 600`); world- or group-readable files are rejected with exit 77 (`IdentityTokenFilePermissive`). File must be **owned by the effective user** (uid match required); a foreign-owned file with mode `0600` is still rejected with exit 77 (CWE-732). Symlinks are not followed; a symlink at the supplied path is rejected with exit 77 (CWE-367 mitigation). **Windows:** permission validation is not implemented; use `--identity-token-stdin` or [`OCX_IDENTITY_TOKEN`][env-identity-token] instead (the command exits 77 if `--identity-token-file` is used on Windows). |
+| `--identity-token-stdin` | — | — | Read the OIDC identity token from stdin (second precedence). Mutually exclusive with `--identity-token-file` |
+| `--no-tty` | — | `false` | Suppress the interactive browser OAuth fallback; ambient token detection must succeed or an override flag must supply a token |
+| `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+
+**Token precedence**
+
+`ocx package sign` resolves an OIDC identity token from the following sources, in order:
+
+1. `--identity-token-file <PATH>` — read from file (highest precedence)
+2. `--identity-token-stdin` — read from stdin
+3. [`OCX_IDENTITY_TOKEN`][env-identity-token] environment variable
+4. Ambient CI detection (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, `GOOGLE_OAUTH_TOKEN`, etc.)
+5. Interactive browser OAuth (suppressed when `--no-tty` is set)
+
+Never pass a raw token on the command line — it would appear in shell history and process listings.
+
+:::warning Preview / not yet fully implemented
+The `package sign` command is currently in preview. Until the sigstore-rs integration completes in Slice 2, the command validates its inputs and then exits 78 (`pipeline_pending`) — it never reaches the signing pipeline, so it does not panic. Exit codes documented below describe the intended Slice 1 behavior; today only flag validation, offline-mode rejection, identity-token file permission checks, and OIDC token resolution are wired.
+:::
+
+**Exit codes**
+
+| Code | Condition |
+|------|-----------|
+| 0 | Signature published successfully |
+| 64 | `InvalidEndpointUrl` — malformed `--fulcio-url` or `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no unsupported schemes) |
+| 77 | `OidcPreCheckFailed` — OIDC pre-check rejected the token (missing scopes, audience mismatch, expired) |
+| 77 | `OfflineSignRefused` — `--offline` is incompatible with `package sign`; Fulcio + Rekor are hard dependencies |
+| 77 | `IdentityTokenFilePermissive` — `--identity-token-file` is readable by group/other (must be `0600` or tighter) |
+| 78 | Fulcio rejected the certificate signing request as malformed |
+| 80 | Fulcio rejected the OIDC token (issuer mismatch, expired, wrong audience) |
+| 83 | Rekor transparency log unavailable at time of signing |
+| 84 | Registry does not support the OCI Referrers API |
+
+**JSON output** (`--format json`)
+
+On success, `ocx package sign` emits a C-S1-1 success envelope. The top-level shape is:
+
+```json
+{
+  "schema_version": 1,
+  "command": "package sign",
+  "exit_code": 0,
+  "data": {
+    "identifier": "registry.example/pkg:1.0",
+    "subject_digest": "sha256:<64-hex>",
+    "bundle_digest": "sha256:<64-hex>",
+    "referrer_digest": "sha256:<64-hex>",
+    "platform": "linux/amd64",
+    "signer": "keyless-fulcio",
+    "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com"
+  }
+}
+```
+
+`data` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `identifier` | string | Identifier argument passed to the command |
+| `subject_digest` | string (`sha256:...`) | Digest of the manifest that was signed |
+| `bundle_digest` | string (`sha256:...`) | SHA-256 of the Sigstore bundle v0.3 blob (the referrer layer content) |
+| `referrer_digest` | string (`sha256:...`) | SHA-256 of the OCI referrer manifest wrapping the bundle |
+| `platform` | string | Platform that was signed (e.g. `"linux/amd64"`) |
+| `signer` | string | Signing mechanism; always `"keyless-fulcio"` in Slice 1 |
+| `certificate_identity` | string | SAN from the Fulcio-issued certificate |
+| `certificate_oidc_issuer` | string | OIDC issuer URL from the Fulcio-issued certificate |
+
+Note: `bundle_digest` and `referrer_digest` are distinct. `bundle_digest` covers the protobuf blob that [Rekor][rekor] includes in its transparency log; `referrer_digest` identifies the OCI manifest returned by the Referrers API.
+
+On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` field (when present) is a snake_case discriminant for programmatic matching:
+
+```json
+{
+  "schema_version": 1,
+  "command": "package sign",
+  "exit_code": 80,
+  "error": {
+    "kind": "auth_error",
+    "detail": "oidc_token_rejected",
+    "message": "Fulcio rejected OIDC token: issuer not in trust root",
+    "remediation": "Verify --certificate-oidc-issuer matches a Fulcio-trusted issuer",
+    "context": {
+      "identifier": "registry.example/pkg:1.0"
+    }
+  }
+}
+```
+
+`detail` is omitted when no fine-grained discriminant is available. `context` is always present (may be `{}`). The `kind` values are the snake_case `ErrorCategory` variants: `usage_error`, `auth_error`, `permission_denied`, `config_error`, `data_error`, `not_found`, `rekor_unavailable`, `referrers_unsupported`, `io_error`, `internal`.
+
+**`detail` discriminants for `package sign`** (frozen contract C-S1-1):
+
+| `detail` value | Exit | Meaning |
+|----------------|------|---------|
+| `fulcio_bad_request` | 78 | Fulcio rejected the CSR as malformed |
+| `oidc_token_rejected` | 80 | Fulcio rejected the OIDC token (issuer mismatch, expired, wrong audience) |
+| `rekor_unavailable` | 83 | Rekor transparency log unavailable at time of signing |
+| `rekor_set_malformed` | 65 | Rekor returned the entry but the SET could not be extracted or parsed |
+| `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
+| `oidc_pre_check_failed` | 77 | OIDC pre-check failed client-side before the token was sent to Fulcio |
+| `offline_sign_refused` | 77 | `--offline` is incompatible with `package sign` |
+| `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
+| `invalid_endpoint_url` | 64 | Malformed `--fulcio-url` or `--rekor-url` |
+| `pipeline_pending` | 78 | Sign pipeline not yet wired (Phase 5c pending); command exits with a structured error instead of panicking |
+| `internal` | 1 | Unexpected internal error |
+
+**Example — CI keyless signing with GitHub Actions ambient OIDC**
+
+```yaml
+- name: Sign package
+  run: |
+    ocx package sign \
+      -p linux/amd64 \
+      registry.example/pkg:1.0
+```
+
+In GitHub Actions, the `ACTIONS_ID_TOKEN_REQUEST_TOKEN` variable is present automatically (requires `id-token: write` permission). No `--identity-token-*` flag is needed.
+
+#### `verify` {#package-verify}
+
+Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against the embedded [TUF][sigstore-tuf] trust root, verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the values you supply. All five checks must pass for the command to exit 0.
+
+There are no default values for `--certificate-identity` and `--certificate-oidc-issuer` — keyless verification is meaningless without specifying whose signature you trust.
+
+**Usage**
+
+```shell
+ocx package verify [OPTIONS] --platform <PLATFORM> \
+  --certificate-identity <IDENTITY> \
+  --certificate-oidc-issuer <URL> \
+  <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier to verify (`registry/repo:tag[@digest]`).
+
+**Options**
+
+| Name | Short | Default | Purpose |
+|------|-------|---------|---------|
+| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index |
+| `--certificate-identity` | — | *(required)* | Expected certificate SAN (Subject Alternative Name). Exact match only in Slice 1. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
+| `--certificate-oidc-issuer` | — | *(required)* | Expected OIDC issuer URL. Exact match only in Slice 1. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
+| `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
+| `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+
+:::warning Preview / not yet fully implemented
+The `package verify` command is currently in preview. Verification of signatures fetched from a registry's referrers index requires the sigstore-rs integration that ships in Slice 2. Exit codes documented below describe the intended Slice 1 behavior; today the command only resolves the identifier, validates `--rekor-url`, and rejects offline mode before returning a `trust_root_unavailable` error (exit 78). The referrers-capability probe, trust-root load, and full verify pipeline land in Slice 2; `--no-cache` is accepted but has no effect until the capability probe is wired.
+:::
+
+**Exit codes**
+
+| Code | Condition |
+|------|-----------|
+| 0 | Signature verified — identity and issuer match, bundle cryptographically valid |
+| 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, non-loopback, no credentials, no userinfo). |
+| 65 | Data integrity failure: signature invalid, certificate chain invalid, Rekor SET invalid (bundle tampered), bundle parse failed |
+| 77 | Certificate identity or OIDC issuer mismatch |
+| 78 | Trust root unavailable or failed to load |
+| 79 | No signatures found for target, or no usable Sigstore bundle among referrers |
+| 80 | Registry authentication failed while fetching referrers |
+| 81 | `PolicyBlocked` — `--offline` blocked the network access verify requires. Drop `--offline` and re-run. |
+| 83 | Rekor unavailable, or SET absent with only TSA timestamp present (Rekor v2 transition) |
+| 84 | Registry does not support the OCI Referrers API |
+
+::: warning No auto-verify during install
+`ocx package verify` is a standalone command. Automatic signature verification during `ocx install` or `ocx package pull` is planned for a later release. For now, run `ocx package verify` explicitly before using a package in security-sensitive contexts.
+:::
+
+**JSON output** (`--format json`)
+
+On success, `ocx package verify` emits a C-S1-1 success envelope:
+
+```json
+{
+  "schema_version": 1,
+  "command": "package verify",
+  "exit_code": 0,
+  "data": {
+    "subject": "registry.example/pkg:1.0",
+    "bundle_digest": "sha256:<64-hex>",
+    "signature_count": 1,
+    "signatures": [
+      {
+        "signature_format": "sigstore-bundle-v0.3",
+        "discovery_method": "referrers-api",
+        "certificate": {
+          "issuer": "https://token.actions.githubusercontent.com",
+          "san": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+          "not_before": "2026-04-19T11:55:00Z",
+          "not_after": "2026-04-19T12:05:00Z"
+        },
+        "rekor": {
+          "log_index": 98765432,
+          "integrated_time": "2026-04-19T12:00:00Z",
+          "log_id": "abcdef1234567890"
+        }
+      }
+    ]
+  }
+}
+```
+
+`data` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `subject` | string | Identifier argument passed to the command |
+| `bundle_digest` | string (`sha256:...`) | Digest of the OCI referrer manifest carrying the signature |
+| `signature_count` | integer | Number of valid signatures found (Slice 1: always `1`) |
+| `signatures` | array | Per-signature detail (Slice 1: exactly one entry) |
+| `signatures[].signature_format` | string | Bundle format; always `"sigstore-bundle-v0.3"` in Slice 1 |
+| `signatures[].discovery_method` | string | How the bundle was found; always `"referrers-api"` in Slice 1 |
+| `signatures[].certificate.issuer` | string | OIDC issuer URL from the Fulcio cert |
+| `signatures[].certificate.san` | string | Subject Alternative Name (identity) from the Fulcio cert |
+| `signatures[].certificate.not_before` | string (ISO-8601) | Certificate validity start |
+| `signatures[].certificate.not_after` | string (ISO-8601) | Certificate validity end |
+| `signatures[].rekor.log_index` | integer | Rekor log index for the entry |
+| `signatures[].rekor.integrated_time` | string (ISO-8601) | Time the entry was added to the log |
+| `signatures[].rekor.log_id` | string | Hex public-key digest identifying the Rekor log |
+
+Note the asymmetry with `package sign`: verify uses `subject` (the thing being verified) where sign uses `identifier` (the thing being signed). Both echo the identifier argument, but their field names differ per the C-S1-1 contract.
+
+On error, `ocx package verify` emits a C-S1-1 error envelope. The `error.detail` field is a snake_case discriminant for programmatic matching:
+
+```json
+{
+  "schema_version": 1,
+  "command": "package verify",
+  "exit_code": 79,
+  "error": {
+    "kind": "not_found",
+    "message": "no signatures found for registry.example/pkg:1.0",
+    "context": {
+      "identifier": "registry.example/pkg:1.0"
+    }
+  }
+}
+```
+
+The envelope shape matches the `package sign` error envelope (see [`package sign`](#package-sign)), but the `detail` discriminants are different — `package verify` operates on a distinct error taxonomy. `detail` is omitted when no fine-grained discriminant applies.
+
+**`detail` discriminants for `package verify`** (frozen contract C-S1-1):
+
+| `detail` value | Exit | Meaning |
+|----------------|------|---------|
+| `no_signatures_found` | 79 | No referrers found for the target manifest; publisher has not signed this platform |
+| `no_usable_bundle` | 79 | Referrers found but none has a recognized Sigstore bundle artifact type |
+| `identity_mismatch` | 77 | Certificate SAN does not match `--certificate-identity` |
+| `issuer_mismatch` | 77 | Certificate OIDC issuer does not match `--certificate-oidc-issuer` |
+| `cert_chain_invalid` | 65 | Certificate chain does not verify against the TUF trust root |
+| `signature_invalid` | 65 | Signature does not verify over the subject manifest digest |
+| `rekor_set_invalid` | 65 | Rekor SET does not verify (bundle tampered) |
+| `rekor_set_absent_tsa_present` | 83 | Rekor SET absent but RFC 3161 TSA timestamp present (Rekor v2 transition) |
+| `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
+| `rekor_unavailable` | 83 | Rekor transparency log unavailable during verify |
+| `bundle_parse_failed` | 65 | Bundle is not valid Sigstore bundle v0.3 or is corrupted JSON |
+| `trust_root_unavailable` | 78 | Embedded TUF trust root asset not present in this build (Slice 1) |
+| `trust_root_load` | 78 | Trust root PEM failed to load (malformed PEM, no certificate blocks, TUF fetch failed) |
+| `invalid_endpoint_url` | 64 | Malformed `--rekor-url` |
+
+**Example — verify a package signed in CI**
+
+```shell
+ocx package verify \
+  -p linux/amd64 \
+  --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  registry.example/pkg:1.0
+```
+
 #### `info` {#package-info}
 
 Displays description metadata for one or more packages from the registry.
@@ -3121,6 +3425,13 @@ or a registry error) — the report then degrades to a local-state-only summary
 [nixos]: https://nixos.org/
 [nix-ld]: https://github.com/nix-community/nix-ld
 [gentoo-prefix]: https://wiki.gentoo.org/wiki/Project:Prefix
+[sigstore]: https://www.sigstore.dev/
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[cosign]: https://github.com/sigstore/cosign
+[sigstore-bundle]: https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_bundle.proto
+[sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
+[oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views
@@ -3152,6 +3463,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-github-env]: ./environment.md#external-github-env
 [env-github-path]: ./environment.md#external-github-path
 [env-gitlab-ci]: ./environment.md#external-gitlab-ci
+[env-identity-token]: ./environment.md#ocx-identity-token
 
 <!-- external: completions -->
 [clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/

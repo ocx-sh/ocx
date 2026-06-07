@@ -37,8 +37,12 @@ pub enum Package {
     Select(super::select::Select),
     /// Remove the current-version symlink for one or more packages.
     Deselect(super::deselect::Deselect),
+    /// Sign a published package's manifest (keyless Sigstore, via OCI Referrers).
+    Sign(super::package_sign::PackageSign),
     /// Materialize a package locally (no registry round-trip) and run a command in its env.
     Test(super::package_test::PackageTest),
+    /// Verify a published package's Sigstore signature (keyless, via OCI Referrers).
+    Verify(super::verify::Verify),
     /// Runs installed packages.
     Exec(super::exec::Exec),
     /// Remove an installed candidate for one or more packages.
@@ -62,7 +66,9 @@ impl Package {
             Package::Push(deploy) => deploy.execute(context).await,
             Package::Select(select) => select.execute(context).await,
             Package::Deselect(deselect) => deselect.execute(context).await,
+            Package::Sign(sign) => sign.execute(context).await,
             Package::Test(test) => test.execute(context).await,
+            Package::Verify(verify) => verify.execute(context).await,
             Package::Exec(exec) => exec.execute(context).await,
             Package::Uninstall(uninstall) => uninstall.execute(context).await,
             Package::Which(which) => which.execute(context).await,

@@ -77,6 +77,9 @@ async-compression.workspace = true
 liblzma.workspace = true
 # SyncIoBridge — AsyncRead → sync Read bridge at spawn_blocking boundary (Phase 3).
 tokio-util.workspace = true
+url.workspace = true
+zeroize.workspace = true
+pem.workspace = true
 
 # Embedded Starlark engine — exact-pinned family (see root Cargo.toml comment).
 starlark.workspace = true

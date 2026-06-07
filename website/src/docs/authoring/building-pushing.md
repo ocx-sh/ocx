@@ -90,6 +90,30 @@ The hand-publishing pattern (the [`ocx_mirror`][mirror-pipeline] tool currently 
 If a file in your working directory is literally named `sha256:abc….tar.gz`, prefix it with `./` to force file interpretation. Bare `<algo>:<hex>.<ext>` tokens are always parsed as digest references.
 :::
 
+## Signing after push {#signing-after-push}
+
+A pushed manifest is identified by its digest, but nothing prevents a registry operator or network
+attacker from substituting a different binary under the same tag. [Sigstore][sigstore] keyless
+signing closes that gap: it binds the manifest digest to your OIDC identity (GitHub Actions
+workflow, Google account, email) via a short-lived certificate, logs the entry in
+[Rekor][rekor]'s append-only transparency log, and attaches the resulting bundle to the manifest
+as an [OCI Referrers][oci-referrers-spec] artifact. No long-lived signing keys, no key management.
+
+After pushing, sign the platform manifest:
+
+```sh
+ocx package sign -p linux/amd64 my/cmake:3.28
+```
+
+Consumers verify by supplying the expected signer identity — verification fails loudly rather than
+silently if the bundle is absent or the identity does not match.
+
+For implementation detail (TUF trust root loading, referrers-capability cache, OCI 1.1 hard-fail
+policy, bundle storage paths, and slice boundaries) see [Signing In Depth][in-depth-signing].
+
+For command flags, token-source precedence, and exit codes see the
+[`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify].
+
 ## See Also {#see-also}
 
 - [`ocx package push` reference][cmd-package-push]
@@ -102,11 +126,16 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 <!-- external -->
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
 [mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
+[oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
+[sigstore]: https://www.sigstore.dev/
+[rekor]: https://github.com/sigstore/rekor
 
 <!-- commands -->
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-describe]: ../reference/command-line.md#package-describe
+[cmd-package-sign]: ../reference/command-line.md#package-sign
+[cmd-package-verify]: ../reference/command-line.md#package-verify
 [arg-remote]: ../reference/command-line.md#arg-remote
 [arg-offline]: ../reference/command-line.md#arg-offline
 [arg-frozen]: ../reference/command-line.md#arg-frozen
@@ -117,6 +146,7 @@ If a file in your working directory is literally named `sha256:abc….tar.gz`, p
 <!-- in-depth -->
 [in-depth-storage-layers]: ../in-depth/storage.md#layers
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
+[in-depth-signing]: ../in-depth/signing.md
 
 <!-- authoring -->
 [authoring-bundle-anatomy]: ./bundle-anatomy.md

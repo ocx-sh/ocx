@@ -7,7 +7,9 @@
 // discovery helpers (`patch_descriptor_id` / `global_descriptor_id` /
 // `PatchTagMap`) — every other module stays `pub(crate)` so internal `pub`
 // items (e.g. `pull::SetupGroups::new`) do not leak into the crate's public
-// API surface (which would trip `clippy::new_without_default`).
+// API surface (which would trip `clippy::new_without_default`). `sign` /
+// `verify` follow the same rule: the CLI reaches them through `PackageManager`,
+// never by module path.
 pub(crate) mod clean;
 pub(crate) mod common;
 pub(crate) mod deselect;
@@ -29,5 +31,7 @@ pub(crate) mod pull_local;
 pub(crate) mod purge;
 pub(crate) mod resolve;
 pub(crate) mod select;
+pub(crate) mod sign;
 pub(crate) mod uninstall;
 pub(crate) mod update_check;
+pub(crate) mod verify;
