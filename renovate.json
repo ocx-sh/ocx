@@ -1,0 +1,62 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "schedule:weekly"
+  ],
+  "semanticCommits": "enabled",
+  "packageRules": [
+    {
+      "description": "release.yml is cargo-dist-generated and floats by design — never let Renovate bump its actions",
+      "matchManagers": ["github-actions"],
+      "matchFileNames": [".github/workflows/release.yml"],
+      "enabled": false
+    },
+    {
+      "description": "GitHub Actions — group, SHA-pin, ci(deps) prefix",
+      "matchManagers": ["github-actions"],
+      "groupName": "actions",
+      "semanticCommitType": "ci",
+      "semanticCommitScope": "deps",
+      "pinDigests": true
+    },
+    {
+      "description": "Cargo crates — group, chore(deps) prefix",
+      "matchManagers": ["cargo"],
+      "groupName": "rust-deps",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Website npm deps — group, chore(deps) prefix",
+      "matchManagers": ["npm"],
+      "groupName": "npm-deps",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Action pins embedded in ocx-mirror workflow templates — same actions group + ci(deps) prefix",
+      "matchManagers": ["custom.regex"],
+      "groupName": "actions",
+      "semanticCommitType": "ci",
+      "semanticCommitScope": "deps"
+    }
+  ],
+  "npm": {
+    "managerFilePatterns": ["/^website/", "/^\\.github/actions/setup-ocx/"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Bump SHA-pinned GitHub Actions baked into ocx-mirror pipeline templates (outside .github/, so the built-in manager never sees them)",
+      "managerFilePatterns": [
+        "/^crates/ocx_mirror/src/command/pipeline/generate/templates/[^/]+\\.yml$/"
+      ],
+      "matchStrings": [
+        "uses:\\s+(?<depName>[^@\\s]+)@(?<currentDigest>[0-9a-f]{40})\\s+#\\s+(?<currentValue>v[^\\s]+)"
+      ],
+      "datasourceTemplate": "github-tags",
+      "autoReplaceStringTemplate": "uses: {{{depName}}}@{{{newDigest}}}  # {{{newValue}}}"
+    }
+  ]
+}
