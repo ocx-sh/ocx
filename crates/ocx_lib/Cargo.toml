@@ -64,6 +64,23 @@ indicatif.workspace = true
 thiserror.workspace = true
 rpassword.workspace = true
 
+# Embedded Starlark engine — exact-pinned family (see root Cargo.toml comment).
+starlark.workspace = true
+starlark_syntax.workspace = true
+starlark_map.workspace = true
+starlark_derive.workspace = true
+# Sealed-trait supertrait of starlark's `StarlarkValue` (see root Cargo.toml).
+# Host-allocated typed values (`OsValue`, `ArchValue`, `PlatformValue`,
+# `RunResultValue`) implement `allocative::Allocative` directly.
+allocative.workspace = true
+# `anyhow` is the CLI-boundary error carrier: `cli::classify_error` takes an
+# `&anyhow::Error` to map error chains to exit codes (the documented
+# library/CLI boundary pattern in quality-rust-errors), and the `script`
+# engine firewall uses it for the starlark evaluator boundary payload.
+# ocx_lib's PUBLIC error API stays `thiserror` (`ScriptError` /
+# `ScriptOutcomeKind`); anyhow never appears in a public structured-error type.
+anyhow = "1"
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 

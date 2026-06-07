@@ -394,6 +394,12 @@ The automatic update check is also suppressed when stderr is not a terminal (typ
 
 To disable the check entirely rather than adjusting its frequency, use [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check). The explicit [`ocx self update`][cmd-self-update] and [`ocx self update --check`][cmd-self-update] commands always bypass this interval — they are explicit user intent.
 
+### Script env access (`ocx package test --script`) {#script-env-access}
+
+`ocx.env(name)` in a [Starlark test script][authoring-testing-scripted] reads one variable from the **composed package env** — the same env surface that `ocx exec` exposes. It does not read the host process env.
+
+No new `OCX_*` variable was introduced by the `--script` feature. The resolution-affecting variables listed above (`OCX_BINARY_PIN`, `OCX_HOME`, `OCX_CONFIG`, `OCX_PROJECT`, `OCX_INDEX`, and others) remain inaccessible to script `ocx.env()` calls and cannot be overridden via the `ocx.run(env=...)` overlay kwarg — those keys are reserved and any attempt to set them results in a `Failed` outcome.
+
 ## External {#external}
 
 ### `CI` {#external-ci}
@@ -526,3 +532,6 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [fs-index]: ../user-guide.md#file-structure-index
 [fs-symlinks]: ../user-guide.md#file-structure-symlinks
 [faq-codesign]: ../faq.md#macos-codesign
+
+<!-- authoring -->
+[authoring-testing-scripted]: ../authoring/testing.md#scripted-tests

@@ -95,6 +95,7 @@ export default defineConfig({
           collapsed: true,
           items: [
             { text: "Command Line", link: "/docs/reference/command-line" },
+            { text: "Script Host API", link: "/docs/reference/script-host-api" },
             { text: "Configuration", link: "/docs/reference/configuration" },
             { text: "Environment", link: "/docs/reference/environment" },
             { text: "Metadata", link: "/docs/reference/metadata" },

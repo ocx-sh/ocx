@@ -133,6 +133,36 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security",
 ] }
 
+# Embedded Starlark interpreter for `ocx package test --script`.
+#
+# DELIBERATE EXACT PIN (deviation from this repo's caret-version convention):
+# starlark-rust does NOT promise API stability between releases. Every bump is
+# treated as a breaking change requiring a manual review pass (and re-running
+# the engine-isolation test). The whole family is co-versioned and must move
+# together. See .claude/rules/subsystem-deps.md "Manually-tracked exact pins".
+starlark = "=0.13.0"
+starlark_syntax = "=0.13.0"
+starlark_map = "=0.13.0"
+starlark_derive = "=0.13.0"
+# Not a free choice: `allocative` is part of starlark's public API surface.
+# `StarlarkValue` is a sealed trait whose supertrait bound is
+# `allocative::Allocative`, so every host-allocated typed value must implement
+# it against the SAME allocative version starlark 0.13.0 links from crates.io.
+# Bump only together with the starlark family above.
+allocative = "=0.3.4"
+
+[workspace.lints.rust]
+# Deny member-crate warnings via Cargo's lints table (Cargo 1.74+) rather than a
+# blanket RUSTFLAGS=-D warnings in CI. RUSTFLAGS is global and also denies path
+# dependencies — Cargo only auto-caps registry/git deps with `--cap-lints allow`,
+# not path deps — which would turn the path-vendored forks' (oci-client,
+# docker_credential) upstream lint warnings into hard build errors. This table
+# applies to workspace members only (those with `lints.workspace = true`), so the
+# forks compile capped while our crates stay warning-clean. CI's
+# `setup-rust-toolchain` steps set `rustflags: ""` to defer denial to here, which
+# also removes the prior local-vs-CI drift (local `cargo build` now denies too).
+warnings = "deny"
+
 [workspace.lints.clippy]
 # Placeholder for future workspace-wide clippy overrides. Crate-specific
 # overrides belong in each crate's own [lints.clippy] section so the
