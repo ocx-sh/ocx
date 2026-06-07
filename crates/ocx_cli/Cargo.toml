@@ -47,5 +47,8 @@ which.workspace = true
 secrecy.workspace = true
 async-trait.workspace = true
 
+[dev-dependencies]
+serde_json = "1"
+
 [lints]
 workspace = true
