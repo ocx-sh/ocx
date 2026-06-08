@@ -22,14 +22,14 @@ Install pre-built tools with a single command, switch versions instantly, and ru
 curl -fsSL https://ocx.sh/install.sh | sh
 
 # Install a package
-ocx install cmake:3.28
+ocx package install cmake:4
 
 # Run with a clean environment
-ocx exec cmake:3.28 -- cmake --version
+ocx package exec cmake:4 -- cmake --version
 
 # Switch versions
-ocx install cmake:3.29 --select
-ocx select cmake:3.28    # switch back
+ocx package install cmake:3 --select
+ocx package select cmake:4    # switch back
 ```
 
 See the [Getting Started guide][getting-started] for more.
