@@ -3,9 +3,27 @@
 
 use std::collections::HashMap;
 
+use futures::stream::{self, StreamExt, TryStreamExt};
+
 use crate::{Result, file_structure::TagStore, log, oci};
 
 use super::{cache, tag_guard::TagGuard};
+
+/// Maximum number of per-tag manifest-digest fetches to run concurrently in a
+/// single [`TagManager::refresh`].
+///
+/// These are tiny, latency-bound metadata round-trips (a manifest digest
+/// lookup), not memory-bound transfers — so this is deliberately far higher
+/// than the archive-bound `LAYER_PUSH_CONCURRENCY`. Fetch time is roughly
+/// `ceil(tag_count / N) * RTT`, and most packages carry well under ~64 tags, so
+/// 64 resolves the typical package in a single round (effectively full
+/// parallelism). The cap still matters for two ceilings: a cmake-class package
+/// with hundreds of tags must not open a wide simultaneous burst a registry
+/// answers with `429`, and `ocx index update` fans out across packages
+/// unbounded, so peak in-flight requests is `package_count * N`. 64 is the knee
+/// of the curve — raising it only helps packages with 65+ tags while doubling
+/// that burst pressure.
+const TAG_REFRESH_CONCURRENCY: usize = 64;
 
 /// Self-contained manager for the local tag store.
 ///
@@ -51,19 +69,42 @@ impl TagManager {
             None => source.list_tags(identifier).await?.unwrap_or_default(),
         };
 
-        let mut fetched: HashMap<String, oci::Digest> = HashMap::new();
-        for tag in tags {
-            let tagged = identifier.clone_with_tag(&tag);
-            log::info!("Refreshing tag '{}' for identifier '{}'.", tag, identifier);
-            let Some(digest) = source
-                .fetch_manifest_digest(&tagged, super::super::IndexOperation::Resolve)
-                .await?
-            else {
-                log::debug!("Source has no digest for tag '{}' — skipping.", tag);
-                continue;
-            };
-            fetched.insert(tag, digest);
+        if tags.is_empty() {
+            return Ok(());
         }
+
+        // One info line per identifier; per-tag detail is debug-only so an
+        // index update over a many-tagged package does not flood info logs.
+        log::info!("Refreshing tags for identifier '{}'.", identifier);
+
+        // Fetch each tag's digest concurrently. A package can carry hundreds
+        // of tags and each fetch is an independent registry round-trip, so the
+        // former sequential loop dominated `ocx index update` wall-clock
+        // (issue #154). `(tag, digest)` pairs are order-independent — they
+        // merge into a map under unique keys — so completion-order results are
+        // safe. `buffer_unordered` caps in-flight fetches at
+        // `TAG_REFRESH_CONCURRENCY` to stay a polite registry citizen.
+        let fetched: HashMap<String, oci::Digest> = stream::iter(tags)
+            .map(|tag| {
+                let tagged = identifier.clone_with_tag(&tag);
+                async move {
+                    log::debug!("Refreshing tag '{}' for identifier '{}'.", tag, identifier);
+                    match source
+                        .fetch_manifest_digest(&tagged, super::super::IndexOperation::Resolve)
+                        .await?
+                    {
+                        Some(digest) => Ok::<_, crate::Error>(Some((tag, digest))),
+                        None => {
+                            log::debug!("Source has no digest for tag '{}' — skipping.", tag);
+                            Ok(None)
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(TAG_REFRESH_CONCURRENCY)
+            .try_filter_map(|entry| async move { Ok(entry) })
+            .try_collect()
+            .await?;
 
         if fetched.is_empty() {
             return Ok(());

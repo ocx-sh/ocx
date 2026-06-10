@@ -548,6 +548,81 @@ mod spec_tests {
         assert_eq!(tags.len(), 8, "all 8 concurrent writers' entries must be on disk");
     }
 
+    // ── refresh_tags: fans tag fetches out concurrently (issue #154) ──────
+
+    /// Source whose every `fetch_manifest_digest` blocks on a shared barrier
+    /// sized to the tag count. A concurrent refresh has all fetches in flight
+    /// at once, so the barrier releases; a sequential refresh blocks forever on
+    /// the first fetch.
+    #[derive(Clone)]
+    struct BarrierSource {
+        known: HashMap<String, oci::Digest>,
+        barrier: std::sync::Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl super::super::index_impl::IndexImpl for BarrierSource {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &oci::Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(Some(self.known.keys().cloned().collect()))
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: super::super::IndexOperation,
+        ) -> crate::Result<Option<(oci::Digest, Manifest)>> {
+            let tag = identifier.tag_or_latest();
+            Ok(self
+                .known
+                .get(tag)
+                .map(|d| (d.clone(), Manifest::Image(ImageManifest::default()))))
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &oci::Identifier,
+            _op: super::super::IndexOperation,
+        ) -> crate::Result<Option<oci::Digest>> {
+            let digest = self.known.get(identifier.tag_or_latest()).cloned();
+            // Block until every concurrent fetch reaches this point. Releases
+            // only if `refresh` fans the fetches out in parallel.
+            self.barrier.wait().await;
+            Ok(digest)
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// `refresh_tags` on a bare identifier must fetch every tag's digest
+    /// concurrently, not in a sequential loop. Each fetch blocks on a barrier
+    /// sized to the tag count: parallel fetches all arrive and release it; a
+    /// sequential loop deadlocks on the first fetch and trips the timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_tags_fetches_tag_digests_concurrently() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let id = repo_id();
+
+        let tags = ["1.0", "2.0", "3.0", "4.0", "5.0"];
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(tags.len()));
+        let known: HashMap<String, oci::Digest> = tags.iter().map(|t| ((*t).to_string(), digest('a'))).collect();
+        let source = super::super::Index::from_impl(BarrierSource { known, barrier });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), index.refresh_tags(&id, &source))
+            .await
+            .expect("refresh_tags must fetch tags concurrently; a sequential fetch deadlocks on the barrier")
+            .expect("refresh_tags failed");
+
+        let fresh = make_index(&dir);
+        let on_disk = fresh.get_tags(&id).await.unwrap().unwrap();
+        assert_eq!(on_disk.len(), tags.len(), "every fetched tag must be persisted");
+    }
+
     // ── ChainedIndex cache-miss persistence: image manifest ──────────────
 
     /// `ChainedIndex::fetch_manifest` on a cache miss must persist the
