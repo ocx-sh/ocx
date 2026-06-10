@@ -42,13 +42,17 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 ### ChainMode
 
 ```rust
-#[non_exhaustive]
 pub enum ChainMode {
     Default,  // Local index first for queries. `Op::Resolve` walks chain on miss; `Op::Query` returns None. Normal online operation.
     Remote,   // Mutable lookups (tag list, catalog, tag-addressed manifest) hit source directly. Digest-addressed lookups still consult local index. Used for `--remote`.
-    Offline,  // Local index only; source never consulted; miss returns None. Used for `--offline`.
+    Offline,  // Local index only; source never consulted. Digest miss → None; unpinned-tag `Op::Resolve` miss → PolicyResolutionBlocked (exit 81). Used for `--offline`.
+    Frozen,   // Freeze resolution to the local index: unpinned-tag `Op::Resolve` miss → PolicyResolutionBlocked (exit 81); digest-addressed content still walks the source like Default. Used for `--frozen`.
 }
 ```
+
+`ChainMode::policy_label(self) -> &'static str` returns the lowercase flag name (`"offline"` / `"frozen"`) embedded in the `PolicyResolutionBlocked` message.
+
+**Deferred: composed RoutingPolicy.** A struct form (`RoutingPolicy { resolution: Allowed|LocalOnly, network: Allowed|Banned }`) was considered and deferred in favor of the flat `ChainMode` enum — YAGNI: only one policy axis exists today, and four variants enumerate the space exactly. Revisit trigger: when a *second orthogonal* policy flag appears, compose instead of adding a fifth flattened variant (combinatorial growth is the signal).
 
 ### IndexOperation
 
@@ -66,12 +70,14 @@ The enum exists because the trait used to conflate query and update — a cache 
 
 ### Routing matrix
 
-| Operation | `--remote` | `--offline` | `--offline --remote` | Default |
-|-----------|-----------|-------------|----------------------|---------|
-| `list_repositories`, `list_tags`, `fetch_manifest` tag+`Op::Query` | source only, no write | local only | local only (info log) | local only |
-| `fetch_manifest` tag+`Op::Resolve` | source only, write blobs+tag | local only (errors if missing) | local only (errors) | local first, miss → fetch+write |
-| `fetch_manifest` digest, any op | local first | local only | local only | local first |
-| `fetch_manifest` digest+`Op::Resolve` (pinned-id pull) | source on miss, write blobs only, **no tag** | local only | local only | local first, miss → fetch blobs only |
+| Operation | `--remote` | `--offline` | `--frozen` | `--offline --remote` | Default |
+|-----------|-----------|-------------|------------|----------------------|---------|
+| `list_repositories`, `list_tags`, `fetch_manifest` tag+`Op::Query` | source only, no write | local only | local only | local only (info log) | local only |
+| `fetch_manifest` tag+`Op::Resolve` | source only, write blobs+tag | local only; unpinned miss → **PolicyBlocked (81)** | local only; unpinned miss → **PolicyBlocked (81)** | local only (→ 81) | local first, miss → fetch+write |
+| `fetch_manifest` digest, any op | local first | local only | local first | local only | local first |
+| `fetch_manifest` digest+`Op::Resolve` (pinned-id pull) | source on miss, write blobs only, **no tag** | local only | source on miss, write blobs only, **no tag** | local only | local first, miss → fetch blobs only |
+
+**No-resolve policy block (offline + frozen).** Both `Offline` and `Frozen` refuse to resolve an unpinned (tag-only) reference from a source. The shared gate at the top of `ChainedIndex::walk_chain` is an exhaustive `match self.mode` — the `Offline | Frozen` arm with an `identifier.digest().is_none()` guard raises `oci::index::error::Error::PolicyResolutionBlocked { identifier, policy }` → `ExitCode::PolicyBlocked` (81); adding a new `ChainMode` variant forces a compile error at this routing decision. This is a deliberate behaviour change for offline: an unpinned-tag `Op::Resolve` miss now surfaces as `PolicyBlocked` (81), not `TagNotFound` (79) — realizing offline's documented "errors if missing" contract and aligning it with frozen. `TagNotFound` (79) now means strictly "a source *was* consulted and the tag genuinely does not exist" (Default / Remote). The two policies still differ on the digest axis: offline blocks the pinned digest's *content* fetch, frozen lets it through (only unpinned-tag *resolution* is refused). The project-lock layer mirrors this with `ProjectErrorKind::PolicyBlocked` (terminal, no retry).
 
 **Design note — write paths.** Local index mutation is owned by exactly three entry points: `LocalIndex::refresh_tags` (called from `ocx index update`), `LocalIndex::persist_manifest_chain` (content-addressed blob writes from install/pull), and `LocalIndex::commit_tag` (`pub(super)`, the only tag-pointer writer outside `refresh_tags`; called only from `ChainedIndex::fetch_and_persist_chain`). Pure query paths must never reach any of them. The structural test `chain_refs_tests::op_query_never_writes_local_index_in_any_mode` enforces this for `Op::Query` (Default/Offline → `None`, no source; `--remote` → read-through to source via `query_sources_manifest{,_digest}`, returns `Some`, tag store untouched). Pinned-id pulls (`tag+digest`) skip the `commit_tag` step because `ocx.lock` is canonical.
 

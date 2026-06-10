@@ -74,9 +74,9 @@ pub enum ExitCode {
     /// Authentication failure: registry 401, missing credentials.
     /// Tool-specific.
     AuthError = 80,
-    /// Offline mode blocked a network operation.
-    /// Distinct from `Unavailable`: the failure is deliberate policy, not a fault.
-    OfflineBlocked = 81,
+    /// A deliberate local policy (`--offline` or `--frozen`) refused a network
+    /// or resolution operation — not a fault. Distinct from `Unavailable`.
+    PolicyBlocked = 81,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -98,7 +98,7 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
         // Match the outer library error type first (three-layer pattern).
         if let Some(e) = cause.downcast_ref::<MyLibError>() {
             return match e {
-                MyLibError::OfflineMode        => ExitCode::OfflineBlocked,
+                MyLibError::OfflineMode        => ExitCode::PolicyBlocked,
                 MyLibError::Io { .. }          => ExitCode::IoError,
                 MyLibError::Config(ce)         => classify_config(ce),
                 MyLibError::PackageManager(pe) => match pe.kind() {
@@ -187,7 +187,7 @@ case $? in
     78) echo "bad config; fix and retry" ;;
     79) echo "not found; pin a different version" ;;
     80) echo "auth failed; refresh credentials" ;;
-    81) echo "offline mode; run online" ;;
+    81) echo "policy blocked (offline/frozen); loosen the flag or update the index" ;;
     *)  echo "unknown failure ($?)"; exit 1 ;;
 esac
 ```
