@@ -206,6 +206,7 @@ Whenever ocx spawns a subprocess (most commonly the child process under [`ocx pa
 |---|---|---|
 | [`OCX_BINARY_PIN`][env-ocx-binary-pin] | Resolved path of the running ocx executable | Pins the inner ocx to the same binary that installed the package |
 | [`OCX_OFFLINE`][env-ocx-offline] | `--offline` flag on the outer invocation | Child ocx stays offline if outer was offline |
+| [`OCX_FROZEN`][env-ocx-frozen] | `--frozen` flag on the outer invocation | Child ocx stays frozen if outer was frozen |
 | [`OCX_REMOTE`][env-ocx-remote] | `--remote` flag on the outer invocation | Child ocx uses the remote index if outer did |
 | [`OCX_CONFIG`][env-ocx-config] | `--config` flag on the outer invocation | Child ocx loads the same explicit config file |
 | [`OCX_INDEX`][env-ocx-index] | `--index` flag on the outer invocation | Child ocx reads the same local index directory |
@@ -260,6 +261,7 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 <!-- environment -->
 [env-ocx-binary-pin]: ../reference/environment.md#ocx-binary-pin
 [env-ocx-offline]: ../reference/environment.md#ocx-offline
+[env-ocx-frozen]: ../reference/environment.md#ocx-frozen
 [env-ocx-remote]: ../reference/environment.md#ocx-remote
 [env-ocx-config]: ../reference/environment.md#ocx-config
 [env-ocx-index]: ../reference/environment.md#ocx-index

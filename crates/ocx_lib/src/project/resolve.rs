@@ -387,6 +387,21 @@ async fn retry_fetch(
                 .into());
             }
             Err(err) => {
+                // A no-resolve policy (offline / frozen) refused this unpinned
+                // tag at the index boundary. Terminal — no retry, no backoff —
+                // and routed to its own `ProjectErrorKind` so it classifies as
+                // PolicyBlocked (81) rather than falling through to
+                // `ClientFailure::Other` → RegistryUnreachable (69).
+                if let Some(policy) = policy_block_label(&err) {
+                    return Err(ProjectError::new(
+                        PathBuf::new(),
+                        ProjectErrorKind::PolicyBlocked {
+                            identifier: Box::new(identifier),
+                            policy,
+                        },
+                    )
+                    .into());
+                }
                 let classification = classify_client_error(&err);
                 match classification {
                     ClientFailure::Transient if attempt < options.retry_attempts => {
@@ -463,6 +478,24 @@ enum ClientFailure {
 /// chained-index source walk — before starting the generic `source()`
 /// walk for any remaining downcast opportunities (e.g. nested via
 /// `ClientError::Internal`).
+/// Detect an index-layer no-resolve policy block in `err`.
+///
+/// Returns the lowercase policy label (`"offline"` / `"frozen"`) when the
+/// chained index refused to resolve an unpinned tag under `--offline` /
+/// `--frozen`. The error arrives as
+/// [`crate::Error::OciIndex`]`(`[`PolicyResolutionBlocked`]`)` straight from
+/// `ChainedIndex::walk_chain` — it is raised before the singleflight walk, so
+/// it is never wrapped in `SourceWalkFailed`. Terminal: the caller returns
+/// immediately without consuming the retry budget.
+///
+/// [`PolicyResolutionBlocked`]: crate::oci::index::error::Error::PolicyResolutionBlocked
+fn policy_block_label(err: &crate::Error) -> Option<&'static str> {
+    if let crate::Error::OciIndex(crate::oci::index::error::Error::PolicyResolutionBlocked { policy, .. }) = err {
+        return Some(policy);
+    }
+    None
+}
+
 fn classify_client_error(err: &crate::Error) -> ClientFailure {
     // Direct `crate::Error::OciClient` — the simple case.
     if let crate::Error::OciClient(client) = err {
@@ -1312,6 +1345,65 @@ mod tests {
             "StaleLockOnPartial must classify as DataError (exit 65); got {:?}",
             code
         );
+    }
+
+    // ── #155 frozen / offline policy block is terminal ──────────────────────
+
+    /// A no-resolve policy block from the index layer
+    /// (`PolicyResolutionBlocked`) is terminal in `retry_fetch`: it returns
+    /// immediately (no retry, no backoff), routes to
+    /// `ProjectErrorKind::PolicyBlocked` carrying the policy label, and
+    /// classifies as PolicyBlocked (81). Exercised for both `"offline"` and
+    /// `"frozen"` so the single check covers both policies.
+    #[tokio::test]
+    async fn resolve_lock_policy_block_is_terminal_and_classifies_policy_blocked() {
+        for policy in ["offline", "frozen"] {
+            let config = single_tool_config();
+            let index_err = crate::oci::index::error::Error::PolicyResolutionBlocked {
+                identifier: format!("{TEST_REGISTRY}/{TOOL_REPO}:{TOOL_TAG}"),
+                policy,
+            };
+            let mock = MockIndex::with_script(vec![Err(index_err.into())]);
+            let (index, counter) = index_from_mock(&mock);
+
+            let err = resolve_lock(&config, &index, &[], fast_options())
+                .await
+                .expect_err("policy block must surface as an error");
+
+            assert_eq!(
+                *counter.lock().unwrap(),
+                1,
+                "policy block must NOT retry (policy={policy}); expected exactly 1 call, got {}",
+                *counter.lock().unwrap()
+            );
+
+            // Terminal routing → ProjectErrorKind::PolicyBlocked with the label.
+            let mut found = false;
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+            while let Some(c) = cause {
+                if let Some(ProjectErrorKind::PolicyBlocked { policy: got, .. }) = c.downcast_ref::<ProjectErrorKind>()
+                {
+                    assert_eq!(
+                        *got, policy,
+                        "policy label must be carried through to the project error"
+                    );
+                    found = true;
+                    break;
+                }
+                cause = c.source();
+            }
+            assert!(
+                found,
+                "error chain must contain ProjectErrorKind::PolicyBlocked (policy={policy}); chain: {err:#}"
+            );
+
+            let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+            assert_eq!(
+                code,
+                Some(crate::cli::ExitCode::PolicyBlocked),
+                "policy block must classify as PolicyBlocked (exit 81); got {code:?}"
+            );
+        }
     }
 
     /// `resolve_lock_partial` does NOT return `StaleLockOnPartial` when

@@ -184,7 +184,7 @@ impl std::error::Error for ArcError {
 impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            Self::OfflineMode => Some(ExitCode::OfflineBlocked),
+            Self::OfflineMode => Some(ExitCode::PolicyBlocked),
             Self::InternalFile(_, _) => Some(ExitCode::IoError),
             Self::InternalPathInvalid(_) => Some(ExitCode::Failure),
             Self::SerializationFailure(_) | Self::UnsupportedMediaType(_, _) => Some(ExitCode::DataError),

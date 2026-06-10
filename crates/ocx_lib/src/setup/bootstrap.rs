@@ -70,7 +70,7 @@ enum Decision {
 /// # Errors
 ///
 /// - Offline and not already installed → an error classifying to exit 81
-///   (`OfflineBlocked`): setup cannot complete without the CAS populated.
+///   (`PolicyBlocked`): setup cannot complete without the CAS populated.
 /// - Registry probe failure during the live tag query → an error classifying
 ///   to exit 69 (`Unavailable`): no published target is reachable.
 /// - Install failure → the underlying [`Error`] from `install_all`, classified
@@ -181,9 +181,9 @@ fn map_skipped(reason: SkippedReason, already_installed: bool) -> Decision {
     }
 }
 
-/// Builds a bootstrap error that classifies to exit 81 (`OfflineBlocked`).
+/// Builds a bootstrap error that classifies to exit 81 (`PolicyBlocked`).
 ///
-/// Wraps [`crate::Error::OfflineMode`] (which classifies to `OfflineBlocked`)
+/// Wraps [`crate::Error::OfflineMode`] (which classifies to `PolicyBlocked`)
 /// in the package-manager error ladder so it composes through
 /// [`crate::setup::error::Error::Bootstrap`].
 fn offline_blocked() -> Error {
@@ -261,7 +261,7 @@ mod tests {
         let Decision::Fail(error) = decide(UpdateCheckResult::Skipped(SkippedReason::Offline), false) else {
             panic!("expected Fail for offline + empty CAS");
         };
-        assert_eq!(classify_error(&error), ExitCode::OfflineBlocked);
+        assert_eq!(classify_error(&error), ExitCode::PolicyBlocked);
     }
 
     /// Registry probe failure → exit 69 (`Unavailable`).

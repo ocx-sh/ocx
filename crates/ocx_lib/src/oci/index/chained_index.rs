@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use super::index_impl::IndexImpl;
 use super::{ChainMode, Index, IndexOperation, LocalIndex, index_impl};
 use crate::utility::singleflight;
 use crate::{Result, log, oci};
@@ -76,8 +77,46 @@ impl ChainedIndex {
     /// `Err(_)` when every source errored — preserves the trust boundary
     /// between "not found" (cache retry → `None`) and "registry outage".
     async fn walk_chain(&self, identifier: &oci::Identifier) -> Result<()> {
+        // No-resolve policies (offline, frozen) refuse to resolve an unpinned
+        // (tag-only) reference whose tag→digest mapping is genuinely absent from
+        // the local index. A digest-bearing identifier is an already-known
+        // version, so it is exempt here — Offline still blocks its *content*
+        // fetch just below; Frozen lets it walk the chain like Default.
+        //
+        // The block fires only on a true *resolution* miss. A tag pointer that
+        // DOES resolve locally — even when its manifest blob is missing from the
+        // cache — is not a policy block: that is a content-fetch concern handled
+        // downstream (offline → `OfflineManifestMissing` naming the digest).
+        // `fetch_manifest` reaches `walk_chain` for both "tag absent" and "tag
+        // present, blob missing"; probing the tag pointer (no source contact —
+        // `LocalIndex::fetch_manifest_digest` needs only the tag store) tells the
+        // two apart.
+        //
+        // Errors from the probe are propagated with `?` — a corrupt or unreadable
+        // local index must surface as a real I/O error, not be silently treated
+        // as "tag absent" which would incorrectly raise PolicyResolutionBlocked.
+        if identifier.digest().is_none() && matches!(self.mode, ChainMode::Frozen | ChainMode::Offline) {
+            // Propagate genuine I/O / parse errors so a corrupt or unreadable
+            // local index surfaces as a real error rather than being silently
+            // treated as "tag absent" → wrong PolicyResolutionBlocked (exit 81).
+            // Only a genuine `None` (tag truly absent) must trigger the policy block.
+            let locally_resolvable = self
+                .local_index
+                .fetch_manifest_digest(identifier, IndexOperation::Query)
+                .await?
+                .is_some();
+            if !locally_resolvable {
+                return Err(super::error::Error::PolicyResolutionBlocked {
+                    identifier: identifier.to_string(),
+                    policy: self.mode.policy_label(),
+                }
+                .into());
+            }
+        }
         if self.mode == ChainMode::Offline {
-            // Offline mode never consults sources.
+            // Digest-addressed offline miss: no source contact, content stays
+            // unfetched (the resulting `None` becomes a policy error at the
+            // content boundary).
             return Ok(());
         }
 
@@ -669,20 +708,24 @@ mod chain_refs_tests {
 
     // ── test 26 ───────────────────────────────────────────────────────────
 
-    /// Design record §26: in Offline mode, a cache miss returns None without
-    /// consulting any sources.
+    /// Design record §26 (revised for #155): in Offline mode an unpinned
+    /// (tag-only) cache miss is a **policy block** — it errors with
+    /// `PolicyResolutionBlocked{policy:"offline"}` and never consults a
+    /// source. This unifies offline with frozen: under either policy the
+    /// resolver was forbidden from checking, so "policy blocked" is the honest
+    /// answer (previously this surfaced as `Ok(None)` → not-found exit 79).
     #[tokio::test(flavor = "multi_thread")]
-    async fn offline_mode_cache_miss_returns_none_without_consulting_sources() {
+    async fn offline_mode_tag_only_miss_blocks_without_consulting_sources() {
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
 
         let (spy, src_idx) = make_source(TAG, digest_a());
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Offline);
-        let result = chained
+        let err = chained
             .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
             .await
-            .unwrap();
-        assert!(result.is_none(), "Offline mode: cache miss must return None");
+            .expect_err("Offline mode: unpinned-tag miss must be a policy block");
+        assert_policy_blocked(&err, "offline");
         assert_eq!(spy.calls(), 0, "Offline mode must never consult sources");
     }
 
@@ -707,6 +750,199 @@ mod chain_refs_tests {
             .unwrap();
         assert!(result.is_some(), "Offline mode: cache hit must return Some");
         assert_eq!(spy.calls(), 0, "Offline mode must never consult sources on hit");
+    }
+
+    // ── #155 frozen / no-resolve-policy routing ─────────────────────────────
+
+    /// Assert `err` is the chained-index `PolicyResolutionBlocked` variant with
+    /// the expected lowercase policy label.
+    fn assert_policy_blocked(err: &crate::Error, expected_policy: &str) {
+        match err {
+            crate::Error::OciIndex(super::super::error::Error::PolicyResolutionBlocked { policy, identifier }) => {
+                assert_eq!(
+                    *policy, expected_policy,
+                    "policy label mismatch (identifier={identifier})"
+                );
+            }
+            other => panic!("expected PolicyResolutionBlocked{{policy:{expected_policy:?}}}, got: {other:?}"),
+        }
+    }
+
+    /// Frozen + unpinned (tag-only) miss → `PolicyResolutionBlocked{policy:"frozen"}`,
+    /// source never contacted (the spy records zero calls).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn frozen_mode_tag_only_miss_blocks_without_consulting_sources() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Frozen);
+        let err = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .expect_err("Frozen mode: unpinned-tag miss must be a policy block");
+        assert_policy_blocked(&err, "frozen");
+        assert_eq!(
+            spy.calls(),
+            0,
+            "Frozen mode must not consult sources for an unpinned-tag miss"
+        );
+    }
+
+    /// Frozen + tag-only HIT (already in the local index) → resolves from
+    /// cache, no source contact. Frozen never costs anything on the hit path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn frozen_mode_tag_only_hit_returns_from_local_index() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        // Seed the cache via a temporary source so the tag is locally known.
+        let (_, seed) = make_source(TAG, digest_a());
+        seed_full(&cache, &tagged_id(), digest_a(), &seed).await;
+
+        let (spy, src_idx) = make_source(TAG, digest_b()); // different digest
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Frozen);
+        let result = chained
+            .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .expect("Frozen mode: tag-only hit must resolve from cache");
+        assert!(result.is_some(), "Frozen mode: tag-only hit must return Some");
+        assert_eq!(spy.calls(), 0, "Frozen mode must not consult sources on a local hit");
+    }
+
+    /// Tag pointer present in the local index but manifest blob missing (the
+    /// "tag-present, blob-missing" state that arises after `ocx index update`
+    /// without a subsequent pull) must NOT be treated as a policy block under
+    /// Frozen or Offline modes.  The policy gate probes `fetch_manifest_digest`
+    /// which queries only the tag store — returning `Some(digest)` means the
+    /// tag IS locally resolvable — so the gate lets the call through.  The
+    /// blob-absent path is a content-fetch concern handled downstream, not a
+    /// resolution policy violation.
+    ///
+    /// The two modes differ in what happens *after* the gate passes:
+    ///   - `Offline`: early-return at the `ChainMode::Offline` guard; no source
+    ///     contact at all (gate + early-return together mean zero spy calls).
+    ///   - `Frozen`: the gate passes, then the chain walks normally to fetch the
+    ///     missing content — spy IS called (content fetch is allowed for a
+    ///     locally-resolved tag; only resolution of *unknown* tags is blocked).
+    ///
+    /// Regression: the probe formerly used `.ok().flatten()` which would silently
+    /// mask a real I/O error from a corrupt index as "tag absent", raising a
+    /// spurious `PolicyResolutionBlocked`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tag_present_blob_missing_does_not_trigger_policy_block() {
+        // ── Offline: gate passes + early-return → zero spy calls ────────────
+        {
+            let cache_dir = TempDir::new().unwrap();
+            let cache = make_local_index(&cache_dir);
+
+            // Seed only the tag pointer — skip `persist_manifest_chain` so the
+            // manifest blob is never written.  `commit_tag` is `pub(super)` and
+            // accessible here because `chain_refs_tests` lives in the same
+            // `index` parent module.
+            cache.commit_tag(&tagged_id(), &digest_a()).await.unwrap();
+
+            let (spy, src_idx) = make_source(TAG, digest_a());
+            let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Offline);
+
+            let result = chained
+                .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+                .await;
+
+            // (a) Must NOT be PolicyResolutionBlocked.
+            assert!(
+                !matches!(
+                    result,
+                    Err(crate::Error::OciIndex(
+                        super::super::error::Error::PolicyResolutionBlocked { .. }
+                    ))
+                ),
+                "Offline: tag-present/blob-missing must not raise PolicyResolutionBlocked; \
+                 got {result:?}"
+            );
+            // (b) Offline early-return fires after the gate: zero source calls.
+            assert_eq!(
+                spy.calls(),
+                0,
+                "Offline: spy must receive zero calls (early-return before source walk); \
+                 got {} call(s)",
+                spy.calls()
+            );
+        }
+
+        // ── Frozen: gate passes, chain walks to fetch missing content ────────
+        {
+            let cache_dir = TempDir::new().unwrap();
+            let cache = make_local_index(&cache_dir);
+
+            // Same tag-only seed; Frozen permits content fetches for known tags.
+            cache.commit_tag(&tagged_id(), &digest_a()).await.unwrap();
+
+            let (spy, src_idx) = make_source(TAG, digest_a());
+            let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Frozen);
+
+            let result = chained
+                .fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+                .await;
+
+            // (a) Must NOT be PolicyResolutionBlocked.
+            assert!(
+                !matches!(
+                    result,
+                    Err(crate::Error::OciIndex(
+                        super::super::error::Error::PolicyResolutionBlocked { .. }
+                    ))
+                ),
+                "Frozen: tag-present/blob-missing must not raise PolicyResolutionBlocked; \
+                 got {result:?}"
+            );
+            // (b) Frozen walks the chain for content: spy IS called.
+            assert!(
+                spy.calls() > 0,
+                "Frozen: spy must be called for content fetch after gate passes; \
+                 got {} call(s)",
+                spy.calls()
+            );
+        }
+    }
+
+    /// Frozen + digest-addressed miss → walks the source (content fetch is
+    /// allowed for an already-known version); Offline + the same input → no
+    /// source contact. The digest axis is exactly what makes frozen distinct
+    /// from offline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn digest_addressed_miss_walks_under_frozen_but_not_offline() {
+        // Frozen: source IS consulted (not a policy block).
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Frozen);
+        let result = chained
+            .fetch_manifest(&digest_only_id(), super::super::IndexOperation::Resolve)
+            .await;
+        assert!(
+            result.is_ok(),
+            "Frozen mode must not policy-block a digest-addressed resolve; got {result:?}"
+        );
+        assert!(
+            spy.calls() > 0,
+            "Frozen mode must walk the source for a digest-addressed miss"
+        );
+
+        // Offline: source is NOT consulted; the miss stays a clean None.
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Offline);
+        let result = chained
+            .fetch_manifest(&digest_only_id(), super::super::IndexOperation::Resolve)
+            .await
+            .expect("Offline digest-addressed miss must be a clean None, not an error");
+        assert!(result.is_none(), "Offline digest-addressed miss must return None");
+        assert_eq!(
+            spy.calls(),
+            0,
+            "Offline mode must never consult sources for a digest miss"
+        );
     }
 
     // ── test 28 ───────────────────────────────────────────────────────────
@@ -865,8 +1101,8 @@ mod chain_refs_tests {
     /// `adr_index_routing_semantics.md`.
     #[tokio::test(flavor = "multi_thread")]
     async fn op_query_never_writes_local_index_in_any_mode() {
-        // Default / Offline: tag-addressed cache miss → None, source untouched.
-        for mode in [ChainMode::Default, ChainMode::Offline] {
+        // Default / Offline / Frozen: tag-addressed cache miss → None, source untouched.
+        for mode in [ChainMode::Default, ChainMode::Offline, ChainMode::Frozen] {
             let cache_dir = TempDir::new().unwrap();
             let cache = make_local_index(&cache_dir);
             let (spy, src_idx) = make_source(TAG, digest_a());

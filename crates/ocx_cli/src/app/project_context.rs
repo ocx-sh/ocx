@@ -311,7 +311,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
 ///
 /// `--offline` is honoured transitively: `pull_all` calls
 /// `manager.require_client()` for every cache-miss layer, returning
-/// `Error::OfflineMode` (→ exit code `OfflineBlocked`) before any
+/// `Error::OfflineMode` (→ exit code `PolicyBlocked`) before any
 /// filesystem mutation.
 ///
 /// # Errors

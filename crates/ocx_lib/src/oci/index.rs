@@ -47,8 +47,35 @@ pub enum ChainMode {
     /// Used for `--remote`.
     Remote,
     /// Local index only. Source list is empty or never consulted; misses
-    /// return `None`. Used for `--offline`.
+    /// return `None` for digest-addressed content and **error** for an
+    /// unpinned (tag-only) `Resolve` miss (no source was allowed to be
+    /// consulted, so "policy blocked" is the honest answer). Used for
+    /// `--offline`.
     Offline,
+    /// Freeze tag resolution to the local index: a tag-only `Resolve` miss
+    /// **errors** (never walks the chain to fetch + commit an unknown
+    /// reference), but digest-addressed content is still fetched from the
+    /// source exactly like [`Self::Default`] (a digest is an already-known
+    /// version). Used for `--frozen`. Distinct from [`Self::Offline`] on the
+    /// digest axis: offline blocks all source contact; frozen still pulls
+    /// locked digests.
+    Frozen,
+}
+
+impl ChainMode {
+    /// Lowercase label for the no-resolve policies, embedded in the
+    /// [`error::Error::PolicyResolutionBlocked`] message so a user sees which
+    /// flag refused the resolution. `Default` / `Remote` are not no-resolve
+    /// policies and never reach the policy-block path, but return their own
+    /// label for completeness.
+    pub fn policy_label(self) -> &'static str {
+        match self {
+            ChainMode::Default => "default",
+            ChainMode::Remote => "remote",
+            ChainMode::Offline => "offline",
+            ChainMode::Frozen => "frozen",
+        }
+    }
 }
 
 /// Caller intent for a manifest lookup on `IndexImpl`.

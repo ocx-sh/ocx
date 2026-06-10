@@ -49,9 +49,11 @@ pub enum ExitCode {
     /// Authentication failure: registry 401, missing credentials.
     /// OCX-specific.
     AuthError = 80,
-    /// Offline mode blocked a network operation.
-    /// Distinct from `Unavailable`: the failure is deliberate policy, not a fault.
-    OfflineBlocked = 81,
+    /// A deliberate local policy (offline, frozen, ...) refused a
+    /// network or resolution operation; loosen the flag or pre-populate the
+    /// local index (e.g. `ocx index update`).
+    /// Distinct from `Unavailable`: the refusal is deliberate policy, not a fault.
+    PolicyBlocked = 81,
     /// A managed shell-integration block carries user edits and was left
     /// untouched (`ocx self setup` without `--force`).
     /// OCX-specific; script-discoverable so a rerun with `--force` is easy.
@@ -138,9 +140,11 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_offline_blocked_is_81() {
-        // OCX-specific; distinct from Unavailable (deliberate policy, not a fault)
-        assert_eq!(ExitCode::OfflineBlocked as u8, 81);
+    fn exit_code_policy_blocked_is_81() {
+        // OCX-specific; distinct from Unavailable (deliberate policy, not a fault).
+        // Shared by offline and frozen no-resolve policies; value stays 81 so
+        // existing scripts/docs keyed on 81 remain valid.
+        assert_eq!(ExitCode::PolicyBlocked as u8, 81);
     }
 
     #[test]

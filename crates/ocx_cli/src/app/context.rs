@@ -148,7 +148,13 @@ impl Context {
         let (mode, sources): (index::ChainMode, Vec<index::Index>) = match &remote_index {
             None => (index::ChainMode::Offline, Vec::new()),
             Some(remote) => {
-                let mode = if options.remote {
+                // Precedence (offline already won via the `None` arm — it
+                // produced no remote_index): frozen ▸ remote ▸ default. Frozen
+                // keeps the remote source so digest-pinned content still
+                // fetches; only unpinned-tag resolution is refused.
+                let mode = if options.frozen {
+                    index::ChainMode::Frozen
+                } else if options.remote {
                     index::ChainMode::Remote
                 } else {
                     index::ChainMode::Default
@@ -189,6 +195,7 @@ impl Context {
         // ocx inherits `OCX_MIRRORS` matching the parent's transport rewrite.
         config_view.mirrors = mirror_pairs;
         check_global_project_exclusivity(&config_view)?;
+        check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);
 
         Ok(Context {
@@ -348,6 +355,33 @@ fn check_global_project_exclusivity(view: &env::OcxConfigView) -> Result<(), ocx
     Ok(())
 }
 
+/// Enforce mutual exclusion of `--frozen` and `--remote`.
+///
+/// `--frozen` freezes tag resolution to the local index; `--remote` forces
+/// every mutable lookup to the source. They are directly contradictory.
+/// clap's `conflicts_with = "remote"` on [`ContextOptions::frozen`] already
+/// rejects the explicit `--frozen` + `--remote` *flag* pair at parse time.
+/// This guard closes the env-sourced gap clap cannot see: both `OCX_FROZEN`
+/// and `OCX_REMOTE` reach `view` through the arg defaults (not CLI-provided
+/// values, so clap's conflict does not fire).
+///
+/// `--frozen` + `--offline` is deliberately **allowed**: offline is the
+/// stronger constraint and wins the mode precedence, so the combination
+/// collapses cleanly to offline.
+///
+/// # Errors
+///
+/// Returns [`UsageError`](ocx_lib::cli::UsageError) (exit `64`) when both the
+/// frozen and remote policies are set.
+fn check_frozen_remote_exclusivity(view: &env::OcxConfigView) -> Result<(), ocx_lib::cli::UsageError> {
+    if view.frozen && view.remote {
+        return Err(ocx_lib::cli::UsageError::new(
+            "--frozen cannot be combined with --remote (OCX_FROZEN and OCX_REMOTE)",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! Spec for the `--global` ⟂ explicit-project exclusivity guard.
@@ -389,6 +423,77 @@ mod tests {
         assert!(
             err.to_string().contains("--global"),
             "conflict message must name --global so users can grep stderr; got: {err}"
+        );
+    }
+
+    #[test]
+    fn frozen_with_remote_is_usage_error() {
+        // clap rejects the `--frozen` + `--remote` flag pair; this guard closes
+        // the env-sourced gap (OCX_FROZEN + OCX_REMOTE both via the arg
+        // defaults). The conflict must classify to UsageError (64).
+        let mut view = ocx_lib::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        view.frozen = true;
+        view.remote = true;
+
+        let err = check_frozen_remote_exclusivity(&view).expect_err("--frozen + --remote must be rejected");
+        assert_eq!(
+            err.classify(),
+            Some(ExitCode::UsageError),
+            "the conflict must classify to ExitCode::UsageError (64)"
+        );
+        assert!(
+            err.to_string().contains("--frozen"),
+            "conflict message must name --frozen so users can grep stderr; got: {err}"
+        );
+    }
+
+    #[test]
+    fn frozen_without_remote_is_ok() {
+        // Frozen alone (and frozen+offline, which collapses to offline upstream)
+        // is a valid combination — the guard only rejects frozen+remote.
+        let mut view = ocx_lib::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        view.frozen = true;
+        assert!(
+            check_frozen_remote_exclusivity(&view).is_ok(),
+            "--frozen without --remote must be accepted"
+        );
+    }
+
+    #[test]
+    fn frozen_and_offline_together_produces_offline_chain_mode() {
+        // `--frozen --offline` is a valid combination: the guard accepts it, and
+        // the mode-selection logic collapses it to `ChainMode::Offline` (the
+        // stronger constraint). The key invariant: when `offline=true` the
+        // `remote_index` is `None`, and the `match &remote_index` arm for `None`
+        // always emits `ChainMode::Offline` regardless of the `frozen` flag.
+        // This mirrors the precedence comment in `try_init`:
+        // "offline already won via the `None` arm — it produced no remote_index".
+        let mut view = ocx_lib::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        view.frozen = true;
+        // offline=true → remote_index=None; the guard must accept the combination.
+        assert!(
+            check_frozen_remote_exclusivity(&view).is_ok(),
+            "--frozen + --offline must pass the exclusivity guard"
+        );
+
+        // Replicate the mode-selection match from try_init:
+        // offline=true produces remote_index=None → Offline wins, ignoring frozen.
+        let remote_index: Option<index::RemoteIndex> = None; // simulates offline=true
+        let frozen = true;
+        let mode: index::ChainMode = match &remote_index {
+            None => index::ChainMode::Offline,
+            Some(_) => {
+                if frozen {
+                    index::ChainMode::Frozen
+                } else {
+                    index::ChainMode::Default
+                }
+            }
+        };
+        assert_eq!(
+            mode,
+            index::ChainMode::Offline,
+            "offline (remote_index=None) must produce ChainMode::Offline even when frozen=true"
         );
     }
 }

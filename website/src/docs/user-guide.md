@@ -729,16 +729,18 @@ When multiple projects share the same `OCX_HOME`, `ocx clean` retains every pack
 
 ### Lock-first by default: where are `--locked` and `--frozen`? {#locked-frozen-equivalents}
 
-Users coming from [uv][uv], [Cargo][cargo], or [pnpm][pnpm] often look for `--locked` / `--frozen` flags on read-path commands. OCX folds those guarantees into the defaults instead — read paths refuse stale locks unconditionally, and the only commands that touch `ocx.lock` are explicit mutators.
+Users coming from [uv][uv], [Cargo][cargo], or [pnpm][pnpm] often look for `--locked` / `--frozen` flags on read-path commands. OCX folds the *lock-freshness* guarantee into the defaults — read paths refuse stale locks unconditionally, and the only commands that touch `ocx.lock` are explicit mutators — and exposes the *no-new-versions* guarantee as the global [`--frozen`][arg-frozen] flag.
 
 | You used to write… | OCX equivalent |
 |---|---|
 | [`uv lock --check`][uv-lock] | [`ocx lock --check`][cmd-lock] |
 | [`uv sync --locked`][uv-sync] | [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] (default; exit 65 on drift) |
-| [`uv sync --frozen`][uv-sync] | `ocx pull --offline` / `ocx run --offline` |
+| [`uv sync --frozen`][uv-sync] | [`ocx --frozen pull`][arg-frozen] / [`ocx --frozen run`][arg-frozen] |
 | [`cargo build --locked`][cargo-build] | [`ocx run`][cmd-run] / [`ocx pull`][cmd-pull] (default) |
-| [`cargo build --frozen`][cargo-build] | `--offline` |
+| [`cargo build --frozen`][cargo-build] | [`--offline`][arg-offline] (subsumes `--frozen`: no unknown tags, no network) |
 | [`pnpm install --frozen-lockfile`][pnpm-install] | [`ocx pull`][cmd-pull] (default) |
+
+[`--frozen`][arg-frozen] and [`--offline`][arg-offline] sit on different axes. `--frozen` freezes *version discovery*: a tag already in the local index (or a digest-pinned reference) resolves, but an unknown tag errors instead of being fetched — known content still downloads over the network. `--offline` bans the *network* entirely, so even a digest-pinned blob that is not already cached fails. Use `--frozen` to guarantee no unfamiliar version slips in; use `--offline` for a fully air-gapped run; combine both for the strictest mode (offline wins where they overlap).
 
 Why this asymmetry? OCX is [backend-first][product-context]: read paths refuse stale locks unconditionally so CI scripts cannot silently drift. The mutating commands ([`ocx add`][cmd-add], [`ocx remove`][cmd-remove], [`ocx lock`][cmd-lock], [`ocx upgrade`][cmd-upgrade]) are the only commands that touch `ocx.lock`; if you do not run them, the lock cannot change.
 
@@ -860,6 +862,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-direnv-init]: ./reference/command-line.md#direnv-init
 [arg-remote]: ./reference/command-line.md#arg-remote
 [arg-offline]: ./reference/command-line.md#arg-offline
+[arg-frozen]: ./reference/command-line.md#arg-frozen
 [arg-index]: ./reference/command-line.md#arg-index
 
 <!-- environment -->

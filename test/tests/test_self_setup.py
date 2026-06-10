@@ -704,12 +704,12 @@ def test_setup_bootstrap_failure_writes_nothing(ocx: OcxRunner, tmp_path: Path) 
 
 
 def test_setup_offline_with_no_install_exits_81(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``ocx --offline self setup`` with an empty CAS exits 81 (OfflineBlocked).
+    """``ocx --offline self setup`` with an empty CAS exits 81 (PolicyBlocked).
 
     With no candidate seeded and ``--offline`` (the plan-approved seam, already
     passed by the ``_setup`` helper), the bootstrap cannot populate the CAS and
     cannot self-heal to ``already_present`` -- the ``current`` install does not
-    resolve. The OfflineBlocked exit code (81) must surface through the full CLI
+    resolve. The PolicyBlocked exit code (81) must surface through the full CLI
     stack (bootstrap offline_blocked path -> classify routing). No env shims and
     no profile edits happen (bootstrap-FIRST invariant).
     """
@@ -720,7 +720,7 @@ def test_setup_offline_with_no_install_exits_81(ocx: OcxRunner, tmp_path: Path) 
 
     result = _setup(ocx, profile=profile, fmt_json=False)
     assert result.returncode == 81, (
-        f"offline + empty CAS must exit 81 (OfflineBlocked); rc={result.returncode}\n"
+        f"offline + empty CAS must exit 81 (PolicyBlocked); rc={result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 

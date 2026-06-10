@@ -133,25 +133,19 @@ def test_deps_flat_offline_shows_topological_order(
 
 
 # ---------------------------------------------------------------------------
-# Tests: Exit codes for offline mode (Phase 3 specification tests)
-# NOTE: These tests assert exit code 81 (OfflineBlocked) which will only pass
-# after Phase 4 implements classify_error dispatch in main.rs.
+# Tests: Exit codes for offline mode
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="resolve path returns NotFound (79) before the offline check fires; "
-    "routing `--offline + cache-miss` through OfflineMode requires a resolve-layer "
-    "change that distinguishes 'never cached' from 'not in index'",
-)
 def test_exit_code_on_offline_blocks_fetch(ocx: OcxRunner) -> None:
-    """--offline install of non-cached package → exit 81 (OfflineBlocked).
+    """--offline install of an un-indexed package → exit 81 (PolicyBlocked).
 
-    Plan Test 3.2.6: ocx_lib::Error::OfflineMode → OfflineBlocked (81).
-    The package has never been installed so no cached version exists — offline
-    mode must block the fetch and exit with code 81 (distinct from Unavailable=69
-    which signals a network fault rather than a deliberate policy block).
+    The package has never been indexed, so there is no local tag pointer. Under
+    #155 an unpinned-tag miss in a no-resolve policy (offline/frozen) is a
+    policy block (`PolicyResolutionBlocked`) rather than a not-found: offline
+    forbade walking the source, so "policy blocked" (81) is the honest answer,
+    distinct from Unavailable=69 (a network fault) and NotFound=79 (a source
+    *was* consulted and the tag genuinely does not exist).
     """
     result = subprocess.run(
         [str(ocx.binary), "--offline", "package", "install", "nonexistent_spec_test_pkg:0"],
@@ -160,7 +154,7 @@ def test_exit_code_on_offline_blocks_fetch(ocx: OcxRunner) -> None:
         env=ocx.env,
     )
     assert result.returncode == 81, (
-        f"offline fetch should exit with code 81 (OfflineBlocked), got {result.returncode}; "
+        f"offline fetch should exit with code 81 (PolicyBlocked), got {result.returncode}; "
         f"stderr={result.stderr!r}"
     )
 

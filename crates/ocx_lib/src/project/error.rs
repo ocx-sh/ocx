@@ -280,6 +280,24 @@ pub enum ProjectErrorKind {
         previous_hash: String,
         current_hash: String,
     },
+
+    /// A no-resolve routing policy (`--offline` or `--frozen`) refused to
+    /// resolve an unpinned (tag-only) reference while building the lock.
+    ///
+    /// Surfaced from the resolver ([`crate::project::resolve`]) when the
+    /// index layer returns [`crate::oci::index::error::Error::PolicyResolutionBlocked`]:
+    /// the tag was not in the local index and the active policy forbids
+    /// walking the source chain to fetch + commit it. Terminal — the
+    /// resolver does not retry. `policy` is the lowercase flag label
+    /// (`"offline"` / `"frozen"`). Populate the local index (e.g.
+    /// `ocx index update`) or loosen the flag.
+    #[error(
+        "{policy} mode refused to resolve unpinned reference '{identifier}'; run `ocx index update` or pin a digest"
+    )]
+    PolicyBlocked {
+        identifier: Box<Identifier>,
+        policy: &'static str,
+    },
 }
 
 impl ClassifyExitCode for Error {
@@ -317,6 +335,9 @@ impl ClassifyExitCode for Error {
                 // wrappers and scripts get a single signal regardless of
                 // which resolver path detected the mismatch.
                 ProjectErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError,
+                // Offline / frozen refused an unpinned-tag resolve during lock
+                // building — same category as the index-layer policy block.
+                ProjectErrorKind::PolicyBlocked { .. } => ExitCode::PolicyBlocked,
             },
         })
     }

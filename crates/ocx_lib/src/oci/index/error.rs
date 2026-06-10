@@ -39,6 +39,18 @@ pub enum Error {
     /// entry; abort the persist instead.
     #[error("nested image index at {digest} is not a supported OCI shape")]
     NestedImageIndex { digest: crate::oci::Digest },
+
+    /// A no-resolve routing policy (`--offline` or `--frozen`) refused to
+    /// resolve an unpinned (tag-only) reference from a source. The local
+    /// index did not have the tag and the active policy forbids walking the
+    /// chain to fetch + commit an unknown version. `policy` is the lowercase
+    /// flag label (`"offline"` / `"frozen"`); `identifier` is the reference
+    /// that could not be resolved. Populate the local index (e.g.
+    /// `ocx index update`) or loosen the flag.
+    #[error(
+        "{policy} mode refused to resolve unpinned reference '{identifier}'; run `ocx index update` or pin a digest"
+    )]
+    PolicyResolutionBlocked { identifier: String, policy: &'static str },
 }
 
 impl ClassifyExitCode for Error {
@@ -53,6 +65,9 @@ impl ClassifyExitCode for Error {
             // are resolved via the generic `try_classify` ladder.
             Self::SourceWalkFailed(arc) => return Some(crate::cli::classify_error(arc.as_error())),
             Self::SingleflightFailed(_) => ExitCode::Failure,
+            // A deliberate local policy (offline / frozen) refused the
+            // resolution — categorically the same as every other policy block.
+            Self::PolicyResolutionBlocked { .. } => ExitCode::PolicyBlocked,
         })
     }
 }

@@ -373,6 +373,14 @@ When set to a [truthy value](#truthy-values), routes mutable lookups (tag list, 
 
 Equivalent to passing the [`--remote`][arg-remote] flag on every invocation. See the user guide for the [routing model][indices-routing] and the [pinned-only mode][cmd-pinned-only-mode] (combined with `OCX_OFFLINE`).
 
+### `OCX_FROZEN` {#ocx-frozen}
+
+When set to a [truthy value](#truthy-values), freezes tag→digest resolution to the local index. A tag already in the local index resolves from cache; a digest-pinned identifier (`repo@sha256:…`, or a tag pinned by `ocx.lock`) still fetches its content over the network. An unpinned tag missing from the local index errors with exit code `81` instead of being fetched and recorded — the guarantee that no unknown version is installed.
+
+Unlike [`OCX_OFFLINE`](#ocx-offline), this is **not** a network ban: known and digest-pinned content is still fetched. It only refuses to discover a new tag→digest mapping. Run [`ocx index update`][cmd-index-update] to populate the index first.
+
+Equivalent to passing the [`--frozen`][arg-frozen] flag on every invocation; the flag takes precedence. Mutually exclusive with [`OCX_REMOTE`](#ocx-remote) (combining the two is a usage error, exit `64`); combining with [`OCX_OFFLINE`](#ocx-offline) is accepted, with offline taking effect.
+
 ### `OCX_UPDATE_CHECK_INTERVAL` {#ocx-update-check-interval}
 
 Override the minimum interval between automatic update-check registry probes. The check runs once per shell invocation after the interval elapses; it is a background notification only and does not block the command.
@@ -584,6 +592,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-jobs]: command-line.md#arg-jobs
 [arg-log-level]: command-line.md#arg-log-level
 [arg-offline]: command-line.md#arg-offline
+[arg-frozen]: command-line.md#arg-frozen
 [arg-project]: command-line.md#arg-project
 [arg-quiet]: command-line.md#arg-quiet
 [arg-remote]: command-line.md#arg-remote

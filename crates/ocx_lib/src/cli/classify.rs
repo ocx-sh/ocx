@@ -238,10 +238,10 @@ mod tests {
     // ── ocx_lib::Error variants ──────────────────────────────────────────────
 
     #[test]
-    fn lib_offline_mode_maps_to_offline_blocked() {
-        // Plan taxonomy: ocx_lib::Error::OfflineMode → OfflineBlocked (81)
+    fn lib_offline_mode_maps_to_policy_blocked() {
+        // Plan taxonomy: ocx_lib::Error::OfflineMode → PolicyBlocked (81)
         let err = crate::Error::OfflineMode;
-        assert_eq!(classify(err), ExitCode::OfflineBlocked);
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
     }
 
     // ── std::io::Error with PermissionDenied kind ────────────────────────────
@@ -411,6 +411,33 @@ mod tests {
         assert_eq!(classify(err), ExitCode::AuthError);
     }
 
+    // ── #155 policy-block classification (offline + frozen) ──────────────────
+
+    #[test]
+    fn oci_index_policy_resolution_blocked_maps_to_policy_blocked() {
+        // Index-layer no-resolve policy block (offline / frozen unpinned-tag
+        // miss) → PolicyBlocked (81).
+        let err = crate::oci::index::error::Error::PolicyResolutionBlocked {
+            identifier: "registry.test/cmake:3.28".to_string(),
+            policy: "frozen",
+        };
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
+    #[test]
+    fn project_policy_blocked_maps_to_policy_blocked() {
+        // Project-layer policy block (offline / frozen during lock resolution)
+        // → PolicyBlocked (81), same category as the index-layer block.
+        use crate::project::error::{ProjectError, ProjectErrorKind};
+        let id = crate::oci::Identifier::new_registry("cmake", "registry.test");
+        let kind = ProjectErrorKind::PolicyBlocked {
+            identifier: Box::new(id),
+            policy: "offline",
+        };
+        let err = crate::project::error::Error::Project(ProjectError::new(PathBuf::new(), kind));
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
     // ── singleflight::Error exit-code classification ─────────────────────────
 
     #[test]
@@ -467,12 +494,12 @@ mod tests {
     fn setup_bootstrap_error_delegates_to_inner_offline() {
         // Plan contract 6: setup::Error::Bootstrap delegates to the inner
         // package-manager error. An offline-mode bootstrap failure classifies
-        // to OfflineBlocked (81) via the inner cause, not a setup-specific code.
+        // to PolicyBlocked (81) via the inner cause, not a setup-specific code.
         let identifier = crate::oci::Identifier::new_registry("ocx/cli", "ocx.sh");
         let inner = PackageError::new(identifier, PackageErrorKind::Internal(crate::Error::OfflineMode));
         let pm_err = crate::package_manager::error::Error::InstallFailed(vec![inner]);
         let err = crate::setup::error::Error::Bootstrap(pm_err);
-        assert_eq!(classify(err), ExitCode::OfflineBlocked);
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
     }
 
     // ── Fall-through lock-in ─────────────────────────────────────────────────

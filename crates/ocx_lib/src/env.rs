@@ -20,6 +20,11 @@ pub mod keys {
     pub const OCX_BINARY_PIN: &str = "OCX_BINARY_PIN";
     /// Boolean — disables network access when truthy. Mirrors `--offline`.
     pub const OCX_OFFLINE: &str = "OCX_OFFLINE";
+    /// Boolean — freezes tag resolution to the local index when truthy:
+    /// an unpinned (tag-only) reference missing from the local index errors
+    /// instead of being fetched and committed. Digest-pinned content still
+    /// fetches over the network. Mirrors `--frozen`.
+    pub const OCX_FROZEN: &str = "OCX_FROZEN";
     /// Boolean — uses the remote index by default when truthy. Mirrors `--remote`.
     pub const OCX_REMOTE: &str = "OCX_REMOTE";
     /// Path to an explicit configuration file. Mirrors `--config`.
@@ -70,6 +75,11 @@ pub struct OcxConfigView {
     pub self_exe: PathBuf,
     pub offline: bool,
     pub remote: bool,
+    /// When true, tag→digest resolution may only consult the local index; an
+    /// unpinned (tag-only) miss errors instead of walking the source chain.
+    /// Digest-pinned content still fetches. Resolution-affecting → forwarded
+    /// as [`keys::OCX_FROZEN`] so a child ocx applies the same freeze.
+    pub frozen: bool,
     pub config: Option<PathBuf>,
     pub project: Option<PathBuf>,
     /// When true, the global toolchain (`$OCX_HOME/ocx.toml`) is the
@@ -107,6 +117,7 @@ impl OcxConfigView {
             self_exe: self_exe.into(),
             offline: false,
             remote: false,
+            frozen: false,
             config: None,
             project: None,
             global: false,
@@ -224,8 +235,8 @@ impl Env {
     /// child ocx process sees the same policy the parent saw.
     ///
     /// Always sets [`keys::OCX_BINARY_PIN`]. Sets [`keys::OCX_OFFLINE`] /
-    /// [`keys::OCX_REMOTE`] / [`keys::OCX_GLOBAL`] only when the
-    /// corresponding flag is true so the child env stays minimal. Sets
+    /// [`keys::OCX_REMOTE`] / [`keys::OCX_FROZEN`] / [`keys::OCX_GLOBAL`] only
+    /// when the corresponding flag is true so the child env stays minimal. Sets
     /// [`keys::OCX_CONFIG`] /
     /// [`keys::OCX_INDEX`] only when the parent had an explicit value;
     /// otherwise removes any inherited setting so a stale parent-shell export
@@ -245,6 +256,11 @@ impl Env {
             self.set(keys::OCX_REMOTE, "1");
         } else {
             self.remove(keys::OCX_REMOTE);
+        }
+        if cfg.frozen {
+            self.set(keys::OCX_FROZEN, "1");
+        } else {
+            self.remove(keys::OCX_FROZEN);
         }
         if cfg.global {
             self.set(keys::OCX_GLOBAL, "1");
@@ -812,6 +828,33 @@ mod tests {
         assert_eq!(env.get(keys::OCX_REMOTE).unwrap(), "1");
         assert_eq!(env.get(keys::OCX_CONFIG).unwrap(), "/cfg.toml");
         assert_eq!(env.get(keys::OCX_INDEX).unwrap(), "/idx");
+    }
+
+    #[test]
+    fn apply_ocx_config_sets_ocx_frozen_when_set() {
+        // `--frozen` is resolution-affecting, so `apply_ocx_config` MUST
+        // forward it to a child ocx as `OCX_FROZEN=1` when set, and clear any
+        // inherited value when unset so a stale parent-shell export cannot beat
+        // the outer ocx's parsed state. Mirrors the OCX_OFFLINE/REMOTE/GLOBAL
+        // contract.
+        let mut cfg = view("/abs/ocx");
+        cfg.frozen = true;
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+        assert_eq!(
+            env.get(keys::OCX_FROZEN).unwrap(),
+            "1",
+            "cfg.frozen=true must forward OCX_FROZEN=1 to the child env"
+        );
+
+        // Unset: a stale inherited OCX_FROZEN must be cleared.
+        let mut env = Env::clean();
+        env.set(keys::OCX_FROZEN, "1");
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_FROZEN).is_none(),
+            "cfg.frozen=false must clear any inherited OCX_FROZEN"
+        );
     }
 
     #[test]

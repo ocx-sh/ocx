@@ -37,6 +37,11 @@ be satisfied by the local index or by a digest-pinned identifier; unpinned
 tags missing from the local index error immediately rather than triggering
 a registry query. Useful for hermetic CI runs and air-gapped environments.
 
+An unpinned tag that is absent from the local index exits [`81`](#exit-codes)
+(`PolicyBlocked`) — the same code `--frozen` produces for the same class of
+miss. To recover, either run `ocx index update` online first, or switch to a
+digest-pinned identifier.
+
 ::: warning
 Running `ocx --offline install <pkg>` after a bare `ocx index update <pkg>` (without a prior
 online install) fails with an `OfflineManifestMissing` error that names the missing digest.
@@ -77,6 +82,40 @@ ocx --offline --remote exec -- my-build-script
 
 If any tool resolution falls back to a floating tag, the command fails — a
 hermetic-build sanity check without round-tripping to the registry.
+
+### `--frozen` {#arg-frozen}
+
+Freezes tag→digest resolution to the local index. A tag already in the local
+index resolves from cache; a digest-pinned reference (`repo@sha256:…`, or a tag
+pinned by `ocx.lock`) still fetches its content over the network. But an
+unpinned tag that is missing from the local index **errors** with exit
+[`81`](#exit-codes) instead of being fetched and recorded — `--frozen`
+guarantees that no unknown (un-pinned) version slips in. To resolve a new tag
+under `--frozen`, populate the local index first with
+[`ocx index update`](#index-update).
+
+Unlike [`--offline`](#arg-offline), `--frozen` is **not** a network ban: it
+still reaches the registry for known and digest-pinned content. It only refuses
+to *discover* a new tag→digest mapping. Use it in CI to assert a project never
+installs a version that was not already locked or indexed.
+
+```sh
+ocx --frozen pull                 # succeeds when every tool is already locked
+ocx --frozen add some/tool:tag    # exit 81 if that tag is not in the index
+```
+
+`--frozen` conflicts with [`--remote`](#arg-remote) (exit
+[`64`](#exit-codes)); the two are contradictory. Combining `--frozen` with
+[`--offline`](#arg-offline) is accepted — offline is the stricter constraint and
+takes effect. The same policy can be set persistently via the
+[`OCX_FROZEN`][env-ocx-frozen] environment variable.
+
+::: tip Cargo divergence
+[Cargo][cargo]'s `--frozen` implies `--offline`; OCX's `--frozen` does not disable the network —
+known and digest-pinned content still downloads. For `cargo build --frozen` semantics use
+[`--offline`](#arg-offline) alone: offline is the stronger constraint and already refuses
+unpinned tags (adding `--frozen` is accepted but has no further effect).
+:::
 
 ### `--index` {#arg-index}
 
@@ -243,7 +282,7 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent | Pin a different version or correct the path |
 | 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials | Refresh or set registry credentials |
-| 81 | OfflineBlocked | OCX | Offline mode blocked a network operation (deliberate policy, not a fault) | Re-run online, or populate the local cache first |
+| 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first (e.g. `ocx index update`) |
 
 Scripts can `case $?` on these stable values:
 
@@ -257,7 +296,7 @@ case $? in
     78) echo "bad config; inspect the config file" ;;
     79) echo "not found; pin a different version" ;;
     80) echo "auth failed; refresh credentials" ;;
-    81) echo "offline mode active; re-run online" ;;
+    81) echo "policy blocked (offline/frozen); loosen the flag or update the index" ;;
     *)  echo "unexpected failure (exit $?)"; exit 1 ;;
 esac
 ```
@@ -1495,7 +1534,7 @@ ocx self setup [--no-modify-path] [--profile PATH]... [--dry-run] [--force]
 | 0 | Setup completed, no-op, or migrated; or a dry-run (including over a dirty profile). |
 | 69 | Registry unreachable while bootstrapping. |
 | 74 | I/O error writing a shim or profile. |
-| 81 | Offline mode blocked the bootstrap and no install was present. |
+| 81 | The offline policy (`PolicyBlocked`) blocked the bootstrap and no install was present. |
 | 82 | A managed activation block carried user edits and `--force` was not passed. Scripts can `case $? in 82)` to detect this and re-run with `--force`. |
 
 #### `self activate` {#self-activate}
@@ -1879,7 +1918,7 @@ ocx package test [OPTIONS] --platform <PLATFORM> --identifier <IDENTIFIER> [LAYE
 
 **Arguments**
 
-- `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`: a path to a `.tar.gz`/`.tar.xz` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs in `--offline` mode produce exit code 81 (`OfflineBlocked`).
+- `<LAYERS>...`: Zero or more layers, in order (base first, top last). Same syntax as `package push`: a path to a `.tar.gz`/`.tar.xz` archive, or a `sha256:<hex>.<ext>` digest reference to a layer already in the registry. Digest refs are fetched on demand; missing digest blobs when a local policy (`--offline` or `--frozen`) is active produce exit code 81 (`PolicyBlocked`).
 - `-- <CMD> [ARGS]...`: Command to run inside the composed env. Required unless `--script` is given.
 
 **Options**
@@ -2071,7 +2110,7 @@ registry/repo:tag@sha256:…
 **Exit codes**
 
 - `79` (`NotFound`) — the tag or digest does not resolve.
-- `81` (`OfflineBlocked`) — `--offline` and the manifest or config blob is absent from the local cache.
+- `81` (`PolicyBlocked`) — a local policy (`--offline` or `--frozen`) refused the resolution: the manifest or config blob is absent from the local cache, or an unpinned tag was not in the local index.
 - `65` (`DataError`) — the resolved metadata is malformed or fails validation.
 
 #### `describe` {#package-describe}
@@ -2290,6 +2329,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 :::
 
 <!-- external -->
+[cargo]: https://doc.rust-lang.org/cargo/
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [github-actions-workflow-commands]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions
 [gitlab-ci-export-docs]: https://docs.gitlab.com/ee/ci/variables/#pass-an-environment-variable-to-another-job
@@ -2314,6 +2354,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [env-clicolor]: ./environment.md#external-clicolor
 [env-clicolor-force]: ./environment.md#external-clicolor-force
 [env-ocx-index]: ./environment.md#ocx-index
+[env-ocx-frozen]: ./environment.md#ocx-frozen
 [env-no-config]: ./environment.md#ocx-no-config
 [env-config]: ./environment.md#ocx-config
 [env-project]: ./environment.md#ocx-project

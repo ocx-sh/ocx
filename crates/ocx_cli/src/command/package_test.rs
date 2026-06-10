@@ -66,7 +66,7 @@ pub struct PackageTest {
     /// either a path to a `.tar.gz`/`.tar.xz` archive, or `sha256:<hex>.<ext>`
     /// referring to a layer already present in the target registry. Digest
     /// refs are auto-pulled from the registry on demand; in `--offline`,
-    /// missing digest blobs error with `OfflineBlocked`.
+    /// missing digest blobs error with `PolicyBlocked`.
     #[clap(num_args = 0.., value_terminator = "--")]
     layers: Vec<LayerRef>,
 

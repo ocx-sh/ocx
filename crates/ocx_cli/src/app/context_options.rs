@@ -65,6 +65,21 @@ pub struct ContextOptions {
     #[arg(long, default_value_t = env::flag(env::keys::OCX_OFFLINE, false))]
     pub offline: bool,
 
+    /// Freeze tag resolution to the local index; never fetch an unknown tag.
+    ///
+    /// A tag already in the local index resolves from cache; a digest-pinned
+    /// reference (`repo@sha256:...`, or a tag pinned by `ocx.lock`) still
+    /// fetches its content. But an unpinned tag missing from the local index
+    /// errors instead of being fetched and recorded. Run
+    /// `ocx index update` to populate the index first, then resolve under
+    /// `--frozen`. Unlike `--offline`, frozen still reaches the network for
+    /// known/pinned content. Unlike Cargo's `--frozen`, the network is not
+    /// disabled; `--offline` alone (which also refuses unpinned tags) matches
+    /// Cargo's behavior. Conflicts with `--remote`. Equivalent env var:
+    /// `OCX_FROZEN`.
+    #[arg(long, conflicts_with = "remote", default_value_t = env::flag(env::keys::OCX_FROZEN, false))]
+    pub frozen: bool,
+
     /// Output format for stdout reports: `plain` (default) or `json`.
     ///
     /// Applies to every command; there is no per-command `--format`. The
@@ -136,6 +151,7 @@ impl ContextOptions {
             self_exe,
             offline: self.offline,
             remote: self.remote,
+            frozen: self.frozen,
             config: self.config.clone(),
             project: self.project.clone(),
             global: self.global,

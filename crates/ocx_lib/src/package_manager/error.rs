@@ -214,7 +214,7 @@ impl ClassifyExitCode for PackageErrorKind {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
             Self::NotFound | Self::SymlinkNotFound(_) | Self::BlobNotFound(_) => ExitCode::NotFound,
-            Self::OfflineManifestMissing(_) => ExitCode::OfflineBlocked,
+            Self::OfflineManifestMissing(_) => ExitCode::PolicyBlocked,
             Self::SelectionAmbiguous(_)
             | Self::SymlinkRequiresTag
             | Self::DigestMissing

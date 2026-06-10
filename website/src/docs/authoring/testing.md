@@ -107,7 +107,7 @@ ocx package test -p linux/amd64 -i mytool:1.0.1 \
   sha256:<hex>.tar.xz ./newtool.tar.xz -- mytool --version
 ```
 
-Digest layers are fetched from the registry on demand when not already cached locally. In `--offline` mode, a missing digest layer exits with code 81 (`OfflineBlocked`).
+Digest layers are fetched from the registry on demand when not already cached locally. In `--offline` mode, a missing digest layer exits with code 81 (`PolicyBlocked`).
 
 ## The inner pre-push loop {#workflow}
 
@@ -274,7 +274,7 @@ For `.star` syntax highlighting in VS Code, add the [vscode-bazel][vscode-bazel]
 | 64 | Usage error — bad identifier, conflicting flags, or (for `--script`) missing/extra arguments |
 | 65 | Data error — malformed metadata or script syntax error |
 | 74 | I/O error — `--output` on wrong filesystem, filesystem failure, or stdin read failure |
-| 81 | Offline blocked — digest layer missing and `--offline` set |
+| 81 | Policy blocked — a local policy (`--offline` or `--frozen`) refused the operation (e.g. digest layer missing and `--offline` set) |
 
 ## See also {#see-also}
 

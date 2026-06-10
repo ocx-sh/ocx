@@ -15,7 +15,7 @@ Read-only, ref-shape adaptive:
 Exit codes per quality-rust-exit_codes.md:
   0  = Success
   79 = NotFound (unknown tag)
-  81 = OfflineBlocked (offline + config blob absent locally)
+  81 = PolicyBlocked (offline + config blob absent locally)
 """
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def test_inspect_unknown_tag_exits_79(
 def test_inspect_resolve_offline_missing_config_blob_exits_81(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """``--resolve --offline`` with the config blob absent is OfflineBlocked (81).
+    """``--resolve --offline`` with the config blob absent is PolicyBlocked (81).
 
     ``make_package`` runs ``index update`` which persists the manifest chain
     but not the OCX config blob, so an offline resolve selects the platform
@@ -273,14 +273,14 @@ def test_inspect_default_offline_missing_manifest_blob_exits_81(
     (which is ``--resolve`` + config-blob miss). Here the tag→digest pointer
     is pinned locally (``index update`` persists it) but the manifest blob
     itself is removed before going offline, so a *default-mode* inspect
-    cannot fetch the manifest and must exit 81 (OfflineBlocked).
+    cannot fetch the manifest and must exit 81 (PolicyBlocked).
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     # `index update` persisted the tag→digest pointer under tags/ and the
     # manifest chain under blobs/. Drop the blob CAS so the digest stays
     # pinned locally but the manifest blob is gone — default-mode offline
-    # inspect must report OfflineBlocked rather than NotFound.
+    # inspect must report PolicyBlocked rather than NotFound.
     # Note: the pin step does not persist the manifest blob under blobs/ —
     # the digest stays pinned via tags/ while the manifest blob is absent,
     # which is exactly the state this test needs. Remove blobs/ defensively
@@ -297,7 +297,7 @@ def test_inspect_default_offline_missing_manifest_blob_exits_81(
     )
 
     assert result.returncode == 81, (
-        f"expected 81 (OfflineBlocked), got {result.returncode}\n"
+        f"expected 81 (PolicyBlocked), got {result.returncode}\n"
         f"stderr: {result.stderr}"
     )
 

@@ -320,16 +320,26 @@ mod spec_tests {
         }
     }
 
-    /// Unknown tag resolves to `NotFound` in default mode.
+    /// Unknown (unpinned) tag under the offline manager is a **policy block**
+    /// (#155): the local index has no pointer and offline forbids walking the
+    /// source, so resolution refuses with `PolicyResolutionBlocked` (exit 81)
+    /// rather than a not-found (79). This unifies offline with frozen — under
+    /// either no-resolve policy the resolver was forbidden from checking, so
+    /// "policy blocked" is the honest answer.
     #[tokio::test(flavor = "multi_thread")]
-    async fn inspect_unknown_tag_is_not_found() {
+    async fn inspect_unknown_tag_is_policy_blocked_offline() {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir);
         let err = mgr.inspect(&tagged_id(), vec![], false).await.unwrap_err();
-        assert!(
-            matches!(err, PackageErrorKind::NotFound),
-            "unknown tag must be NotFound, got {err:?}"
-        );
+        match err {
+            PackageErrorKind::Internal(crate::Error::OciIndex(
+                crate::oci::index::error::Error::PolicyResolutionBlocked { policy, .. },
+            )) => assert_eq!(
+                policy, "offline",
+                "offline manager must label the policy block as offline"
+            ),
+            other => panic!("unknown tag offline must be a policy block (exit 81), got {other:?}"),
+        }
     }
 
     // ── F4 (Warn gap): exit-65 / malformed inputs ──
