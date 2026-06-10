@@ -34,7 +34,6 @@ pub(crate) use index_impl::IndexImpl;
 /// `IndexImpl` trait. The parameter is threaded end-to-end; each variant
 /// below documents its own cache/source routing behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ChainMode {
     /// Local-index first for all lookups. Tag-addressed `fetch_manifest`
     /// with `IndexOperation::Resolve` walks the chain and persists on

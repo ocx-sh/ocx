@@ -68,6 +68,31 @@ impl ChainedIndex {
         }
     }
 
+    /// Policy probe for no-resolve modes: an unpinned identifier whose
+    /// tag→digest mapping is absent from the local index raises
+    /// `PolicyResolutionBlocked`. Genuine local-index I/O / parse errors
+    /// propagate (must not be masked as a policy block).
+    ///
+    /// Called from `walk_chain` for both `Offline` (unpinned path) and
+    /// `Frozen` (all unpinned paths). Each mode decides what to do after
+    /// the probe returns `Ok(())` — Offline early-returns; Frozen falls
+    /// through to the source walk.
+    async fn ensure_locally_resolvable(&self, identifier: &oci::Identifier) -> Result<()> {
+        let locally_resolvable = self
+            .local_index
+            .fetch_manifest_digest(identifier, IndexOperation::Query)
+            .await?
+            .is_some();
+        if !locally_resolvable {
+            return Err(super::error::Error::PolicyResolutionBlocked {
+                identifier: identifier.to_string(),
+                policy: self.mode.policy_label(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Walk the source chain for an identifier — fetch the manifest (by tag
     /// or digest) and persist the full chain into the cache. Wrapped in a
     /// singleflight guard so concurrent waiters share the leader's result.
@@ -95,29 +120,35 @@ impl ChainedIndex {
         // Errors from the probe are propagated with `?` — a corrupt or unreadable
         // local index must surface as a real I/O error, not be silently treated
         // as "tag absent" which would incorrectly raise PolicyResolutionBlocked.
-        if identifier.digest().is_none() && matches!(self.mode, ChainMode::Frozen | ChainMode::Offline) {
-            // Propagate genuine I/O / parse errors so a corrupt or unreadable
-            // local index surfaces as a real error rather than being silently
-            // treated as "tag absent" → wrong PolicyResolutionBlocked (exit 81).
-            // Only a genuine `None` (tag truly absent) must trigger the policy block.
-            let locally_resolvable = self
-                .local_index
-                .fetch_manifest_digest(identifier, IndexOperation::Query)
-                .await?
-                .is_some();
-            if !locally_resolvable {
-                return Err(super::error::Error::PolicyResolutionBlocked {
-                    identifier: identifier.to_string(),
-                    policy: self.mode.policy_label(),
+        match self.mode {
+            // Offline never contacts a source. For unpinned (tag-only) identifiers,
+            // first check whether the tag IS locally resolvable — a true miss raises
+            // PolicyResolutionBlocked; a hit lets through and falls to the early-return.
+            // For digest-bearing identifiers the check is skipped: the early-return fires
+            // immediately (content stays unfetched; the resulting `None` is a policy error
+            // at the content boundary).
+            ChainMode::Offline => {
+                if identifier.digest().is_none() {
+                    // Probe the local tag store; raises PolicyResolutionBlocked if
+                    // the tag is genuinely absent. I/O errors propagate unchanged.
+                    self.ensure_locally_resolvable(identifier).await?;
                 }
-                .into());
+                // Digest-addressed offline miss: no source contact, content stays
+                // unfetched (the resulting `None` becomes a policy error at the
+                // content boundary).
+                return Ok(());
             }
-        }
-        if self.mode == ChainMode::Offline {
-            // Digest-addressed offline miss: no source contact, content stays
-            // unfetched (the resulting `None` becomes a policy error at the
-            // content boundary).
-            return Ok(());
+            // Frozen refuses to resolve an unpinned reference from a source, but
+            // digest-addressed (already-known) content is still fetched like Default.
+            ChainMode::Frozen if identifier.digest().is_none() => {
+                // Probe the local tag store; raises PolicyResolutionBlocked if
+                // the tag is genuinely absent. I/O errors propagate unchanged.
+                self.ensure_locally_resolvable(identifier).await?;
+                // Tag is locally resolvable: fall through to source walk so the
+                // missing content blob is fetched (only unknown-tag *resolution* is
+                // blocked; content fetches for known tags are allowed).
+            }
+            ChainMode::Default | ChainMode::Remote | ChainMode::Frozen => {}
         }
 
         // Digest-bearing inputs (digest-only OR tag+digest pinned-id pulls)
