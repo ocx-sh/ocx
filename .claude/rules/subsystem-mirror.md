@@ -23,8 +23,8 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `command/pipeline/mod.rs` | `Pipeline` subcommand dispatcher; routes to generate/plan/prepare/push/notify |
 | `command/pipeline/generate/mod.rs` | `generate` subgroup dispatcher |
 | `command/pipeline/generate/ci.rs` | `pipeline generate ci` — renderer + `--check` |
-| `command/pipeline/plan.rs` | `pipeline plan` — discover new work, emit plan.json |
-| `command/pipeline/prepare.rs` | `pipeline prepare --version V` — download + bundle |
+| `command/pipeline/plan.rs` | `pipeline plan` — discover new work, emit plan.json (schema v2: entries carry `source_version`, `variant`, resolved per-platform `assets`) |
+| `command/pipeline/prepare.rs` | `pipeline prepare --version V [--plan plan.json]` — download + bundle; `--plan` builds from discover's resolved assets, no source re-crawl (issue #160) |
 | `command/pipeline/push.rs` | `pipeline push` — serial push driver, writes run-summary.json |
 | `command/pipeline/notify.rs` | `pipeline notify` — Discord webhook POST |
 | `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution |
@@ -117,6 +117,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `RendererDrift` | 65 (DataError) | `--check` mode: generated files differ from current spec |
 | `JunitParseError` | 65 (DataError) | JUnit XML parse failure in `pipeline push` |
 | `RunSummaryError` | 65 (DataError) | Cannot read or write `run-summary.json` |
+| `PlanError` | 65 (DataError) | `plan.json` missing/malformed, version absent from plan, or plan lacks resolved assets (`prepare --plan`) |
 | `TemplateError` | 74 (IoError) | Workflow template render failure |
 | `WebhookUnavailable` | 69 (Unavailable) | Discord 5xx / timeout in `pipeline notify` |
 | `WebhookPermissionDenied` | 77 (PermissionDenied) | Discord 401/403 — webhook secret likely rotated |
@@ -130,8 +131,8 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | Subcommand | Role in pipeline | Key invariant |
 |-----------|-----------------|---------------|
 | `pipeline generate ci` | Renderer — writes `.github/workflows/{mirror,describe,verify-generated}.yml` | Idempotent; `--check` exits 65 on drift. Emits `verify-generated.yml` (drift guard, R4) unless `allow_manual_edits: true`. Rejects hardcoded webhook URLs at parse time (R3) |
-| `pipeline plan` | Discover — find new work | Side-effect-free; calls registry + source; emits `plan.json` |
-| `pipeline prepare --version V` | Prepare — download + bundle | One version across all platforms; writes `bundle-{V}-{P}.tar.xz` per platform |
+| `pipeline plan` | Discover — find new work | Side-effect-free; calls registry + source; emits `plan.json` (schema v2 carries resolved asset URLs per entry) |
+| `pipeline prepare --version V [--plan plan.json]` | Prepare — download + bundle | One version across all platforms; writes `bundle-{V}-{P}.tar.xz` per platform. With `--plan`, tasks come from the plan's resolved assets — the source is never queried (one crawl per run, issue #160); without it, falls back to a standalone crawl |
 | `pipeline push` | Push — publish greens | Serial driver; AND across containers for each `(V, P)`; sole cascade-tag writer in pipeline |
 | `pipeline notify` | Notify — Discord report | Reads `run-summary.json`; silent when all skipped-existing |
 

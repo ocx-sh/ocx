@@ -11,7 +11,7 @@ use ocx_lib::cli::DataInterface;
 use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::command::options::OutputFormat;
 use crate::command::sync::list_upstream_versions;
@@ -25,7 +25,7 @@ use crate::spec::{self, MirrorSpec};
 use crate::version_platform_map::VersionPlatformMap;
 
 /// `new` | `backfill-partial` — what kind of work is needed for this version.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PlanVersionKind {
     /// Version not yet present in the target registry.
@@ -34,8 +34,21 @@ pub enum PlanVersionKind {
     BackfillPartial,
 }
 
+/// A resolved per-platform asset carried in the plan so `prepare` legs can
+/// build tasks without re-crawling the source (issue #160 — one crawl per
+/// pipeline run instead of N+1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanAssetEntry {
+    /// Platform slug (e.g. `linux/amd64`).
+    pub platform: String,
+    /// Upstream asset file name (drives archive-type detection downstream).
+    pub asset_name: String,
+    /// Direct download URL resolved by discover's single source crawl.
+    pub url: url::Url,
+}
+
 /// A single version entry in the plan output.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanVersionEntry {
     /// Variant-prefixed normalized tag the pipeline publishes (e.g. `3.29.0`
     /// for the default variant, `slim-3.29.0` for the `slim` variant). The
@@ -46,21 +59,38 @@ pub struct PlanVersionEntry {
     pub platforms: Vec<String>,
     /// Kind of work needed.
     pub kind: PlanVersionKind,
+    /// Raw upstream version string (pre-normalization, e.g. `3.29.0` for tag
+    /// `3.29.0_20260610`). `prepare --plan` needs it for platform
+    /// applicability checks and task construction.
+    ///
+    /// `#[serde(default)]` keeps schema_version-1 plans parseable; consumers
+    /// requiring resolved data must check [`PlanVersionEntry::assets`] first.
+    #[serde(default)]
+    pub source_version: String,
+    /// Variant name this entry belongs to (`None` = default variant).
+    #[serde(default)]
+    pub variant: Option<String>,
+    /// Resolved assets for exactly the platforms in `platforms`. Carried so
+    /// `prepare --plan` never re-runs the source generator (issue #160).
+    #[serde(default)]
+    pub assets: Vec<PlanAssetEntry>,
 }
 
 /// Structured output of `ocx-mirror pipeline plan`.
 ///
-/// JSON shape (schema_version 1):
+/// JSON shape (schema_version 2 — v2 adds `source_version`, `variant`, and
+/// resolved `assets` per version entry so `prepare --plan` consumes the
+/// discover crawl instead of re-crawling, issue #160):
 /// ```json
 /// {
-///   "schema_version": 1,
+///   "schema_version": 2,
 ///   "has_new": true,
 ///   "versions": [...],
 ///   "target": "ocx.sh/cmake",
 ///   "ocx_mirror_rev": "abc123..."
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanReport {
     /// Schema version for forward-compat detection.
     pub schema_version: u32,
@@ -235,7 +265,7 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
     let ocx_mirror_rev = spec.ocx_mirror.as_ref().and_then(|c| c.rev.clone());
 
     Ok(PlanReport {
-        schema_version: 1,
+        schema_version: 2,
         has_new,
         versions: version_entries,
         target,
@@ -271,10 +301,26 @@ fn build_version_entries(
                 PlanVersionKind::New
             };
 
+            // Carry the resolved assets so `prepare --plan` never re-runs the
+            // source generator (issue #160). After filter_versions,
+            // rv.platforms holds exactly the platforms that still need work.
+            let assets: Vec<PlanAssetEntry> = rv
+                .platforms
+                .iter()
+                .map(|pa| PlanAssetEntry {
+                    platform: pa.platform.to_string(),
+                    asset_name: pa.asset_name.clone(),
+                    url: pa.url.clone(),
+                })
+                .collect();
+
             PlanVersionEntry {
                 version: rv.normalized_version.clone(),
                 platforms: missing_platforms,
                 kind,
+                source_version: rv.version.clone(),
+                variant: rv.variant.clone(),
+                assets,
             }
         })
         .collect()
@@ -326,24 +372,33 @@ mod tests {
     // involved. The actual plan computation (source/registry queries) is
     // exercised via integration tests once execute() is implemented.
 
+    /// Test helper: entry with the v2 fields defaulted so schema-shape tests
+    /// stay focused on the field under assertion.
+    fn entry(version: &str, platforms: &[&str], kind: PlanVersionKind) -> PlanVersionEntry {
+        PlanVersionEntry {
+            version: version.to_string(),
+            platforms: platforms.iter().map(|p| p.to_string()).collect(),
+            kind,
+            source_version: version.to_string(),
+            variant: None,
+            assets: vec![],
+        }
+    }
+
     #[test]
-    fn plan_report_serializes_schema_version_1() {
-        // §3.5: JSON output format matches design spec §2.2 schema exactly.
-        // schema_version must be 1.
+    fn plan_report_serializes_schema_version_2() {
+        // §3.5: JSON output format matches design spec §2.2 schema.
+        // schema_version 2 since plan entries carry resolved assets (issue #160).
         let report = PlanReport {
-            schema_version: 1,
+            schema_version: 2,
             has_new: true,
-            versions: vec![PlanVersionEntry {
-                version: "3.29.0".to_string(),
-                platforms: vec!["linux/amd64".to_string(), "darwin/arm64".to_string()],
-                kind: PlanVersionKind::New,
-            }],
+            versions: vec![entry("3.29.0", &["linux/amd64", "darwin/arm64"], PlanVersionKind::New)],
             target: "ocx.sh/cmake".to_string(),
             ocx_mirror_rev: Some("abc123def456".to_string()),
         };
 
         let value: serde_json::Value = serde_json::to_value(&report).unwrap();
-        assert_eq!(value["schema_version"].as_u64().unwrap(), 1);
+        assert_eq!(value["schema_version"].as_u64().unwrap(), 2);
         assert!(value["has_new"].as_bool().unwrap());
         assert_eq!(value["target"].as_str().unwrap(), "ocx.sh/cmake");
         assert_eq!(value["ocx_mirror_rev"].as_str().unwrap(), "abc123def456");
@@ -353,7 +408,7 @@ mod tests {
     fn plan_report_has_new_false_when_no_versions() {
         // §3.5: Empty source + empty target → has_new: false, versions: []
         let report = PlanReport {
-            schema_version: 1,
+            schema_version: 2,
             has_new: false,
             versions: vec![],
             target: "ocx.sh/cmake".to_string(),
@@ -369,24 +424,16 @@ mod tests {
     #[test]
     fn plan_version_kind_new_serializes_as_kebab_case() {
         // §3.5: PlanVersionKind::New → "new" in JSON (kebab-case)
-        let entry = PlanVersionEntry {
-            version: "3.29.0".to_string(),
-            platforms: vec!["linux/amd64".to_string()],
-            kind: PlanVersionKind::New,
-        };
-        let value: serde_json::Value = serde_json::to_value(&entry).unwrap();
+        let value: serde_json::Value =
+            serde_json::to_value(entry("3.29.0", &["linux/amd64"], PlanVersionKind::New)).unwrap();
         assert_eq!(value["kind"].as_str().unwrap(), "new");
     }
 
     #[test]
     fn plan_version_kind_backfill_partial_serializes_as_kebab_case() {
         // §3.5: PlanVersionKind::BackfillPartial → "backfill-partial" in JSON
-        let entry = PlanVersionEntry {
-            version: "3.28.5".to_string(),
-            platforms: vec!["linux/arm64".to_string()],
-            kind: PlanVersionKind::BackfillPartial,
-        };
-        let value: serde_json::Value = serde_json::to_value(&entry).unwrap();
+        let value: serde_json::Value =
+            serde_json::to_value(entry("3.28.5", &["linux/arm64"], PlanVersionKind::BackfillPartial)).unwrap();
         assert_eq!(value["kind"].as_str().unwrap(), "backfill-partial");
     }
 
@@ -395,19 +442,11 @@ mod tests {
         // §3.5: Mixed: 2 versions present in target, 1 new → only 1 in versions[]
         // This test verifies the schema shape for the mixed case.
         let report = PlanReport {
-            schema_version: 1,
+            schema_version: 2,
             has_new: true,
             versions: vec![
-                PlanVersionEntry {
-                    version: "3.29.0".to_string(),
-                    platforms: vec!["linux/amd64".to_string(), "linux/arm64".to_string()],
-                    kind: PlanVersionKind::New,
-                },
-                PlanVersionEntry {
-                    version: "3.28.5".to_string(),
-                    platforms: vec!["linux/arm64".to_string()],
-                    kind: PlanVersionKind::BackfillPartial,
-                },
+                entry("3.29.0", &["linux/amd64", "linux/arm64"], PlanVersionKind::New),
+                entry("3.28.5", &["linux/arm64"], PlanVersionKind::BackfillPartial),
             ],
             target: "ocx.sh/cmake".to_string(),
             ocx_mirror_rev: None,
@@ -465,6 +504,52 @@ mod tests {
             vec!["3.13.9", "slim-3.13.9"],
             "plan must emit the variant-prefixed normalized tag, not the bare upstream version"
         );
+    }
+
+    #[test]
+    fn build_version_entries_carries_resolved_assets() {
+        // Regression (issue #160): plan entries must carry the resolved
+        // per-platform assets (source_version, variant, asset URLs) so
+        // `prepare --plan` consumes the discover crawl instead of re-running
+        // the source generator once per matrix leg (N+1 crawls → GraphQL
+        // rate-limit exhaustion).
+        use crate::filter::ResolvedVersion;
+        use crate::resolver::asset_resolution::ResolvedPlatformAsset;
+
+        let platform: Platform = "linux/amd64".parse().unwrap();
+        let filtered = vec![ResolvedVersion {
+            version: "3.13.9".to_string(),
+            normalized_version: "slim-3.13.9_20260610".to_string(),
+            variant: Some("slim".to_string()),
+            platforms: vec![ResolvedPlatformAsset {
+                platform: platform.clone(),
+                asset_name: "cpython-slim.tar.gz".to_string(),
+                url: url::Url::parse("https://example.com/cpython-slim.tar.gz").unwrap(),
+            }],
+            is_prerelease: false,
+        }];
+
+        let entries = build_version_entries(&filtered, &[], 0);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.source_version, "3.13.9");
+        assert_eq!(entry.variant.as_deref(), Some("slim"));
+        assert_eq!(entry.assets.len(), 1);
+        assert_eq!(entry.assets[0].platform, "linux/amd64");
+        assert_eq!(entry.assets[0].asset_name, "cpython-slim.tar.gz");
+        assert_eq!(entry.assets[0].url.as_str(), "https://example.com/cpython-slim.tar.gz");
+
+        // Round-trip: prepare deserializes what plan serialized.
+        let json = serde_json::to_string(&PlanReport {
+            schema_version: 2,
+            has_new: true,
+            versions: entries,
+            target: "ocx.sh/cpython".to_string(),
+            ocx_mirror_rev: None,
+        })
+        .unwrap();
+        let parsed: PlanReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.versions[0].assets[0].asset_name, "cpython-slim.tar.gz");
     }
 
     #[test]

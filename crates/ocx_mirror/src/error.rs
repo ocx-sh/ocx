@@ -32,6 +32,10 @@ pub enum MirrorError {
     JunitParseError(String),
     /// `run-summary.json` is missing, malformed, or has an unrecognised schema version.
     RunSummaryError(String),
+    /// `plan.json` is missing, malformed, or does not carry the data the
+    /// consuming subcommand needs (e.g. a `prepare --plan` invocation against
+    /// a plan without resolved assets, or a version absent from the plan).
+    PlanError(String),
     /// Template render failure or write failure for a generated file.
     TemplateError(String),
     /// Discord webhook returned 5xx or the request timed out.
@@ -60,6 +64,7 @@ impl MirrorError {
             Self::RendererDrift(_) => ExitCode::DataError,
             Self::JunitParseError(_) => ExitCode::DataError,
             Self::RunSummaryError(_) => ExitCode::DataError,
+            Self::PlanError(_) => ExitCode::DataError,
             Self::TemplateError(_) => ExitCode::IoError,
             Self::WebhookUnavailable(_) => ExitCode::Unavailable,
             Self::WebhookPermissionDenied(_) => ExitCode::PermissionDenied,
@@ -98,6 +103,7 @@ impl std::fmt::Display for MirrorError {
             }
             Self::JunitParseError(msg) => write!(f, "JUNIT parse error: {msg}"),
             Self::RunSummaryError(msg) => write!(f, "run-summary error: {msg}"),
+            Self::PlanError(msg) => write!(f, "plan error: {msg}"),
             Self::TemplateError(msg) => write!(f, "template error: {msg}"),
             Self::WebhookUnavailable(msg) => write!(f, "webhook unavailable: {msg}"),
             Self::WebhookPermissionDenied(msg) => write!(f, "webhook permission denied: {msg}"),
@@ -140,6 +146,14 @@ mod tests {
         // Plan taxonomy: SourceError → Unavailable (69) — upstream source unreachable.
         let err = MirrorError::SourceError("GitHub API returned 503".into());
         assert_eq!(err.kind_exit_code(), ExitCode::Unavailable);
+    }
+
+    #[test]
+    fn plan_error_maps_to_data_error() {
+        // Issue #160: PlanError → DataError (65) — plan.json input is malformed
+        // or lacks resolved assets; same class as RunSummaryError.
+        let err = MirrorError::PlanError("version '1.2.3' not present in plan".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
     }
 
     #[test]

@@ -40,8 +40,19 @@ jobs:
           set -euo pipefail
           ocx-mirror pipeline plan --format json > plan.json
           echo "has_new=$(jq -r '.has_new' plan.json)" >> "${GITHUB_OUTPUT}"
-          echo "versions=$(jq -c '.versions' plan.json)" >> "${GITHUB_OUTPUT}"
+          # Project to the matrix-relevant fields only. The full plan — including
+          # the resolved per-platform asset URLs — travels to the prepare legs
+          # via the plan artifact below, keeping the matrix JSON lean.
+          echo "versions=$(jq -c '[.versions[] | {version, platforms, kind}]' plan.json)" >> "${GITHUB_OUTPUT}"
           echo "target=$(jq -r '.target' plan.json)" >> "${GITHUB_OUTPUT}"
+      # Ship the resolved plan (asset URLs included) to the prepare legs so
+      # they never re-run the source crawl — one crawl per run instead of N+1,
+      # which blew the shared GitHub GraphQL points budget (issue #160).
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: plan
+          path: plan.json
+          retention-days: 1
 
   prepare:
     needs: discover
@@ -54,16 +65,18 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@8cd2f38eed07c9b79aaed22e61f9ba6b36e967a3  # v1.2.2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: plan
       - name: Prepare ${{ matrix.version.version }}
-        # `GITHUB_TOKEN` is forwarded to the in-process octocrab client so
-        # release-listing runs authenticated (5 000 reqs/h). With N parallel
-        # prepare legs each calling the source unauthenticated, the 60/h
-        # anonymous quota blows up after the first run of the day.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # `--plan` feeds prepare the asset URLs the discover crawl already
+        # resolved, so this leg never re-runs the source generator. N parallel
+        # legs each re-crawling exhausted the shared GitHub GraphQL points
+        # budget (5 000 pts/h per installation token, issue #160). No
+        # GITHUB_TOKEN needed: asset downloads are plain HTTP.
         run: |
           set -euo pipefail
-          ocx-mirror pipeline prepare --version "${{ matrix.version.version }}"
+          ocx-mirror pipeline prepare --version "${{ matrix.version.version }}" --plan plan.json
           # Flatten .ocx-mirror/{V}/{P}/bundle.tar.xz → bundles/bundle-{V}-{P_slug}.tar.xz
           # and copy the per-platform metadata.json written by `pipeline prepare`
           # as sibling so `ocx package test` auto-discovers the correct override

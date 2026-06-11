@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
 
+use crate::command::pipeline::plan::PlanReport;
 use crate::command::sync::list_upstream_versions;
 use crate::error::MirrorError;
 use crate::normalizer;
@@ -37,6 +38,12 @@ pub struct Prepare {
     /// Working directory for intermediate artifacts. Defaults to `./.ocx-mirror`.
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
+
+    /// Path to a `plan.json` produced by `pipeline plan`. When set, tasks are
+    /// built from the plan's resolved assets and the source is never queried —
+    /// one crawl per pipeline run instead of one per prepare leg (issue #160).
+    #[arg(long)]
+    pub plan: Option<PathBuf>,
 }
 
 impl Prepare {
@@ -50,7 +57,13 @@ impl Prepare {
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(".ocx-mirror"));
 
-        let tasks = build_tasks_for_version(&spec, &spec_dir, &self.version).await?;
+        let tasks = match &self.plan {
+            Some(plan_path) => {
+                let plan = read_plan(plan_path).await?;
+                build_tasks_from_plan(&spec, &spec_dir, &plan, &self.version)?
+            }
+            None => build_tasks_for_version(&spec, &spec_dir, &self.version).await?,
+        };
 
         if tasks.is_empty() {
             return Err(MirrorError::SpecInvalid(vec![format!(
@@ -95,6 +108,95 @@ impl Prepare {
 
         Ok(())
     }
+}
+
+/// Read and parse a `plan.json` document written by `pipeline plan`.
+async fn read_plan(path: &std::path::Path) -> Result<PlanReport, MirrorError> {
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| MirrorError::PlanError(format!("failed to read plan file '{}': {e}", path.display())))?;
+    serde_json::from_str(&content)
+        .map_err(|e| MirrorError::PlanError(format!("failed to parse plan file '{}': {e}", path.display())))
+}
+
+/// Build `MirrorTask`s for `version` from the resolved assets a `pipeline plan`
+/// run already crawled — no source query (issue #160: N prepare matrix legs
+/// re-crawling the source exhausted the GitHub GraphQL points budget).
+///
+/// `version` is matched against the plan entry's variant-prefixed normalized
+/// tag (the string the workflow matrix carries). Spec-owned task fields
+/// (target, verify, cascade, metadata, asset_type) come from the local spec;
+/// only the asset resolution is taken from the plan.
+fn build_tasks_from_plan(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    plan: &PlanReport,
+    version: &str,
+) -> Result<Vec<MirrorTask>, MirrorError> {
+    let entry = plan
+        .versions
+        .iter()
+        .find(|e| e.version == version)
+        .ok_or_else(|| MirrorError::PlanError(format!("version '{version}' not present in plan")))?;
+
+    if entry.assets.is_empty() {
+        return Err(MirrorError::PlanError(format!(
+            "plan entry for '{version}' carries no resolved assets — regenerate plan.json \
+             with an ocx-mirror that emits schema_version >= 2"
+        )));
+    }
+
+    let effective_variants = spec.effective_variants();
+    let variant = effective_variants
+        .iter()
+        .find(|v| v.name == entry.variant)
+        .ok_or_else(|| {
+            MirrorError::PlanError(format!(
+                "variant '{}' from plan not declared in spec",
+                entry.variant.as_deref().unwrap_or("<default>")
+            ))
+        })?;
+
+    let mut tasks = Vec::new();
+    for asset in &entry.assets {
+        // Re-check applicability for consistency with the crawl path; plan
+        // already drops non-applicable pairs, so this only matters for
+        // hand-edited plan documents.
+        if !spec.platform_applies(&entry.source_version, &asset.platform) {
+            continue;
+        }
+
+        let platform = asset
+            .platform
+            .parse()
+            .map_err(|e| MirrorError::PlanError(format!("invalid platform '{}' in plan: {e}", asset.platform)))?;
+
+        let asset_type = variant
+            .asset_type
+            .as_ref()
+            .map(|at| at.resolve(&asset.platform))
+            .unwrap_or(spec::AssetType::Archive { strip_components: None });
+
+        tasks.push(MirrorTask {
+            version: entry.source_version.clone(),
+            normalized_version: entry.version.clone(),
+            platform,
+            download_url: asset.url.clone(),
+            asset_name: asset.asset_name.clone(),
+            target: spec.target.clone(),
+            metadata_config: variant.metadata.clone(),
+            verify_config: spec.verify.clone(),
+            cascade: spec.cascade,
+            spec_dir: spec_dir.to_path_buf(),
+            asset_type,
+            variant: variant.name.as_ref().map(|name| VariantContext {
+                name: name.clone(),
+                is_default: variant.is_default,
+            }),
+        });
+    }
+
+    Ok(tasks)
 }
 
 /// Build `MirrorTask`s for a specific version string across all resolved platforms.
@@ -231,6 +333,7 @@ mod tests {
                 spec: spec_path,
                 version: "3.29.0".to_string(),
                 work_dir: Some(work_dir.path().to_path_buf()),
+                plan: None,
             })
         }));
 
@@ -263,6 +366,7 @@ mod tests {
                 spec: spec_path,
                 version: "3.29.0".to_string(),
                 work_dir: Some(work_dir.path().to_path_buf()),
+                plan: None,
             })
         }));
 
@@ -294,6 +398,7 @@ mod tests {
                 spec: spec_path.clone(),
                 version: "3.29.0".to_string(),
                 work_dir: Some(work_dir.path().to_path_buf()),
+                plan: None,
             })
         }));
 
@@ -304,6 +409,7 @@ mod tests {
                     spec: spec_path,
                     version: "3.29.0".to_string(),
                     work_dir: Some(work_dir.path().to_path_buf()),
+                    plan: None,
                 })
             }));
             assert!(result2.is_err(), "Second run must also panic with unimplemented");
@@ -316,6 +422,7 @@ mod tests {
                     spec: spec_path,
                     version: "3.29.0".to_string(),
                     work_dir: Some(work_dir.path().to_path_buf()),
+                    plan: None,
                 })
             }));
             assert!(matches!(result2, Ok(Ok(()))), "Second run (idempotent) must succeed");
@@ -337,6 +444,7 @@ mod tests {
                 spec: spec_path,
                 version: "99.99.99-bad-checksum".to_string(),
                 work_dir: Some(work_dir.path().to_path_buf()),
+                plan: None,
             })
         }));
 
@@ -369,6 +477,7 @@ mod tests {
                 spec: spec_path,
                 version: "3.29.0".to_string(),
                 work_dir: Some(work_dir.path().to_path_buf()),
+                plan: None,
             })
         }));
 
@@ -473,6 +582,7 @@ platforms:
             spec: spec_path,
             version: "3.29.0".to_string(),
             work_dir: None, // uses default ./.ocx-mirror
+            plan: None,
         };
 
         // Struct construction must succeed (no panic)
@@ -484,5 +594,156 @@ platforms:
         }));
         // Panicked or returned — either is acceptable at Phase 3
         let _ = result;
+    }
+
+    // ── issue #160: plan-based task building (no source re-crawl) ───────────
+
+    use crate::command::pipeline::plan::{PlanAssetEntry, PlanVersionEntry, PlanVersionKind};
+
+    /// Spec whose source is unreachable by construction (unroutable remote
+    /// url_index). Any code path that queries the source fails; plan-based
+    /// task building must succeed regardless.
+    const UNREACHABLE_SOURCE_SPEC: &str = r#"
+name: testtool
+target:
+  registry: ocx.sh
+  repository: testtool
+source:
+  type: url_index
+  url: "http://127.0.0.1:1/index.json"
+assets:
+  linux/amd64:
+    - "tool-linux-amd64$"
+  darwin/arm64:
+    - "tool-darwin-arm64$"
+asset_type:
+  type: binary
+  name: tool
+build_timestamp: none
+"#;
+
+    fn plan_with(versions: Vec<PlanVersionEntry>) -> PlanReport {
+        PlanReport {
+            schema_version: 2,
+            has_new: !versions.is_empty(),
+            versions,
+            target: "ocx.sh/testtool".to_string(),
+            ocx_mirror_rev: None,
+        }
+    }
+
+    fn asset_entry(platform: &str, name: &str) -> PlanAssetEntry {
+        PlanAssetEntry {
+            platform: platform.to_string(),
+            asset_name: name.to_string(),
+            url: url::Url::parse(&format!("https://example.com/{name}")).unwrap(),
+        }
+    }
+
+    #[test]
+    fn build_tasks_from_plan_does_not_query_source() {
+        // Regression (issue #160): N prepare matrix legs re-crawling the
+        // source exhausted the GitHub GraphQL points budget. With --plan,
+        // tasks come from the plan's resolved assets — the (unreachable)
+        // source is never queried, so this must succeed offline.
+        let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
+        let plan = plan_with(vec![PlanVersionEntry {
+            version: "1.2.3".to_string(),
+            platforms: vec!["linux/amd64".to_string(), "darwin/arm64".to_string()],
+            kind: PlanVersionKind::New,
+            source_version: "1.2.3".to_string(),
+            variant: None,
+            assets: vec![
+                asset_entry("linux/amd64", "tool-linux-amd64"),
+                asset_entry("darwin/arm64", "tool-darwin-arm64"),
+            ],
+        }]);
+
+        let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap();
+
+        assert_eq!(tasks.len(), 2);
+        let task = tasks.iter().find(|t| t.platform.to_string() == "linux/amd64").unwrap();
+        assert_eq!(task.version, "1.2.3");
+        assert_eq!(task.normalized_version, "1.2.3");
+        assert_eq!(task.asset_name, "tool-linux-amd64");
+        assert_eq!(task.download_url.as_str(), "https://example.com/tool-linux-amd64");
+        assert!(task.variant.is_none());
+    }
+
+    #[test]
+    fn build_tasks_from_plan_errors_on_missing_version() {
+        let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
+        let plan = plan_with(vec![]);
+
+        let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "9.9.9").unwrap_err();
+        assert!(
+            matches!(err, MirrorError::PlanError(_)),
+            "expected PlanError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_tasks_from_plan_errors_on_plan_without_assets() {
+        // A schema_version-1 plan parses (serde defaults) but carries no
+        // resolved assets — prepare must fail with an actionable error
+        // instead of silently building nothing.
+        let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
+        let plan = plan_with(vec![PlanVersionEntry {
+            version: "1.2.3".to_string(),
+            platforms: vec!["linux/amd64".to_string()],
+            kind: PlanVersionKind::New,
+            source_version: String::new(),
+            variant: None,
+            assets: vec![],
+        }]);
+
+        let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap_err();
+        match err {
+            MirrorError::PlanError(msg) => {
+                assert!(msg.contains("no resolved assets"), "unexpected message: {msg}");
+            }
+            other => panic!("expected PlanError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_tasks_from_plan_errors_on_unknown_variant() {
+        let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
+        let plan = plan_with(vec![PlanVersionEntry {
+            version: "slim-1.2.3".to_string(),
+            platforms: vec!["linux/amd64".to_string()],
+            kind: PlanVersionKind::New,
+            source_version: "1.2.3".to_string(),
+            variant: Some("slim".to_string()),
+            assets: vec![asset_entry("linux/amd64", "tool-linux-amd64")],
+        }]);
+
+        let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "slim-1.2.3").unwrap_err();
+        assert!(
+            matches!(err, MirrorError::PlanError(_)),
+            "expected PlanError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_tasks_from_plan_respects_platform_applicability() {
+        // Same applicability rules as the crawl path: out-of-window pairs in a
+        // (hand-edited) plan are dropped, not built.
+        let spec: MirrorSpec = serde_yaml_ng::from_str(APPLICABILITY_SPEC).unwrap();
+        let plan = plan_with(vec![PlanVersionEntry {
+            version: "0.10.0".to_string(),
+            platforms: vec!["linux/amd64".to_string(), "windows/arm64".to_string()],
+            kind: PlanVersionKind::New,
+            source_version: "0.10.0".to_string(),
+            variant: None,
+            assets: vec![
+                asset_entry("linux/amd64", "tool-linux-amd64"),
+                // Below windows/arm64's min_version (0.11.7) → must be dropped.
+                asset_entry("windows/arm64", "tool-windows-arm64"),
+            ],
+        }]);
+
+        let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "0.10.0").unwrap();
+        assert_eq!(platforms_of(&tasks), vec!["linux/amd64".to_string()]);
     }
 }

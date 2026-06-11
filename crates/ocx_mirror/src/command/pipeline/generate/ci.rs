@@ -1707,6 +1707,32 @@ notify:
     }
 
     #[test]
+    fn rendered_workflow_prepare_consumes_plan_artifact() {
+        // Regression (issue #160): the prepare matrix legs must consume the
+        // plan artifact (`--plan plan.json`) instead of re-running the source
+        // generator — N+1 concurrent crawls exhausted the GitHub GraphQL
+        // points budget. discover uploads the plan; prepare downloads it.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-minimal.yml", dir.path());
+        if let Ok(()) = result {
+            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let content = std::fs::read_to_string(&workflow).unwrap();
+            assert!(
+                content.contains("name: plan\n          path: plan.json"),
+                "discover must upload plan.json as the 'plan' artifact"
+            );
+            assert!(
+                content.contains("--plan plan.json"),
+                "prepare must pass --plan plan.json so the source is never re-crawled"
+            );
+            assert!(
+                content.contains("jq -c '[.versions[] | {version, platforms, kind}]'"),
+                "versions output must be projected so asset URLs stay out of the matrix JSON"
+            );
+        }
+    }
+
+    #[test]
     fn rendered_describe_contains_detect_step_and_guards() {
         // End-to-end: render from a fixture and assert the generated describe.yml
         // carries the credential-detect step and the guards.
