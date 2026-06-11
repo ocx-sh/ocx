@@ -18,26 +18,44 @@ use std::time::Duration;
 
 use crate::file_structure::FileStructure;
 use crate::package_manager::concurrency::Concurrency;
-use crate::package_manager::error::{Error, PackageError, PackageErrorKind};
+use crate::package_manager::error::{Error as PmError, PackageError, PackageErrorKind};
 use crate::package_manager::{PackageManager, SkippedReason, UpdateCheckResult};
+use crate::setup::error::Error as SetupError;
+use crate::setup::version_spec::VersionSpec;
 use crate::{log, oci};
 
-/// Outcome of ensuring the latest published `ocx.sh/ocx/cli` is installed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BootstrapOutcome {
-    /// The CAS already resolves to a version at least as new as the latest
-    /// published release; nothing was installed.
+/// Status discriminant for a bootstrap run (flat variant of former enum payloads).
+///
+/// Mirrors the `BootstrapStatus` in `api/data/self_setup.rs` — lib carries the
+/// typed enum; the API layer stringifies it at the serialization boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapStatus {
+    /// The installed `current` already points at the requested version.
     AlreadyPresent,
-    /// The latest published release was pulled and selected.
-    Pulled {
-        /// The latest published version that was installed.
-        version: String,
-    },
-    /// Dry-run: the latest published release would be pulled.
-    WouldPull {
-        /// The latest published version that would be installed.
-        version: String,
-    },
+    /// The requested version was pulled and selected.
+    Pulled,
+    /// Dry-run: the requested version would be pulled.
+    WouldPull,
+}
+
+/// Outcome of ensuring `ocx.sh/ocx/cli` is installed (flat struct, plan D7).
+///
+/// Replaces the former `BootstrapOutcome` enum with variant payloads so the
+/// fields map 1:1 to the API `BootstrapEntry` without per-variant ambiguity.
+///
+/// - `version`: the tag when known (pinned tag or latest-resolved). `None` for
+///   digest-only pins.
+/// - `digest`: `Some` whenever resolution produced a digest (includes pinned
+///   `AlreadyPresent` and `WouldPull`). `None` on the unpinned fast path and
+///   on policy-skip offline paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapOutcome {
+    /// Bootstrap status discriminant.
+    pub status: BootstrapStatus,
+    /// Tag string when known; `None` for digest-only pins.
+    pub version: Option<String>,
+    /// Resolved digest when available; `None` on the unpinned fast path.
+    pub digest: Option<oci::Digest>,
 }
 
 /// Decision produced by mapping an [`UpdateCheckResult`] without performing any
@@ -57,15 +75,21 @@ enum Decision {
         version: String,
     },
     /// Bootstrap cannot proceed — surface this error to the caller.
-    Fail(Error),
+    Fail(PmError),
 }
 
-/// Ensures the latest published `ocx.sh/ocx/cli` release is installed.
+/// Ensures the specified (or latest published) `ocx.sh/ocx/cli` release is installed.
 ///
-/// Resolves the latest published version through the throttle-bypassing
-/// update-check path, then installs it with `candidate=false, select=true`
-/// (mirroring `self_update`). The version reported in [`BootstrapOutcome`] is
-/// always the **latest published** version, never the running binary's.
+/// When `version` is `None`, resolves the latest published version through the
+/// throttle-bypassing update-check path and installs it with
+/// `candidate=false, select=true` (mirroring `self_update`). The version
+/// reported in [`BootstrapOutcome`] is always the **latest published** version,
+/// never the running binary's (Decision 2A unchanged).
+///
+/// When `version` is `Some(spec)`, takes the pinned path: applies the spec to
+/// the base identifier, resolves the digest via the index (ChainMode applies),
+/// cross-checks `tag@digest` consistency, and installs only if not already
+/// current. Resolved digest is always set in the returned outcome.
 ///
 /// # Errors
 ///
@@ -73,16 +97,25 @@ enum Decision {
 ///   (`PolicyBlocked`): setup cannot complete without the CAS populated.
 /// - Registry probe failure during the live tag query → an error classifying
 ///   to exit 69 (`Unavailable`): no published target is reachable.
+/// - `tag@digest` mismatch → [`crate::setup::error::Error::PinDigestMismatch`]
+///   (exit 65 `DataError`), fail-closed per plan D9.
 /// - Install failure → the underlying [`Error`] from `install_all`, classified
 ///   by the existing ladder.
 ///
-/// Offline **and** already installed returns [`BootstrapOutcome::AlreadyPresent`]
-/// so re-runs on an installed machine work offline.
+/// Offline **and** already installed returns
+/// `BootstrapOutcome { status: AlreadyPresent, .. }` so re-runs on an
+/// installed machine work offline.
 pub async fn ensure_self_installed(
     manager: &PackageManager,
     file_structure: &FileStructure,
     dry_run: bool,
-) -> Result<BootstrapOutcome, Error> {
+    version: Option<&VersionSpec>,
+) -> Result<BootstrapOutcome, crate::setup::error::Error> {
+    if let Some(spec) = version {
+        return ensure_pinned(manager, spec, dry_run).await;
+    }
+
+    // ── Unpinned path (Decision 2A — latest published, unchanged) ────────────
     let identifier = oci::ocx_cli_identifier();
 
     // `Some(Duration::ZERO)` bypasses the throttle and performs a live tag
@@ -91,7 +124,7 @@ pub async fn ensure_self_installed(
     let check = manager
         .check_update(&identifier, Some(Duration::ZERO))
         .await
-        .map_err(|kind| Error::InstallFailed(vec![PackageError::new(identifier.clone(), kind)]))?;
+        .map_err(|kind| PmError::InstallFailed(vec![PackageError::new(identifier.clone(), kind)]))?;
 
     // Probe whether the `current` install actually resolves. `try_exists`
     // follows the symlink, so a dangling or absent `current` reads as `false`.
@@ -104,11 +137,19 @@ pub async fn ensure_self_installed(
     let decision = decide(check, already_installed);
 
     match decision {
-        Decision::AlreadyPresent => Ok(BootstrapOutcome::AlreadyPresent),
-        Decision::Fail(error) => Err(error),
+        Decision::AlreadyPresent => Ok(BootstrapOutcome {
+            status: BootstrapStatus::AlreadyPresent,
+            version: None,
+            digest: None,
+        }),
+        Decision::Fail(error) => Err(SetupError::Bootstrap(error)),
         Decision::Install { identifier, version } => {
             if dry_run {
-                return Ok(BootstrapOutcome::WouldPull { version });
+                return Ok(BootstrapOutcome {
+                    status: BootstrapStatus::WouldPull,
+                    version: Some(version),
+                    digest: None,
+                });
             }
             // Mirror `self_update`: no candidate symlink, update `current`.
             let candidate = false;
@@ -122,9 +163,205 @@ pub async fn ensure_self_installed(
                     Concurrency::default(),
                 )
                 .await?;
-            Ok(BootstrapOutcome::Pulled { version })
+            Ok(BootstrapOutcome {
+                status: BootstrapStatus::Pulled,
+                version: Some(version),
+                digest: None,
+            })
         }
     }
+}
+
+/// Pinned bootstrap path (plan D1–D11, `Some(spec)` branch).
+///
+/// Applies the spec to the canonical self identifier, resolves it to a digest
+/// through the index (ChainMode applies, so `--frozen`/`--offline` block an
+/// unpinned-tag resolution → exit 81), cross-checks a `tag@digest` pin
+/// (fail-closed on mismatch → exit 65), then compares the resolved digest
+/// against the installed `current` digest:
+///
+/// - equal → [`BootstrapStatus::AlreadyPresent`] (re-pin is a no-op)
+/// - differ/absent → optional downgrade warn (D10), then
+///   `install_all(candidate=false, select=true)` → [`BootstrapStatus::Pulled`]
+///
+/// Dry-run still resolves (read-only) and reports [`BootstrapStatus::WouldPull`]
+/// with the resolved digest; nothing is persisted.
+async fn ensure_pinned(
+    manager: &PackageManager,
+    spec: &VersionSpec,
+    dry_run: bool,
+) -> Result<BootstrapOutcome, SetupError> {
+    let id = spec.apply(oci::ocx_cli_identifier());
+
+    // ── Resolve to a digest through the index (ChainMode applies) ─────────────
+    let resolved = resolve_pinned_digest(manager, spec, &id).await?;
+
+    // ── tag@digest cross-check (fail-closed immutability assertion, D9) ───────
+    // guarded by acceptance test test_tag_digest_mismatch_exits_65
+    if let (Some(tag), Some(pinned)) = (spec.tag(), spec.digest())
+        && *pinned != resolved
+    {
+        return Err(SetupError::PinDigestMismatch {
+            tag: tag.to_string(),
+            expected: pinned.clone(),
+            resolved,
+            // ChainMode is not cleanly observable at this seam, so the stale-
+            // index hint is attached unconditionally (acceptable per plan D9):
+            // under `--frozen` the resolution came from the local index and a
+            // refresh is the likely fix; online it is harmless advice.
+            hint: Some("if you froze resolution to a stale local index, run `ocx index update`".to_string()),
+        });
+    }
+
+    // ── Compare against the installed `current` digest (D6) ───────────────────
+    let installed = manager
+        .installed_current_digest(&id)
+        .await
+        .map_err(|e| bootstrap_error(PackageErrorKind::Internal(e)))?;
+
+    if installed.as_ref() == Some(&resolved) {
+        return Ok(BootstrapOutcome {
+            status: BootstrapStatus::AlreadyPresent,
+            version: spec.tag().map(str::to_owned),
+            digest: Some(resolved),
+        });
+    }
+
+    // ── Dry-run: resolution complete; nothing persisted (dry-run contract) ──
+    if dry_run {
+        return Ok(BootstrapOutcome {
+            status: BootstrapStatus::WouldPull,
+            version: spec.tag().map(str::to_owned),
+            digest: Some(resolved),
+        });
+    }
+
+    // ── Downgrade warn (D10): warn-only when both sides parse as semver and the
+    //    pinned tag is older than the installed `current` version ──────────────
+    maybe_warn_downgrade(manager, spec, &id, installed.as_ref()).await;
+
+    // ── Install the resolved version, selecting `current` (mirrors unpinned) ──
+    let install_id = id.clone_with_digest(resolved.clone());
+    let candidate = false;
+    let select = true;
+    manager
+        .install_all(
+            vec![install_id],
+            oci::Platform::supported_set(),
+            candidate,
+            select,
+            Concurrency::default(),
+        )
+        .await?;
+
+    Ok(BootstrapOutcome {
+        status: BootstrapStatus::Pulled,
+        version: spec.tag().map(str::to_owned),
+        digest: Some(resolved),
+    })
+}
+
+/// Resolves the pinned spec to the **platform-selected content digest** through
+/// the index — the same digest `install_all` materializes and the one the
+/// `current` package's `digest` file holds, so the satisfied-check (D6) can
+/// compare like with like.
+///
+/// The package-root `digest` file always holds a platform image-manifest digest
+/// (never an image-index digest), because `install_all` writes the platform-
+/// selected manifest digest there. Consequently, a digest-only re-pin resolves
+/// through the flat `Manifest::Image` arm and returns the same pinned digest
+/// unchanged — which is the invariant that makes `bootstrap.digest` round-trip
+/// stable as a pin.
+///
+/// Resolution always goes through [`PackageManager::resolve`] so ChainMode
+/// governs the lookup (a `--frozen`/`--offline` unpinned-tag miss surfaces as
+/// `PolicyResolutionBlocked` → exit 81) and the platform manifest is selected.
+///
+/// - Tag present (tag-only or `tag@digest`): resolves via the **tag** (digest
+///   dropped) so the index performs a real tag → digest resolution; a genuinely
+///   unknown tag (a source was consulted) surfaces as `NotFound` → exit 79.
+/// - Digest-only pin: resolves the pinned digest itself (digest fast path —
+///   `resolve_top_manifest` fetches the manifest by digest, then platform-selects).
+async fn resolve_pinned_digest(
+    manager: &PackageManager,
+    spec: &VersionSpec,
+    id: &oci::Identifier,
+) -> Result<oci::Digest, SetupError> {
+    // For a `tag@digest` pin, resolve via the TAG (digest dropped) so the index
+    // performs a real tag → digest resolution and the cross-check compares the
+    // tag's resolved digest against the pinned one. A tag-only or digest-only
+    // pin resolves its sole component.
+    let resolve_id = if spec.tag().is_some() {
+        id.without_digest()
+    } else {
+        id.clone()
+    };
+
+    let chain = manager
+        .resolve(&resolve_id, oci::Platform::supported_set())
+        .await
+        .map_err(|kind| match kind {
+            // A tag/digest that genuinely does not exist (a source was consulted)
+            // → NotFound (exit 79), per the error taxonomy.
+            PackageErrorKind::NotFound => bootstrap_error(PackageErrorKind::NotFound),
+            other => bootstrap_error(other),
+        })?;
+
+    Ok(chain.pinned.digest())
+}
+
+/// Emits a single-line stderr warning when the pinned tag is semver-older than
+/// the currently installed `current` version (plan D10, TUF rollback signal).
+///
+/// Best-effort: silently skips when either side is unknown or not semver-
+/// parseable (digest-only pins, dev builds, a fresh machine). Reuses
+/// [`Version::parse`](crate::package::version::Version::parse) — the same
+/// semver-ish parser `tasks/update_check.rs::find_latest_version` uses — and the
+/// `query_installed_self_version` subprocess seam for the installed version.
+///
+/// Pass `installed` from a previously computed `installed_current_digest` call to
+/// avoid a redundant subprocess when nothing is installed (`None` returns early
+/// before the subprocess is invoked).
+async fn maybe_warn_downgrade(
+    manager: &PackageManager,
+    spec: &VersionSpec,
+    id: &oci::Identifier,
+    installed: Option<&oci::Digest>,
+) {
+    use crate::package::version::Version;
+
+    // Fast exit: nothing is installed, so there is no installed version to compare
+    // against and the subprocess would return None anyway.
+    if installed.is_none() {
+        return;
+    }
+
+    let Some(pinned_tag) = spec.tag() else {
+        return;
+    };
+    let Some(pinned_version) = Version::parse(pinned_tag) else {
+        return;
+    };
+    let Some(installed_str) = manager.query_installed_self_version(id).await else {
+        return;
+    };
+    let Some(installed_version) = Version::parse(&installed_str) else {
+        return;
+    };
+
+    if pinned_version < installed_version {
+        log::warn!("downgrade {installed_version} -> {pinned_version}");
+    }
+}
+
+/// Wraps a [`PackageErrorKind`] into the bootstrap error ladder so it composes
+/// through [`SetupError::Bootstrap`] and classifies via the existing exit-code
+/// mapping (NotFound → 79, PolicyResolutionBlocked → 81, …).
+fn bootstrap_error(kind: PackageErrorKind) -> SetupError {
+    SetupError::Bootstrap(PmError::InstallFailed(vec![PackageError::new(
+        oci::ocx_cli_identifier(),
+        kind,
+    )]))
 }
 
 /// Maps an [`UpdateCheckResult`] to a [`Decision`] without side effects.
@@ -186,9 +423,9 @@ fn map_skipped(reason: SkippedReason, already_installed: bool) -> Decision {
 /// Wraps [`crate::Error::OfflineMode`] (which classifies to `PolicyBlocked`)
 /// in the package-manager error ladder so it composes through
 /// [`crate::setup::error::Error::Bootstrap`].
-fn offline_blocked() -> Error {
+fn offline_blocked() -> PmError {
     let identifier = oci::ocx_cli_identifier();
-    Error::InstallFailed(vec![PackageError::new(
+    PmError::InstallFailed(vec![PackageError::new(
         identifier,
         PackageErrorKind::Internal(crate::Error::OfflineMode),
     )])
@@ -200,10 +437,10 @@ fn offline_blocked() -> Error {
 /// structured client error, so the detail is re-wrapped as
 /// [`crate::oci::client::error::ClientError::Registry`] — which classifies to
 /// `Unavailable`.
-fn registry_unavailable(detail: impl Into<String>) -> Error {
+fn registry_unavailable(detail: impl Into<String>) -> PmError {
     let identifier = oci::ocx_cli_identifier();
     let client_error = crate::oci::client::error::ClientError::Registry(detail.into().into());
-    Error::InstallFailed(vec![PackageError::new(
+    PmError::InstallFailed(vec![PackageError::new(
         identifier,
         PackageErrorKind::Internal(crate::Error::OciClient(client_error)),
     )])

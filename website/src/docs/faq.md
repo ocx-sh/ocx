@@ -25,6 +25,39 @@ The grammar is fully unambiguous: `.` separates components, `-` introduces a pre
 
 See [Versioning][ug-versioning] in the user guide for the full tag hierarchy and cascade behavior.
 
+## Installation {#installation-faq}
+
+### How do I install a specific ocx version? {#install-specific-version}
+
+Pass a version to [`ocx self setup`][cmd-self-setup] using the downloaded binary. The `VERSION` argument accepts three forms:
+
+```sh
+# Install by tag:
+/tmp/ocx self setup 0.9.2
+
+# Install by content digest (no tag resolution):
+/tmp/ocx self setup sha256:ab12cd34ef56...
+
+# Install by tag and verify the digest (immutability assertion):
+/tmp/ocx self setup 0.9.2@sha256:ab12cd34ef56...
+```
+
+The `tag@digest` form is the strongest reproducibility guarantee for CI. If the tag ever points to different content, the command exits 65 and names both digests. Note that a digest pin is **platform-specific**: the same tag resolves to a different digest on each OS and architecture, so a digest captured on one runner cannot be shared across platforms. For CI matrices, pin by tag. The digest value for a single platform comes from the JSON output of a prior run:
+
+```sh
+digest=$(/tmp/ocx --format json self setup 0.9.2 | jq -r .bootstrap.digest)
+# Subsequent runs assert the exact same content:
+/tmp/ocx self setup "0.9.2@$digest"
+```
+
+That digest round-trips: re-running `/tmp/ocx self setup 0.9.2@$digest` exits 0 with status `already_present` when the same version is already installed and pointed to by `current`. No redundant download occurs.
+
+When the specified version is already installed, `ocx self setup` is a no-op and exits 0 — the shims and profile blocks are only re-written when their content has drifted.
+
+::: tip Offline and frozen environments
+A digest-only pin works under `--frozen` when the blobs are cached locally. A tag-only pin under `--frozen` resolves from the local index; the command exits 81 if the tag is absent from the index — run `ocx index update` first.
+:::
+
 ## Project Toolchain {#project}
 
 ### When should I use `ocx package exec` vs `ocx run`? {#exec-vs-run}
@@ -163,6 +196,7 @@ This caveat is about a packaged tool that ships as a `.bat`/`.cmd` script — *n
 [nix]: https://nixos.org/
 
 <!-- commands -->
+[cmd-self-setup]: ./reference/command-line.md#self-setup
 [cmd-deps]: ./reference/command-line.md#deps
 [cmd-package-exec]: ./reference/command-line.md#package-exec
 [cmd-run]: ./reference/command-line.md#run

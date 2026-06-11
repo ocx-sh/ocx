@@ -3,11 +3,12 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::str::FromStr;
 
 use clap::Parser;
 use ocx_lib::cli::ExitCode as OcxExitCode;
 use ocx_lib::env;
-use ocx_lib::setup::{self, SetupOptions, SetupOutcome};
+use ocx_lib::setup::{self, SetupOptions, SetupOutcome, VersionSpec};
 
 use crate::api::data::self_setup::SelfSetupData;
 
@@ -17,6 +18,11 @@ use crate::api::data::self_setup::SelfSetupData;
 /// content store, writes the per-shell env shims into `$OCX_HOME`, and adds a
 /// managed activation block to your shell profiles. Re-running is safe: the
 /// shims and blocks are diff-gated, so an unchanged setup is a no-op.
+///
+/// Pass an optional VERSION to install a specific release instead of the
+/// latest. VERSION accepts a tag (`1.2.3`), a digest (`sha256:<hex>`), or both
+/// (`1.2.3@sha256:<hex>` — an immutability assertion that fails if the tag
+/// resolves to a different digest).
 ///
 /// The managed block is fenced (`# >>> ocx v1 <hash> >>>`). If you edit the
 /// block by hand, that profile is reported as dirty and left untouched (exit
@@ -35,10 +41,29 @@ use crate::api::data::self_setup::SelfSetupData;
 /// | Outcome | Exit |
 /// |---|---|
 /// | completed / no-op / migrated | 0 |
+/// | bad VERSION syntax | 64 |
+/// | tag@digest mismatch (immutability assertion failed) | 65 |
+/// | registry unreachable | 69 |
+/// | writing env shims or profile failed | 74 |
+/// | package not found in registry | 79 |
 /// | bootstrap blocked (offline, not installed) | 81 |
 /// | a profile was dirty and skipped (no `--force`) | 82 |
 #[derive(Parser)]
 pub struct SelfSetup {
+    /// Version to install: tag, `sha256:<hex>`, or `tag@sha256:<hex>`.
+    ///
+    /// Omit to install the latest published release. A tag installs that exact
+    /// release. A digest installs the exact content. A `tag@digest` form
+    /// verifies the tag resolves to the given digest (immutability assertion).
+    ///
+    /// The literal `latest` resolves only if the registry publishes such a tag;
+    /// omitting VERSION is the recommended way to request the latest release.
+    ///
+    // NOTE: `require_equals` is NOT needed here — a single-value typed positional
+    // plus named repeatable `--profile` is unambiguous to clap without it.
+    #[arg(value_name = "VERSION", value_parser = |s: &str| VersionSpec::from_str(s).map_err(|e| e.to_string()))]
+    version: Option<VersionSpec>,
+
     /// Write the env shims but do not modify any shell profile.
     ///
     /// A truthy `OCX_NO_MODIFY_PATH` (`1`/`y`/`yes`/`on`/`true`) sets this too. The
@@ -70,6 +95,7 @@ impl SelfSetup {
             profiles: self.profile.clone(),
             dry_run: self.dry_run,
             force: self.force,
+            version: self.version.clone(),
         };
 
         let outcome = setup::run(&options, context.manager(), context.file_structure()).await?;
@@ -124,13 +150,17 @@ fn exit_code_for(outcome: &SetupOutcome, force: bool, dry_run: bool) -> ExitCode
 mod tests {
     use std::path::PathBuf;
 
-    use ocx_lib::setup::{BootstrapOutcome, ProfileOutcome, SetupOutcome};
+    use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ProfileOutcome, SetupOutcome};
 
     use super::exit_code_for;
 
     fn outcome(profiles: Vec<(PathBuf, ProfileOutcome)>) -> SetupOutcome {
         SetupOutcome {
-            bootstrap: BootstrapOutcome::AlreadyPresent,
+            bootstrap: BootstrapOutcome {
+                status: BootstrapStatus::AlreadyPresent,
+                version: None,
+                digest: None,
+            },
             shims_written: Vec::new(),
             profiles,
             exec_policy_warning: None,

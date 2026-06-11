@@ -105,6 +105,37 @@ If you plan to manage your own PATH (CI jobs, container images, package-manager 
 
 Note that `--no-modify-path` is **not remembered** between invocations. If you run `ocx self setup` again later without the flag, profiles will be modified. Set `OCX_NO_MODIFY_PATH=1` persistently in your environment or pass the flag each time to prevent that. See the [environment reference][env-no-modify-path] for the full semantics.
 
+### Install a pinned ocx version {#install-bare-binary-pin}
+
+CI pipelines often need a specific ocx release — not "whatever is latest" — so that every runner runs the same build regardless of when the job triggers.
+
+Pass a version to `ocx self setup` to install exactly that release. The optional `VERSION` argument accepts a tag, a content digest, or both:
+
+```sh
+# Install a specific release by tag:
+/tmp/ocx self setup 0.9.2
+
+# Install a specific release and assert the exact content (strongest guarantee):
+/tmp/ocx self setup 0.9.2@sha256:ab12cd34ef56...
+
+# Install by digest alone — no tag resolution:
+/tmp/ocx self setup sha256:ab12cd34ef56...
+```
+
+The `tag@digest` form is an immutability assertion. If the tag ever resolves to different content, the command fails with exit 65 and names both digests. To get the digest value, capture it from the JSON output of a prior run:
+
+```sh
+digest=$(/tmp/ocx --format json self setup 0.9.2 | jq -r .bootstrap.digest)
+```
+
+That digest round-trips: `/tmp/ocx self setup 0.9.2@$digest` on the next run either confirms the install is already present (exit 0, status `already_present`) or downloads and verifies the exact same content.
+
+When the pinned version is older than what is already installed, a warning appears on stderr and the downgrade proceeds. This is a signal for CI logs, not a block.
+
+::: tip Learn more
+[`ocx self setup` reference][cmd-self-setup] — full `VERSION` grammar, JSON output shape, and all exit codes.
+:::
+
 ::: tip Learn more
 [Shell Activation Files reference][env-shell-activation-files] — what the env shim files contain and how each shell sources them.
 [`OCX_NO_MODIFY_PATH` reference][env-no-modify-path] — truthy semantics, per-invocation behavior.

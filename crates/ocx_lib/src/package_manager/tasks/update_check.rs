@@ -275,6 +275,22 @@ impl PackageManager {
         }
     }
 
+    /// Queries the version string of the installed `current` binary for
+    /// `identifier` via the hermetic `ocx --format json version` subprocess.
+    ///
+    /// Returns `None` when the package is not locally installed (no `current`
+    /// symlink), the subprocess fails, or its output is malformed — the same
+    /// soft-failure contract as the self-update version probe. This is the
+    /// pub seam the pinned-bootstrap downgrade check (plan D10) reuses to learn
+    /// the currently-installed version without re-implementing the subprocess
+    /// pattern; it stays best-effort and the caller skips silently on `None`.
+    ///
+    /// The `query_` prefix signals that calling this method may spawn a subprocess
+    /// (non-trivial cost), mirroring the `query_installed_version` private helper.
+    pub async fn query_installed_self_version(&self, identifier: &oci::Identifier) -> Option<String> {
+        query_installed_version(self, identifier).await
+    }
+
     /// Self-flavored install: check for update (always bypasses throttle,
     /// explicit user intent) and install the new version if one is available.
     ///

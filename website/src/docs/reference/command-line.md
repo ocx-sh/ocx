@@ -1503,19 +1503,29 @@ The `ocx self` group manages the OCX installation itself: PATH activation, shell
 
 #### `self setup` {#self-setup}
 
-Complete a bare-binary install: bootstrap the latest published OCX into the content store, write the per-shell env shims (`$OCX_HOME/env.*`), and add a managed activation block to the detected shell profiles.
+Complete a bare-binary install: bootstrap OCX into the content store, write the per-shell env shims (`$OCX_HOME/env.*`), and add a managed activation block to the detected shell profiles.
 
-This is the answer to "I won't pipe `curl` into a shell": download the standalone `ocx` binary from GitHub Releases, run `ocx self setup`, and reach the same state the install script produces — no shell script involved. The loose binary bootstraps the managed copy, writes the shims, and wires shell profiles in one command.
+This is the answer to "I won't pipe `curl` into a shell": download the standalone `ocx` binary from [GitHub Releases][releases], run `ocx self setup`, and reach the same state the install script produces — no shell script involved. The loose binary bootstraps the managed copy, writes the shims, and wires shell profiles in one command.
 
-Setup runs three things in a hard order: **bootstrap first** (install the latest published `ocx.sh/ocx/cli` so the shims have a `current` to point at — a no-op when an install already exists), then the five `env.*` shims, then the profile activation blocks. A failed bootstrap stops the run before any shim or profile is touched.
+Setup runs three things in a hard order: **bootstrap first** (install the specified or latest published `ocx.sh/ocx/cli` so the shims have a `current` to point at — a no-op when the same version is already installed), then the five `env.*` shims, then the profile activation blocks. A failed bootstrap stops the run before any shim or profile is touched.
 
 Re-running is safe. The shims and the managed block are diff-gated: an unchanged setup is a no-op. A stale ocx-authored block is rewritten in place (format upgrade); a legacy `# BEGIN ocx` block is migrated to the versioned fence. A block the user edited by hand is reported dirty and left untouched (exit 82) unless `--force` is passed.
 
 **Usage**
 
 ```shell
-ocx self setup [--no-modify-path] [--profile PATH]... [--dry-run] [--force]
+ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--force]
 ```
+
+**Arguments**
+
+| Argument | Description |
+|----------|-------------|
+| `VERSION` | Optional version to install. Three forms are accepted: |
+| | `1.2.3` — install the release with that tag. |
+| | `sha256:<64hex>` — install the exact content identified by that digest (no tag resolution; written bare, without `@`). |
+| | `1.2.3@sha256:<64hex>` — install that tag and verify it resolves to the given digest (immutability assertion). If the tag resolves to a different digest, the command fails with exit 65 and names both digests. Under `--frozen`, comparison uses the local index; a mismatch message hints `ocx index update`. |
+| | Omit `VERSION` to install the latest published release. The literal value `latest` is treated as an ordinary tag lookup and resolves only if the registry publishes such a tag — omitting `VERSION` is the recommended way to request the latest release. Malformed input exits 64. |
 
 **Options**
 
@@ -1523,19 +1533,141 @@ ocx self setup [--no-modify-path] [--profile PATH]... [--dry-run] [--force]
 |------|-------|-------------|---------|
 | `--no-modify-path` | — | Write the env shims only; skip every shell profile. Equivalent env var: [`OCX_NO_MODIFY_PATH`][env-ocx-no-modify-path] (truthy). The opt-out is not remembered between runs. | off |
 | `--profile PATH` | — | Override the auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name. | *(autodetect)* |
-| `--dry-run` | — | Report what would change and write nothing. Never returns exit 82. | off |
+| `--dry-run` | — | Report what would change and write nothing. Resolves the version and reports `WouldPull` with the resolved digest, but writes nothing. Never returns exit 82. | off |
 | `--force` | — | Overwrite a managed block that carries user edits (the dirty state). | off |
 | `-h`, `--help` | | Print help information. | — |
+
+**Version grammar**
+
+The `VERSION` positional applies to the `ocx.sh/ocx/cli` identifier as a suffix. It never accepts a registry or repository — only the tag, digest, or tag-plus-digest portion.
+
+| Form | Example | Behavior |
+|------|---------|----------|
+| Tag only | `0.9.2` | Resolves the tag, installs, points `current` at it. |
+| Digest only | `sha256:ab12…` | Fetches by content digest; `version` field omitted from JSON output. |
+| Tag + digest | `0.9.2@sha256:ab12…` | Resolves tag, cross-checks digest (immutability assertion), fails closed on mismatch (exit 65). |
+
+sha256 (64 hex chars) is the standard OCI digest algorithm; sha384 (96 hex chars) and sha512 (128 hex chars) are also accepted. Hex digits must be lowercase for all three algorithms — uppercase letters are rejected with exit 64.
+
+Tag characters are restricted: the first character must match `[a-zA-Z0-9_]`; subsequent characters must match `[a-zA-Z0-9._-]`; maximum 128 characters. The `+` character is accepted in tag strings and normalized to `_` internally (the `adr_version_build_separator.md` convention).
+
+A `sha256:` digest pin selects a **platform-specific** package digest — the same tag yields a different digest per OS and architecture. For CI matrices, pin by tag (each runner resolves its own platform digest) or supply a per-platform digest map; never share one digest across platforms.
+
+When a pinned version is already installed and already pointed to by `current`, the command exits 0 with status `already_present` — no re-download.
+
+When a pinned tag is semver-older than the currently installed version, a warning is emitted to stderr and the downgrade proceeds. This is an informational signal for CI logs, not a block.
+
+The `[--frozen]` global flag affects pin resolution: a tag-only pin not present in the local index exits 81. A digest-only pin works under `--frozen` when the blobs are already cached locally.
+
+**JSON output** (`--format json`)
+
+A typical pinned run that pulled a new version:
+
+```json
+{
+  "status": "completed",
+  "bootstrap": {
+    "status": "pulled",
+    "version": "0.9.2",
+    "digest": "sha256:ab12cd34..."
+  },
+  "shims": [
+    "/home/alice/.ocx/env.sh",
+    "/home/alice/.ocx/env.fish"
+  ],
+  "profiles": [
+    {"path": "/home/alice/.bashrc", "outcome": "completed"},
+    {"path": "/home/alice/.zshrc", "outcome": "no_op"}
+  ],
+  "reload_hint": true
+}
+```
+
+The root object is discriminated by `status`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Top-level run outcome — one of `completed`, `no_op`, `skipped`, `migrated` (see table below). |
+| `bootstrap` | object | Nested sub-object describing the ocx binary install step (see below). |
+| `shims` | array of strings | Absolute paths to the env shim files written during this run. Empty when no shims changed. |
+| `profiles` | array of objects | Per-profile outcome: `{"path": "…", "outcome": "completed"|"no_op"|"migrated"|"skipped_dirty"}`. |
+| `dirty_profiles` | array of strings | Paths of profiles that carried user edits and were skipped. Present only when `status` is `skipped`. |
+| `exec_policy_warning` | string | Windows-only advisory when the execution policy is `Restricted`. Omitted when absent. |
+| `conflicting_ocx` | string | Absolute path to a shadowing `ocx` binary found ahead of the shim directory on `PATH`. Omitted when absent. |
+| `reload_hint` | boolean | `true` when at least one shim or profile was written and the shell must be re-sourced to activate the changes. Omitted when `false`. |
+
+Root-level `status` values:
+
+| Value | Meaning |
+|-------|---------|
+| `completed` | At least one shim or profile was written or upgraded. |
+| `no_op` | Everything was already current; nothing changed. |
+| `skipped` | At least one profile carried user edits and was left untouched (no `--force`). Exit 82. |
+| `migrated` | A legacy activation block was migrated to the versioned fence; no dirty profiles. |
+
+::: warning `jq .status` returns the root discriminant, not the bootstrap status
+`jq .status` on a `self setup --format json` result returns `completed`, `no_op`, `skipped`, or `migrated` — the overall run outcome. The bootstrap-specific values (`pulled`, `already_present`, `would_pull`) are nested one level deeper under `bootstrap.status`. Use `jq .bootstrap.status` to inspect the binary install step.
+:::
+
+The `bootstrap` sub-object:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `bootstrap.status` | string | Binary install outcome: `already_present`, `pulled`, or `would_pull` (dry-run). |
+| `bootstrap.version` | string | Version string of the installed or would-install release. Omitted for digest-only pins. |
+| `bootstrap.digest` | string | Platform-selected content digest in `sha256:<hex>` form. Present only on pinned runs; omitted on unpinned latest-release runs so JSON consumers stay byte-identical to prior behaviour. |
+
+`bootstrap.status` values:
+
+| Value | Meaning |
+|-------|---------|
+| `already_present` | The requested version was already installed: on a pinned run, `current` already pointed at the pinned digest; on an unpinned run, the latest published release was already current. |
+| `pulled` | The version was downloaded and `current` updated. |
+| `would_pull` | Dry-run: this version would be downloaded. |
+
+The `version` field is omitted for digest-only pins. The `digest` field round-trips as a pin: use `jq -r .bootstrap.digest` to extract it and pass it back as `ocx self setup "0.9.2@$digest"`.
+
+To script against the bootstrap outcome:
+
+```shell
+result=$(ocx --format json self setup 0.9.2)
+root_status=$(echo "$result" | jq -r .status)          # completed / no_op / skipped / migrated
+bootstrap_status=$(echo "$result" | jq -r .bootstrap.status)  # pulled / already_present / would_pull
+digest=$(echo "$result" | jq -r '.bootstrap.digest // empty')  # sha256:<hex>, or empty when unpinned
+```
 
 **Exit codes**
 
 | Code | Meaning |
 |------|---------|
 | 0 | Setup completed, no-op, or migrated; or a dry-run (including over a dirty profile). |
+| 64 | Malformed `VERSION` syntax (empty, short or uppercase hex, unknown algorithm, double `@`, trailing `@`). |
+| 65 | `tag@digest` immutability assertion failed — the tag resolved to a different digest than the one specified. |
 | 69 | Registry unreachable while bootstrapping. |
-| 74 | I/O error writing a shim or profile. |
-| 81 | The offline policy (`PolicyBlocked`) blocked the bootstrap and no install was present. |
+| 74 | I/O error writing a shim or shell profile. |
+| 79 | The pinned tag or digest was not found in the registry. |
+| 81 | A policy (`--offline` or `--frozen`) blocked resolution and the version was not cached locally. |
 | 82 | A managed activation block carried user edits and `--force` was not passed. Scripts can `case $? in 82)` to detect this and re-run with `--force`. |
+
+**Examples**
+
+```shell
+# Install the latest published release (default behavior):
+ocx self setup
+
+# Install a specific release by tag:
+ocx self setup 0.9.2
+
+# Install a specific release and assert the exact content:
+ocx self setup 0.9.2@sha256:ab12cd34ef56...
+
+# Install by digest alone (useful when a prior JSON run produced the digest):
+ocx self setup sha256:ab12cd34ef56...
+
+# Repeat a prior run's pin using the JSON output's digest field:
+digest=$(ocx --format json self setup 0.9.2 | jq -r .bootstrap.digest)
+ocx self setup "0.9.2@$digest"   # round-trip: asserts the same content
+```
 
 #### `self activate` {#self-activate}
 
@@ -2329,6 +2461,7 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 :::
 
 <!-- external -->
+[releases]: https://github.com/ocx-sh/ocx/releases/latest
 [cargo]: https://doc.rust-lang.org/cargo/
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [github-actions-workflow-commands]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions

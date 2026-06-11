@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use crate::cli::{ClassifyExitCode, ExitCode};
+use crate::oci;
 use crate::package_manager;
 
 /// Error raised while creating or refreshing shell integration.
@@ -38,6 +39,38 @@ pub enum Error {
     // mapping for a future probe site that surfaces the failure as a typed error.
     #[error("profile subprocess failed")]
     Subprocess(#[source] std::io::Error),
+    /// The VERSION argument could not be parsed as a valid version spec.
+    ///
+    /// Surfaced via the clap `value_parser` so clap renders it as a usage error
+    /// (exit 64). `reason` describes which part of the syntax was invalid.
+    #[error("invalid version spec {input:?}: {reason}")]
+    InvalidVersionSpec {
+        /// The raw input string that was rejected.
+        input: String,
+        /// Human-readable description of why the input was rejected.
+        reason: String,
+    },
+    /// A `tag@digest` pin was specified but the tag resolved to a different
+    /// digest than the one pinned (fail-closed immutability assertion, plan D9).
+    ///
+    /// The error message names both digests so the operator can diagnose
+    /// whether the index is stale (see `hint`).
+    #[error(
+        "pin digest mismatch for {tag}: expected {expected} but registry resolved {resolved}{hint}",
+        hint = if let Some(h) = hint { format!("; {h}") } else { String::new() }
+    )]
+    PinDigestMismatch {
+        /// The tag component of the `tag@digest` spec.
+        tag: String,
+        /// The digest that was pinned in the VERSION argument.
+        expected: oci::Digest,
+        /// The digest the registry (or local index) resolved for the tag.
+        resolved: oci::Digest,
+        /// Optional hint shown when resolution was against the local index and
+        /// the mismatch may be caused by a stale index
+        /// (e.g. `"run \`ocx index update\` to refresh the local index"`).
+        hint: Option<String>,
+    },
 }
 
 impl ClassifyExitCode for Error {
@@ -52,6 +85,11 @@ impl ClassifyExitCode for Error {
             Error::Bootstrap(_) => None,
             Error::Io { .. } => Some(ExitCode::IoError),
             Error::Subprocess(_) => Some(ExitCode::Unavailable),
+            // Parsed via clap value_parser → rendered as usage error (exit 64).
+            Error::InvalidVersionSpec { .. } => Some(ExitCode::UsageError),
+            // tag@digest mismatch is a found-but-inconsistent error (exit 65),
+            // not a "not found" (79). Fail-closed per plan D9.
+            Error::PinDigestMismatch { .. } => Some(ExitCode::DataError),
         }
     }
 }

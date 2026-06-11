@@ -35,7 +35,7 @@ If you manage your `PATH` manually — for example, in a CI environment or a dot
 curl -fsSL https://ocx.sh/install.sh | sh -s -- --no-modify-path
 ```
 
-You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path] as an environment variable. Either way, add `~/.ocx/symlinks/ocx.sh/ocx/current/bin` to your `PATH` yourself.
+You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path] as an environment variable. Either way, add `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin` to your `PATH` yourself.
 :::
 
 ## GitHub Releases {#github-releases}
@@ -77,6 +77,36 @@ The `musl` variants have no runtime dependency on glibc. Use them in Alpine cont
 ::: warning Old wget (<1.17) is rejected by `install.sh`
 `install.sh` fails closed when only an older `wget` is available — the strict TLS flags it relies on were added in wget 1.17 (2015), and downgrading would silently weaken the download integrity check. Alpine edge and some minimal Docker base images still ship older builds. If you hit this, either install a newer `wget` (`apk add --upgrade wget` on Alpine) or use the `curl` form of the install pipeline shown above — `curl` is the default and always works when present.
 :::
+
+## Pinned Install {#pinned-install}
+
+When a CI pipeline needs to run the same ocx build on every runner — regardless of when it runs or who triggers it — pass a version to `ocx self setup`. The version can be a tag, a content digest, or both:
+
+```sh
+# Pin by tag (resolves once, installs that release):
+ocx self setup 0.9.2
+
+# Pin by tag and assert the exact content (immutability assertion):
+ocx self setup 0.9.2@sha256:ab12cd34ef56...
+```
+
+The `tag@digest` form is the strongest guarantee: if the tag ever resolves to different content — for example because a digest was republished — the command fails with exit 65 and names both digests. No silent drift.
+
+::: warning Digest pins are platform-specific
+A `sha256:` digest pin selects the platform-specific package digest — the same tag resolves to a different digest on each OS and architecture. For CI matrices, pin by tag (each runner resolves its own platform digest), or supply a per-platform digest map; never share one digest value across different platforms.
+:::
+
+To get the digest for a version you trust, capture it from a prior run's JSON output:
+
+```sh
+digest=$(ocx --format json self setup 0.9.2 | jq -r .bootstrap.digest)
+# Then write the full pin into your CI config:
+echo "ocx self setup 0.9.2@$digest"
+```
+
+That digest round-trips: the next `ocx self setup 0.9.2@<digest>` call succeeds immediately (`already_present`) if the same version is already installed, or downloads and verifies the exact content otherwise.
+
+Under `--frozen`, a tag-only pin resolves from the local index (exit 81 if the tag is absent); a digest-only pin works when the blobs are already cached locally. Both modes are suitable for hermetic CI environments where the index is pre-populated.
 
 ## Updating {#updating}
 

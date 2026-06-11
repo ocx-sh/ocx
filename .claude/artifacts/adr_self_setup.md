@@ -486,9 +486,57 @@ ocx-managed keys and/or make it opt-in.
 
 ---
 
+## Amendment: Decision 2A — Pin Escape Hatch (`[VERSION]` positional) {#amendment-pin-escape-hatch}
+
+**Applies to Decision 2A (bootstrap = latest-published).** Decision 2A was always the default path. This amendment adds an optional `VERSION` positional that lets callers override the default with a specific release, without reversing the "latest-published" default.
+
+**Summary of changes shipped in [#156]:**
+
+- `ocx self setup [VERSION]` — optional positional accepting three forms (D1–D4, D6, D8–D11 from `plan_self_setup_version_selection.md`):
+  - `1.2.3` — tag-only pin. Resolves via local index (`Resolve` op); ChainMode applies.
+  - `@sha256:<64hex>` — digest-only pin. No tag resolution; `version` omitted from JSON.
+  - `1.2.3@sha256:<64hex>` — tag+digest immutability assertion (D9, fail-closed exit 65 on mismatch).
+- Malformed `VERSION` exits 64 (clap `value_parser`, `InvalidVersionSpec`). The `VersionSpec` digest parser deliberately enforces lowercase-only hex — this is stricter than the general `Digest::try_from` which permits mixed case. Do not "fix" this asymmetry by loosening `VersionSpec`; the stricter rule makes user-supplied pins unambiguous and matches the OCI distribution spec's canonical lowercase form.
+- Pin satisfied ⟺ `current` symlink already resolves to the pinned digest (D6); no re-download. The resolved digest is a **platform-specific** package digest (the digest `installed_current_digest` reads back, which is platform-selected). Consequence for [#150]: the installer must thread the tag or supply a per-platform digest map — sharing one digest value across OS/arch combinations is incorrect because each platform resolves a distinct digest.
+- Downgrade warning (D10): if pinned tag is semver-older than installed `current`, warn on stderr and proceed.
+- Literal `latest` = ordinary tag lookup (D11, no special-casing).
+- `BootstrapOutcome` promoted to flat struct `{ status, version, digest }` (D7); `digest` surfaces in JSON as `bootstrap.digest` (`#[serde(skip_serializing_if = "Option::is_none")]`).
+- `--dry-run` resolves and reports `WouldPull` with digest; writes nothing (D8 dry-run contract).
+- `--frozen` + tag-only pin not in local index → exit 81; `--frozen` + cached digest → succeeds (D8).
+- `tag@digest` mismatch under `--frozen` → exit 65 + stale-index hint (`ocx index update`) (D9).
+
+**Related issues:** [#156] (this plan), [#150] (installer passes release-bound digest — unblocked, not decided here).
+
+**Related artifacts:** `plan_self_setup_version_selection.md`, `research_self_pinning_patterns.md`.
+
+## Amendment: Decision 2B / Adopt-Running-Binary — RATIFIED REJECTED {#amendment-2b-rejected}
+
+**Human ratification 2026-06-11 (Michael Herwig).** Decision 2B (self-copy `current_exe()` into the CAS, the "adopt running binary" mode) is **permanently rejected**. This amendment records the rationale and marks the path closed. Reopening requires a new ADR.
+
+**Sole irreducible blocker: OCI-manifest reverifiability.**
+
+CAS layer identity is the SHA-256 digest of the layer *tar archive*. When a running binary is extracted from its package layer, the individual binary bytes cannot be re-verified against any OCI manifest without the original tar bytes. There is no lossless round-trip from `current_exe()` bytes back to the content-addressed layer that produced them.
+
+An adoption path would therefore require a *second root of trust* alongside OCI digests. The closest prior art is **rustup-init**: it verifies the downloaded binary against a `SHA256SUMS` file hosted alongside the release, separate from the distribution channel. This is the TOFU (Trust On First Use) model — a single-point-of-trust at first download, thereafter anchored by the host key.
+
+**Why the rustup TOFU middle path was considered and rejected:**
+
+Introducing a release-checksum TOFU path would add a second store-population invariant beside OCI-digest verification. The CAS currently has one invariant: every object is reachable only via an OCI content digest. If `current_exe()` could be ingested via a separate checksum file, two objects at the same logical identity (version) could exist in the store with different provenance proofs. This contradicts the single-invariant design that makes GC reachability proofs simple and makes the store self-auditable.
+
+The air-gapped install case that motivated 2B/2C is addressed by:
+- **Mirrors** (Differentiator #9 — first-class corporate/air-gapped mirror support).
+- **Digest-only pin** — `ocx self setup @sha256:<hex>` works under `--frozen` when blobs are cached locally.
+- The loose binary downloaded from GitHub Releases requires network access to reach GitHub in the first place, so pure offline sideload is already outside the stated constraint.
+
+**Status:** Closed. This finding was surfaced during plan review 2026-06-11 as a deferred item (D5 ratification) and ratified by the human architect in the same session. No code implementing adoption mode was written.
+
 ## Changelog
 
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-06-04 | Architect (Michael Herwig) | Initial draft — four coupled decisions (scaffold ownership, bootstrap, RC marker state machine, update policy) |
 | 2026-06-04 | Architect (post-review) | Amendments from review panel: bootstrap = latest-published (not version-pin); exit code 82 `DirtyRcBlock` (was "e.g. 78"); PowerShell fence body uses `$env:OCX_HOME`-with-fallback (was hardcoded `$env:USERPROFILE`); removed `ci_sink` from C4 diagram (D2); struck the false "drift-gap closes" consequence; 4C shim refresh stated as destructive-by-design for env.* + advisory-on-refresh-error; `--from-self` deferral note; added `product-context.md` to docs + "Why not curl\|sh" differentiator |
+| 2026-06-11 | Architect (Michael Herwig) | Amendment: Decision 2A pin escape hatch (`[VERSION]` positional, D1–D4/D6/D8–D11 from plan_self_setup_version_selection.md, issue #156); Decision 2B adopt-running-binary RATIFIED REJECTED (sole blocker: OCI-manifest reverifiability, single store-population invariant, rustup TOFU middle path considered and rejected); cross-refs #156, #150, plan + research artifacts |
+
+[#156]: https://github.com/ocx-sh/ocx/issues/156
+[#150]: https://github.com/ocx-sh/ocx/issues/150

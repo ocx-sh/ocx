@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_lib::cli::Cell;
-use ocx_lib::setup::{BootstrapOutcome, ProfileOutcome, SetupOutcome};
+use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ProfileOutcome, SetupOutcome};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -83,18 +83,29 @@ impl std::fmt::Display for ProfileOutcomeKind {
 
 /// JSON-serialized bootstrap outcome.
 ///
-/// `{"status":"already_present"}`, `{"status":"pulled","version":"1.2.3"}`, or
-/// `{"status":"would_pull","version":"1.2.3"}` (dry-run).
+/// Unpinned path (no VERSION): `{"status":"already_present"}` or
+/// `{"status":"pulled","version":"1.2.3"}`.
+/// Pinned path (VERSION given): same shapes plus `"digest":"sha256:<hex>"` when
+/// resolution produced one. `digest` is omitted on unpinned fast-path runs so
+/// existing JSON consumers stay byte-identical (plan D7).
 #[derive(Serialize)]
 struct BootstrapEntry {
-    status: BootstrapStatus,
+    status: ApiBootstrapStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
+    /// Resolved content digest; present when pinning produced one.
+    ///
+    /// Stringified at this API boundary — lib carries [`ocx_lib::oci::Digest`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
 }
 
+/// API-layer status discriminant (mirrors `ocx_lib::setup::BootstrapStatus`).
+///
+/// Named `ApiBootstrapStatus` to avoid shadowing the lib type imported above.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-enum BootstrapStatus {
+enum ApiBootstrapStatus {
     AlreadyPresent,
     Pulled,
     WouldPull,
@@ -102,31 +113,28 @@ enum BootstrapStatus {
 
 impl BootstrapEntry {
     fn from_outcome(outcome: &BootstrapOutcome) -> Self {
-        match outcome {
-            BootstrapOutcome::AlreadyPresent => Self {
-                status: BootstrapStatus::AlreadyPresent,
-                version: None,
-            },
-            BootstrapOutcome::Pulled { version } => Self {
-                status: BootstrapStatus::Pulled,
-                version: Some(version.clone()),
-            },
-            BootstrapOutcome::WouldPull { version } => Self {
-                status: BootstrapStatus::WouldPull,
-                version: Some(version.clone()),
-            },
+        let status = match outcome.status {
+            BootstrapStatus::AlreadyPresent => ApiBootstrapStatus::AlreadyPresent,
+            BootstrapStatus::Pulled => ApiBootstrapStatus::Pulled,
+            BootstrapStatus::WouldPull => ApiBootstrapStatus::WouldPull,
+        };
+        Self {
+            status,
+            version: outcome.version.clone(),
+            // Stringify the typed Digest at the API serialization boundary.
+            digest: outcome.digest.as_ref().map(|d| d.to_string()),
         }
     }
 
     /// Plain-text summary of the bootstrap outcome for the key/value table.
     fn summary(&self) -> String {
         match (&self.status, &self.version) {
-            (BootstrapStatus::AlreadyPresent, _) => "already present".to_string(),
-            (BootstrapStatus::Pulled, Some(version)) => format!("pulled {version}"),
-            (BootstrapStatus::WouldPull, Some(version)) => format!("would pull {version}"),
+            (ApiBootstrapStatus::AlreadyPresent, _) => "already present".to_string(),
+            (ApiBootstrapStatus::Pulled, Some(version)) => format!("pulled {version}"),
+            (ApiBootstrapStatus::WouldPull, Some(version)) => format!("would pull {version}"),
             // `version` is always Some for Pulled / WouldPull (contract 2).
-            (BootstrapStatus::Pulled, None) => "pulled".to_string(),
-            (BootstrapStatus::WouldPull, None) => "would pull".to_string(),
+            (ApiBootstrapStatus::Pulled, None) => "pulled".to_string(),
+            (ApiBootstrapStatus::WouldPull, None) => "would pull".to_string(),
         }
     }
 }
@@ -232,6 +240,11 @@ impl Printable for SelfSetupData {
             Cell::from(self.bootstrap.summary()),
         ];
 
+        if let Some(digest) = &self.bootstrap.digest {
+            fields.push("Digest".into());
+            values.push(Cell::from(digest.clone()));
+        }
+
         for (index, shim) in self.shims.iter().enumerate() {
             let label = if index == 0 { "Shims".to_string() } else { String::new() };
             fields.push(Cell::from(label));
@@ -256,14 +269,18 @@ impl Printable for SelfSetupData {
 mod tests {
     use std::path::PathBuf;
 
-    use ocx_lib::setup::{BootstrapOutcome, ProfileOutcome, SetupOutcome};
+    use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ProfileOutcome, SetupOutcome};
     use serde_json::json;
 
     use super::SelfSetupData;
 
     fn outcome() -> SetupOutcome {
         SetupOutcome {
-            bootstrap: BootstrapOutcome::AlreadyPresent,
+            bootstrap: BootstrapOutcome {
+                status: BootstrapStatus::AlreadyPresent,
+                version: None,
+                digest: None,
+            },
             shims_written: Vec::new(),
             profiles: Vec::new(),
             exec_policy_warning: None,
@@ -277,8 +294,10 @@ mod tests {
     #[test]
     fn completed_run_serializes_with_shims_and_profiles() {
         let mut base = outcome();
-        base.bootstrap = BootstrapOutcome::Pulled {
-            version: "1.2.3".to_string(),
+        base.bootstrap = BootstrapOutcome {
+            status: BootstrapStatus::Pulled,
+            version: Some("1.2.3".to_string()),
+            digest: None,
         };
         base.shims_written = vec![PathBuf::from("/home/dev/.ocx/env.sh")];
         base.profiles = vec![(PathBuf::from("/home/dev/.bashrc"), ProfileOutcome::Completed)];
@@ -286,6 +305,7 @@ mod tests {
 
         let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
         assert_eq!(value["status"], json!("completed"));
+        // Unpinned pull: digest absent so JSON is byte-identical to former shape.
         assert_eq!(value["bootstrap"], json!({"status": "pulled", "version": "1.2.3"}));
         assert_eq!(value["shims"], json!(["/home/dev/.ocx/env.sh"]));
         assert_eq!(
@@ -363,10 +383,40 @@ mod tests {
     #[test]
     fn would_pull_bootstrap_serializes() {
         let mut base = outcome();
-        base.bootstrap = BootstrapOutcome::WouldPull {
-            version: "2.0.0".to_string(),
+        base.bootstrap = BootstrapOutcome {
+            status: BootstrapStatus::WouldPull,
+            version: Some("2.0.0".to_string()),
+            digest: None,
         };
         let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
+        // Unpinned dry-run: digest absent so JSON is byte-identical to former shape.
         assert_eq!(value["bootstrap"], json!({"status": "would_pull", "version": "2.0.0"}));
+    }
+
+    /// A pinned dry-run (`WouldPull` + digest) serializes `bootstrap.digest` as
+    /// `"sha256:<hex>"` string (plan D7: digest surfaces in JSON on pinned path).
+    #[test]
+    fn would_pull_with_digest_serializes_digest_field() {
+        use ocx_lib::oci::Digest;
+
+        let hex = "a".repeat(64);
+        let digest = Digest::Sha256(hex.clone());
+        let expected_digest_str = format!("sha256:{hex}");
+
+        let mut base = outcome();
+        base.bootstrap = BootstrapOutcome {
+            status: BootstrapStatus::WouldPull,
+            version: Some("0.9.2".to_string()),
+            digest: Some(digest),
+        };
+
+        let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
+        assert_eq!(value["bootstrap"]["status"], json!("would_pull"));
+        assert_eq!(value["bootstrap"]["version"], json!("0.9.2"));
+        assert_eq!(
+            value["bootstrap"]["digest"],
+            json!(expected_digest_str),
+            "bootstrap.digest must serialize to the sha256:<hex> string"
+        );
     }
 }

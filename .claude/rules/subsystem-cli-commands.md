@@ -94,15 +94,19 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `self setup` | Complete a bare-binary install: bootstrap ocx, write env shims, add managed activation block to shell profiles | `--no-modify-path`, `--profile PATH`, `--dry-run`, `--force` |
+| `self setup [VERSION]` | Bootstrap specified or latest ocx, write env shims, add managed activation block to shell profiles | `--no-modify-path`, `--profile PATH`, `--dry-run`, `--force` |
 | `self activate` | Emit eval-safe PATH prepend + completions + global env eval for the detected shell | `--shell[=NAME]` |
 | `self update` | Check and install the latest released ocx version | — |
 | `self update --check` | Query registry for newer version; no install | `--check` |
 
 **`self setup` notes:**
+- **`VERSION` positional (optional)**: three forms accepted — `1.2.3` (tag), `sha256:<64hex>` (digest, written bare without `@`), `1.2.3@sha256:<64hex>` (tag+digest immutability assertion). Malformed input exits 64. `tag@digest` mismatch exits 65 (fail-closed; message names both digests; under `--frozen` adds stale-index hint). Pin satisfied ⟺ `current` already points at the pinned digest — no re-download. Downgrade (pinned tag semver-older than installed) warns on stderr and proceeds. Literal `latest` = ordinary tag lookup; omit `VERSION` for latest-release semantics.
+- Resolved digest surfaces in JSON output (`bootstrap.digest`; omitted when unpinned). Round-trips as a pin: `ocx self setup 0.9.2@<digest>`.
+- ChainMode applies to pin resolution: `--frozen`/`--offline` + uncached tag → exit 81; digest-only pin works frozen when blobs cached.
+- Exit 74 (`IoError`) — writing an env shim or shell profile failed (disk full, permission denied, etc.).
 - `--no-modify-path` (or `OCX_NO_MODIFY_PATH` truthy) — writes env shims only, skips profile modification. `OCX_NO_MODIFY_PATH` is read through `ocx_lib::env::flag` + `BooleanString`: truthy = `1`/`y`/`yes`/`on`/`true`; falsy = `0`/`n`/`no`/`off`/`false`; unrecognised non-empty value → WARN + default (`false`). The opt-out is not remembered between runs.
 - `--profile PATH` — override auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name.
-- `--dry-run` — report what would change; write nothing. Never returns exit 82.
+- `--dry-run` — resolve but write nothing; reports `WouldPull` with resolved digest. Never returns exit 82.
 - `--force` — overwrite a managed block that carries user edits (the dirty state).
 - Exit 82 (`DirtyRcBlock`) — at least one profile contained a managed block with user edits and `--force` was not passed. Scripts: `case $? in 82)`.
 - All `Self_` variants (including `self setup`) are in the `should_check_for_update` skip list.
@@ -116,8 +120,9 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 **`self update` / `self update --check` notes:**
 - Both always bypass the auto-check throttle (explicit user intent).
-- `--check` calls `self_check_update(Some(Duration::ZERO), version)` and reports without installing.
-- Without `--check` calls `self_update(version)` which routes the install through `install_all`.
+- `--check` calls `self_check_update(Some(Duration::ZERO))` and reports without installing.
+- Without `--check` calls `self_update()` which routes the install through `install_all`.
+- A `sha256:` digest pin in `self setup` selects a platform-specific package digest; the same tag resolves to a different digest per OS/arch. For CI matrices, pin by tag (each runner resolves its own platform digest) rather than sharing a single digest across platforms.
 
 ### Other Commands
 

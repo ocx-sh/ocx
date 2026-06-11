@@ -490,6 +490,60 @@ mod tests {
         assert_eq!(classify(err), ExitCode::Unavailable);
     }
 
+    /// Error taxonomy: `setup::Error::InvalidVersionSpec` → `UsageError` (64).
+    ///
+    /// Clap's `value_parser` produces this variant when the VERSION positional
+    /// fails to parse; it routes to exit 64 so the operator sees a usage error.
+    #[test]
+    fn setup_invalid_version_spec_maps_to_usage_error() {
+        let err = crate::setup::error::Error::InvalidVersionSpec {
+            input: "1.2.3@".to_string(),
+            reason: "trailing '@' with no digest".to_string(),
+        };
+        assert_eq!(classify(err), ExitCode::UsageError);
+    }
+
+    /// Error taxonomy: `setup::Error::PinDigestMismatch` → `DataError` (65).
+    ///
+    /// A `tag@digest` pin is a fail-closed immutability assertion (plan D9).
+    /// "Found but inconsistent" = exit 65, not "not found" (79).
+    #[test]
+    fn setup_pin_digest_mismatch_maps_to_data_error() {
+        let hex = "a".repeat(64);
+        let hex2 = "b".repeat(64);
+        let expected =
+            crate::oci::Digest::try_from(format!("sha256:{hex}").as_str()).expect("expected digest must parse");
+        let resolved =
+            crate::oci::Digest::try_from(format!("sha256:{hex2}").as_str()).expect("resolved digest must parse");
+        let err = crate::setup::error::Error::PinDigestMismatch {
+            tag: "0.9.2".to_string(),
+            expected,
+            resolved,
+            hint: None,
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    /// Error taxonomy: `PinDigestMismatch` with a `--frozen` stale-index hint
+    /// still maps to `DataError` (65) — the hint is diagnostic, not a different
+    /// error class.
+    #[test]
+    fn setup_pin_digest_mismatch_with_hint_still_maps_to_data_error() {
+        let hex = "a".repeat(64);
+        let hex2 = "b".repeat(64);
+        let expected =
+            crate::oci::Digest::try_from(format!("sha256:{hex}").as_str()).expect("expected digest must parse");
+        let resolved =
+            crate::oci::Digest::try_from(format!("sha256:{hex2}").as_str()).expect("resolved digest must parse");
+        let err = crate::setup::error::Error::PinDigestMismatch {
+            tag: "0.9.2".to_string(),
+            expected,
+            resolved,
+            hint: Some("run `ocx index update` to refresh the local index".to_string()),
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
     #[test]
     fn setup_bootstrap_error_delegates_to_inner_offline() {
         // Plan contract 6: setup::Error::Bootstrap delegates to the inner

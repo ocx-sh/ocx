@@ -24,8 +24,10 @@ pub mod error;
 pub mod profiles;
 pub mod rc_block;
 pub mod shims;
+pub mod version_spec;
 
-pub use bootstrap::BootstrapOutcome;
+pub use bootstrap::{BootstrapOutcome, BootstrapStatus};
+pub use version_spec::VersionSpec;
 
 /// POSIX fence payload — sources the POSIX env shim.
 ///
@@ -85,6 +87,9 @@ pub struct SetupOptions {
     pub dry_run: bool,
     /// Overwrite a managed RC block that carries user edits (dirty state).
     pub force: bool,
+    /// Optional version spec — when `Some`, pins the bootstrap to a specific
+    /// tag, digest, or `tag@digest` combination (plan D1–D4).
+    pub version: Option<VersionSpec>,
 }
 
 /// Per-profile result of applying the RC-block state machine.
@@ -165,7 +170,8 @@ pub async fn run(
 ) -> Result<SetupOutcome, error::Error> {
     // ── Phase 1: bootstrap (hard gate, runs first) ────────────────────────────
     // On `Err`, propagate now — zero shims written, zero profiles touched.
-    let bootstrap = bootstrap::ensure_self_installed(manager, file_structure, options.dry_run).await?;
+    let bootstrap =
+        bootstrap::ensure_self_installed(manager, file_structure, options.dry_run, options.version.as_ref()).await?;
 
     // ── Phase 2: env.* shims ─────────────────────────────────────────────────
     let ocx_home = file_structure.root();

@@ -63,7 +63,6 @@ pub async fn write_digest_file(path: &Path, digest: &Digest) -> crate::Result<()
 /// Reads and parses a digest file at the given path.
 ///
 /// The caller provides the full path (typically from a store's `digest_file()` accessor).
-#[allow(dead_code)]
 pub async fn read_digest_file(path: &Path) -> crate::Result<Digest> {
     let content = tokio::fs::read_to_string(path)
         .await
