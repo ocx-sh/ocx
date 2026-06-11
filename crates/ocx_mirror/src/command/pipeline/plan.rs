@@ -4,17 +4,18 @@
 //! `ocx-mirror pipeline plan` — compute which versions need work without
 //! side-effects. Used by the GHA `discover` job.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ocx_lib::cli::DataInterface;
-use ocx_lib::oci::{ClientBuilder, Platform};
+use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 use serde::Serialize;
 
 use crate::command::options::OutputFormat;
-use crate::command::sync::{extract_platforms, list_upstream_versions};
+use crate::command::sync::list_upstream_versions;
+use crate::command::target_registry;
 use crate::error::MirrorError;
 use crate::filter;
 use crate::normalizer;
@@ -128,9 +129,10 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
     let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
 
     // Fetch existing tags from the target registry to build the platform map.
-    // On network failure this returns empty (not an error) — same pattern as sync.rs.
-    // A genuine connectivity failure surfaces later via SourceError.
-    let all_tags: Vec<String> = publisher.list_tags(identifier.clone()).await.unwrap_or_default();
+    // Fail-safe (issue #157): only an authoritative "repository not found"
+    // (first publish) yields an empty list; any other failure aborts the plan
+    // so published versions are never re-flagged as new.
+    let all_tags: Vec<String> = target_registry::list_target_tags(&publisher, &identifier).await?;
 
     // Determine which (version, platform) pairs are already present.
     let source_version_tags: HashSet<String> = {
@@ -150,18 +152,11 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
         .map(String::as_str)
         .collect();
 
-    let mut platform_info: BTreeMap<Version, HashSet<Platform>> = BTreeMap::new();
-    for tag in &tags_needing_platform_check {
-        let tag_id = identifier.clone_with_tag(tag.to_string());
-        if let Ok((_, manifest)) = publisher.client().fetch_manifest(&tag_id).await
-            && let Some(v) = Version::parse(tag)
-        {
-            let platforms = extract_platforms(&manifest);
-            if !platforms.is_empty() {
-                platform_info.entry(v).or_default().extend(platforms);
-            }
-        }
-    }
+    // Fail-safe (issue #157): a transient manifest fetch failure aborts
+    // instead of leaving the version's platform set empty (which would
+    // classify it as New with the full platform set → republish).
+    let platform_info =
+        target_registry::fetch_published_platforms(&publisher, &identifier, &tags_needing_platform_check).await?;
 
     let version_map = VersionPlatformMap::from_tags_and_platforms(&all_tags, platform_info);
 
@@ -321,6 +316,8 @@ fn print_plan_plain(report: &PlanReport) {
 
 #[cfg(test)]
 mod tests {
+    use ocx_lib::oci::Platform;
+
     use super::*;
 
     // ── §3.5 S5: ocx-mirror pipeline plan — unit tests ────────────────────

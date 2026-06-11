@@ -27,6 +27,13 @@ pub enum ClientError {
     /// The requested manifest does not exist in the registry.
     #[error("manifest not found: {0}")]
     ManifestNotFound(String),
+    /// The requested repository does not exist in the registry.
+    ///
+    /// Distinct from [`ClientError::Registry`] so callers can treat an
+    /// authoritative "repository absent" (e.g. first publish to a new
+    /// repository) differently from a transient registry failure.
+    #[error("repository not found: {0}")]
+    RepositoryNotFound(String),
     /// A referenced blob does not exist in the registry.
     ///
     /// The identifier is the canonical OCX `registry/repository[:tag]@digest`
@@ -96,7 +103,7 @@ impl ClassifyExitCode for ClientError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
             Self::Authentication(_) => ExitCode::AuthError,
-            Self::ManifestNotFound(_) | Self::BlobNotFound(_) => ExitCode::NotFound,
+            Self::ManifestNotFound(_) | Self::BlobNotFound(_) | Self::RepositoryNotFound(_) => ExitCode::NotFound,
             Self::Io { .. } => ExitCode::IoError,
             // TODO: inspect inner source to refine (HTTP 429/503 → TempFail,
             // 401/403 → AuthError, timeout → TempFail). For v1, treat every

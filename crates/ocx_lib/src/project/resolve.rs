@@ -525,7 +525,9 @@ fn classify(client: &ClientError) -> ClientFailure {
         // Terminal auth failure — no retry.
         ClientError::Authentication(_) => ClientFailure::Auth,
         // 404-equivalent — no retry.
-        ClientError::ManifestNotFound(_) | ClientError::BlobNotFound(_) => ClientFailure::NotFound,
+        ClientError::ManifestNotFound(_) | ClientError::BlobNotFound(_) | ClientError::RepositoryNotFound(_) => {
+            ClientFailure::NotFound
+        }
         // Data errors and other structural failures — not retryable.
         ClientError::InvalidManifest(_)
         | ClientError::DigestMismatch { .. }
@@ -596,6 +598,11 @@ mod classify_tests {
     #[test]
     fn manifest_not_found_is_not_found() {
         assert_not_found(ClientError::ManifestNotFound("reg/repo:tag".to_string()));
+    }
+
+    #[test]
+    fn repository_not_found_is_not_found() {
+        assert_not_found(ClientError::RepositoryNotFound("reg/repo".to_string()));
     }
 
     #[test]

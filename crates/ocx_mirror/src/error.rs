@@ -14,6 +14,11 @@ pub enum MirrorError {
     ExecutionFailed(Vec<String>),
     /// Error fetching upstream version information from source (GitHub, URL index).
     SourceError(String),
+    /// Error reading published state from the target registry (tag list,
+    /// per-tag manifests). Fail-safe counterpart to `SourceError`: a
+    /// transient target read failure must abort instead of classifying
+    /// published versions as absent (issue #157).
+    TargetError(String),
 
     // ── Pipeline variants (added in test-pipeline phase) ────────────────────
     /// Content-policy violation in `mirror.yml`: hardcoded webhook URL, empty
@@ -49,6 +54,7 @@ impl MirrorError {
             Self::SpecNotFound(_) => ExitCode::NotFound,
             Self::ExecutionFailed(_) => ExitCode::Failure,
             Self::SourceError(_) => ExitCode::Unavailable,
+            Self::TargetError(_) => ExitCode::Unavailable,
             // Pipeline variants
             Self::SpecUsageError(_) => ExitCode::UsageError,
             Self::RendererDrift(_) => ExitCode::DataError,
@@ -80,6 +86,7 @@ impl std::fmt::Display for MirrorError {
                 Ok(())
             }
             Self::SourceError(msg) => write!(f, "source error: {msg}"),
+            Self::TargetError(msg) => write!(f, "target registry error: {msg}"),
             // Pipeline variants — lowercase, no trailing punctuation (quality-rust-errors.md)
             Self::SpecUsageError(msg) => write!(f, "mirror spec usage error: {msg}"),
             Self::RendererDrift(paths) => {
@@ -132,6 +139,14 @@ mod tests {
     fn source_error_maps_to_unavailable() {
         // Plan taxonomy: SourceError → Unavailable (69) — upstream source unreachable.
         let err = MirrorError::SourceError("GitHub API returned 503".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::Unavailable);
+    }
+
+    #[test]
+    fn target_error_maps_to_unavailable() {
+        // Issue #157: TargetError → Unavailable (69) — target registry read
+        // failed; the plan aborts instead of re-flagging published versions.
+        let err = MirrorError::TargetError("registry returned 503".into());
         assert_eq!(err.kind_exit_code(), ExitCode::Unavailable);
     }
 }

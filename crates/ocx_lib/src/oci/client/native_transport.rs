@@ -95,6 +95,38 @@ fn manifest_not_found_or_registry_error(
     }
 }
 
+/// Maps OCI distribution errors to [`ClientError::RepositoryNotFound`] when the
+/// registry indicates the repository does not exist (404 / NAME_UNKNOWN),
+/// and falls back to [`ClientError::Registry`] for everything else.
+///
+/// Used by `list_tags` so callers can distinguish an authoritative
+/// "repository absent" (legitimately empty, e.g. before the first publish)
+/// from a transient failure — treating the two alike is the fail-open
+/// hazard behind issue #157.
+fn repository_not_found_or_registry_error(
+    e: oci_client::errors::OciDistributionError,
+    image: &oci::native::Reference,
+) -> ClientError {
+    use oci_client::errors::OciDistributionError::*;
+    use oci_client::errors::OciErrorCode;
+    let repository = format!("{}/{}", image.registry(), image.repository());
+    match &e {
+        RegistryError { envelope, .. } => {
+            let is_not_found = envelope
+                .errors
+                .iter()
+                .any(|err| matches!(err.code, OciErrorCode::NotFound | OciErrorCode::NameUnknown));
+            if is_not_found {
+                ClientError::RepositoryNotFound(repository)
+            } else {
+                ClientError::Registry(Box::new(e))
+            }
+        }
+        ServerError { code: 404, .. } => ClientError::RepositoryNotFound(repository),
+        _ => ClientError::Registry(Box::new(e)),
+    }
+}
+
 fn io_error(path: &Path, e: impl Into<std::io::Error>) -> ClientError {
     ClientError::Io {
         path: path.to_path_buf(),
@@ -119,7 +151,7 @@ impl OciTransport for NativeTransport {
             .client
             .list_tags(image, &auth, Some(chunk_size), last.as_deref())
             .await
-            .map_err(registry_error)?;
+            .map_err(|e| repository_not_found_or_registry_error(e, image))?;
         Ok(response.tags)
     }
 
@@ -343,6 +375,76 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use std::sync::Mutex;
+
+    /// Regression tests for issue #157 — `list_tags` errors must distinguish
+    /// an authoritative "repository absent" from a transient registry failure
+    /// so discover callers can stay fail-safe.
+    mod repository_not_found_mapping {
+        use super::*;
+        use oci_client::errors::{OciDistributionError, OciEnvelope, OciError, OciErrorCode};
+
+        fn reference() -> oci::native::Reference {
+            oci::native::Reference::try_from("registry.test/mirror/cmake:4.3.3").expect("valid reference")
+        }
+
+        fn envelope_error(code: OciErrorCode) -> OciDistributionError {
+            OciDistributionError::RegistryError {
+                envelope: OciEnvelope {
+                    errors: vec![OciError {
+                        code,
+                        message: String::new(),
+                        detail: serde_json::Value::Null,
+                    }],
+                },
+                url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
+            }
+        }
+
+        #[test]
+        fn name_unknown_maps_to_repository_not_found() {
+            let mapped =
+                repository_not_found_or_registry_error(envelope_error(OciErrorCode::NameUnknown), &reference());
+            assert!(
+                matches!(&mapped, ClientError::RepositoryNotFound(repo) if repo == "registry.test/mirror/cmake"),
+                "expected RepositoryNotFound, got {mapped:?}"
+            );
+        }
+
+        #[test]
+        fn not_found_code_maps_to_repository_not_found() {
+            let mapped = repository_not_found_or_registry_error(envelope_error(OciErrorCode::NotFound), &reference());
+            assert!(matches!(mapped, ClientError::RepositoryNotFound(_)), "got {mapped:?}");
+        }
+
+        #[test]
+        fn server_404_maps_to_repository_not_found() {
+            let error = OciDistributionError::ServerError {
+                code: 404,
+                url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
+                message: "not found".to_string(),
+            };
+            let mapped = repository_not_found_or_registry_error(error, &reference());
+            assert!(matches!(mapped, ClientError::RepositoryNotFound(_)), "got {mapped:?}");
+        }
+
+        #[test]
+        fn server_5xx_stays_registry_error() {
+            let error = OciDistributionError::ServerError {
+                code: 503,
+                url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
+                message: "service unavailable".to_string(),
+            };
+            let mapped = repository_not_found_or_registry_error(error, &reference());
+            assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
+        }
+
+        #[test]
+        fn rate_limit_envelope_stays_registry_error() {
+            let mapped =
+                repository_not_found_or_registry_error(envelope_error(OciErrorCode::Toomanyrequests), &reference());
+            assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
+        }
+    }
 
     /// Creates a chunked progress stream that mirrors `do_push_blob`'s upload logic.
     ///

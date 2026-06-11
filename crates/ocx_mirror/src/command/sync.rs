@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ocx_lib::cli::progress::ProgressManager;
@@ -9,6 +9,7 @@ use ocx_lib::log;
 use ocx_lib::oci::Platform;
 
 use super::options::{self, SyncOptions};
+use super::target_registry;
 use crate::error::MirrorError;
 use crate::filter;
 use crate::normalizer;
@@ -53,7 +54,10 @@ impl Sync {
         let publisher = Publisher::new(client);
         let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
         log::debug!("[{}] Fetching existing tags from {}", spec.name, identifier);
-        let all_tags: Vec<String> = publisher.list_tags(identifier.clone()).await.unwrap_or_default();
+        // Fail-safe (issue #157): only an authoritative "repository not found"
+        // (first publish) yields an empty list; any other failure aborts so
+        // published versions are never treated as absent.
+        let all_tags: Vec<String> = target_registry::list_target_tags(&publisher, &identifier).await?;
         log::debug!("[{}] Found {} existing tags", spec.name, all_tags.len());
 
         // List upstream versions
@@ -144,23 +148,11 @@ impl Sync {
 
         // Build platform-aware version map.
         // Fetch manifests for matching tags to determine which platforms are already pushed.
-        let mut platform_info: BTreeMap<Version, HashSet<Platform>> = BTreeMap::new();
-        for tag in &tags_needing_platform_check {
-            let tag_id = identifier.clone_with_tag(tag.to_string());
-            match publisher.client().fetch_manifest(&tag_id).await {
-                Ok((_, manifest)) => {
-                    if let Some(v) = Version::parse(tag) {
-                        let platforms = extract_platforms(&manifest);
-                        if !platforms.is_empty() {
-                            platform_info.entry(v).or_default().extend(platforms);
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[{}] Could not fetch manifest for tag {tag}: {e}", spec.name);
-                }
-            }
-        }
+        // Fail-safe (issue #157): a transient manifest fetch failure aborts
+        // instead of leaving the version's platform set empty (which would
+        // classify it as unpublished → rebuild + republish → tag re-point).
+        let platform_info =
+            target_registry::fetch_published_platforms(&publisher, &identifier, &tags_needing_platform_check).await?;
 
         let version_map = VersionPlatformMap::from_tags_and_platforms(&all_tags, platform_info);
 

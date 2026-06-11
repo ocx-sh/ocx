@@ -16,6 +16,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | Path | Purpose |
 |------|---------|
 | `command/sync.rs` | Main sync command: spec → versions → filter → pipeline |
+| `command/target_registry.rs` | Fail-safe target-registry state loading (`list_target_tags`, `fetch_published_platforms`) shared by sync + plan; only authoritative not-found counts as absent (issue #157) |
 | `command/check.rs` | Dry-run sync |
 | `command/validate.rs` | Spec validation only |
 | `command/options.rs` | Shared `SyncOptions` (--exact-version, --latest, --fail-fast) |
@@ -111,6 +112,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `SpecNotFound` | 79 (NotFound) | `mirror.yml` not found at spec path |
 | `ExecutionFailed` | 1 (Failure) | Mirror pipeline execution error |
 | `SourceError` | 69 (Unavailable) | Upstream source unreachable |
+| `TargetError` | 69 (Unavailable) | Target registry read failed (tag list / manifest fetch) — fail-safe abort instead of re-flagging published versions as new (issue #157) |
 | `SpecUsageError` | 64 (UsageError) | Invalid `mirror.yml` usage: hardcoded webhook URL, empty `tests:`, missing `release_tag` when containers declared, ambiguous shell |
 | `RendererDrift` | 65 (DataError) | `--check` mode: generated files differ from current spec |
 | `JunitParseError` | 65 (DataError) | JUnit XML parse failure in `pipeline push` |

@@ -7,6 +7,7 @@ mod pipeline;
 #[cfg(feature = "jsonschema")]
 mod schema;
 mod sync;
+mod target_registry;
 mod validate;
 
 use ocx_lib::cli::DataInterface;
