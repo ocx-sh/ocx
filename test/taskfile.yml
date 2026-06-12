@@ -97,6 +97,102 @@ tasks:
         {{.SHELLS_IMAGE}}
         python3 -m pytest -v -p no:cacheprovider /work/test_shell_activation.py
 
+  # ---------------------------------------------------------------------------
+  # Benchmark targets (bench: namespace)
+  # All bench tasks require `task bench:setup` first (Docker bench profile).
+  # `task test` is unaffected — the bench profile is never started by default.
+  # ---------------------------------------------------------------------------
+
+  bench:setup:
+    desc: >-
+      Start the bench Docker-compose profile (toxiproxy + registry). Required
+      before running any bench:* target. Fails with a clear message when Docker
+      is unavailable.
+    dir: '{{.TASKFILE_DIR}}'
+    preconditions:
+      - sh: docker info > /dev/null 2>&1
+        msg: >-
+          Docker is not running or not accessible.
+          Start Docker and re-run `task bench:setup`.
+    cmds:
+      - docker compose -f {{.TASKFILE_DIR}}/docker-compose.yml --profile bench up -d
+      # Wait for toxiproxy API to become reachable (up to 15 s).
+      - >-
+        for i in $(seq 1 30); do
+          if curl -sf http://localhost:8474/version > /dev/null 2>&1; then
+            echo "toxiproxy API ready."; break;
+          fi;
+          sleep 0.5;
+        done
+      # Wait for registry to become reachable (already running from prior `task test`,
+      # but in case bench:setup is called standalone).
+      - >-
+        for i in $(seq 1 30); do
+          if curl -sf http://localhost:5000/v2/ > /dev/null 2>&1; then
+            echo "registry ready."; break;
+          fi;
+          sleep 0.5;
+        done
+
+  bench:teardown:
+    desc: >-
+      Stop the bench-proxy container only — leaves registry + mirror-registry running
+      so `task test` is unaffected. Use `docker compose down` manually to stop everything.
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - docker compose -f {{.TASKFILE_DIR}}/docker-compose.yml --profile bench stop bench-proxy
+      - docker compose -f {{.TASKFILE_DIR}}/docker-compose.yml --profile bench rm -f bench-proxy
+
+  bench:baseline:
+    desc: >-
+      Run the full benchmark matrix against the CURRENT (pre-optimization) binary
+      and save results as test/bench/baseline.json. Run this BEFORE any
+      optimization lands. Requires bench:setup and hyperfine.
+    dir: '{{.TASKFILE_DIR}}'
+    deps: [build, bench:setup, .bench:acquire-hyperfine]
+    cmds:
+      - uv run python bench/harness.py --save-baseline
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
+      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+
+  bench:
+    desc: >-
+      Run the full benchmark matrix and compare against test/bench/baseline.json.
+      Exits 1 if any scenario regresses beyond the 0.85x threshold.
+      Requires bench:setup and hyperfine.
+    dir: '{{.TASKFILE_DIR}}'
+    deps: [build, bench:setup, .bench:acquire-hyperfine]
+    cmds:
+      - uv run python bench/harness.py --compare
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
+      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+
+  .bench:acquire-hyperfine:
+    desc: Download hyperfine 1.20.0 into test/bin/ if not already on PATH or in test/bin/.
+    internal: true
+    dir: '{{.TASKFILE_DIR}}'
+    # status: exit 0 = up-to-date; hyperfine already on PATH or already in test/bin/.
+    # `which hyperfine` succeeds if on PATH; `test -x` checks test/bin/ fallback.
+    status:
+      - which hyperfine || test -x {{.TASKFILE_DIR}}/bin/hyperfine
+    cmds:
+      - mkdir -p {{.TASKFILE_DIR}}/bin
+      # Tag is positional, not a flag. Asset name verified against sharkdp/hyperfine
+      # v1.20.0 release: hyperfine-v1.20.0-x86_64-unknown-linux-musl.tar.gz
+      # The tarball extracts to hyperfine-v1.20.0-x86_64-unknown-linux-musl/hyperfine.
+      # TODO: revisit once hyperfine is mirrored on ocx.sh (dogfood opportunity).
+      - >-
+        gh release download v1.20.0
+        -R sharkdp/hyperfine
+        -p 'hyperfine-v1.20.0-x86_64-unknown-linux-musl.tar.gz'
+        -D /tmp/hyperfine-dl
+        --clobber
+      - tar -xzf /tmp/hyperfine-dl/hyperfine-v1.20.0-x86_64-unknown-linux-musl.tar.gz -C /tmp/hyperfine-dl
+      - install -m755 /tmp/hyperfine-dl/hyperfine-v1.20.0-x86_64-unknown-linux-musl/hyperfine {{.TASKFILE_DIR}}/bin/hyperfine
+      - rm -rf /tmp/hyperfine-dl
+
   doc-scripts:list:
     desc: Print the doc-script discovery export as JSON (PT6 seam for website publish task)
     dir: '{{.TASKFILE_DIR}}'

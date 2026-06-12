@@ -13,3 +13,24 @@ services:
     image: registry:2
     ports:
       - "5001:5000"
+
+  # toxiproxy — TCP proxy with programmable toxics (bandwidth throttle,
+  # latency injection) used by the bench harness (test/bench/) to simulate
+  # realistic network conditions during benchmarking.
+  #
+  # Profile isolation: this service is declared under the `bench` profile so
+  # plain `docker compose up -d` (and `task test`) never starts it.  Only
+  # `task bench:setup` (which passes --profile bench) brings it up.  This
+  # ensures the benchmark infrastructure is zero-cost for the normal
+  # acceptance-test cycle and profile-isolation is enforced structurally.
+  #
+  # Ports:
+  #   5002 — proxied registry endpoint (bench packages install via this port)
+  #   8474 — toxiproxy REST API (bench/harness.py controls toxics here)
+  bench-proxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports:
+      - "5002:5002"
+      - "8474:8474"
+    profiles:
+      - bench
