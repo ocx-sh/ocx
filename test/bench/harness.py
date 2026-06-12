@@ -29,7 +29,6 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +42,13 @@ if str(_TEST_DIR) not in sys.path:
 
 from bench.baseline import build_baseline_command  # noqa: E402
 from bench.compare import compare_against_baseline  # noqa: E402
-from bench.scenarios import SCENARIOS, Scenario  # noqa: E402
+from bench.scenarios import (  # noqa: E402
+    DEFAULT_RUNS,
+    DEFAULT_WARMUP,
+    SCENARIOS,
+    SUITE_ORDER,
+    Scenario,
+)
 from src.helpers import make_package  # noqa: E402
 from src.runner import OcxRunner  # noqa: E402
 
@@ -63,8 +68,24 @@ BENCH_RESULTS_DIR = Path(
 )
 BASELINE_JSON = _BENCH_DIR / "baseline.json"
 
-DEFAULT_RUNS = 10
-DEFAULT_WARMUP = 1
+# ---------------------------------------------------------------------------
+# Scratch root — ALL harness temp state goes here, NEVER under /tmp.
+#
+# /tmp is tmpfs (RAM-backed) on WSL2 and many Linux systems.  Putting large
+# package tarballs, OCX_HOME dirs, and hyperfine extract dirs there OOM-kills
+# the VM under concurrent matrix runs.
+#
+# Default: <repo-root>/target/bench-tmp  (disk-backed, gitignored by target/).
+# Override: set BENCH_TMPDIR env var to any writable disk-backed path.
+# ---------------------------------------------------------------------------
+_REPO_ROOT = _TEST_DIR.parent
+BENCH_SCRATCH_DIR = Path(
+    os.environ.get("BENCH_TMPDIR", str(_REPO_ROOT / "target" / "bench-tmp"))
+)
+
+# DEFAULT_RUNS and DEFAULT_WARMUP are imported from bench.scenarios.
+# They are the global fallback values; per-scenario Scenario.runs/warmup fields take
+# precedence unless the CLI --runs / --warmup flags override everything.
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -73,7 +94,19 @@ DEFAULT_WARMUP = 1
 
 @dataclasses.dataclass(slots=True)
 class ScenarioResult:
-    """Result from a single benchmark scenario run."""
+    """Result from a single benchmark scenario run.
+
+    Attributes
+    ----------
+    times:
+        Per-run wall-clock values in seconds (real measured values).
+        For hyperfine scenarios this is the actual ``times`` array from the
+        hyperfine JSON export. For Shape-2 / parallel-curl scenarios this is
+        the real per-iteration wall-clock list from asyncio.TaskGroup.
+        Never mean-replicated — honest data for z-score statistics.
+    suite:
+        Suite tier this result was collected under ("small"|"medium"|"large").
+    """
 
     scenario_name: str
     mean_seconds: float
@@ -82,6 +115,8 @@ class ScenarioResult:
     max_seconds: float
     runs: int
     command: str
+    times: list[float] = dataclasses.field(default_factory=list)
+    suite: str = "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +285,11 @@ class BenchRunner:
         }
 
     def _apply_toxics(self, scenario: Scenario) -> None:
-        """Apply bandwidth and/or latency toxics for a scenario."""
+        """Apply bandwidth and/or latency toxics for a scenario.
+
+        Always clears any stale toxics first (handles killed-run leftovers).
+        """
+        self._remove_toxics()
         if scenario.bandwidth_kbps > 0:
             self._toxi.add_bandwidth_toxic(PROXY_NAME, scenario.bandwidth_kbps)
         if scenario.latency_ms > 0:
@@ -300,13 +339,19 @@ class BenchRunner:
         try:
             self._apply_toxics(scenario)
 
-            with tempfile.TemporaryDirectory(prefix="bench-ocx-home-") as tmp_ocx_home:
+            with tempfile.TemporaryDirectory(
+                prefix="bench-ocx-home-", dir=BENCH_SCRATCH_DIR
+            ) as tmp_ocx_home:
                 if scenario.shape == "floor":
                     # curl+tar baseline: use the first package's blob.
                     pkg_short = packages[0]
                     repo, tag = pkg_short.split(":", 1)
                     baseline_cmd = build_baseline_command(
-                        self.registry_url, self.proxy_host, repo, tag
+                        self.registry_url,
+                        self.proxy_host,
+                        repo,
+                        tag,
+                        scratch_dir=str(BENCH_SCRATCH_DIR / "curl-extract"),
                     )
                     bench_cmd = baseline_cmd.bench_cmd
                     prepare_cmd = baseline_cmd.prepare_cmd
@@ -353,7 +398,92 @@ class BenchRunner:
         finally:
             self._remove_toxics()
 
-        return self._parse_hyperfine_result(scenario.name, export_path)
+        return self._parse_hyperfine_result(
+            scenario.name, export_path, suite=scenario.suite
+        )
+
+    def parallel_curl_wall_clock(
+        self,
+        scenario: Scenario,
+        packages: list[str],
+        runs: int = DEFAULT_RUNS,
+        results_dir: Path = BENCH_RESULTS_DIR,
+    ) -> ScenarioResult:
+        """Floor shape with concurrency > 1: fire N concurrent curl | tar -xJ processes.
+
+        Each package in `packages` maps to one curl+tar process (cold runs only —
+        no warm-state concept for floor scenarios). Wall-clock measured from first
+        launch to last completion. Emits hyperfine-compatible JSON.
+
+        Parameters
+        ----------
+        scenario:
+            Must be shape "floor" with concurrency > 1. The blob URL for each
+            package is resolved from the registry manifest before timing begins.
+        packages:
+            List of package short identifiers ("repo:tag"), one per concurrent process.
+        runs:
+            Number of wall-clock measurement repetitions.
+        results_dir:
+            Directory for the emitted hyperfine-compatible JSON.
+        """
+        if scenario.shape != "floor" or scenario.concurrency < 2:  # noqa: PLR2004
+            msg = (
+                f"parallel_curl_wall_clock is for floor scenarios with concurrency>=2; "
+                f"got shape={scenario.shape!r} concurrency={scenario.concurrency}"
+            )
+            raise ValueError(msg)
+
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        # Resolve blob URLs for each package before timing begins.
+        curl_cmds: list[str] = []
+        prepare_cmds: list[str] = []
+        for pkg_short in packages:
+            repo, tag = pkg_short.split(":", 1)
+            baseline_cmd = build_baseline_command(
+                self.registry_url,
+                self.proxy_host,
+                repo,
+                tag,
+                scratch_dir=str(BENCH_SCRATCH_DIR / f"curl-extract-{repo}"),
+            )
+            curl_cmds.append(baseline_cmd.bench_cmd)
+            prepare_cmds.append(baseline_cmd.prepare_cmd)
+
+        try:
+            self._apply_toxics(scenario)
+            timings = asyncio.run(
+                self._run_parallel_commands(curl_cmds, runs, prepare_cmds=prepare_cmds)
+            )
+        finally:
+            self._remove_toxics()
+
+        if not timings:
+            msg = f"No timing measurements collected for {scenario.name}"
+            raise RuntimeError(msg)
+
+        mean_s = sum(timings) / len(timings)
+        stddev_s = (
+            (sum((t - mean_s) ** 2 for t in timings) / len(timings)) ** 0.5
+            if len(timings) > 1
+            else 0.0
+        )
+        result = ScenarioResult(
+            scenario_name=scenario.name,
+            mean_seconds=mean_s,
+            stddev_seconds=stddev_s,
+            min_seconds=min(timings),
+            max_seconds=max(timings),
+            runs=len(timings),
+            command=f"parallel({len(curl_cmds)}x curl|tar via asyncio.TaskGroup)",
+            times=timings,
+            suite=scenario.suite,
+        )
+
+        export_path = results_dir / f"{scenario.name}.json"
+        self._write_hyperfine_json([result], export_path)
+        return result
 
     def parallel_install_wall_clock(
         self,
@@ -417,12 +547,59 @@ class BenchRunner:
             max_seconds=max(timings),
             runs=len(timings),
             command=f"parallel({len(packages)}x ocx package install via asyncio.TaskGroup)",
+            times=timings,
+            suite=scenario.suite,
         )
 
         # Write hyperfine-compatible JSON.
         export_path = results_dir / f"{scenario.name}.json"
         self._write_hyperfine_json([result], export_path)
         return result
+
+    async def _run_parallel_commands(
+        self,
+        shell_cmds: list[str],
+        runs: int,
+        prepare_cmds: list[str] | None = None,
+    ) -> list[float]:
+        """Run N concurrent shell commands repeatedly; return wall-clock timings per run.
+
+        Each element of shell_cmds is a full shell command string (e.g. a curl | tar
+        pipeline). Commands are spawned via asyncio.create_subprocess_shell so shell
+        operators (pipes) work correctly. All N commands run concurrently via
+        asyncio.TaskGroup; wall-clock is from first launch to last completion.
+
+        prepare_cmds run UNTIMED before every timed iteration (hyperfine --prepare
+        equivalent) — e.g. wiping and recreating the curl extract directories that
+        the timed pipelines write into.
+        """
+        timings: list[float] = []
+        for _ in range(runs):
+            if prepare_cmds:
+                async with asyncio.TaskGroup() as tg:
+                    for cmd in prepare_cmds:
+                        tg.create_task(self._run_single_shell_command(cmd))
+            t_start = time.perf_counter()
+            async with asyncio.TaskGroup() as tg:
+                for cmd in shell_cmds:
+                    tg.create_task(self._run_single_shell_command(cmd))
+            timings.append(time.perf_counter() - t_start)
+        return timings
+
+    async def _run_single_shell_command(self, cmd: str) -> None:
+        """Run a single shell command string as an asyncio subprocess."""
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            msg = (
+                f"shell command failed (rc={proc.returncode}): "
+                f"{cmd!r}: {stderr.decode(errors='replace').strip()}"
+            )
+            raise RuntimeError(msg)
 
     async def _run_parallel_wall_clock(
         self,
@@ -435,10 +612,10 @@ class BenchRunner:
         timings: list[float] = []
 
         if scenario.cold:
-            # Cold: each run gets a fresh TemporaryDirectory.
+            # Cold: each run gets a fresh disk-backed TemporaryDirectory.
             for _ in range(runs):
                 with tempfile.TemporaryDirectory(
-                    prefix="bench-ocx-home-parallel-"
+                    prefix="bench-ocx-home-parallel-", dir=BENCH_SCRATCH_DIR
                 ) as tmp_ocx_home:
                     env = {
                         **os.environ,
@@ -499,7 +676,7 @@ class BenchRunner:
             raise RuntimeError(msg)
 
     def _parse_hyperfine_result(
-        self, scenario_name: str, export_path: Path
+        self, scenario_name: str, export_path: Path, suite: str = "medium"
     ) -> ScenarioResult:
         """Parse a hyperfine --export-json file and return a ScenarioResult."""
         data = json.loads(export_path.read_text())
@@ -508,14 +685,18 @@ class BenchRunner:
             msg = f"hyperfine JSON for {scenario_name} has no results"
             raise RuntimeError(msg)
         entry = results[0]
+        # Capture the real per-run times array from hyperfine — never replicate mean.
+        raw_times = [float(t) for t in entry.get("times", [])]
         return ScenarioResult(
             scenario_name=scenario_name,
             mean_seconds=float(entry.get("mean", 0.0)),
             stddev_seconds=float(entry.get("stddev", 0.0)),
             min_seconds=float(entry.get("min", 0.0)),
             max_seconds=float(entry.get("max", 0.0)),
-            runs=int(entry.get("times", [0]).__len__()),
+            runs=len(raw_times),
             command=str(entry.get("command", "")),
+            times=raw_times,
+            suite=suite,
         )
 
     def save_results(self, results: list[ScenarioResult], path: Path) -> None:
@@ -525,22 +706,30 @@ class BenchRunner:
 
     @staticmethod
     def _write_hyperfine_json(results: list[ScenarioResult], path: Path) -> None:
-        """Write results in hyperfine export-json format."""
+        """Write results in hyperfine export-json format.
+
+        Always writes the real ``times`` array — never mean-replicated.
+        For Shape-2 and parallel-curl scenarios the harness stores real per-iteration
+        wall-clock values so z-score statistics remain honest.
+        """
         entries = []
         for r in results:
+            # Use real times if available; empty list is acceptable (dashboard handles it).
+            times_arr = r.times if r.times else []
             entries.append(
                 {
                     "command": r.scenario_name,
                     "mean": r.mean_seconds,
                     "stddev": r.stddev_seconds,
-                    "median": r.mean_seconds,  # approximation when no raw times
+                    "median": r.mean_seconds,
                     "user": 0.0,
                     "system": 0.0,
                     "min": r.min_seconds,
                     "max": r.max_seconds,
-                    "times": [r.mean_seconds] * r.runs,
-                    "exit_codes": [0] * r.runs,
+                    "times": times_arr,
+                    "exit_codes": [0] * len(times_arr),
                     "parameters": {},
+                    "suite": r.suite,
                 }
             )
         path.write_text(json.dumps({"results": entries}, indent=2))
@@ -652,45 +841,103 @@ def _warm_ocx_home(
         )
 
 
+def _probe_manifest(registry_url: str, repo: str, tag: str) -> bool:
+    """Return True if the manifest for repo:tag exists in the registry.
+
+    Uses a HEAD request against the OCI manifests endpoint.  A 200 response
+    means the fixture is already present and can be reused without re-pushing.
+    A 404 (or any error) means we need to push.
+    """
+    url = f"http://{registry_url}/v2/{repo}/manifests/{tag}"
+    req = urllib.request.Request(url, method="HEAD")
+    req.add_header(
+        "Accept",
+        "application/vnd.oci.image.manifest.v1+json,"
+        "application/vnd.oci.image.index.v1+json",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200  # noqa: PLR2004
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+        return False
+
+
+def _fixture_repo_name(size_mb: int, n_layers: int, idx: int) -> str:
+    """Deterministic fixture repo name — stable across harness invocations.
+
+    bench-<size>mb-<layers>l-<idx>
+
+    Using deterministic names (no UUID) lets the harness skip re-pushing
+    fixtures that are already present in the registry from a previous run.
+    Bench repos are isolated from test repos by the ``bench-`` prefix.
+    Trade-off: shared registry state between sessions; acceptable here because
+    bench fixtures are content-addressed by size+layers (immutable semantics).
+    """
+    return f"bench-{size_mb}mb-{n_layers}l-{idx}"
+
+
 def _setup_bench_packages(
     ocx_binary: Path,
     registry_url: str,
     scenarios: list[Scenario],
+    scratch_dir: Path,
 ) -> dict[str, list[str]]:
-    """Push benchmark packages to the registry and return scenario → package list mapping.
+    """Push benchmark packages and return scenario → package list mapping.
 
-    Packages are deduplicated by (size_mb, concurrency) key so each unique
-    combination is only pushed once.
+    Packages are deduplicated by (size_mb, n_packages, n_layers) key so each
+    unique combination is only pushed once per session.
+
+    Deterministic repo names (no UUID) allow reusing fixtures across harness
+    invocations: a manifest HEAD probe skips push when already present.  This
+    makes repeated `bench:quick` runs substantially faster (~5–10 s saved per
+    already-present fixture key).
+
+    All temp dirs are created under ``scratch_dir`` (disk-backed) to avoid
+    RAM exhaustion on WSL2 where /tmp is tmpfs.
     """
-    pushed: dict[tuple[int, int], list[str]] = {}
+    # Map (size_mb, n_packages, n_layers) → list of pushed package shorts.
+    resolved: dict[tuple[int, int, int], list[str]] = {}
     scenario_packages: dict[str, list[str]] = {}
 
-    with tempfile.TemporaryDirectory(prefix="bench-setup-ocx-home-") as tmp_home:
+    with tempfile.TemporaryDirectory(
+        prefix="bench-setup-home-", dir=scratch_dir
+    ) as tmp_home:
         runner = OcxRunner(ocx_binary, Path(tmp_home), registry_url)
 
         for scenario in scenarios:
-            key = (scenario.size_mb, scenario.concurrency)
-            if key not in pushed:
-                pkg_list: list[str] = []
-                n = max(1, scenario.concurrency)
-                with tempfile.TemporaryDirectory(
-                    prefix="bench-pkg-build-"
-                ) as build_tmp:
-                    for i in range(n):
-                        repo = f"bench-{scenario.size_mb}mb-{uuid.uuid4().hex[:8]}-{i}"
-                        tag = "1.0.0"
-                        info = make_package(
-                            runner,
-                            repo,
-                            tag,
-                            Path(build_tmp),
-                            size_mb=scenario.size_mb,
-                            cascade=False,
-                        )
-                        pkg_list.append(info.short)
-                pushed[key] = pkg_list
+            n_packages = max(1, scenario.concurrency)
+            n_layers = max(1, scenario.layers)
+            key = (scenario.size_mb, n_packages, n_layers)
 
-            scenario_packages[scenario.name] = pushed[key]
+            if key not in resolved:
+                pkg_list: list[str] = []
+                with tempfile.TemporaryDirectory(
+                    prefix="bench-pkg-build-", dir=scratch_dir
+                ) as build_tmp:
+                    for i in range(n_packages):
+                        repo = _fixture_repo_name(scenario.size_mb, n_layers, i)
+                        tag = "1.0.0"
+                        short = f"{repo}:{tag}"
+
+                        if _probe_manifest(registry_url, repo, tag):
+                            # Fixture already present — register with index only.
+                            runner.plain("index", "update", repo)
+                            print(f"    fixture reused: {short}")
+                        else:
+                            make_package(
+                                runner,
+                                repo,
+                                tag,
+                                Path(build_tmp),
+                                size_mb=scenario.size_mb,
+                                cascade=False,
+                                layers=n_layers,
+                            )
+                            print(f"    fixture pushed: {short}")
+                        pkg_list.append(short)
+                resolved[key] = pkg_list
+
+            scenario_packages[scenario.name] = resolved[key]
 
     return scenario_packages
 
@@ -718,24 +965,40 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--runs",
         type=int,
-        default=DEFAULT_RUNS,
-        help=f"Number of hyperfine runs per scenario (default: {DEFAULT_RUNS})",
+        default=None,
+        help=(
+            "Override hyperfine --min-runs for ALL scenarios "
+            "(default: per-scenario value from scenarios.py)"
+        ),
     )
     parser.add_argument(
         "--warmup",
         type=int,
-        default=DEFAULT_WARMUP,
-        help=f"Number of hyperfine warmup runs (default: {DEFAULT_WARMUP})",
+        default=None,
+        help=(
+            "Override hyperfine --warmup for ALL scenarios "
+            "(default: per-scenario value from scenarios.py)"
+        ),
     )
     parser.add_argument(
         "--scenarios",
         nargs="*",
-        help="Run only named scenarios (default: all 14)",
+        help=f"Run only named scenarios (default: all {len(SCENARIOS)})",
     )
     parser.add_argument(
         "--compare",
         action="store_true",
         help="Compare against baseline.json after running",
+    )
+    parser.add_argument(
+        "--suite",
+        choices=["small", "medium", "large"],
+        default=None,
+        help=(
+            "Run scenarios for the given suite tier (cumulative: large ⊇ medium ⊇ small). "
+            "small=<1 min, medium=<4 min (default gate), large=<10 min. "
+            "Takes precedence over --scenarios when both supplied."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -766,97 +1029,145 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0912,PLR0915
     )
 
     # 4. Select scenarios.
-    selected = SCENARIOS
-    if args.scenarios:
+    # --suite takes precedence; cumulative: large runs all, medium runs small+medium, etc.
+    effective_suite = args.suite or "medium"
+    suite_idx = SUITE_ORDER.index(effective_suite)
+    suites_in_tier = set(SUITE_ORDER[: suite_idx + 1])
+
+    if args.suite:
+        selected = [s for s in SCENARIOS if s.suite in suites_in_tier]
+    elif args.scenarios:
         name_set = set(args.scenarios)
         selected = [s for s in SCENARIOS if s.name in name_set]
         if not selected:
             print(
                 f"ERROR: No scenarios matched {args.scenarios}. "
-                "Available: " + ", ".join(s.name for s in SCENARIOS),
+                f"Available ({len(SCENARIOS)}): "
+                + ", ".join(s.name for s in SCENARIOS),
                 file=sys.stderr,
             )
             return 2  # noqa: PLR2004
+    else:
+        # Default: medium suite (backward compat — same as before suite flag existed).
+        selected = [s for s in SCENARIOS if s.suite in {"small", "medium"}]
 
-    # 5. Push packages.
-    print(f"Pushing benchmark packages to {REGISTRY_URL}...")
-    scenario_packages = _setup_bench_packages(ocx_binary, REGISTRY_URL, selected)
-
-    # 6. Run scenarios.
-    BENCH_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    all_results: list[ScenarioResult] = []
-
-    # Warm scenarios need a persistent OCX_HOME with pre-populated index.
-    # We create one per unique (size_mb, concurrency) combination of warm scenarios
-    # and keep it alive for the full bench session.
-    warm_homes: list[tempfile.TemporaryDirectory[str]] = []
-    warm_home_map: dict[str, Path] = {}  # scenario_name → warm OCX_HOME path
+    # 5. Create scratch root — ALL session temp state lives here (disk-backed).
+    #    Wiped entirely at session end so peak disk usage stays bounded.
+    BENCH_SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        for scenario in selected:
-            if not scenario.cold:
-                packages = scenario_packages.get(scenario.name, [])
-                td = tempfile.TemporaryDirectory(prefix="bench-warm-home-")
-                warm_homes.append(td)
-                warm_path = Path(td.name)
-                print(
-                    f"  Pre-populating warm index for: {scenario.name} "
-                    f"({len(packages)} packages)..."
-                )
-                _warm_ocx_home(ocx_binary, warm_path, PROXY_HOST, packages)
-                warm_home_map[scenario.name] = warm_path
+        # 6. Push (or reuse) packages — only for the selected scenarios.
+        print(f"Setting up benchmark fixtures for {REGISTRY_URL}...")
+        scenario_packages = _setup_bench_packages(
+            ocx_binary, REGISTRY_URL, selected, BENCH_SCRATCH_DIR
+        )
 
-        for scenario in selected:
-            packages = scenario_packages.get(scenario.name, [])
-            print(f"  Running scenario: {scenario.name} ...")
-            if scenario.shape == "shape2":
-                result = runner.parallel_install_wall_clock(
-                    scenario=scenario,
-                    packages=packages,
-                    runs=args.runs,
-                    results_dir=BENCH_RESULTS_DIR,
-                    warm_ocx_home=warm_home_map.get(scenario.name),
-                )
-            else:
-                result = runner.run_scenario(
-                    scenario=scenario,
-                    packages=packages,
-                    warmup=args.warmup,
-                    runs=args.runs,
-                    results_dir=BENCH_RESULTS_DIR,
-                )
-            all_results.append(result)
-            print(
-                f"    {scenario.name}: mean={result.mean_seconds:.3f}s "
-                f"stddev={result.stddev_seconds:.3f}s"
-            )
-    finally:
-        # Clean up warm home directories.
-        for td in warm_homes:
-            try:
-                td.cleanup()
-            except OSError:
-                pass
-        # 7. Teardown proxy.
+        # 7. Run scenarios.
+        BENCH_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        all_results: list[ScenarioResult] = []
+
+        # Warm scenarios need a persistent OCX_HOME with pre-populated index.
+        # Keep it alive for the full bench session; cleaned up in the finally block.
+        warm_homes: list[tempfile.TemporaryDirectory[str]] = []
+        warm_home_map: dict[str, Path] = {}  # scenario_name → warm OCX_HOME path
+
         try:
-            toxi.delete_proxy(PROXY_NAME)
-        except RuntimeError:
-            pass  # Best-effort teardown.
+            for scenario in selected:
+                if not scenario.cold:
+                    packages = scenario_packages.get(scenario.name, [])
+                    td = tempfile.TemporaryDirectory(
+                        prefix="bench-warm-home-", dir=BENCH_SCRATCH_DIR
+                    )
+                    warm_homes.append(td)
+                    warm_path = Path(td.name)
+                    print(
+                        f"  Pre-populating warm index for: {scenario.name} "
+                        f"({len(packages)} packages)..."
+                    )
+                    _warm_ocx_home(ocx_binary, warm_path, PROXY_HOST, packages)
+                    warm_home_map[scenario.name] = warm_path
 
-    # 8. Save combined results.
+            for scenario in selected:
+                packages = scenario_packages.get(scenario.name, [])
+                # CLI --runs / --warmup override per-scenario values; absent = use scenario defaults.
+                effective_runs = args.runs if args.runs is not None else scenario.runs
+                effective_warmup = (
+                    args.warmup if args.warmup is not None else scenario.warmup
+                )
+                print(
+                    f"  Running scenario: {scenario.name} "
+                    f"(runs={effective_runs}, warmup={effective_warmup}) ..."
+                )
+                if scenario.shape == "shape2":
+                    result = runner.parallel_install_wall_clock(
+                        scenario=scenario,
+                        packages=packages,
+                        runs=effective_runs,
+                        results_dir=BENCH_RESULTS_DIR,
+                        warm_ocx_home=warm_home_map.get(scenario.name),
+                    )
+                elif scenario.shape == "floor" and scenario.concurrency > 1:
+                    # Parallel curl floor: N concurrent curl|tar processes, wall-clock.
+                    result = runner.parallel_curl_wall_clock(
+                        scenario=scenario,
+                        packages=packages,
+                        runs=effective_runs,
+                        results_dir=BENCH_RESULTS_DIR,
+                    )
+                else:
+                    result = runner.run_scenario(
+                        scenario=scenario,
+                        packages=packages,
+                        warmup=effective_warmup,
+                        runs=effective_runs,
+                        results_dir=BENCH_RESULTS_DIR,
+                    )
+                all_results.append(result)
+                print(
+                    f"    {scenario.name}: mean={result.mean_seconds:.3f}s "
+                    f"stddev={result.stddev_seconds:.3f}s"
+                )
+        finally:
+            # Clean up warm home directories.
+            for td in warm_homes:
+                try:
+                    td.cleanup()
+                except OSError:
+                    pass
+            # 8. Teardown proxy.
+            try:
+                toxi.delete_proxy(PROXY_NAME)
+            except RuntimeError:
+                pass  # Best-effort teardown.
+
+    finally:
+        # 9. Wipe scratch root entirely — frees all per-session disk usage.
+        #    Best-effort: do not mask exceptions from the bench run itself.
+        try:
+            if BENCH_SCRATCH_DIR.exists():
+                shutil.rmtree(BENCH_SCRATCH_DIR)
+        except OSError:
+            pass  # Non-fatal — files on disk are gitignored under target/.
+
+    # 10. Save per-suite results + latest.json (backward compat symlink/copy).
+    BENCH_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    suite_results_path = BENCH_RESULTS_DIR / f"latest-{effective_suite}.json"
+    runner.save_results(all_results, suite_results_path)
+    print(f"\nResults saved to: {suite_results_path}")
+
+    # latest.json = copy of the most recent run (any suite) for backward compat.
     latest_path = BENCH_RESULTS_DIR / "latest.json"
-    runner.save_results(all_results, latest_path)
-    print(f"\nResults saved to: {latest_path}")
+    shutil.copy2(suite_results_path, latest_path)
 
-    # 9. Optionally save as baseline.
+    # 11. Optionally save as baseline.
     if capture_baseline:
-        shutil.copy2(latest_path, BASELINE_JSON)
+        shutil.copy2(suite_results_path, BASELINE_JSON)
         print(f"Baseline saved to: {BASELINE_JSON}")
 
-    # 10. Optionally compare against baseline.
+    # 12. Optionally compare against baseline.
     if args.compare and not capture_baseline and BASELINE_JSON.exists():
         baseline_data = json.loads(BASELINE_JSON.read_text())
-        current_data = json.loads(latest_path.read_text())
+        current_data = json.loads(suite_results_path.read_text())
         report = compare_against_baseline(baseline_data, current_data)
         from bench.compare import _format_report  # noqa: PLC0415
 

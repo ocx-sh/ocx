@@ -21,13 +21,24 @@ Ratio:
   ratio < 1.0 = improvement (current is faster)
   ratio > 1.0 = regression (current is slower)
   FAIL if ratio > 1.0 / threshold (i.e. > ~1.176 at threshold=0.85)
+
+Baseline-absent semantics:
+  Scenarios in current results that have NO entry in baseline are reported
+  as "ungated" — they are listed in ungated_scenarios and do NOT contribute
+  to the overall pass/fail decision. This allows new scenarios (e.g. new
+  parallel curl floors) to be added without requiring a full baseline re-capture.
+
+  Scenarios in baseline that are NOT in current results are reported as
+  "not run" in not_run_scenarios. They do NOT fail the overall gate — this
+  allows partial subset runs (e.g. bench:quick with 3 scenarios) without
+  falsely failing the other 15 baseline scenarios.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -51,8 +62,11 @@ class CompareReport:
 
     scenarios: list[ScenarioComparison]
     threshold: float
-    passed: bool  # True if ALL scenarios passed
-    missing_scenarios: list[str]  # In baseline but not in current results
+    passed: bool  # True if ALL gated comparisons passed
+    missing_scenarios: list[str]  # kept for backward compat; same as not_run_scenarios
+    ungated_scenarios: list[str] = field(default_factory=list)
+    # In baseline but not in current run (not a failure — subset runs allowed).
+    not_run_scenarios: list[str] = field(default_factory=list)
 
 
 def compare_against_baseline(
@@ -80,6 +94,10 @@ def compare_against_baseline(
     -------
     CompareReport
         Per-scenario comparisons plus overall pass/fail.
+        - scenarios: gated comparisons (scenario in both baseline and current)
+        - ungated_scenarios: in current but NOT in baseline (skipped with note)
+        - not_run_scenarios: in baseline but NOT in current (noted but not a failure)
+        - passed: True iff all gated comparisons pass (ungated/not_run do not affect)
     """
 
     # Index baseline and current by scenario name (hyperfine "command" field).
@@ -95,12 +113,20 @@ def compare_against_baseline(
     current_index = _index(current)
 
     comparisons: list[ScenarioComparison] = []
-    missing: list[str] = []
+    not_run: list[str] = []
+    ungated: list[str] = []
 
+    # Scenarios in current but not in baseline → ungated (no gate applied).
+    for name in current_index:
+        if name not in baseline_index:
+            ungated.append(name)
+
+    # Scenarios in baseline → gated comparison (if present in current) or not-run note.
     for name, b_entry in baseline_index.items():
         b_mean = float(b_entry.get("mean", 0.0))
         if name not in current_index:
-            missing.append(name)
+            # In baseline but not run this session → noted, not a failure.
+            not_run.append(name)
             continue
         c_entry = current_index[name]
         c_mean = float(c_entry.get("mean", 0.0))
@@ -138,13 +164,17 @@ def compare_against_baseline(
             )
         )
 
-    overall_passed = all(c.passed for c in comparisons) and not missing
+    # Overall passes iff all gated comparisons pass.
+    # not_run and ungated scenarios do NOT affect the gate.
+    overall_passed = all(c.passed for c in comparisons)
 
     return CompareReport(
         scenarios=comparisons,
         threshold=threshold,
         passed=overall_passed,
-        missing_scenarios=missing,
+        missing_scenarios=not_run,  # backward compat alias
+        ungated_scenarios=ungated,
+        not_run_scenarios=not_run,
     )
 
 
@@ -166,16 +196,24 @@ def _format_report(report: CompareReport) -> str:
             f"{status:>8}"
             f"{note}"
         )
-    if report.missing_scenarios:
+    if report.ungated_scenarios:
         lines.append("")
-        lines.append("Missing from current results (in baseline but not run):")
-        for name in report.missing_scenarios:
-            lines.append(f"  - {name}")
+        lines.append("Ungated (in current but absent from baseline — no gate applied):")
+        for name in sorted(report.ungated_scenarios):
+            lines.append(f"  - {name}  [SKIP — no baseline entry]")
+    if report.not_run_scenarios:
+        lines.append("")
+        lines.append("Not run this session (in baseline but not in current results):")
+        for name in report.not_run_scenarios:
+            lines.append(f"  - {name}  [NOT RUN — partial run OK]")
     lines.append("")
     overall = "PASSED" if report.passed else "FAILED"
+    gated_count = len(report.scenarios)
     lines.append(
         f"Overall: {overall}  "
-        f"(threshold: current <= baseline / {report.threshold:.2f} = {1.0 / report.threshold:.3f}x)"
+        f"({gated_count} gated, {len(report.ungated_scenarios)} ungated, "
+        f"{len(report.not_run_scenarios)} not run; "
+        f"threshold: current <= baseline / {report.threshold:.2f} = {1.0 / report.threshold:.3f}x)"
     )
     return "\n".join(lines)
 

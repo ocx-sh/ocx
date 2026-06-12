@@ -158,16 +158,64 @@ tasks:
 
   bench:
     desc: >-
-      Run the full benchmark matrix and compare against test/bench/baseline.json.
+      Run the medium suite (regression gate, <4 min) and compare against baseline.json.
       Exits 1 if any scenario regresses beyond the 0.85x threshold.
       Requires bench:setup and hyperfine.
     dir: '{{.TASKFILE_DIR}}'
     deps: [build, bench:setup, .bench:acquire-hyperfine]
     cmds:
-      - uv run python bench/harness.py --compare
+      - uv run python bench/harness.py --suite medium --compare
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
       BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+
+  bench:quick:
+    desc: >-
+      Fast subset benchmark (<1 min): small suite (unthrottled + 100 Mbps + parallel_2_processes).
+      Fixture push skipped when registry already has the packages (deterministic repo names).
+      Compares against baseline where entries exist. Requires bench:setup and hyperfine.
+    dir: '{{.TASKFILE_DIR}}'
+    deps: [build, bench:setup, .bench:acquire-hyperfine]
+    cmds:
+      - uv run python bench/harness.py --suite small --compare
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
+      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+
+  bench:large:
+    desc: >-
+      Extended benchmark run (<10 min): large suite adds higher-runs rows (runs=10)
+      and larger payloads (50 MB, 25 MB layer rows) for tighter σ.
+      Run before landing optimizations where statistical confidence matters.
+      Requires bench:setup and hyperfine.
+    dir: '{{.TASKFILE_DIR}}'
+    deps: [build, bench:setup, .bench:acquire-hyperfine]
+    cmds:
+      - uv run python bench/harness.py --suite large --compare
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
+      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+
+  bench:scenario:
+    desc: >-
+      Run one or more named scenarios: task test:bench:scenario -- <name> [<name>...]
+      Uses 3 runs, no warmup. Requires bench:setup and hyperfine.
+    dir: '{{.TASKFILE_DIR}}'
+    deps: [build, bench:setup, .bench:acquire-hyperfine]
+    cmds:
+      - uv run python bench/harness.py --scenarios {{.CLI_ARGS}} --runs 3 --warmup 0
+    env:
+      OCX_COMMAND: "{{.OCX_BINARY}}"
+      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+
+  bench:report:
+    desc: >-
+      Generate the static HTML dashboard from the latest bench results.
+      Writes test/bench/results/index.html (self-contained; no Docker required).
+      Open the printed path in a browser to view the dashboard.
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - uv run python bench/report.py
 
   .bench:acquire-hyperfine:
     desc: Download hyperfine 1.20.0 into test/bin/ if not already on PATH or in test/bin/.

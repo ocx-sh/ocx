@@ -97,6 +97,7 @@ def make_package(
     new: bool = True,
     cascade: bool = True,
     size_mb: int = 0,
+    layers: int = 1,
     platform: str | None = None,
     bins: list[str] | None = None,
     env: list[dict] | None = None,
@@ -110,7 +111,16 @@ def make_package(
     ----------
     size_mb:
         Approximate size in MB of random padding data.  Useful for making
-        downloads large enough to show progress bars.
+        downloads large enough to show progress bars.  When ``layers > 1``
+        the total padding is divided across the layers (``size_mb // layers``
+        MB per layer).
+    layers:
+        Number of OCI layers to split the package into.  Defaults to 1
+        (single-bundle push, existing behaviour).  When > 1, N separate
+        ``tar.xz`` archives are built, each with a distinct content path
+        (``layer_N/data.bin``) so the blobs are never identical, then all
+        are passed to ``ocx package push`` as positional layer arguments.
+        Binaries and metadata always reside in layer 0 (``bundle-...-L0``).
     platform:
         OCI platform string (e.g. ``linux/amd64``).  Defaults to the
         current host platform.
@@ -168,8 +178,12 @@ def make_package(
             script.write_text(f"#!/bin/sh\necho {marker}\n")
             script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
-    # Add random padding for realistic download sizes
-    if size_mb > 0:
+    # Add random padding for realistic download sizes.
+    # For single-layer packages all padding lives in pkg_dir/lib/data.bin.
+    # For multi-layer packages the padding is omitted from pkg_dir — it goes
+    # into the extra layer directories built below.
+    n_layers = max(1, layers)
+    if size_mb > 0 and n_layers == 1:
         lib_dir = pkg_dir / "lib"
         lib_dir.mkdir(parents=True)
         data_file = lib_dir / "data.bin"
@@ -200,32 +214,65 @@ def make_package(
         },
     ]
     metadata_obj: dict = {
-        "type": "bundle", "version": 1, "env": metadata_env,
+        "type": "bundle",
+        "version": 1,
+        "env": metadata_env,
     }
     if dependencies:
         metadata_obj["dependencies"] = dependencies
     metadata_path.write_text(json.dumps(metadata_obj))
 
-    # Create bundle
-    bundle = tmp_path / f"bundle-{fname_slug}-{tag}.tar.xz"
+    # Create bundles.  For multi-layer packages, build one bundle per layer:
+    # layer 0 contains the binaries+metadata tree (pkg_dir), extra layers
+    # contain only a synthetic padding blob at a unique path so no two layers
+    # share an identical blob.
+    layer_per_mb = (size_mb // n_layers) if n_layers > 1 and size_mb > 0 else 0
+
+    # Single-layer keeps the historical bundle filename — fixtures outside
+    # this helper (e.g. test_package_test_script.py) construct that path by
+    # convention; the -L0 suffix exists only when extra layers are built.
+    bundle_l0 = tmp_path / (
+        f"bundle-{fname_slug}-{tag}.tar.xz"
+        if n_layers == 1
+        else f"bundle-{fname_slug}-{tag}-L0.tar.xz"
+    )
     ocx.plain(
         "package",
         "create",
         "-m",
         str(metadata_path),
         "-o",
-        str(bundle),
+        str(bundle_l0),
         str(pkg_dir),
     )
 
-    # Push
+    all_bundles: list[Path] = [bundle_l0]
+    for li in range(1, n_layers):
+        layer_dir = tmp_path / f"layer-{fname_slug}-{tag}-L{li}"
+        layer_dir.mkdir(parents=True)
+        blob = layer_dir / f"layer_{li}" / "data.bin"
+        blob.parent.mkdir(parents=True)
+        blob.write_bytes(os.urandom(max(1, layer_per_mb) * 1024 * 1024))
+        bundle_ln = tmp_path / f"bundle-{fname_slug}-{tag}-L{li}.tar.xz"
+        ocx.plain(
+            "package",
+            "create",
+            "-m",
+            str(metadata_path),
+            "-o",
+            str(bundle_ln),
+            str(layer_dir),
+        )
+        all_bundles.append(bundle_ln)
+
+    # Push — pass all layer bundles as positional args to `ocx package push`.
     fq = f"{ocx.registry}/{repo}:{tag}"
     push_args = ["package", "push", "-p", plat, "-m", str(metadata_path)]
     if new:
         push_args.append("-n")
     if cascade:
         push_args.append("--cascade")
-    push_args += ["-i", fq, str(bundle)]
+    push_args += ["-i", fq] + [str(b) for b in all_bundles]
     ocx.plain(*push_args)
 
     # Update local index so install/find can discover the package.
@@ -311,14 +358,14 @@ def make_package_with_entrypoints(
             script = script.with_suffix(".bat")
             script.write_text(f"@echo entry-point-{name} {marker} %*\n")
         else:
-            script.write_text(
-                f'#!/bin/sh\necho "entry-point-{name} {marker} $@"\n'
-            )
+            script.write_text(f'#!/bin/sh\necho "entry-point-{name} {marker} $@"\n')
             script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
     metadata_path = tmp_path / f"metadata-{file_prefix}-{unique_repo}-{tag}.json"
     metadata_obj: dict = {
-        "type": "bundle", "version": 1, "env": env,
+        "type": "bundle",
+        "version": 1,
+        "env": env,
         "entrypoints": entrypoints_obj,
     }
     if dependencies:
@@ -326,12 +373,24 @@ def make_package_with_entrypoints(
     metadata_path.write_text(json.dumps(metadata_obj))
 
     bundle = tmp_path / f"bundle-{file_prefix}-{unique_repo}-{tag}.tar.xz"
-    ocx.plain("package", "create", "-m", str(metadata_path), "-o", str(bundle), str(pkg_dir))
+    ocx.plain(
+        "package", "create", "-m", str(metadata_path), "-o", str(bundle), str(pkg_dir)
+    )
 
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:{tag}"
     ocx.plain(
-        "package", "push", "-p", plat, "-m", str(metadata_path), "-n", "--cascade", "-i", fq, str(bundle),
+        "package",
+        "push",
+        "-p",
+        plat,
+        "-m",
+        str(metadata_path),
+        "-n",
+        "--cascade",
+        "-i",
+        fq,
+        str(bundle),
     )
     short = f"{unique_repo}:{tag}"
     ocx.plain("index", "update", unique_repo)

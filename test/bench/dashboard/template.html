@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OCX Install Benchmark Dashboard</title>
+  <style>
+    /* ---- CSS custom properties: light theme (default) ---- */
+    :root {
+      --bg:          #f8f9fa;
+      --surface:     #ffffff;
+      --border:      #dee2e6;
+      --text:        #212529;
+      --text-dim:    #6c757d;
+      --text-header: #e8e8e8;
+      --header-bg:   #1a1a2e;
+      --section-h2:  #343a40;
+      --bar-track:   #e9ecef;
+      --bar-current: #0d6efd;
+      --bar-base:    #6c757d;
+      --bar-floor:   #198754;
+      --bar-nodata:  #e9ecef;
+      --badge-pass-bg:    #d1e7dd; --badge-pass-fg:    #0f5132;
+      --badge-fail-bg:    #f8d7da; --badge-fail-fg:    #842029;
+      --badge-ungated-bg: #fff3cd; --badge-ungated-fg: #664d03;
+      --badge-nodata-bg:  #e9ecef; --badge-nodata-fg:  #6c757d;
+      --badge-noise-bg:   #e9ecef; --badge-noise-fg:   #6c757d;
+      --badge-improve-bg: #d1e7dd; --badge-improve-fg: #0f5132;
+      --badge-regress-bg: #f8d7da; --badge-regress-fg: #842029;
+      --toggle-bg:   #e9ecef;
+      --toggle-fg:   #343a40;
+      --suite-active-bg: #0d6efd; --suite-active-fg: #fff;
+      --suite-inactive-bg: #e9ecef; --suite-inactive-fg: #343a40;
+      --suite-disabled-bg: #f1f3f5; --suite-disabled-fg: #adb5bd;
+      --eff-bar:     #0dcaf0;
+      --eff-ideal:   #dee2e6;
+    }
+
+    /* ---- Dark theme ---- */
+    html[data-theme="dark"] {
+      --bg:          #121212;
+      --surface:     #1e1e2e;
+      --border:      #3a3a4e;
+      --text:        #e0e0e0;
+      --text-dim:    #9a9aaa;
+      --text-header: #e8e8e8;
+      --header-bg:   #0d0d1a;
+      --section-h2:  #cdd2d8;
+      --bar-track:   #2a2a3e;
+      --bar-current: #4a9eff;
+      --bar-base:    #888;
+      --bar-floor:   #3ac97c;
+      --bar-nodata:  #2a2a3e;
+      --badge-pass-bg:    #0f3624; --badge-pass-fg:    #6edd9e;
+      --badge-fail-bg:    #3c1012; --badge-fail-fg:    #f5a0a5;
+      --badge-ungated-bg: #3a2e00; --badge-ungated-fg: #ffd97a;
+      --badge-nodata-bg:  #2a2a3e; --badge-nodata-fg:  #9a9aaa;
+      --badge-noise-bg:   #2a2a3e; --badge-noise-fg:   #9a9aaa;
+      --badge-improve-bg: #0f3624; --badge-improve-fg: #6edd9e;
+      --badge-regress-bg: #3c1012; --badge-regress-fg: #f5a0a5;
+      --toggle-bg:   #2a2a3e;
+      --toggle-fg:   #e0e0e0;
+      --suite-active-bg: #4a9eff; --suite-active-fg: #fff;
+      --suite-inactive-bg: #2a2a3e; --suite-inactive-fg: #cdd2d8;
+      --suite-disabled-bg: #1e1e2e; --suite-disabled-fg: #4a4a5e;
+      --eff-bar:     #29b8d3;
+      --eff-ideal:   #2a2a3e;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.5;
+      transition: background 0.2s, color 0.2s;
+    }
+    header {
+      background: var(--header-bg); color: var(--text-header);
+      padding: 1rem 1.5rem; display: flex; flex-direction: column; gap: 0.25rem; position: relative;
+    }
+    header h1 { font-size: 1.25rem; font-weight: 600; }
+    header .meta { font-size: 0.8rem; color: #aaa; }
+    .theme-toggle {
+      position: absolute; top: 1rem; right: 1.5rem;
+      background: var(--toggle-bg); color: var(--toggle-fg);
+      border: none; border-radius: 4px; padding: 0.3rem 0.7rem;
+      font-size: 0.8rem; cursor: pointer; user-select: none;
+    }
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1rem; display: flex; flex-direction: column; gap: 2rem; }
+    section {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 1.25rem 1.5rem;
+    }
+    section h2 {
+      font-size: 1rem; font-weight: 600; color: var(--section-h2);
+      margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;
+    }
+    section p.insight { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 1rem; }
+
+    /* ---- Suite toggle buttons ---- */
+    .suite-toggles { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
+    .suite-toggles .label { font-size: 0.78rem; color: var(--text-dim); margin-right: 0.25rem; }
+    .suite-btn {
+      font-size: 0.75rem; padding: 0.25rem 0.75rem; border-radius: 4px;
+      border: none; cursor: pointer; font-weight: 600; transition: background 0.15s;
+    }
+    .suite-btn.active   { background: var(--suite-active-bg);   color: var(--suite-active-fg); }
+    .suite-btn.inactive { background: var(--suite-inactive-bg); color: var(--suite-inactive-fg); }
+    .suite-btn.disabled { background: var(--suite-disabled-bg); color: var(--suite-disabled-fg); cursor: not-allowed; }
+    .suite-btn[title] { position: relative; }
+
+    /* ---- Per-scenario bars ---- */
+    .scenario-list { display: flex; flex-direction: column; gap: 0.75rem; }
+    .scenario-row {
+      display: grid;
+      grid-template-columns: 14rem 1fr 8rem;
+      gap: 0.5rem; align-items: start;
+    }
+    .scenario-name {
+      font-size: 0.75rem; font-weight: 500; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      padding-top: 2px;
+    }
+    .bar-group { display: flex; flex-direction: column; gap: 2px; }
+    .bar-line { display: flex; align-items: center; gap: 0.4rem; }
+    .bar-label { font-size: 0.65rem; color: var(--text-dim); width: 3.5rem; text-align: right; flex-shrink: 0; }
+    .bar-track {
+      flex: 1; background: var(--bar-track); border-radius: 3px;
+      height: 10px; position: relative; overflow: hidden;
+    }
+    .bar-fill { height: 100%; border-radius: 3px; transition: width 0.2s; }
+    .bar-fill.current  { background: var(--bar-current); }
+    .bar-fill.baseline { background: var(--bar-base); }
+    .bar-fill.floor    { background: var(--bar-floor); }
+    .bar-fill.suite-2  { background: #fd7e14; }
+    .bar-fill.suite-3  { background: #6f42c1; }
+    .bar-fill.no-data  { background: var(--bar-nodata); }
+    .bar-value { font-size: 0.65rem; color: var(--text-dim); white-space: nowrap; min-width: 4rem; }
+    /* whisker / σ band on bar (± stddev overlay) */
+    .whisker {
+      position: absolute; top: 0; height: 100%;
+      background: rgba(255,255,255,0.35); pointer-events: none;
+    }
+    .badges { display: flex; flex-direction: column; gap: 2px; align-items: flex-end; }
+    .badge {
+      font-size: 0.65rem; padding: 1px 5px; border-radius: 3px;
+      font-weight: 600; white-space: nowrap;
+    }
+    .badge.pass    { background: var(--badge-pass-bg);    color: var(--badge-pass-fg); }
+    .badge.fail    { background: var(--badge-fail-bg);    color: var(--badge-fail-fg); }
+    .badge.ungated { background: var(--badge-ungated-bg); color: var(--badge-ungated-fg); }
+    .badge.nodata  { background: var(--badge-nodata-bg);  color: var(--badge-nodata-fg); }
+    .badge.z-noise   { background: var(--badge-noise-bg);   color: var(--badge-noise-fg); }
+    .badge.z-improve { background: var(--badge-improve-bg); color: var(--badge-improve-fg); }
+    .badge.z-regress { background: var(--badge-regress-bg); color: var(--badge-regress-fg); }
+
+    /* ---- Scaling panel ---- */
+    .scaling-groups { display: flex; flex-direction: column; gap: 1.5rem; }
+    .scaling-group h3 { font-size: 0.85rem; font-weight: 600; color: var(--section-h2); margin-bottom: 0.5rem; }
+    .scaling-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .scaling-table th {
+      text-align: left; padding: 0.3rem 0.5rem;
+      color: var(--text-dim); font-weight: 500;
+      border-bottom: 1px solid var(--border);
+    }
+    .scaling-table td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); color: var(--text); }
+    .eff-bar { display: inline-block; height: 8px; border-radius: 2px; background: var(--eff-bar); vertical-align: middle; margin-left: 4px; }
+    .eff-ideal { background: var(--eff-ideal); }
+    .na { color: var(--text-dim); font-style: italic; }
+
+    .legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.72rem; margin-top: 0.5rem; color: var(--text-dim); }
+    .legend span { display: flex; align-items: center; gap: 0.3rem; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>OCX Install Benchmark Dashboard</h1>
+      <button class="theme-toggle" @click="toggleTheme">{{ isDark ? '☀ Light' : '☾ Dark' }}</button>
+      <div class="meta" v-if="currentMeta">
+        Suite: {{ activeSuites.join(', ') || '—' }}
+        &nbsp;&bull;&nbsp; Scenarios: {{ visibleResults.length }}
+        <span v-if="currentMeta.machine_note">&nbsp;&bull;&nbsp; {{ currentMeta.machine_note }}</span>
+      </div>
+      <div class="meta" v-if="!hasAnyBaseline">No baseline — showing current results only</div>
+    </header>
+
+    <main>
+      <!-- Suite toggle -->
+      <section>
+        <h2>Suite</h2>
+        <p class="insight">
+          Select suites to display. Multi-select overlays results in grouped bars.
+          Disabled suites have no embedded results (run the corresponding task first).
+        </p>
+        <div class="suite-toggles">
+          <span class="label">Suites:</span>
+          <button
+            v-for="s in SUITE_NAMES" :key="s"
+            :class="['suite-btn', suiteHasData(s) ? (activeSuites.includes(s) ? 'active' : 'inactive') : 'disabled']"
+            :title="suiteHasData(s) ? '' : 'No results — run task test:bench:' + suiteTaskSuffix(s)"
+            :disabled="!suiteHasData(s)"
+            @click="toggleSuite(s)"
+          >{{ s }}</button>
+        </div>
+      </section>
+
+      <!-- (a) Per-scenario bars with z-score -->
+      <section>
+        <h2>Per-Scenario Results</h2>
+        <p class="insight">
+          Current (blue), baseline (grey), and curl floor (green) bars scaled to slowest value.
+          z-score (Welch) vs baseline: <b>gray</b> = noise (|z|&lt;2), <b>green</b> = real improvement, <b>red</b> = real regression.
+          Whisker = ±σ band. 0.85x gate applies only to gated scenarios.
+        </p>
+        <div class="legend">
+          <span><span class="legend-dot" style="background:var(--bar-current)"></span>Current</span>
+          <span><span class="legend-dot" style="background:var(--bar-base)"></span>Baseline</span>
+          <span><span class="legend-dot" style="background:var(--bar-floor)"></span>curl floor</span>
+        </div>
+        <br>
+        <div class="scenario-list">
+          <div v-for="row in scenarioRows" :key="row.name" class="scenario-row">
+            <div class="scenario-name" :title="row.name">{{ row.name }}</div>
+            <div class="bar-group">
+              <!-- Current bars — one per active suite -->
+              <div v-for="(sb, si) in row.suiteBars" :key="sb.suite" class="bar-line">
+                <span class="bar-label">{{ sb.suite }}</span>
+                <div class="bar-track">
+                  <div :class="['bar-fill', si === 0 ? 'current' : (si === 1 ? 'suite-2' : 'suite-3')]"
+                       :style="{ width: barPct(sb.mean, row.maxVal) + '%' }"></div>
+                  <!-- σ whisker -->
+                  <div v-if="sb.stddev > 0" class="whisker"
+                       :style="whiskerStyle(sb.mean, sb.stddev, row.maxVal)"></div>
+                </div>
+                <span class="bar-value">{{ fmtSeconds(sb.mean) }}<span v-if="sb.stddev > 0" style="opacity:0.6"> ±{{ fmtSeconds(sb.stddev) }}</span></span>
+              </div>
+              <!-- Baseline bar (from medium baseline) -->
+              <div class="bar-line" v-if="row.baselineMean !== null">
+                <span class="bar-label">baseline</span>
+                <div class="bar-track">
+                  <div class="bar-fill baseline"
+                       :style="{ width: barPct(row.baselineMean, row.maxVal) + '%' }"></div>
+                </div>
+                <span class="bar-value">{{ fmtSeconds(row.baselineMean) }}</span>
+              </div>
+              <!-- Floor bar -->
+              <div class="bar-line" v-if="row.floorMean !== null">
+                <span class="bar-label">curl floor</span>
+                <div class="bar-track">
+                  <div class="bar-fill floor"
+                       :style="{ width: barPct(row.floorMean, row.maxVal) + '%' }"></div>
+                </div>
+                <span class="bar-value">{{ fmtSeconds(row.floorMean) }}</span>
+              </div>
+            </div>
+            <div class="badges">
+              <!-- Gate badge (primary active suite vs baseline) -->
+              <template v-if="row.primaryMean !== null">
+                <span v-if="row.baselineMean !== null" :class="['badge', row.gatePass ? 'pass' : 'fail']">
+                  {{ fmtRatio(row.ratio) }}x {{ row.gatePass ? 'PASS' : 'FAIL' }}
+                </span>
+                <span v-else class="badge ungated">ungated</span>
+              </template>
+              <!-- z-score badge -->
+              <span v-if="row.zBadgeClass" :class="['badge', row.zBadgeClass]" :title="'z = ' + (row.zScore !== null ? row.zScore.toFixed(2) : '?')">
+                z={{ row.zScore !== null ? row.zScore.toFixed(1) : '?' }}
+              </span>
+              <!-- Floor ratio badge -->
+              <span v-if="row.floorMean !== null && row.primaryMean !== null" class="badge nodata">
+                floor: {{ fmtRatio(row.primaryMean / row.floorMean) }}x
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- (b) Process parallelization scaling panel -->
+      <section v-if="processScalingGroups.length > 0">
+        <h2>Process Parallelization Scaling</h2>
+        <p class="insight">
+          Wall-clock time and efficiency (T<sub>1</sub> / (N &times; T<sub>N</sub>))
+          at 1, 2, and 4 concurrent packages/processes.
+          Ideal efficiency = 1.0 (linear scaling).
+        </p>
+        <div class="scaling-groups">
+          <div v-for="grp in processScalingGroups" :key="grp.name" class="scaling-group">
+            <h3>{{ grp.title }}</h3>
+            <table class="scaling-table">
+              <thead>
+                <tr>
+                  <th>Processes (N)</th>
+                  <th>Wall-clock (mean)</th>
+                  <th>Efficiency T₁/(N×Tₙ)</th>
+                  <th>Scenario</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="pt in grp.points" :key="pt.n">
+                  <td>{{ pt.n }}</td>
+                  <td>{{ pt.mean !== null ? fmtSeconds(pt.mean) : '—' }}</td>
+                  <td>
+                    <span v-if="pt.efficiency !== null">
+                      {{ (pt.efficiency * 100).toFixed(0) }}%
+                      <span class="eff-bar"
+                            :style="{ width: Math.min(pt.efficiency * 60, 60) + 'px' }"></span>
+                      <span class="eff-bar eff-ideal"
+                            :style="{ width: Math.max(60 - Math.min(pt.efficiency * 60, 60), 0) + 'px' }"></span>
+                    </span>
+                    <span v-else class="na">—</span>
+                  </td>
+                  <td class="na">{{ pt.scenarioName || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- (c) Layer parallelization scaling panel -->
+      <section v-if="layerScalingGroups.length > 0">
+        <h2>Layer Parallelization Scaling</h2>
+        <p class="insight">
+          Wall-clock time and layer-pull efficiency (T<sub>1</sub> / (N &times; T<sub>N</sub>))
+          for the same total payload split across 1, 2, and 4 OCI layers.
+          Multi-layer pulls download layers concurrently (JoinSet per layer in ocx_lib).
+        </p>
+        <div class="scaling-groups">
+          <div v-for="grp in layerScalingGroups" :key="grp.name" class="scaling-group">
+            <h3>{{ grp.title }}</h3>
+            <table class="scaling-table">
+              <thead>
+                <tr>
+                  <th>Layers (N)</th>
+                  <th>Wall-clock (mean)</th>
+                  <th>Efficiency T₁/(N×Tₙ)</th>
+                  <th>Scenario</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="pt in grp.points" :key="pt.n">
+                  <td>{{ pt.n }}</td>
+                  <td>{{ pt.mean !== null ? fmtSeconds(pt.mean) : '—' }}</td>
+                  <td>
+                    <span v-if="pt.efficiency !== null">
+                      {{ (pt.efficiency * 100).toFixed(0) }}%
+                      <span class="eff-bar"
+                            :style="{ width: Math.min(pt.efficiency * 60, 60) + 'px' }"></span>
+                      <span class="eff-bar eff-ideal"
+                            :style="{ width: Math.max(60 - Math.min(pt.efficiency * 60, 60), 0) + 'px' }"></span>
+                    </span>
+                    <span v-else class="na">—</span>
+                  </td>
+                  <td class="na">{{ pt.scenarioName || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>/* __VUE_INLINE__ */</script>
+  <script>
+    // Multi-suite: keyed by suite name.
+    const RESULTS_BY_SUITE   = /* __BENCH_RESULTS_BY_SUITE_JSON__ */;
+    const BASELINES_BY_SUITE = /* __BENCH_BASELINES_BY_SUITE_JSON__ */;
+    const SCENARIOS          = /* __BENCH_SCENARIOS_META__ */;
+
+    const { createApp } = Vue;
+
+    const SUITE_NAMES = ['small', 'medium', 'large'];
+    const THRESHOLD   = 0.85;
+
+    // Welch z-score: z = (m_cur - m_base) / sqrt(σ_cur²/n_cur + σ_base²/n_base)
+    function welchZ(mCur, sCur, nCur, mBase, sBase, nBase) {
+      const se = Math.sqrt(sCur * sCur / nCur + sBase * sBase / nBase);
+      if (!se || se === 0) return 0;
+      return (mCur - mBase) / se;
+    }
+
+    createApp({
+      data() {
+        // Build indexes.
+        const resultsBySuiteIdx = {};
+        for (const [suite, data] of Object.entries(RESULTS_BY_SUITE || {})) {
+          const idx = {};
+          for (const r of (data.results || [])) {
+            idx[r.command] = r;
+          }
+          resultsBySuiteIdx[suite] = idx;
+        }
+        const baselinesBySuiteIdx = {};
+        for (const [suite, data] of Object.entries(BASELINES_BY_SUITE || {})) {
+          const idx = {};
+          for (const r of (data.results || [])) {
+            idx[r.command] = r;
+          }
+          baselinesBySuiteIdx[suite] = idx;
+        }
+        const scenarioMeta = {};
+        for (const s of (SCENARIOS.scenarios || [])) {
+          scenarioMeta[s.name] = s;
+        }
+        const anchors = SCENARIOS.scaling_group_anchors || {};
+
+        // Determine initial active suites: prefer medium, else whatever has data.
+        const availableSuites = SUITE_NAMES.filter(s => resultsBySuiteIdx[s] && Object.keys(resultsBySuiteIdx[s]).length > 0);
+        const initialActive = availableSuites.includes('medium') ? ['medium'] : availableSuites.slice(0, 1);
+
+        // Theme: follow prefers-color-scheme, override from localStorage.
+        const savedTheme = localStorage.getItem('ocx-bench-theme');
+        const sysDark    = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const isDark     = savedTheme ? savedTheme === 'dark' : sysDark;
+        if (isDark) document.documentElement.setAttribute('data-theme', 'dark');
+
+        return {
+          resultsBySuiteIdx,
+          baselinesBySuiteIdx,
+          scenarioMeta,
+          anchors,
+          activeSuites: initialActive,
+          isDark,
+          SUITE_NAMES,
+        };
+      },
+
+      computed: {
+        currentMeta() {
+          // Use first active suite's meta, or null.
+          for (const s of this.activeSuites) {
+            const data = RESULTS_BY_SUITE[s];
+            if (data && data.meta) return data.meta;
+          }
+          return null;
+        },
+
+        hasAnyBaseline() {
+          return BASELINES_BY_SUITE && Object.keys(BASELINES_BY_SUITE).length > 0;
+        },
+
+        // All results across active suites (union of scenario names).
+        visibleResults() {
+          const seen = new Set();
+          const out = [];
+          for (const suite of this.activeSuites) {
+            for (const r of Object.values(this.resultsBySuiteIdx[suite] || {})) {
+              if (!seen.has(r.command)) { seen.add(r.command); out.push(r); }
+            }
+          }
+          return out;
+        },
+
+        scenarioRows() {
+          const rows = [];
+          const allNames = new Set();
+          for (const suite of this.activeSuites) {
+            for (const name of Object.keys(this.resultsBySuiteIdx[suite] || {})) {
+              allNames.add(name);
+            }
+          }
+
+          // Build baseline index (medium baseline preferred).
+          const baselineIdx = this.baselinesBySuiteIdx['medium']
+            || (Object.values(this.baselinesBySuiteIdx)[0] || {});
+
+          for (const name of allNames) {
+            const meta = this.scenarioMeta[name] || {};
+            if (meta.shape === 'floor') continue;
+
+            // Per-suite bars.
+            const suiteBars = [];
+            for (const suite of this.activeSuites) {
+              const entry = (this.resultsBySuiteIdx[suite] || {})[name];
+              if (entry) {
+                suiteBars.push({
+                  suite,
+                  mean: entry.mean,
+                  stddev: entry.stddev || 0,
+                  times: entry.times || [],
+                  n: (entry.times || []).length || 1,
+                });
+              }
+            }
+
+            const primaryBar = suiteBars[0] || null;
+            const primaryMean = primaryBar ? primaryBar.mean : null;
+            const primaryStddev = primaryBar ? primaryBar.stddev : 0;
+            const primaryN = primaryBar ? primaryBar.n : 1;
+
+            const baselineEntry = baselineIdx[name];
+            const baselineMean = baselineEntry ? baselineEntry.mean : null;
+            const baselineStddev = baselineEntry ? (baselineEntry.stddev || 0) : 0;
+            const baselineN = baselineEntry ? ((baselineEntry.times || []).length || 1) : 1;
+
+            // Floor lookup.
+            let floorMean = null;
+            for (const s of (SCENARIOS.scenarios || [])) {
+              if (s.floor_for === name) {
+                for (const suite of this.activeSuites) {
+                  const fe = (this.resultsBySuiteIdx[suite] || {})[s.name];
+                  if (fe) { floorMean = fe.mean; break; }
+                }
+                if (floorMean !== null) break;
+              }
+            }
+
+            const maxVal = Math.max(
+              primaryMean ?? 0,
+              baselineMean ?? 0,
+              floorMean ?? 0,
+              ...suiteBars.map(b => b.mean),
+            );
+
+            let ratio = null, gatePass = null;
+            if (primaryMean !== null && baselineMean !== null && baselineMean > 0) {
+              ratio = primaryMean / baselineMean;
+              gatePass = ratio <= (1.0 / THRESHOLD);
+            }
+
+            // Welch z-score.
+            let zScore = null, zBadgeClass = null;
+            if (primaryMean !== null && baselineMean !== null && baselineMean > 0
+                && (primaryStddev > 0 || baselineStddev > 0)) {
+              zScore = welchZ(primaryMean, primaryStddev, primaryN, baselineMean, baselineStddev, baselineN);
+              if (Math.abs(zScore) < 2) {
+                zBadgeClass = 'z-noise';
+              } else if (zScore <= -2) {
+                zBadgeClass = 'z-improve';
+              } else {
+                zBadgeClass = 'z-regress';
+              }
+            }
+
+            rows.push({
+              name, suiteBars, primaryMean, baselineMean, floorMean,
+              maxVal, ratio, gatePass, zScore, zBadgeClass,
+            });
+          }
+          return rows;
+        },
+
+        allScalingGroups() {
+          const anchors = this.anchors;
+          const groups = {};
+          for (const s of (SCENARIOS.scenarios || [])) {
+            if (!s.scaling_group) continue;
+            if (!groups[s.scaling_group]) groups[s.scaling_group] = { members: [] };
+            groups[s.scaling_group].members.push(s);
+          }
+
+          // Primary results: first active suite.
+          const primaryIdx = this.resultsBySuiteIdx[this.activeSuites[0]] || {};
+
+          const titleMap = {
+            ocx_shape1_100mbps:       'ocx Shape 1 — 100 Mbps (single-invocation parallelism)',
+            ocx_shape2_100mbps:       'ocx Shape 2 — 100 Mbps (separate-process parallelism)',
+            curl_100mbps:             'curl+tar floor — 100 Mbps',
+            ocx_layers_100mbps:       'ocx layer scaling — 12 MB total @100 Mbps',
+            ocx_layers_large_100mbps: 'ocx layer scaling large — ~25 MB total @100 Mbps',
+          };
+          const LAYER_GROUPS = new Set(['ocx_layers_100mbps', 'ocx_layers_large_100mbps']);
+
+          const result = [];
+          for (const [groupName, grp] of Object.entries(groups)) {
+            const anchorName = anchors[groupName];
+            const anchorEntry = anchorName ? primaryIdx[anchorName] : null;
+            const t1 = anchorEntry ? anchorEntry.mean : null;
+
+            const members = [...grp.members]
+              .filter(m => m.name !== anchorName)
+              .sort((a, b) => a.process_count - b.process_count);
+            const points = [];
+            points.push({ n: 1, mean: t1, efficiency: t1 !== null ? 1.0 : null, scenarioName: anchorName || null });
+            for (const m of members) {
+              const entry = primaryIdx[m.name];
+              const tn = entry ? entry.mean : null;
+              const n = m.process_count;
+              const efficiency = (t1 !== null && tn !== null && tn > 0) ? t1 / (n * tn) : null;
+              points.push({ n, mean: tn, efficiency, scenarioName: m.name });
+            }
+            result.push({ name: groupName, title: titleMap[groupName] || groupName, isLayerGroup: LAYER_GROUPS.has(groupName), points });
+          }
+          return result;
+        },
+
+        processScalingGroups() { return this.allScalingGroups.filter(g => !g.isLayerGroup); },
+        layerScalingGroups()   { return this.allScalingGroups.filter(g =>  g.isLayerGroup); },
+      },
+
+      methods: {
+        suiteHasData(suite) {
+          return !!(this.resultsBySuiteIdx[suite] && Object.keys(this.resultsBySuiteIdx[suite]).length > 0);
+        },
+
+        suiteTaskSuffix(suite) {
+          if (suite === 'small')  return 'quick';
+          if (suite === 'large')  return 'large';
+          return '';  // medium = default bench task
+        },
+
+        toggleSuite(suite) {
+          if (!this.suiteHasData(suite)) return;
+          const idx = this.activeSuites.indexOf(suite);
+          if (idx >= 0) {
+            // Don't allow deselecting the last active suite.
+            if (this.activeSuites.length > 1) {
+              this.activeSuites = this.activeSuites.filter(s => s !== suite);
+            }
+          } else {
+            this.activeSuites = [...this.activeSuites, suite].sort((a, b) => SUITE_NAMES.indexOf(a) - SUITE_NAMES.indexOf(b));
+          }
+        },
+
+        toggleTheme() {
+          this.isDark = !this.isDark;
+          document.documentElement.setAttribute('data-theme', this.isDark ? 'dark' : 'light');
+          localStorage.setItem('ocx-bench-theme', this.isDark ? 'dark' : 'light');
+        },
+
+        barPct(val, maxVal) {
+          if (!maxVal || maxVal <= 0) return 0;
+          return Math.max(1, (val / maxVal) * 100);
+        },
+
+        // Returns style object for ±σ whisker overlay on bar.
+        whiskerStyle(mean, stddev, maxVal) {
+          if (!maxVal || maxVal <= 0 || !stddev) return {};
+          const leftPct  = Math.max(0, ((mean - stddev) / maxVal) * 100);
+          const rightPct = Math.min(100, ((mean + stddev) / maxVal) * 100);
+          return { left: leftPct + '%', width: (rightPct - leftPct) + '%' };
+        },
+
+        fmtSeconds(s) {
+          if (s === null || s === undefined) return '—';
+          if (s >= 10) return s.toFixed(2) + 's';
+          if (s >= 1)  return s.toFixed(3) + 's';
+          return (s * 1000).toFixed(1) + 'ms';
+        },
+
+        fmtRatio(r) {
+          if (r === null || r === undefined) return '—';
+          return r.toFixed(3);
+        },
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>

@@ -108,6 +108,8 @@ def build_baseline_command(
     proxy_host: str,
     repo: str,
     tag: str,
+    *,
+    scratch_dir: str | None = None,
 ) -> BaselineCommand:
     """Build the curl+tar floor command for a package.
 
@@ -123,9 +125,16 @@ def build_baseline_command(
         floor measurement is subject to the same network conditions as the
         ocx install benchmark.
     repo:
-        OCI repository name (e.g. "bench-pkg-50mb").
+        OCI repository name (e.g. "bench-pkg-10mb").
     tag:
         OCI tag (e.g. "1.0.0").
+    scratch_dir:
+        Root directory for the curl extract temp dir.  Must be disk-backed
+        (NOT /tmp which is tmpfs/RAM on WSL2).  Defaults to
+        ``<bench_scratch_dir>/curl-extract`` when None — callers should pass
+        ``str(BENCH_SCRATCH_DIR / "curl-extract")`` from harness.py.
+        The fallback default is ``/tmp/bench-baseline-tmp`` for backward
+        compatibility with ``__main__`` standalone usage only.
 
     Returns
     -------
@@ -147,8 +156,11 @@ def build_baseline_command(
 
     # prepare_cmd: wipe and recreate a temp directory.
     # The bench_cmd uses $tmpdir as a shell variable populated by prepare_cmd.
-    prepare_cmd = "rm -rf /tmp/bench-baseline-tmp && mkdir -p /tmp/bench-baseline-tmp"
-    bench_cmd = f"curl -sS {download_url} | tar -xJ -C /tmp/bench-baseline-tmp"
+    # IMPORTANT: use the caller-supplied scratch_dir (disk-backed) — never /tmp
+    # (tmpfs/RAM-backed on WSL2 and many Linux systems) to avoid OOM.
+    extract_dir = scratch_dir if scratch_dir is not None else "/tmp/bench-baseline-tmp"
+    prepare_cmd = f"rm -rf {extract_dir} && mkdir -p {extract_dir}"
+    bench_cmd = f"curl -sS {download_url} | tar -xJ -C {extract_dir}"
 
     return BaselineCommand(
         download_url=download_url,
