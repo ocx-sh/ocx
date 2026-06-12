@@ -478,7 +478,12 @@ async fn process_directory(
             // Single non-directory entry.
             match kind {
                 EntryKind::File { size } => {
-                    crate::hardlink::create(src_path, &dest_path)?;
+                    // `dest_dir` is always pre-created: subdirectories are
+                    // created in the Dir branch below (or by the pre-condition
+                    // setup for the root `dest_content` dir). Skip the
+                    // `create_dir_all` inside `hardlink::create` to avoid one
+                    // redundant no-op syscall per file.
+                    crate::hardlink::create_in_existing_parent(src_path, &dest_path)?;
                     stats.files_hardlinked += 1;
                     stats.bytes_hardlinked += size;
                 }

@@ -31,6 +31,29 @@ pub fn create(source: impl AsRef<std::path::Path>, link: impl AsRef<std::path::P
     Ok(())
 }
 
+/// Creates a new hardlink at `link` assuming the parent directory already exists.
+///
+/// Skips the `create_dir_all` call that [`create`] performs. Callers MUST
+/// guarantee that `link.parent()` exists — the assembly walker pre-creates all
+/// destination directories before placing files, so this invariant always holds
+/// for that code path.
+///
+/// Using this instead of [`create`] eliminates the per-file no-op
+/// `create_dir_all` syscall that would otherwise be issued for every hardlinked
+/// entry in an already-assembled directory tree.
+///
+/// Fails if `link` already exists, or with `io::ErrorKind::CrossesDevices` for
+/// cross-volume links — same contract as [`create`].
+pub(crate) fn create_in_existing_parent(
+    source: impl AsRef<std::path::Path>,
+    link: impl AsRef<std::path::Path>,
+) -> Result<()> {
+    let source = source.as_ref();
+    let link = link.as_ref();
+    std::fs::hard_link(source, link).map_err(|error| Error::InternalFile(link.to_path_buf(), error))?;
+    Ok(())
+}
+
 /// Creates or replaces a hardlink at `link` referencing `source`.
 ///
 /// If `link` already exists (file or link), it is removed first. Then the

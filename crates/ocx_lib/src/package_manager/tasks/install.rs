@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use tokio::task::JoinSet;
+
 use crate::{
     oci,
     package::install_info::InstallInfo,
@@ -44,8 +46,14 @@ impl PackageManager {
     ///
     /// Phase 1: [`pull_all`](PackageManager::pull_all) downloads all packages
     /// and their transitive deps with a shared singleflight group.
-    /// Phase 2: Install symlinks are created sequentially (cheap I/O, no
-    /// contention benefit from parallelism).
+    /// Phase 2: Install symlinks are created in parallel via a [`JoinSet`].
+    /// Candidate symlinks land at distinct per-tag paths
+    /// (`candidates/{tag}`), so concurrent writes never collide on the same
+    /// file (same-tag duplication is prevented upstream by pull singleflight).
+    /// Only the floating `current` symlink is contended; that write is guarded
+    /// by the per-repo `.select.lock` inside
+    /// [`super::common::wire_selection`]. Results are collected in completion
+    /// order and all errors are gathered before returning.
     pub async fn install_all(
         &self,
         packages: Vec<oci::Identifier>,
@@ -57,14 +65,37 @@ impl PackageManager {
         // Phase 1: Pull all packages with shared singleflight group.
         let infos = self.pull_all(&packages, platforms, concurrency).await?;
 
-        // Phase 2: Create symlinks sequentially.
+        // Phase 2: Create symlinks in parallel.
         if candidate || select {
-            for (pkg, info) in packages.iter().zip(infos.iter()) {
-                create_install_symlinks(self, pkg, info, candidate, select)
-                    .await
-                    .map_err(|kind| {
-                        package_manager::error::Error::InstallFailed(vec![PackageError::new(pkg.clone(), kind)])
-                    })?;
+            let mut tasks: JoinSet<(usize, Result<(), PackageErrorKind>)> = JoinSet::new();
+
+            for (index, (pkg, info)) in packages.iter().zip(infos.iter()).enumerate() {
+                let mgr = self.clone();
+                let pkg = pkg.clone();
+                let info = info.clone();
+                tasks.spawn(async move {
+                    let result = create_install_symlinks(&mgr, &pkg, &info, candidate, select).await;
+                    (index, result)
+                });
+            }
+
+            let mut errors: Vec<PackageError> = Vec::new();
+            while let Some(join_result) = tasks.join_next().await {
+                match join_result {
+                    Ok((index, Err(kind))) => {
+                        errors.push(PackageError::new(packages[index].clone(), kind));
+                    }
+                    Ok((_, Ok(()))) => {}
+                    Err(panic) => {
+                        // A task panicked — abort remaining and propagate.
+                        tasks.abort_all();
+                        std::panic::resume_unwind(panic.into_panic());
+                    }
+                }
+            }
+
+            if !errors.is_empty() {
+                return Err(package_manager::error::Error::InstallFailed(errors));
             }
         }
 

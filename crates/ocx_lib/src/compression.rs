@@ -242,8 +242,20 @@ pub async fn write_file(
     Ok(writer)
 }
 
+/// Buffered-read capacity used by [`read_file`] to coalesce small reads from
+/// the decompressor into fewer filesystem syscalls.
+///
+/// 256 KiB matches the typical XZ block read-ahead size and keeps I/O
+/// syscall count low without increasing working-set memory significantly.
+const READ_FILE_BUF_CAPACITY: usize = 256 * 1024;
+
 /// Opens a reader for the given file.
 /// If the algorithm is not specified, it will be tried to infer it from the file extension.
+///
+/// The compressed-format paths (Lzma, Gzip) wrap the underlying file in a
+/// [`std::io::BufReader`] with a 256 KiB buffer before handing it to the
+/// decoder. This coalesces the many small reads that decompressors issue into
+/// larger filesystem operations, reducing syscall count on large blobs.
 pub async fn read_file(
     file: impl AsRef<std::path::Path>,
     algorithm: Option<CompressionAlgorithm>,
@@ -259,14 +271,16 @@ pub async fn read_file(
                 path: file.to_path_buf(),
                 source: e,
             })?;
-            Ok(Box::new(lzma_rust2::XzReader::new(handle, false)))
+            let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
+            Ok(Box::new(lzma_rust2::XzReader::new(buffered, false)))
         }
         CompressionAlgorithm::Gzip => {
             let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
                 path: file.to_path_buf(),
                 source: e,
             })?;
-            Ok(Box::new(flate2::read::GzDecoder::new(handle)))
+            let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
+            Ok(Box::new(flate2::read::GzDecoder::new(buffered)))
         }
         CompressionAlgorithm::None => {
             let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
