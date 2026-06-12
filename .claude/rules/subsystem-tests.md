@@ -137,6 +137,29 @@ A behaviour assertion belongs in **one** harness, not both. If a pytest case can
 - **Self-contained:** resolves the binary from `$OCX_ACTIVATION_BINARY` / `$OCX_COMMAND` / `test/bin/ocx`, uses `shutil.which` to **skip-if-absent**, so a host `uv run pytest` stays green while the container runs the full matrix. It needs a clean child env (no `_OCX_ENV_LOADED` / `OCX_*` leakage) or env.sh's double-source guard short-circuits the prepend.
 - **Known gaps (xfail/skip, tracked separately):** nushell `source (expr)` is rejected at parse time (autoload limitation); the elvish "empty global toolchain" `slurp | eval` arity error is an orthogonal `self activate` template issue.
 
+## Benchmark Harness {#bench-harness}
+
+`test/bench/` is a standalone performance harness, separate from the pytest acceptance
+suite. It is not pytest-collected for normal runs.
+
+| File | Role |
+|------|------|
+| `harness.py` | Entry point; owns session lifecycle (toxiproxy proxy, reachability, teardown) |
+| `scenarios.py` | 21-row scenario matrix v3 + `SCALING_GROUP_ANCHORS` + `SUITE_BUDGET_SECONDS` |
+| `baseline.py` | curl+tar floor command builder |
+| `compare.py` | Pure comparison function + `__main__` exit-code handler |
+| `report.py` | Pure `generate_report()` + `__main__` file-IO wrapper |
+| `conftest.py` | Smoke-validation fixtures only (no Docker required) |
+| `dashboard/template.html` | Vue 3 single-file app template for generated HTML report |
+| `dashboard/vendor/vue.global.prod.js` | Vue 3.5.x global prod build (inlined into output) |
+| `test/tests/test_bench_smoke.py` | pytest-collected smoke tests for harness internals |
+
+Task targets: `task test:bench:setup`, `task test:bench`, `task test:bench:baseline`,
+`task test:bench:teardown`, `task test:bench:quick`, `task test:bench:large`,
+`task test:bench:scenario`, `task test:bench:report`. The `bench` Docker Compose
+profile is isolated — `task test` never starts toxiproxy. See `test/bench/README.md`
+for full usage.
+
 ## Quality Gate
 
 During review-fix loops, run `task test:parallel` — not full `task verify`. Acceptance tests only; no Rust rebuild needed with `--no-build`.

@@ -16,26 +16,19 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 
 | Path | Purpose |
 |------|---------|
-| `oci.rs` | Root module; re-exports public types |
-| `oci/index.rs` | Public `Index` wrapper; `ChainMode` enum; `SelectResult` enum; `fetch_candidates()`, `select()` |
+| `oci/index.rs` | Public `Index` wrapper; `ChainMode`; `SelectResult`; `fetch_candidates()`, `select()` |
 | `oci/index/index_impl.rs` | Private `IndexImpl` async trait (4 core methods) |
 | `oci/index/chained_index.rs` | `ChainedIndex`: cache + ordered sources + `ChainMode` routing |
-| `oci/index/local_index.rs` | `LocalIndex`: file-backed snapshot; high-level entry points `refresh_tags`, `write_chain_and_commit_tag` |
-| `oci/index/local_index/cache.rs` | In-memory shared cache (tags + manifests) |
-| `oci/index/local_index/tag_manager.rs` | Tag read/write helpers used by `LocalIndex` |
+| `oci/index/local_index.rs` | `LocalIndex`: file-backed snapshot; `refresh_tags`, `persist_manifest_chain` |
 | `oci/index/remote_index.rs` | `RemoteIndex`: wraps `Client`, in-memory cache only |
-| `oci/index/remote_index/cache.rs` | In-memory shared cache (repositories, tags, digests) |
-| `oci/index/snapshot.rs` | `Snapshot` struct: tag → [(digest, platform)] (orphan, not yet wired as IndexImpl) |
-| `oci/identifier.rs` | `Identifier` struct: parsed OCI reference with validation |
+| `oci/identifier.rs` | `Identifier`: parsed OCI reference with validation |
 | `oci/digest.rs` | `Digest` enum: Sha256, Sha384, Sha512 |
-| `oci/platform.rs` | `Platform` struct: os/arch matching, `any()` for platform-agnostic packages |
+| `oci/platform.rs` | `Platform`: os/arch matching, `any()` for platform-agnostic packages |
 | `oci/client.rs` | `Client`: registry operations (list, fetch, push, pull) |
-| `oci/client/builder.rs` | `ClientBuilder`: configures transport, auth, chunk sizes |
 | `oci/client/transport.rs` | `OciTransport` async trait (abstract HTTP transport) |
 | `oci/client/native_transport.rs` | Native transport using `oci_client` library |
-| `oci/client/test_transport.rs` | Mock transport for unit tests |
-| `oci/manifest.rs` | `has_platform()` utility |
-| `oci/annotations.rs` | OCI annotation keys + OCX-specific `KEYWORDS` |
+| `oci/client/hashing_reader.rs` | `HashingAsyncReader`: digest tee over sha256/sha384/sha512 |
+| `oci/client/progress_reader.rs` | `ProgressReader`: cumulative download progress callback |
 
 ## Key Types
 
@@ -133,16 +126,6 @@ File-backed snapshot of registry metadata. Three public entry points, each narro
 - `persist_manifest_chain(source, identifier)` — content-addressed write of the manifest chain (image index + per-platform manifests). Returns the head digest. Used by both tag- and digest-addressed pulls.
 - `commit_tag(identifier, digest)` — `pub(super)`. The single tag-pointer writer outside `refresh_tags`. Visibility narrowed so `ChainedIndex::fetch_and_persist_chain` is the sole caller; pinned-id pulls (`tag+digest`) skip it because `ocx.lock` is canonical.
 
-### LocalIndex vs RemoteIndex
-
-| Aspect | LocalIndex | RemoteIndex |
-|--------|-----------|-------------|
-| Storage | Disk JSON + in-memory cache | In-memory cache only |
-| Population | Via `ChainedIndex` write-through | Lazy on access |
-| Manifest cache | Yes (disk + memory) | No (re-fetches each time) |
-| Offline support | Yes | No |
-| Clone behavior | Shares in-memory cache | Shares in-memory cache |
-
 **Write-through semantics** (via `ChainedIndex`):
 - Tagged identifier (`cmake:3.28`): fetches only that tag; preserves other tags locally
 - Bare identifier (`cmake`): fetches all tags; does not remove local-only tags
@@ -167,11 +150,46 @@ File-backed snapshot of registry metadata. Three public entry points, each narro
 3. **Digest overrides tag** — when identifier has both, `fetch_manifest()` uses digest direct.
 4. **Auth at Client level** — index impls don't handle auth; `Client::ensure_auth()` called before operations.
 
-## Gotchas
+## Pull Path (streaming single-pass pipeline) {#pull-path}
+
+`Client::pull_layer` assembles a single-pass pipeline per layer:
+
+```
+transport.pull_blob_streaming → .take(layer.size) → HashingAsyncReader(algo)
+  → ProgressReader → XzDecoder/GzDecoder → SyncIoBridge → tar::Archive::unpack()
+```
+
+After stream end, `HashingAsyncReader::finalize()` compares the computed digest against
+the descriptor digest **before** returning any extraction error. Wrong bytes (CWE-345)
+cause a tar format error, but the digest mismatch is surfaced first (`DigestMismatch`,
+not `Internal`) — retrying usually heals transient corruption.
+
+`NativeTransport::pull_blob_streaming` calls the fork's public `pull_blob_stream`, which
+wraps the response in `VerifyingStream` (mismatch → `io::Error(DigestError::VerificationError)`
+at stream end). `HashingAsyncReader` is canonical and covers all paths including
+`StubTransport`; `VerifyingStream` is secondary.
+
+**Decompression-bomb caps (CWE-400):**
+
+| Cap | Limit | Applied to |
+|----|-------|-----------|
+| Compressed | `layer.size` bytes via `.take()` | Raw stream, before `HashingAsyncReader` |
+| Decompressed | `max(1 GiB, 100 × layer.size)` | `SyncIoBridge` output inside `spawn_blocking` |
+
+Exceeding either cap terminates the stream; the digest check fires as usual.
+
+No blob file is written to disk during pull — there is no `DropFile` guard to drop.
+
+**`SyncIoBridge` occupancy:** `spawn_blocking` thread is held for the full
+download + extract duration (previously extract only). At 10 Mbps × 200 MB ≈ 160 s.
+Tokio blocking pool cap is 512. Deferred: add semaphore if install parallelism grows
+unbounded. Note: `SyncIoBridge` uses `Handle::block_on` per read (not `block_in_place`);
+creating it inside the closure is idiomatic (tokio issue #6795).
+
+## Gotchas {#gotchas}
 
 - **OCI tags mutable.** Never assume tag "frozen" or "pinned." Only digests immutable.
 - **Cache coherence issue**: Some commands call `context.remote_client()` directly instead of going through `default_index`. Bypasses cache, produces inconsistent results. All index ops should route through `default_index`.
-- **`oci-client` flush audit**: `pull_blob` missing `out.flush().await?` caused truncated files. Fixed in `pull_blob`, but audit other `AsyncWrite` methods.
 - **Submodule at `external/rust-oci-client/`** patched fork. Changes need upstream PRs. Only format new code (upstream uses 100-char rustfmt).
 - **When unsure about current `oci-client` API**, query Context7 MCP (`mcp__context7__resolve-library-id` → `mcp__context7__get-library-docs`) before guessing. Upstream crate evolves independently of patched fork; training-data knowledge of API shape decays fast.
 
