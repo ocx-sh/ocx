@@ -153,6 +153,33 @@ impl Archive {
     }
 }
 
+/// Extracts a tar archive from a sync reader to `output`, returning the reader
+/// after extraction.
+///
+/// This is the streaming-pipeline entry point for [`crate::oci::client::Client::pull_layer`]:
+/// the tar extractor is driven from inside a `spawn_blocking` closure that holds the
+/// [`tokio_util::io::SyncIoBridge`] over the async decompressor. The function applies
+/// the same path-safety rules (escape check, strip_components) as
+/// [`Archive::extract_with_options`].
+///
+/// Returning the reader allows the caller to recover state accumulated during the
+/// read (e.g. a digest computed by a hashing wrapper). On error the reader may be
+/// partially consumed.
+///
+/// # Why a separate function
+///
+/// [`Archive::extract_with_options`] accepts a file path and opens its own
+/// `spawn_blocking` internally, which cannot be nested inside the caller's
+/// `spawn_blocking`. This function accepts an already-open sync reader so the caller
+/// manages the blocking boundary.
+pub(crate) fn extract_tar_from_reader<R: std::io::Read>(
+    reader: R,
+    output: &Path,
+    strip_components: usize,
+) -> (crate::Result<()>, R) {
+    tar::extract_returning_reader(reader, output, strip_components)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

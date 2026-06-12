@@ -255,6 +255,32 @@ impl OciTransport for NativeTransport {
         }
     }
 
+    async fn pull_blob_streaming(
+        &self,
+        image: &oci::native::Reference,
+        digest: &oci::Digest,
+    ) -> Result<Box<dyn tokio::io::AsyncRead + Send + Unpin + 'static>> {
+        let digest_str = digest.to_string();
+        log::debug!("Streaming blob {} for image {}", digest_str, image);
+
+        // Call the fork's public `pull_blob_stream`, which wraps the response
+        // in a `VerifyingStream` that verifies the digest at stream end.
+        // Digest mismatch surfaces as `io::Error::other(DigestError::VerificationError)`
+        // at the point where the stream yields `None`.
+        let sized_stream = self
+            .client
+            .pull_blob_stream(image, digest_str.as_str())
+            .await
+            .map_err(registry_error)?;
+
+        // Adapt `SizedStream` (a `BoxStream<Result<Bytes, io::Error>>`) to
+        // `AsyncRead` using `tokio_util::io::StreamReader`. The map_err is a
+        // no-op here (both sides are `io::Error`) but makes the type explicit.
+        let stream_reader = tokio_util::io::StreamReader::new(sized_stream.stream);
+
+        Ok(Box::new(stream_reader))
+    }
+
     async fn push_manifest(&self, image: &oci::native::Reference, manifest: &oci::Manifest) -> Result<String> {
         self.client.push_manifest(image, manifest).await.map_err(registry_error)
     }
@@ -287,6 +313,77 @@ impl OciTransport for NativeTransport {
     fn box_clone(&self) -> Box<dyn OciTransport> {
         Box::new(self.clone())
     }
+}
+
+/// Checks whether a borrowed `io::Error` carries a fork `DigestError::VerificationError`
+/// and, if so, returns the corresponding `ClientError::DigestMismatch`.
+///
+/// This is the shared detection core. Both the owned-error path
+/// ([`map_fork_io_error_to_client_error`]) and the chain-walk path in
+/// `pull_layer` use this function to avoid duplicating the downcast logic.
+///
+/// Returns `None` if the error is not a fork digest error; returns
+/// `Some(ClientError::DigestMismatch {...})` on detection.
+/// Checks whether a borrowed `io::Error` carries a fork `DigestError::VerificationError`
+/// and, if so, returns the corresponding `ClientError::DigestMismatch`.
+///
+/// This is the shared detection core. Both the owned-error path
+/// ([`map_fork_io_error_to_client_error`]) and the chain-walk path in
+/// `pull_layer` use this function to avoid duplicating the downcast logic.
+///
+/// Returns `None` if the error is not a typed fork digest error; the caller
+/// maps `None` to `Io`. **No string-fallback** — any `io::Error` whose inner
+/// source is not a typed `DigestError::VerificationError` maps to `Io`, not
+/// `DigestMismatch`. A string-fallback would be CWE-20 (spoofable: any
+/// io::Error whose message happens to contain "digest" could produce a spurious
+/// `DigestMismatch{expected: ""}` that would be logged and reported to users
+/// as a security event when none occurred).
+pub(super) fn check_fork_io_error(error: &std::io::Error) -> Option<ClientError> {
+    // The fork produces io::Error::other(DigestError::VerificationError { expected, actual }).
+    // We detect this by downcasting the inner error stored in the io::Error.
+    // `io::Error::get_ref()` returns `Option<&(dyn Error + Send + Sync + 'static)>`.
+    if let Some(inner) = error.get_ref()
+        && let Some(oci_client::errors::DigestError::VerificationError { expected, actual }) =
+            inner.downcast_ref::<oci_client::errors::DigestError>()
+    {
+        return Some(ClientError::DigestMismatch {
+            expected: expected.clone(),
+            actual: actual.clone(),
+        });
+    }
+    None
+}
+
+/// Maps an `io::Error` that originates from the fork's `VerifyingStream`
+/// (which surfaces digest mismatch as `io::Error { kind: Other, source: DigestError }`)
+/// to the typed [`ClientError::DigestMismatch`].
+///
+/// Any other `io::Error` is mapped to `Err(ClientError::Io)` with no path context
+/// (the caller adds path context when needed). A non-digest io::Error results in
+/// `Err(ClientError::Io { path: PathBuf::new(), source: error })`.
+///
+/// # Design
+///
+/// The fork's `VerifyingStream` (in `external/rust-oci-client/src/blob.rs`) wraps
+/// the response stream and, at stream end, compares the accumulated digest against
+/// the expected one. On mismatch it yields:
+///   `io::Error::new(io::ErrorKind::Other, DigestError::VerificationError { ... })`
+///
+/// OCX must convert this to `ClientError::DigestMismatch` (not `ClientError::Io`) so
+/// the error taxonomy holds regardless of whether the fork's verifier or
+/// OCX's `HashingAsyncReader` fires first. See spec §D2 "two verifiers, one typed error".
+///
+/// Used only in unit tests that validate the mapping contract. Production code uses
+/// [`check_fork_io_error`] (the borrowed-ref extraction core) directly.
+#[cfg(test)]
+pub(super) fn map_fork_io_error_to_client_error(error: std::io::Error) -> super::transport::Result<()> {
+    if let Some(client_err) = check_fork_io_error(&error) {
+        return Err(client_err);
+    }
+    Err(ClientError::Io {
+        path: std::path::PathBuf::new(),
+        source: error,
+    })
 }
 
 impl NativeTransport {

@@ -65,11 +65,37 @@ Fork API decision: `NativeTransport::pull_blob_streaming` calls the fork's **pub
 
 Two verifiers, one typed error: the fork's `VerifyingStream` (secondary, io::Error) + OCX's `HashingAsyncReader` (canonical, typed). `Client::pull_layer` maps a stream-end `io::Error` whose source is the fork's `DigestError` to `ClientError::DigestMismatch` (never `ClientError::Io`), so the error taxonomy holds regardless of which verifier fires first. `HashingAsyncReader` is retained even though the fork verifies, because: (a) `StubTransport`'s default-impl path has no `VerifyingStream`, (b) the mirror-path invariant (T-A4 replacement) needs an OCX-side verifier independent of transport, (c) SHA-NI makes the second hash ~free.
 
+**HashingAsyncReader algorithm dispatch (amendment, review-fix round 1):** The constructor accepts the expected `oci::Algorithm` (sha256 / sha384 / sha512) from the layer descriptor, dispatching over `sha2::Sha256`, `sha2::Sha384`, or `sha2::Sha512` internally. `finalize()` returns a `Digest` in the same variant. This preserves the CWE-345 guarantee for all three OCI-spec hash algorithms — the original sha256-only implementation was a regression for sha512 descriptors introduced by deleting `verify_blob_digest` (which dispatched by algorithm). The `oci::Algorithm` enum is the authoritative single source of truth for algorithm-to-hasher mapping; `HashingAsyncReader` follows the same pattern as `Algorithm::hash_file`.
+
+**pull_layer digest-check ordering (amendment, review-fix round 1):** `pull_layer` performs the canonical HashingAsyncReader digest check BEFORE returning extraction errors. Rationale: wrong bytes (CWE-345 registry content substitution) cause extraction to fail with a format error (e.g., "Invalid gzip header") because the wrong bytes cannot be decompressed. Surfacing DigestMismatch first is more informative and correctly attributes the failure to the registry. HashingAsyncReader accumulates even partial reads, so the hash over partial bytes will not match the expected digest, triggering DigestMismatch. This is deliberate — `pull_layer` ordering governs; finalize-after-error used deliberately for DigestMismatch-first reporting.
+
+**Two-sided stream bounding for decompression-bomb prevention (amendment, review-fix round 2):** The old two-pass pipeline verified the compressed digest before decompression, so tampered bytes never reached the decoder. The streaming pipeline decompresses unverified bytes, creating two attack surfaces:
+
+(a) **Compressed-side cap:** The raw stream is capped at exactly `layer.size` bytes via `tokio::io::AsyncReadExt::take(layer.size)` applied to `raw_stream` before `HashingAsyncReader`. `layer.size` comes from the digest-verified OCI manifest, so it is a trusted upper bound. Behavior: reading stops at `layer.size` bytes; the final digest check detects mismatch from truncation or wrong bytes. Attempting to read past `layer.size` is silently stopped by `take` — the stream terminates, extraction may fail or produce a partial result, and the digest check fires as usual. This prevents an unbounded compressed stream from occupying a spawn_blocking thread indefinitely (CWE-400 compressed-side vector).
+
+(b) **Decompressed-side cap:** The `SyncIoBridge<Decoder<...>>` passed to tar extraction is wrapped in `std::io::Read::take(DECOMPRESSED_SIZE_CAP)` inside `spawn_blocking`. `DECOMPRESSED_SIZE_CAP = max(1 GiB, 100 × layer.size)` — generous enough for legitimate XZ compression ratios (2–10×; OCX payloads are tool binaries, not compressible text) but stops a crafted stream from expanding without bound. Exceeding the cap causes tar extraction to fail (the `take` adapter returns EOF, so tar sees a truncated archive), which propagates as `ClientError::Internal`. The error taxonomy records this under `Internal` (same as tar extraction errors). This prevents a crafted compressed stream with a high expansion ratio from exhausting disk or memory before the digest check fires (CWE-400 decompressed-side vector).
+
+**Constants with rationale:**
+```rust
+/// Maximum number of bytes that may expand from a single layer's decompressed content.
+/// `max(1 GiB, 100 × layer.size)`: 100× covers all realistic XZ compression ratios
+/// (tool binaries: 2–10×; no legitimate payload exceeds this). The minimum of 1 GiB
+/// ensures the cap is never unreasonably tight for very small declared layer sizes.
+/// Exceeding this cap causes tar to see a truncated archive → ClientError::Internal.
+/// (CWE-400: decompression-bomb prevention.)
+const DECOMPRESSED_CAP_MULTIPLIER: u64 = 100;
+const DECOMPRESSED_CAP_MINIMUM: u64 = 1 << 30; // 1 GiB
+```
+
+**check_fork_io_error string-fallback removal (amendment, review-fix round 2):** The defensive string-fallback (`msg.contains("Invalid digest") || msg.contains("digest verification error")`) in `check_fork_io_error` is CWE-20 (spoofable by any io::Error whose message happens to contain these substrings, incorrectly producing `DigestMismatch{expected: ""}` for benign errors). Removed entirely. Only the typed `oci_client::errors::DigestError::VerificationError` downcast path is retained. Any io::Error that does not carry a typed `DigestError` as its inner source maps to `Io`, not `DigestMismatch`. Tests updated: the string-only io::Error case now asserts `Io` (not `DigestMismatch`).
+
+**SyncIoBridge occupancy note correction (amendment, review-fix round 2):** Prior comment incorrectly stated SyncIoBridge uses `block_in_place`. Correct: per tokio-util 0.7.18 `sync_bridge.rs:293`, `SyncIoBridge::new()` captures `Handle::current()` and uses `Handle::block_on` per read (not `block_in_place`). Creating it inside `spawn_blocking` is correct and conventional but not required by the `block_in_place` precondition. The reason to create it inside the closure is clarity — it makes the sync-side boundary explicit at the point of construction.
+
 ```
 Client::pull_layer:
   transport.pull_blob_streaming(image, digest)   → impl AsyncRead (raw compressed bytes;
   |                                                 NativeTransport: fork pull_blob_stream + StreamReader)
-  ├── HashingAsyncReader(sha256)                 → tees compressed bytes into digester
+  ├── HashingAsyncReader(algorithm)              → tees compressed bytes into digester (dispatches sha256/sha384/sha512)
   ├── ProgressReader                             → on_progress(cumulative bytes_read)
   ├── XzDecoder / GzDecoder (async-compression)  → media-type dispatch in pull_layer
   ├── SyncIoBridge (tokio_util::io)              → AsyncRead → sync Read
@@ -330,17 +356,17 @@ bench:
 
 **Contract:**
 ```rust
-/// An AsyncRead wrapper that computes a running SHA-256 digest over all bytes read.
-pub(crate) struct HashingAsyncReader<R> {
+/// AsyncRead wrapper that computes a running digest (dispatched by algorithm) over all bytes read.
+pub(super) struct HashingAsyncReader<R> {
     inner: R,
-    digester: sha2::Sha256,
+    state: DigestState,  // enum over sha2::Sha256 / Sha384 / Sha512
     bytes_read: u64,
 }
 
 impl<R: AsyncRead + Unpin> HashingAsyncReader<R> {
-    pub fn new(inner: R) -> Self;
-    /// Returns the digest over all bytes successfully read so far, plus byte count.
-    /// Consumes self.
+    /// algorithm must match the OCI descriptor's digest algorithm.
+    pub fn new(inner: R, algorithm: oci::Algorithm) -> Self;
+    /// Returns (digest_in_declared_algorithm_variant, bytes_read). Consumes self.
     #[must_use]
     pub fn finalize(self) -> (oci::Digest, u64);
 }
@@ -348,7 +374,7 @@ impl<R: AsyncRead + Unpin> HashingAsyncReader<R> {
 impl<R: AsyncRead + Unpin> AsyncRead for HashingAsyncReader<R>;
 ```
 
-**Semantics (testable):** `finalize()` is callable at any point and deterministically returns the digest of exactly the bytes that successful reads returned. The *caller protocol* in `pull_layer` is: on any mid-stream I/O error, abort the pipeline and propagate the error — never call `finalize()` for verification after an error (a partial digest would simply mismatch, which is also safe, but the I/O error is the primary failure). Only after EOF is the finalize digest compared against the descriptor digest.
+**Semantics (testable):** `finalize()` is callable at any point and deterministically returns the digest of exactly the bytes that successful reads returned. The `pull_layer` ordering governs: digest check fires BEFORE extraction error check, even after a partial read that caused extraction failure, to surface `DigestMismatch` over a tar format error when the registry served wrong bytes (CWE-345; finalize-after-error used deliberately for DigestMismatch-first reporting).
 
 **Error behavior:** I/O errors from inner `AsyncRead` are propagated unchanged. Bytes from errored reads are never fed to the digester (only successfully-filled buffer slices update it).
 
@@ -360,15 +386,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for HashingAsyncReader<R>;
 
 **Contract:**
 ```rust
-pub(crate) struct ProgressReader<R> {
+pub(super) struct ProgressReader<R> {
     inner: R,
     on_progress: ProgressFn,
     bytes_read: u64,
-    total: u64,
 }
 
 impl<R: AsyncRead + Unpin> ProgressReader<R> {
-    pub fn new(inner: R, total: u64, on_progress: ProgressFn) -> Self;
+    pub fn new(inner: R, on_progress: ProgressFn) -> Self;
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R>;

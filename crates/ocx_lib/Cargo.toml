@@ -63,6 +63,10 @@ zip.workspace = true
 indicatif.workspace = true
 thiserror.workspace = true
 rpassword.workspace = true
+# Async XZ/gzip decoding — streaming pull pipeline (Phase 3; see workspace Cargo.toml comment).
+async-compression.workspace = true
+# SyncIoBridge — AsyncRead → sync Read bridge at spawn_blocking boundary (Phase 3).
+tokio-util.workspace = true
 
 # Embedded Starlark engine — exact-pinned family (see root Cargo.toml comment).
 starlark.workspace = true

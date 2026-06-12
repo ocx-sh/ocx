@@ -49,14 +49,6 @@ pub fn media_type_from_path(path: impl AsRef<std::path::Path>) -> Option<&'stati
     media_type_from_filename(path.file_name()?.to_str()?)
 }
 
-pub fn media_type_file_ext(media_type: impl AsRef<str>) -> Option<&'static str> {
-    match media_type.as_ref() {
-        MEDIA_TYPE_TAR_GZ => Some("tar.gz"),
-        MEDIA_TYPE_TAR_XZ => Some("tar.xz"),
-        _ => None,
-    }
-}
-
 /// Validates that the given media type is one of the expected media types, and returns it as a String.
 /// If the media type is not one of the expected media types, returns an UnsupportedMediaType error.
 pub fn media_type_select_some<S: AsRef<str>>(

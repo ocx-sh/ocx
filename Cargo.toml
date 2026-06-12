@@ -83,6 +83,18 @@ flate2 = "1.1.9"
 tar = "0.4.46"
 lzma-rust2 = "0.16.3"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# Async XZ/gzip decoding for the streaming pull pipeline (Phase 3).
+# Requires `tokio` feature for AsyncRead-based decoders.
+# New transitive dep `liblzma` via `compression-codecs`: CVE-2025-31115 affects
+# `lzma_stream_decoder_mt` (multithreaded path only); OCX uses `XzDecoder`
+# (single-threaded), so the vulnerable code path is never reached. If `cargo
+# deny` flags the advisory, add an ignore entry to deny.toml citing this
+# rationale. Verified bundled XZ version ≥ 5.8.1 in async-compression ≥ 0.4.38.
+async-compression = { version = "0.4.42", default-features = false, features = ["tokio", "xz", "gzip"] }
+# SyncIoBridge for bridging AsyncRead → sync Read at the spawn_blocking boundary
+# in Client::pull_layer. New direct dep — confirmed absent from workspace before
+# this addition (grep 2026-06-12, 0 matches).
+tokio-util = { version = "0.7", default-features = false, features = ["io", "io-util"] }
 
 # Filesystem
 tempfile = "3.27.0"

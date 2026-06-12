@@ -134,10 +134,40 @@ fn add_dir_recursive(
     Ok(())
 }
 
+/// Extract a tar archive from `reader` to `output`, applying `strip_components`.
+///
+/// Returns an error on path-escape, I/O failure, or malformed archive.
 pub(super) fn extract(reader: impl std::io::Read, output: &std::path::Path, strip_components: usize) -> Result<()> {
+    extract_returning_reader(reader, output, strip_components).0
+}
+
+/// Like [`extract`] but returns the reader after extraction alongside the result.
+///
+/// Enables callers that wrapped the reader in a digest-accumulating or
+/// progress-tracking adapter to recover their state after the tar extractor
+/// has consumed the stream. The reader may be partially consumed on error.
+pub(super) fn extract_returning_reader<R: std::io::Read>(
+    reader: R,
+    output: &std::path::Path,
+    strip_components: usize,
+) -> (Result<()>, R) {
     let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
 
+    let result = extract_from_archive(&mut archive, output, strip_components);
+
+    // Recover the reader from the archive regardless of whether extraction
+    // succeeded or failed. This allows callers to finalize digest state.
+    let reader = archive.into_inner();
+    (result, reader)
+}
+
+/// Internal extraction loop shared by `extract` and `extract_returning_reader`.
+fn extract_from_archive<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    output: &std::path::Path,
+    strip_components: usize,
+) -> Result<()> {
     let mut count = 0u64;
     for entry in archive.entries().map_err(Error::Tar)? {
         let mut entry = entry.map_err(Error::Tar)?;
