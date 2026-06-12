@@ -134,7 +134,7 @@ ocx package push -p linux/amd64 mytool:1.2.4 sha256:<hex>.tar.gz newtool.tar.gz
 The order matters for the manifest descriptor list, but assembled content must not overlap — two layers cannot contain the same file path. Overlap is rejected at install time with a clear error.
 
 ::: info Digest verification on pull
-Every layer blob downloaded by `ocx install` or `ocx package pull` is streamed through SHA-256 on the way to disk and compared against the digest declared in the manifest before extraction. A mismatch — the registry serving different bytes for the same digest ([CWE-345](https://cwe.mitre.org/data/definitions/345.html)) — deletes the tampered file and fails the command. Zero-layer pulls are valid: a config-only package (produced by `ocx package push` with no file layers and `--metadata`) installs into an empty `content/` directory, which is the expected shape for referrer-only or description-only artifacts.
+Every layer downloaded by `ocx install` or `ocx package pull` is verified in-stream: bytes are hashed as they arrive and compared against the digest declared in the manifest before extraction completes. A mismatch — the registry serving different bytes for the same digest ([CWE-345][cwe-345]) — fails the command. Zero-layer pulls are valid: a config-only package (produced by `ocx package push` with no file layers and `--metadata`) installs into an empty `content/` directory, which is the expected shape for referrer-only or description-only artifacts.
 :::
 
 ::: warning Bring your own archives
@@ -243,6 +243,9 @@ Two symlink entries cover every use case. Both target the **package root** (`pac
 <!-- reference -->
 [metadata-ref]: ../reference/metadata.md
 [metadata-entry-points]: ../reference/metadata.md#entry-points
+
+<!-- security -->
+[cwe-345]: https://cwe.mitre.org/data/definitions/345.html
 
 <!-- internal -->
 [fs-packages]: #packages
