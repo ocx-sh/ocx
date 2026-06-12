@@ -5,7 +5,6 @@ version: '3'
 vars:
   BIN_DIR: "{{.ROOT_DIR}}/test/bin"
   OCX_BINARY: "{{.BIN_DIR}}/ocx{{exeExt}}"
-  OCX_MIRROR_BINARY: "{{.BIN_DIR}}/ocx-mirror{{exeExt}}"
   # The Windows native launcher shim. test_windows_shim.py is skipif
   # non-Windows, so on Linux/macOS legs this is a harmless check-only
   # compile (the ELF is never exercised; _find_shim_binary keeps skipping
@@ -26,10 +25,9 @@ tasks:
       # seams are loopback-only-asserted at runtime and compile-gated;
       # release builds never include them. See `crates/ocx_lib/Cargo.toml`
       # for the contract.
-      - cargo build --release -p ocx -p ocx_mirror -p ocx_shim --features ocx/__testing --locked
+      - cargo build --release -p ocx -p ocx_shim --features ocx/__testing --locked
       - mkdir -p {{.BIN_DIR}}
       - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
-      - cp {{.ROOT_DIR}}/target/release/ocx-mirror{{exeExt}} {{.OCX_MIRROR_BINARY}}
       - cp {{.ROOT_DIR}}/target/release/ocx-shim{{exeExt}} {{.OCX_SHIM_BINARY}}
     status:
       - '{{eq .SKIP_BUILD "true"}}'
@@ -43,7 +41,6 @@ tasks:
       - uv run pytest {{.CLI_ARGS | default "-v"}}
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
-      OCX_MIRROR_COMMAND: "{{.OCX_MIRROR_BINARY}}"
       # _find_shim_binary() honours OCX_SHIM_BINARY first; pointing it at the
       # copied test/bin/ocx-shim{exe} makes test_windows_shim.py a live gate
       # on windows-latest and a no-op skip elsewhere (module is skipif Win32).
@@ -129,4 +126,3 @@ tasks:
         {{.CLI_ARGS | default "-q"}}
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
-      OCX_MIRROR_COMMAND: "{{.OCX_MIRROR_BINARY}}"

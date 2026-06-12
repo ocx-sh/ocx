@@ -196,7 +196,7 @@ tasks:
       aarch64-pc-windows-msvc inside the messense/cargo-xwin Docker image.
       Mirrors the CI cross-compile (verify-deep.yml) byte-for-byte modulo
       the Docker-from-host scaffolding. Produces
-      target/xwin/<triple>/release/{ocx,ocx-mirror}.exe. Shares caches
+      target/xwin/<triple>/release/ocx.exe. Shares caches
       with check:windows under .cache/xwin/.
     cmds:
       - task: xwin-build-x86:exec
@@ -206,7 +206,7 @@ tasks:
     desc: Cross-build the x86_64 Windows MSVC release binary via Docker (cargo-xwin, cached)
     summary: |
       Single-arch slice of build:windows — produces
-      target/xwin/x86_64-pc-windows-msvc/release/{ocx,ocx-mirror}.exe only.
+      target/xwin/x86_64-pc-windows-msvc/release/ocx.exe only.
       Used by the Windows activation gate (verify:windows-activation) so the
       local verify loop does not also pay for the aarch64 cross-build.
     cmds:

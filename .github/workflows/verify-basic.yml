@@ -67,17 +67,13 @@ jobs:
         run: task rust:build
       - name: Test
         run: task rust:test:unit -- --profile ci
-      - name: Build Mirror
-        run: cargo build --release -p ocx_mirror --locked
       - name: Generate Schema
         run: task schema:generate
       - name: Upload Binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-binary
-          path: |
-            target/release/ocx
-            target/release/ocx-mirror
+          path: target/release/ocx
           compression-level: 0
           retention-days: 1
       - name: Upload Schema
@@ -120,7 +116,7 @@ jobs:
           name: ocx-binary
           path: test/bin
       - name: Prepare Binaries
-        run: chmod +x test/bin/ocx test/bin/ocx-mirror
+        run: chmod +x test/bin/ocx
       - name: Download Schema
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -132,8 +128,6 @@ jobs:
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Run Acceptance Tests
         run: task test:parallel -- --junit-xml=results/junit.xml
-        env:
-          OCX_MIRROR_COMMAND: ${{ github.workspace }}/test/bin/ocx-mirror
       - name: Publish Acceptance Test Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0

@@ -14,7 +14,7 @@ Auto-load on every Rust file edit. Provide stable architectural context — "why
 |-------|---------|---------------------|
 | `ocx_lib` | Core lib — stores, OCI, packages, manager | Depend nothing internal |
 | `ocx_cli` | Thin CLI shell — args, context, commands, reporting | Depend `ocx_lib` |
-| `ocx_mirror` | Standalone mirror tool — upstream → registry pipeline | Depend `ocx_lib` |
+| (mirror tool) | Moved to own repo [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) — vendors ocx as submodule, `ocx_lib` path dep | — |
 | `ocx_schema` | JSON schema gen (build-only) | Depend `ocx_lib` |
 
 Patched dep: `oci-client` at `external/rust-oci-client` (local git submodule).

@@ -225,7 +225,7 @@ Project-local JSONL store for recurring technical patterns (oci-client quirks, c
 7. **Dead glob patterns** — rules silently never fire after directory rename
 8. **Config drift** — embed project knowledge stale as code evolve
 9. **Category subdirectories under `.claude/skills/`** — break slash command discovery. Caught structural by `test_all_skills_at_flat_layout`.
-10. **Language rules with project-specific content** — `quality-{lang}.md` files shareable across repos. Any ref to OCX types (`PackageErrorKind`, `ReferenceManager`) or modules (`ocx_lib/`, `crates/ocx_mirror/`) belong in `arch-principles.md` or `subsystem-*.md`, not language rule. Enforced structural by `test_shareable_rules_no_ocx_leak`.
+10. **Language rules with project-specific content** — `quality-{lang}.md` files shareable across repos. Any ref to OCX types (`PackageErrorKind`, `ReferenceManager`) or modules (`ocx_lib/`, `crates/ocx_cli/`) belong in `arch-principles.md` or `subsystem-*.md`, not language rule. Enforced structural by `test_shareable_rules_no_ocx_leak`.
 11. **Catalog drift** — add, remove, rename rule in `.claude/rules/` no update `.claude/rules.md` same commit. Enforced by `test_catalog_covers_all_rules` and `test_catalog_references_resolve`.
 12. **Missing `triggers:` on user-invocable skill** — UserPromptSubmit routing hook matcher silently exclude skill, natural-language prompts never route. Enforced structural by `test_user_invocable_skills_have_triggers`.
 

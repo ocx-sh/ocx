@@ -42,9 +42,9 @@ jobs:
       registry: ocx.sh
       repo: ocx
       version_tag: ${{ needs.compute-tag.outputs.version_tag }}
-      # Prod registry today carries the default ocx variant only. Adding
-      # `mirror` here would publish ocx-mirror to ocx.sh — gate that on a
-      # separate decision when the time comes.
+      # Prod registry carries the default ocx variant only. ocx-mirror
+      # releases publish ocx.sh/ocx/mirror from its own repo:
+      # github.com/ocx-sh/ocx-mirror.
       variants: '[""]'
       targets: '["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-apple-darwin","aarch64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]'
       environment: ocx.sh

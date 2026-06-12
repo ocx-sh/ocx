@@ -1,9 +1,9 @@
 name: Deploy Dev
 
 # Manual deploy pipeline. Run via `gh workflow run "Deploy Dev"` or the Actions
-# UI. Builds all production targets (linux musl + darwin + windows) for `ocx`
-# and `ocx-mirror`, then publishes them to `dev.ocx.sh/ocx:<core>-dev_<TS>`
-# (and `mirror-<core>-dev_<TS>`).
+# UI. Builds all production targets (linux musl + darwin + windows) for `ocx`,
+# then publishes them to `dev.ocx.sh/ocx/cli:<core>-dev_<TS>`.
+# (`ocx-mirror` deploys from its own repo: github.com/ocx-sh/ocx-mirror.)
 #
 # Musl-only linux matches the prod target set in `post-release-oci-publish.yml`.
 # Cross-compile uses cargo-zigbuild on ubuntu-22.04 (linux), native build on
@@ -158,19 +158,11 @@ jobs:
         shell: bash
         run: |
           cp target/${{ matrix.target }}/release/ocx.exe ocx-${{ matrix.target }}.exe
-          cp target/${{ matrix.target }}/release/ocx-mirror.exe ocx-mirror-${{ matrix.target }}.exe
       - name: Upload ocx Binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-${{ matrix.target }}
           path: ocx-${{ matrix.target }}.exe
-          compression-level: 0
-          retention-days: 1
-      - name: Upload ocx-mirror Binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ocx-mirror-${{ matrix.target }}
-          path: ocx-mirror-${{ matrix.target }}.exe
           compression-level: 0
           retention-days: 1
 
@@ -182,7 +174,7 @@ jobs:
       registry: dev.ocx.sh
       repo: ocx
       version_tag: ${{ needs.compute-version.outputs.version_tag }}
-      variants: '["","mirror"]'
+      variants: '[""]'
       targets: '["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","x86_64-apple-darwin","aarch64-apple-darwin","x86_64-pc-windows-msvc","aarch64-pc-windows-msvc"]'
       environment: dev.ocx.sh
     secrets:

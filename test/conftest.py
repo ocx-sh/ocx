@@ -33,9 +33,9 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     ``docker compose up`` a registry no collected test needs.
 
     The mirror registry (``localhost:5001``) is started under the same
-    opt-out guard. Tests in ``test_mirror.py`` skip if the mirror registry
-    is not reachable after the compose-up so that a single-registry
-    environment does not regress.
+    opt-out guard. Tests in ``test_oci_registry_mirror.py`` skip if the
+    mirror registry is not reachable after the compose-up so that a
+    single-registry environment does not regress.
     """
     if os.environ.get("PYTEST_XDIST_WORKER") is not None:
         return
@@ -84,8 +84,8 @@ def mirror_registry() -> str:
     registry is not reachable (single-registry environment, no Docker, or
     Windows runner that sets ``OCX_TESTS_NO_REGISTRY=1``).
 
-    Tests in ``test_mirror.py`` declare this as a fixture dependency so they
-    are automatically skipped when the mirror is absent.
+    Tests in ``test_oci_registry_mirror.py`` declare this as a fixture
+    dependency so they are automatically skipped when the mirror is absent.
     """
     if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
         pytest.skip("OCX_TESTS_NO_REGISTRY=1: mirror registry not started")
@@ -96,7 +96,7 @@ def mirror_registry() -> str:
     if not registry_is_reachable(addr):
         pytest.skip(
             f"mirror registry at {addr} is not reachable; "
-            "test_mirror.py requires the docker-compose 'mirror-registry' service"
+            "test_oci_registry_mirror.py requires the docker-compose 'mirror-registry' service"
         )
     return addr
 

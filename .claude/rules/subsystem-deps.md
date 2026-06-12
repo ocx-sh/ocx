@@ -90,7 +90,7 @@ cargo deny check                # Verify licenses + advisories after update
 task verify                     # Full verification
 ```
 
-Renovate groups: `actions` (GitHub Actions) prefixes `ci(deps)`; `rust-deps` (Cargo) and `npm-deps` (website + the `setup-ocx` action) prefix `chore(deps)`. A `customManager` (regex, `github-tags` datasource) also bumps SHA-pinned actions embedded in `crates/ocx_mirror/.../templates/*.yml`, which the built-in managers cannot see.
+Renovate groups: `actions` (GitHub Actions) prefixes `ci(deps)`; `rust-deps` (Cargo) and `npm-deps` (website + the `setup-ocx` action) prefix `chore(deps)`.
 
 ## Bans + Sources Policy
 

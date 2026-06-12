@@ -35,7 +35,7 @@ Lint tooling setup (one-off): `task ocx:index-update` populates `.ocx/index/` fo
 
 ## Architecture
 
-Four crates: `crates/ocx_lib` (core), `crates/ocx_cli` (thin CLI, pkg `ocx`), `crates/ocx_mirror`, `crates/ocx_schema` (build-only JSON schema). Rust 2024, resolver v3. `oci-client` patched to `external/rust-oci-client`.
+Four crates: `crates/ocx_lib` (core), `crates/ocx_cli` (thin CLI, pkg `ocx`), `crates/ocx_schema` (build-only JSON schema), `crates/ocx_shim` (Windows launcher shim). The mirror tool lives in its own repo: [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) (vendors ocx as submodule). Rust 2024, resolver v3. `oci-client` patched to `external/rust-oci-client`.
 
 Subsystem rules auto-load on path match. Read relevant one before work on that area:
 
@@ -46,7 +46,6 @@ Subsystem rules auto-load on path match. Read relevant one before work on that a
 | Package metadata | [subsystem-package.md](./.claude/rules/subsystem-package.md) | `crates/ocx_lib/src/package/**` |
 | Package manager | [subsystem-package-manager.md](./.claude/rules/subsystem-package-manager.md) | `crates/ocx_lib/src/package_manager/**` |
 | CLI commands/API | [subsystem-cli.md](./.claude/rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
-| Mirror tool | [subsystem-mirror.md](./.claude/rules/subsystem-mirror.md) | `crates/ocx_mirror/**` |
 | Script host API | [subsystem-script.md](./.claude/rules/subsystem-script.md) | `crates/ocx_lib/src/script/**` |
 | Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
 | Website/docs | [subsystem-website.md](./.claude/rules/subsystem-website.md) | `website/**` |

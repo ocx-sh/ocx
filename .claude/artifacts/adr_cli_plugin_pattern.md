@@ -11,7 +11,7 @@
 
 ## Context
 
-OCX ships multiple binaries today (`ocx`, `ocx-mirror`) and will likely add more in adjacent operator/publisher domains (`ocx-mcp`, `ocx-sbom`, `ocx-sign`). Today `ocx-mirror` is built from `crates/ocx_mirror` but has no install path — it's a developer/CI tool reachable only via `cargo build`. From a user perspective `ocx mirror` exits with "unknown command".
+OCX ships multiple binaries today (`ocx`, `ocx-mirror`) and will likely add more in adjacent operator/publisher domains (`ocx-mcp`, `ocx-sbom`, `ocx-sign`). (Update 2026-06: `ocx-mirror` now lives in its own repo, github.com/ocx-sh/ocx-mirror, and installs as `ocx.sh/ocx/mirror` — the install-path gap below is closed by the repo split.) From a user perspective `ocx mirror` exits with "unknown command".
 
 The question: should adjacent tools be **discovered as plugins** (the `ocx` binary dispatches `ocx mirror <args>` to an `ocx-mirror` binary discovered on `$PATH`, in the cargo / git / kubectl pattern), or should each remain an independent CLI invoked directly?
 

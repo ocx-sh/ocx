@@ -32,7 +32,6 @@ For each `subsystem-*.md` rule file:
 | `subsystem-package.md` | `Metadata`, `Bundle`, `Env`, `Var`, `Modifier`, `Exporter`, `BundleBuilder`, `Version`, `Tag` |
 | `subsystem-package-manager.md` | `PackageManager`, `PackageError`, `PackageErrorKind` variants (NotFound, SelectionAmbiguous, etc.), task method names |
 | `subsystem-cli.md` | `Context`, `Command` enum variants, `Printable` trait, `Api` struct |
-| `subsystem-mirror.md` | `MirrorSpec`, `Source` variants, `MirrorTask`, `MirrorResult`, pipeline modules |
 | `subsystem-tests.md` | Fixture names in conftest.py, test file names, `OcxRunner` methods, `make_package` params |
 | `subsystem-website.md` | Vue component names/props in `theme/index.mts`, VitePress config, task commands, generated content paths |
 

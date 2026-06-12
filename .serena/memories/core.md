@@ -6,7 +6,7 @@ OCX = Rust package manager backed by OCI registries (Docker Hub/GHCR/private) fo
 
 - `crates/ocx_lib/` — core library (most logic lives here).
 - `crates/ocx_cli/` (`ocx`) — thin clap shell. Substance belongs in `ocx_lib`.
-- `crates/ocx_mirror/` — mirror tool (separate binary `ocx-mirror`).
+- Mirror tool moved to its own repo: ocx-sh/ocx-mirror (vendors ocx as submodule, `ocx_lib` path dep).
 - `crates/ocx_schema/` — JSON schema generator (build-only).
 - `crates/ocx_shim/` — Windows `.exe` launcher shim (committed blob, hermetic zig build).
 - `external/rust-oci-client/`, `external/docker_credential/` — local submodules patched via `[patch.crates-io]`; excluded from workspace.

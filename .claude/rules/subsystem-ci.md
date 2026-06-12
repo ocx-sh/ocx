@@ -80,7 +80,7 @@ Build binary **once** in smoke job, upload with `compression-level: 0` and `rete
 ### 5. Security
 
 - **SHA-pin every action** — `uses: owner/action@<full-sha>  # vX.Y.Z`. Includes first-party actions (`ocx-sh/setup-ocx`): no floating-major carve-out. Exception: `release.yml` is cargo-dist-generated and floats by design (ignored by the bumper).
-- **Keep pins fresh automatically** — dependency updates run via **Renovate** (`renovate.json`, replaces Dependabot). Action pins embedded in workflow *templates* outside `.github/` (e.g. `crates/ocx_mirror/.../templates/*.yml`) are invisible to the built-in managers; a Renovate `customManager` (regex, `github-tags` datasource) keeps their SHA + `# vX` comment in sync.
+- **Keep pins fresh automatically** — dependency updates run via **Renovate** (`renovate.json`, replaces Dependabot). (The ocx-mirror pipeline templates and their customManager moved to the ocx-sh/ocx-mirror repo.)
 - **Minimal permissions** — declare at workflow level, elevate per-job
 - **No secrets in `run:` steps** — use `env:` intermediary to block script injection
 - **OIDC for cloud auth** — not static credentials

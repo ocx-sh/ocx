@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_mirror", "crates/ocx_schema", "crates/ocx_shim"]
+members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_schema", "crates/ocx_shim"]
 # The submodule is pulled in via [patch.crates-io] below; excluding it here
 # lets `cargo` commands run directly inside `external/rust-oci-client/` (for
 # the fork's own test suite) without the outer workspace claiming ownership.
@@ -69,19 +69,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "std", "fmt
 
 # OCI / HTTP
 oci-client = "0.16"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "json"] }
-rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs", "std"] }
-octocrab = { version = "0.51", default-features = false, features = [
-    "default-client",
-    "follow-redirect",
-    "jwt-aws-lc-rs",
-    "retry",
-    "rustls",
-    "rustls-aws-lc-rs",
-    "timeout",
-    "tracing",
-] }
-url = { version = "2.5.8", features = ["serde"] }
 
 # Crypto / encoding
 sha2 = "0.11.0"
@@ -133,9 +120,6 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Threading",
     "Win32_Security",
 ] }
-
-# Testing
-quick-junit = "0.6"
 
 # Embedded Starlark interpreter for `ocx package test --script`.
 #

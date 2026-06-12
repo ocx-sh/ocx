@@ -39,7 +39,6 @@ decisions that are not obvious from the code:
 | `crates/ocx_lib/src/package/**` | `.claude/rules/subsystem-package.md` |
 | `crates/ocx_lib/src/package_manager/**` | `.claude/rules/subsystem-package-manager.md` |
 | `crates/ocx_cli/src/**` | `.claude/rules/subsystem-cli.md` |
-| `crates/ocx_mirror/**` | `.claude/rules/subsystem-mirror.md` |
 | `test/**` | `.claude/rules/subsystem-tests.md` |
 | `website/**` | `.claude/rules/subsystem-website.md` |
 | `.github/workflows/**` | `.claude/rules/subsystem-ci.md` |

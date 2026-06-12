@@ -114,6 +114,5 @@ The following clauses from the Bazel `.bzl style guide` apply unchanged:
 
 - [`workflow-feature.md`](./workflow-feature.md) — when adding a new typed value, follow the contract-first TDD sequence.
 - [`subsystem-tests.md`](./subsystem-tests.md) — acceptance tests for the script surface live in `test/tests/test_package_test_script.py`.
-- [`subsystem-mirror.md`](./subsystem-mirror.md) — mirror tests consume the host API; mirror corpus migration tracks this rule.
 - Bazel `.bzl style guide`: <https://bazel.build/rules/bzl-style> (external).
 - Buck2 `host_info` reference: <https://buck2.build/docs/api/build/native/#host_info> (external).

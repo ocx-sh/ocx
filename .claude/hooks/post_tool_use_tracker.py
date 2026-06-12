@@ -34,7 +34,6 @@ CONTEXT_REMINDERS: list[tuple[str, str, str]] = [
     ("crates/ocx_lib/src/package/**", "subsystem-package.md", "Package"),
     ("crates/ocx_lib/src/package_manager/**", "subsystem-package-manager.md", "Package Manager"),
     ("crates/ocx_cli/src/**", "subsystem-cli.md", "CLI"),
-    ("crates/ocx_mirror/**", "subsystem-mirror.md", "Mirror"),
     ("website/**", "subsystem-website.md", "Website"),
 ]
 
