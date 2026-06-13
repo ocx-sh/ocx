@@ -9,6 +9,8 @@ ignore = [
   "RUSTSEC-2024-0436",
   # REMOVE when 'cargo tree -i fxhash' is empty after a starlark family bump — fxhash unmaintained (transitive via starlark_map), RUSTSEC-2025-0057 informational-only.
   "RUSTSEC-2025-0057",
+  # REMOVE when 'cargo tree -i proc-macro-error2' is empty — unmaintained (transitive via oci-client → oci-spec → getset, a build-time proc-macro), RUSTSEC-2026-0173 informational-only, no safe upgrade until oci-spec drops getset or getset migrates off proc-macro-error2.
+  "RUSTSEC-2026-0173",
 ]
 
 [licenses]
