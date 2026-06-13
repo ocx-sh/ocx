@@ -79,11 +79,18 @@ impl PackageManager {
                 });
             }
 
-            let mut errors: Vec<PackageError> = Vec::new();
+            // `JoinSet::join_next` yields in completion order, which is
+            // nondeterministic. The exit-code classifier
+            // (`package_manager::error::Error::classify`) derives the code from
+            // the first `PackageError`, so an unsorted collection would make the
+            // exit code depend on a race when ≥2 packages fail at once. Keep the
+            // spawn index with each error and sort by it before building the
+            // batch error, restoring deterministic input-order classification.
+            let mut indexed_errors: Vec<(usize, PackageError)> = Vec::new();
             while let Some(join_result) = tasks.join_next().await {
                 match join_result {
                     Ok((index, Err(kind))) => {
-                        errors.push(PackageError::new(packages[index].clone(), kind));
+                        indexed_errors.push((index, PackageError::new(packages[index].clone(), kind)));
                     }
                     Ok((_, Ok(()))) => {}
                     Err(panic) => {
@@ -94,7 +101,9 @@ impl PackageManager {
                 }
             }
 
-            if !errors.is_empty() {
+            if !indexed_errors.is_empty() {
+                indexed_errors.sort_by_key(|(index, _)| *index);
+                let errors: Vec<PackageError> = indexed_errors.into_iter().map(|(_, error)| error).collect();
                 return Err(package_manager::error::Error::InstallFailed(errors));
             }
         }
@@ -123,6 +132,49 @@ async fn create_install_symlinks(
 
 #[cfg(test)]
 mod tests {
+    use crate::cli::ClassifyExitCode;
+    use crate::cli::ExitCode;
+    use crate::oci;
+    use crate::package_manager::error::{Error, PackageError, PackageErrorKind};
+
+    /// Regression: `install_all` collects symlink failures in `JoinSet`
+    /// completion order, which is nondeterministic. The exit-code classifier
+    /// derives the code from the first `PackageError`, so the batch must be
+    /// sorted by spawn index before being wrapped in `InstallFailed`. This test
+    /// feeds errors that arrive in reverse completion order with distinct kinds
+    /// (different exit codes) and asserts that sorting by index produces a
+    /// stable, input-ordered classification regardless of arrival order.
+    #[test]
+    fn install_failures_are_sorted_by_index_for_deterministic_exit_code() {
+        fn package(name: &str) -> oci::Identifier {
+            oci::Identifier::new_registry(name, "example.com")
+        }
+
+        // Index 0 fails with NotFound (→ NotFound exit code 79); index 1 fails
+        // with SelectionAmbiguous (→ DataError exit code 65). If ordering were
+        // by completion, classification would flip nondeterministically.
+        let kind0 = PackageErrorKind::NotFound;
+        let kind1 = PackageErrorKind::SelectionAmbiguous(vec![package("pkg1")]);
+        let expected_first_code = kind0.classify();
+
+        // Arrive in reverse completion order (index 1 then index 0), as a race
+        // could produce.
+        let mut indexed_errors: Vec<(usize, PackageError)> = vec![
+            (1, PackageError::new(package("pkg1"), kind1)),
+            (0, PackageError::new(package("pkg0"), kind0)),
+        ];
+        indexed_errors.sort_by_key(|(index, _)| *index);
+        let errors: Vec<PackageError> = indexed_errors.into_iter().map(|(_, error)| error).collect();
+
+        assert_eq!(errors[0].identifier.repository(), "pkg0", "first error must be index 0");
+        let code = Error::InstallFailed(errors).classify();
+        assert_eq!(
+            code, expected_first_code,
+            "exit code must derive from input-order-first failure"
+        );
+        assert_eq!(code, Some(ExitCode::NotFound));
+    }
+
     /// PackageDir::entrypoints() returns sibling of content/ — verify path shape.
     #[test]
     fn package_dir_entrypoints_path_is_sibling_of_content() {
