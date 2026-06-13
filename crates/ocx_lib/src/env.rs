@@ -45,6 +45,24 @@ pub mod keys {
     pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
+    /// Absolute path to the cache zone root (blobs, layers, and layer-staging
+    /// temp). Defaults to `$OCX_HOME` when unset or empty.
+    ///
+    /// Resolution-affecting — forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`] so a fleet member inherits the same zone
+    /// layout the parent resolved.
+    pub const OCX_CACHE_DIR: &str = "OCX_CACHE_DIR";
+    /// Absolute path to the packages zone root (assembled packages and
+    /// package-staging temp). Defaults to the resolved `OCX_CACHE_DIR` when
+    /// unset or empty.
+    ///
+    /// Resolution-affecting — forwarded to child ocx processes.
+    pub const OCX_PACKAGES_DIR: &str = "OCX_PACKAGES_DIR";
+    /// Absolute path to the per-instance state zone root (symlinks, state,
+    /// projects). Defaults to `$OCX_HOME` when unset or empty.
+    ///
+    /// Resolution-affecting — forwarded to child ocx processes.
+    pub const OCX_STATE_DIR: &str = "OCX_STATE_DIR";
     /// JSON object mapping an upstream registry host to its mirror `url`
     /// (e.g. `{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}`).
     /// Resolution-affecting → forwarded to child ocx processes. A single JSON
@@ -103,6 +121,17 @@ pub struct OcxConfigView {
     /// contract is fully pinned at the unit layer.
     pub global: bool,
     pub index: Option<PathBuf>,
+    /// Explicit cache zone root (`OCX_CACHE_DIR`). `None` means "use
+    /// `$OCX_HOME` as the cache zone" (the default single-root layout).
+    /// Resolution-affecting → forwarded to child ocx processes.
+    pub cache_dir: Option<PathBuf>,
+    /// Explicit packages zone root (`OCX_PACKAGES_DIR`). `None` means "use
+    /// the resolved cache zone" (default). Resolution-affecting → forwarded.
+    pub packages_dir: Option<PathBuf>,
+    /// Explicit per-instance state zone root (`OCX_STATE_DIR`). `None` means
+    /// "use `$OCX_HOME` as the state zone" (default). Resolution-affecting →
+    /// forwarded to child ocx processes.
+    pub state_dir: Option<PathBuf>,
     /// Per-upstream-host registry mirrors, as `(host, url)` pairs. Resolution-
     /// affecting → forwarded to child ocx processes via
     /// [`Env::apply_ocx_config`] as the single JSON object [`keys::OCX_MIRRORS`].
@@ -122,6 +151,9 @@ impl OcxConfigView {
             project: None,
             global: false,
             index: None,
+            cache_dir: None,
+            packages_dir: None,
+            state_dir: None,
             mirrors: Vec::new(),
         }
     }
@@ -278,6 +310,18 @@ impl Env {
         match &cfg.index {
             Some(path) => self.set(keys::OCX_INDEX, path.as_os_str()),
             None => self.remove(keys::OCX_INDEX),
+        }
+        match &cfg.cache_dir {
+            Some(path) => self.set(keys::OCX_CACHE_DIR, path.as_os_str()),
+            None => self.remove(keys::OCX_CACHE_DIR),
+        }
+        match &cfg.packages_dir {
+            Some(path) => self.set(keys::OCX_PACKAGES_DIR, path.as_os_str()),
+            None => self.remove(keys::OCX_PACKAGES_DIR),
+        }
+        match &cfg.state_dir {
+            Some(path) => self.set(keys::OCX_STATE_DIR, path.as_os_str()),
+            None => self.remove(keys::OCX_STATE_DIR),
         }
         match encode_mirrors(&cfg.mirrors) {
             Some(json) => self.set(keys::OCX_MIRRORS, json),

@@ -7,6 +7,7 @@ pub mod error;
 mod layer_store;
 mod package_store;
 mod state_store;
+mod store_layout;
 mod symlink_store;
 mod tag_store;
 mod temp_store;
@@ -18,6 +19,7 @@ pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, read_digest_file, wri
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore};
 pub use state_store::StateStore;
+pub use store_layout::StoreLayout;
 pub use symlink_store::{SymlinkKind, SymlinkStore};
 pub use tag_store::TagStore;
 pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
@@ -25,15 +27,22 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 /// Root layout of the local OCX data directory.
 ///
 /// `FileStructure` is a thin composite that provides typed, well-named access
-/// to seven top-level stores:
+/// to the top-level stores:
 ///
-/// - **`blobs`**    — content-addressed raw blob store
-/// - **`layers`**   — content-addressed extracted layer store
-/// - **`packages`** — content-addressed package store (content, metadata, refs)
-/// - **`tags`**     — tag-to-digest mapping store (local index)
-/// - **`symlinks`** — install symlinks (candidate / current)
-/// - **`state`**    — persistent runtime state (update-check timestamps, etc.)
-/// - **`temp`**     — temporary staging directories for in-progress downloads
+/// - **`blobs`**      — content-addressed raw blob store
+/// - **`layers`**     — content-addressed extracted layer store
+/// - **`packages`**   — content-addressed package store (content, metadata, refs)
+/// - **`tags`**       — tag-to-digest mapping store (local index)
+/// - **`symlinks`**   — install symlinks (candidate / current)
+/// - **`state`**      — persistent runtime state (update-check timestamps, etc.)
+/// - **`temp`**       — package-zone staging directories for in-progress downloads
+/// - **`layer_temp`** — cache-zone staging directories for in-progress layer extractions
+///
+/// In the default single-root layout (`OCX_CACHE_DIR`, `OCX_PACKAGES_DIR`, and
+/// `OCX_STATE_DIR` all unset), `temp` and `layer_temp` point at the same
+/// directory (`$OCX_HOME/temp`). When zone overrides are in effect, each temp
+/// store is co-located with its tier so that every publish is an intra-volume
+/// atomic rename.
 ///
 /// Default root: `~/.ocx` (resolved via [`default_ocx_root`]).
 #[derive(Debug, Clone)]
@@ -45,7 +54,15 @@ pub struct FileStructure {
     pub tags: TagStore,
     pub symlinks: SymlinkStore,
     pub state: StateStore,
+    /// Package-zone staging temp. Co-located with `packages/` so the final
+    /// rename is always intra-volume.
     pub temp: TempStore,
+    /// Cache-zone staging temp for layer extractions. Co-located with
+    /// `layers/` so layer publish is always an intra-volume rename.
+    ///
+    /// In the default single-root layout this is the same directory as
+    /// `temp`; they diverge only when `OCX_CACHE_DIR` ≠ `OCX_PACKAGES_DIR`.
+    pub layer_temp: TempStore,
 }
 
 impl Default for FileStructure {
@@ -62,6 +79,11 @@ impl FileStructure {
     }
 
     /// Creates a `FileStructure` rooted at `root`.
+    ///
+    /// All stores are derived as `root.join(<name>)`. This is the pre-M2
+    /// single-root layout; `layer_temp` is initialized to the same directory
+    /// as `temp` so the invariant "each temp is co-located with its tier"
+    /// holds trivially in the unified-zone case.
     pub fn with_root(root: std::path::PathBuf) -> Self {
         Self {
             blobs: BlobStore::new(root.join("blobs")),
@@ -71,8 +93,24 @@ impl FileStructure {
             symlinks: SymlinkStore::new(root.join("symlinks")),
             state: StateStore::new(root.join("state")),
             temp: TempStore::new(root.join("temp")),
+            layer_temp: TempStore::new(root.join("temp")),
             root,
         }
+    }
+
+    /// Creates a `FileStructure` from a pre-resolved [`StoreLayout`].
+    ///
+    /// Each store is rooted at the zone directory prescribed by the layout:
+    ///
+    /// - `blobs`, `layers`, `layer_temp` → cache zone (`layout.cache()`)
+    /// - `packages`, `temp`              → packages zone (`layout.packages_root()`)
+    /// - `tags`                          → `layout.tags_root()` or `{cache}/tags`
+    /// - `symlinks`, `state`             → state zone (`layout.state()`)
+    ///
+    /// When all zone overrides are absent (the default), this produces the
+    /// same layout as `with_root($OCX_HOME)`.
+    pub fn with_layout(_layout: StoreLayout) -> Self {
+        unimplemented!()
     }
 
     /// Returns the root directory of this file structure (e.g., `~/.ocx`).

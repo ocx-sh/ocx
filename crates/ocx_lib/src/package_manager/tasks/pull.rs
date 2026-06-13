@@ -628,6 +628,54 @@ async fn post_download_actions(
     Ok(())
 }
 
+/// Non-destructive publish of an enriched package temp directory into the CAS.
+///
+/// Mirrors the proven layer-tier [`super::layer_staging::finalize_layer_dir`]
+/// pattern extended with a guarded swap for the broken-install replacement
+/// case (the one case the layer tier never hits).
+///
+/// **Race semantics (three branches):**
+///
+/// 1. `rename(temp, output_path)` succeeds → first writer wins; `Ok(())`.
+/// 2. `rename` fails AND `output_path` contains a committed OK install
+///    (`install.json` present and valid) → discard our temp, reuse the winner.
+///    Stricter than the layer tier's `path_exists_lossy` check: requires a
+///    committed install so a half-written loser cannot masquerade as a winner.
+/// 3. `rename` fails AND `output_path` exists but is **not** a committed OK
+///    install (broken/partial) → **stash→swap under the per-digest temp lock
+///    already held by the pull path**:
+///    ```text
+///    stash = {temp_root}/__stale_{pid}_{rand}   // reclaimed by stale sweep
+///    rename(output_path, stash)                 // move old live dir out
+///    rename(temp, output_path)                  // new dir into canonical name
+///    remove_dir_all(stash)  (best-effort)
+///    ```
+///    Post-lock recheck collapses a second concurrent writer's swap to a no-op.
+///
+/// **Invariant INV-M1.** No lock-free reader ever observes `packages/{digest}/`
+/// missing or half-deleted during publish or re-pull. The happy path is
+/// rename-only (no `remove_dir_all` of the canonical name); the broken-install
+/// replace only ever `rename`s the canonical name outward before the new dir
+/// is renamed in, so open file descriptors survive; two writers are serialized
+/// by the held digest lock.
+///
+/// **Not for `dest_override` paths.** When the caller supplies an override
+/// destination (e.g. `pull_local` with a caller-owned empty target), use
+/// [`move_temp_to_object_store`] instead — that path is empty by contract and
+/// does not share the CAS address space.
+// Dead-code allow: this function is a P1 stub wired in by a subsequent
+// implementation task (P1.5). The parameter underscores are required by the
+// `-D unused-variables` lint while the body is `unimplemented!()`.
+#[allow(dead_code)]
+async fn finalize_package_dir(
+    _fs: &file_structure::FileStructure,
+    _pinned: &oci::PinnedIdentifier,
+    _temp_path: &std::path::Path,
+    _output_path: &std::path::Path,
+) -> Result<(), PackageErrorKind> {
+    unimplemented!()
+}
+
 /// Atomically moves the enriched temp directory to the object store.
 ///
 /// When `dest_override` is `Some(path)`, the package is moved to `path` instead
