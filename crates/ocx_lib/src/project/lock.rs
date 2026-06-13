@@ -380,6 +380,20 @@ impl ProjectLock {
         // re-registers).
         super::registry::register_project_dir_best_effort(config_path, ocx_home).await;
 
+        // Shared-roots ledger write (P3.6): the cross-instance sibling of the
+        // project registry. No-op (zero bytes) unless `OCX_SHARED_STORE=true`,
+        // so default-mode behavior is byte-identical. Persists this lock's
+        // ImageIndex digests (resolve-on-read), best-effort (WARN on failure,
+        // never aborts the save). `ocx_home` here is the per-instance STATE
+        // zone — the instance-id source; the ledger itself lands in the shared
+        // PACKAGES zone resolved from the env inside the helper.
+        let pinned_digests: Vec<String> = self
+            .tools
+            .iter()
+            .map(|tool| tool.pinned.strip_advisory().to_string())
+            .collect();
+        super::shared_roots::write_shared_roots_best_effort(config_path, ocx_home, &pinned_digests).await;
+
         Ok(())
     }
 }

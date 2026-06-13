@@ -10,10 +10,17 @@ use tokio::task::JoinSet;
 use crate::file_structure::{FileStructure, StaleEntry};
 use crate::log;
 use crate::oci;
+use crate::project::shared_roots::{SharedRoots, SharedRootsUnion, is_shared_store_enabled};
 use crate::project::{ProjectLock, ProjectRegistry};
 
+use crate::utility::fs::filesystem_kind::{self, NetworkFsPosture};
+
 use super::super::PackageManager;
-use super::garbage_collection::{GarbageCollector, ProjectRootDigests};
+use super::garbage_collection::audit_log::new_run_id;
+use super::garbage_collection::audit_log::{AuditAction, ObjectKind};
+use super::garbage_collection::{
+    AuditLog, GarbageCollector, GcLock, ProjectRootDigests, grace_seconds_from_env, lock_timeouts_from_env,
+};
 
 /// Concurrency cap for `collect_project_roots` cross-tool / cross-platform
 /// resolution. Mirrors the cap used by the reachability graph builder so a
@@ -71,11 +78,53 @@ pub struct CleanResult {
 /// unreadable, the original digest is returned as a best-effort fallback —
 /// the resulting path will not exist in the store and will therefore be a
 /// no-op root that does not affect GC decisions, but also does not raise an
-/// error that would abort the operation.
+/// error that would abort the operation. This benign fallback is correct for
+/// **local** project roots (the package is not on this machine, so there is
+/// nothing to protect). It is the WRONG choice for shared/peer roots — see
+/// [`resolve_shared_root`], which fails closed instead.
 async fn resolve_to_package_digests(
     pinned: &oci::PinnedIdentifier,
     file_structure: &FileStructure,
 ) -> Vec<oci::PinnedIdentifier> {
+    match resolve_root_inner(pinned, file_structure).await {
+        // Resolved cleanly: use the enumerated package digests as-is.
+        RootResolution::Resolved(resolved) => resolved,
+        // Unresolvable (blob absent/unreadable, manifest unparseable) OR an
+        // ImageIndex whose children are all absent on disk: fall back to the
+        // original digest so GC decisions are unaffected. The fallback path
+        // does not exist in the store, so it is a harmless no-op root.
+        RootResolution::Unresolvable | RootResolution::NoChildrenOnDisk => vec![pinned.clone()],
+    }
+}
+
+/// Outcome of resolving a root digest to its package-store keys, retaining the
+/// distinctions both callers need:
+///
+/// - `Resolved` — the manifest blob was read and parsed; the carried vector is
+///   the set of package-store digests this root protects (a flat `Image`
+///   resolves to the locked digest itself; an `ImageIndex` resolves to the
+///   subset of platform children present on disk, which is always non-empty
+///   here).
+/// - `NoChildrenOnDisk` — the manifest WAS read and parsed as an `ImageIndex`,
+///   but none of its platform children have a package directory on disk. This
+///   is SAFE for shared roots (the blob was readable, no platform of this
+///   package is on the volume, so there is nothing to protect) but the local
+///   caller treats it as a no-op fallback.
+/// - `Unresolvable` — the blob could not be read, or the manifest could not be
+///   parsed. The peer's platform package digests cannot be enumerated. The
+///   local caller treats this as a benign no-op; the shared caller MUST fail
+///   closed (see [`resolve_shared_root`]).
+enum RootResolution {
+    Resolved(Vec<oci::PinnedIdentifier>),
+    NoChildrenOnDisk,
+    Unresolvable,
+}
+
+/// Shared manifest read + parse + child-enumeration logic behind both
+/// [`resolve_to_package_digests`] (local, benign fallback) and
+/// [`resolve_shared_root`] (shared, fail-closed). Keeping the ImageIndex walk
+/// in one place avoids duplicating the (tested) platform-child translation.
+async fn resolve_root_inner(pinned: &oci::PinnedIdentifier, file_structure: &FileStructure) -> RootResolution {
     let registry = pinned.registry();
     let digest = pinned.digest();
     let blob_path = file_structure.blobs.data(registry, &digest);
@@ -83,11 +132,9 @@ async fn resolve_to_package_digests(
     let blob_bytes = match tokio::fs::read(&blob_path).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            // Blob not yet cached locally — return the original pinned id as
-            // a best-effort fallback. It will not match any existing package
-            // directory, so GC will be unaffected.
-            log::debug!("Project root blob not found locally for '{}', using as-is.", pinned);
-            return vec![pinned.clone()];
+            // Blob not cached locally — we cannot enumerate the package digests.
+            log::debug!("Project root blob not found locally for '{}'.", pinned);
+            return RootResolution::Unresolvable;
         }
     };
 
@@ -95,13 +142,13 @@ async fn resolve_to_package_digests(
         Ok(m) => m,
         Err(e) => {
             log::warn!("Failed to parse manifest blob for '{}': {e}", pinned);
-            return vec![pinned.clone()];
+            return RootResolution::Unresolvable;
         }
     };
 
     match manifest {
         // Flat image manifest: the locked digest IS the package-store key.
-        oci::Manifest::Image(_) => vec![pinned.clone()],
+        oci::Manifest::Image(_) => RootResolution::Resolved(vec![pinned.clone()]),
 
         // Image index: the package is stored by the child platform-manifest
         // digest. Enumerate all children and return those that are present
@@ -137,17 +184,50 @@ async fn resolve_to_package_digests(
                 }
             }
             if resolved.is_empty() {
-                // No children present on disk — fall back to original digest
-                // so GC decisions are unaffected.
-                log::debug!(
-                    "No ImageIndex children found on disk for '{}', using index digest as fallback.",
-                    pinned
-                );
-                vec![pinned.clone()]
+                // No children present on disk — the manifest was readable, so
+                // this is a determinate "nothing of this package is here".
+                log::debug!("No ImageIndex children found on disk for '{}'.", pinned);
+                RootResolution::NoChildrenOnDisk
             } else {
-                resolved
+                RootResolution::Resolved(resolved)
             }
         }
+    }
+}
+
+/// Resolves a **shared/peer** root digest to the package-store digests it
+/// protects, failing closed on any unresolvable input.
+///
+/// Returns:
+/// - `Some(vec)` when the manifest blob was read and parsed — the vector is the
+///   subset of platform children present on disk (possibly empty `Some(vec![])`,
+///   which is SAFE: the blob was readable, no platform of this package is on the
+///   volume, so there is nothing to protect).
+/// - `None` (UNRESOLVABLE) when the blob could not be read or the manifest could
+///   not be parsed. The peer's platform package digests cannot be enumerated, so
+///   the caller MUST retain everything this run rather than collect against an
+///   incomplete root set.
+///
+/// Rationale: in the safe shared-CACHE deployment (UC1) a peer that pinned X
+/// also pulled X into the shared cache, so the blob is present and resolution
+/// succeeds. Blob-absence only occurs in the per-instance-cache deployment,
+/// where this cleaner genuinely cannot determine the peer's package digest
+/// while the peer's package directory still lives on the shared packages
+/// volume — making fail-closed (RetainAll) the only safe choice. This is the
+/// opposite of [`resolve_to_package_digests`]'s benign local fallback.
+async fn resolve_shared_root(
+    pinned: &oci::PinnedIdentifier,
+    file_structure: &FileStructure,
+) -> Option<Vec<oci::PinnedIdentifier>> {
+    match resolve_root_inner(pinned, file_structure).await {
+        RootResolution::Resolved(resolved) => Some(resolved),
+        // The blob was readable but no platform child is on this volume —
+        // nothing of this package to protect here, which is safe to treat as
+        // an empty (but resolved) root set.
+        RootResolution::NoChildrenOnDisk => Some(Vec::new()),
+        // Blob unreadable or manifest unparseable: cannot enumerate the peer's
+        // package digests → fail closed.
+        RootResolution::Unresolvable => None,
     }
 }
 
@@ -370,6 +450,109 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
     Ok(CollectedRoots::Roots(roots))
 }
 
+/// Unions every instance's shared-roots ledger and resolves it into a single
+/// synthetic [`ProjectRootDigests`] grafted onto `project_roots` (P3.6).
+///
+/// Only called when `OCX_SHARED_STORE=true` ([`is_shared_store_enabled`]). The
+/// shared-roots ledger lives at `$OCX_PACKAGES_DIR/roots/<instance_id>/<project_hash>`
+/// and stores the **ImageIndex manifest digest** strings (`registry/repo@digest`)
+/// pinned by every fleet member sharing this content volume. This function:
+///
+/// 1. Reads + unions all instances' ledgers via [`SharedRoots::union_all_digests`].
+/// 2. Resolves each unioned digest string back through the same
+///    [`resolve_to_package_digests`] path the project ledger uses (ImageIndex →
+///    platform-child package digests present on disk). Resolve-on-read, never
+///    resolve-on-write (Adjustment 2): the writer stays trivial and the tested
+///    ImageIndex→platform translation is reused.
+/// 3. Returns a single [`ProjectRootDigests`] whose `ocx_lock_path` is the
+///    stable `roots/` directory marker so dry-run "Held By" attribution works
+///    (Adjustment 3: reuses `reachability_graph.rs` root-insertion unchanged).
+///
+/// Fail-closed on two distinct unresolvable conditions:
+/// 1. The union returns [`SharedRootsUnion::RetainAll`] (a peer ledger was
+///    unparseable / unknown-version, or unreadable — the one-way-door safety
+///    property): this returns [`CollectedRoots::RetainAll`].
+/// 2. Any unioned peer digest is **blob-unresolvable** on this cleaner — the
+///    manifest blob is absent or unparseable, so the peer's platform package
+///    digests cannot be enumerated ([`resolve_shared_root`] returns `None`):
+///    this also returns [`CollectedRoots::RetainAll`]. Unlike a local project
+///    root (where a missing blob means the package is not on this machine and
+///    is a harmless no-op), a peer's package directory may live on the shared
+///    packages volume even when this cleaner lacks the blob in its own cache —
+///    resolving to a no-op root would let `clean` delete the peer's package.
+///
+/// In both cases `clean` retains every object this run rather than collecting
+/// against an incomplete root set.
+async fn collect_shared_root_digests(
+    file_structure: &FileStructure,
+    state_zone_root: &Path,
+) -> crate::Result<CollectedRoots> {
+    // The ledger is rooted at the PACKAGES zone (`$OCX_PACKAGES_DIR`, shared
+    // across the fleet), never the per-instance state zone. `packages.root()`
+    // is `{packages_zone}/packages`; its parent is the packages zone root.
+    let packages_zone_root = file_structure
+        .packages
+        .root()
+        .parent()
+        .unwrap_or_else(|| file_structure.packages.root());
+
+    // `instance_id` comes from the per-instance state zone (`$OCX_STATE_DIR`),
+    // resolved (created on first use) via the audit-log helper — single source
+    // of truth for the instance-id file so the two consumers cannot drift.
+    let instance_id = crate::utility::instance_id::load_or_create_instance_id(state_zone_root).await;
+    let shared_roots = SharedRoots::new(packages_zone_root, instance_id);
+
+    let union = match shared_roots.union_all_digests().await? {
+        SharedRootsUnion::Digests(set) => set,
+        SharedRootsUnion::RetainAll => return Ok(CollectedRoots::RetainAll),
+    };
+
+    // Resolve each unioned digest string (ImageIndex manifest digest) to its
+    // package-store digests via the same translation the project ledger uses,
+    // but FAIL CLOSED on unresolvable peer digests (a missing/unparseable blob
+    // would otherwise resolve to a no-op root and let `clean` delete the peer's
+    // package — see `resolve_shared_root`).
+    //
+    // A digest string that does not parse as a `PinnedIdentifier` is skipped
+    // with a debug line (it cannot key a package path, so it is a harmless
+    // no-op root — never an error that aborts clean).
+    let mut digests: Vec<oci::PinnedIdentifier> = Vec::new();
+    for digest_str in union {
+        let identifier = match oci::Identifier::parse(&digest_str) {
+            Ok(id) => id,
+            Err(e) => {
+                log::debug!("Shared-roots digest '{digest_str}' is not a valid identifier (skipped): {e}");
+                continue;
+            }
+        };
+        let pinned = match oci::PinnedIdentifier::try_from(identifier) {
+            Ok(p) => p,
+            Err(_) => {
+                log::debug!("Shared-roots digest '{digest_str}' has no digest (skipped).");
+                continue;
+            }
+        };
+        match resolve_shared_root(&pinned, file_structure).await {
+            Some(resolved) => digests.extend(resolved),
+            None => {
+                log::warn!(
+                    "Shared-roots digest '{pinned}' is blob-unresolvable on this cleaner; \
+                     failing closed (RetainAll) to avoid deleting a peer's package."
+                );
+                return Ok(CollectedRoots::RetainAll);
+            }
+        }
+    }
+
+    // Stable synthetic marker so dry-run "Held By" attribution names the
+    // shared-roots ledger directory rather than an absent lock file.
+    let ocx_lock_path = packages_zone_root.join("roots");
+    Ok(CollectedRoots::Roots(vec![ProjectRootDigests {
+        ocx_lock_path,
+        digests,
+    }]))
+}
+
 /// A registered project's `ocx.lock` parsed into resolvable GC-root inputs.
 ///
 /// Carries **no** load index: the resolve buckets are keyed by the survivor's
@@ -426,19 +609,42 @@ impl PackageManager {
     pub async fn clean(&self, dry_run: bool, force: bool) -> crate::Result<CleanResult> {
         let ocx_home = self.file_structure().root().to_path_buf();
 
+        // Network-FS posture (P3.7): probe the content/packages/state zones.
+        // Under `refuse` this aborts with PolicyBlocked (81) before any lock or
+        // deletion; under `warn` (default) it logs once and proceeds. Runs
+        // before the GC lock so a refused store never even touches gc.lock.
+        enforce_network_fs_posture(self.file_structure()).await?;
+
+        // Store-wide exclusive GC lock (P3.3): serialises `clean` against
+        // concurrent installs/pulls (which take the shared lock) within the same
+        // `$OCX_HOME`. Held for the whole run via this RAII guard; a contended
+        // lock that does not drain within `OCX_GC_LOCK_TIMEOUT` aborts with
+        // TempFail (75) rather than running destructive GC alongside a mutator.
+        // Acquired BEFORE building the reachability graph (no L1 object lock is
+        // held yet → GC-before-L1 ordering, no deadlock).
+        let (exclusive_timeout, _shared_timeout) = lock_timeouts_from_env();
+        let _gc_lock =
+            GcLock::acquire_exclusive_with_timeout(self.file_structure().state_zone_root(), exclusive_timeout).await?;
+
+        // Audit log (P3.5) + mtime grace (P3.4): one run_id per invocation.
+        // `open` delegates instance-id I/O to spawn_blocking so the async
+        // worker is never blocked (replaces the old sync AuditLog::new call).
+        let audit = AuditLog::open(self.file_structure().state_zone_root(), new_run_id()).await;
+        let grace_seconds = grace_seconds_from_env();
+
         // Collect project-registry roots unless --force suppresses the
         // registry. A transiently-unreachable *live* root makes the root set
         // indeterminate (plan A1/A2): fail closed by retaining every object
         // this run — skip object collection entirely and only sweep stale
         // temps. The run stays non-fatal (exit 0); `--force` is the
         // sanctioned override to GC against live install symlinks alone.
-        let project_roots: Vec<ProjectRootDigests> = if force {
+        let mut project_roots: Vec<ProjectRootDigests> = if force {
             Vec::new()
         } else {
             match collect_project_roots(&ocx_home, self.file_structure()).await? {
                 CollectedRoots::Roots(roots) => roots,
                 CollectedRoots::RetainAll => {
-                    let temp = clean_temp(self.file_structure(), dry_run).await?;
+                    let temp = clean_temp(self.file_structure(), dry_run, &audit).await?;
                     return Ok(CleanResult {
                         objects: Vec::new(),
                         temp,
@@ -446,6 +652,25 @@ impl PackageManager {
                 }
             }
         };
+
+        // Shared-roots grafting (P3.6 Adjustment 3): under `OCX_SHARED_STORE`
+        // (and never under `--force`, which bypasses the registry entirely),
+        // union every fleet member's shared-roots ledger and append it as a
+        // synthetic `ProjectRootDigests` so `reachability_graph.rs` roots a
+        // peer's pinned packages exactly like a local project's. An unparseable
+        // peer ledger fails closed (RetainAll → retain everything this run).
+        if !force && is_shared_store_enabled() {
+            match collect_shared_root_digests(self.file_structure(), self.file_structure().state_zone_root()).await? {
+                CollectedRoots::Roots(shared) => project_roots.extend(shared),
+                CollectedRoots::RetainAll => {
+                    let temp = clean_temp(self.file_structure(), dry_run, &audit).await?;
+                    return Ok(CleanResult {
+                        objects: Vec::new(),
+                        temp,
+                    });
+                }
+            }
+        }
 
         let garbage_collector = GarbageCollector::build(self.file_structure(), &project_roots).await?;
 
@@ -458,7 +683,9 @@ impl PackageManager {
             targets.len(),
         );
 
-        let raw_objects = garbage_collector.delete_objects(&targets, dry_run).await?;
+        let raw_objects = garbage_collector
+            .delete_objects_with_policy(&targets, dry_run, grace_seconds, &audit)
+            .await?;
         // Objects returned by delete_objects are unreachable (in `targets`). By
         // definition, unreachable objects cannot appear in `attribution` (which
         // only contains objects reachable from project-registry roots). So
@@ -491,9 +718,41 @@ impl PackageManager {
             }
         }
 
-        let temp = clean_temp(self.file_structure(), dry_run).await?;
+        let temp = clean_temp(self.file_structure(), dry_run, &audit).await?;
         Ok(CleanResult { objects, temp })
     }
+}
+
+/// Enforces the `OCX_NETWORK_FS` posture across the zones `clean` mutates.
+///
+/// Probes the content zone (packages/layers/blobs — rename atomicity) and the
+/// state zone (`gc.lock` advisory locking). Under `OCX_NETWORK_FS=refuse` a
+/// network filesystem on any zone aborts with `Error::NetworkFsRefused`
+/// (PolicyBlocked, exit 81); under `warn` (default) it logs once per zone and
+/// proceeds; under `allow` it is a no-op. A probe that fails (unsupported
+/// platform, transient I/O) yields `FilesystemKind::Unknown`, which is treated
+/// as local (proceed) — the posture never blocks on an indeterminate result.
+///
+/// Free function (not a `PackageManager` method) per the task-module
+/// architecture rule: it orchestrates multi-step work over explicit params.
+async fn enforce_network_fs_posture(fs: &FileStructure) -> crate::Result<()> {
+    let posture = NetworkFsPosture::from_env();
+    if posture == NetworkFsPosture::Allow {
+        return Ok(());
+    }
+    // (zone label, representative path). Layers/blobs share the cache zone with
+    // packages' content; probing one representative path per distinct zone root
+    // is sufficient — the posture only distinguishes network vs local.
+    let zones: [(&str, &Path); 3] = [
+        ("cache", fs.blobs.root()),
+        ("packages", fs.packages.root()),
+        ("state", fs.state_zone_root()),
+    ];
+    for (label, path) in zones {
+        let kind = filesystem_kind::filesystem_kind(path).await?;
+        filesystem_kind::apply_posture(posture, label, kind)?;
+    }
+    Ok(())
 }
 
 /// Removes stale temp directories and orphan lock files from both temp zones.
@@ -509,13 +768,21 @@ impl PackageManager {
 /// Uses [`TempStore::stale_entries`] which discovers entries from both
 /// `.lock` files and directories, acquiring locks where possible to
 /// prevent races with concurrent installs.
-async fn clean_temp(fs: &crate::file_structure::FileStructure, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+///
+/// Each removed (or would-be-removed in dry-run) temp entry is recorded in the
+/// audit log as `ObjectKind::Temp` with a `null` digest (best-effort — a log
+/// write failure is never fatal).
+async fn clean_temp(
+    fs: &crate::file_structure::FileStructure,
+    dry_run: bool,
+    audit: &AuditLog,
+) -> crate::Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
-    sweep_temp_store(&fs.temp, dry_run, &mut removed).await?;
+    sweep_temp_store(&fs.temp, dry_run, audit, &mut removed).await?;
     // Skip the second sweep when both temp stores resolve to the same directory
     // (unified-zone layout) so an entry is never double-counted.
     if fs.layer_temp.root() != fs.temp.root() {
-        sweep_temp_store(&fs.layer_temp, dry_run, &mut removed).await?;
+        sweep_temp_store(&fs.layer_temp, dry_run, audit, &mut removed).await?;
     }
 
     log::debug!(
@@ -531,8 +798,11 @@ async fn clean_temp(fs: &crate::file_structure::FileStructure, dry_run: bool) ->
 async fn sweep_temp_store(
     store: &crate::file_structure::TempStore,
     dry_run: bool,
+    audit: &AuditLog,
     removed: &mut Vec<PathBuf>,
 ) -> crate::Result<()> {
+    use AuditAction::{Deleted, WouldDelete};
+
     let stale = store.stale_entries()?;
 
     log::debug!(
@@ -542,6 +812,8 @@ async fn sweep_temp_store(
         if dry_run { " (dry run)" } else { "" },
     );
 
+    let action = if dry_run { WouldDelete } else { Deleted };
+
     for entry in stale {
         match entry {
             StaleEntry::Locked(acquired) => {
@@ -549,10 +821,14 @@ async fn sweep_temp_store(
                 remove_stale_dir(&dir_path, dry_run, "stale").await?;
                 // Drop releases the OS lock and auto-deletes the .lock file.
                 drop(acquired);
+                // Best-effort audit log — never fatal.
+                audit.record_delete(action, ObjectKind::Temp, &dir_path, None).await;
                 removed.push(dir_path);
             }
             StaleEntry::Orphan(dir_path) => {
                 remove_stale_dir(&dir_path, dry_run, "orphan").await?;
+                // Best-effort audit log — never fatal.
+                audit.record_delete(action, ObjectKind::Temp, &dir_path, None).await;
                 removed.push(dir_path);
             }
         }
@@ -748,6 +1024,104 @@ pinned = "localhost:5000/shfmt@sha256:bbbb00000000000000000000000000000000000000
         assert!(
             digest_strs.iter().any(|s| s.contains("sha256:bbbb0000")),
             "shfmt digest must be a GC root; got: {digest_strs:?}"
+        );
+    }
+
+    // ── FIX C: shared-root resolution fails closed on unresolvable digests ──────
+
+    /// A fully-qualified pinned identifier whose manifest blob is NOT present in
+    /// the cleaner's blob store. Used to drive the blob-absent path.
+    const SHARED_PEER_DIGEST: &str =
+        "localhost:5000/peer@sha256:cccc0000000000000000000000000000000000000000000000000000000000dd";
+
+    fn shared_peer_pinned() -> oci::PinnedIdentifier {
+        let identifier = oci::Identifier::parse(SHARED_PEER_DIGEST).unwrap();
+        oci::PinnedIdentifier::try_from(identifier).unwrap()
+    }
+
+    /// `resolve_shared_root` must return `None` (UNRESOLVABLE) when the manifest
+    /// blob is absent on this cleaner — the peer's platform package digests
+    /// cannot be enumerated, so the shared path must fail closed. This is the
+    /// opposite of `resolve_to_package_digests`, which returns the benign
+    /// `vec![pinned]` no-op fallback for the same input (asserted below for
+    /// contrast — the local fallback must remain unchanged).
+    #[tokio::test]
+    async fn resolve_shared_root_none_on_missing_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let pinned = shared_peer_pinned();
+
+        // No blob planted → blob read fails → Unresolvable.
+        let shared = resolve_shared_root(&pinned, &file_structure).await;
+        assert!(
+            shared.is_none(),
+            "resolve_shared_root must be None (fail closed) when the manifest blob is absent"
+        );
+
+        // Contrast: the local resolver keeps the benign no-op fallback so
+        // existing project-root GC behavior is unchanged (Constraint).
+        let local = resolve_to_package_digests(&pinned, &file_structure).await;
+        assert_eq!(
+            local,
+            vec![pinned.clone()],
+            "resolve_to_package_digests must keep its benign vec![pinned] fallback on a missing blob"
+        );
+    }
+
+    /// `resolve_shared_root` must return `None` when the blob exists but is not
+    /// a parseable manifest — the peer's digests still cannot be enumerated.
+    #[tokio::test]
+    async fn resolve_shared_root_none_on_unparseable_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let pinned = shared_peer_pinned();
+
+        // Plant a non-JSON blob at the CAS data path for this digest.
+        let blob_path = file_structure.blobs.data(pinned.registry(), &pinned.digest());
+        tokio::fs::create_dir_all(blob_path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&blob_path, b"not a manifest").await.unwrap();
+
+        let shared = resolve_shared_root(&pinned, &file_structure).await;
+        assert!(
+            shared.is_none(),
+            "resolve_shared_root must be None (fail closed) when the manifest blob is unparseable"
+        );
+    }
+
+    /// `collect_shared_root_digests` must map an unresolvable shared digest to
+    /// `CollectedRoots::RetainAll` — the fail-closed contract end to end. We
+    /// plant a peer ledger referencing a digest whose blob is absent, with the
+    /// shared-store flag enabled, and assert the cleaner retains everything.
+    #[tokio::test]
+    async fn collect_shared_roots_retain_all_on_unresolvable_peer_digest() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_SHARED_STORE, "true");
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_structure = FileStructure::with_root(root.clone());
+
+        // The packages zone root is the parent of `packages/` — where the
+        // `roots/` ledger lives (mirrors `collect_shared_root_digests`).
+        let packages_zone_root = file_structure
+            .packages
+            .root()
+            .parent()
+            .unwrap_or_else(|| file_structure.packages.root())
+            .to_path_buf();
+
+        // Plant a peer ledger pinning a digest whose blob is NOT in the store.
+        let peer = SharedRoots::new(&packages_zone_root, "instance-peer");
+        peer.write("peerproj", &[SHARED_PEER_DIGEST.to_string()]).await.unwrap();
+
+        let result = collect_shared_root_digests(&file_structure, file_structure.state_zone_root())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, CollectedRoots::RetainAll),
+            "an unresolvable peer digest (blob absent) must yield RetainAll (fail closed) \
+             so the cleaner never deletes the peer's package"
         );
     }
 }

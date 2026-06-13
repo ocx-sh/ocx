@@ -348,6 +348,20 @@ impl MutationGuard {
         // commit (next `ocx lock` re-registers).
         super::registry::register_project_dir_best_effort(&self.config_path, &self.home).await;
 
+        // Shared-roots ledger write (P3.6) — the cross-instance sibling of the
+        // registry, kept on the same belt-and-suspenders trigger topology.
+        // `new_lock.save` above (the lock-first rename) already fired this once
+        // via `ProjectLock::save`; this post-manifest re-fire is idempotent
+        // (atomic same-content overwrite) and matches the registry's double
+        // registration so both ledgers share one mental model. No-op (zero
+        // bytes) unless `OCX_SHARED_STORE=true` — default-mode byte-identical.
+        let pinned_digests: Vec<String> = new_lock
+            .tools
+            .iter()
+            .map(|tool| tool.pinned.strip_advisory().to_string())
+            .collect();
+        super::shared_roots::write_shared_roots_best_effort(&self.config_path, &self.home, &pinned_digests).await;
+
         Ok(MutationCommit {
             config_path: self.config_path,
             lock_path: self.lock_path,

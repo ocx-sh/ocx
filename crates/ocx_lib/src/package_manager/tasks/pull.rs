@@ -119,8 +119,18 @@ impl PackageManager {
         package: &oci::Identifier,
         platforms: Vec<oci::Platform>,
     ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + '_>> {
-        let groups = SetupGroups::new();
-        setup_with_tracker(self, package, platforms, groups)
+        let package = package.clone();
+        Box::pin(async move {
+            // Shared GC lock (P3.3): acquired BEFORE the per-digest L1 temp lock
+            // (taken inside `setup_owned`) so the global lock ordering is
+            // GC-before-L1 — no deadlock with a concurrent exclusive `clean`.
+            // Best-effort: a stuck `clean` must never block an install, so a
+            // timeout yields `None` and the pull proceeds without the lock.
+            // Held for the whole pull via this RAII guard.
+            let _gc_lock = acquire_shared_gc_lock(self.file_structure()).await;
+            let groups = SetupGroups::new();
+            setup_with_tracker(self, &package, platforms, groups).await
+        })
     }
 
     /// Pulls multiple packages in parallel with a shared singleflight group
@@ -145,6 +155,12 @@ impl PackageManager {
         if packages.is_empty() {
             return Ok(Vec::new());
         }
+
+        // Shared GC lock (P3.3) for the whole batch: acquired BEFORE any
+        // per-digest L1 temp lock the spawned pulls take (GC-before-L1 order).
+        // Best-effort — a timeout proceeds without the lock so a stuck `clean`
+        // never blocks installs. Held across the batch via this RAII guard.
+        let _gc_lock = acquire_shared_gc_lock(self.file_structure()).await;
 
         let count = packages.len();
         let outer = info_span!("Pulling", count);
@@ -175,6 +191,31 @@ impl PackageManager {
         }
 
         super::common::drain_package_tasks(packages, tasks, package_manager::error::Error::InstallFailed).await
+    }
+}
+
+/// Acquires the store-wide **shared** GC lock for a mutator (pull/install).
+///
+/// Returns the RAII guard on success, or `None` when the shared lock could not
+/// be acquired within the (short, non-configurable) timeout — the caller then
+/// proceeds without the lock. This is deliberate: a stuck `clean` holding the
+/// exclusive lock must never block an install indefinitely. The lock lives in
+/// the per-instance state zone, so it serialises same-`$OCX_HOME` processes
+/// only (cross-instance safety rests on content-addressing + mtime grace).
+///
+/// Free function per the task-module architecture rule.
+async fn acquire_shared_gc_lock(
+    file_structure: &file_structure::FileStructure,
+) -> Option<package_manager::tasks::garbage_collection::GcLock> {
+    use package_manager::tasks::garbage_collection::GcLock;
+    match GcLock::acquire_shared(file_structure.state_zone_root()).await {
+        Ok(guard) => guard,
+        // A hard I/O error acquiring the shared lock is non-fatal for a mutator:
+        // log and proceed (the content-addressed store tolerates the race).
+        Err(error) => {
+            log::debug!("Could not acquire shared GC lock ({error}); proceeding without it.");
+            None
+        }
     }
 }
 

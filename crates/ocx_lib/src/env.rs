@@ -74,6 +74,76 @@ pub mod keys {
     /// resolution-affecting flag (not forwarded to child ocx); the opt-out is
     /// not remembered between runs.
     pub const OCX_NO_MODIFY_PATH: &str = "OCX_NO_MODIFY_PATH";
+
+    // ── GC / shared-store / network-FS keys (P3) ─────────────────────────
+
+    /// Boolean — opt-in to shared-store GC rooting.
+    ///
+    /// When truthy, `clean` unions all instances' shared-roots ledgers at
+    /// `$OCX_PACKAGES_DIR/roots/` as additional GC roots so packages pinned by
+    /// a peer instance on the same shared volume are not collected. Also enables
+    /// non-pruning of project-ledger entries absent from the shared roots.
+    ///
+    /// Default: `false`. Behavioral (not resolution-affecting); not forwarded
+    /// to child ocx processes. See `system_design_shared_store.md` §5 M4 item 4.
+    pub const OCX_SHARED_STORE: &str = "OCX_SHARED_STORE";
+
+    /// GC lock timeout for the exclusive `clean` lock, in seconds.
+    ///
+    /// When `ocx clean` cannot acquire the exclusive `$OCX_STATE_DIR/gc.lock`
+    /// within this many seconds it exits `TempFail` (75). Default: 120.
+    pub const OCX_GC_LOCK_TIMEOUT: &str = "OCX_GC_LOCK_TIMEOUT";
+
+    /// mtime grace period for GC, in seconds.
+    ///
+    /// Object-store entries whose directory mtime is younger than this many
+    /// seconds are retained even if they are unreachable from any GC root.
+    /// Protects freshly-assembled objects that have not yet registered their
+    /// install back-refs. Default: 600 (10 minutes).
+    ///
+    /// A value of `0` disables the grace check. Future/skewed mtime (clock
+    /// drift: mtime > now) is treated as "retain" (conservative).
+    pub const OCX_GC_GRACE_SECONDS: &str = "OCX_GC_GRACE_SECONDS";
+
+    /// Audit log enable/disable.
+    ///
+    /// Set to `off` to disable the delete-objects JSONL audit log at
+    /// `$OCX_STATE_DIR/gc-log.jsonl`. Any other value (or absence) leaves
+    /// logging enabled (default: on).
+    pub const OCX_GC_LOG: &str = "OCX_GC_LOG";
+
+    /// Maximum size of the GC audit log file before rotation, in bytes.
+    ///
+    /// When `$OCX_STATE_DIR/gc-log.jsonl` exceeds this size it is atomically
+    /// renamed to `gc-log.jsonl.1` and a new file is started (one-generation
+    /// rotation). Default: 10 MiB (10,485,760 bytes).
+    pub const OCX_GC_LOG_MAX_BYTES: &str = "OCX_GC_LOG_MAX_BYTES";
+
+    /// Network-FS posture for zone paths.
+    ///
+    /// Controls OCX's reaction when a zone path (`$OCX_CACHE_DIR`,
+    /// `$OCX_PACKAGES_DIR`, `$OCX_STATE_DIR`) is detected on a network
+    /// filesystem (NFS, SMB, …):
+    ///
+    /// - `warn` (default) — emit `warn!` and continue. Advisory locks on NFS
+    ///   are unreliable but the operation proceeds.
+    /// - `refuse` — return `Error::NetworkFsRefused` (exit 81 `PolicyBlocked`).
+    ///   Use in environments where network-FS OCX stores are explicitly
+    ///   disallowed.
+    /// - `allow` — skip the check entirely. Use when the FS-type probe
+    ///   misidentifies a local-FS (e.g. a custom kernel module).
+    pub const OCX_NETWORK_FS: &str = "OCX_NETWORK_FS";
+
+    /// Testing seam — force the filesystem-kind probe to return a specific
+    /// result for all paths, bypassing the OS `statfs`/`GetVolumeInformationW`
+    /// call.
+    ///
+    /// Accepted values: `local`, `network`, `unknown`.
+    /// Unrecognised values yield `FilesystemKind::Unknown`.
+    ///
+    /// The `__` prefix marks this as a testing-only override (see
+    /// `feedback_testing_env_prefix`). Not documented in the public reference.
+    pub const __OCX_TESTING_FORCE_FS_KIND: &str = "__OCX_TESTING_FORCE_FS_KIND";
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed

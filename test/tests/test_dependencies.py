@@ -548,6 +548,8 @@ def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tm
 
 def test_clean_dry_run_reports_without_removing(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """clean --dry-run after uninstall lists collectible objects without removing."""
+    # P3.4 grace defaults to 600s; this test asserts immediate collection, so disable it.
+    ocx.env["OCX_GC_GRACE_SECONDS"] = "0"
     leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
     # Uninstall without --purge to leave orphaned objects for clean to find.
     ocx.plain("package", "uninstall", "-d", app.short)
@@ -889,6 +891,8 @@ def test_clean_dry_run_transitive_chain(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A->B->C: uninstall A, dry-run reports all three as collectible."""
+    # P3.4 grace defaults to 600s; this test asserts immediate collection, so disable it.
+    ocx.env["OCX_GC_GRACE_SECONDS"] = "0"
     c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
     # Uninstall without --purge to leave all three objects as orphans.

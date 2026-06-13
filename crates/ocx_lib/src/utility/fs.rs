@@ -6,6 +6,7 @@ mod dir_walker;
 mod drop_file;
 mod empty_or_absent;
 mod file_lock;
+pub mod filesystem_kind;
 mod locked_file;
 pub mod path;
 mod same_dir;
@@ -16,6 +17,8 @@ pub use assemble::{AssemblyError, AssemblyMode, AssemblyStats, assemble_from_lay
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 pub use empty_or_absent::{EmptyOrAbsentError, ensure_empty_or_absent};
+#[allow(unused_imports)]
+pub use filesystem_kind::{FilesystemKind, NetworkFsPosture, apply_posture, classify_magic, filesystem_kind};
 // `FileLock` is the underlying primitive; consumers prefer the
 // `LockedFile` / `LockedJsonFile` / `LockedTomlFile` API for in-place
 // F2-safe I/O. `FileLock` itself is re-exported for the synchronous

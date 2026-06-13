@@ -76,6 +76,49 @@ impl LockedFile {
         Self::open_shared_with_timeout(path, DEFAULT_LOCK_TIMEOUT).await
     }
 
+    /// Acquire a shared lock on `path`, **creating the file (and parent
+    /// directories) if absent**. Blocks until acquired or `timeout` elapses.
+    ///
+    /// This is the variant needed by GC-lock shared acquirers (mutators): they
+    /// must create `gc.lock` when it does not exist yet (the first mutator
+    /// before any `clean` runs), then take a shared advisory lock on it.
+    /// [`Self::open_shared`] returns `Ok(None)` on absence, which would leave
+    /// the GC lock file uncreated and allow `clean`'s exclusive acquire to
+    /// race without the shared holder being visible.
+    ///
+    /// Unlike [`Self::open_exclusive_with_timeout`], the created file is
+    /// opened read+write for creation but only a shared lock is taken.
+    pub async fn open_shared_create_with_timeout(path: impl Into<PathBuf>, timeout: Duration) -> crate::Result<Self> {
+        let path = path.into();
+        // Create the parent directory tree if absent — the first mutator to run
+        // before any `clean` must be able to create `gc.lock` and its parents.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| crate::error::file_error(parent, e))?;
+        }
+        let open_path = path.clone();
+        let file = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&open_path)
+        })
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(std::convert::identity)
+        .map_err(|e| crate::error::file_error(&path, e))?;
+
+        let lock = FileLock::lock_shared_with_timeout(file, timeout)
+            .await
+            .map_err(|e| crate::error::file_error(&path, e))?;
+        Ok(Self { lock, path })
+    }
+
     /// Acquire a shared lock on `path` with a caller-supplied timeout.
     ///
     /// Returns `Ok(None)` if the file does not exist.

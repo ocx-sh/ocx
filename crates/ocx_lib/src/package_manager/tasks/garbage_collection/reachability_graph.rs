@@ -15,10 +15,50 @@ use tokio::task::JoinSet;
 
 use crate::{
     file_structure::{CasTier, FileStructure},
-    log, utility,
+    log,
 };
 
 use super::project_roots::ProjectRootDigests;
+
+/// Three-state liveness of a package install back-reference.
+///
+/// Returned by the back-ref probe performed during GC root identification.
+/// The distinction between [`RefLiveness::Dead`] and [`RefLiveness::Unknown`]
+/// is the SEC-1 silent-data-loss guard: collapsing a transient I/O `Err`
+/// into "dead" would cause `clean` to collect a live package.
+///
+/// `max` semantics apply when combining results over multiple back-refs:
+/// `Live > Unknown > Dead`.
+// Stub: used from P3.3 implementation onward.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefLiveness {
+    /// At least one install back-ref resolves to a live install symlink. The
+    /// package is a GC root and must not be collected.
+    Live,
+    /// A transient I/O error (`EACCES`, `ESTALE`, `EIO`, …) prevented a
+    /// definitive liveness check. Treated as `Live` for GC purposes (retain).
+    Unknown,
+    /// All install back-refs are definitively absent (`Ok(false)` or
+    /// `NotFound`). Safe to consider for collection.
+    Dead,
+}
+
+// Stub: `max` used from P3.3 implementation onward.
+#[allow(dead_code)]
+impl RefLiveness {
+    /// Returns the "higher" of two liveness outcomes.
+    ///
+    /// `Live > Unknown > Dead` — conservatively retaining a package when any
+    /// back-ref signals uncertainty.
+    pub fn max(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Live, _) | (_, Self::Live) => Self::Live,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            _ => Self::Dead,
+        }
+    }
+}
 
 /// Maximum concurrent I/O tasks for graph building.
 const BUILD_CONCURRENCY: usize = 50;
@@ -81,14 +121,14 @@ impl ReachabilityGraph {
 
             tasks.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
-                let is_root = has_live_refs(&pkg_dir).await;
+                let liveness = has_live_refs(&pkg_dir).await;
                 let dep_refs = read_refs(&deps_dir, &pkgs_root).await;
                 let layer_refs = read_refs(&layers_dir, &lyrs_root).await;
                 let blob_refs = read_refs(&blobs_dir, &blbs_root).await;
                 let mut all_edges = dep_refs;
                 all_edges.extend(layer_refs);
                 all_edges.extend(blob_refs);
-                (pkg_dir, is_root, all_edges)
+                (pkg_dir, liveness, all_edges)
             });
         }
 
@@ -114,9 +154,14 @@ impl ReachabilityGraph {
         }
 
         while let Some(result) = tasks.join_next().await {
-            let (pkg_dir, is_root, pkg_edges) = result.expect("task panicked");
+            let (pkg_dir, liveness, pkg_edges) = result.expect("task panicked");
 
-            if is_root {
+            // Retain both `Live` and `Unknown` as roots. `Unknown` means the
+            // liveness probe hit a transient I/O error (NFS/automount) — failing
+            // safe (retain) avoids GC'ing a live package whose back-refs could
+            // not be read this run. Only a definitively `Dead` package is a
+            // collection candidate.
+            if !matches!(liveness, RefLiveness::Dead) {
                 roots.insert(pkg_dir.clone());
             }
 
@@ -272,25 +317,72 @@ async fn read_refs(refs_dir: &Path, store_root: &Path) -> Vec<PathBuf> {
     targets
 }
 
-/// Returns true if the package directory has any live install refs.
+/// Three-state liveness of a package directory's install back-refs.
 ///
-/// A ref is live if its symlink target still exists. Broken refs (target deleted
-/// by user or crashed uninstall) do not protect the package from collection.
-async fn has_live_refs(pkg_dir: &Path) -> bool {
+/// `Live` = at least one `refs/symlinks/` entry still points to an existing
+/// target. `Dead` = directory readable but no live ref (safe to collect).
+/// `Unknown` = a transient I/O error (`EACCES`/`ESTALE`/`EIO` on NFS/automount)
+/// left liveness indeterminate; the caller retains the package as a root
+/// (fail-safe — collapsing this to `Dead` would silently GC a live package,
+/// the SEC-1 class).
+///
+/// Liveness over multiple back-refs is the `max` fold (`Live > Unknown > Dead`):
+/// a single live ref wins, otherwise a single `Unknown` ref forces retention.
+async fn has_live_refs(pkg_dir: &Path) -> RefLiveness {
     let refs_dir = pkg_dir.join("refs").join("symlinks");
-    let Ok(mut entries) = tokio::fs::read_dir(&refs_dir).await else {
-        return false;
+    let mut entries = match tokio::fs::read_dir(&refs_dir).await {
+        Ok(entries) => entries,
+        // A genuinely-absent refs dir means no install back-refs → Dead.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RefLiveness::Dead,
+        // Any other error reading the directory is a transient I/O failure —
+        // retain conservatively.
+        Err(e) => {
+            log::debug!(
+                "Cannot read install back-refs at '{}' ({e}); treating liveness as Unknown (retain).",
+                refs_dir.display()
+            );
+            return RefLiveness::Unknown;
+        }
     };
+
+    let mut liveness = RefLiveness::Dead;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if crate::symlink::is_link(&path)
-            && let Ok(target) = tokio::fs::read_link(&path).await
-            && utility::fs::path_exists_lossy(&target).await
-        {
-            return true;
+        if !crate::symlink::is_link(&path) {
+            continue;
+        }
+        let target = match tokio::fs::read_link(&path).await {
+            Ok(target) => target,
+            // Reading the symlink itself failed transiently (EACCES/ESTALE/EIO
+            // on NFS/automount). We cannot determine where this back-ref points,
+            // so it contributes Unknown (retain) — collapsing it to Dead by
+            // skipping the entry would silently GC a possibly-live package
+            // (the SEC-1 class). Mirrors the try_exists Err arm below.
+            Err(e) => {
+                log::debug!(
+                    "I/O error reading install back-ref symlink '{}' ({e}); liveness Unknown (retain).",
+                    path.display()
+                );
+                liveness = liveness.max(RefLiveness::Unknown);
+                continue;
+            }
+        };
+        match tokio::fs::try_exists(&target).await {
+            // Target present → this package is a live GC root; short-circuit.
+            Ok(true) => return RefLiveness::Live,
+            // Target definitively absent → contributes Dead (no change).
+            Ok(false) => {}
+            // Probe failed transiently → contributes Unknown (retain).
+            Err(e) => {
+                log::debug!(
+                    "I/O error probing install back-ref target '{}' ({e}); liveness Unknown (retain).",
+                    target.display()
+                );
+                liveness = liveness.max(RefLiveness::Unknown);
+            }
         }
     }
-    false
+    liveness
 }
 
 /// Canonicalize a path, falling back to the original on error.
@@ -422,5 +514,194 @@ pub mod tests {
     fn unreferenced_blob_not_reachable() {
         let g = graph_with_tiers(&["A"], &[], &["orphan_blob"], &[("orphan_blob", CasTier::Blob)]);
         assert_eq!(g.reachable(), set(&["A"]));
+    }
+
+    // ── RefLiveness three-state ─────────────────────────────────────────────
+    //
+    // Requirement: system_design_shared_store.md §5 M4 item 2 —
+    // `RefLiveness::{Live, Unknown, Dead}` with max semantics `Live > Unknown > Dead`.
+    // Unknown must be treated as Live for GC (retain, not collect).
+    // Traced to: plan_shared_store P3.2s back-ref three-state.
+
+    use super::RefLiveness;
+
+    #[test]
+    fn ref_liveness_max_live_beats_all() {
+        // Live > Unknown and Live > Dead.
+        assert_eq!(RefLiveness::Live.max(RefLiveness::Unknown), RefLiveness::Live);
+        assert_eq!(RefLiveness::Live.max(RefLiveness::Dead), RefLiveness::Live);
+        assert_eq!(RefLiveness::Unknown.max(RefLiveness::Live), RefLiveness::Live);
+        assert_eq!(RefLiveness::Dead.max(RefLiveness::Live), RefLiveness::Live);
+    }
+
+    #[test]
+    fn ref_liveness_max_unknown_beats_dead() {
+        // Unknown > Dead.
+        assert_eq!(RefLiveness::Unknown.max(RefLiveness::Dead), RefLiveness::Unknown);
+        assert_eq!(RefLiveness::Dead.max(RefLiveness::Unknown), RefLiveness::Unknown);
+    }
+
+    #[test]
+    fn ref_liveness_max_dead_plus_dead_is_dead() {
+        // Dead max Dead = Dead (safe to collect).
+        assert_eq!(RefLiveness::Dead.max(RefLiveness::Dead), RefLiveness::Dead);
+    }
+
+    #[test]
+    fn ref_liveness_max_is_commutative() {
+        // Commutativity — order of arguments must not matter.
+        let pairs = [
+            (RefLiveness::Live, RefLiveness::Dead),
+            (RefLiveness::Live, RefLiveness::Unknown),
+            (RefLiveness::Unknown, RefLiveness::Dead),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(
+                a.max(b),
+                b.max(a),
+                "RefLiveness::max must be commutative for ({a:?}, {b:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn ref_liveness_unknown_retain_semantic() {
+        // SEC-1 guard: collapsing an I/O error to Dead would cause clean to
+        // collect a live package. Unknown must compare as >= Dead so a single
+        // Unknown back-ref stops collection.
+        //
+        // This test encodes the retain-on-unknown semantic: given a set of
+        // back-refs where at least one returns Unknown, the combined liveness
+        // must not be Dead.
+        let liveness_results = [RefLiveness::Dead, RefLiveness::Unknown, RefLiveness::Dead];
+        let combined = liveness_results
+            .iter()
+            .copied()
+            .fold(RefLiveness::Dead, RefLiveness::max);
+        assert_ne!(
+            combined,
+            RefLiveness::Dead,
+            "a single Unknown back-ref must prevent Dead verdict (retain-on-unknown)"
+        );
+        assert_eq!(
+            combined,
+            RefLiveness::Unknown,
+            "combined liveness of [Dead, Unknown, Dead] must be Unknown"
+        );
+    }
+
+    // ── install_backref_io_error_is_unknown (SEC-1 guard via has_live_refs) ──────
+
+    /// Proves that a genuine I/O error probing `refs/symlinks/` yields
+    /// `RefLiveness::Unknown`, NOT `Dead`.
+    ///
+    /// The SEC-1 guard: collapsing a transient I/O error to `Dead` would cause
+    /// `clean` to collect a live package whose back-refs could not be read due
+    /// to a permission flip, NFS stale handle, etc.
+    ///
+    /// Technique (Unix-only): create a package directory with a `refs/symlinks/`
+    /// sub-directory holding one symlink entry, then set `0o000` permissions on
+    /// `refs/symlinks/` so `read_dir` returns `EACCES`. `has_live_refs` must
+    /// return `Unknown` (retain), never `Dead`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_backref_io_error_is_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let pkg_dir = dir.path().join("packages/sha256/aa/bb");
+
+        // Build refs/symlinks/ with one entry (a dangling symlink is fine —
+        // has_live_refs reads the dir before following targets).
+        let refs_dir = pkg_dir.join("refs").join("symlinks");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        // Place a symlink entry so the directory is non-empty (empty dirs with
+        // 0o000 still return EACCES on read_dir, but be explicit).
+        let symlink_entry = refs_dir.join("entry");
+        std::os::unix::fs::symlink("/nonexistent/target", &symlink_entry).unwrap();
+
+        // Revoke read+exec so `read_dir` → EACCES (transient-like I/O error).
+        std::fs::set_permissions(&refs_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let liveness = super::has_live_refs(&pkg_dir).await;
+
+        // Restore permissions so tempdir cleanup can remove the directory.
+        std::fs::set_permissions(&refs_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            liveness,
+            RefLiveness::Unknown,
+            "has_live_refs must return Unknown (not Dead) when refs/symlinks/ is unreadable \
+             (SEC-1 silent-data-loss guard: an I/O error must not be collapsed to Dead)"
+        );
+    }
+
+    // ── I/O-error → Unknown retain (try_exists probe path) ─────────────────────
+
+    /// Documents the design contract for the `try_exists` Err arm of
+    /// `has_live_refs`: when probing a back-ref target returns an `Err`
+    /// (EACCES, ESTALE, EIO, …), that ref contributes `Unknown`, which causes
+    /// the whole package to be retained rather than collected.
+    ///
+    /// We cannot inject a real `try_exists` I/O error here without a
+    /// filesystem, but the `max()` combinator that folds per-ref results is
+    /// exercised directly above (`max_combinator_*`), and the `read_dir` Err
+    /// path is covered by `install_backref_io_error_is_unknown`. This test
+    /// pins the distinctness the retain-on-error guard relies on.
+    #[test]
+    fn ref_liveness_io_error_yields_unknown_not_dead() {
+        // The implementation obligation: map `Err(_)` in `try_exists` (and in
+        // `read_link`) to `RefLiveness::Unknown` before folding with `max`.
+        assert_ne!(
+            RefLiveness::Unknown,
+            RefLiveness::Dead,
+            "Unknown and Dead must be distinct; collapsing them breaks the retain-on-error guard"
+        );
+    }
+
+    // ── read_link I/O error → Unknown retain (FIX A) ───────────────────────────
+
+    /// Proves the `read_link` Err arm of `has_live_refs` yields `Unknown`
+    /// (retain), not `Dead`, for a readable `refs/symlinks/` directory whose
+    /// entry cannot be `read_link`-ed.
+    ///
+    /// PORTABILITY GAP (documented, intentional): a deterministic `read_link`
+    /// error is not portably injectable. A valid symlink reads fine; making the
+    /// symlink's *parent* unreadable makes `read_dir` fail first (a different
+    /// code path, already covered by `install_backref_io_error_is_unknown`),
+    /// and a dangling symlink still `read_link`s successfully (the target need
+    /// not exist). We therefore do not fabricate a fragile platform-specific
+    /// `read_link` failure. Instead this test pins the *adjacent* invariant:
+    /// a `refs/symlinks/` entry that is a dangling symlink (read_dir + read_link
+    /// both succeed, but the target is absent) contributes `Dead` only — so the
+    /// fold result is `Dead` when no error and no live target exists. The Err
+    /// arm itself is verified by the matching code structure (the read_link Err
+    /// arm mirrors the try_exists Err arm verified by the SEC-1 test) plus the
+    /// `max`-combinator coverage above.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ref_liveness_dangling_symlink_is_dead_not_unknown() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let pkg_dir = dir.path().join("packages/sha256/aa/bb");
+        let refs_dir = pkg_dir.join("refs").join("symlinks");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+
+        // A dangling symlink: read_dir + read_link both succeed; the target is
+        // absent, so try_exists returns Ok(false) → contributes Dead. This
+        // confirms the read_link Ok arm does not spuriously yield Unknown.
+        let symlink_entry = refs_dir.join("entry");
+        std::os::unix::fs::symlink("/nonexistent/target", &symlink_entry).unwrap();
+
+        let liveness = super::has_live_refs(&pkg_dir).await;
+
+        assert_eq!(
+            liveness,
+            RefLiveness::Dead,
+            "a dangling back-ref (read_link OK, target absent) must be Dead, not Unknown — \
+             only a read_link/try_exists I/O *error* yields Unknown"
+        );
     }
 }

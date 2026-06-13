@@ -93,6 +93,38 @@ pub enum Error {
     /// The unsafe set is owned by `crate::package_manager::launcher`.
     #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
     LauncherUnsafeCharacter { value: String, character: char },
+
+    /// A network filesystem was detected on a zone path and `OCX_NETWORK_FS`
+    /// is set to `refuse`.
+    ///
+    /// Advisory locks (`flock(2)`) degrade silently on NFS; use a local
+    /// filesystem for OCX zone directories, or set `OCX_NETWORK_FS=warn` to
+    /// proceed with a warning (the default) or `OCX_NETWORK_FS=allow` to
+    /// suppress the check entirely.
+    ///
+    /// Classified as [`crate::cli::ExitCode::PolicyBlocked`] (81) — the
+    /// refusal is a deliberate local policy decision, not a transient fault.
+    #[error("network filesystem detected on zone '{zone}'; set OCX_NETWORK_FS=warn|allow to proceed")]
+    NetworkFsRefused {
+        /// Label for the zone whose path was probed (e.g. `cache`, `packages`,
+        /// `state`).
+        zone: String,
+    },
+
+    /// The store-wide exclusive GC lock could not be acquired within the
+    /// configured timeout (`OCX_GC_LOCK_TIMEOUT`, default 120 s) because another
+    /// process holds it. `clean` aborts rather than running destructive GC
+    /// alongside a concurrent mutator.
+    ///
+    /// Classified as [`crate::cli::ExitCode::TempFail`] (75) — a retry once the
+    /// lock holder finishes is expected to succeed.
+    #[error("could not acquire GC lock at '{}' within {timeout_secs}s; another ocx process holds it", .path.display())]
+    GcLockTimeout {
+        /// Path of the contended lock file (`$OCX_STATE_DIR/gc.lock`).
+        path: std::path::PathBuf,
+        /// The timeout budget that elapsed, in seconds.
+        timeout_secs: u64,
+    },
 }
 
 fn launcher_unsafe_hint(c: char) -> &'static str {
@@ -222,6 +254,12 @@ impl ClassifyExitCode for Error {
             Self::PinnedIdentifier(e) => e.classify(),
             Self::Singleflight(e) => e.classify(),
             Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
+            // Network-FS refusal is a deliberate local policy, same as offline/frozen.
+            // Reuses PolicyBlocked (81) per system_design_shared_store.md §8 item 2.
+            Self::NetworkFsRefused { .. } => Some(ExitCode::PolicyBlocked),
+            // A contended GC lock is a transient condition — retry once the
+            // holder finishes. Mirrors sysexits EX_TEMPFAIL.
+            Self::GcLockTimeout { .. } => Some(ExitCode::TempFail),
         }
     }
 }

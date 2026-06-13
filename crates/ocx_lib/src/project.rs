@@ -15,6 +15,7 @@ pub mod mutation;
 mod project_lock;
 pub mod registry;
 pub mod resolve;
+pub mod shared_roots;
 
 pub use compose::{Origin, PositionalPackage, ResolvedTool, compose_tool_set, expand_all_keyword, parse_positional};
 pub use config::ProjectConfig;
@@ -30,6 +31,8 @@ pub use mutation::{MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};
 pub use registry::ProjectRegistry;
 pub use resolve::{ResolveLockOptions, resolve_lock, resolve_lock_partial};
+#[allow(unused_imports)]
+pub use shared_roots::{SharedRoots, is_shared_store_enabled};
 
 /// Reserved group name for the implicit default group (the top-level
 /// `[tools]` table in `ocx.toml`, the `"default"` group key in lock
