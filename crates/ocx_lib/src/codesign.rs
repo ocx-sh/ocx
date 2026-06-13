@@ -27,13 +27,14 @@ use crate::{Result, log};
 ///
 /// Hardlinked files (same inode) are signed only once. Symlinks are not followed.
 ///
-/// **Cross-device packages (P2.4 forward-pointer):** files placed via
-/// [`crate::reflink::create`] have independent inodes, so on macOS a
-/// cross-device package assembly produces independent inode copies that may
-/// need re-signing. Signature bytes are embedded in the Mach-O so a reflink
-/// clone or full copy preserves them, but the conditional re-sign in P2.4
-/// covers the independent-inode case to ensure freshly placed binaries carry
-/// a valid ad-hoc signature on the destination device.
+/// **Cross-device packages (P2.4):** files placed via [`crate::reflink::create`]
+/// have independent inodes (cross-volume copies), so on macOS the pull pipeline
+/// re-signs the package content after assembly. The caller MUST gate this on
+/// [`crate::utility::fs::AssemblyStats::is_fully_independent`], never on
+/// `used_independent_inode`: this function signs Mach-O files in place, so
+/// signing a file that is hardlinked to a layer (a mixed assembly) would mutate
+/// the shared layer-store inode and corrupt every package linked to it.
+/// Whole-tree signing is only safe when EVERY file is an independent copy.
 ///
 /// On non-macOS platforms this is a no-op.
 ///

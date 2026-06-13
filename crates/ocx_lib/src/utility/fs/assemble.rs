@@ -145,6 +145,21 @@ impl AssemblyStats {
     pub fn used_independent_inode(&self) -> bool {
         self.independent_inode_files > 0
     }
+
+    /// Returns `true` when EVERY placed file is on an independent inode (the
+    /// whole tree was reflinked/copied, nothing hardlinked to a layer).
+    ///
+    /// This is the only safe precondition for whole-tree in-place mutation of
+    /// package content (e.g. macOS re-signing): a hardlinked file still shares
+    /// the layer-store inode, so mutating it would corrupt the shared layer and
+    /// every other package linked to it. A package is fully independent
+    /// (single- or multi-layer, all on a different volume than the cache) or
+    /// fully hardlinked (same volume) in the normal pull pipeline, because all
+    /// of a package's layers live in one cache zone; this guard makes the
+    /// mixed case (which whole-tree mutation must never touch) explicit.
+    pub fn is_fully_independent(&self) -> bool {
+        self.files_placed > 0 && self.independent_inode_files == self.files_placed
+    }
 }
 
 /// Walks `source_content` depth-first and mirrors its tree into
@@ -259,21 +274,24 @@ async fn assemble_from_layers_with_cap(
 
     // ── Compute per-source assembly mode. ───────────────────────────────────
     // Probe each source against dest_content to determine whether they reside
-    // on the same filesystem. Hardlink if same fs (or probe errors — default
-    // preserves existing behavior); Reflink if cross-device.
+    // on the same filesystem. Same fs → Hardlink (shared inode, dedup). Cross
+    // fs → Reflink (CoW clone or byte copy). Probe FAILURE → Reflink, not
+    // Hardlink: reflink_or_copy succeeds on both same-fs and cross-fs (it
+    // copies when it must), whereas hardlink fails hard with EXDEV across
+    // devices. Defaulting to Reflink on an unprovable relationship trades a
+    // little dedup for a guaranteed-correct install.
     let mut src_dirs_with_mode: Vec<(PathBuf, AssemblyMode)> = Vec::with_capacity(sources.len());
     for src in sources {
         let mode = match crate::utility::fs::same_filesystem(src, dest_content).await {
             Ok(true) => AssemblyMode::Hardlink,
             Ok(false) => AssemblyMode::Reflink,
-            // Probe failure: default to Hardlink to preserve existing behavior.
             Err(error) => {
                 tracing::debug!(
                     source = %src.display(),
                     %error,
-                    "same_filesystem probe failed; defaulting to hardlink mode"
+                    "same_filesystem probe failed; defaulting to reflink/copy (safe across devices)"
                 );
-                AssemblyMode::Hardlink
+                AssemblyMode::Reflink
             }
         };
         src_dirs_with_mode.push((src.to_path_buf(), mode));
@@ -3296,6 +3314,49 @@ mod tests {
         assert!(
             stats.used_independent_inode(),
             "used_independent_inode() must be true when independent_inode_files > 0"
+        );
+    }
+
+    /// `is_fully_independent()` gates whole-tree in-place mutation (macOS
+    /// re-sign). It must be true ONLY when every placed file is independent —
+    /// a mixed assembly (some hardlinked to a layer) must return false so the
+    /// caller never mutates a shared layer inode.
+    #[test]
+    fn is_fully_independent_true_only_when_all_files_independent() {
+        let all_independent = AssemblyStats {
+            files_placed: 3,
+            independent_inode_files: 3,
+            ..AssemblyStats::default()
+        };
+        assert!(
+            all_independent.is_fully_independent(),
+            "all files independent → fully independent"
+        );
+
+        let all_hardlinked = AssemblyStats {
+            files_placed: 3,
+            independent_inode_files: 0,
+            ..AssemblyStats::default()
+        };
+        assert!(
+            !all_hardlinked.is_fully_independent(),
+            "all files hardlinked → NOT fully independent (re-sign would corrupt layers)"
+        );
+
+        let mixed = AssemblyStats {
+            files_placed: 3,
+            independent_inode_files: 1,
+            ..AssemblyStats::default()
+        };
+        assert!(
+            !mixed.is_fully_independent(),
+            "mixed hardlink+independent → NOT fully independent (whole-tree re-sign unsafe)"
+        );
+
+        let empty = AssemblyStats::default();
+        assert!(
+            !empty.is_fully_independent(),
+            "empty assembly → NOT fully independent (nothing to sign)"
         );
     }
 

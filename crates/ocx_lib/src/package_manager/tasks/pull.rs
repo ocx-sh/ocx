@@ -407,11 +407,20 @@ pub async fn setup_owned(
         .await
         .map_err(PackageErrorKind::Internal)?;
 
-    // macOS: cross-device package content lives on independent inodes that do not
-    // share the layer's signed inode, so re-sign in place before the atomic move.
-    // `sign_extracted_content` no-ops under OCX_NO_CODESIGN and off-macOS.
+    // macOS: cross-device package content lives on independent inodes that do
+    // NOT share the layer's signed inode, so re-sign in place before the atomic
+    // move. Gate on `is_fully_independent()` — NOT `used_independent_inode()`:
+    // `sign_extracted_content` signs Mach-O files in place, so signing a file
+    // that is hardlinked to a layer would mutate the shared layer inode and
+    // corrupt every package linked to it. Whole-tree signing is only safe when
+    // EVERY file is an independent copy. In the normal pull pipeline a package
+    // is either fully hardlinked (same volume, nothing to re-sign) or fully
+    // independent (all layers cross-volume); the mixed case never reaches here
+    // because all of a package's layers share one cache zone. The guard makes
+    // that invariant safe by construction rather than relying on it.
+    // `sign_extracted_content` additionally no-ops under OCX_NO_CODESIGN.
     #[cfg(target_os = "macos")]
-    if assembly_stats.used_independent_inode() {
+    if assembly_stats.is_fully_independent() {
         crate::codesign::sign_extracted_content(&pkg.content())
             .await
             .map_err(PackageErrorKind::Internal)?;
