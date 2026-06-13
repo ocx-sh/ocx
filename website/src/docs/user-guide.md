@@ -786,6 +786,87 @@ When multiple projects share the same `OCX_HOME`, `ocx clean` retains every pack
 [Project Toolchain In Depth → Multi-project retention][in-depth-project-multi-project-retention] — symlink ledger, GC semantics, `$OCX_HOME/projects/` browsability.
 :::
 
+### Concurrent and CI safety {#cleanup-concurrent-safety}
+
+`ocx clean` is safe to run alongside `ocx install` and other concurrent OCX processes. Before scanning and deleting, it acquires an exclusive advisory lock at `$OCX_STATE_DIR/gc.lock`. Other OCX commands (install, pull) acquire a shared lock on the same file. `clean` waits up to [`OCX_GC_LOCK_TIMEOUT`][env-gc-lock-timeout] seconds (default: 120) for the exclusive lock before giving up with exit code **75** (`TempFail`) — retry-safe.
+
+The lock is per-instance: it lives in `$OCX_STATE_DIR`, which is always per-machine and per-user. Cross-machine or cross-container safety on a shared content volume comes from content-addressing and the mtime grace window below, not from the lock.
+
+**Grace window.** Every object whose directory mtime is younger than [`OCX_GC_GRACE_SECONDS`][env-gc-grace-seconds] (default: 600 seconds) is retained, even if it appears unreachable at scan time. This protects freshly-placed objects that haven't yet been back-referenced — the TOCTOU window between `ocx install` writing a package directory and registering its symlink.
+
+A future mtime (clock skew on a shared volume) is treated as "retain" — the conservative direction. Setting `OCX_GC_GRACE_SECONDS=0` disables the check and collects immediately.
+
+### Shared store for DevContainer fleets {#cleanup-shared-store}
+
+The goal is to share a single content volume across a fleet of DevContainers while still running `ocx clean` from any instance without deleting objects held by another.
+
+When `OCX_SHARED_STORE=true`, `ocx clean` reads the shared-roots ledger at `$OCX_PACKAGES_DIR/roots/`. Each instance writes its live project roots to a per-instance subdirectory: `roots/<instance_id>/<project_hash>`. Before collecting, `ocx clean` unions the pinned digests from every instance directory so no object held by any peer is deleted.
+
+The canonical split for shared-store setups:
+
+```sh
+export OCX_PACKAGES_DIR=/vol/shared   # shared across containers
+export OCX_STATE_DIR=$HOME/.ocx-local # per-container; holds gc.lock + instance-id
+export OCX_SHARED_STORE=true
+```
+
+**Safety boundaries.** Shared-roots writes are best-effort and atomic (tempfile + rename). A missed write means the next `clean` on a peer may collect that object; the [grace window](#cleanup-concurrent-safety) provides a time-bounded backstop. Stale ledger directories from departed instances over-retain (safe direction — no spurious deletion). Unreadable peer ledger files (permission error, truncation) cause the cleaner to retain all of that peer's objects rather than guess.
+
+:::info How instance identity works
+Each `$OCX_STATE_DIR` contains an `instance-id` file holding a UUID generated on first use. This ID namespaces the shared-roots ledger subdirectory so writes from different containers never collide, even when they share the same packages volume.
+:::
+
+::: warning Opt-in only
+`OCX_SHARED_STORE` defaults to off. OCX never auto-detects a shared store from the filesystem type. Set it explicitly in every container that participates in the fleet — both when running installs and when running `ocx clean`.
+:::
+
+### GC audit log {#cleanup-audit-log}
+
+`ocx clean` appends a JSONL record to `$OCX_STATE_DIR/gc-log.jsonl` for every object it deletes (or would delete in `--dry-run` mode). The log is best-effort — a write failure emits a warning but does not abort the clean.
+
+Each record has the form:
+
+```json
+{"schema_version":1,"run_id":"<uuid>","instance_id":"<uuid>","timestamp":"2026-06-14T10:00:00Z","action":"Deleted","object_kind":"Package","path":"/path/to/pkg","digest":"sha256:abc123..."}
+```
+
+| Field | Description |
+|-------|-------------|
+| `schema_version` | Always `1` in this release |
+| `run_id` | UUID unique to this `ocx clean` invocation |
+| `instance_id` | UUID from `$OCX_STATE_DIR/instance-id` |
+| `timestamp` | ISO-8601 UTC |
+| `action` | `Deleted` or `WouldDelete` (dry run) |
+| `object_kind` | `Package`, `Layer`, `Blob`, or `Temp` |
+| `path` | Absolute path of deleted entry |
+| `digest` | Content digest, or `null` for `Temp` objects |
+
+When `gc-log.jsonl` reaches [`OCX_GC_LOG_MAX_BYTES`][env-gc-log-max-bytes] (default: 10,485,760 bytes / 10 MiB), it is atomically renamed to `gc-log.jsonl.1` and a fresh log starts. Only one previous-generation file is kept.
+
+To disable audit logging: `export OCX_GC_LOG=off`.
+
+**Forensics.** To see what `ocx clean` deleted in the last run, filter by `run_id`:
+
+```sh
+# Most recent clean run (jq required)
+last_run=$(tail -1 "$OCX_STATE_DIR/gc-log.jsonl" | jq -r .run_id)
+grep "\"$last_run\"" "$OCX_STATE_DIR/gc-log.jsonl" | jq -r '"\(.action) \(.object_kind) \(.path)"'
+```
+
+### Network filesystem posture {#cleanup-network-fs}
+
+Advisory locks degrade silently on NFS v2/v3: two concurrent `ocx clean` processes on different machines targeting the same NFS-hosted store will not be serialized by the GC lock. OCX detects when a zone path lives on a network filesystem and warns by default.
+
+Control this with [`OCX_NETWORK_FS`][env-network-fs]:
+
+| Value | What happens |
+|-------|-------------|
+| `warn` (default) | Log a warning; operation continues. |
+| `refuse` | Exit **81** (`PolicyBlocked`) before touching the store. Use in CI to enforce a hard policy. |
+| `allow` | Skip the detection check. Use when the probe gives a false positive (e.g. a custom kernel filesystem module). |
+
+For shared DevContainer fleets, the intended pattern is to keep the packages volume on a shared mount but keep `$OCX_STATE_DIR` on a local (per-container) filesystem. This way the GC lock is always local-filesystem-backed and the network posture warning does not fire for state-zone operations.
+
 ### Lock-first by default: where are `--locked` and `--frozen`? {#locked-frozen-equivalents}
 
 Users coming from [uv][uv], [Cargo][cargo], or [pnpm][pnpm] often look for `--locked` / `--frozen` flags on read-path commands. OCX folds the *lock-freshness* guarantee into the defaults — read paths refuse stale locks unconditionally, and the only commands that touch `ocx.lock` are explicit mutators — and exposes the *no-new-versions* guarantee as the global [`--frozen`][arg-frozen] flag.
@@ -941,6 +1022,10 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-docker-config]: ./reference/environment.md#external-docker-config
 [env-ocx-no-update-check]: ./reference/environment.md#ocx-no-update-check
 [env-ocx-update-check-interval]: ./reference/environment.md#ocx-update-check-interval
+[env-gc-lock-timeout]: ./reference/environment.md#ocx-gc-lock-timeout
+[env-gc-grace-seconds]: ./reference/environment.md#ocx-gc-grace-seconds
+[env-gc-log-max-bytes]: ./reference/environment.md#ocx-gc-log-max-bytes
+[env-network-fs]: ./reference/environment.md#ocx-network-fs
 [env-shell-activation-files]: ./reference/environment.md#shell-activation-files
 [xdg-basedir]: ./reference/environment.md#external-xdg-config-home
 [env-ref]: ./reference/environment.md
