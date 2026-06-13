@@ -183,12 +183,20 @@ Add `reflink-copy` (`reflink_or_copy()` = CoW clone with automatic byte-copy fal
 - **Shared-store rooting**: root GC on the **shared project ledger** (lockfile pins), since per-instance install symlinks are not globally visible. Place `projects/` to be reachable by all sharers (decision recorded in P3).
 - **Network-FS posture**: detect NFS/SMB at store init; warn (or refuse) on mutating ops + `clean`; document `$OCX_HOME` on network FS as best-effort (consistent with `adr_lock_file_locking_strategy.md`).
 
-### "Are we safe?" — verified matrix
+### "Are we safe?" — verified matrix (P3 as-built)
 
 | Substrate | Content tiers (blob/layer/package*) | Mutable state (tags/symlinks/projects/install/auth) | Concurrent `clean` |
 |-----------|-------------------------------------|------------------------------------------------------|--------------------|
-| Same host, local-FS shared volume | Safe (*after P1 package fix) | Safe — state per-instance; shared locks enforced by host kernel | Safe **only after P3** lock |
-| Network FS / cross-host | Content stays correct (content-addressed); rename non-atomic on NFS is a residual risk | **Unsafe** — flock degrades silently | **Unsafe** — best-effort, P3 detect+warn |
+| Same host, local-FS shared volume | Safe (*after P1 package fix) | Safe — state per-instance; shared locks enforced by host kernel | **Safe (P3 landed)** — GC lock serializes `clean` vs install/pull on same instance; grace window + content-addressing cover cross-instance. |
+| Network FS / cross-host | Content stays correct (content-addressed); rename non-atomic on NFS is a residual risk | **Unsafe** — flock degrades silently on NFS v2/v3 | **Best-effort.** P3 detects NFS and warns; `OCX_NETWORK_FS=refuse` enforces hard block (exit 81). Cross-instance concurrent clean on NFS-hosted store is still unsafe due to silent lock degradation. |
+
+**P3 hardening facts (cross-model review, as-built):**
+
+1. **Three-state liveness** — `read_link` I/O errors (e.g. NFS stale-handle, EPERM) on install back-refs → `RefLiveness::Unknown` → retain. Only clean `ENOENT`/`NotFound` → `Dead`. `registry.rs::probe_live_target` was already three-state pre-P3; P3 confirmed `reachability_graph.rs` uses the same semantics for back-refs.
+2. **Shared-roots fail-closed on unreadable peer** — `SharedRootsVersion` is a `serde_repr` u8 enum (V1=1); unknown version → `SharedRootsUnion::RetainAll`. Unreadable committed peer ledger file (non-`NotFound` I/O error) → `RetainAll`. NotFound race (file vanished between readdir and read) → skip with debug log (benign).
+3. **Shared-root resolution fail-closed** — when a peer's digest appears in the shared ledger but the corresponding blob/layer/package is absent from the cleaner's own cache, the cleaner retains the entry (the object is simply missing from this instance's view; it may be present on the peer's zone).
+4. **GC lock ordering** — GC lock (`$OCX_STATE_DIR/gc.lock`) acquired BEFORE any L1 object-store lock (state-zone is coarser than object-level). This ordering is enforced structurally: `clean()` calls `GcLock::acquire_exclusive()` at the start, before any `PackageStore`/`LayerStore`/`BlobStore` operation.
+5. **Cross-instance scope** — the GC lock is per-instance (lives in per-instance `$OCX_STATE_DIR`). Cross-instance safety relies solely on: content-addressing (idempotent writes) + mtime grace window (time-bounded) + shared-roots ledger (opt-in, fail-closed).
 
 ## Implementation Plan
 

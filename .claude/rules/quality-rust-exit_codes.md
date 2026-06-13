@@ -74,8 +74,13 @@ pub enum ExitCode {
     /// Authentication failure: registry 401, missing credentials.
     /// Tool-specific.
     AuthError = 80,
-    /// A deliberate local policy (`--offline` or `--frozen`) refused a network
-    /// or resolution operation — not a fault. Distinct from `Unavailable`.
+    /// A deliberate local policy refused an operation — not a fault.
+    ///
+    /// Examples: a mode flag (`--offline`, `--frozen`) blocked a network or
+    /// resolution operation; a posture configuration flag refused a storage
+    /// path whose type policy disallows.  Distinct from `Unavailable`
+    /// (infrastructure unreachable) — `PolicyBlocked` means the tool was
+    /// told to refuse this class of operation by explicit configuration.
     PolicyBlocked = 81,
 }
 
@@ -187,7 +192,7 @@ case $? in
     78) echo "bad config; fix and retry" ;;
     79) echo "not found; pin a different version" ;;
     80) echo "auth failed; refresh credentials" ;;
-    81) echo "policy blocked (offline/frozen); loosen the flag or update the index" ;;
+    81) echo "policy blocked by configuration; check mode flags or posture settings" ;;
     *)  echo "unknown failure ($?)"; exit 1 ;;
 esac
 ```
