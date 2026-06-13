@@ -187,8 +187,10 @@ Setting this to an empty string (`OCX_CACHE_DIR=`) is treated as unset.
 
 This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same zone layout.
 
-::: warning Same filesystem required
-Package assembly hardlinks files from `layers/` into `packages/content/`. Both stores must therefore reside on the same filesystem. Setting `OCX_PACKAGES_DIR` to a path on a different filesystem than `OCX_CACHE_DIR` is not yet supported — cross-device assembly will fail. This constraint will be lifted in a future release.
+::: tip Cross-volume packages
+`OCX_PACKAGES_DIR` may point to a different volume than `OCX_CACHE_DIR`. When assembling a package, OCX probes whether each layer and the package destination are on the same filesystem. Same filesystem → [hardlink][hardlink-create] (shared inode, zero extra disk). Different filesystem → reflink (copy-on-write clone where the filesystem supports it — btrfs cross-subvolume, APFS) with a full byte-for-byte copy fallback otherwise (ext4, tmpfs). Cross-volume packages therefore occupy real disk space with independent inodes rather than sharing the layer store's inodes.
+
+On macOS, packages assembled cross-volume are re-signed in place after assembly (independent inodes do not share the layer's signed inode). [`OCX_NO_CODESIGN`](#ocx-no-codesign) suppresses re-signing.
 :::
 
 ### `OCX_PACKAGES_DIR` {#ocx-packages-dir}
@@ -207,8 +209,8 @@ Setting this to an empty string (`OCX_PACKAGES_DIR=`) is treated as unset.
 
 This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`.
 
-::: warning Same filesystem required
-See the constraint note under [`OCX_CACHE_DIR`](#ocx-cache-dir): `OCX_PACKAGES_DIR` and `OCX_CACHE_DIR` must resolve to the same filesystem until cross-device assembly support is added.
+::: tip Cross-volume layout
+`OCX_PACKAGES_DIR` may resolve to a different filesystem than [`OCX_CACHE_DIR`](#ocx-cache-dir). When the zones are on different volumes, package content is reflinked or byte-copied (independent inodes) rather than hardlinked — see the cross-volume note under [`OCX_CACHE_DIR`](#ocx-cache-dir) for the full assembly model.
 :::
 
 ### `OCX_STATE_DIR` {#ocx-state-dir}
@@ -605,6 +607,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [fs-index]: ../user-guide.md#file-structure-index
 [fs-symlinks]: ../user-guide.md#file-structure-symlinks
 [faq-codesign]: ../faq.md#macos-codesign
+[hardlink-create]: ../in-depth/storage.md#layers
 
 <!-- authoring -->
 [authoring-testing-scripted]: ../authoring/testing.md#scripted-tests

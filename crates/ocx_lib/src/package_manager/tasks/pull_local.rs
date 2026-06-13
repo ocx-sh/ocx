@@ -98,8 +98,10 @@ impl PackageManager {
     ///   mode, missing digest blobs error with `OfflineMode`.
     /// * `dest_override` — when `Some(path)`, the package is moved to `path` instead of
     ///   `$OCX_HOME/packages/{registry}/.../{digest}/`. The launcher bake-in path is computed
-    ///   from the same override. `path` must be empty (or absent) and reside on the same
-    ///   filesystem as `$OCX_HOME/layers/`.
+    ///   from the same override. `path` must be empty (or absent). It need not be on the same
+    ///   filesystem as the layer store: assembly probes `same_filesystem` per layer and falls
+    ///   back to `reflink::create` (CoW clone or copy, independent inodes) when the destination
+    ///   is on a different volume than `layers/`.
     ///
     /// # Singleflight bypass
     ///

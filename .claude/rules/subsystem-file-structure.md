@@ -53,7 +53,8 @@ These modules sit at `crates/ocx_lib/src/` root — consumed across subsystems.
 | Module | Purpose | Used by |
 |--------|---------|---------|
 | `symlink.rs` | Symlink create/update/remove/is_link; Windows junction aware | ReferenceManager, pull, assemble walker, archive extractor |
-| `hardlink.rs` | Hardlink create/update — THE ONE place `std::fs::hard_link` lives | assemble walker, codesign |
+| `hardlink.rs` | Hardlink create/update — THE ONE place `std::fs::hard_link` lives; same-filesystem only | assemble walker, codesign |
+| `reflink.rs` | Cross-filesystem file placement: CoW reflink or full-copy fallback; independent inode | assemble walker (`AssemblyMode::Reflink` path) |
 | `utility/fs/path.rs` | Lexical path helpers: `lexical_normalize`, `escapes_root`, `validate_symlinks_in_dir` | symlink, archive extractor, assemble walker |
 
 ## FileStructure (composite root)
@@ -229,6 +230,21 @@ Low-level primitives for file-level dedup during layer assembly:
 - `create(source, link)` — hardlink; create parent dirs; fail if link exists or cross-device
 - `update(source, link)` — create or replace
 
-Cross-device hardlinks fail with `io::ErrorKind::CrossesDevices`. `$OCX_HOME` must sit on single volume — required by `temp → packages/` atomic rename.
+Cross-device hardlinks fail with `io::ErrorKind::CrossesDevices`. The `temp → packages/` atomic rename within the packages zone requires same-filesystem. When `OCX_PACKAGES_DIR` and `OCX_CACHE_DIR` are on different volumes, the assembly walker falls back to `reflink::create` — see reflink Module below.
 
-**Assembly walker**: `utility/fs/assemble_from_layer(source_content, dest_content)` mirror layer's `content/` tree into package's `content/` dir — hardlink regular files via `hardlink::create`, create real subdirs, recreate intra-layer symlinks verbatim. `packages/{P}/content/` is real dir, not symlink into `layers/`. Walker fan out dir-level tasks through semaphore-bounded `JoinSet`; per-task stats return-and-summed (no shared mutex). Windows layer symlinks return `io::ErrorKind::Unsupported`.
+**Assembly walker**: `utility/fs/assemble_from_layer(source_content, dest_content)` mirror layer's `content/` tree into package's `content/` dir. Per-layer assembly mode (`AssemblyMode`) is computed by probing `utility::fs::same_filesystem(source, dest)`:
+- **Same filesystem** → `hardlink::create` (shared inode, zero extra disk)
+- **Different filesystem** → `reflink::create` (independent inode, CoW clone or byte-copy fallback)
+
+Probe failure defaults to `Reflink` (safe across devices). Walker fan out dir-level tasks through semaphore-bounded `JoinSet`; per-task stats return-and-summed as `AssemblyStats`. `is_fully_independent()` on stats gates macOS re-signing after cross-volume assembly. Windows layer symlinks return `io::ErrorKind::Unsupported`.
+
+## reflink Module
+
+`crates/ocx_lib/src/reflink.rs` — THE ONE place `reflink_copy::reflink_or_copy` is called. Mirrors the `hardlink` module for the cross-device case.
+
+- `create(source, link)` — reflink (CoW clone) or full byte-copy fallback; independent inode; create parent dirs; fail if link exists
+- `Ok(None)` from underlying `reflink_or_copy` = CoW reflink succeeded (btrfs cross-subvolume, APFS); `Ok(Some(bytes))` = full copy performed (ext4, tmpfs, no CoW support)
+
+**When to use vs `hardlink::create`:** same-filesystem → `hardlink::create` (shared inode, zero-copy). Different filesystem → `reflink::create` (independent inode, CoW or copy). The assembly walker probes `same_filesystem` and dispatches through `AssemblyMode`.
+
+**macOS re-signing:** packages assembled cross-volume have `AssemblyStats::is_fully_independent() == true`; the pull pipeline gates ad-hoc codesign on this flag. Re-signing is suppressed by `OCX_NO_CODESIGN`.

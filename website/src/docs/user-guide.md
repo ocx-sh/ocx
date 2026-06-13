@@ -531,6 +531,34 @@ To export environment variables into CI runtime files (e.g. `$GITHUB_PATH` / `$G
 [Storage In Depth → Packages][in-depth-storage-packages] — why concurrent CI writes are safe.
 :::
 
+### Cache layers, ephemeral packages {#ci-split-zones}
+
+OCX separates raw OCI content (blobs and extracted layers in [`OCX_CACHE_DIR`][env-ocx-cache-dir]) from assembled package trees ([`OCX_PACKAGES_DIR`][env-ocx-packages-dir]). In CI, these two zones can live on different volumes — useful when blobs and layers are expensive to re-download but assembled packages are cheap to re-assemble from the cached layers.
+
+A typical setup: a persistent cache volume holds the layer store; each job gets a fresh ephemeral volume for its package trees.
+
+```yaml
+# GitHub Actions — restore the layer cache, assemble packages fresh each job
+- name: Restore layer cache
+  uses: actions/cache@v4
+  with:
+    path: /cache/ocx          # persistent volume: blobs/ + layers/
+    key: ocx-layers-${{ runner.os }}-${{ hashFiles('ocx.lock') }}
+
+- name: Install tools
+  env:
+    OCX_CACHE_DIR: /cache/ocx    # blobs/ and layers/ on the persistent volume
+    OCX_PACKAGES_DIR: /tmp/ocx   # assembled packages on an ephemeral volume
+  run: ocx pull
+```
+
+When `OCX_CACHE_DIR` holds the layers from a previous job, `ocx pull` assembles the packages directly from the cached layers without re-downloading any OCI content. The assembled packages land on `/tmp/ocx` with independent inodes (reflinked or byte-copied, depending on the filesystem) rather than hardlinks, because the two volumes are on different filesystems.
+
+::: tip Learn more
+[`OCX_CACHE_DIR` reference][env-ocx-cache-dir] — blobs and layers zone, cross-volume assembly model.
+[`OCX_PACKAGES_DIR` reference][env-ocx-packages-dir] — packages zone, ephemeral usage.
+:::
+
 ## Authenticate with a private registry {#authentication}
 
 OCX uses a layered approach to authentication. Most methods are scoped per registry, so different registries can use different credentials. Methods are queried in order; the first one to succeed wins:
@@ -901,6 +929,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-ocx-binary-pin]: ./reference/environment.md#ocx-binary-pin
 [env-ocx-home]: ./reference/environment.md#ocx-home
 [env-ocx-index]: ./reference/environment.md#ocx-index
+[env-ocx-cache-dir]: ./reference/environment.md#ocx-cache-dir
+[env-ocx-packages-dir]: ./reference/environment.md#ocx-packages-dir
 [env-config]: ./reference/environment.md#ocx-config
 [env-no-config]: ./reference/environment.md#ocx-no-config
 [env-no-modify-path]: ./reference/environment.md#ocx-no-modify-path

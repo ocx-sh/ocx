@@ -188,9 +188,9 @@ impl AssemblyStats {
 /// # Errors
 ///
 /// - `Error::InternalFile` wrapping the underlying `io::Error` if a
-///   filesystem operation fails. Cross-device hardlink attempts surface as
-///   `io::ErrorKind::CrossesDevices` — see the `$OCX_HOME` single-volume
-///   invariant in the plan.
+///   filesystem operation fails. Cross-device sources are handled by
+///   `AssemblyMode::Reflink` (CoW clone or copy), not rejected — only a
+///   same-volume layer takes the hardlink path.
 /// - Walker invariant violations (entry cap, depth cap, scheduler failure)
 ///   surface as `Error::InternalFile` wrapping an [`AssemblyError`] via
 ///   `io::Error::other`. Callers can downcast the `io::Error` source to

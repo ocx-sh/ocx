@@ -133,7 +133,7 @@ Global flags: `--offline`, `--remote`, `--format json`.
 ├── blobs/{registry}/      # Raw OCI blobs (manifests, referrers, image indexes)
 ├── layers/{registry}/     # Extracted OCI tar layers (content-addressed, shared)
 │  ← OCX_PACKAGES_DIR overrides packages and package-staging temp (default = OCX_CACHE_DIR)
-├── packages/{registry}/   # Assembled packages (content/ hardlinked from layers/)
+├── packages/{registry}/   # Assembled packages (content/ from layers/: hardlinked same-volume, reflinked/copied cross-volume)
 ├── tags/{registry}/       # Tag-to-digest mappings (OCX_INDEX or under OCX_CACHE_DIR)
 │  ← OCX_STATE_DIR overrides symlinks, state, and projects (per-instance; never shared)
 ├── symlinks/{registry}/   # Install symlinks (candidates + current)
