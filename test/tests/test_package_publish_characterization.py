@@ -182,21 +182,17 @@ def test_temp_cleaned_after_publish(
 def test_repull_replaces_package_dir_observably(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
-    """CURRENT BEHAVIOR (pre-M1): re-installing the same digest destroys the package dir.
+    """INV-M1 (post-M1): re-installing over a broken install is NON-destructive.
 
-    Documents the destructive re-pull window in move_dir (remove_dir_all(dst) then
-    rename).  A sentinel file written into the package dir before the re-pull is
-    absent afterwards, proving the package dir was removed wholesale.
+    After M1 (``finalize_package_dir`` stash→swap), a re-install over a broken
+    install never ``remove_dir_all``s the canonical package dir — it only ever
+    renames the canonical name outward to a stash before renaming the new dir
+    in. This test asserts the package dir is always present and a healthy
+    install.json is restored after the re-install (the prior assertion documented
+    today's now-fixed destructive replace).
 
-    ** THIS IS THE TEST EXPECTED TO CHANGE WHEN M1 LANDS. **
-    After M1 (finalize_package_dir stash→swap) the package dir is NEVER removed from
-    its canonical name — only a stash copy is created.  At that point update this test
-    to assert non-destructive replace (e.g. the canonical package dir is always present
-    and any stash is cleaned up asynchronously).
-
-    Traced to: utility/fs.rs move_dir (remove_dir_all branch), system_design §5 M1
-    "Problem" paragraph, plan P1.0 acceptance criterion "test_repull_replaces_package_dir_observably
-    documents today's destructive replace".
+    Traced to: system_design §5 M1 (INV-M1), plan P1.5; the explicitly-allowed
+    characterization update once M1 landed.
     """
     pkg = published_package
 
@@ -235,31 +231,41 @@ def test_repull_replaces_package_dir_observably(
         f"the existing package dir; sentinel must survive under {pkg_root}"
     )
 
-    # ── Re-pull over a BROKEN install: destructive move_dir replaces dir ──────
+    # ── Re-pull over a BROKEN install: NON-destructive stash→swap (post-M1) ───
     # Break the install by removing install.json so check_install_status returns
     # false; the fast-path no longer fires and setup_owned re-pulls →
-    # move_temp_to_object_store → move_dir (remove_dir_all(dst) then rename).
+    # move_temp_to_object_store → finalize_package_dir (stash→swap under the held
+    # digest lock). The canonical name is only ever renamed, never removed.
     #
-    # ** This is the one assertion EXPECTED TO CHANGE when M1 lands. **
-    # After M1's stash→swap the canonical package dir is never removed — update
-    # this to assert the broken-install re-pull preserves the dir.
+    # ** Updated for M1 (was: assert the destructive replace). **
+    # The canonical package dir must be present before AND after the re-install;
+    # a healthy install.json must be restored. The broken sentinel lived inside
+    # the replaced broken content, so it travels to the stash (reclaimed by the
+    # stale sweep) and is not expected to survive at the canonical name.
     install_json.unlink()
-    broken_sentinel = pkg_root / "__broken_repull_sentinel__.txt"
-    broken_sentinel.write_text("broken marker")
-    assert broken_sentinel.exists(), "broken sentinel must be writable before re-pull"
+    assert pkg_root.exists(), "canonical package dir must exist before the broken re-install"
 
     ocx.json("package", "install", pkg.short)
 
-    assert not broken_sentinel.exists(), (
-        "CURRENT BEHAVIOR (pre-M1): re-pull over a BROKEN install must destroy the "
-        "existing package dir via move_dir's remove_dir_all so the sentinel is absent. "
-        "If this assertion fails, M1 has landed — update the test to assert "
-        "non-destructive stash→swap replace instead."
+    # INV-M1: the canonical package dir is always present (never removed).
+    assert pkg_root.exists(), (
+        "INV-M1: the canonical package dir must remain present after the non-destructive "
+        f"stash→swap re-install; checked: {pkg_root}"
     )
-    # The re-pull restored a fresh healthy install.
+    assert (pkg_root / "content").exists(), (
+        f"the swapped-in package dir must have a content/ directory: {pkg_root}"
+    )
+    # The re-install restored a fresh healthy install.
     assert install_json.exists(), (
-        f"re-pull must restore a healthy install.json under {pkg_root}"
+        f"re-install must restore a healthy install.json under {pkg_root}"
     )
+    # No __stale_ stash dir must linger under the temp zone after the swap.
+    temp_root = Path(ocx.env["OCX_HOME"]) / "temp"
+    if temp_root.exists():
+        leftover = [p for p in temp_root.iterdir() if p.name.startswith("__stale_")]
+        assert not leftover, (
+            f"no __stale_ stash dir must remain under temp/ after the swap: {leftover}"
+        )
 
 
 # ---------------------------------------------------------------------------

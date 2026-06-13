@@ -47,10 +47,18 @@ pub async fn path_exists_lossy(path: &std::path::Path) -> bool {
     }
 }
 
-/// Moves `src` directory to `dst` via same-filesystem rename.
+/// Destructively moves `src` directory to `dst` via same-filesystem rename.
 ///
-/// Creates parent directories of `dst` if needed. If `dst` already exists
-/// (e.g., from a crashed previous attempt), it is removed first.
+/// **Destructive — override / empty-destination callers only.** If `dst`
+/// already exists it is `remove_dir_all`'d before the rename, opening a window
+/// where a lock-free reader observes `dst` missing or half-deleted. This is
+/// safe only when `dst` is a caller-owned, empty-by-contract path (e.g. the
+/// `dest_override` target of `pull_local`) — never a shared content-addressed
+/// store entry. For CAS package publishes use
+/// [`finalize_package_dir`](crate::package_manager) (non-destructive
+/// stash→swap under the per-digest lock) instead.
+///
+/// Creates parent directories of `dst` if needed.
 ///
 /// Uses `tokio::fs::rename` which requires `src` and `dst` to reside on
 /// the same filesystem. Cross-device moves return an OS error.
@@ -69,6 +77,72 @@ pub async fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()
         .await
         .map_err(|e| crate::error::file_error(src, e))?;
     Ok(())
+}
+
+/// Windows transient OS error codes for a rename/persist over a path a
+/// non-sharing reader (or Defender real-time scan) holds open:
+/// `ERROR_ACCESS_DENIED` (5) and `ERROR_SHARING_VIOLATION` (32).
+#[cfg(windows)]
+const WINDOWS_TRANSIENT_RENAME_ERRORS: [i32; 2] = [5, 32];
+
+/// Backoff schedule for the Windows rename-retry loop: first attempt runs with
+/// no delay, then up to three retries at 100/400/800 ms (±25% jitter applied
+/// at call time). Shared by [`persist_temp_file`] and
+/// [`with_windows_rename_retry`].
+#[cfg(windows)]
+const WINDOWS_RENAME_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(400),
+    std::time::Duration::from_millis(800),
+];
+
+/// Sleeps for `backoff` scaled by ±25% jitter derived from the wall-clock
+/// subsecond nanos (no `rand` dependency). No-op for a zero duration.
+#[cfg(windows)]
+fn windows_rename_jitter_sleep(backoff: std::time::Duration) {
+    if backoff.is_zero() {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let jitter_scale = 0.75 + (f64::from(nanos % 1024) / 1023.0) * 0.5;
+    std::thread::sleep(std::time::Duration::from_secs_f64(backoff.as_secs_f64() * jitter_scale));
+}
+
+/// Runs a blocking rename-like operation, retrying on Windows transient
+/// lock/access errors with the shared [`WINDOWS_RENAME_BACKOFF`] schedule.
+///
+/// On non-Windows this calls `operation` exactly once. On Windows it retries up
+/// to three times (after the first no-delay attempt) when `operation` fails
+/// with `ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION` — the same transient
+/// class [`persist_temp_file`] handles, raised here for the directory `rename`s
+/// in the broken-install stash→swap where a live launcher may hold a package
+/// file open. After retry exhaustion the last error is returned. Any
+/// non-transient error returns immediately.
+///
+/// Blocking — wrap in `spawn_blocking` inside async code.
+pub fn with_windows_rename_retry(mut operation: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut last_err: Option<std::io::Error> = None;
+        for backoff in std::iter::once(std::time::Duration::ZERO).chain(WINDOWS_RENAME_BACKOFF) {
+            windows_rename_jitter_sleep(backoff);
+            match operation() {
+                Ok(()) => return Ok(()),
+                Err(e) if matches!(e.raw_os_error(), Some(code) if WINDOWS_TRANSIENT_RENAME_ERRORS.contains(&code)) => {
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| std::io::Error::other("rename retries exhausted")))
+    }
+    #[cfg(not(windows))]
+    {
+        operation()
+    }
 }
 
 /// Atomically publish a written [`tempfile::NamedTempFile`] to `target` via
@@ -102,31 +176,22 @@ pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path)
     {
         use std::time::Duration;
 
-        const BACKOFF: [Duration; 3] = [
-            Duration::from_millis(100),
-            Duration::from_millis(400),
-            Duration::from_millis(800),
-        ];
-
         let mut tmp_opt = Some(tmp);
         let mut last_err: Option<std::io::Error> = None;
         // First attempt with no backoff, then up to 3 retries with jitter.
-        for backoff in std::iter::once(Duration::ZERO).chain(BACKOFF) {
-            if !backoff.is_zero() {
-                // ±25% jitter from SystemTime subsecond nanos (no `rand` dep).
-                let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos();
-                let jitter_scale = 0.75 + (f64::from(nanos % 1024) / 1023.0) * 0.5;
-                std::thread::sleep(Duration::from_secs_f64(backoff.as_secs_f64() * jitter_scale));
-            }
+        // Persist consumes the file and hands it back inside `PersistError`, so
+        // this loop re-threads the file itself rather than using
+        // `with_windows_rename_retry` (which retries a value-free closure); it
+        // shares the same backoff schedule + jitter helper for consistency.
+        for backoff in std::iter::once(Duration::ZERO).chain(WINDOWS_RENAME_BACKOFF) {
+            windows_rename_jitter_sleep(backoff);
             let temp_file = tmp_opt.take().expect("tmp_opt is always Some at loop entry");
             match temp_file.persist(target) {
                 Ok(_) => return Ok(()),
                 Err(persist_err) => {
                     // ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32) — transient.
-                    if matches!(persist_err.error.raw_os_error(), Some(5) | Some(32)) {
+                    if matches!(persist_err.error.raw_os_error(), Some(code) if WINDOWS_TRANSIENT_RENAME_ERRORS.contains(&code))
+                    {
                         tmp_opt = Some(persist_err.file);
                         last_err = Some(persist_err.error);
                         continue;

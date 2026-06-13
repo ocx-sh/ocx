@@ -185,7 +185,19 @@ impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         match self {
             Self::OfflineMode => Some(ExitCode::PolicyBlocked),
-            Self::InternalFile(_, _) => Some(ExitCode::IoError),
+            // An I/O error against a path. A `PermissionDenied` inner error
+            // (e.g. a root-owned / unwritable zone directory — the Docker
+            // named-volume UID mismatch) maps to the dedicated 77; all other
+            // I/O failures fall under the generic 74. The outer enum is matched
+            // before the inner `io::Error` is reached by the chain walker, so
+            // this discrimination must live here, not be left to the walker.
+            Self::InternalFile(_, io_error) => {
+                if io_error.kind() == std::io::ErrorKind::PermissionDenied {
+                    Some(ExitCode::PermissionDenied)
+                } else {
+                    Some(ExitCode::IoError)
+                }
+            }
             Self::InternalPathInvalid(_) => Some(ExitCode::Failure),
             Self::SerializationFailure(_) | Self::UnsupportedMediaType(_, _) => Some(ExitCode::DataError),
             // Transparent wrappers delegate to the inner error's classification.

@@ -663,27 +663,238 @@ async fn post_download_actions(
 /// destination (e.g. `pull_local` with a caller-owned empty target), use
 /// [`move_temp_to_object_store`] instead — that path is empty by contract and
 /// does not share the CAS address space.
-// Dead-code allow: this function is a P1 stub wired in by a subsequent
-// implementation task (P1.5). The parameter underscores are required by the
-// `-D unused-variables` lint while the body is `unimplemented!()`.
-#[allow(dead_code)]
 async fn finalize_package_dir(
-    _fs: &file_structure::FileStructure,
-    _pinned: &oci::PinnedIdentifier,
-    _temp_path: &std::path::Path,
-    _output_path: &std::path::Path,
+    fs: &file_structure::FileStructure,
+    pinned: &oci::PinnedIdentifier,
+    temp_path: &std::path::Path,
+    output_path: &std::path::Path,
 ) -> Result<(), PackageErrorKind> {
-    unimplemented!()
+    // Branch 1: bare first-writer-wins rename. No `remove_dir_all` of the
+    // canonical name on this path ever.
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(parent.to_path_buf(), e)))?;
+    }
+    match tokio::fs::rename(temp_path, output_path).await {
+        Ok(()) => {
+            log::debug!(
+                "Package '{}' published (first writer): {}",
+                pinned,
+                output_path.display()
+            );
+            return Ok(());
+        }
+        Err(rename_err) => {
+            // A rename can only fail with the dest occupied (ENOTEMPTY /
+            // directory-not-empty) on the contended paths we care about; any
+            // other error with no dest present is a genuine I/O failure.
+            if !utility::fs::path_exists_lossy(output_path).await {
+                return Err(PackageErrorKind::Internal(crate::Error::InternalFile(
+                    output_path.to_path_buf(),
+                    rename_err,
+                )));
+            }
+        }
+    }
+
+    // Dest exists. Branch 2: a committed OK install already won the race —
+    // discard our temp and reuse the winner. Stricter than the layer tier's
+    // bare existence check: a half-written loser must not masquerade as a
+    // winner, so require a committed `install.json`.
+    let output_status = file_structure::PackageDir::with_root(output_path.to_path_buf()).install_status();
+    if crate::package::install_status::check_install_status(&output_status).await {
+        log::debug!(
+            "Package '{}' already committed by a concurrent winner; discarding temp.",
+            pinned
+        );
+        // Best-effort: reclaim our now-redundant temp dir immediately so it
+        // does not linger until the next stale sweep.
+        if let Err(e) = tokio::fs::remove_dir_all(temp_path).await {
+            log::debug!("Failed to remove redundant temp dir {}: {}", temp_path.display(), e);
+        }
+        return Ok(());
+    }
+
+    // Branch 3: dest exists but is NOT a committed OK install (broken/partial).
+    // Stash→swap under the per-digest TempStore lock the pull path already
+    // holds — never `remove_dir_all(output_path)`. The canonical name is only
+    // ever renamed outward (to a stash under the temp zone) before the new dir
+    // is renamed in, so a lock-free reader never observes it missing and open
+    // file descriptors survive the unlink.
+    swap_broken_install(fs, pinned, temp_path, output_path).await
 }
 
-/// Atomically moves the enriched temp directory to the object store.
+/// Replaces a broken/partial install at `output_path` with the freshly-built
+/// `temp_path` via the stash→swap idiom (INV-M1 branch 3).
 ///
-/// When `dest_override` is `Some(path)`, the package is moved to `path` instead
-/// of the content-addressed location under `$OCX_HOME/packages/`. The returned
-/// [`InstallInfo`] is constructed with a [`PackageDir`](file_structure::PackageDir)
-/// rooted at whichever destination was chosen, so all downstream consumers
-/// (including `install_info_from_package_root`) see the correct paths. All
-/// existing callers pass `None`.
+/// Holds the per-digest [`TempStore`](crate::file_structure::TempStore) lock
+/// already acquired by the pull path (its sibling `.lock` survives the rename
+/// because it lives outside the dir). A post-lock recheck collapses a second
+/// concurrent writer's swap to a no-op. The directory renames are blocking and
+/// routed through [`with_windows_rename_retry`](crate::utility::fs::with_windows_rename_retry)
+/// inside `spawn_blocking` so a live launcher holding a handle open
+/// (`ERROR_SHARING_VIOLATION`) does not fail the swap.
+async fn swap_broken_install(
+    fs: &file_structure::FileStructure,
+    pinned: &oci::PinnedIdentifier,
+    temp_path: &std::path::Path,
+    output_path: &std::path::Path,
+) -> Result<(), PackageErrorKind> {
+    // Post-lock recheck: another writer may have committed an OK install
+    // between branch 2's probe and here (both run under the held digest lock,
+    // so this only catches a winner that committed before we acquired it —
+    // belt-and-suspenders against a TOCTOU on the status read).
+    let output_status = file_structure::PackageDir::with_root(output_path.to_path_buf()).install_status();
+    if crate::package::install_status::check_install_status(&output_status).await {
+        log::debug!(
+            "Package '{}' became a committed install before swap; discarding temp.",
+            pinned
+        );
+        if let Err(e) = tokio::fs::remove_dir_all(temp_path).await {
+            log::debug!("Failed to remove redundant temp dir {}: {}", temp_path.display(), e);
+        }
+        return Ok(());
+    }
+
+    // Stash path under the temp zone so the existing stale sweep reclaims it
+    // even if this process dies mid-swap. `__stale_` prefix + pid + random
+    // suffix keeps it disjoint from the 32-hex temp-dir names.
+    let stash = stash_path(fs);
+    // Ensure the temp root exists so `rename(output, stash)` has a valid
+    // parent. Normally the pull path already created it via `acquire_temp_dir`,
+    // but the unit test calls `finalize_package_dir` directly without one.
+    if let Some(parent) = stash.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(parent.to_path_buf(), e)))?;
+    }
+    log::debug!(
+        "Replacing broken install for '{}' via stash→swap (stash: {})",
+        pinned,
+        stash.display()
+    );
+
+    let temp_owned = temp_path.to_path_buf();
+    let output_owned = output_path.to_path_buf();
+    let stash_owned = stash.clone();
+
+    // The two swap renames run on a blocking thread (std::fs::rename) and route
+    // through the Windows rename-retry helper. spawn_blocking keeps the async
+    // runtime free while the blocking renames + the optional fault pause run.
+    let pinned_for_log = pinned.to_string();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        // Fault hook (M5): block here BEFORE any rename, while the broken dir
+        // still occupies the canonical name, so a reader-loop test can prove
+        // INV-M1 — a lock-free reader keeps finding the package throughout the
+        // (test-controlled) pause window. Gated on `__OCX_TESTING_PUBLISH_PAUSE`;
+        // blocks until the release file named by
+        // `__OCX_TESTING_PUBLISH_RELEASE_FILE` appears. Once released the two
+        // renames run back-to-back with no `.await` and no further pause, so the
+        // only "missing" window is the microscopic inter-rename gap the OS
+        // makes atomic per step.
+        maybe_pause_publish(&pinned_for_log)?;
+
+        // Step 1: move the old live dir out of the canonical name (atomic; open
+        // fds survive via the stash inode).
+        utility::fs::with_windows_rename_retry(|| std::fs::rename(&output_owned, &stash_owned))?;
+
+        // Step 2: move the new dir into the canonical name (atomic).
+        utility::fs::with_windows_rename_retry(|| std::fs::rename(&temp_owned, &output_owned))?;
+        Ok(())
+    })
+    .await
+    .map_err(|join_err| {
+        if join_err.is_panic() {
+            std::panic::resume_unwind(join_err.into_panic());
+        }
+        PackageErrorKind::Internal(crate::Error::InternalFile(
+            output_path.to_path_buf(),
+            std::io::Error::other(format!("broken-install swap task aborted: {join_err}")),
+        ))
+    })?
+    .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(output_path.to_path_buf(), e)))?;
+
+    // Best-effort: reclaim the stash now; otherwise the stale sweep does it.
+    if let Err(e) = tokio::fs::remove_dir_all(&stash).await {
+        log::debug!(
+            "Failed to remove stash dir {} (stale sweep will reclaim): {}",
+            stash.display(),
+            e
+        );
+    }
+
+    Ok(())
+}
+
+/// Builds a unique stash path under the package-staging temp zone for the
+/// broken-install swap. Name = `__stale_<pid>_<rand>` so it is reclaimed by the
+/// existing `TempStore` stale sweep and never collides with a real temp dir.
+fn stash_path(fs: &file_structure::FileStructure) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let pid = std::process::id();
+    // Cheap process-local uniqueness without a `rand` dep: wall-clock nanos
+    // XORed with a monotonically-increasing counter. Collisions only matter
+    // within one process holding the same digest lock, which is serialized.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let seq = STASH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    fs.temp.root().join(format!("__stale_{pid}_{nanos:08x}{seq:08x}"))
+}
+
+/// Monotonic counter feeding [`stash_path`] uniqueness within a process.
+static STASH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only fault hook (M5) for the broken-install swap.
+///
+/// Gated on `__OCX_TESTING_PUBLISH_PAUSE` (any non-empty value). When active,
+/// blocks (with the broken dir still at the canonical name) until the release
+/// file named by `__OCX_TESTING_PUBLISH_RELEASE_FILE` appears, so a reader-loop
+/// test can prove INV-M1 holds across a long pause window.
+///
+/// Off the hook this is a zero-cost env probe. Production builds never set the
+/// var; the `__OCX_TESTING_` prefix keeps it out of the public env namespace.
+/// Both keys are read through [`crate::env::var`] so the in-process test
+/// override seam (`crate::test::env`) can drive the pause without an unsafe
+/// `std::env::set_var`; the release-file is polled on disk.
+fn maybe_pause_publish(pinned: &str) -> std::io::Result<()> {
+    match crate::env::var("__OCX_TESTING_PUBLISH_PAUSE") {
+        Some(value) if !value.is_empty() => {}
+        _ => return Ok(()),
+    }
+
+    crate::log::debug!("[__OCX_TESTING_PUBLISH_PAUSE] paused broken-install swap for '{pinned}'");
+    let release = crate::env::var("__OCX_TESTING_PUBLISH_RELEASE_FILE");
+    loop {
+        if let Some(ref path) = release
+            && std::fs::metadata(path).is_ok()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    Ok(())
+}
+
+/// Publishes the enriched temp directory to its destination.
+///
+/// Branches on the destination kind:
+///
+/// - **CAS dest** (`dest_override == None`) → [`finalize_package_dir`]: the
+///   non-destructive INV-M1 publish (first-writer-wins bare rename, OK-winner
+///   reuse, or stash→swap over a broken install under the held digest lock).
+///   The canonical `packages/{digest}/` name is never `remove_dir_all`'d.
+/// - **Override dest** (`dest_override == Some(path)`) → [`move_dir`]: the
+///   caller owns `path` and it is empty-by-contract (not a shared CAS target),
+///   so the destructive overwrite-then-rename is appropriate there.
+///
+/// The returned [`InstallInfo`] is constructed with a
+/// [`PackageDir`](file_structure::PackageDir) rooted at whichever destination
+/// was chosen.
+///
+/// [`move_dir`]: crate::utility::fs::move_dir
 async fn move_temp_to_object_store(
     fs: &file_structure::FileStructure,
     identifier: &oci::PinnedIdentifier,
@@ -692,16 +903,29 @@ async fn move_temp_to_object_store(
     temp: crate::file_structure::TempAcquireResult,
     dest_override: Option<&std::path::Path>,
 ) -> Result<InstallInfo, PackageErrorKind> {
-    let output_path = dest_override
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| fs.packages.path(identifier));
     let temp_path = temp.dir.dir.clone();
-    let pkg = file_structure::PackageDir::with_root(output_path.clone());
 
-    crate::utility::fs::move_dir(&temp_path, &output_path)
-        .await
-        .map_err(PackageErrorKind::Internal)?;
+    let output_path = match dest_override {
+        // Override path: caller-owned, empty-by-contract. Keep the destructive
+        // move_dir — it is not a shared CAS address.
+        Some(path) => {
+            let output_path = path.to_path_buf();
+            crate::utility::fs::move_dir(&temp_path, &output_path)
+                .await
+                .map_err(PackageErrorKind::Internal)?;
+            output_path
+        }
+        // CAS path: route through the non-destructive INV-M1 publish.
+        None => {
+            let output_path = fs.packages.path(identifier);
+            finalize_package_dir(fs, identifier, &temp_path, &output_path).await?;
+            output_path
+        }
+    };
+    let pkg = file_structure::PackageDir::with_root(output_path);
 
+    // Drop the temp handle last so the per-digest lock guarding the stash→swap
+    // is held through `finalize_package_dir`.
     drop(temp);
 
     Ok(InstallInfo::new(identifier.clone(), metadata.clone(), resolved, pkg))
@@ -847,16 +1071,24 @@ async fn extract_layer_inner(
         return Ok(());
     }
 
-    // Step 3: acquire exclusive temp dir at the layer-keyed path.
-    let temp_path = fs.temp.layer_path(pinned.registry(), layer_digest);
-    let temp = match fs.temp.try_acquire(&temp_path).map_err(PackageErrorKind::Internal)? {
+    // Step 3: acquire exclusive temp dir at the layer-keyed path. Layer
+    // staging uses `layer_temp` (cache-zone) so the final rename into
+    // `layers/` is always an intra-volume move even when packages live on a
+    // different volume. In the unified-zone layout `layer_temp` and `temp`
+    // point at the same directory, so this is identical to before the split.
+    let temp_path = fs.layer_temp.layer_path(pinned.registry(), layer_digest);
+    let temp = match fs
+        .layer_temp
+        .try_acquire(&temp_path)
+        .map_err(PackageErrorKind::Internal)?
+    {
         Some(r) => r,
         None => {
             log::debug!(
                 "Layer temp dir locked by another process, waiting: {}",
                 temp_path.display()
             );
-            fs.temp
+            fs.layer_temp
                 .acquire_with_timeout(&temp_path, client.lock_timeout())
                 .await
                 .map_err(PackageErrorKind::Internal)?
@@ -948,4 +1180,217 @@ fn link_layers_in_temp(
         crate::symlink::create(&layer_content, &link_path).map_err(PackageErrorKind::Internal)?;
     }
     Ok(())
+}
+
+// ── finalize_package_dir behavioral specifications (P1.2) ────────────────────
+//
+// These tests verify the three branches of INV-M1 non-destructive publish:
+//
+//   Branch 1: first writer — rename(temp, output_path) succeeds.
+//   Branch 2: race loser — dest is a committed OK install; temp discarded,
+//             winner content unchanged.
+//   Branch 3: broken install replace — dest install.json ok=false; new
+//             content must be present at output_path after finalize.
+//
+// Tests are deterministic (no pause hook) and operate at the filesystem
+// level.  The pause-hook tests (reader_never_observes_remove_window) require
+// the __OCX_TESTING_PUBLISH_PAUSE fault hook added in P1.5 — see the
+// TODO comment below.
+//
+// Requirement: system_design_shared_store.md §5 M1 (INV-M1).
+// Traced to: plan_shared_store P1.2.
+//
+// TODO P1.5: reader_never_observes_remove_window (INV-M1 reader-loop) —
+// requires the __OCX_TESTING_PUBLISH_PAUSE fault hook added in P1.5.
+#[cfg(test)]
+mod finalize_package_dir_tests {
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    use crate::file_structure::FileStructure;
+    use crate::oci::{Digest, Identifier, PinnedIdentifier};
+    use crate::package::install_status::InstallStatus;
+
+    use super::finalize_package_dir;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn make_pinned() -> PinnedIdentifier {
+        let id = Identifier::new_registry("cmake", "example.com")
+            .clone_with_tag("3.28")
+            .clone_with_digest(Digest::Sha256("a".repeat(64)));
+        PinnedIdentifier::try_from(id).unwrap()
+    }
+
+    /// Write an `install.json` with `ok` set to the given value.
+    fn write_install_json(dir: &Path, ok: bool) {
+        let status = if ok {
+            InstallStatus::new().ok()
+        } else {
+            InstallStatus::new()
+        };
+        let json = serde_json::to_vec(&status).unwrap();
+        std::fs::write(dir.join("install.json"), json).unwrap();
+    }
+
+    /// Write a distinguishing sentinel file into `dir` so we can assert
+    /// which directory's content is present at the output path after finalize.
+    fn write_sentinel(dir: &Path, content: &str) {
+        std::fs::write(dir.join("sentinel.txt"), content).unwrap();
+    }
+
+    fn read_sentinel(dir: &Path) -> Option<String> {
+        std::fs::read_to_string(dir.join("sentinel.txt")).ok()
+    }
+
+    // ── Branch 1: first writer wins ──────────────────────────────────────────
+    //
+    // Requirement: M1 branch 1 — "`rename(temp, output_path)` succeeds →
+    // first writer wins; Ok(())."
+    //
+    // When no directory exists at output_path, finalize_package_dir must
+    // atomically rename temp into output_path and return Ok.
+    //
+    // Multi-thread flavor: the OK-winner/broken-install branches call
+    // `check_install_status`, which acquires a blocking advisory lock through
+    // `LockedJsonFile` and so requires the multi-threaded Tokio runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_package_dir_first_writer_renames_in() {
+        let root = TempDir::new().unwrap();
+        let root_path = root.path().to_path_buf();
+
+        let fs = FileStructure::with_root(root_path.clone());
+        let pinned = make_pinned();
+
+        // Build a temp directory with sentinel content.
+        let temp_dir = root_path.join("temp_stage");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        write_sentinel(&temp_dir, "winner-content");
+        write_install_json(&temp_dir, true);
+
+        // output_path must not exist yet (first writer).
+        let output_path = root_path.join("output_pkg");
+        assert!(!output_path.exists(), "precondition: output_path must not exist");
+
+        let result = finalize_package_dir(&fs, &pinned, &temp_dir, &output_path).await;
+
+        result.unwrap();
+        assert!(output_path.exists(), "output_path must exist after first-writer rename");
+        assert!(
+            !temp_dir.exists(),
+            "temp dir must not exist after successful rename (it was moved)"
+        );
+        assert_eq!(
+            read_sentinel(&output_path),
+            Some("winner-content".to_string()),
+            "output_path must contain the temp dir's content after rename"
+        );
+    }
+
+    // ── Branch 2: race loser — winner already committed ───────────────────────
+    //
+    // Requirement: M1 branch 2 — "rename fails AND output_path contains a
+    // committed OK install → discard our temp, reuse the winner."
+    //
+    // When a concurrent writer already installed a committed OK package at
+    // output_path, finalize_package_dir must return Ok and leave the winner's
+    // content intact.  The loser's temp may be discarded or cleaned up.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_package_dir_loser_discards_temp_keeps_ok_winner() {
+        let root = TempDir::new().unwrap();
+        let root_path = root.path().to_path_buf();
+
+        let fs = FileStructure::with_root(root_path.clone());
+        let pinned = make_pinned();
+
+        // Simulate "already committed by a concurrent winner": create
+        // output_path with an OK install.json and distinct content.
+        let output_path = root_path.join("output_pkg");
+        std::fs::create_dir_all(&output_path).unwrap();
+        write_install_json(&output_path, true);
+        write_sentinel(&output_path, "committed-winner-content");
+
+        // Our losing temp has different content.
+        let temp_dir = root_path.join("temp_loser");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        write_install_json(&temp_dir, true);
+        write_sentinel(&temp_dir, "loser-content");
+
+        let result = finalize_package_dir(&fs, &pinned, &temp_dir, &output_path).await;
+
+        // Must succeed: losing race to a committed winner is not an error.
+        result.unwrap();
+
+        // Winner's content must be unchanged.
+        assert_eq!(
+            read_sentinel(&output_path),
+            Some("committed-winner-content".to_string()),
+            "committed winner's content must be preserved; loser must not overwrite"
+        );
+    }
+
+    // ── Branch 3: broken install replacement ─────────────────────────────────
+    //
+    // Requirement: M1 branch 3 — "rename fails AND output_path exists but is
+    // NOT a committed OK install → stash→swap under the per-digest temp lock
+    // already held by the pull path."
+    //
+    // The design invariant: no `remove_dir_all(output_path)`.  The canonical
+    // name is only ever `rename`d outward (to stash) before the new dir is
+    // renamed inward.
+    //
+    // Observable contract tested here: after finalize_package_dir returns Ok,
+    // `output_path` must contain our new content (not the broken content), and
+    // no stash directory must remain under the packages/ tree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_package_dir_replaces_broken_install_via_swap() {
+        let root = TempDir::new().unwrap();
+        let root_path = root.path().to_path_buf();
+
+        let fs = FileStructure::with_root(root_path.clone());
+        let pinned = make_pinned();
+
+        // Simulate a "broken" install at output_path: install.json with ok=false.
+        let output_path = root_path.join("output_pkg");
+        std::fs::create_dir_all(&output_path).unwrap();
+        write_install_json(&output_path, false);
+        write_sentinel(&output_path, "broken-content");
+
+        // New temp dir with the correct (repaired) content.
+        let temp_dir = root_path.join("temp_repair");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        write_install_json(&temp_dir, true);
+        write_sentinel(&temp_dir, "repaired-content");
+
+        let result = finalize_package_dir(&fs, &pinned, &temp_dir, &output_path).await;
+
+        result.unwrap();
+
+        // After finalize, output_path must contain the repaired content.
+        assert_eq!(
+            read_sentinel(&output_path),
+            Some("repaired-content".to_string()),
+            "output_path must contain the new (repaired) content after broken-install swap"
+        );
+
+        // No stash directory must remain in the temp zone after finalize.
+        // The stash is reclaimed by the existing stale sweep; for deterministic
+        // unit tests we assert there is no leftover __stale_* entry under
+        // the temp root (root_path/temp in the unified-zone layout used here).
+        let temp_root = root_path.join("temp");
+        if temp_root.exists() {
+            let stale_remains: Vec<PathBuf> = std::fs::read_dir(&temp_root)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with("__stale_"))
+                .map(|e| e.path())
+                .collect();
+            assert!(
+                stale_remains.is_empty(),
+                "no __stale_ directory must remain under temp/ after finalize: {:?}",
+                stale_remains
+            );
+        }
+    }
 }

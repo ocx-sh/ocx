@@ -1174,24 +1174,21 @@ mod tests {
 
     // ── move_temp_to_object_store_current_behavior ────────────────────────────
     //
-    // CHARACTERIZATION TEST — locks the current (pre-M1) destructive publish
-    // behavior of `move_temp_to_object_store`.
+    // INV-M1 publish behavior of `move_temp_to_object_store` (post-M1).
     //
-    // Today `move_dir` calls `remove_dir_all(dst)` then renames the temp dir
-    // into place. This means:
+    // `move_temp_to_object_store` now routes CAS publishes through
+    // `finalize_package_dir` (non-destructive). This test pins:
     //   1. A fresh install (no existing package dir) creates:
     //      `packages/{registry_slug}/{shard}/` with `content/` + `install.json`.
-    //   2. A re-pull over an existing dir replaces it wholesale — the old dir
-    //      is deleted and the new one is renamed into its place. This is the
-    //      destructive behavior that M1 (`finalize_package_dir`) will change to a
-    //      stash→swap-under-held-lock pattern so readers never observe a missing
-    //      or half-deleted dir.
+    //   2. A re-pull over a HEALTHY install short-circuits (no move) and
+    //      preserves the existing dir + any sentinel.
+    //   3. A re-pull over a BROKEN install is NON-DESTRUCTIVE: the canonical
+    //      package dir is never `remove_dir_all`'d — it is only ever renamed
+    //      outward to a stash before the new dir is renamed in. After the swap
+    //      the package dir is present with a healthy install.json. (Updated when
+    //      M1 landed — the prior assertion documented the destructive replace.)
     //
-    // IMPORTANT: The second assertion (`re_pull_replaces_package_dir_observably`)
-    // documents the current BUGGY behavior. When M1 lands this test MUST be
-    // updated to assert non-destructive replace instead.
-    //
-    // Requirement traced to: plan_shared_store P1.0, system_design_shared_store §5 M1.
+    // Requirement traced to: plan_shared_store P1.5, system_design_shared_store §5 M1 (INV-M1).
     #[tokio::test(flavor = "multi_thread")]
     async fn move_temp_to_object_store_current_behavior() {
         let (_dir, mgr) = setup_offline_manager();
@@ -1246,36 +1243,222 @@ mod tests {
         // eliminates. We break the install by removing `install.json` so
         // `check_install_status` returns false; the fast-path no longer fires and
         // `setup_owned` proceeds to re-pull → `move_temp_to_object_store` →
-        // `move_dir`, which calls `remove_dir_all(dst)` before renaming the temp
-        // dir in. A sentinel written before the re-pull is therefore destroyed.
+        // `finalize_package_dir`, which performs the stash→swap (rename the old
+        // dir out to a stash, rename the new dir in) — never `remove_dir_all` of
+        // the canonical name.
         //
-        // ** This is the one assertion EXPECTED TO CHANGE when M1 lands. **
-        // After M1's stash→swap the canonical package dir is never removed —
-        // update this to assert the broken-install re-pull preserves the dir
-        // (or that no reader observes a missing dir mid-swap).
+        // ** Updated for M1 (was: assert the destructive replace). **
+        // The non-destructive contract: the canonical package dir is present
+        // both before and after the re-pull (never a missing window), and a
+        // healthy install.json is restored. The broken sentinel lived inside
+        // the replaced broken content, so it travels to the stash (reclaimed by
+        // the stale sweep) and is NOT expected to survive at the canonical name.
         std::fs::remove_file(&install_json).unwrap();
         assert!(
             !crate::package::install_status::check_install_status(&install_json).await,
             "removing install.json must make the install status not-OK so re-pull is forced"
         );
-        let broken_sentinel = pkg_root.join("broken_repull_sentinel.txt");
-        std::fs::write(&broken_sentinel, b"broken").unwrap();
-        assert!(broken_sentinel.exists(), "broken sentinel must exist before re-pull");
+        assert!(
+            pkg_root.exists(),
+            "canonical package dir must exist before the broken re-pull"
+        );
 
         let repull_result = mgr.pull_local(info, &[], None).await;
         repull_result.expect("re-pull over a broken install must succeed");
 
+        // INV-M1: the canonical package dir is always present — the swap only
+        // ever renames the canonical name, never removes it.
         assert!(
-            !broken_sentinel.exists(),
-            "CURRENT BEHAVIOR (pre-M1): re-pull over a BROKEN install destroys the existing \
-             package dir via move_dir's remove_dir_all; the sentinel must be absent. \
-             If this assertion fails, M1 has landed — update this test to assert the \
-             non-destructive stash→swap replace instead."
+            pkg_root.exists(),
+            "INV-M1: the canonical package dir must remain present after the non-destructive \
+             stash→swap re-pull; pkg_root={pkg_root:?}"
+        );
+        assert!(
+            pkg_root.join("content").exists(),
+            "the swapped-in package dir must have a content/ directory; pkg_root={pkg_root:?}"
         );
         // The re-pull re-wrote a fresh, healthy install.
         assert!(
             install_json.exists(),
             "re-pull must restore a healthy install.json; pkg_root={pkg_root:?}"
+        );
+        assert!(
+            crate::package::install_status::check_install_status(&install_json).await,
+            "re-pull must restore an OK install status; pkg_root={pkg_root:?}"
+        );
+        // No `__stale_` stash dir must linger under the package-staging temp
+        // zone after the swap (best-effort reclaim happened in finalize).
+        let temp_root = mgr.file_structure().temp.root().to_path_buf();
+        if temp_root.exists() {
+            let leftover_stash: Vec<_> = std::fs::read_dir(&temp_root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().starts_with("__stale_"))
+                .map(|e| e.path())
+                .collect();
+            assert!(
+                leftover_stash.is_empty(),
+                "no __stale_ stash dir must remain under temp/ after the swap: {leftover_stash:?}"
+            );
+        }
+    }
+
+    // ── reader_never_observes_remove_window (INV-M1, P1.5) ────────────────────
+    //
+    // INV-M1 load-bearing test: a lock-free reader spinning on `find_plain`
+    // during a paused broken-install re-pull swap must NEVER observe the
+    // package directory missing (None) or errored (Err).
+    //
+    // Drive: install fresh, break install.json so the re-pull is forced down
+    // the broken-install stash→swap path, arm the `__OCX_TESTING_PUBLISH_PAUSE`
+    // fault hook (which blocks BEFORE any rename while the broken dir still
+    // occupies the canonical name), spawn the re-pull, then spin a reader loop
+    // for many iterations and assert every read is `Ok(Some(_))`. Release the
+    // pause via the release-file so the swap completes and the re-pull returns.
+    //
+    // The pause window is intentionally generous (the reader iterates while the
+    // swap is blocked) so the test deterministically exercises the contended
+    // window rather than relying on scheduler luck.
+    //
+    // Requirement: system_design_shared_store.md §5 M1 INV-M1, plan P1.5.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reader_never_observes_remove_window() {
+        use std::sync::Arc;
+
+        let (root_dir, mgr) = setup_offline_manager();
+        let mgr = Arc::new(mgr);
+
+        // ── Fresh install so a complete (then broken) package dir exists ──────
+        let info = fixture_info("inv-m1-reader-tool");
+        let install_info = mgr
+            .pull_local(info.clone(), &[], None)
+            .await
+            .expect("fresh pull_local must succeed");
+        let pinned = install_info.identifier().clone();
+        let pkg_root = install_info.dir().root().to_path_buf();
+        let install_json = pkg_root.join("install.json");
+        assert!(install_json.exists(), "install.json must exist after fresh install");
+
+        // Break the install so the re-pull is forced down the broken-install
+        // swap path (status not-OK → no short-circuit).
+        std::fs::remove_file(&install_json).unwrap();
+
+        // ── Arm the pause hook via the in-process test env override seam ──────
+        let release_file = root_dir.path().join("__inv_m1_release__");
+        let env_guard = crate::test::env::lock();
+        env_guard.set("__OCX_TESTING_PUBLISH_PAUSE", "1");
+        env_guard.set("__OCX_TESTING_PUBLISH_RELEASE_FILE", release_file.to_str().unwrap());
+
+        // ── Spawn the re-pull (will pause inside the broken-install swap) ─────
+        let repull_mgr = mgr.clone();
+        let repull = tokio::spawn(async move { repull_mgr.pull_local(info, &[], None).await });
+
+        // ── Reader loop: never None, never Err while the swap is paused ───────
+        // Run a fixed number of iterations; the pause holds the swap so every
+        // read must observe the (broken-but-present) package dir.
+        let mut observed_present = 0usize;
+        for _ in 0..200 {
+            let found = mgr
+                .find_plain(&pinned)
+                .await
+                .expect("INV-M1: find_plain must never error during a paused swap");
+            assert!(
+                found.is_some(),
+                "INV-M1: a lock-free reader must never observe the package dir missing \
+                 during the broken-install swap (got None)"
+            );
+            observed_present += 1;
+            // Yield so the spawned re-pull task makes progress to the pause.
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(observed_present >= 200, "reader loop must have run all iterations");
+
+        // ── Release the pause; the swap completes and re-pull returns Ok ──────
+        std::fs::write(&release_file, b"go").unwrap();
+        let repull_result = repull.await.expect("re-pull task must not panic");
+        repull_result.expect("paused re-pull must succeed after release");
+
+        // After the swap the canonical dir is present with a healthy install.
+        assert!(pkg_root.exists(), "INV-M1: canonical package dir present after swap");
+        assert!(install_json.exists(), "re-pull must restore install.json after release");
+
+        drop(env_guard);
+        drop(root_dir);
+    }
+
+    // ── named_volume_unwritable_zone_is_permission_denied (P1.6) ──────────────
+    //
+    // A root-owned / unwritable zone directory (the Docker named-volume UID
+    // mismatch, system_design §4 interaction 5) must surface a clean
+    // `PermissionDenied` (ExitCode 77) — NOT a panic.
+    //
+    // Construct a `FileStructure` whose entire root is a read-only directory so
+    // any store-subdir `create_dir_all` during `pull_local` fails with
+    // `ErrorKind::PermissionDenied`. The error must propagate as
+    // `PackageErrorKind::Internal(Error::InternalFile(_, io))` whose `io.kind()`
+    // is `PermissionDenied`, which `cli::classify_error` maps to
+    // `ExitCode::PermissionDenied`. No new error type is invented — the existing
+    // `file_error` / `InternalFile` chain + the io-kind classifier suffice.
+    //
+    // Unix-only (uses chmod). Self-skips when running as root (CI containers),
+    // where the read-only bit does not block writes.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn named_volume_unwritable_zone_is_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // A read-only sub-directory standing in for a root-owned named volume.
+        let zone = dir.path().join("ro-zone");
+        std::fs::create_dir_all(&zone).unwrap();
+        std::fs::set_permissions(&zone, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Root ignores DAC permission bits, so the unwritable condition cannot
+        // be constructed. Probe by attempting a write into the chmod-0555 dir;
+        // if it succeeds we are root — skip without failing (the probe IS the
+        // precondition, mirroring `project::registry` tests — no unsafe geteuid).
+        let probe = zone.join(".root-probe");
+        if std::fs::write(&probe, b"x").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            std::fs::set_permissions(&zone, std::fs::Permissions::from_mode(0o755)).ok();
+            eprintln!("skipping named_volume_unwritable_zone_is_permission_denied: running as root");
+            return;
+        }
+
+        // Build a manager rooted at the read-only zone so the first store write
+        // (blob staging) fails with PermissionDenied.
+        let fs = FileStructure::with_root(zone.clone());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                tag_store: TagStore::new(zone.join("tags")),
+                blob_store: BlobStore::new(zone.join("blobs")),
+            }),
+            Vec::new(),
+            ChainMode::Offline,
+        );
+        let mgr = PackageManager::new(fs, index, None, "example.com");
+
+        // A one-byte file layer forces a blob write into the read-only zone.
+        let layer = dir.path().join("layer.tar.gz");
+        std::fs::write(&layer, b"x").unwrap();
+        let info = fixture_info("perm-denied-tool");
+
+        let result = mgr
+            .pull_local(info, &[crate::publisher::LayerRef::File(layer)], None)
+            .await;
+
+        // Restore writable perms so the TempDir can be cleaned up on drop.
+        std::fs::set_permissions(&zone, std::fs::Permissions::from_mode(0o755)).ok();
+
+        let err = result.expect_err("pull_local into a read-only zone must fail, not panic");
+        // Convert to the top-level library error so the CLI classifier sees the
+        // same chain `main.rs` would.
+        let lib_err: crate::Error = err.into();
+        let exit = crate::cli::classify_error(&lib_err);
+        assert_eq!(
+            exit,
+            crate::cli::ExitCode::PermissionDenied,
+            "an unwritable (root-owned) zone dir must classify to PermissionDenied (77); got {exit:?}"
         );
     }
 }

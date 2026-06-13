@@ -487,21 +487,51 @@ impl PackageManager {
     }
 }
 
-/// Removes stale temp directories and orphan lock files.
+/// Removes stale temp directories and orphan lock files from both temp zones.
+///
+/// Sweeps the package-staging temp (`fs.temp`, packages zone) and the
+/// layer-staging temp (`fs.layer_temp`, cache zone). When the two zones are
+/// unified (the default single-root layout) both stores point at the same
+/// directory, so the second sweep finds nothing new — the operation is
+/// idempotent. The stash directories created by `finalize_package_dir`'s
+/// broken-install swap live under `fs.temp` as `__stale_*` orphan dirs and are
+/// reclaimed here as well.
 ///
 /// Uses [`TempStore::stale_entries`] which discovers entries from both
 /// `.lock` files and directories, acquiring locks where possible to
 /// prevent races with concurrent installs.
 async fn clean_temp(fs: &crate::file_structure::FileStructure, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
-    let stale = fs.temp.stale_entries()?;
+    let mut removed = Vec::new();
+    sweep_temp_store(&fs.temp, dry_run, &mut removed).await?;
+    // Skip the second sweep when both temp stores resolve to the same directory
+    // (unified-zone layout) so an entry is never double-counted.
+    if fs.layer_temp.root() != fs.temp.root() {
+        sweep_temp_store(&fs.layer_temp, dry_run, &mut removed).await?;
+    }
 
     log::debug!(
-        "Found {} stale temp entry/entries{}.",
-        stale.len(),
-        if dry_run { " (dry run)" } else { "" },
+        "{} {} stale temp entry/entries.",
+        if dry_run { "Would remove" } else { "Removed" },
+        removed.len(),
     );
 
-    let mut removed = Vec::new();
+    Ok(removed)
+}
+
+/// Sweeps a single [`TempStore`], appending removed directories to `removed`.
+async fn sweep_temp_store(
+    store: &crate::file_structure::TempStore,
+    dry_run: bool,
+    removed: &mut Vec<PathBuf>,
+) -> crate::Result<()> {
+    let stale = store.stale_entries()?;
+
+    log::debug!(
+        "Found {} stale temp entry/entries under {}{}.",
+        stale.len(),
+        store.root().display(),
+        if dry_run { " (dry run)" } else { "" },
+    );
 
     for entry in stale {
         match entry {
@@ -519,13 +549,7 @@ async fn clean_temp(fs: &crate::file_structure::FileStructure, dry_run: bool) ->
         }
     }
 
-    log::debug!(
-        "{} {} stale temp entry/entries.",
-        if dry_run { "Would remove" } else { "Removed" },
-        removed.len(),
-    );
-
-    Ok(removed)
+    Ok(())
 }
 
 async fn remove_stale_dir(dir_path: &std::path::Path, dry_run: bool, label: &str) -> crate::Result<()> {
