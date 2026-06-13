@@ -267,7 +267,14 @@ async fn assemble_from_layers_with_cap(
             Ok(true) => AssemblyMode::Hardlink,
             Ok(false) => AssemblyMode::Reflink,
             // Probe failure: default to Hardlink to preserve existing behavior.
-            Err(_) => AssemblyMode::Hardlink,
+            Err(error) => {
+                tracing::debug!(
+                    source = %src.display(),
+                    %error,
+                    "same_filesystem probe failed; defaulting to hardlink mode"
+                );
+                AssemblyMode::Hardlink
+            }
         };
         src_dirs_with_mode.push((src.to_path_buf(), mode));
     }
@@ -532,7 +539,9 @@ async fn process_directory(
                         AssemblyMode::Reflink => {
                             // reflink_or_copy can move large bytes — blocking I/O,
                             // must not run on the async executor thread.
-                            let src = (*src_path).clone(); // &&PathBuf → owned PathBuf
+                            // `src_path` is `&&PathBuf` (ref into the non_dirs tuple); deref + own it
+                            // for the move into the blocking closure.
+                            let src = (*src_path).to_path_buf();
                             let dst = dest_path.clone();
                             tokio::task::spawn_blocking(move || crate::reflink::create(&src, &dst))
                                 .await
@@ -3287,6 +3296,96 @@ mod tests {
         assert!(
             stats.used_independent_inode(),
             "used_independent_inode() must be true when independent_inode_files > 0"
+        );
+    }
+
+    // ── TC6: mixed same-fs + cross-fs layers dispatch per layer ─────────────
+    //
+    // Two layers assembled in one `assemble_from_layers` call:
+    //   - Layer A: tempdir (same device as dest) → Hardlink
+    //   - Layer B: /dev/shm (different device from dest) → Reflink/copy
+    //
+    // Assertions:
+    //   - Both files present with correct content in dest.
+    //   - stats.independent_inode_files == 1 (layer B's file).
+    //   - stats.files_placed - stats.independent_inode_files == 1 (layer A's file).
+    //   - Layer A file shares inode with its source (hardlinked).
+    //   - Layer B file has an independent inode.
+    //
+    // Self-skips when no second device is available.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mixed_same_and_cross_device_layers_dispatch_per_layer() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, root) = setup();
+
+        // Layer A — same tempdir as dest → Hardlink mode.
+        let layer_a = make_dir(&root, "layer_a/content");
+        let source_a = make_file(&layer_a, "same_fs_file.txt", b"same fs content");
+
+        // Layer B — /dev/shm (different device) → Reflink mode.
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available for mixed same/cross-device test");
+            return;
+        };
+
+        // Build layer B under shm_dir.
+        let layer_b = shm_dir.join("layer_b/content");
+        let source_b_path = layer_b.join("cross_fs_file.txt");
+        std::fs::create_dir_all(&layer_b).unwrap();
+        std::fs::write(&source_b_path, b"cross fs content").unwrap();
+
+        // Dest is in the primary tempdir (same device as layer A).
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let result = assemble_from_layers(&[layer_a.as_path(), layer_b.as_path()], &dest).await;
+        let _ = std::fs::remove_dir_all(&shm_dir); // cleanup regardless
+
+        let stats = result.expect("mixed same/cross-device assembly must succeed");
+
+        // Both files present with correct content.
+        assert_eq!(
+            std::fs::read(dest.join("same_fs_file.txt")).unwrap(),
+            b"same fs content",
+            "layer A file must be present with correct content"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("cross_fs_file.txt")).unwrap(),
+            b"cross fs content",
+            "layer B file must be present with correct content"
+        );
+
+        // Stats: one file from each layer placed; layer B counted as independent inode.
+        assert_eq!(stats.files_placed, 2, "both files must be counted in files_placed");
+        assert_eq!(
+            stats.independent_inode_files, 1,
+            "only the cross-device layer B file must be counted as independent_inode_files"
+        );
+        assert_eq!(
+            stats.files_placed - stats.independent_inode_files,
+            1,
+            "same-device layer A file must not be counted as independent inode"
+        );
+
+        // Layer A file shares inode with its source (hardlinked).
+        let ino_src_a = std::fs::metadata(&source_a).unwrap().ino();
+        let ino_dest_a = std::fs::metadata(dest.join("same_fs_file.txt")).unwrap().ino();
+        assert_eq!(
+            ino_src_a, ino_dest_a,
+            "layer A file must share inode with its source (hardlinked)"
+        );
+
+        // Layer B file has an independent inode (reflinked/copied).
+        // We compare against the original source_b_path which was on shm_dir —
+        // after cleanup we can only assert the dest inode differs from source_a's inode.
+        // Since the dest file is on a different device than shm_dir was, the dest
+        // file's inode must differ from dest layer A's inode (different files).
+        assert_ne!(
+            ino_dest_a,
+            std::fs::metadata(dest.join("cross_fs_file.txt")).unwrap().ino(),
+            "layer B file must have a different inode from layer A file"
         );
     }
 

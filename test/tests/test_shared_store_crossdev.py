@@ -286,6 +286,13 @@ def test_ci_cache_persist_packages_ephemeral(
             f"checked: {pkgs_under_v2}"
         )
 
+        # Verify the re-assembled binary is executable and prints its marker.
+        result = runner_v2.plain("package", "exec", pkg.fq, "--", "hello")
+        assert pkg.marker in result.stdout, (
+            "binary re-assembled from cached layers must be executable; "
+            f"got: {result.stdout.strip()!r}"
+        )
+
         # Cache zone blobs/layers must NOT have grown (no re-download).
         # We verify layers is still present and non-empty (not wiped by re-install).
         assert (cache_dir / "layers").exists(), (

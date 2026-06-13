@@ -200,13 +200,14 @@ mod tests {
         );
 
         let result = create(&source, &link);
+        let content = result.as_ref().ok().and_then(|()| std::fs::read(&link).ok());
         let _ = std::fs::remove_dir_all(&shm_dir); // cleanup
 
-        result.unwrap(); // must succeed
-
-        // Content byte-identical.
-        // (We reconstruct the expected bytes since we cleaned up; re-read source.)
-        // The key assertion is that create() returned Ok, not an error.
+        result.expect("cross-device create must succeed via copy fallback");
+        assert_eq!(
+            content.expect("link must be readable after copy"),
+            b"cross device content",
+        );
     }
 
     // ── R3: exec bit preserved ───────────────────────────────────────────────
@@ -259,40 +260,25 @@ mod tests {
     //
     // When the source path does not exist, `create` must return `Err` rather
     // than panic or silently succeed.
-    //
-    // NOTE: The current stub unconditionally panics with `unimplemented!()`.
-    // That is acceptable RED — the test body below documents the post-impl
-    // contract.  After P2.3 the stub is replaced and `Err` is returned.
-    //
-    // FAILS NOW: panics with `unimplemented!()` (which `catch_unwind` catches).
     #[test]
     fn create_errors_when_source_missing() {
         let (_dir, root) = setup();
         let ghost = root.join("nonexistent_source");
         let link = root.join("link");
+        let result = create(&ghost, &link);
+        assert!(result.is_err(), "create() must return Err for a missing source");
+    }
 
-        // Use catch_unwind so the unimplemented!() panic is caught gracefully
-        // and the test still reports a useful message.
-        let result = std::panic::catch_unwind(|| create(&ghost, &link));
-        match result {
-            // Post-impl contract: returns Err, does not panic.
-            Ok(Err(_)) => {
-                // Correct post-impl behavior — error returned for missing source.
-            }
-            Ok(Ok(())) => {
-                panic!("create() succeeded with a missing source — this is wrong");
-            }
-            Err(panic_payload) => {
-                // Acceptable RED: the stub panics.  Confirm it's our stub.
-                if let Some(msg) = panic_payload.downcast_ref::<&str>() {
-                    assert!(
-                        msg.contains("P2.3") || msg.contains("not implemented"),
-                        "unexpected panic message: {msg}"
-                    );
-                }
-                // This branch is expected to disappear once P2.3 is implemented.
-                // After implementation, this test must reach Ok(Err(_)) above.
-            }
-        }
+    // ── R6: link-already-exists errors ──────────────────────────────────────
+    //
+    // When the link path already exists, `create` must return `Err` rather
+    // than silently overwriting the existing file.
+    #[test]
+    fn create_errors_when_link_already_exists() {
+        let (_dir, root) = setup();
+        let source = make_file(&root, "source", b"original");
+        let link = make_file(&root, "link", b"already here");
+        let result = create(&source, &link);
+        assert!(result.is_err(), "create() must fail when link already exists");
     }
 }
