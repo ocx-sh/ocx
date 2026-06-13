@@ -1171,4 +1171,111 @@ mod tests {
             "stage_blob_bytes must propagate leader failure; got Ok"
         );
     }
+
+    // ── move_temp_to_object_store_current_behavior ────────────────────────────
+    //
+    // CHARACTERIZATION TEST — locks the current (pre-M1) destructive publish
+    // behavior of `move_temp_to_object_store`.
+    //
+    // Today `move_dir` calls `remove_dir_all(dst)` then renames the temp dir
+    // into place. This means:
+    //   1. A fresh install (no existing package dir) creates:
+    //      `packages/{registry_slug}/{shard}/` with `content/` + `install.json`.
+    //   2. A re-pull over an existing dir replaces it wholesale — the old dir
+    //      is deleted and the new one is renamed into its place. This is the
+    //      destructive behavior that M1 (`finalize_package_dir`) will change to a
+    //      stash→swap-under-held-lock pattern so readers never observe a missing
+    //      or half-deleted dir.
+    //
+    // IMPORTANT: The second assertion (`re_pull_replaces_package_dir_observably`)
+    // documents the current BUGGY behavior. When M1 lands this test MUST be
+    // updated to assert non-destructive replace instead.
+    //
+    // Requirement traced to: plan_shared_store P1.0, system_design_shared_store §5 M1.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn move_temp_to_object_store_current_behavior() {
+        let (_dir, mgr) = setup_offline_manager();
+
+        // ── First install: fresh CAS path ─────────────────────────────────────
+        let info = fixture_info("cas-tool");
+        let result = mgr.pull_local(info.clone(), &[], None).await;
+        let install_info = result.expect("fresh pull_local to CAS path must succeed");
+
+        // The package lands in the content-addressed object store.
+        let pkg_root = install_info.dir().root().to_path_buf();
+        assert!(
+            pkg_root.to_str().is_some_and(|s| s.contains("packages")),
+            "CAS install must land under $OCX_HOME/packages/; got: {pkg_root:?}"
+        );
+
+        // content/ sub-directory must exist.
+        assert!(
+            pkg_root.join("content").exists(),
+            "content/ must exist after install; pkg_root={pkg_root:?}"
+        );
+
+        // install.json sentinel must exist (written by post_download_actions).
+        let install_json = pkg_root.join("install.json");
+        assert!(
+            install_json.exists(),
+            "install.json must be present after a successful install; pkg_root={pkg_root:?}"
+        );
+
+        // ── Re-pull over a HEALTHY install: short-circuits, dir preserved ─────
+        //
+        // `setup_owned` (pull.rs:288-302) takes a fast-path when
+        // `dest_override.is_none()` AND `find_plain` finds the package AND
+        // `check_install_status` is OK: it returns the existing install WITHOUT
+        // re-pulling or moving anything. So a re-pull of a *healthy* install
+        // never reaches `move_dir` — the existing dir (and any sentinel in it)
+        // survives untouched. M1 MUST preserve this short-circuit (first-writer-
+        // wins / OK-winner reuse), so this assertion stays green after M1.
+        let healthy_sentinel = pkg_root.join("healthy_repull_sentinel.txt");
+        std::fs::write(&healthy_sentinel, b"healthy").unwrap();
+        let healthy_repull = mgr.pull_local(info.clone(), &[], None).await;
+        healthy_repull.expect("re-pull of a healthy install must succeed (short-circuit)");
+        assert!(
+            healthy_sentinel.exists(),
+            "re-pull of a HEALTHY install must short-circuit (no move_dir) and preserve the \
+             existing package dir; sentinel must survive. pkg_root={pkg_root:?}"
+        );
+
+        // ── Re-pull over a BROKEN install: destructive move_dir replaces dir ──
+        //
+        // This is the destructive window M1 (`finalize_package_dir` stash→swap)
+        // eliminates. We break the install by removing `install.json` so
+        // `check_install_status` returns false; the fast-path no longer fires and
+        // `setup_owned` proceeds to re-pull → `move_temp_to_object_store` →
+        // `move_dir`, which calls `remove_dir_all(dst)` before renaming the temp
+        // dir in. A sentinel written before the re-pull is therefore destroyed.
+        //
+        // ** This is the one assertion EXPECTED TO CHANGE when M1 lands. **
+        // After M1's stash→swap the canonical package dir is never removed —
+        // update this to assert the broken-install re-pull preserves the dir
+        // (or that no reader observes a missing dir mid-swap).
+        std::fs::remove_file(&install_json).unwrap();
+        assert!(
+            !crate::package::install_status::check_install_status(&install_json).await,
+            "removing install.json must make the install status not-OK so re-pull is forced"
+        );
+        let broken_sentinel = pkg_root.join("broken_repull_sentinel.txt");
+        std::fs::write(&broken_sentinel, b"broken").unwrap();
+        assert!(broken_sentinel.exists(), "broken sentinel must exist before re-pull");
+
+        let repull_result = mgr.pull_local(info, &[], None).await;
+        repull_result.expect("re-pull over a broken install must succeed");
+
+        assert!(
+            !broken_sentinel.exists(),
+            "CURRENT BEHAVIOR (pre-M1): re-pull over a BROKEN install destroys the existing \
+             package dir via move_dir's remove_dir_all; the sentinel must be absent. \
+             If this assertion fails, M1 has landed — update this test to assert the \
+             non-destructive stash→swap replace instead."
+        );
+        // The re-pull re-wrote a fresh, healthy install.
+        assert!(
+            install_json.exists(),
+            "re-pull must restore a healthy install.json; pkg_root={pkg_root:?}"
+        );
+    }
 }

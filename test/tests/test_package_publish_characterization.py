@@ -1,0 +1,333 @@
+"""Characterization tests for the current package publish + store layout behavior.
+
+These tests are the safety net (P1.0) for the shared-store feature (plan_shared_store).
+They lock the *current* (pre-M1/M2) observable behavior of OCX package publish and the
+single-root store layout so that:
+
+  - M1 (non-destructive publish / finalize_package_dir) can be validated against them.
+  - M2 (StoreLayout resolver / zone env vars) can verify that the default (unset-env)
+    path produces identical layout to today.
+
+Coverage matrix
+---------------
+
+Publish behavior (tested against ``ocx package install``, which exercises the full
+pull → move_temp_to_object_store pipeline):
+
+  test_fresh_install_creates_package_dir
+      A first install creates ``$OCX_HOME/packages/{registry}/{shard}/`` with
+      ``content/`` and ``install.json``.  Traced to: system_design §2 constraint
+      ("Package publish is destructive"), plan P1.0 acceptance criterion.
+
+  test_install_json_present_after_publish
+      ``install.json`` is written by ``post_download_actions`` as the final
+      sentinel indicating a complete install.  Traced to: pull.rs:591-622.
+
+  test_temp_cleaned_after_publish
+      ``$OCX_HOME/temp/`` must be empty (or absent) after a successful install.
+      Reuses the assertion from test_install.py::test_install_cleans_temp_directory
+      to confirm the same guarantee holds for the publish path specifically.
+      Traced to: TempStore stale-sweep, plan P1.0.
+
+  test_repull_replaces_package_dir_observably
+      DOCUMENTS THE CURRENT BUG.  A second install of the same digest (re-pull)
+      destroys the existing package directory via ``remove_dir_all`` then renames
+      the new temp dir into place.  A sentinel file written before the re-pull is
+      absent afterwards, proving the destructive window.
+
+      ** This is the one test EXPECTED TO CHANGE when M1 lands. **
+      When M1's stash→swap-under-lock replace is implemented, update this test
+      to assert the sentinel is absent from stash but the package dir is present
+      and was never removed from its canonical path.
+
+      Traced to: utility/fs.rs::move_dir (remove_dir_all branch), system_design
+      §5 M1 "Problem" paragraph, plan P1.0.
+
+Store layout (tested against $OCX_HOME on-disk structure):
+
+  test_single_root_store_layout
+      ``$OCX_HOME`` is the single root for all seven stores: blobs/, layers/,
+      packages/, tags/, symlinks/, state/, temp/.  Traced to: file_structure.rs
+      with_root(), system_design §2 constraint ("Single root: FileStructure::with_root
+      → root.join(name) for 7 stores"), plan P1.0 / M2 baseline.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from src import OcxRunner, PackageInfo, assert_dir_exists, assert_not_exists, registry_dir
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _package_dir(ocx: OcxRunner, pkg: PackageInfo) -> Path:
+    """Return the content-addressed package root from ``ocx package pull`` output."""
+    result = ocx.json("package", "pull", pkg.short)
+    return Path(result[pkg.short])
+
+
+# ---------------------------------------------------------------------------
+# Publish behavior characterization
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_install_creates_package_dir(
+    ocx: OcxRunner, published_package: PackageInfo
+) -> None:
+    """A fresh install creates packages/{registry}/{shard}/ with content/ sub-directory.
+
+    Characterizes the current move_dir-based publish path.  After M1 the same
+    directory structure must exist — this test should remain green.
+
+    Traced to: system_design §5 M1 (Problem), plan P1.0.
+    """
+    pkg = published_package
+    ocx.json("package", "install", pkg.short)
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    packages_root = ocx_home / "packages" / registry_dir(ocx.registry)
+
+    # packages/{registry}/ must exist.
+    assert_dir_exists(packages_root)
+
+    # At least one shard directory containing a content/ sub-directory must be
+    # present under the registry slug.  Walk two levels (algorithm/prefix) then
+    # one more (full shard) to find a package dir.
+    package_dirs = [
+        entry
+        for level1 in packages_root.iterdir()
+        for level2 in level1.iterdir()
+        for entry in level2.iterdir()
+        if entry.is_dir()
+    ]
+    assert package_dirs, (
+        f"No package shard directories found under {packages_root}; "
+        "expected at least one after install"
+    )
+    content_dirs = [d for d in package_dirs if (d / "content").is_dir()]
+    assert content_dirs, (
+        f"No package dir with a content/ subdirectory found under {packages_root}; "
+        f"shard dirs found: {[str(d) for d in package_dirs]}"
+    )
+
+
+def test_install_json_present_after_publish(
+    ocx: OcxRunner, published_package: PackageInfo
+) -> None:
+    """install.json sentinel must exist in the package dir after a successful install.
+
+    post_download_actions() writes install.json as the final OK sentinel.  Its
+    presence proves the publish pipeline completed without a kill-9 truncation.
+    Readers (check_install_status) depend on it to determine whether a dir is a
+    fully committed install or a partial/broken one.
+
+    Traced to: pull.rs post_download_actions(), plan P1.0.
+    """
+    pkg = published_package
+    result = ocx.json("package", "install", pkg.short)
+
+    pkg_root = Path(result[pkg.short]["path"])
+    # The reported path is the symlink (candidate or current); follow it to get
+    # the package root containing install.json.
+    pkg_content = pkg_root.resolve()
+    # install.json is a sibling of content/ under the package root dir.
+    pkg_dir = pkg_content.parent if pkg_content.name == "content" else pkg_content
+    # Walk up to find a dir containing install.json.
+    install_json = _find_install_json(pkg_content)
+    assert install_json is not None and install_json.exists(), (
+        f"install.json must be present after a successful install; "
+        f"searched from {pkg_content}"
+    )
+
+
+def _find_install_json(start: Path) -> Path | None:
+    """Walk from start up toward the packages/ root looking for install.json."""
+    candidate = start
+    for _ in range(6):  # at most 6 levels up (content → pkg_dir → shard → ...)
+        install_json = candidate / "install.json"
+        if install_json.exists():
+            return install_json
+        if candidate.parent == candidate:
+            break
+        candidate = candidate.parent
+    return None
+
+
+def test_temp_cleaned_after_publish(
+    ocx: OcxRunner, published_package: PackageInfo
+) -> None:
+    """$OCX_HOME/temp/ must be empty or absent after a successful install.
+
+    Mirrors test_install.py::test_install_cleans_temp_directory but framed as
+    a characterization test so M1/M2 changes cannot accidentally break the stale
+    sweep without failing this safety net.
+
+    Traced to: TempStore stale-sweep, plan P1.0.
+    """
+    pkg = published_package
+    ocx.json("package", "install", pkg.short)
+
+    temp_dir = Path(ocx.env["OCX_HOME"]) / "temp"
+    if temp_dir.exists():
+        leftover = list(temp_dir.iterdir())
+        assert leftover == [], (
+            f"temp/ must be empty after install; leftover entries: "
+            f"{[str(e) for e in leftover]}"
+        )
+
+
+def test_repull_replaces_package_dir_observably(
+    ocx: OcxRunner, published_package: PackageInfo
+) -> None:
+    """CURRENT BEHAVIOR (pre-M1): re-installing the same digest destroys the package dir.
+
+    Documents the destructive re-pull window in move_dir (remove_dir_all(dst) then
+    rename).  A sentinel file written into the package dir before the re-pull is
+    absent afterwards, proving the package dir was removed wholesale.
+
+    ** THIS IS THE TEST EXPECTED TO CHANGE WHEN M1 LANDS. **
+    After M1 (finalize_package_dir stash→swap) the package dir is NEVER removed from
+    its canonical name — only a stash copy is created.  At that point update this test
+    to assert non-destructive replace (e.g. the canonical package dir is always present
+    and any stash is cleaned up asynchronously).
+
+    Traced to: utility/fs.rs move_dir (remove_dir_all branch), system_design §5 M1
+    "Problem" paragraph, plan P1.0 acceptance criterion "test_repull_replaces_package_dir_observably
+    documents today's destructive replace".
+    """
+    pkg = published_package
+
+    # First install — populate the object store.
+    first_result = ocx.json("package", "install", pkg.short)
+    first_path = Path(first_result[pkg.short]["path"]).resolve()
+
+    # Locate the package root (content/ parent or content itself).
+    pkg_root = first_path
+    while pkg_root.name == "content" or pkg_root.name == "candidates" or pkg_root.name == pkg.tag:
+        pkg_root = pkg_root.parent
+    # Navigate into the CAS tree: symlinks → packages dir.
+    # Follow the resolved symlink to its target inside packages/.
+    if first_path.is_symlink() or first_path.exists():
+        target = first_path.resolve()
+        # Walk up from target until we find a dir that contains install.json.
+        install_json = _find_install_json(target)
+        if install_json is not None:
+            pkg_root = install_json.parent
+
+    install_json = pkg_root / "install.json"
+    assert install_json.exists(), (
+        f"expected a healthy install.json under {pkg_root} before re-pull"
+    )
+
+    # ── Re-pull over a HEALTHY install: short-circuits, dir preserved ─────────
+    # setup_owned takes a fast-path (find_plain + check_install_status OK) and
+    # returns the existing install WITHOUT re-pulling or moving. So a healthy
+    # re-pull never reaches move_dir and the existing dir survives. M1 must keep
+    # this short-circuit, so this assertion stays green after M1.
+    healthy_sentinel = pkg_root / "__healthy_repull_sentinel__.txt"
+    healthy_sentinel.write_text("healthy marker")
+    ocx.json("package", "install", pkg.short)
+    assert healthy_sentinel.exists(), (
+        "re-pull of a HEALTHY install must short-circuit (no move_dir) and preserve "
+        f"the existing package dir; sentinel must survive under {pkg_root}"
+    )
+
+    # ── Re-pull over a BROKEN install: destructive move_dir replaces dir ──────
+    # Break the install by removing install.json so check_install_status returns
+    # false; the fast-path no longer fires and setup_owned re-pulls →
+    # move_temp_to_object_store → move_dir (remove_dir_all(dst) then rename).
+    #
+    # ** This is the one assertion EXPECTED TO CHANGE when M1 lands. **
+    # After M1's stash→swap the canonical package dir is never removed — update
+    # this to assert the broken-install re-pull preserves the dir.
+    install_json.unlink()
+    broken_sentinel = pkg_root / "__broken_repull_sentinel__.txt"
+    broken_sentinel.write_text("broken marker")
+    assert broken_sentinel.exists(), "broken sentinel must be writable before re-pull"
+
+    ocx.json("package", "install", pkg.short)
+
+    assert not broken_sentinel.exists(), (
+        "CURRENT BEHAVIOR (pre-M1): re-pull over a BROKEN install must destroy the "
+        "existing package dir via move_dir's remove_dir_all so the sentinel is absent. "
+        "If this assertion fails, M1 has landed — update the test to assert "
+        "non-destructive stash→swap replace instead."
+    )
+    # The re-pull restored a fresh healthy install.
+    assert install_json.exists(), (
+        f"re-pull must restore a healthy install.json under {pkg_root}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Store layout characterization
+# ---------------------------------------------------------------------------
+
+
+def test_single_root_store_layout(
+    ocx: OcxRunner, published_package: PackageInfo
+) -> None:
+    """All seven stores derive directly from $OCX_HOME (single-root layout).
+
+    After a package install, $OCX_HOME must contain exactly the canonical seven
+    store sub-directories (blobs, layers, packages, tags, symlinks, state, temp).
+    No zone overrides are active (OCX_CACHE_DIR / OCX_STATE_DIR / OCX_PACKAGES_DIR
+    are not set in the default OcxRunner env).
+
+    This characterizes the FileStructure::with_root baseline that M2 (StoreLayout
+    resolver) must preserve under default (unset) zone env vars.
+
+    Traced to: file_structure.rs::with_root, system_design §2 constraint
+    ("Single root"), system_design §5 M2 ("Defaults preserve today's single-root
+    layout exactly"), plan P1.0 / M2 baseline.
+    """
+    pkg = published_package
+    ocx.json("package", "install", pkg.short)
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+
+    # None of the zone override variables must be set in the default runner env.
+    assert "OCX_CACHE_DIR" not in ocx.env, (
+        "OCX_CACHE_DIR must not be set in the default OcxRunner env for this characterization"
+    )
+    assert "OCX_STATE_DIR" not in ocx.env, (
+        "OCX_STATE_DIR must not be set in the default OcxRunner env for this characterization"
+    )
+    assert "OCX_PACKAGES_DIR" not in ocx.env, (
+        "OCX_PACKAGES_DIR must not be set in the default OcxRunner env for this characterization"
+    )
+
+    # All seven canonical stores must be rooted directly under $OCX_HOME.
+    expected_stores = [
+        "blobs",
+        "layers",
+        "packages",
+        "tags",
+        "symlinks",
+        "state",
+        "temp",
+    ]
+    for store_name in expected_stores:
+        store_path = ocx_home / store_name
+        # Not all stores need to be materialised after a single install
+        # (e.g. state/ is created lazily), but blobs/layers/packages/tags/symlinks
+        # must exist after install.
+        if store_name in ("blobs", "layers", "packages", "tags", "symlinks"):
+            assert_dir_exists(store_path)
+        # Every store that exists must be a direct child of $OCX_HOME, not a
+        # symlink to a different root (zone override).
+        if store_path.exists():
+            assert not store_path.is_symlink(), (
+                f"store {store_name!r} at {store_path} must be a real directory under "
+                f"$OCX_HOME, not a symlink to a zone-override path"
+            )
+            # The store must not escape $OCX_HOME (no zone override pointing elsewhere).
+            resolved = store_path.resolve()
+            home_resolved = ocx_home.resolve()
+            assert str(resolved).startswith(str(home_resolved)), (
+                f"store {store_name!r} resolved path {resolved} must be inside "
+                f"$OCX_HOME={home_resolved}; a zone override is active unexpectedly"
+            )

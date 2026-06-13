@@ -137,4 +137,44 @@ mod tests {
         let expected = Path::new("a").join("b").join("c");
         assert_eq!(repository_path("a/b/c"), expected);
     }
+
+    // ── with_root_derives_seven_stores (M2 baseline characterization) ─────────
+    //
+    // CHARACTERIZATION TEST — locks the current (pre-M2) single-root layout.
+    //
+    // Today `FileStructure::with_root(root)` derives all seven stores directly
+    // as `root.join(<name>)`.  The M2 `StoreLayout` resolver changes this by
+    // adding zone overrides (`OCX_CACHE_DIR`, `OCX_STATE_DIR`, `OCX_PACKAGES_DIR`),
+    // but the **default** (unset) behaviour must stay byte-identical to today —
+    // `with_root` becomes a shim for `with_layout(StoreLayout::from_root(root))`.
+    //
+    // Requirement traced to: system_design_shared_store.md §5 M2, plan_shared_store P1.1
+    // ("with_root == with_layout(from_root) parity").
+    #[test]
+    fn with_root_derives_seven_stores() {
+        let root = std::path::PathBuf::from("/home/user/.ocx");
+        let fs = FileStructure::with_root(root.clone());
+
+        assert_eq!(fs.blobs.root(), root.join("blobs"), "blobs store must be root/blobs");
+        assert_eq!(
+            fs.layers.root(),
+            root.join("layers"),
+            "layers store must be root/layers"
+        );
+        assert_eq!(
+            fs.packages.root(),
+            root.join("packages"),
+            "packages store must be root/packages"
+        );
+        assert_eq!(fs.tags.root(), root.join("tags"), "tags store must be root/tags");
+        assert_eq!(
+            fs.symlinks.root(),
+            root.join("symlinks"),
+            "symlinks store must be root/symlinks"
+        );
+        assert_eq!(fs.state.root(), root.join("state"), "state store must be root/state");
+        assert_eq!(fs.temp.root(), root.join("temp"), "temp store must be root/temp");
+        // root() accessor round-trips.
+        assert_eq!(fs.root(), root.as_path(), "root() must return the original root");
+    }
 }
