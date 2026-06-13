@@ -107,22 +107,23 @@ const DEFAULT_CONCURRENCY: usize = 50;
 /// invocation. Useful for progress reporting and as a test observable.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AssemblyStats {
-    /// Regular files placed via `hardlink::create`.
-    pub files_hardlinked: usize,
+    /// Regular files placed into the destination tree (via `hardlink::create`
+    /// on the same filesystem; reflink/copy across filesystems is added in P2).
+    pub files_placed: usize,
     /// Intra-layer symlinks recreated verbatim in the destination (Unix).
     pub symlinks_recreated: usize,
     /// Real directories created in the destination tree.
     pub dirs_created: usize,
-    /// Total bytes across the files that were hardlinked. Informational.
-    pub bytes_hardlinked: u64,
+    /// Total bytes across the files that were placed. Informational.
+    pub bytes_placed: u64,
 }
 
 impl AssemblyStats {
     fn merge(&mut self, other: AssemblyStats) {
-        self.files_hardlinked += other.files_hardlinked;
+        self.files_placed += other.files_placed;
         self.symlinks_recreated += other.symlinks_recreated;
         self.dirs_created += other.dirs_created;
-        self.bytes_hardlinked += other.bytes_hardlinked;
+        self.bytes_placed += other.bytes_placed;
     }
 }
 
@@ -479,8 +480,8 @@ async fn process_directory(
             match kind {
                 EntryKind::File { size } => {
                     crate::hardlink::create(src_path, &dest_path)?;
-                    stats.files_hardlinked += 1;
-                    stats.bytes_hardlinked += size;
+                    stats.files_placed += 1;
+                    stats.bytes_placed += size;
                 }
                 EntryKind::Symlink => {
                     handle_symlink_entry(src_path, &dest_path, &dest_root, &mut stats).await?;
@@ -640,7 +641,7 @@ mod tests {
 
         assert!(dest.exists(), "dest content/ must be created by the walker");
         assert!(dest.is_dir(), "dest content/ must be a real directory, not a symlink");
-        assert_eq!(stats.files_hardlinked, 0, "empty layer yields zero hardlinked files");
+        assert_eq!(stats.files_placed, 0, "empty layer yields zero hardlinked files");
         assert_eq!(
             stats.symlinks_recreated, 0,
             "empty layer yields zero recreated symlinks"
@@ -672,7 +673,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "all three files must be hardlinked");
+        assert_eq!(stats.files_placed, 3, "all three files must be hardlinked");
         assert_eq!(stats.symlinks_recreated, 0, "no symlinks in a flat file layer");
         // `dirs_created` counts subdirectories encountered during the walk.
         // A flat layer has files only at the root — zero subdirectories.
@@ -712,7 +713,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "three files across three subdirs");
+        assert_eq!(stats.files_placed, 3, "three files across three subdirs");
         assert_eq!(stats.symlinks_recreated, 0, "no symlinks in this layer");
         // `dirs_created` counts subdirectories encountered during the walk:
         // `bin`, `lib`, `share`, and `share/doc` = 4. `dest_content` itself
@@ -766,7 +767,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 1, "one file at depth 5");
+        assert_eq!(stats.files_placed, 1, "one file at depth 5");
         // `dirs_created` counts subdirectories encountered during the walk:
         // `a`, `a/b`, `a/b/c`, `a/b/c/d`, `a/b/c/d/e` = 5 subdirs.
         // `dest_content` itself is NOT counted.
@@ -803,7 +804,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 1, "one file outside the empty dir");
+        assert_eq!(stats.files_placed, 1, "one file outside the empty dir");
         // `dirs_created` counts subdirectories encountered during the walk:
         // `bin` (holding `tool`) and `empty` (the preserved empty dir) = 2.
         // `dest_content` itself is NOT counted.
@@ -850,7 +851,7 @@ mod tests {
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "one symlink must be recreated");
-        assert_eq!(stats.files_hardlinked, 1, "one real file must be hardlinked");
+        assert_eq!(stats.files_placed, 1, "one real file must be hardlinked");
 
         let dest_link = dest.join("lib/libfoo.so.1");
 
@@ -899,7 +900,7 @@ mod tests {
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "one cross-dir symlink recreated");
-        assert_eq!(stats.files_hardlinked, 1, "one real file hardlinked");
+        assert_eq!(stats.files_placed, 1, "one real file hardlinked");
 
         let dest_link = dest.join("bin/link");
 
@@ -950,7 +951,7 @@ mod tests {
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "one absolute symlink must be recreated");
-        assert_eq!(stats.files_hardlinked, 0, "no regular files in this layer");
+        assert_eq!(stats.files_placed, 0, "no regular files in this layer");
 
         let dest_link = dest.join("abs_link");
 
@@ -996,7 +997,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 1, "one real file at the end of the chain");
+        assert_eq!(stats.files_placed, 1, "one real file at the end of the chain");
         assert_eq!(stats.symlinks_recreated, 3, "all three chain links recreated");
 
         // All four entries must exist in dest.
@@ -1048,7 +1049,7 @@ mod tests {
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "broken symlink must be recreated");
-        assert_eq!(stats.files_hardlinked, 0, "no real files in this layer");
+        assert_eq!(stats.files_placed, 0, "no real files in this layer");
 
         let dest_link = dest.join("foo");
 
@@ -1266,12 +1267,12 @@ mod tests {
         assert_eq!(mode, 0o755, "executable bits must be preserved");
     }
 
-    /// AssemblyStats invariant: `files_hardlinked` counts every regular file
+    /// AssemblyStats invariant: `files_placed` counts every regular file
     /// placed in the destination, including files in subdirectories.
     ///
     /// Directories and symlinks are not counted here; only regular files.
     #[tokio::test]
-    async fn stats_files_hardlinked_counts_regular_files() {
+    async fn stats_files_placed_counts_regular_files() {
         let (_dir, root) = setup();
         let layer = make_dir(&root, "layer/content");
         make_file(&layer, "a.txt", b"a");
@@ -1282,15 +1283,15 @@ mod tests {
         let dest = root.join("pkg/content");
         let stats = assemble_from_layer(&layer, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "must count three files");
+        assert_eq!(stats.files_placed, 3, "must count three files");
         // Intra-layer symlinks count separately — none here.
         assert_eq!(stats.symlinks_recreated, 0);
     }
 
-    /// AssemblyStats invariant: `bytes_hardlinked` is the sum of the source
+    /// AssemblyStats invariant: `bytes_placed` is the sum of the source
     /// file sizes across all hardlinked files.
     #[tokio::test]
-    async fn stats_bytes_hardlinked_sums_source_file_sizes() {
+    async fn stats_bytes_placed_sums_source_file_sizes() {
         let (_dir, root) = setup();
         let layer = make_dir(&root, "layer/content");
         make_file(&layer, "a.txt", b"12345"); // 5 bytes
@@ -1300,7 +1301,7 @@ mod tests {
         let dest = root.join("pkg/content");
         let stats = assemble_from_layer(&layer, &dest).await.unwrap();
 
-        assert_eq!(stats.bytes_hardlinked, 15);
+        assert_eq!(stats.bytes_placed, 15);
     }
 
     // ── error paths + Windows ───────────────────────────────────────────────
@@ -1392,7 +1393,7 @@ mod tests {
         let stats = assemble_from_layer(&layer_b, &dest).await.unwrap();
 
         // Both layer B files must be hardlinked into dest.
-        assert_eq!(stats.files_hardlinked, 2);
+        assert_eq!(stats.files_placed, 2);
 
         // Layer A files must still be present and their inodes unchanged.
         assert_eq!(std::fs::read(dest.join("bin/tool_a")).unwrap(), b"tool A binary");
@@ -1596,7 +1597,7 @@ mod tests {
         let stats = assemble_from_layer(&layer, &dest).await.unwrap();
 
         assert_eq!(
-            stats.files_hardlinked, 1000,
+            stats.files_placed, 1000,
             "all 1000 files across 100 dirs must be hardlinked"
         );
         assert_eq!(stats.dirs_created, 100, "100 subdirectories must be created");
@@ -1691,7 +1692,7 @@ mod tests {
         let dest_ml = root.join("pkg_ml/content");
         let stats = assemble_from_layers(&[src_a.as_path()], &dest_ml).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "single-source must hardlink all files");
+        assert_eq!(stats.files_placed, 2, "single-source must hardlink all files");
         assert_eq!(stats.dirs_created, 2, "single-source must create bin/ and lib/");
         assert!(dest_ml.join("bin/tool").exists(), "bin/tool must appear in dest");
         assert!(
@@ -1740,10 +1741,10 @@ mod tests {
             .unwrap();
 
         assert!(dest.exists(), "dest must be created even for two empty layers");
-        assert_eq!(stats.files_hardlinked, 0, "no files in empty layers");
+        assert_eq!(stats.files_placed, 0, "no files in empty layers");
         assert_eq!(stats.symlinks_recreated, 0, "no symlinks in empty layers");
         assert_eq!(stats.dirs_created, 0, "no subdirectories in empty layers");
-        assert_eq!(stats.bytes_hardlinked, 0, "no bytes in empty layers");
+        assert_eq!(stats.bytes_placed, 0, "no bytes in empty layers");
         assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "dest must be empty");
     }
 
@@ -1766,7 +1767,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both disjoint files must be hardlinked");
+        assert_eq!(stats.files_placed, 2, "both disjoint files must be hardlinked");
         assert!(dest.join("a.txt").exists(), "a.txt from layer A must appear");
         assert!(dest.join("b.txt").exists(), "b.txt from layer B must appear");
         assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"file from A");
@@ -1790,7 +1791,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both disjoint files must be hardlinked");
+        assert_eq!(stats.files_placed, 2, "both disjoint files must be hardlinked");
         assert_eq!(stats.dirs_created, 2, "lib/ and bin/ must be created separately");
         assert!(dest.join("lib/a.so").exists(), "lib/a.so from A must appear");
         assert!(dest.join("bin/b").exists(), "bin/b from B must appear");
@@ -1818,7 +1819,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both tools must be hardlinked");
+        assert_eq!(stats.files_placed, 2, "both tools must be hardlinked");
         // bin/ should be created exactly once despite appearing in both layers
         assert_eq!(stats.dirs_created, 1, "shared bin/ must be created only once");
         assert!(dest.join("bin").is_dir(), "bin/ must be a real directory");
@@ -1849,7 +1850,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both deep files must be hardlinked");
+        assert_eq!(stats.files_placed, 2, "both deep files must be hardlinked");
         // a/, a/b/, a/b/c/ — 3 shared directories each created once
         assert_eq!(
             stats.dirs_created, 3,
@@ -1880,7 +1881,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 4, "all 4 files must be hardlinked");
+        assert_eq!(stats.files_placed, 4, "all 4 files must be hardlinked");
         // bin/ (shared, once), lib/ (A-only), share/ (B-only) = 3 directories
         assert_eq!(stats.dirs_created, 3, "bin/, lib/, share/ = 3 directories");
         assert!(dest.join("bin/a").exists());
@@ -1942,7 +1943,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "one file from each of 3 disjoint layers");
+        assert_eq!(stats.files_placed, 3, "one file from each of 3 disjoint layers");
         assert_eq!(stats.dirs_created, 3, "a/, b/, c/ = 3 disjoint directories");
         assert!(dest.join("a/x").exists());
         assert!(dest.join("b/y").exists());
@@ -1968,7 +1969,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "all three files must be hardlinked");
+        assert_eq!(stats.files_placed, 3, "all three files must be hardlinked");
         assert_eq!(stats.dirs_created, 1, "shared bin/ must be created exactly once");
         assert!(dest.join("bin/a").exists());
         assert!(dest.join("bin/b").exists());
@@ -1998,10 +1999,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            stats.files_hardlinked, 6,
-            "all 6 files across 3 layers must be hardlinked"
-        );
+        assert_eq!(stats.files_placed, 6, "all 6 files across 3 layers must be hardlinked");
         // bin/ (A+B), lib/ (A+C), share/ (B+C) = 3 directories each created once
         assert_eq!(stats.dirs_created, 3, "bin/, lib/, share/ = 3 directories");
         assert!(dest.join("bin/a").exists());
@@ -2032,7 +2030,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "x, y, z all placed");
+        assert_eq!(stats.files_placed, 3, "x, y, z all placed");
         // a/ (all 3 contribute), a/b/ (A+B contribute), a/b/c/ (A only) = 3 dirs
         assert_eq!(stats.dirs_created, 3, "a/, a/b/, a/b/c/ = 3 directories");
         assert!(dest.join("a/b/c/x").exists(), "deepest file from A must be present");
@@ -2224,7 +2222,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "one symlink from A must be recreated");
-        assert_eq!(stats.files_hardlinked, 1, "one file from B must be hardlinked");
+        assert_eq!(stats.files_placed, 1, "one file from B must be hardlinked");
 
         let dest_link = dest.join("lib/libfoo.so");
         assert!(dest_link.is_symlink(), "lib/libfoo.so must be a symlink");
@@ -2311,10 +2309,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            stats.files_hardlinked, 1,
-            "real file libfoo.so.1 from A must be hardlinked"
-        );
+        assert_eq!(stats.files_placed, 1, "real file libfoo.so.1 from A must be hardlinked");
         assert_eq!(
             stats.symlinks_recreated, 1,
             "symlink libfoo.so from B must be recreated"
@@ -2386,7 +2381,7 @@ mod tests {
 
     // ── 3.6: Stats accumulation ──────────────────────────────────────────────
 
-    /// ML-23: files_hardlinked sums correctly across multiple layers.
+    /// ML-23: files_placed sums correctly across multiple layers.
     /// Layer A: 3 files; Layer B: 2 files → total 5.
     #[tokio::test]
     async fn ml_stats_sum_files_across_layers() {
@@ -2406,10 +2401,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 5, "3 from A + 2 from B = 5 total files");
+        assert_eq!(stats.files_placed, 5, "3 from A + 2 from B = 5 total files");
     }
 
-    /// ML-24: bytes_hardlinked sums correctly across layers.
+    /// ML-24: bytes_placed sums correctly across layers.
     /// Layer A: 100 bytes; Layer B: 50 bytes → total 150.
     #[tokio::test]
     async fn ml_stats_sum_bytes_across_layers() {
@@ -2428,7 +2423,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.bytes_hardlinked, 150, "100 from A + 50 from B = 150 total bytes");
+        assert_eq!(stats.bytes_placed, 150, "100 from A + 50 from B = 150 total bytes");
     }
 
     /// ML-25: dirs_created counts each unique directory exactly once, even when
@@ -2496,8 +2491,8 @@ mod tests {
         assert_eq!(stats.symlinks_recreated, 3, "1 from A + 2 from B = 3 symlinks");
     }
 
-    /// ML-27: Zero-byte files are counted in files_hardlinked but contribute
-    /// 0 to bytes_hardlinked.
+    /// ML-27: Zero-byte files are counted in files_placed but contribute
+    /// 0 to bytes_placed.
     #[tokio::test]
     async fn ml_stats_zero_length_files_counted() {
         let (_dir, root) = setup();
@@ -2513,11 +2508,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "two zero-byte files must still be counted");
-        assert_eq!(
-            stats.bytes_hardlinked, 0,
-            "zero-byte files contribute 0 to bytes_hardlinked"
-        );
+        assert_eq!(stats.files_placed, 2, "two zero-byte files must still be counted");
+        assert_eq!(stats.bytes_placed, 0, "zero-byte files contribute 0 to bytes_placed");
     }
 
     // ── 3.7: Error paths — overlap detection ─────────────────────────────────
@@ -2851,7 +2843,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 500, "250 from A + 250 from B = 500 files");
+        assert_eq!(stats.files_placed, 500, "250 from A + 250 from B = 500 files");
         assert_eq!(
             stats.dirs_created, 50,
             "50 shared directories must each be created exactly once"
@@ -2891,7 +2883,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both deep files must be assembled");
+        assert_eq!(stats.files_placed, 2, "both deep files must be assembled");
         // 20 shared directories, each created once
         assert_eq!(stats.dirs_created, 20, "20 shared directory levels each created once");
 
