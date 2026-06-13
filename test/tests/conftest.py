@@ -46,7 +46,7 @@ def published_two_versions(
 # ---------------------------------------------------------------------------
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True, slots=True)
 class SharedStore:
     """Two OcxRunner instances sharing one OCX_CACHE_DIR with distinct OCX_STATE_DIRs.
 

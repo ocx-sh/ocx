@@ -761,6 +761,17 @@ async fn swap_broken_install(
     // even if this process dies mid-swap. `__stale_` prefix + pid + random
     // suffix keeps it disjoint from the 32-hex temp-dir names.
     let stash = stash_path(fs);
+    // Containment guard: every `remove_dir_all(stash)` below must target a path
+    // strictly under the package-staging temp root. `stash_path` builds it that
+    // way; this assert is a tripwire so any future refactor that lets `stash`
+    // escape the temp zone fails loudly in debug/test before a stray
+    // `remove_dir_all` can touch the canonical CAS tree.
+    debug_assert!(
+        stash.starts_with(fs.temp.root()),
+        "stash path ({}) must be contained under the package-staging temp root ({})",
+        stash.display(),
+        fs.temp.root().display()
+    );
     // Ensure the temp root exists so `rename(output, stash)` has a valid
     // parent. Normally the pull path already created it via `acquire_temp_dir`,
     // but the unit test calls `finalize_package_dir` directly without one.
@@ -782,6 +793,10 @@ async fn swap_broken_install(
     // The two swap renames run on a blocking thread (std::fs::rename) and route
     // through the Windows rename-retry helper. spawn_blocking keeps the async
     // runtime free while the blocking renames + the optional fault pause run.
+    //
+    // `pinned_for_log` only feeds the test-only fault hook below, so it is
+    // gated on the same `cfg` — release builds neither build nor capture it.
+    #[cfg(any(test, feature = "__testing"))]
     let pinned_for_log = pinned.to_string();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         // Fault hook (M5): block here BEFORE any rename, while the broken dir
@@ -793,6 +808,14 @@ async fn swap_broken_install(
         // renames run back-to-back with no `.await` and no further pause, so the
         // only "missing" window is the microscopic inter-rename gap the OS
         // makes atomic per step.
+        //
+        // The hook is compiled out of release artifacts entirely — it exists
+        // only under `cfg(test)` (unit tests) or `feature = "__testing"` (the
+        // acceptance-test binary), matching the `__OCX_SELF_IMAGE` seam
+        // convention. A plain `cargo build --release` physically lacks this
+        // call and the function it targets, so the env-driven unbounded block
+        // (which holds the per-digest lock) cannot be triggered in production.
+        #[cfg(any(test, feature = "__testing"))]
         maybe_pause_publish(&pinned_for_log)?;
 
         // Step 1: move the old live dir out of the canonical name (atomic; open
@@ -835,7 +858,8 @@ fn stash_path(fs: &file_structure::FileStructure) -> std::path::PathBuf {
     let pid = std::process::id();
     // Cheap process-local uniqueness without a `rand` dep: wall-clock nanos
     // XORed with a monotonically-increasing counter. Collisions only matter
-    // within one process holding the same digest lock, which is serialized.
+    // within one process holding the same temp lock (keyed by registry+digest,
+    // not digest alone), which is serialized.
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -854,11 +878,20 @@ static STASH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// file named by `__OCX_TESTING_PUBLISH_RELEASE_FILE` appears, so a reader-loop
 /// test can prove INV-M1 holds across a long pause window.
 ///
-/// Off the hook this is a zero-cost env probe. Production builds never set the
-/// var; the `__OCX_TESTING_` prefix keeps it out of the public env namespace.
-/// Both keys are read through [`crate::env::var`] so the in-process test
-/// override seam (`crate::test::env`) can drive the pause without an unsafe
-/// `std::env::set_var`; the release-file is polled on disk.
+/// Before entering the poll loop it writes a "paused" sentinel file named by
+/// `__OCX_TESTING_PUBLISH_PAUSED_FILE` (when set), so a cross-process test can
+/// deterministically wait for the swap to have *reached* the paused state
+/// before starting its reader loop — no timing heuristic / `sleep` race.
+///
+/// The whole function is compiled out of release artifacts: it exists only
+/// under `cfg(test)` or `feature = "__testing"` (matching the
+/// `__OCX_SELF_IMAGE` seam). Production builds physically lack it, so the
+/// env-driven unbounded block that holds the per-digest lock cannot be
+/// triggered. All keys are read through [`crate::env::var`] so the in-process
+/// test override seam (`crate::test::env`) can drive the pause without an
+/// unsafe `std::env::set_var`; the sentinel/release files are written/polled on
+/// disk so a separate process observes them.
+#[cfg(any(test, feature = "__testing"))]
 fn maybe_pause_publish(pinned: &str) -> std::io::Result<()> {
     match crate::env::var("__OCX_TESTING_PUBLISH_PAUSE") {
         Some(value) if !value.is_empty() => {}
@@ -866,6 +899,13 @@ fn maybe_pause_publish(pinned: &str) -> std::io::Result<()> {
     }
 
     crate::log::debug!("[__OCX_TESTING_PUBLISH_PAUSE] paused broken-install swap for '{pinned}'");
+    // Signal "I have reached the paused state" by writing the sentinel BEFORE
+    // the poll loop. A cross-process test waits for this file to appear, then
+    // knows the broken dir still occupies the canonical name and the reader
+    // loop can begin deterministically (no `sleep`-then-`poll` heuristic).
+    if let Some(sentinel) = crate::env::var("__OCX_TESTING_PUBLISH_PAUSED_FILE") {
+        std::fs::write(&sentinel, b"paused")?;
+    }
     let release = crate::env::var("__OCX_TESTING_PUBLISH_RELEASE_FILE");
     loop {
         if let Some(ref path) = release

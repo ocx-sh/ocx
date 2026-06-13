@@ -48,6 +48,12 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 #[derive(Debug, Clone)]
 pub struct FileStructure {
     root: std::path::PathBuf,
+    /// Resolved per-instance state-zone root (`OCX_STATE_DIR`, defaulting to
+    /// `$OCX_HOME`). The `symlinks/`, `state/`, and `projects/` ledgers all
+    /// hang off this directory, never off `root` (= `$OCX_HOME`), so a fleet
+    /// member with `OCX_STATE_DIR` set keeps its install state — including the
+    /// GC project ledger — isolated from the shared content store.
+    state_zone_root: std::path::PathBuf,
     pub blobs: BlobStore,
     pub layers: LayerStore,
     pub packages: PackageStore,
@@ -104,7 +110,7 @@ impl FileStructure {
     /// - `blobs`, `layers`, `layer_temp` → cache zone (`layout.cache()`)
     /// - `packages`, `temp`              → packages zone (`layout.packages_root()`)
     /// - `tags`                          → `layout.tags_root()` or `{cache}/tags`
-    /// - `symlinks`, `state`             → state zone (`layout.state()`)
+    /// - `symlinks`, `state`, `projects` → state zone (`layout.state()`)
     ///
     /// When all zone overrides are absent (the default), this produces the
     /// same layout as `with_root($OCX_HOME)`.
@@ -126,6 +132,7 @@ impl FileStructure {
             state: StateStore::new(state.join("state")),
             temp: TempStore::new(packages_root.join("temp")),
             layer_temp: TempStore::new(cache.join("temp")),
+            state_zone_root: state.to_path_buf(),
             root: layout.home().to_path_buf(),
         }
     }
@@ -133,6 +140,18 @@ impl FileStructure {
     /// Returns the root directory of this file structure (e.g., `~/.ocx`).
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// Returns the per-instance state-zone root (`OCX_STATE_DIR`, defaulting to
+    /// `$OCX_HOME`).
+    ///
+    /// This is the parent of `symlinks/`, `state/`, and the `projects/` GC
+    /// ledger. Construct `ProjectRegistry` from this path — **not** from
+    /// [`root`](Self::root) — so the ledger lands in the per-instance state
+    /// zone and stays isolated when `OCX_STATE_DIR` diverges from `$OCX_HOME`
+    /// (UC1 fleet sharing, system_design_shared_store.md §5 M2).
+    pub fn state_zone_root(&self) -> &std::path::Path {
+        &self.state_zone_root
     }
 }
 
@@ -370,6 +389,68 @@ mod tests {
             fs.temp.root(),
             fs.layer_temp.root(),
             "temp and layer_temp must point at the same directory in the unified-zone (single-root) layout"
+        );
+    }
+
+    // ── projects_ledger_resolves_under_state_zone (P1 review-fix #2) ──────────
+    //
+    // Requirement: system_design_shared_store.md §5 M2 — the `projects/` GC
+    // ledger lives in the per-instance STATE zone (`OCX_STATE_DIR`), never under
+    // `$OCX_HOME`/the shared content store.  When the state zone diverges from
+    // home, `state_zone_root()` (the root from which `ProjectRegistry` is
+    // constructed) must resolve under the state zone, so the ledger lands at
+    // `{state}/projects/` and stays isolated from a shared `$OCX_HOME`.
+    //
+    // Traced to: P1 shared-store review-fix loop, finding #2 (BLOCK spec).
+    #[test]
+    fn projects_ledger_resolves_under_state_zone() {
+        let home = std::path::PathBuf::from("/home/user/.ocx");
+        let state = std::path::PathBuf::from("/home/user/.ocx-local");
+        let layout = StoreLayout::resolve(home.clone(), None, None, Some(state.clone()), None);
+        let fs = FileStructure::with_layout(layout);
+
+        // The registry root must be the state zone, not home.
+        assert_eq!(
+            fs.state_zone_root(),
+            state.as_path(),
+            "state_zone_root() must equal the OCX_STATE_DIR override, not $OCX_HOME"
+        );
+        assert_ne!(
+            fs.state_zone_root(),
+            home.as_path(),
+            "state_zone_root() must NOT collapse to $OCX_HOME when OCX_STATE_DIR is set"
+        );
+
+        // The ledger path `ProjectRegistry::new(state_zone_root())` would build
+        // (`{root}/projects`) must therefore sit under the state zone.
+        let ledger = fs.state_zone_root().join("projects");
+        assert!(
+            ledger.starts_with(&state),
+            "projects ledger ({}) must be under the state zone ({})",
+            ledger.display(),
+            state.display()
+        );
+        assert!(
+            !ledger.starts_with(&home),
+            "projects ledger ({}) must NOT be under $OCX_HOME ({}) when zones diverge",
+            ledger.display(),
+            home.display()
+        );
+    }
+
+    // ── state_zone_root_collapses_to_home_by_default ──────────────────────────
+    //
+    // In the default single-root layout (no OCX_STATE_DIR), the state zone — and
+    // hence the projects ledger root — must equal `$OCX_HOME`, preserving the
+    // pre-M2 placement byte-for-byte.
+    #[test]
+    fn state_zone_root_collapses_to_home_by_default() {
+        let root = std::path::PathBuf::from("/home/user/.ocx");
+        let fs = FileStructure::with_root(root.clone());
+        assert_eq!(
+            fs.state_zone_root(),
+            root.as_path(),
+            "state_zone_root() must equal $OCX_HOME in the default single-root layout"
         );
     }
 

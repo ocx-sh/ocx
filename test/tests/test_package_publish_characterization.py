@@ -307,6 +307,11 @@ def test_single_root_store_layout(
     )
 
     # All seven canonical stores must be rooted directly under $OCX_HOME.
+    # NOTE: the FileStructure carries two temp stores (`temp` = package-staging
+    # zone, `layer_temp` = cache-staging zone), but in the unified single-root
+    # layout `layer_temp` collapses to the SAME `$OCX_HOME/temp/` directory as
+    # `temp` (system_design §5 M2 "When zones unified, temp/layer_temp point at
+    # the same dir"). So there is only one on-disk `temp/` entry to assert here.
     expected_stores = [
         "blobs",
         "layers",

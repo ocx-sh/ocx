@@ -81,7 +81,9 @@ The five mechanisms are not independent. These interactions are load-bearing:
 - `move_dir` retained for override path only; doc narrowed to "destructive; empty/override dest only."
 - Windows: route the swap renames through a shared `with_windows_rename_retry` (extract the backoff already in `persist_temp_file`) — a live launcher may hold a handle open (`ERROR_SHARING_VIOLATION`).
 
-**Invariant INV-M1.** No lock-free reader ever observes `packages/{digest}/` missing or half-deleted during publish/re-pull. Established by: happy path is rename-only (no `remove_dir_all` of the canonical name ever); broken-install replace only ever `rename`s the canonical name (old inode unlinked via stash after the new dir is in place; open fds survive); two writers serialized by the held digest lock.
+**Invariant INV-M1.** The canonical `packages/{digest}/` is never `remove_dir_all`'d during publish/re-pull; a lock-free reader never observes it half-deleted. The only window in which it can be momentarily absent is the microscopic gap between the two sequential kernel renames in the broken-install swap (`rename(output, stash)` then `rename(temp, output)`). Established by: happy path is rename-only (no `remove_dir_all` of the canonical name ever); broken-install replace only ever `rename`s the canonical name (old inode unlinked via stash after the new dir is in place; open fds survive); two writers serialized by the held digest lock.
+
+> Follow-up (not P1): a fully-atomic swap via Linux `renameat2(RENAME_EXCHANGE)` would close even the microscopic inter-rename gap (it atomically exchanges the two dir entries in a single syscall). Recommended for a later mechanism — it is `RENAME_EXCHANGE`-only on Linux and needs a non-atomic fallback for macOS/Windows, so it is out of scope for P1. Do NOT implement now.
 
 **Tests.** Characterization first (pre-change safety net): `test_repull_replaces_package_dir_observably`. Then U1–U8 unit + **C1 `concurrent_repull_vs_find_never_observes_missing_dir`** (the load-bearing test — tight reader loop during a paused re-pull swap; never `None`/`Err`) + C2 `concurrent_repull_vs_clean_bfs`.
 

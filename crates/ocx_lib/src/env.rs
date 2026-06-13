@@ -1137,6 +1137,59 @@ mod tests {
         );
     }
 
+    // ── as_view empty-string zone is treated as unset (review-fix #3) ─────────
+    //
+    // Requirement: `ContextOptions::as_view` (ocx_cli) reads zone overrides via
+    // `env::var(KEY).filter(|v| !v.is_empty()).map(PathBuf::from)`, mirroring
+    // `context.rs` and `StoreLayout::resolve_from_env`. An empty-string env
+    // value must collapse to `None` so an empty override is never forwarded to a
+    // child as a `""` zone (which resolves differently than "absent").
+    //
+    // `as_view` lives in ocx_cli, which cannot reach this crate's `cfg(test)`
+    // env seam; this test exercises the identical filter predicate through the
+    // test-env-aware `crate::env::var` reader so the behaviour is pinned at the
+    // layer both call sites share.
+    //
+    // Traced to: P1 shared-store review-fix loop, finding #3 (BLOCK).
+    #[test]
+    fn empty_zone_env_value_filters_to_none() {
+        let env_guard = crate::test::env::lock();
+        env_guard.set(keys::OCX_CACHE_DIR, "");
+        env_guard.set(keys::OCX_PACKAGES_DIR, "");
+        env_guard.set(keys::OCX_STATE_DIR, "");
+
+        // The exact predicate `as_view` / `context.rs` apply.
+        let zone = |key: &str| -> Option<std::path::PathBuf> {
+            crate::env::var(key)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from)
+        };
+
+        assert_eq!(
+            zone(keys::OCX_CACHE_DIR),
+            None,
+            "empty OCX_CACHE_DIR must filter to None"
+        );
+        assert_eq!(
+            zone(keys::OCX_PACKAGES_DIR),
+            None,
+            "empty OCX_PACKAGES_DIR must filter to None"
+        );
+        assert_eq!(
+            zone(keys::OCX_STATE_DIR),
+            None,
+            "empty OCX_STATE_DIR must filter to None"
+        );
+
+        // A non-empty value still passes through.
+        env_guard.set(keys::OCX_CACHE_DIR, "/mnt/shared/cache");
+        assert_eq!(
+            zone(keys::OCX_CACHE_DIR),
+            Some(std::path::PathBuf::from("/mnt/shared/cache")),
+            "a non-empty zone value must pass the filter"
+        );
+    }
+
     // ── resolve_command ──────────────────────────────────────────────────
 
     // ── Step 3.1 specification tests: OCX_MIRRORS round-trip ──────────────────

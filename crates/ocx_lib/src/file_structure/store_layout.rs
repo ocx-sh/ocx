@@ -33,9 +33,11 @@ use std::path::PathBuf;
 /// the constructor returns.
 #[derive(Debug, Clone)]
 pub struct StoreLayout {
-    /// Root for the cache zone: blobs, layers, and layer-staging temp.
+    /// `$OCX_HOME` — the overall store root.
     ///
-    /// Defaults to `$OCX_HOME`.
+    /// Acts as the fallback default for both the cache and state zones (and,
+    /// transitively, packages via cache) when their dedicated overrides are
+    /// absent. It is also the path returned by `FileStructure::root()`.
     home: PathBuf,
     /// Root for the cache zone (blobs, layers, layer-staging temp).
     ///
@@ -161,20 +163,75 @@ impl StoreLayout {
     }
 }
 
-/// Reads an environment variable as a `PathBuf`, returning `None` when unset
-/// or empty. Empty-string env values are treated as unset per the §5 M2
-/// resolution contract.
+/// Reads a zone-override environment variable as an absolute `PathBuf`,
+/// returning `None` when unset, empty, or not absolute.
+///
+/// Empty-string env values are treated as unset per the §5 M2 resolution
+/// contract. A relative value is rejected (CWD-relative zone roots are a
+/// path-traversal / surprise-resolution hazard, CWE-22) with a `WARN` and
+/// treated as unset, so the zone safely falls back to its default rather than
+/// resolving against whatever CWD the process happens to have.
+///
+/// NOTE: `OCX_HOME` / [`super::default_ocx_root`] are intentionally left
+/// unchanged here — they pre-date this guard and broadening it to them is a
+/// separate follow-up (avoid scope creep).
 fn non_empty_path(key: &str) -> Option<PathBuf> {
-    crate::env::var(key)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    let value = crate::env::var(key).filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        crate::log::warn!("{key} must be an absolute path; ignoring relative value");
+        return None;
+    }
+    Some(path)
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::StoreLayout;
+    use super::{StoreLayout, non_empty_path};
+
+    // ── relative_zone_value_is_ignored (review-fix #4, CWE-22) ────────────────
+    //
+    // Requirement: a relative zone-override value must be rejected (it would
+    // otherwise resolve against the process CWD — a path-traversal / surprise
+    // hazard). `non_empty_path` must return `None` for a relative path and the
+    // zone falls back to its default; an absolute value passes through.
+    //
+    // Traced to: P1 shared-store review-fix loop, finding #4 (WARN security).
+    #[test]
+    fn relative_zone_value_is_ignored() {
+        use crate::env::keys;
+        let env_guard = crate::test::env::lock();
+
+        // A relative path → ignored (treated as unset).
+        env_guard.set(keys::OCX_CACHE_DIR, "relative/cache");
+        assert_eq!(
+            non_empty_path(keys::OCX_CACHE_DIR),
+            None,
+            "a relative zone value must be ignored (CWE-22 guard)"
+        );
+
+        // An empty value → ignored (existing contract, unchanged).
+        env_guard.set(keys::OCX_CACHE_DIR, "");
+        assert_eq!(
+            non_empty_path(keys::OCX_CACHE_DIR),
+            None,
+            "an empty zone value must be ignored"
+        );
+
+        // An absolute value → passes through unchanged.
+        #[cfg(unix)]
+        let absolute = "/mnt/shared/cache";
+        #[cfg(windows)]
+        let absolute = r"C:\mnt\shared\cache";
+        env_guard.set(keys::OCX_CACHE_DIR, absolute);
+        assert_eq!(
+            non_empty_path(keys::OCX_CACHE_DIR),
+            Some(PathBuf::from(absolute)),
+            "an absolute zone value must pass the guard"
+        );
+    }
 
     // ── from_root_collapses_all_zones ─────────────────────────────────────────
     //

@@ -386,6 +386,12 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         Some(pair) => pair,
         None => return Err(ProjectContextError::NoProject { cwd }),
     };
+    // The GC project ledger (`projects/`) lives in the per-instance state zone
+    // (`OCX_STATE_DIR`, default `$OCX_HOME`), not under the shared content
+    // store. Register the lock there so a fleet member with `OCX_STATE_DIR`
+    // set keeps its ledger isolated (system_design_shared_store.md §5 M2).
+    // `$OCX_HOME` (`home`) is still the global-config discovery root above.
+    let state_zone_root = context.file_structure().state_zone_root().to_path_buf();
 
     // Acquire the exclusive flock on the resolved config file BEFORE loading
     // the snapshot so a concurrent writer cannot race us between read and
@@ -423,7 +429,7 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         flock,
         config_path,
         lock_path,
-        home,
+        state_zone_root,
         config,
         previous_lock,
     ))

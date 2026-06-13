@@ -272,9 +272,12 @@ impl ProjectLock {
     /// `registry/repo@digest` is the canonical on-disk form.
     /// Save the lock file and register its path in the per-user project registry.
     ///
-    /// `ocx_home` is the OCX data-home directory (e.g., `~/.ocx`) used to
-    /// locate the project ledger at `$OCX_HOME/projects/` (flat symlink store,
-    /// ADR: `adr_project_gc_symlink_ledger.md`). `config_path` is the
+    /// `ocx_home` is the per-instance STATE-zone root (`OCX_STATE_DIR`,
+    /// defaulting to `$OCX_HOME`) used to locate the project ledger at
+    /// `{state}/projects/` (flat symlink store,
+    /// ADR: `adr_project_gc_symlink_ledger.md`). The ledger lives in the state
+    /// zone, never the shared content store, so a fleet member with
+    /// `OCX_STATE_DIR` set keeps its ledger isolated. `config_path` is the
     /// originating project config file (typically `<dir>/ocx.toml`, but may
     /// carry a custom name when `--project=<custom>.toml` was used) — its
     /// parent directory is canonicalized and registered as the project dir.

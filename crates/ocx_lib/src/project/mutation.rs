@@ -88,8 +88,10 @@ pub struct MutationGuard {
     config_path: PathBuf,
     /// Absolute path to the sibling `ocx.lock`.
     lock_path: PathBuf,
-    /// `$OCX_HOME` — propagated so commit can register the lock with
-    /// `ProjectRegistry` when the file is materialised for the first time.
+    /// Per-instance state-zone root (`OCX_STATE_DIR`, default `$OCX_HOME`) —
+    /// propagated so commit can register the lock in the `projects/` GC ledger,
+    /// which lives in the state zone (never the shared content store) so a
+    /// fleet member with `OCX_STATE_DIR` set keeps its ledger isolated.
     home: PathBuf,
     /// Snapshot of `ocx.toml` parsed at guard-acquisition time.
     config: ProjectConfig,
@@ -181,10 +183,10 @@ impl MutationGuard {
         &self.lock_path
     }
 
-    /// `$OCX_HOME` root directory (forwarded from the originating
-    /// `Context`). Used by [`Self::commit`] to register the lock with
-    /// the per-user `ProjectRegistry` so `ocx clean` does not GC
-    /// packages pinned by this project.
+    /// Per-instance state-zone root (`OCX_STATE_DIR`, default `$OCX_HOME`),
+    /// forwarded from the originating `Context`. Used by [`Self::commit`] to
+    /// register the lock in the state-zone `projects/` GC ledger so `ocx clean`
+    /// does not GC packages pinned by this project.
     pub fn home(&self) -> &Path {
         &self.home
     }

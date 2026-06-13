@@ -12,11 +12,16 @@ Determinism is achieved with the publish fault hook added in P1.5:
 - ``__OCX_TESTING_PUBLISH_PAUSE=1`` — when set, ``finalize_package_dir``'s
   broken-install stash→swap blocks BEFORE any rename (the broken dir still
   occupies the canonical name) until a release file appears.
+- ``__OCX_TESTING_PUBLISH_PAUSED_FILE=<path>`` — written by the swap right
+  *before* it enters the wait loop, so the test can wait for the swap to have
+  reached the paused state (a deterministic barrier — no ``sleep``-then-``poll``
+  timing heuristic).
 - ``__OCX_TESTING_PUBLISH_RELEASE_FILE=<path>`` — the swap resumes once this
   file exists.
 
-The fault hook is gated behind the ``__OCX_TESTING_`` env prefix (testing-only
-namespace convention) and is a zero-cost env probe in production.
+The fault hook is compiled out of release artifacts (``cfg(test)`` /
+``feature = "__testing"``); it exists only in the test binary and is a zero-cost
+probe even there until ``__OCX_TESTING_PUBLISH_PAUSE`` is set.
 
 Spec sources
 ------------
@@ -42,6 +47,7 @@ EXIT_SUCCESS = 0
 
 # Testing-only fault hook env vars (must match pull.rs::maybe_pause_publish).
 PAUSE_ENV = "__OCX_TESTING_PUBLISH_PAUSE"
+PAUSED_FILE_ENV = "__OCX_TESTING_PUBLISH_PAUSED_FILE"
 RELEASE_ENV = "__OCX_TESTING_PUBLISH_RELEASE_FILE"
 
 _PLATFORM = "linux/amd64"
@@ -133,6 +139,7 @@ def test_concurrent_same_digest_publish_no_enoent(
     install_json.unlink()
 
     release_file = tmp_path / "inv_m1_release"
+    paused_file = tmp_path / "inv_m1_paused"
 
     # Spawn the re-install paused inside the broken-install swap.
     repull = _spawn(
@@ -140,15 +147,21 @@ def test_concurrent_same_digest_publish_no_enoent(
         "package",
         "install",
         pkg.short,
-        extra_env={PAUSE_ENV: "1", RELEASE_ENV: str(release_file)},
+        extra_env={
+            PAUSE_ENV: "1",
+            PAUSED_FILE_ENV: str(paused_file),
+            RELEASE_ENV: str(release_file),
+        },
     )
 
     try:
-        # Wait until the re-install has reached the swap and is paused: the
-        # debug log line is on stderr but we cannot read it without blocking,
-        # so instead poll until the candidate dir is observably stable AND the
-        # process is still running (it blocks in the swap, not exiting).
-        time.sleep(0.5)
+        # Deterministic barrier: the swap writes the paused-sentinel right before
+        # entering its wait loop (broken dir still at the canonical name), so wait
+        # for that file rather than guessing a sleep interval.
+        assert _wait_until(paused_file.exists), (
+            "re-install must reach the paused swap state (sentinel file never appeared); "
+            f"rc={repull.poll()}"
+        )
         assert repull.poll() is None, (
             "paused re-install must still be running (blocked in the swap); "
             f"it exited early rc={repull.returncode}"
@@ -233,18 +246,28 @@ def test_dest_override_no_destructive_race(
     # Break P's CAS install so its re-install runs the paused swap.
     install_json.unlink()
     release_file = tmp_path / "override_release"
+    paused_file = tmp_path / "override_paused"
 
     repull = _spawn(
         ocx,
         "package",
         "install",
         pkg_p.short,
-        extra_env={PAUSE_ENV: "1", RELEASE_ENV: str(release_file)},
+        extra_env={
+            PAUSE_ENV: "1",
+            PAUSED_FILE_ENV: str(paused_file),
+            RELEASE_ENV: str(release_file),
+        },
     )
 
     override_dir = tmp_path / "override-dest"
     try:
-        time.sleep(0.5)
+        # Deterministic barrier: wait for the swap's paused sentinel instead of
+        # sleeping a fixed interval.
+        assert _wait_until(paused_file.exists), (
+            "paused CAS re-install must reach the swap state (sentinel never appeared); "
+            f"rc={repull.poll()}"
+        )
         assert repull.poll() is None, "paused CAS re-install must still be running"
 
         # While P's CAS swap is paused, materialize Q via the dest_override path

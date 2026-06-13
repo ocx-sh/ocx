@@ -176,15 +176,24 @@ async fn resolve_to_package_digests(
 /// A corrupt-registry exit-78 branch is deliberately absent — eliminated with
 /// the JSON ledger (ADR §Risks "Corrupt-state failure mode removed, not relocated").
 pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructure) -> crate::Result<CollectedRoots> {
-    let registry = ProjectRegistry::new(ocx_home);
+    // The project GC ledger (`projects/`) lives in the per-instance STATE zone
+    // (`OCX_STATE_DIR`, defaulting to `$OCX_HOME`), never under the shared
+    // content store. With `OCX_STATE_DIR` set, rooting the registry at
+    // `$OCX_HOME` would defeat UC1 isolation, so construct it from the resolved
+    // state-zone root (system_design_shared_store.md §5 M2). `ocx_home` still
+    // names the GLOBAL toolchain lock (`$OCX_HOME/ocx.lock`) added below — the
+    // global tier's config genuinely lives in `$OCX_HOME`, not the state zone.
+    let state_zone = file_structure.state_zone_root();
+    let registry = ProjectRegistry::new(state_zone);
 
     // Opportunistic legacy cleanup: the superseded JSON ledger
     // (`projects.json` + its `.projects.lock` advisory sentinel) is obsolete
     // under the flat symlink store. No migration of contents — the symlink
     // ledger is rebuilt by ordinary `ocx.lock` saves. Remove once if present,
-    // a single debug line (never WARN — benign legacy artifact).
-    let legacy_json = ocx_home.join("projects.json");
-    let legacy_lock = ocx_home.join(".projects.lock");
+    // a single debug line (never WARN — benign legacy artifact). The legacy
+    // files lived in the state zone too, so look there.
+    let legacy_json = state_zone.join("projects.json");
+    let legacy_lock = state_zone.join(".projects.lock");
     let legacy_present = crate::utility::fs::path_exists_lossy(&legacy_json).await
         || crate::utility::fs::path_exists_lossy(&legacy_lock).await;
     if legacy_present {

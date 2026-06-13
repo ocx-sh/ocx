@@ -75,7 +75,14 @@ def test_separate_state_independent_pins(
     def _which_path(runner: OcxRunner, *args: str) -> Path:
         """Resolve `ocx package which` to the package-root path it reports."""
         result = runner.json("package", "which", *args)
-        raw = result[args[-1]] if isinstance(result, dict) else result
+        if isinstance(result, dict):
+            # Single identifier per call here, so the mapping has exactly one
+            # entry; take it by value rather than guessing the key (the key is
+            # the resolved identifier string, which is not always `args[-1]`).
+            assert len(result) == 1, f"expected a single `which` entry, got: {result!r}"
+            raw = next(iter(result.values()))
+        else:
+            raw = result
         return Path(raw["path"] if isinstance(raw, dict) else raw).resolve()
 
     bare = f"{runner_a.registry}/{repo}"
