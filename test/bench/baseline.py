@@ -22,7 +22,15 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import NamedTuple
+
+# ---------------------------------------------------------------------------
+# Repo-root resolution — used for the __main__ fallback scratch directory.
+# /tmp is tmpfs (RAM-backed) on WSL2; large tarballs OOM the VM there.
+# ---------------------------------------------------------------------------
+_BENCH_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _BENCH_DIR.parent.parent  # test/bench → test → repo-root
 
 
 class BaselineCommand(NamedTuple):
@@ -83,7 +91,10 @@ def _resolve_platform_manifest(registry: str, repo: str, manifest: dict) -> dict
             msg = "Image index has no platform manifests"
             raise RuntimeError(msg)
         first = manifests[0]
-        digest = first["digest"]
+        digest = first.get("digest")
+        if not digest:
+            msg = "Image index manifest entry has no digest"
+            raise RuntimeError(msg)
         url = f"http://{registry}/v2/{repo}/manifests/{digest}"
         req = urllib.request.Request(
             url,
@@ -131,10 +142,9 @@ def build_baseline_command(
     scratch_dir:
         Root directory for the curl extract temp dir.  Must be disk-backed
         (NOT /tmp which is tmpfs/RAM on WSL2).  Defaults to
-        ``<bench_scratch_dir>/curl-extract`` when None — callers should pass
-        ``str(BENCH_SCRATCH_DIR / "curl-extract")`` from harness.py.
-        The fallback default is ``/tmp/bench-baseline-tmp`` for backward
-        compatibility with ``__main__`` standalone usage only.
+        ``<repo-root>/target/bench-baseline-tmp`` when None — callers should
+        pass ``str(BENCH_SCRATCH_DIR / "curl-extract")`` from harness.py to
+        use the session-scoped scratch directory instead.
 
     Returns
     -------
@@ -151,14 +161,23 @@ def build_baseline_command(
 
     # Use the first (and typically only) layer blob for the floor benchmark.
     layer = layers[0]
-    digest = layer["digest"]  # e.g. "sha256:abc123..."
+    digest = layer.get("digest")  # e.g. "sha256:abc123..."
+    if not digest:
+        msg = f"Layer descriptor in {repo}:{tag} manifest has no digest"
+        raise RuntimeError(msg)
     download_url = f"http://{proxy_host}/v2/{repo}/blobs/{digest}"
 
     # prepare_cmd: wipe and recreate a temp directory.
     # The bench_cmd uses $tmpdir as a shell variable populated by prepare_cmd.
-    # IMPORTANT: use the caller-supplied scratch_dir (disk-backed) — never /tmp
-    # (tmpfs/RAM-backed on WSL2 and many Linux systems) to avoid OOM.
-    extract_dir = scratch_dir if scratch_dir is not None else "/tmp/bench-baseline-tmp"
+    # IMPORTANT: use a disk-backed directory — /tmp is tmpfs (RAM) on WSL2 and
+    # many Linux systems; large layer tarballs there OOM the VM.
+    # Fall back to <repo-root>/target/bench-baseline-tmp (disk-backed, inside
+    # the gitignored target/ tree) when the caller does not provide scratch_dir.
+    extract_dir = (
+        scratch_dir
+        if scratch_dir is not None
+        else str(_REPO_ROOT / "target" / "bench-baseline-tmp")
+    )
     prepare_cmd = f"rm -rf {extract_dir} && mkdir -p {extract_dir}"
     bench_cmd = f"curl -sS {download_url} | tar -xJ -C {extract_dir}"
 

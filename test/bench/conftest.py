@@ -5,7 +5,7 @@ the full benchmark matrix from pytest. The full benchmark is driven by
 `task bench` (standalone script via uv run python bench/harness.py).
 
 Pytest smoke tests in test/tests/test_bench_smoke.py use these fixtures to:
-  - Verify the scenario matrix has exactly 14 rows.
+  - Verify the scenario matrix has exactly 21 rows.
   - Verify compare_against_baseline is a pure function (no I/O).
   - Verify ScenarioResult and CompareReport dataclasses have expected fields.
   - Skip full harness tests unless BENCH_SMOKE_LIVE=1 env var is set.

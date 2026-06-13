@@ -464,8 +464,11 @@ class BenchRunner:
             raise RuntimeError(msg)
 
         mean_s = sum(timings) / len(timings)
+        # Sample stddev (÷ n−1) to match hyperfine's convention so the dashboard's
+        # Welch z-score consumes both sources with a consistent formula.
+        # Guard len < 2 to avoid ZeroDivisionError on single-run scenarios.
         stddev_s = (
-            (sum((t - mean_s) ** 2 for t in timings) / len(timings)) ** 0.5
+            (sum((t - mean_s) ** 2 for t in timings) / (len(timings) - 1)) ** 0.5
             if len(timings) > 1
             else 0.0
         )
@@ -534,8 +537,11 @@ class BenchRunner:
             raise RuntimeError(msg)
 
         mean_s = sum(timings) / len(timings)
+        # Sample stddev (÷ n−1) to match hyperfine's convention so the dashboard's
+        # Welch z-score consumes both sources with a consistent formula.
+        # Guard len < 2 to avoid ZeroDivisionError on single-run scenarios.
         stddev_s = (
-            (sum((t - mean_s) ** 2 for t in timings) / len(timings)) ** 0.5
+            (sum((t - mean_s) ** 2 for t in timings) / (len(timings) - 1)) ** 0.5
             if len(timings) > 1
             else 0.0
         )
