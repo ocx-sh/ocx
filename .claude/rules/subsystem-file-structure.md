@@ -18,11 +18,25 @@ Old `objects/` tree mix three concerns: raw OCI blobs, extracted layer files, as
 
 Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`) → GC do single BFS pass over all three tiers. Only packages can be roots or have outgoing edges; layers and blobs reachable only via package `refs/layers/` and `refs/blobs/` links.
 
+## Zone Model (P1 — landed)
+
+`StoreLayout` (`store_layout.rs`) resolves zone roots once; `FileStructure::with_layout` maps each store to the correct zone. `with_root(root)` is a thin shim over `with_layout(StoreLayout::from_root(root))`.
+
+| Env var | Zone | Stores | Default |
+|---------|------|--------|---------|
+| `OCX_CACHE_DIR` | cache | `blobs/`, `layers/`, `layer_temp/` | `$OCX_HOME` |
+| `OCX_PACKAGES_DIR` | packages | `packages/`, `temp/` | resolved `OCX_CACHE_DIR` |
+| `OCX_STATE_DIR` | state | `symlinks/`, `state/`, `projects/` | `$OCX_HOME` |
+| `OCX_INDEX` | tags override | `tags/` | `{cache}/tags` |
+
+All zones collapse to `$OCX_HOME` by default — byte-identical to the pre-P1 layout. **Two temp stores:** `temp` (packages zone) and `layer_temp` (cache zone) are co-located with their tier for intra-volume atomic renames; they are the same directory in the unified layout. **`state_zone_root()` accessor** returns `OCX_STATE_DIR` (default `$OCX_HOME`) — `ProjectRegistry` must use this, not `root()`, so the `projects/` ledger stays per-instance when zones diverge.
+
 ## Module Map
 
 | File | Purpose | Key Types |
 |------|---------|-----------|
 | `file_structure.rs` | Composite root; `slugify()`, `repository_path()` | `FileStructure` |
+| `store_layout.rs` | Zone resolver; `from_root` (single-root), `resolve` (zone overrides), `resolve_from_env` | `StoreLayout` |
 | `blob_store.rs` | Raw OCI blob storage; stateless `write_blob` / `read_blob` (tempfile + atomic rename + Windows-cfg retry-with-backoff) | `BlobStore`, `BlobDir` |
 | `layer_store.rs` | Extracted layer storage | `LayerStore`, `LayerDir` |
 | `package_store.rs` | Assembled package storage | `PackageStore`, `PackageDir` |
@@ -51,17 +65,19 @@ pub struct FileStructure {
     pub packages: PackageStore,
     pub tags: TagStore,
     pub symlinks: SymlinkStore,
-    pub temp: TempStore,
+    pub state: StateStore,
+    pub temp: TempStore,       // packages zone — co-located with packages/
+    pub layer_temp: TempStore, // cache zone — co-located with layers/
 }
 ```
 
-One instance per session. Sub-stores public fields. `root()` return OCX home path.
+One instance per session. Sub-stores public fields. `root()` returns `$OCX_HOME`. `state_zone_root()` returns the per-instance state-zone root (see Zone Model above).
 
-**Root-level state files under `$OCX_HOME`:**
+**State-zone files (under `OCX_STATE_DIR`, default `$OCX_HOME`):**
 
 | Path | Purpose |
 |------|---------|
-| `projects/` | Project GC ledger — flat directory of one symlink per registered project. Name = first 16 hex chars of `SHA-256(canonical_abs_project_dir)`; target = the project directory. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` via `ProjectRegistry::live_projects()` to retain cross-project packages. ADR: `adr_project_gc_symlink_ledger.md`. |
+| `projects/` | Project GC ledger — flat directory of one symlink per registered project. Name = first 16 hex chars of `SHA-256(canonical_abs_project_dir)`; target = the project directory. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` via `ProjectRegistry::live_projects()` to retain cross-project packages. Lives in the STATE zone (not the cache zone) so each fleet member keeps its own GC roots when `OCX_STATE_DIR` is set. ADR: `adr_project_gc_symlink_ledger.md`. |
 | `state/` | Persistent runtime state. Distinct from `cache/` (regenerable bulk). Subdirectory entries are small files whose existence or mtime IS the data — no content structure required. Never regenerated; persisted across sessions. |
 | `state/update-check/<slug>` | Update-check throttle state file. `<slug>` = `to_slug(identifier)` — strict no-dot slug, for example `ocx_sh_ocx_cli` for `ocx.sh/ocx/cli`. File is always zero-byte; mtime is the only datum (time of last registry probe). Touched after every registry probe (success or error); NOT touched on throttle short-circuit. Parent directory created lazily on first touch. Written atomically via PID-suffixed temp file + `std::fs::rename`. |
 

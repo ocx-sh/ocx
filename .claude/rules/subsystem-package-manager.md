@@ -106,6 +106,10 @@ reference_manager.link_blobs(pkg.content(), chain.blobs()).await?;
 
 TOCTOU `!target.exists()` pre-check intentionally absent — eventual consistency handles dangling refs, idempotent `symlink::update` makes repeated calls safe.
 
+## Package Publish (P1 — non-destructive)
+
+`move_temp_to_object_store` now routes CAS-path publishes through `finalize_package_dir` (non-destructive first-writer-wins). Happy path: bare `rename(temp, output_path)`. If the destination already exists and has a committed OK `install.json`, the temp is discarded and the winner reused. If the destination is broken or partial, a stash→swap under the per-digest temp lock replaces it without `remove_dir_all` — a lock-free reader never observes the canonical package dir missing (INV-M1). `move_dir` is retained only for the `dest_override` path (caller-owned, empty-by-contract, not a shared CAS target).
+
 ## Task Methods
 
 | Method | Auto-Install | Returns | Notes |

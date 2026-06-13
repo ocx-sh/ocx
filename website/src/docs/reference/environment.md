@@ -169,17 +169,76 @@ export OCX_HOME="/opt/ocx"
 
 OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [OCX home tier in the Configuration in-depth page][config-home-tier].
 
+When no zone overrides are set (see below), every store is rooted at `$OCX_HOME` — this is the default single-root layout.
+
+### `OCX_CACHE_DIR` {#ocx-cache-dir}
+
+Overrides the root directory for the **cache zone**: raw OCI blobs (`blobs/`) and extracted layer trees (`layers/`), plus the layer-extraction staging temp.
+
+```sh
+export OCX_CACHE_DIR="/mnt/shared/cache"
+```
+
+When unset, the cache zone defaults to `$OCX_HOME`. When set, `OCX_PACKAGES_DIR` also defaults to `OCX_CACHE_DIR` (unless independently overridden — see below).
+
+The value must be an **absolute path**. A relative path is ignored with a warning and the zone falls back to its default.
+
+Setting this to an empty string (`OCX_CACHE_DIR=`) is treated as unset.
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same zone layout.
+
+::: warning Same filesystem required
+Package assembly hardlinks files from `layers/` into `packages/content/`. Both stores must therefore reside on the same filesystem. Setting `OCX_PACKAGES_DIR` to a path on a different filesystem than `OCX_CACHE_DIR` is not yet supported — cross-device assembly will fail. This constraint will be lifted in a future release.
+:::
+
+### `OCX_PACKAGES_DIR` {#ocx-packages-dir}
+
+Overrides the root directory for the **packages zone**: assembled package trees (`packages/`) and package-staging temp.
+
+```sh
+export OCX_PACKAGES_DIR="/mnt/shared/packages"
+```
+
+When unset, the packages zone defaults to the resolved `OCX_CACHE_DIR` (which itself defaults to `$OCX_HOME`).
+
+The value must be an **absolute path**. A relative path is ignored with a warning and the zone falls back to its default.
+
+Setting this to an empty string (`OCX_PACKAGES_DIR=`) is treated as unset.
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`.
+
+::: warning Same filesystem required
+See the constraint note under [`OCX_CACHE_DIR`](#ocx-cache-dir): `OCX_PACKAGES_DIR` and `OCX_CACHE_DIR` must resolve to the same filesystem until cross-device assembly support is added.
+:::
+
+### `OCX_STATE_DIR` {#ocx-state-dir}
+
+Overrides the root directory for the **state zone**: install symlinks (`symlinks/`), persistent runtime state (`state/`), and the GC project ledger (`projects/`).
+
+```sh
+export OCX_STATE_DIR="/home/user/.ocx-local"
+```
+
+When unset, the state zone defaults to `$OCX_HOME`. The state zone is per-instance — it must not be shared across concurrent OCX processes or containers.
+
+The value must be an **absolute path**. A relative path is ignored with a warning and the zone falls back to its default.
+
+Setting this to an empty string (`OCX_STATE_DIR=`) is treated as unset.
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`.
+
 ### `OCX_INDEX` {#ocx-index}
 
 Override the path to the [local index][fs-index] directory.
-By default, OCX reads the local index from `$OCX_HOME/index/` (typically `~/.ocx/index/`).
+By default, OCX reads the local index from `$OCX_CACHE_DIR/tags/` (typically `~/.ocx/tags/`).
+When `OCX_CACHE_DIR` is unset, this resolves to `$OCX_HOME/tags/`.
 
 ```sh
 export OCX_INDEX="/path/to/bundled/index"
 ```
 
 This variable is intended for environments where the index snapshot is bundled alongside a tool
-rather than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub Action][github-actions-docs],
+rather than stored in the cache zone — for example inside a [GitHub Action][github-actions-docs],
 [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features].
 
 The command line option [`--index`][arg-index] takes precedence over this variable.
