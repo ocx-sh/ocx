@@ -174,9 +174,15 @@ at stream end). `HashingAsyncReader` is canonical and covers all paths including
 | Cap | Limit | Applied to |
 |----|-------|-----------|
 | Compressed | `layer.size` bytes via `.take()` | Raw stream, before `HashingAsyncReader` |
-| Decompressed | `max(1 GiB, 100 × layer.size)` | `SyncIoBridge` output inside `spawn_blocking` |
+| Decompressed | `max(256 MiB, 100 × layer.size)` | `SyncIoBridge` output inside `spawn_blocking` |
 
-Exceeding either cap terminates the stream; the digest check fires as usual.
+Exceeding the compressed cap is caught by the digest check. Exceeding the
+decompressed cap returns `ClientError::DecompressionCapExceeded` (detected via a
+`take(cap + 1)` probe byte, checked before the digest comparison) — never a
+misattributed `DigestMismatch`. The decompressed cap is computed in `pull_layer`
+and passed to the private `pull_layer_with_caps`, so tests can inject a small
+ceiling without fabricating a huge archive. A descriptor `size` of zero or one
+that does not fit `u64` is rejected up front as `InvalidManifest`.
 
 No blob file is written to disk during pull — there is no `DropFile` guard to drop.
 

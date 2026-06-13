@@ -407,6 +407,62 @@ impl Client {
         metadata: &metadata::Metadata,
         output_dir: &std::path::Path,
     ) -> std::result::Result<(), ClientError> {
+        // A descriptor `size` that is non-positive (zero or negative) or does not
+        // fit in `u64` is a malformed manifest, not a zero-byte layer: it would
+        // collapse the compressed-side `.take()` cap to zero and the decompressed
+        // cap to its floor. Reject it as InvalidManifest rather than silently
+        // pulling nothing.
+        let blob_total_size = match u64::try_from(layer.size) {
+            Ok(size) if size > 0 => size,
+            _ => {
+                return Err(ClientError::InvalidManifest(format!(
+                    "layer descriptor size '{}' is not a positive byte count",
+                    layer.size
+                )));
+            }
+        };
+
+        // Decompressed-side cap (CWE-400): prevents a crafted compressed stream with a
+        // high expansion ratio from exhausting disk/memory before the digest check fires.
+        //
+        // The multiplier 100× covers all realistic XZ compression ratios for tool
+        // binaries (2–10×) with generous headroom. The 256 MiB floor keeps the cap
+        // from being unreasonably tight for a very small declared layer size while
+        // still bounding the damage a tiny-but-bomb layer can do. Exceeding the cap
+        // yields [`ClientError::DecompressionCapExceeded`].
+        const DECOMPRESSED_CAP_MULTIPLIER: u64 = 100;
+        const DECOMPRESSED_CAP_MINIMUM: u64 = 256 << 20; // 256 MiB
+        let decompressed_cap =
+            (blob_total_size.saturating_mul(DECOMPRESSED_CAP_MULTIPLIER)).max(DECOMPRESSED_CAP_MINIMUM);
+
+        self.pull_layer_with_caps(
+            identifier,
+            layer,
+            metadata,
+            output_dir,
+            blob_total_size,
+            decompressed_cap,
+        )
+        .await
+    }
+
+    /// Pipeline body for [`pull_layer`] with the decompressed-side cap passed in.
+    ///
+    /// `pull_layer` computes `decompressed_cap` from the descriptor size and
+    /// delegates here. The cap is a parameter (rather than computed inline) so
+    /// tests can inject a small ceiling and exercise the
+    /// [`ClientError::DecompressionCapExceeded`] path without fabricating a
+    /// gigabyte-scale archive. `blob_total_size` is the validated, positive
+    /// compressed byte count used for the compressed-side `.take()` cap.
+    async fn pull_layer_with_caps(
+        &self,
+        identifier: &oci::PinnedIdentifier,
+        layer: &oci::Descriptor,
+        metadata: &metadata::Metadata,
+        output_dir: &std::path::Path,
+        blob_total_size: u64,
+        decompressed_cap: u64,
+    ) -> std::result::Result<(), ClientError> {
         use async_compression::tokio::bufread::{GzipDecoder, XzDecoder};
         use hashing_reader::HashingAsyncReader;
         use progress_reader::ProgressReader;
@@ -418,7 +474,6 @@ impl Client {
                 ClientError::InvalidManifest(format!("unsupported layer media type: {}", layer.media_type))
             })?;
         let content_path = output_dir.join("content");
-        let blob_total_size = u64::try_from(layer.size).unwrap_or(0);
 
         let image = self.transport_reference(identifier);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
@@ -517,8 +572,9 @@ impl Client {
 
         // Type alias to keep the match arms readable.
         // The extraction result uses crate::Result (= std::result::Result<(), crate::Error>),
-        // since tar.rs uses the top-level error type via `?`.
-        type PipelineResult = (crate::Result<()>, (oci::Digest, u64));
+        // since tar.rs uses the top-level error type via `?`. `cap_exceeded` reports
+        // whether the decompressed stream tripped the CWE-400 ceiling (see below).
+        type PipelineResult = (crate::Result<()>, (oci::Digest, u64), bool);
 
         // 256 KiB BufReader sits between the progress reader and the decoder.
         // async-compression decoders call poll_read on each decode step; without
@@ -529,19 +585,19 @@ impl Client {
         // window segments and XZ block sizes.
         const BUF_READER_CAPACITY: usize = 256 * 1024;
 
-        // Decompressed-side cap (CWE-400): prevents a crafted compressed stream with a
-        // high expansion ratio from exhausting disk/memory before the digest check fires.
-        //
-        // The multiplier 100× covers all realistic XZ compression ratios for tool
-        // binaries (2–10×) with generous headroom. The 1 GiB minimum ensures the
-        // cap is never unreasonably tight for a very small declared layer size.
-        // Exceeding the cap causes tar to see a truncated archive → extract error.
-        const DECOMPRESSED_CAP_MULTIPLIER: u64 = 100;
-        const DECOMPRESSED_CAP_MINIMUM: u64 = 1 << 30; // 1 GiB
-        let decompressed_cap =
-            (blob_total_size.saturating_mul(DECOMPRESSED_CAP_MULTIPLIER)).max(DECOMPRESSED_CAP_MINIMUM);
+        // Decompressed-side cap (CWE-400): `decompressed_cap` is computed by the
+        // public `pull_layer` (256 MiB floor, 100× declared compressed size) or
+        // injected by a test. We wrap the bridge in `take(cap + 1)`: if the
+        // decompressed stream produces `cap + 1` bytes, the extra "probe" byte
+        // means the real output would have exceeded the cap, so `Take::limit()`
+        // reaches 0 and we surface `DecompressionCapExceeded`. A well-formed
+        // layer never reaches `cap + 1` (it would have to be a bomb), so the
+        // extra byte is harmless for the happy path. Detecting the hit
+        // explicitly stops a truncated-at-cap archive from being misattributed
+        // as a digest mismatch or internal tar error.
+        let cap_with_probe = decompressed_cap.saturating_add(1);
 
-        let (extract_result, digest_result): PipelineResult = match blob_compression {
+        let (extract_result, digest_result, cap_exceeded): PipelineResult = match blob_compression {
             compression::CompressionAlgorithm::Lzma => {
                 let decoder = XzDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
                 tokio::task::spawn_blocking(move || -> PipelineResult {
@@ -549,15 +605,18 @@ impl Client {
                     // SyncIoBridge is created inside spawn_blocking for clarity —
                     // it makes the sync-side boundary explicit at construction.
                     // Wrap with std::io::Read::take for the decompressed-side cap.
-                    let bridge = SyncIoBridge::new(decoder).take(decompressed_cap);
+                    let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
                     let (extract_result, bridge) =
                         archive::extract_tar_from_reader(bridge, &content_path_clone, strip_components as usize);
+                    // limit() == 0 means all `cap + 1` bytes were consumed → the
+                    // decompressed output exceeded `decompressed_cap`.
+                    let cap_exceeded = bridge.limit() == 0;
                     // Unwind the pipeline to recover the HashingAsyncReader:
                     //   bridge (Take<SyncIoBridge>) → into_inner() → SyncIoBridge
                     //     → into_inner() → Decoder → into_inner() → BufReader
                     //     → into_inner() → ProgressReader → into_inner() → HashingAsyncReader
                     let hashing_reader = bridge.into_inner().into_inner().into_inner().into_inner().into_inner();
-                    (extract_result, hashing_reader.finalize())
+                    (extract_result, hashing_reader.finalize(), cap_exceeded)
                 })
                 .await
                 .map_err(ClientError::internal)?
@@ -566,11 +625,12 @@ impl Client {
                 let decoder = GzipDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
                 tokio::task::spawn_blocking(move || -> PipelineResult {
                     use std::io::Read as _;
-                    let bridge = SyncIoBridge::new(decoder).take(decompressed_cap);
+                    let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
                     let (extract_result, bridge) =
                         archive::extract_tar_from_reader(bridge, &content_path_clone, strip_components as usize);
+                    let cap_exceeded = bridge.limit() == 0;
                     let hashing_reader = bridge.into_inner().into_inner().into_inner().into_inner().into_inner();
-                    (extract_result, hashing_reader.finalize())
+                    (extract_result, hashing_reader.finalize(), cap_exceeded)
                 })
                 .await
                 .map_err(ClientError::internal)?
@@ -582,6 +642,17 @@ impl Client {
                 )));
             }
         };
+
+        // ── Decompression-bomb cap (CWE-400) ─────────────────────────
+        //
+        // Checked BEFORE the digest comparison: a stream that overruns the cap
+        // is a decompression bomb regardless of whether its compressed bytes
+        // happen to hash correctly. Surfacing DecompressionCapExceeded here is
+        // what stops the hit from being misattributed as DigestMismatch (the
+        // hash is computed over a truncated prefix) or as an internal tar error.
+        if cap_exceeded {
+            return Err(ClientError::DecompressionCapExceeded { cap: decompressed_cap });
+        }
 
         // ── Digest verification (canonical check) ────────────────────
         //
@@ -1363,9 +1434,8 @@ mod tests {
     // (NOT ClientError::Io). The default pull_blob_streaming path uses
     // HashingAsyncReader as sole verifier, so this exercises that path.
     /// spec §D2 threat model: stream hash catches registry serving different bytes.
-    /// This test verifies the contract that will hold once pull_layer uses
-    /// HashingAsyncReader instead of verify_blob_digest.
-    /// Currently: will panic with unimplemented! once pull_blob_streaming is invoked.
+    /// This test verifies that `pull_layer` surfaces the canonical
+    /// `HashingAsyncReader` digest check on the default stub path.
     #[tokio::test]
     async fn streaming_tampered_blob_via_default_stub_path_yields_digest_mismatch() {
         // replaces verify_blob_digest_* coverage (a): tampered stream → DigestMismatch (NOT Io)
@@ -1377,6 +1447,11 @@ mod tests {
         // ClientError::Io or any other variant.
         let claimed_digest = format!("sha256:{}", "a".repeat(64));
         let evil_bytes = b"bytes that definitely do not hash to all-a".to_vec();
+        // The descriptor size must be the real served byte length so the
+        // compressed-side `.take(size)` cap does not truncate the stream — the
+        // test genuinely exercises tampered-content → DigestMismatch rather than
+        // passing coincidentally via an empty-hash mismatch under `size: 0`.
+        let served_len = evil_bytes.len() as i64;
 
         let data = StubTransportData::new();
         data.write().blobs.insert(claimed_digest.clone(), evil_bytes);
@@ -1386,7 +1461,7 @@ mod tests {
         let layer = oci::Descriptor {
             media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
             digest: claimed_digest.clone(),
-            size: 0,
+            size: served_len,
             urls: None,
             annotations: None,
         };
@@ -1505,6 +1580,10 @@ mod tests {
 
         let claimed_digest = format!("sha256:{}", "a".repeat(64));
         let evil_bytes = b"evil bytes that do not hash to all-a".to_vec();
+        // Real served byte length: under the streaming pipeline the compressed-side
+        // `.take(size)` must not truncate, so the digest is computed over the full
+        // tampered payload (not the empty prefix a `size: 0` shortcut would yield).
+        let served_len = evil_bytes.len() as i64;
 
         let data = StubTransportData::new();
         data.write().blobs.insert(claimed_digest.clone(), evil_bytes);
@@ -1525,7 +1604,7 @@ mod tests {
         let layer = oci::Descriptor {
             media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
             digest: claimed_digest.clone(),
-            size: 0,
+            size: served_len,
             urls: None,
             annotations: None,
         };
@@ -1665,6 +1744,92 @@ mod tests {
                 // The spec says "Internal", but the key invariant is NOT DigestMismatch.
             }
             other => panic!("expected Internal (archive error), got {other:?}"),
+        }
+    }
+
+    // ── Decompression-bomb cap (CWE-400) ─────────────────────────────
+    //
+    // The decompressed-side cap rejects a layer whose decompressed output
+    // exceeds the ceiling. A cap hit must surface as
+    // ClientError::DecompressionCapExceeded — never DigestMismatch (the hash
+    // would be computed over a truncated prefix) and never Internal.
+
+    /// A gzip layer whose decompressed output exceeds an injected 512-byte cap
+    /// returns `DecompressionCapExceeded`, not `DigestMismatch`, and terminates
+    /// (does not hang). Exercised via the test-only `pull_layer_with_caps` seam
+    /// so we need not fabricate a multi-hundred-megabyte archive.
+    #[tokio::test]
+    async fn decompressed_cap_hit_yields_cap_exceeded_not_digest_mismatch() {
+        // Build a valid tar.gz whose single file is far larger than the cap.
+        // The digest is correct for these bytes, so a wrong taxonomy (e.g.
+        // surfacing DigestMismatch from the truncated prefix) would be a bug.
+        let big_content = vec![b'x'; 64 * 1024]; // 64 KiB decompressed, well over a 512-byte cap
+        let tar_gz_bytes = make_minimal_tar_gz(&big_content, "big.txt");
+        let layer_digest = Algorithm::Sha256.hash(&tar_gz_bytes);
+        let digest_str = layer_digest.to_string();
+
+        let data = StubTransportData::new();
+        data.write().blobs.insert(digest_str.clone(), tar_gz_bytes.clone());
+        let client = stub(&data);
+
+        let id = {
+            let hex = digest_str.strip_prefix("sha256:").unwrap();
+            test_pinned(hex)
+        };
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: digest_str.clone(),
+            size: tar_gz_bytes.len() as i64,
+            urls: None,
+            annotations: None,
+        };
+        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let blob_total_size = tar_gz_bytes.len() as u64;
+        let result = client
+            .pull_layer_with_caps(&id, &layer, &metadata, dir.path(), blob_total_size, 512)
+            .await;
+        match result {
+            Err(ClientError::DecompressionCapExceeded { cap }) => {
+                assert_eq!(cap, 512, "reported cap must be the injected ceiling");
+            }
+            Err(ClientError::DigestMismatch { .. }) => {
+                panic!("cap hit must not be misattributed as DigestMismatch (hash over truncated prefix)")
+            }
+            other => panic!("expected DecompressionCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// A descriptor with `size: 0` is a malformed manifest, not a zero-byte
+    /// layer; `pull_layer` rejects it as `InvalidManifest` before touching the
+    /// transport.
+    #[tokio::test]
+    async fn zero_size_descriptor_yields_invalid_manifest() {
+        let claimed_digest = format!("sha256:{}", "a".repeat(64));
+        let data = StubTransportData::new();
+        let client = stub(&data);
+
+        let id = test_pinned("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let layer = oci::Descriptor {
+            media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: claimed_digest,
+            size: 0,
+            urls: None,
+            annotations: None,
+        };
+        let metadata: metadata::Metadata = serde_json::from_str(r#"{"type":"bundle","version":1}"#).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = client.pull_layer(&id, &layer, &metadata, dir.path()).await;
+        match result {
+            Err(ClientError::InvalidManifest(msg)) => {
+                assert!(
+                    msg.contains("positive byte count"),
+                    "message should explain the non-positive size, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidManifest for size: 0 descriptor, got {other:?}"),
         }
     }
 
@@ -2550,7 +2715,10 @@ mod tests {
             let layer = oci::Descriptor {
                 media_type: crate::MEDIA_TYPE_TAR_GZ.to_string(),
                 digest: format!("sha256:{}", "a".repeat(64)),
-                size: 0,
+                // A positive size is required to pass the InvalidManifest gate so
+                // the test reaches the auth step; the blob is absent so the fetch
+                // still fails afterward, which is fine — only auth ordering matters.
+                size: 1,
                 urls: None,
                 annotations: None,
             };
@@ -3078,10 +3246,10 @@ mod tests {
         // ── Pinned-install (digest) paths — security-critical ───────────────
         //
         // A pinned install resolves through a digest. The transport reference
-        // MUST carry the digest verbatim so `verify_blob_digest` checks the
-        // bytes against the SAME digest the caller pinned — under both the
-        // mirror and no-mirror paths. A dropped or altered digest here would
-        // silently weaken the tamper gate.
+        // MUST carry the digest verbatim so the canonical `HashingAsyncReader`
+        // check in `pull_layer` verifies the bytes against the SAME digest the
+        // caller pinned — under both the mirror and no-mirror paths. A dropped
+        // or altered digest here would silently weaken the tamper gate.
 
         /// Digest-only identifier (pinned install, no tag): the digest is
         /// preserved verbatim in the transport reference under a mirror.

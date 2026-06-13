@@ -236,7 +236,7 @@ impl OciTransport for NativeTransport {
         // On Windows, `tokio::fs::File` drop is asynchronous — the underlying
         // OS handle is closed on a background threadpool thread, not during
         // the drop call itself. If the caller immediately reopens the same
-        // path (e.g. `verify_blob_digest` opens for read right after this
+        // path (a subsequent reopen for read right after this
         // returns), the still-open write handle can cause ERROR_LOCK_VIOLATION
         // (os error 33). POSIX advisory locks are optional so Linux tolerates
         // the overlap silently. `shutdown()` drives the tokio file through its
@@ -315,15 +315,6 @@ impl OciTransport for NativeTransport {
     }
 }
 
-/// Checks whether a borrowed `io::Error` carries a fork `DigestError::VerificationError`
-/// and, if so, returns the corresponding `ClientError::DigestMismatch`.
-///
-/// This is the shared detection core. Both the owned-error path
-/// ([`map_fork_io_error_to_client_error`]) and the chain-walk path in
-/// `pull_layer` use this function to avoid duplicating the downcast logic.
-///
-/// Returns `None` if the error is not a fork digest error; returns
-/// `Some(ClientError::DigestMismatch {...})` on detection.
 /// Checks whether a borrowed `io::Error` carries a fork `DigestError::VerificationError`
 /// and, if so, returns the corresponding `ClientError::DigestMismatch`.
 ///

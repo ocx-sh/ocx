@@ -18,6 +18,12 @@ pub enum ClientError {
     /// Fires for manifest digests and for verified blob digests.
     #[error("digest mismatch: expected '{expected}', got '{actual}'")]
     DigestMismatch { expected: String, actual: String },
+    /// The decompressed output of a layer exceeded the decompression-bomb cap
+    /// (CWE-400) before extraction completed. The compressed stream is rejected
+    /// rather than allowed to exhaust disk. `cap` is the byte ceiling that was
+    /// crossed.
+    #[error("decompressed layer exceeded the {cap}-byte cap (possible decompression bomb)")]
+    DecompressionCapExceeded { cap: u64 },
     /// Expected an image manifest but got an image index or unknown type.
     #[error("expected an image manifest, got an image index")]
     UnexpectedManifestType,
@@ -110,6 +116,7 @@ impl ClassifyExitCode for ClientError {
             // registry operation failure as Unavailable.
             Self::Registry(_) => ExitCode::Unavailable,
             Self::DigestMismatch { .. }
+            | Self::DecompressionCapExceeded { .. }
             | Self::UnexpectedManifestType
             | Self::InvalidManifest(_)
             | Self::Serialization(_)

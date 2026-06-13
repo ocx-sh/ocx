@@ -531,6 +531,7 @@ fn classify(client: &ClientError) -> ClientFailure {
         // Data errors and other structural failures — not retryable.
         ClientError::InvalidManifest(_)
         | ClientError::DigestMismatch { .. }
+        | ClientError::DecompressionCapExceeded { .. }
         | ClientError::UnexpectedManifestType
         | ClientError::Serialization(_)
         | ClientError::InvalidEncoding(_)
@@ -625,6 +626,11 @@ mod classify_tests {
             expected: "sha256:aaa".to_string(),
             actual: "sha256:bbb".to_string(),
         });
+    }
+
+    #[test]
+    fn decompression_cap_exceeded_is_other() {
+        assert_other(ClientError::DecompressionCapExceeded { cap: 256 << 20 });
     }
 
     #[test]
