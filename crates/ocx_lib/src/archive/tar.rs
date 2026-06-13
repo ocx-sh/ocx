@@ -169,6 +169,16 @@ fn extract_from_archive<R: std::io::Read>(
     strip_components: usize,
 ) -> Result<()> {
     let mut count = 0u64;
+    // Remember only the most recent parent passed to `create_dir_all`. Tar
+    // archives list entries depth-first, so the same parent recurs across many
+    // consecutive entries; without this guard every file re-issues a
+    // `create_dir_all` (an N+1 syscall pattern). A single-slot guard collapses
+    // that run of duplicates with O(1) memory — unlike a whole-archive
+    // `HashSet`, whose size would be attacker-controlled by directory fan-out
+    // (memory-amplification surface). `create_dir_all` is idempotent, so an
+    // interleaved-parent layout merely re-issues a harmless syscall, never a
+    // wrong result.
+    let mut last_parent: Option<PathBuf> = None;
     for entry in archive.entries().map_err(Error::Tar)? {
         let mut entry = entry.map_err(Error::Tar)?;
         let path = entry.path().map_err(Error::Tar)?.to_path_buf();
@@ -184,11 +194,14 @@ fn extract_from_archive<R: std::io::Read>(
 
         let output_path = output.join(&stripped);
 
-        if let Some(parent) = output_path.parent() {
+        if let Some(parent) = output_path.parent()
+            && last_parent.as_deref() != Some(parent)
+        {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io {
                 path: parent.to_path_buf(),
                 source: e,
             })?;
+            last_parent = Some(parent.to_path_buf());
         }
 
         if entry.header().entry_type() == tar::EntryType::Symlink {
@@ -197,6 +210,15 @@ fn extract_from_archive<R: std::io::Read>(
                 crate::symlink::create(target.as_ref(), &output_path)?;
             }
         } else {
+            // QW2 deferred: wrapping the regular-file write in a BufWriter is not
+            // achievable cleanly with tar 0.4.46. `Entry::unpack`/`unpack_in`
+            // always open their own unbuffered `File`, and the only public way to
+            // apply the header's permission/ownership/mtime bits (set_perms_ownerships
+            // is crate-private) and to honour sparse-file padding is to let `unpack`
+            // own the write. A manual BufWriter copy would drop the executable bit
+            // asserted by test_executable_bit_preserved_through_round_trip, so the
+            // buffering quick win is left for an upstream tar API that exposes
+            // "unpack into a provided writer".
             entry.unpack(&output_path).map_err(Error::Tar)?;
         }
 
