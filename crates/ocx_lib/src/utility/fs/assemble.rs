@@ -103,6 +103,16 @@ const MAX_WALK_DEPTH: usize = 4096;
 /// exhausting file descriptors.
 const DEFAULT_CONCURRENCY: usize = 50;
 
+/// How a regular file is placed into the destination tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssemblyMode {
+    /// Same filesystem: `hardlink::create` — destination shares the source inode.
+    Hardlink,
+    /// Different filesystem: `reflink::create` — destination is an independent
+    /// inode (CoW clone or full copy).
+    Reflink,
+}
+
 /// Summary of what the walker did during a single `assemble_from_layer`
 /// invocation. Useful for progress reporting and as a test observable.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +126,9 @@ pub struct AssemblyStats {
     pub dirs_created: usize,
     /// Total bytes across the files that were placed. Informational.
     pub bytes_placed: u64,
+    /// Files placed on an independent inode via `reflink::create`
+    /// (cross-filesystem). Zero on a same-filesystem assembly.
+    pub independent_inode_files: usize,
 }
 
 impl AssemblyStats {
@@ -124,6 +137,13 @@ impl AssemblyStats {
         self.symlinks_recreated += other.symlinks_recreated;
         self.dirs_created += other.dirs_created;
         self.bytes_placed += other.bytes_placed;
+        self.independent_inode_files += other.independent_inode_files;
+    }
+
+    /// Returns `true` when any files in this assembly were placed via
+    /// `reflink::create` (cross-filesystem, independent inode).
+    pub fn used_independent_inode(&self) -> bool {
+        self.independent_inode_files > 0
     }
 }
 
@@ -237,6 +257,21 @@ async fn assemble_from_layers_with_cap(
         return Ok(AssemblyStats::default());
     }
 
+    // ── Compute per-source assembly mode. ───────────────────────────────────
+    // Probe each source against dest_content to determine whether they reside
+    // on the same filesystem. Hardlink if same fs (or probe errors — default
+    // preserves existing behavior); Reflink if cross-device.
+    let mut src_dirs_with_mode: Vec<(PathBuf, AssemblyMode)> = Vec::with_capacity(sources.len());
+    for src in sources {
+        let mode = match crate::utility::fs::same_filesystem(src, dest_content).await {
+            Ok(true) => AssemblyMode::Hardlink,
+            Ok(false) => AssemblyMode::Reflink,
+            // Probe failure: default to Hardlink to preserve existing behavior.
+            Err(_) => AssemblyMode::Hardlink,
+        };
+        src_dirs_with_mode.push((src.to_path_buf(), mode));
+    }
+
     // ── Parallel directory-level fan-out (multi-layer). ─────────────────────
     let semaphore = Arc::new(Semaphore::new(DEFAULT_CONCURRENCY));
     let entries_seen = Arc::new(AtomicUsize::new(0));
@@ -247,7 +282,7 @@ async fn assemble_from_layers_with_cap(
 
     // Seed with the root directory set.
     tx.send(SpawnRequest {
-        src_dirs: sources.iter().map(|s| s.to_path_buf()).collect(),
+        src_dirs: src_dirs_with_mode,
         dest_dir: dest_content.to_path_buf(),
         depth: 0,
     })
@@ -362,9 +397,16 @@ enum EntryKind {
 
 /// Work item for the scheduler. Each request represents one directory level
 /// that needs to be walked across one or more source layers.
+///
+/// Each entry in `src_dirs` pairs a source directory path with the
+/// [`AssemblyMode`] computed for that source at the root of the walk. The
+/// mode travels with the path so that subdirectory `SpawnRequest`s carry
+/// the correct mode for each contributing layer without requiring a global
+/// layer-index lookup (which would be incorrect because child requests
+/// contain only the *contributing subset* of layers).
 #[derive(Debug)]
 struct SpawnRequest {
-    src_dirs: Vec<PathBuf>,
+    src_dirs: Vec<(PathBuf, AssemblyMode)>,
     dest_dir: PathBuf,
     depth: usize,
 }
@@ -373,9 +415,11 @@ struct SpawnRequest {
 ///
 /// Reads entries from all `src_dirs`, merges by name into a `BTreeMap`,
 /// detects overlaps, and places files/symlinks. Directories are posted
-/// back to the scheduler with only the contributing layers.
+/// back to the scheduler with only the contributing layers (each carrying
+/// their [`AssemblyMode`] so the mode travels down the tree without a
+/// global layer-index lookup).
 async fn process_directory(
-    src_dirs: Vec<PathBuf>,
+    src_dirs: Vec<(PathBuf, AssemblyMode)>,
     dest_dir: PathBuf,
     dest_root: PathBuf,
     depth: usize,
@@ -386,9 +430,11 @@ async fn process_directory(
     let mut stats = AssemblyStats::default();
 
     // ── Phase 1: Collect entries from all source layers. ────────────────────
-    let mut merged: BTreeMap<OsString, Vec<(usize, EntryKind, PathBuf)>> = BTreeMap::new();
+    // Each contributor tuple carries (layer_idx, kind, src_path, mode) so the
+    // assembly mode travels with the path into the placement phase.
+    let mut merged: BTreeMap<OsString, Vec<(usize, EntryKind, PathBuf, AssemblyMode)>> = BTreeMap::new();
 
-    for (layer_idx, src_dir) in src_dirs.iter().enumerate() {
+    for (layer_idx, (src_dir, mode)) in src_dirs.iter().enumerate() {
         let mut entries = tokio::fs::read_dir(src_dir)
             .await
             .map_err(|e| crate::error::file_error(src_dir, e))?;
@@ -416,7 +462,7 @@ async fn process_directory(
                 merged
                     .entry(file_name)
                     .or_default()
-                    .push((layer_idx, EntryKind::Symlink, src_path));
+                    .push((layer_idx, EntryKind::Symlink, src_path, *mode));
                 continue;
             }
 
@@ -429,7 +475,7 @@ async fn process_directory(
                 merged
                     .entry(file_name)
                     .or_default()
-                    .push((layer_idx, EntryKind::Dir, src_path));
+                    .push((layer_idx, EntryKind::Dir, src_path, *mode));
             } else if file_type.is_file() {
                 let size = entry
                     .metadata()
@@ -439,7 +485,7 @@ async fn process_directory(
                 merged
                     .entry(file_name)
                     .or_default()
-                    .push((layer_idx, EntryKind::File { size }, src_path));
+                    .push((layer_idx, EntryKind::File { size }, src_path, *mode));
             }
             // Other entry types (sockets, fifos, block/char devices) are
             // skipped silently — OCI layers should never contain them.
@@ -450,14 +496,14 @@ async fn process_directory(
     for (name, contributors) in &merged {
         let dest_path = dest_dir.join(name);
 
-        // Partition into dirs and non-dirs.
-        let mut dirs: Vec<&PathBuf> = Vec::new();
-        let mut non_dirs: Vec<(&EntryKind, &PathBuf)> = Vec::new();
+        // Partition into dirs and non-dirs; carry mode alongside each entry.
+        let mut dirs: Vec<(&PathBuf, AssemblyMode)> = Vec::new();
+        let mut non_dirs: Vec<(&EntryKind, &PathBuf, AssemblyMode)> = Vec::new();
 
-        for (_layer_idx, kind, src_path) in contributors {
+        for (_layer_idx, kind, src_path, mode) in contributors {
             match kind {
-                EntryKind::Dir => dirs.push(src_path),
-                _ => non_dirs.push((kind, src_path)),
+                EntryKind::Dir => dirs.push((src_path, *mode)),
+                _ => non_dirs.push((kind, src_path, *mode)),
             }
         }
 
@@ -475,11 +521,19 @@ async fn process_directory(
             ));
         }
 
-        if let Some((kind, src_path)) = non_dirs.first() {
+        if let Some((kind, src_path, mode)) = non_dirs.first() {
             // Single non-directory entry.
             match kind {
                 EntryKind::File { size } => {
-                    crate::hardlink::create(src_path, &dest_path)?;
+                    match mode {
+                        AssemblyMode::Hardlink => {
+                            crate::hardlink::create(src_path, &dest_path)?;
+                        }
+                        AssemblyMode::Reflink => {
+                            crate::reflink::create(src_path, &dest_path)?;
+                            stats.independent_inode_files += 1;
+                        }
+                    }
                     stats.files_placed += 1;
                     stats.bytes_placed += size;
                 }
@@ -520,8 +574,9 @@ async fn process_directory(
                 ));
             }
 
-            // Post subdirectory request with only the contributing layers.
-            let child_src_dirs: Vec<PathBuf> = dirs.into_iter().cloned().collect();
+            // Post subdirectory request with only the contributing layers,
+            // each carrying their mode so the correct placement path is taken.
+            let child_src_dirs: Vec<(PathBuf, AssemblyMode)> = dirs.into_iter().map(|(p, m)| (p.clone(), m)).collect();
             if join_set_tx
                 .send(SpawnRequest {
                     src_dirs: child_src_dirs,

@@ -36,6 +36,7 @@ pub mod package_manager;
 pub mod project;
 pub mod publisher;
 pub mod reference_manager;
+pub mod reflink;
 pub mod script;
 pub mod setup;
 pub mod shell;

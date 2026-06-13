@@ -12,7 +12,7 @@ mod same_dir;
 mod same_filesystem;
 mod symlink_walk;
 
-pub use assemble::{AssemblyError, AssemblyStats, assemble_from_layer, assemble_from_layers};
+pub use assemble::{AssemblyError, AssemblyMode, AssemblyStats, assemble_from_layer, assemble_from_layers};
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 pub use empty_or_absent::{EmptyOrAbsentError, ensure_empty_or_absent};
