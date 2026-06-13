@@ -403,9 +403,21 @@ pub async fn setup_owned(
         .map(|d| fs.layers.content(pinned.registry(), d))
         .collect();
     let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
-    crate::utility::fs::assemble_from_layers(&sources, &pkg.content())
+    let assembly_stats = crate::utility::fs::assemble_from_layers(&sources, &pkg.content())
         .await
         .map_err(PackageErrorKind::Internal)?;
+
+    // macOS: cross-device package content lives on independent inodes that do not
+    // share the layer's signed inode, so re-sign in place before the atomic move.
+    // `sign_extracted_content` no-ops under OCX_NO_CODESIGN and off-macOS.
+    #[cfg(target_os = "macos")]
+    if assembly_stats.used_independent_inode() {
+        crate::codesign::sign_extracted_content(&pkg.content())
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = &assembly_stats;
 
     // Entry point launcher generation.
     // Launchers are written into pkg.entrypoints() — the temp dir's entrypoints/ sibling —

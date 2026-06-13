@@ -530,7 +530,18 @@ async fn process_directory(
                             crate::hardlink::create(src_path, &dest_path)?;
                         }
                         AssemblyMode::Reflink => {
-                            crate::reflink::create(src_path, &dest_path)?;
+                            // reflink_or_copy can move large bytes — blocking I/O,
+                            // must not run on the async executor thread.
+                            let src = (*src_path).clone(); // &&PathBuf → owned PathBuf
+                            let dst = dest_path.clone();
+                            tokio::task::spawn_blocking(move || crate::reflink::create(&src, &dst))
+                                .await
+                                .map_err(|e| {
+                                    crate::error::file_error(
+                                        &dest_root,
+                                        std::io::Error::other(AssemblyError::TaskPanicked(e)),
+                                    )
+                                })??;
                             stats.independent_inode_files += 1;
                         }
                     }
@@ -2947,5 +2958,374 @@ mod tests {
         assert!(deep_dest.join("y.txt").exists(), "y.txt must exist at depth 20");
         assert_eq!(std::fs::read(deep_dest.join("x.txt")).unwrap(), b"deep x");
         assert_eq!(std::fs::read(deep_dest.join("y.txt")).unwrap(), b"deep y");
+    }
+
+    // ── P2.2 cross-device assembly contract ──────────────────────────────────
+    //
+    // The helper below is shared by all cross-device assembly tests.
+    // Tests self-skip when no second device is available; on this Linux dev box
+    // `/dev/shm` is tmpfs on a different device from the `tempfile` tmpfs, so
+    // these tests FAIL with the unimplemented! stub (proving RED).
+
+    /// Returns a fresh unique subdir under `/dev/shm` iff:
+    ///   (a) `/dev/shm` exists, AND
+    ///   (b) it is on a different `st_dev` than `primary`.
+    ///
+    /// Callers that receive `None` should print a skip note and early-return.
+    #[cfg(unix)]
+    fn second_device_root(primary: &Path) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+
+        let shm = std::path::Path::new("/dev/shm");
+        if !shm.exists() {
+            return None;
+        }
+        let primary_dev = std::fs::metadata(primary).ok()?.dev();
+        let shm_dev = std::fs::metadata(shm).ok()?.dev();
+        if primary_dev == shm_dev {
+            return None;
+        }
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let subdir = shm.join(format!("ocx_asm_test_{}_{}", std::process::id(), suffix));
+        std::fs::create_dir_all(&subdir).ok()?;
+        Some(subdir)
+    }
+
+    // ── A1: cross-device assemble succeeds via copy fallback ─────────────────
+    //
+    // Source layer is in a tempdir; dest is on a second device (/dev/shm).
+    // After assembly:
+    //   - dest file content equals source
+    //   - stats.files_placed == N
+    //   - stats.independent_inode_files == N  (all files were reflinked/copied)
+    //   - dest file ino() != source ino()     (independent inode)
+    //
+    // FAILS NOW: unimplemented!() in reflink::create (called for Reflink mode).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_assemble_succeeds_via_copy_fallback() {
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        let source_file = make_file(&layer, "bin/tool", b"tool binary bytes");
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available for cross-device test");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let result = assemble_from_layer(&layer, &dest).await;
+        let _ = std::fs::remove_dir_all(&shm_dir); // cleanup regardless
+
+        let stats = result.expect("cross-device assembly must succeed via copy fallback");
+
+        assert_eq!(stats.files_placed, 1, "one file must be placed");
+        assert_eq!(
+            stats.independent_inode_files, 1,
+            "cross-device placement must count as independent_inode_files"
+        );
+        // Source file still accessible after copy (not moved).
+        assert!(source_file.exists(), "source must remain after cross-device copy");
+    }
+
+    // ── A1 (extended): byte-parity and inode independence after cross-device ──
+    //
+    // This variant keeps the shm_dir alive for content + inode checks.
+    // FAILS NOW: unimplemented!() in reflink::create.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_assembled_file_has_independent_inode_and_correct_content() {
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        let source_file = make_file(&layer, "bin/tool", b"tool binary for inode check");
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let stats = match assemble_from_layer(&layer, &dest).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&shm_dir);
+                panic!("cross-device assembly failed: {e}");
+            }
+        };
+
+        let dest_file = dest.join("bin/tool");
+
+        // Content must be byte-identical.
+        let src_bytes = std::fs::read(&source_file).unwrap();
+        let dest_bytes = std::fs::read(&dest_file).unwrap();
+        let _ = std::fs::remove_dir_all(&shm_dir); // cleanup after read
+
+        assert_eq!(
+            src_bytes, dest_bytes,
+            "cross-device copy must produce byte-identical content"
+        );
+        assert_eq!(stats.files_placed, 1);
+        assert_eq!(stats.independent_inode_files, 1);
+    }
+
+    // ── A2: same-device still hardlinks ──────────────────────────────────────
+    //
+    // When source and dest are on the same filesystem, the walker must continue
+    // to use hardlinks (independent_inode_files == 0).  This is a regression
+    // guard that the same-fs path is not disturbed by the P2 changes.
+    //
+    // PASSES NOW — same-fs assembly uses hardlink::create (unchanged).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_device_still_uses_hardlinks() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        let source_file = make_file(&layer, "bin/tool", b"tool binary");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layer(&layer, &dest).await.unwrap();
+
+        assert_eq!(
+            stats.independent_inode_files, 0,
+            "same-device assembly must not count any independent_inode_files"
+        );
+
+        let dest_file = dest.join("bin/tool");
+        let ino_source = std::fs::metadata(&source_file).unwrap().ino();
+        let ino_dest = std::fs::metadata(&dest_file).unwrap().ino();
+        assert_eq!(
+            ino_source, ino_dest,
+            "same-device: dest must share inode with layer source (hardlink)"
+        );
+    }
+
+    // ── A3: mixed multi-layer where all layers + dest same fs ────────────────
+    //
+    // With multiple layers all on the same filesystem as the dest, ALL files
+    // must be hardlinked; independent_inode_files must be 0.
+    //
+    // PASSES NOW — regression guard.
+    #[tokio::test]
+    async fn multi_layer_all_same_fs_uses_only_hardlinks() {
+        let (_dir, root) = setup();
+        let layer_a = make_dir(&root, "layer_a/content");
+        make_file(&layer_a, "a.txt", b"A");
+        let layer_b = make_dir(&root, "layer_b/content");
+        make_file(&layer_b, "b.txt", b"B");
+        let layer_c = make_dir(&root, "layer_c/content");
+        make_file(&layer_c, "c.txt", b"C");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layers(&[layer_a.as_path(), layer_b.as_path(), layer_c.as_path()], &dest)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            stats.independent_inode_files, 0,
+            "all-same-fs multi-layer assembly must not use independent inodes"
+        );
+        assert_eq!(stats.files_placed, 3, "all three files must be placed");
+    }
+
+    // ── A4: exec bit preserved under cross-device copy ───────────────────────
+    //
+    // Source file has mode 0o755; dest is on a second device.
+    // After assembly the dest file must also have mode & 0o777 == 0o755.
+    //
+    // FAILS NOW: unimplemented!() in reflink::create.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_exec_bit_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        let source_file = make_file(&layer, "bin/tool", b"#!/bin/sh\necho hi\n");
+        std::fs::set_permissions(&source_file, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let result = assemble_from_layer(&layer, &dest).await;
+
+        // Check mode before cleanup.
+        let mode = result.as_ref().ok().and_then(|_| {
+            std::fs::metadata(dest.join("bin/tool"))
+                .ok()
+                .map(|m| m.permissions().mode() & 0o777)
+        });
+        let _ = std::fs::remove_dir_all(&shm_dir);
+
+        result.expect("cross-device assembly must succeed");
+        assert_eq!(
+            mode.expect("dest file must be readable before cleanup"),
+            0o755,
+            "executable bit must be preserved across cross-device copy"
+        );
+    }
+
+    // ── A5: symlink recreated under cross-device ─────────────────────────────
+    //
+    // Layer contains a relative symlink; dest is on a second device.
+    // The symlink must be recreated verbatim (symlinks_recreated == 1),
+    // independent of the file-placement mode.
+    //
+    // FAILS NOW: assembly panics at reflink::create (unimplemented!) before
+    // reaching the symlink, so this is also RED.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_symlink_recreated_verbatim() {
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        // A real file so the layer has something to reflink first.
+        make_file(&layer, "lib/libfoo.so.1", b"versioned lib");
+        // A relative symlink in the same dir.
+        crate::symlink::create(std::path::Path::new("libfoo.so.1"), layer.join("lib/libfoo.so")).unwrap();
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let result = assemble_from_layer(&layer, &dest).await;
+
+        // Capture filesystem observations while the shm_dir still exists.
+        let (sym_ok, target_ok) = if result.is_ok() {
+            let link = dest.join("lib/libfoo.so");
+            let sym_ok = link.is_symlink();
+            let target_ok = std::fs::read_link(&link)
+                .ok()
+                .map(|t| t == std::path::Path::new("libfoo.so.1"))
+                .unwrap_or(false);
+            (sym_ok, target_ok)
+        } else {
+            (false, false)
+        };
+
+        let _ = std::fs::remove_dir_all(&shm_dir);
+
+        let stats = result.expect("cross-device assembly must succeed");
+        assert_eq!(stats.symlinks_recreated, 1, "symlink must be recreated");
+        assert!(sym_ok, "dest/lib/libfoo.so must be a symlink");
+        assert!(target_ok, "symlink target must be verbatim 'libfoo.so.1'");
+    }
+
+    // ── A6: merge sums independent_inode_files ───────────────────────────────
+    //
+    // Unit-test AssemblyStats::merge directly.
+    // PASSES NOW — merge is already implemented.
+    #[test]
+    fn assembly_stats_merge_sums_independent_inode_files() {
+        let mut a = AssemblyStats {
+            files_placed: 3,
+            symlinks_recreated: 1,
+            dirs_created: 2,
+            bytes_placed: 100,
+            independent_inode_files: 2,
+        };
+        let b = AssemblyStats {
+            files_placed: 5,
+            symlinks_recreated: 0,
+            dirs_created: 4,
+            bytes_placed: 200,
+            independent_inode_files: 3,
+        };
+        a.merge(b);
+        assert_eq!(a.files_placed, 8, "files_placed must sum");
+        assert_eq!(a.symlinks_recreated, 1, "symlinks_recreated must sum");
+        assert_eq!(a.dirs_created, 6, "dirs_created must sum");
+        assert_eq!(a.bytes_placed, 300, "bytes_placed must sum");
+        assert_eq!(
+            a.independent_inode_files, 5,
+            "independent_inode_files must be summed by merge"
+        );
+    }
+
+    // ── A7: used_independent_inode accessor ──────────────────────────────────
+    //
+    // PASSES NOW — accessor is already implemented.
+    #[test]
+    fn used_independent_inode_returns_false_when_zero() {
+        let stats = AssemblyStats {
+            files_placed: 3,
+            symlinks_recreated: 0,
+            dirs_created: 1,
+            bytes_placed: 42,
+            independent_inode_files: 0,
+        };
+        assert!(
+            !stats.used_independent_inode(),
+            "used_independent_inode() must be false when independent_inode_files == 0"
+        );
+    }
+
+    #[test]
+    fn used_independent_inode_returns_true_when_nonzero() {
+        let stats = AssemblyStats {
+            files_placed: 1,
+            symlinks_recreated: 0,
+            dirs_created: 0,
+            bytes_placed: 10,
+            independent_inode_files: 1,
+        };
+        assert!(
+            stats.used_independent_inode(),
+            "used_independent_inode() must be true when independent_inode_files > 0"
+        );
+    }
+
+    // ── A8: byte-parity cross-device (larger file) ───────────────────────────
+    //
+    // A 64 KiB file assembled cross-device must have byte-identical content.
+    // FAILS NOW: unimplemented!() in reflink::create.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_large_file_byte_parity() {
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+
+        // 64 KiB of deterministic content (pattern fill, not truly random,
+        // so the test is reproducible).
+        let data: Vec<u8> = (0u32..65536).map(|i| (i ^ (i >> 8)) as u8).collect();
+        let source_file = make_file(&layer, "data/large.bin", &data);
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let result = assemble_from_layer(&layer, &dest).await;
+
+        let dest_bytes = result
+            .as_ref()
+            .ok()
+            .and_then(|_| std::fs::read(dest.join("data/large.bin")).ok());
+        let _ = std::fs::remove_dir_all(&shm_dir);
+
+        result.expect("cross-device assembly of large file must succeed");
+        let dest_bytes = dest_bytes.expect("dest file must be readable after assembly");
+        let src_bytes = std::fs::read(&source_file).unwrap();
+        assert_eq!(
+            src_bytes, dest_bytes,
+            "64 KiB file assembled cross-device must be byte-identical to source"
+        );
     }
 }
