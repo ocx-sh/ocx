@@ -82,11 +82,17 @@ jobs:
         # `pwsh` is PowerShell 7+. We test both to guard against version-gated
         # APIs (e.g. Expand-Archive zip-slip protection landed in PS 7.4).
         shell: [powershell, pwsh]
+    # `matrix` context is not available on a step's `shell:` key, only on
+    # `defaults.run.shell` — set it here so both run steps inherit the matrix
+    # shell. (A step-level `shell: ${{ matrix.shell }}` is an invalid-context
+    # workflow error that breaks the file's registration.)
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Run install.ps1
-        shell: ${{ matrix.shell }}
         run: |
           $env:OCX_NO_MODIFY_PATH = '1'
           if ('${{ inputs.release_tag }}') {
@@ -94,7 +100,6 @@ jobs:
           }
           & ./website/src/public/install.ps1
       - name: Verify installation
-        shell: ${{ matrix.shell }}
         run: |
           $env:PATH = "$env:USERPROFILE\.ocx\symlinks\ocx.sh\ocx\cli\current\bin;$env:PATH"
           ocx version
