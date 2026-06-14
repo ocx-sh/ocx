@@ -253,6 +253,28 @@ mod tests {
         assert_eq!(classify(err), ExitCode::PermissionDenied);
     }
 
+    #[test]
+    fn internal_file_permission_denied_maps_to_permission_denied() {
+        // P1.6 (named-volume UID): an InternalFile whose inner io error is
+        // PermissionDenied (a root-owned / unwritable zone dir) classifies to
+        // PermissionDenied (77), not the generic IoError (74). The outer enum is
+        // matched before the inner io::Error, so the discrimination lives in the
+        // `Error::InternalFile` classify arm.
+        let err = crate::Error::InternalFile(
+            PathBuf::from("/vol/blobs"),
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "EACCES"),
+        );
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn internal_file_other_io_maps_to_io_error() {
+        // A non-permission InternalFile io error still maps to the generic
+        // IoError (74) — only PermissionDenied is special-cased.
+        let err = crate::Error::InternalFile(PathBuf::from("/vol/blobs"), std::io::Error::other("disk full"));
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
     // ── PackageManager three-layer chain ────────────────────────────────────
 
     #[test]

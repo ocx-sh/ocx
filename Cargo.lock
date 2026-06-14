@@ -3040,6 +3040,7 @@ dependencies = [
  "libc",
  "lzma-rust2",
  "oci-client",
+ "reflink-copy",
  "regex",
  "rpassword",
  "schemars",
@@ -3457,6 +3458,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "reflink-copy"
+version = "0.1.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13362233b147e57674c37b802d216b7c5e3dcccbed8967c84f0d8d223868ae27"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "rustix",
+ "windows",
 ]
 
 [[package]]

@@ -403,6 +403,17 @@ impl ProjectRegistry {
     pub async fn live_projects(&self) -> Result<Vec<PathBuf>, Error> {
         let projects_dir = self.projects_dir.clone();
 
+        // Shared-store non-pruning (P3.6 Adjustment 4): under
+        // `OCX_SHARED_STORE=true` a *definitively departed* (Dead/Dead) link is
+        // RETAINED rather than pruned. In a shared volume a peer instance may
+        // still pin packages a departed project here once held; keeping the
+        // stale link is the safe over-retention direction (the digest stays a
+        // GC root only via the peer's shared-roots ledger, never via this dead
+        // link — a Dead link still resolves to no `<target>/ocx.lock`, so it is
+        // not returned as a live root). Default mode (flag off) prunes exactly
+        // as before — byte-identical.
+        let retain_departed = super::shared_roots::is_shared_store_enabled();
+
         // Synchronous readdir + per-entry stat/readlink/prune. Off the runtime
         // for the same reason as `register`.
         tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>, Error> {
@@ -513,6 +524,21 @@ impl ProjectRegistry {
                                 live.push((file_name, root));
                             }
                             ProbeResult::Dead => {
+                                // Under shared-store mode, retain the departed
+                                // link (P3.6 Adjustment 4 — don't prune; safe
+                                // over-retention direction). It is NOT collected
+                                // as a live root (it resolves to no
+                                // `<target>/ocx.lock`); it merely survives so a
+                                // shared-volume peer's rooting is never
+                                // disturbed by this instance's pruning.
+                                if retain_departed {
+                                    crate::log::debug!(
+                                        "Project registry: retaining departed link '{}' under \
+                                         OCX_SHARED_STORE (no prune).",
+                                        entry_path.display()
+                                    );
+                                    continue;
+                                }
                                 // Departed-other-project (the common benign
                                 // case) → debug only, never WARN (ARCH-3).
                                 crate::log::debug!(
@@ -1316,5 +1342,70 @@ mod tests {
             target,
             "recovered root must be the link's stored target"
         );
+    }
+
+    // ── shared_store_retains_departed_link ───────────────────────────────────
+
+    /// Under `OCX_SHARED_STORE=true`, a definitively departed (Dead) project
+    /// link is RETAINED rather than pruned, but the departed target is NOT
+    /// returned as a live GC root.
+    ///
+    /// Contract: `live_projects` docs §"Shared-store non-pruning" — when
+    /// `retain_departed = true` (shared store mode), Dead links are kept in the
+    /// ledger (a peer may still hold a pin for that digest) but they are NOT
+    /// added to the returned live-roots set (the target `<dir>/ocx.lock` is
+    /// absent so the link is definitively not a live root on this instance).
+    ///
+    /// Also confirms the default-mode (flag off) still prunes the dead link.
+    ///
+    /// Traced to: plan_shared_store P3.6 Adjustment 4 (non-pruning) review-fix.
+    #[tokio::test]
+    async fn shared_store_retains_departed_link_without_adding_it_as_root() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let ocx_home = canon(home.path());
+        let registry = ProjectRegistry::new(&ocx_home);
+
+        // Create and register a live project.
+        let project = make_live_project(home.path(), "proj-departed");
+        registry.register(&project).await.expect("register");
+
+        let link_path = ocx_home.join("projects").join(link_name(&project));
+        assert!(symlink::is_link(&link_path), "ledger link must exist before departure");
+
+        // Simulate project departure: remove the project directory (and thus the
+        // `ocx.lock`). The ledger link now points at a non-existent target.
+        std::fs::remove_dir_all(&project).expect("remove project dir");
+
+        // ── Shared-store mode: departed link must NOT be pruned ──────────────
+        {
+            let env = crate::test::env::lock();
+            env.set(crate::env::keys::OCX_SHARED_STORE, "true");
+            let live = registry.live_projects().await.expect("live_projects must not error");
+
+            assert!(
+                symlink::is_link(&link_path),
+                "OCX_SHARED_STORE=true: departed link must be retained (not pruned)"
+            );
+            assert!(
+                !live.contains(&project),
+                "OCX_SHARED_STORE=true: departed target must NOT appear in live roots"
+            );
+        }
+
+        // ── Default mode: departed link must be pruned ───────────────────────
+        {
+            let env = crate::test::env::lock();
+            env.remove(crate::env::keys::OCX_SHARED_STORE);
+            let live = registry.live_projects().await.expect("live_projects must not error");
+
+            assert!(
+                !symlink::is_link(&link_path),
+                "default mode: departed link must be pruned after live_projects"
+            );
+            assert!(
+                !live.contains(&project),
+                "default mode: pruned target must not appear in live roots"
+            );
+        }
     }
 }

@@ -277,12 +277,12 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest | Validate identifiers and file contents |
 | 69 | Unavailable | EX_UNAVAILABLE | Required resource unavailable: network down, registry unreachable | Retry; check network and registry URL |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
-| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network | Retry with backoff |
+| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: rate limit, transient network, or `clean` could not acquire the store-wide GC lock within its timeout (another `clean` running, or a concurrent install/pull holds the shared lock) | Retry with backoff |
 | 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: registry 403, filesystem EPERM | Refresh credentials or adjust filesystem permissions |
 | 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent | Pin a different version or correct the path |
 | 80 | AuthError | OCX | Authentication failure: registry 401, missing credentials | Refresh or set registry credentials |
-| 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first (e.g. `ocx index update`) |
+| 81 | PolicyBlocked | OCX | A deliberate local policy refused an operation — not a fault. Examples: `--offline`/`--frozen` blocked a network or resolution operation (including an unpinned-tag resolve the policy forbade); [`OCX_NETWORK_FS=refuse`][env-ocx-network-fs] blocked `clean` on a network filesystem | Loosen the flag or posture setting, or populate the local index first (e.g. `ocx index update`) |
 
 Scripts can `case $?` on these stable values:
 
@@ -394,8 +394,10 @@ Removes unreferenced objects from the local object store.
 
 An object is unreferenced when nothing points to it — no candidate or current symlink, no other installed package depends on it, and no registered project's `ocx.lock` pins it. Projects are registered in the `$OCX_HOME/projects/` ledger (a flat directory of symlinks, one per project; created automatically when `ocx lock` or `ocx add` writes a lockfile). This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
 
-::: danger
-Do not run `clean` concurrently with other OCX commands. A concurrent install may reference an object that `clean` is about to remove, causing the install to fail.
+::: tip Concurrency is coordinated
+`clean` takes an exclusive store-wide GC lock for the sweep, and `install`/`pull` take a shared lock while they stage objects, so on the same `$OCX_HOME` a sweep and a concurrent stage are normally serialized. The shared lock is best-effort, though: if a mutator cannot acquire it within a short timeout it proceeds without it, so a stuck `clean` can never block an install. The guarantee that an install never loses an object to a concurrent `clean` therefore rests on the grace window — objects newer than [`OCX_GC_GRACE_SECONDS`][env-ocx-gc-grace-seconds] (default 600) are always retained, lock or no lock.
+
+The lock is per-`$OCX_HOME`, so it does **not** coordinate processes on other hosts sharing the store over a network filesystem. Set [`OCX_NETWORK_FS=refuse`][env-ocx-network-fs] to make `clean` refuse to run on a network filesystem, or opt into the shared-roots ledger with [`OCX_SHARED_STORE=true`][env-ocx-shared-store] so a `clean` unions every instance's pinned digests before collecting.
 :::
 
 **Usage**
@@ -411,6 +413,15 @@ ocx clean [OPTIONS]
 | `--dry-run` | — | Show what would be removed without making any changes. | false |
 | `--force` | — | Bypass the `$OCX_HOME/projects/` ledger and collect packages held only by other projects' `ocx.lock` files. Live install symlinks are still honoured. | false |
 | `--help` | `-h` | Print help information. | — |
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Sweep completed (or, with `--dry-run`, candidates listed). |
+| 74 | I/O error scanning the object store or removing an object — including a non-transient failure reading a package's reference set (the sweep aborts rather than collect against an incomplete reachability graph). |
+| 75 | Could not acquire the store-wide GC lock within the timeout — another `clean` is running, or a mutator is holding the shared lock. Retry with backoff. |
+| 81 | [`OCX_NETWORK_FS=refuse`][env-ocx-network-fs] and a zone resolved to a network filesystem. Move the store to a local filesystem, or set `OCX_NETWORK_FS=allow`. |
 
 **JSON output schema** (`--format json`)
 
@@ -2502,6 +2513,9 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [env-ocx-quiet]: ./environment.md#ocx-quiet
 [env-ocx-jobs]: ./environment.md#ocx-jobs
 [env-docker-config]: ./environment.md#external-docker-config
+[env-ocx-network-fs]: ./environment.md#ocx-network-fs
+[env-ocx-gc-grace-seconds]: ./environment.md#ocx-gc-grace-seconds
+[env-ocx-shared-store]: ./environment.md#ocx-shared-store
 [env-ocx-home]: ./environment.md#ocx-home
 [env-ocx-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-no-completions]: ./environment.md#ocx-no-completions

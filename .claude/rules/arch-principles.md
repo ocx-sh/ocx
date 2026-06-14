@@ -165,7 +165,8 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Refuse a destination path whose ancestor chain contains any symlink (security guard) | `utility::fs::refuse_if_symlink_in_path` | `utility/fs/symlink_walk.rs` |
 | Cross-platform same-filesystem check (Unix dev / Win32 GetVolumePathNameW) | `utility::fs::same_filesystem` | `utility/fs/same_filesystem.rs` |
 | Verify a path is absent or an empty directory | `utility::fs::ensure_empty_or_absent` | `utility/fs/empty_or_absent.rs` |
-| Hardlink file (dedup layer into package) | `hardlink::create` / `update` | `crates/ocx_lib/src/hardlink.rs` |
+| Hardlink file (dedup layer into package — same filesystem only, shared inode) | `hardlink::create` / `update` | `crates/ocx_lib/src/hardlink.rs` |
+| Place a file across filesystems (CoW clone or full-copy fallback — independent inode) | `reflink::create` | `crates/ocx_lib/src/reflink.rs` |
 | Create / update / probe symlink (cross-platform, junction-aware) | `symlink::create` / `update` / `remove` / `is_link` | `crates/ocx_lib/src/symlink.rs` |
 | Assemble layer's content tree into package (hardlinks + symlinks) | `utility::fs::assemble_from_layer(s)` | `utility/fs/assemble.rs` |
 | Boolean-like env string (`true/1/yes/on`) | `utility::boolean_string::BooleanString` | `utility/boolean_string.rs` |

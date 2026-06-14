@@ -106,6 +106,10 @@ reference_manager.link_blobs(pkg.content(), chain.blobs()).await?;
 
 TOCTOU `!target.exists()` pre-check intentionally absent — eventual consistency handles dangling refs, idempotent `symlink::update` makes repeated calls safe.
 
+## Package Publish (P1 — non-destructive)
+
+`move_temp_to_object_store` now routes CAS-path publishes through `finalize_package_dir` (non-destructive first-writer-wins). Happy path: bare `rename(temp, output_path)`. If the destination already exists and has a committed OK `install.json`, the temp is discarded and the winner reused. If the destination is broken or partial, a stash→swap under the per-digest temp lock replaces it without `remove_dir_all` — a lock-free reader never observes the canonical package dir missing (INV-M1). `move_dir` is retained only for the `dest_override` path (caller-owned, empty-by-contract, not a shared CAS target).
+
 ## Task Methods
 
 | Method | Auto-Install | Returns | Notes |
@@ -117,7 +121,7 @@ TOCTOU `!target.exists()` pre-check intentionally absent — eventual consistenc
 | `install()` / `install_all()` | N/A | `InstallInfo` | Downloads; `candidate` flag creates symlink; `select` flag sets current |
 | `uninstall()` / `uninstall_all()` | N/A | `Option<UninstallResult>` | None = candidate already absent |
 | `deselect()` / `deselect_all()` | N/A | `Option<PathBuf>` | None = current already absent |
-| `clean(dry_run, force)` | N/A | `CleanResult` | Removes unreferenced objects + stale temps; `force=true` bypasses project registry |
+| `clean(dry_run, force)` | N/A | `CleanResult` | Removes unreferenced objects + stale temps; `force=true` bypasses project registry. P3 mechanisms: (1) acquires exclusive store-wide GC lock (`$OCX_STATE_DIR/gc.lock`, `DEFAULT_EXCLUSIVE_TIMEOUT=120s`; timeout → `Error::GcLockTimeout` → exit 75); `install`/`pull` take shared lock (10s shared timeout, proceed-without-lock on expiry). (2) Skips objects younger than `OCX_GC_GRACE_SECONDS` (default 600s, `DEFAULT_GRACE_SECONDS`); future mtime → retain. (3) Appends JSONL audit record per deletion to `$OCX_STATE_DIR/gc-log.jsonl`; rotates at `OCX_GC_LOG_MAX_BYTES` (default 10 MiB); `OCX_GC_LOG=off` disables. (4) Checks zone filesystems via `NetworkFsPosture::from_env`; `OCX_NETWORK_FS=refuse` → `Error::NetworkFsRefused` → exit 81 (`PolicyBlocked`). (5) When `OCX_SHARED_STORE=true`, reads `$OCX_PACKAGES_DIR/roots/` to union peer-instance pinned digests before collecting; unknown-version or unreadable peer file → `RetainAll` (fail-closed). |
 | `check_update(identifier, throttle)` | N/A | `UpdateCheckResult` | Generic update-check for any identifier. Throttle: `None` = 24h, `Some(ZERO)` = bypass, `Some(d)` = custom. Returns `Skipped` on short-circuit (no state touch). |
 | `self_check_update(throttle)` | N/A | `UpdateCheckResult` | Convenience wrapper for the canonical `ocx.sh/ocx/cli`. Resolves the running version via subprocess (`ocx --format json version` on the current symlink binary); returns `Skipped(SkippedReason::Bootstrap)` when subprocess fails (binary absent / exec fail / non-zero exit / malformed JSON). Otherwise compares remote latest against installed; returns `AlreadyUpToDate` when remote ≤ current. Same throttle convention. |
 | `self_update()` | N/A | `SelfUpdateResult` | Checks (always bypasses throttle) then installs via `install_all(candidate=false, select=true)` if newer. Bootstrap mode no longer short-circuits — install always proceeds. Returns `Installed { from: Option<String>, to }` on success (`from` is `None` when subprocess version query fails), `AlreadyUpToDate` if current, `Skipped(SkippedReason)` on soft failure. Wraps check errors in `Error::SelfCheckFailed`. |

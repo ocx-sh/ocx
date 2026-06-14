@@ -169,17 +169,178 @@ export OCX_HOME="/opt/ocx"
 
 OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [OCX home tier in the Configuration in-depth page][config-home-tier].
 
+When no zone overrides are set (see below), every store is rooted at `$OCX_HOME` — this is the default single-root layout.
+
+### `OCX_CACHE_DIR` {#ocx-cache-dir}
+
+Overrides the root directory for the **cache zone**: raw OCI blobs (`blobs/`) and extracted layer trees (`layers/`), plus the layer-extraction staging temp.
+
+```sh
+export OCX_CACHE_DIR="/mnt/shared/cache"
+```
+
+When unset, the cache zone defaults to `$OCX_HOME`. When set, `OCX_PACKAGES_DIR` also defaults to `OCX_CACHE_DIR` (unless independently overridden — see below).
+
+The value must be an **absolute path**. A relative path is ignored with a warning and the zone falls back to its default.
+
+Setting this to an empty string (`OCX_CACHE_DIR=`) is treated as unset.
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same zone layout.
+
+::: tip Cross-volume packages
+`OCX_PACKAGES_DIR` may point to a different volume than `OCX_CACHE_DIR`. When assembling a package, OCX probes whether each layer and the package destination are on the same filesystem. Same filesystem → [hardlink][hardlink-create] (shared inode, zero extra disk). Different filesystem → reflink (copy-on-write clone where the filesystem supports it — btrfs cross-subvolume, APFS) with a full byte-for-byte copy fallback otherwise (ext4, tmpfs). Cross-volume packages therefore occupy real disk space with independent inodes rather than sharing the layer store's inodes.
+
+On macOS, packages assembled cross-volume are re-signed in place after assembly (independent inodes do not share the layer's signed inode). [`OCX_NO_CODESIGN`](#ocx-no-codesign) suppresses re-signing.
+:::
+
+### `OCX_PACKAGES_DIR` {#ocx-packages-dir}
+
+Overrides the root directory for the **packages zone**: assembled package trees (`packages/`) and package-staging temp.
+
+```sh
+export OCX_PACKAGES_DIR="/mnt/shared/packages"
+```
+
+When unset, the packages zone defaults to the resolved `OCX_CACHE_DIR` (which itself defaults to `$OCX_HOME`).
+
+The value must be an **absolute path**. A relative path is ignored with a warning and the zone falls back to its default.
+
+Setting this to an empty string (`OCX_PACKAGES_DIR=`) is treated as unset.
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`.
+
+::: tip Cross-volume layout
+`OCX_PACKAGES_DIR` may resolve to a different filesystem than [`OCX_CACHE_DIR`](#ocx-cache-dir). When the zones are on different volumes, package content is reflinked or byte-copied (independent inodes) rather than hardlinked — see the cross-volume note under [`OCX_CACHE_DIR`](#ocx-cache-dir) for the full assembly model.
+:::
+
+### `OCX_STATE_DIR` {#ocx-state-dir}
+
+Overrides the root directory for the **state zone**: install symlinks (`symlinks/`), persistent runtime state (`state/`), and the GC project ledger (`projects/`).
+
+```sh
+export OCX_STATE_DIR="/home/user/.ocx-local"
+```
+
+When unset, the state zone defaults to `$OCX_HOME`. The state zone is per-instance — it must not be shared across concurrent OCX processes or containers.
+
+The value must be an **absolute path**. A relative path is ignored with a warning and the zone falls back to its default.
+
+Setting this to an empty string (`OCX_STATE_DIR=`) is treated as unset.
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`.
+
+### `OCX_SHARED_STORE` {#ocx-shared-store}
+
+Opts in to shared-store GC rooting across OCX instances on the same content volume.
+
+```sh
+export OCX_SHARED_STORE=true
+```
+
+When set to a [truthy value](#truthy-values), `ocx clean` reads the shared-roots ledger at `$OCX_PACKAGES_DIR/roots/` and unions the pinned digests from every instance directory before determining what to collect. This prevents one instance from garbage-collecting objects still held by another instance on the same shared packages volume.
+
+Default: off (`false`). The flag must be set explicitly — OCX never auto-detects shared-store mode from the filesystem type.
+
+This variable is **not** resolution-affecting and is not forwarded to child `ocx` processes.
+
+::: tip DevContainer fleet use case
+Set `OCX_SHARED_STORE=true` alongside `OCX_PACKAGES_DIR=/vol/shared` and `OCX_STATE_DIR=~/.ocx-local` when multiple DevContainer instances share one content volume. See [Shared store][user-guide-shared-store] in the user guide.
+:::
+
+**Residual boundary.** Shared-roots writes are best-effort: a missed write on lock-save means the next `clean` on a peer instance may collect that object. The [mtime grace window](#ocx-gc-grace-seconds) provides a time-bounded backstop. Stale departed-instance ledger directories over-retain (safe direction — no deletion). Cross-instance deletions are recorded in the [audit log](#ocx-gc-log).
+
+### `OCX_GC_LOCK_TIMEOUT` {#ocx-gc-lock-timeout}
+
+Sets the maximum time `ocx clean` waits to acquire the exclusive store-wide GC lock, in seconds.
+
+```sh
+export OCX_GC_LOCK_TIMEOUT=300   # wait up to 5 minutes
+```
+
+`ocx clean` acquires an exclusive advisory lock at `$OCX_STATE_DIR/gc.lock` before scanning and deleting objects. If a concurrent `ocx clean` is already holding the lock, the new invocation waits up to this many seconds. On timeout, `ocx clean` exits with code **75** (`TempFail`) — a signal that the operation should be retried.
+
+**Default:** 120 seconds.
+
+Unrecognised or non-numeric values fall back to the default.
+
+### `OCX_GC_GRACE_SECONDS` {#ocx-gc-grace-seconds}
+
+Sets the mtime grace window for GC, in seconds.
+
+```sh
+export OCX_GC_GRACE_SECONDS=300  # 5-minute window
+export OCX_GC_GRACE_SECONDS=0    # disable grace check (collect immediately)
+```
+
+Object-store entries whose directory mtime is **younger** than this many seconds are retained even when they are unreachable from any GC root. This protects freshly-assembled objects that have been downloaded but not yet registered their install back-refs — the TOCTOU window that would otherwise let a concurrent `ocx clean` delete an object immediately after `ocx install` placed it.
+
+**Default:** 600 seconds (10 minutes).
+
+A value of `0` disables the grace check: every unreachable entry is collected immediately regardless of age. A future mtime (clock skew on a shared volume) is treated as "retain" — the conservative direction.
+
+Unrecognised or non-numeric values fall back to the default.
+
+### `OCX_GC_LOG` {#ocx-gc-log}
+
+Controls the GC delete-objects audit log.
+
+```sh
+export OCX_GC_LOG=off   # disable audit logging
+```
+
+When enabled (the default), `ocx clean` appends one JSONL record per deleted (or would-be-deleted in `--dry-run`) object to `$OCX_STATE_DIR/gc-log.jsonl`. Set to `off` (case-insensitive) to disable all writes.
+
+**Default:** on (any value other than `off`, or absent).
+
+See [GC audit log][user-guide-gc-audit-log] in the user guide for the record schema and forensics workflow.
+
+### `OCX_GC_LOG_MAX_BYTES` {#ocx-gc-log-max-bytes}
+
+Sets the rotation threshold for the GC audit log, in bytes.
+
+```sh
+export OCX_GC_LOG_MAX_BYTES=52428800   # 50 MiB
+```
+
+When `$OCX_STATE_DIR/gc-log.jsonl` reaches or exceeds this size, it is atomically renamed to `gc-log.jsonl.1` and a new log is started. Only one previous-generation file is kept: the `.1` file is overwritten on the next rotation.
+
+**Default:** 10,485,760 bytes (10 MiB).
+
+Unrecognised or non-numeric values fall back to the default.
+
+### `OCX_NETWORK_FS` {#ocx-network-fs}
+
+Controls how `ocx clean` reacts when a zone path (`$OCX_CACHE_DIR`, `$OCX_PACKAGES_DIR`, or `$OCX_STATE_DIR`) is detected on a network filesystem (NFS, SMB, CIFS, AFS, GPFS).
+
+| Value | Behavior |
+|-------|----------|
+| `warn` (default) | Emit a warning log and continue. Advisory locks on NFS degrade silently but the operation proceeds. |
+| `refuse` | Exit with code **81** (`PolicyBlocked`). Use in environments where a network-FS OCX store is explicitly disallowed. |
+| `allow` | Skip the filesystem-type check entirely. Use when the probe misidentifies a local filesystem (e.g. a custom kernel module). |
+
+```sh
+export OCX_NETWORK_FS=refuse   # hard-block NFS stores in CI
+export OCX_NETWORK_FS=allow    # suppress false-positive detection
+```
+
+**Default:** `warn`. Unrecognised values fall back to `warn`.
+
+::: warning NFS and advisory locks
+`flock(2)` degrades silently on NFS v2/v3: concurrent `clean` operations on the same NFS-hosted store are not serialized by the GC lock. Set `OCX_NETWORK_FS=refuse` to enforce a hard policy, or ensure the store lives on a local filesystem when running `ocx clean` in shared environments.
+:::
+
 ### `OCX_INDEX` {#ocx-index}
 
 Override the path to the [local index][fs-index] directory.
-By default, OCX reads the local index from `$OCX_HOME/index/` (typically `~/.ocx/index/`).
+By default, OCX reads the local index from `$OCX_CACHE_DIR/tags/` (typically `~/.ocx/tags/`).
+When `OCX_CACHE_DIR` is unset, this resolves to `$OCX_HOME/tags/`.
 
 ```sh
 export OCX_INDEX="/path/to/bundled/index"
 ```
 
 This variable is intended for environments where the index snapshot is bundled alongside a tool
-rather than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub Action][github-actions-docs],
+rather than stored in the cache zone — for example inside a [GitHub Action][github-actions-docs],
 [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features].
 
 The command line option [`--index`][arg-index] takes precedence over this variable.
@@ -546,6 +707,9 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [fs-index]: ../user-guide.md#file-structure-index
 [fs-symlinks]: ../user-guide.md#file-structure-symlinks
 [faq-codesign]: ../faq.md#macos-codesign
+[hardlink-create]: ../in-depth/storage.md#layers
+[user-guide-shared-store]: ../user-guide.md#cleanup-shared-store
+[user-guide-gc-audit-log]: ../user-guide.md#cleanup-audit-log
 
 <!-- authoring -->
 [authoring-testing-scripted]: ../authoring/testing.md#scripted-tests

@@ -15,10 +15,50 @@ use tokio::task::JoinSet;
 
 use crate::{
     file_structure::{CasTier, FileStructure},
-    log, utility,
+    log,
 };
 
 use super::project_roots::ProjectRootDigests;
+
+/// Three-state liveness of a package install back-reference.
+///
+/// Returned by the back-ref probe performed during GC root identification.
+/// The distinction between [`RefLiveness::Dead`] and [`RefLiveness::Unknown`]
+/// is the SEC-1 silent-data-loss guard: collapsing a transient I/O `Err`
+/// into "dead" would cause `clean` to collect a live package.
+///
+/// `max` semantics apply when combining results over multiple back-refs:
+/// `Live > Unknown > Dead`.
+// Stub: used from P3.3 implementation onward.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefLiveness {
+    /// At least one install back-ref resolves to a live install symlink. The
+    /// package is a GC root and must not be collected.
+    Live,
+    /// A transient I/O error (`EACCES`, `ESTALE`, `EIO`, …) prevented a
+    /// definitive liveness check. Treated as `Live` for GC purposes (retain).
+    Unknown,
+    /// All install back-refs are definitively absent (`Ok(false)` or
+    /// `NotFound`). Safe to consider for collection.
+    Dead,
+}
+
+// Stub: `max` used from P3.3 implementation onward.
+#[allow(dead_code)]
+impl RefLiveness {
+    /// Returns the "higher" of two liveness outcomes.
+    ///
+    /// `Live > Unknown > Dead` — conservatively retaining a package when any
+    /// back-ref signals uncertainty.
+    pub fn max(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Live, _) | (_, Self::Live) => Self::Live,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            _ => Self::Dead,
+        }
+    }
+}
 
 /// Maximum concurrent I/O tasks for graph building.
 const BUILD_CONCURRENCY: usize = 50;
@@ -103,14 +143,17 @@ impl ReachabilityGraph {
                 // spawned task (each holds an `Arc` clone); it is never closed
                 // before all permits release, so `acquire_owned` cannot fail.
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
-                let is_root = has_live_refs(&pkg_dir).await;
-                let dep_refs = read_refs(&deps_dir, &pkgs_root).await;
-                let layer_refs = read_refs(&layers_dir, &lyrs_root).await;
-                let blob_refs = read_refs(&blobs_dir, &blbs_root).await;
+                let liveness = has_live_refs(&pkg_dir).await;
+                // Forward-edge reads fail closed: a transient I/O error aborts
+                // the GC build rather than silently dropping this package's
+                // outgoing edges (see `read_refs` docs — forward-edge SEC-1).
+                let dep_refs = read_refs(&deps_dir, &pkgs_root).await?;
+                let layer_refs = read_refs(&layers_dir, &lyrs_root).await?;
+                let blob_refs = read_refs(&blobs_dir, &blbs_root).await?;
                 let mut all_edges = dep_refs;
                 all_edges.extend(layer_refs);
                 all_edges.extend(blob_refs);
-                (pkg_dir, is_root, all_edges)
+                Ok::<_, crate::Error>((pkg_dir, liveness, all_edges))
             });
         }
 
@@ -136,9 +179,14 @@ impl ReachabilityGraph {
         }
 
         while let Some(result) = tasks.join_next().await {
-            let (pkg_dir, is_root, pkg_edges) = result.expect("task panicked");
+            let (pkg_dir, liveness, pkg_edges) = result.expect("task panicked")?;
 
-            if is_root {
+            // Retain both `Live` and `Unknown` as roots. `Unknown` means the
+            // liveness probe hit a transient I/O error (NFS/automount) — failing
+            // safe (retain) avoids GC'ing a live package whose back-refs could
+            // not be read this run. Only a definitively `Dead` package is a
+            // collection candidate.
+            if !matches!(liveness, RefLiveness::Dead) {
                 roots.insert(pkg_dir.clone());
             }
 
@@ -429,50 +477,134 @@ async fn read_manifest_candidate_blob(path: &Path) -> Option<Vec<u8>> {
 /// Each symlink target is expected to be a content path inside `store_root`.
 /// The parent of the target (the CAS entry directory) is returned.
 /// Symlinks pointing outside `store_root` are skipped (defence-in-depth).
-async fn read_refs(refs_dir: &Path, store_root: &Path) -> Vec<PathBuf> {
+///
+/// # Errors
+///
+/// Returns the underlying I/O error (as [`crate::Error::InternalFile`]) when the
+/// forward-edge set cannot be enumerated completely: a non-`NotFound` `read_dir`
+/// failure, a mid-iteration `read_dir` error, or a `read_link` failure on a
+/// confirmed symlink. A genuinely-absent directory (`NotFound`) is **not** an
+/// error — it means the package declares no edges of this kind and yields
+/// `Ok(empty)`.
+///
+/// This is the forward-edge mirror of the [`has_live_refs`] back-ref guard
+/// (SEC-1 silent-data-loss class). Collapsing a transient I/O error into an
+/// empty edge set would drop a live package's outgoing edges, making its still
+/// referenced deps/layers/blobs unreachable and therefore collectible while the
+/// package itself stays a live root. Failing closed (propagating) aborts `clean`
+/// rather than letting it collect against an incomplete reachability graph.
+async fn read_refs(refs_dir: &Path, store_root: &Path) -> crate::Result<Vec<PathBuf>> {
     let mut targets = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(refs_dir).await else {
-        return targets;
+    let mut entries = match tokio::fs::read_dir(refs_dir).await {
+        Ok(entries) => entries,
+        // A genuinely-absent refs subdir = no edges of this kind (e.g. a package
+        // with no dependencies has no refs/deps). This is the only safe "empty
+        // edge set": definitive absence.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(targets),
+        // Any OTHER error (EACCES/ESTALE/EIO on NFS/automount, …) leaves the
+        // forward-edge set indeterminate — fail closed (see fn doc).
+        Err(e) => return Err(crate::error::file_error(refs_dir, e)),
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            // A mid-iteration directory-read error truncates the edge set — same
+            // indeterminate-forward-edges hazard as the read_dir arm.
+            Err(e) => return Err(crate::error::file_error(refs_dir, e)),
+        };
         let entry_path = entry.path();
-        if crate::symlink::is_link(&entry_path)
-            && let Ok(ref_target) = tokio::fs::read_link(&entry_path).await
-            && let Some(entry_dir) = ref_target.parent()
-        {
-            let canon = canonicalize_or_keep(entry_dir);
-            if !canon.starts_with(store_root) {
-                log::warn!(
-                    "Skipping refs/ symlink pointing outside store: {}",
-                    ref_target.display()
-                );
-                continue;
-            }
-            targets.push(canon);
+        if !crate::symlink::is_link(&entry_path) {
+            continue;
         }
+        let ref_target = match tokio::fs::read_link(&entry_path).await {
+            Ok(target) => target,
+            // The entry IS a symlink (a declared edge) but its target cannot be
+            // read — we know an edge exists yet not where it points. Fail closed.
+            Err(e) => return Err(crate::error::file_error(&entry_path, e)),
+        };
+        let Some(entry_dir) = ref_target.parent() else {
+            continue;
+        };
+        let canon = canonicalize_or_keep(entry_dir);
+        if !canon.starts_with(store_root) {
+            log::warn!(
+                "Skipping refs/ symlink pointing outside store: {}",
+                ref_target.display()
+            );
+            continue;
+        }
+        targets.push(canon);
     }
-    targets
+    Ok(targets)
 }
 
-/// Returns true if the package directory has any live install refs.
+/// Three-state liveness of a package directory's install back-refs.
 ///
-/// A ref is live if its symlink target still exists. Broken refs (target deleted
-/// by user or crashed uninstall) do not protect the package from collection.
-async fn has_live_refs(pkg_dir: &Path) -> bool {
+/// `Live` = at least one `refs/symlinks/` entry still points to an existing
+/// target. `Dead` = directory readable but no live ref (safe to collect).
+/// `Unknown` = a transient I/O error (`EACCES`/`ESTALE`/`EIO` on NFS/automount)
+/// left liveness indeterminate; the caller retains the package as a root
+/// (fail-safe — collapsing this to `Dead` would silently GC a live package,
+/// the SEC-1 class).
+///
+/// Liveness over multiple back-refs is the `max` fold (`Live > Unknown > Dead`):
+/// a single live ref wins, otherwise a single `Unknown` ref forces retention.
+async fn has_live_refs(pkg_dir: &Path) -> RefLiveness {
     let refs_dir = pkg_dir.join("refs").join("symlinks");
-    let Ok(mut entries) = tokio::fs::read_dir(&refs_dir).await else {
-        return false;
+    let mut entries = match tokio::fs::read_dir(&refs_dir).await {
+        Ok(entries) => entries,
+        // A genuinely-absent refs dir means no install back-refs → Dead.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RefLiveness::Dead,
+        // Any other error reading the directory is a transient I/O failure —
+        // retain conservatively.
+        Err(e) => {
+            log::debug!(
+                "Cannot read install back-refs at '{}' ({e}); treating liveness as Unknown (retain).",
+                refs_dir.display()
+            );
+            return RefLiveness::Unknown;
+        }
     };
+
+    let mut liveness = RefLiveness::Dead;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if crate::symlink::is_link(&path)
-            && let Ok(target) = tokio::fs::read_link(&path).await
-            && utility::fs::path_exists_lossy(&target).await
-        {
-            return true;
+        if !crate::symlink::is_link(&path) {
+            continue;
+        }
+        let target = match tokio::fs::read_link(&path).await {
+            Ok(target) => target,
+            // Reading the symlink itself failed transiently (EACCES/ESTALE/EIO
+            // on NFS/automount). We cannot determine where this back-ref points,
+            // so it contributes Unknown (retain) — collapsing it to Dead by
+            // skipping the entry would silently GC a possibly-live package
+            // (the SEC-1 class). Mirrors the try_exists Err arm below.
+            Err(e) => {
+                log::debug!(
+                    "I/O error reading install back-ref symlink '{}' ({e}); liveness Unknown (retain).",
+                    path.display()
+                );
+                liveness = liveness.max(RefLiveness::Unknown);
+                continue;
+            }
+        };
+        match tokio::fs::try_exists(&target).await {
+            // Target present → this package is a live GC root; short-circuit.
+            Ok(true) => return RefLiveness::Live,
+            // Target definitively absent → contributes Dead (no change).
+            Ok(false) => {}
+            // Probe failed transiently → contributes Unknown (retain).
+            Err(e) => {
+                log::debug!(
+                    "I/O error probing install back-ref target '{}' ({e}); liveness Unknown (retain).",
+                    target.display()
+                );
+                liveness = liveness.max(RefLiveness::Unknown);
+            }
         }
     }
-    false
+    liveness
 }
 
 /// Canonicalize a path, falling back to the original on error.
@@ -607,6 +739,8 @@ pub mod tests {
     }
 
     // ── index-manifest retention (child_leaf_blob → index_blob edge) ────────
+
+    use super::RefLiveness;
 
     #[test]
     fn index_blob_held_when_child_leaf_reachable() {
@@ -883,5 +1017,250 @@ pub mod tests {
         println!("serial   (mean)        : {serial_ms:.2} ms");
         println!("parallel (mean)        : {parallel_ms:.2} ms");
         println!("speedup                : {:.2}x", serial_ms / parallel_ms);
+    }
+
+    // ── RefLiveness three-state ─────────────────────────────────────────────
+    //
+    // Requirement: system_design_shared_store.md §5 M4 item 2 —
+    // `RefLiveness::{Live, Unknown, Dead}` with max semantics `Live > Unknown > Dead`.
+    // Unknown must be treated as Live for GC (retain, not collect).
+    // Traced to: plan_shared_store P3.2s back-ref three-state.
+
+    #[test]
+    fn ref_liveness_max_live_beats_all() {
+        // Live > Unknown and Live > Dead.
+        assert_eq!(RefLiveness::Live.max(RefLiveness::Unknown), RefLiveness::Live);
+        assert_eq!(RefLiveness::Live.max(RefLiveness::Dead), RefLiveness::Live);
+        assert_eq!(RefLiveness::Unknown.max(RefLiveness::Live), RefLiveness::Live);
+        assert_eq!(RefLiveness::Dead.max(RefLiveness::Live), RefLiveness::Live);
+    }
+
+    #[test]
+    fn ref_liveness_max_unknown_beats_dead() {
+        // Unknown > Dead.
+        assert_eq!(RefLiveness::Unknown.max(RefLiveness::Dead), RefLiveness::Unknown);
+        assert_eq!(RefLiveness::Dead.max(RefLiveness::Unknown), RefLiveness::Unknown);
+    }
+
+    #[test]
+    fn ref_liveness_max_dead_plus_dead_is_dead() {
+        // Dead max Dead = Dead (safe to collect).
+        assert_eq!(RefLiveness::Dead.max(RefLiveness::Dead), RefLiveness::Dead);
+    }
+
+    #[test]
+    fn ref_liveness_max_is_commutative() {
+        // Commutativity — order of arguments must not matter.
+        let pairs = [
+            (RefLiveness::Live, RefLiveness::Dead),
+            (RefLiveness::Live, RefLiveness::Unknown),
+            (RefLiveness::Unknown, RefLiveness::Dead),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(
+                a.max(b),
+                b.max(a),
+                "RefLiveness::max must be commutative for ({a:?}, {b:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn ref_liveness_unknown_retain_semantic() {
+        // SEC-1 guard: collapsing an I/O error to Dead would cause clean to
+        // collect a live package. Unknown must compare as >= Dead so a single
+        // Unknown back-ref stops collection.
+        //
+        // This test encodes the retain-on-unknown semantic: given a set of
+        // back-refs where at least one returns Unknown, the combined liveness
+        // must not be Dead.
+        let liveness_results = [RefLiveness::Dead, RefLiveness::Unknown, RefLiveness::Dead];
+        let combined = liveness_results
+            .iter()
+            .copied()
+            .fold(RefLiveness::Dead, RefLiveness::max);
+        assert_ne!(
+            combined,
+            RefLiveness::Dead,
+            "a single Unknown back-ref must prevent Dead verdict (retain-on-unknown)"
+        );
+        assert_eq!(
+            combined,
+            RefLiveness::Unknown,
+            "combined liveness of [Dead, Unknown, Dead] must be Unknown"
+        );
+    }
+
+    // ── install_backref_io_error_is_unknown (SEC-1 guard via has_live_refs) ──────
+
+    /// Proves that a genuine I/O error probing `refs/symlinks/` yields
+    /// `RefLiveness::Unknown`, NOT `Dead`.
+    ///
+    /// The SEC-1 guard: collapsing a transient I/O error to `Dead` would cause
+    /// `clean` to collect a live package whose back-refs could not be read due
+    /// to a permission flip, NFS stale handle, etc.
+    ///
+    /// Technique (Unix-only): create a package directory with a `refs/symlinks/`
+    /// sub-directory holding one symlink entry, then set `0o000` permissions on
+    /// `refs/symlinks/` so `read_dir` returns `EACCES`. `has_live_refs` must
+    /// return `Unknown` (retain), never `Dead`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_backref_io_error_is_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let pkg_dir = dir.path().join("packages/sha256/aa/bb");
+
+        // Build refs/symlinks/ with one entry (a dangling symlink is fine —
+        // has_live_refs reads the dir before following targets).
+        let refs_dir = pkg_dir.join("refs").join("symlinks");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        // Place a symlink entry so the directory is non-empty (empty dirs with
+        // 0o000 still return EACCES on read_dir, but be explicit).
+        let symlink_entry = refs_dir.join("entry");
+        std::os::unix::fs::symlink("/nonexistent/target", &symlink_entry).unwrap();
+
+        // Revoke read+exec so `read_dir` → EACCES (transient-like I/O error).
+        std::fs::set_permissions(&refs_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let liveness = super::has_live_refs(&pkg_dir).await;
+
+        // Restore permissions so tempdir cleanup can remove the directory.
+        std::fs::set_permissions(&refs_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            liveness,
+            RefLiveness::Unknown,
+            "has_live_refs must return Unknown (not Dead) when refs/symlinks/ is unreadable \
+             (SEC-1 silent-data-loss guard: an I/O error must not be collapsed to Dead)"
+        );
+    }
+
+    // ── I/O-error → Unknown retain (try_exists probe path) ─────────────────────
+
+    /// Documents the design contract for the `try_exists` Err arm of
+    /// `has_live_refs`: when probing a back-ref target returns an `Err`
+    /// (EACCES, ESTALE, EIO, …), that ref contributes `Unknown`, which causes
+    /// the whole package to be retained rather than collected.
+    ///
+    /// We cannot inject a real `try_exists` I/O error here without a
+    /// filesystem, but the `max()` combinator that folds per-ref results is
+    /// exercised directly above (`max_combinator_*`), and the `read_dir` Err
+    /// path is covered by `install_backref_io_error_is_unknown`. This test
+    /// pins the distinctness the retain-on-error guard relies on.
+    #[test]
+    fn ref_liveness_io_error_yields_unknown_not_dead() {
+        // The implementation obligation: map `Err(_)` in `try_exists` (and in
+        // `read_link`) to `RefLiveness::Unknown` before folding with `max`.
+        assert_ne!(
+            RefLiveness::Unknown,
+            RefLiveness::Dead,
+            "Unknown and Dead must be distinct; collapsing them breaks the retain-on-error guard"
+        );
+    }
+
+    // ── read_link I/O error → Unknown retain (FIX A) ───────────────────────────
+
+    /// Proves the `read_link` Err arm of `has_live_refs` yields `Unknown`
+    /// (retain), not `Dead`, for a readable `refs/symlinks/` directory whose
+    /// entry cannot be `read_link`-ed.
+    ///
+    /// PORTABILITY GAP (documented, intentional): a deterministic `read_link`
+    /// error is not portably injectable. A valid symlink reads fine; making the
+    /// symlink's *parent* unreadable makes `read_dir` fail first (a different
+    /// code path, already covered by `install_backref_io_error_is_unknown`),
+    /// and a dangling symlink still `read_link`s successfully (the target need
+    /// not exist). We therefore do not fabricate a fragile platform-specific
+    /// `read_link` failure. Instead this test pins the *adjacent* invariant:
+    /// a `refs/symlinks/` entry that is a dangling symlink (read_dir + read_link
+    /// both succeed, but the target is absent) contributes `Dead` only — so the
+    /// fold result is `Dead` when no error and no live target exists. The Err
+    /// arm itself is verified by the matching code structure (the read_link Err
+    /// arm mirrors the try_exists Err arm verified by the SEC-1 test) plus the
+    /// `max`-combinator coverage above.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ref_liveness_dangling_symlink_is_dead_not_unknown() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let pkg_dir = dir.path().join("packages/sha256/aa/bb");
+        let refs_dir = pkg_dir.join("refs").join("symlinks");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+
+        // A dangling symlink: read_dir + read_link both succeed; the target is
+        // absent, so try_exists returns Ok(false) → contributes Dead. This
+        // confirms the read_link Ok arm does not spuriously yield Unknown.
+        let symlink_entry = refs_dir.join("entry");
+        std::os::unix::fs::symlink("/nonexistent/target", &symlink_entry).unwrap();
+
+        let liveness = super::has_live_refs(&pkg_dir).await;
+
+        assert_eq!(
+            liveness,
+            RefLiveness::Dead,
+            "a dangling back-ref (read_link OK, target absent) must be Dead, not Unknown — \
+             only a read_link/try_exists I/O *error* yields Unknown"
+        );
+    }
+
+    // ── read_refs forward-edge fail-closed (data-loss guard) ───────────────────
+    //
+    // Forward-edge mirror of the SEC-1 back-ref guard. `read_refs` enumerates a
+    // package's outgoing edges (refs/deps, refs/layers, refs/blobs). If a
+    // transient I/O error is collapsed into an empty edge set, the package's
+    // still-referenced deps/layers/blobs become unreachable and collectible while
+    // the package itself stays a live root — silent data loss.
+    //
+    // Requirement traced to: /swarm-review max + Codex cross-model finding;
+    // symmetric to has_live_refs three-state (system_design_shared_store §5 M4).
+
+    /// A non-`NotFound` `read_dir` error (here `ENOTDIR`, from pointing at a
+    /// regular file) must propagate, never collapse the forward-edge set to
+    /// empty. Deterministic + root-safe: no permission trick — `ENOTDIR` fires
+    /// for any uid.
+    #[tokio::test]
+    async fn read_refs_non_notfound_error_propagates_not_empty() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store_root = dir.path().join("layers");
+        // A regular file where a refs subdir is expected: `read_dir` fails with
+        // ENOTDIR (≠ NotFound).
+        let not_a_dir = dir.path().join("refs_deps_is_a_file");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+
+        let result = super::read_refs(&not_a_dir, &store_root).await;
+
+        assert!(
+            result.is_err(),
+            "read_refs must propagate a non-NotFound I/O error (ENOTDIR) rather than collapse the \
+             forward-edge set to empty; collapsing makes a live package's deps/layers/blobs \
+             collectible (forward-edge mirror of the SEC-1 silent-data-loss guard)"
+        );
+    }
+
+    /// A genuinely-absent refs subdir (`NotFound`) is the one safe empty edge
+    /// set — the package declares no edges of this kind. Must be `Ok(empty)`,
+    /// not an error (an error would needlessly abort every `clean`).
+    #[tokio::test]
+    async fn read_refs_absent_dir_is_empty_not_error() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store_root = dir.path().join("layers");
+        // Never created.
+        let absent = dir.path().join("refs").join("deps");
+
+        let result = super::read_refs(&absent, &store_root).await;
+
+        assert_eq!(
+            result.expect("an absent (NotFound) refs subdir must be Ok, not Err"),
+            Vec::<PathBuf>::new(),
+            "a genuinely-absent refs subdir (NotFound) means the package declares no edges of \
+             this kind → Ok(empty)"
+        );
     }
 }

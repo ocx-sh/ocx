@@ -4,6 +4,7 @@
 pub mod boolean_string;
 pub mod child_process;
 pub mod fs;
+pub mod instance_id;
 pub mod result_ext;
 pub mod serde_ext;
 pub mod singleflight;

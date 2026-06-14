@@ -180,6 +180,8 @@ The `External(Vec<OsString>)` variant on `Command` routes unknown subcommand nam
 
 Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env and before `Command::envs()`. Resolution-affecting `ContextOptions` fields MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env.
 
+The forwarding set includes `OCX_BINARY_PIN`, `OCX_HOME`, `OCX_INDEX`, `OCX_CONFIG`, `OCX_NO_CONFIG`, `OCX_PROJECT`, `OCX_NO_PROJECT`, `OCX_GLOBAL`, `OCX_OFFLINE`, `OCX_REMOTE`, `OCX_FROZEN`, `OCX_MIRRORS`, and the three P1 store-zone vars: `OCX_CACHE_DIR`, `OCX_PACKAGES_DIR`, `OCX_STATE_DIR`. All appear in `env::keys` consts, `OcxConfigView` fields, `Env::apply_ocx_config`, `ContextOptions::as_view`, and `environment.md`.
+
 ## Quality Gate
 
 During review-fix loop, run `task rust:verify` — not full `task verify`.

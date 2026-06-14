@@ -89,8 +89,10 @@ pub struct MutationGuard {
     config_path: PathBuf,
     /// Absolute path to the sibling `ocx.lock`.
     lock_path: PathBuf,
-    /// `$OCX_HOME` — propagated so commit can register the lock with
-    /// `ProjectRegistry` when the file is materialised for the first time.
+    /// Per-instance state-zone root (`OCX_STATE_DIR`, default `$OCX_HOME`) —
+    /// propagated so commit can register the lock in the `projects/` GC ledger,
+    /// which lives in the state zone (never the shared content store) so a
+    /// fleet member with `OCX_STATE_DIR` set keeps its ledger isolated.
     home: PathBuf,
     /// Snapshot of `ocx.toml` parsed at guard-acquisition time.
     config: ProjectConfig,
@@ -190,10 +192,10 @@ impl MutationGuard {
         &self.lock_path
     }
 
-    /// `$OCX_HOME` root directory (forwarded from the originating
-    /// `Context`). Used by [`Self::commit`] to register the lock with
-    /// the per-user `ProjectRegistry` so `ocx clean` does not GC
-    /// packages pinned by this project.
+    /// Per-instance state-zone root (`OCX_STATE_DIR`, default `$OCX_HOME`),
+    /// forwarded from the originating `Context`. Used by [`Self::commit`] to
+    /// register the lock in the state-zone `projects/` GC ledger so `ocx clean`
+    /// does not GC packages pinned by this project.
     pub fn home(&self) -> &Path {
         &self.home
     }
@@ -348,6 +350,20 @@ impl MutationGuard {
         // silent-data-loss policy; a registration failure never aborts the
         // commit (next `ocx lock` re-registers).
         super::registry::register_project_dir_best_effort(&self.config_path, &self.home).await;
+
+        // Shared-roots ledger write (P3.6) — the cross-instance sibling of the
+        // registry, kept on the same belt-and-suspenders trigger topology.
+        // `new_lock.save` above (the lock-first rename) already fired this once
+        // via `ProjectLock::save`; this post-manifest re-fire is idempotent
+        // (atomic same-content overwrite) and matches the registry's double
+        // registration so both ledgers share one mental model. No-op (zero
+        // bytes) unless `OCX_SHARED_STORE=true` — default-mode byte-identical.
+        let pinned_digests: Vec<String> = new_lock
+            .tools
+            .iter()
+            .flat_map(|tool| tool.resolution.shared_root_digest_strings())
+            .collect();
+        super::shared_roots::write_shared_roots_best_effort(&self.config_path, &self.home, &pinned_digests).await;
 
         Ok(MutationCommit {
             config_path: self.config_path,

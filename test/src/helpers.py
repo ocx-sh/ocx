@@ -21,6 +21,43 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 COMPOSE_FILE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
 
 # ---------------------------------------------------------------------------
+# Cross-device helpers (P2.2)
+# ---------------------------------------------------------------------------
+
+
+def separate_tmpfs_device(primary: Path) -> Path | None:
+    """Return a fresh unique dir under ``/dev/shm`` iff it is on a different
+    device from ``primary``, else ``None``.
+
+    ``/dev/shm`` is a tmpfs on Linux and is typically on a different device
+    from the ``tmp_path`` tempfile directory.  When this function returns
+    ``None``, cross-device acceptance tests should call ``pytest.skip``.
+
+    The returned directory is created but not cleaned up automatically —
+    callers are responsible for removing it (e.g. via pytest's ``tmp_path``
+    fixture or explicit ``shutil.rmtree``).
+
+    Parameters
+    ----------
+    primary:
+        A path whose ``st_dev`` is compared against ``/dev/shm``'s ``st_dev``.
+        Typically the test's ``tmp_path``.
+    """
+    shm = Path("/dev/shm")
+    if not shm.exists():
+        return None
+
+    primary_dev = os.stat(primary).st_dev
+    shm_dev = os.stat(shm).st_dev
+    if primary_dev == shm_dev:
+        return None
+
+    unique_dir = shm / f"ocx_test_{uuid4().hex[:12]}"
+    unique_dir.mkdir(parents=True, exist_ok=True)
+    return unique_dir
+
+
+# ---------------------------------------------------------------------------
 # Docker-compose helpers
 # ---------------------------------------------------------------------------
 

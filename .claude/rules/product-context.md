@@ -128,13 +128,18 @@ Global flags: `--offline`, `--remote`, `--format json`.
 ## Storage Layout
 
 ```
-~/.ocx/
-├── blobs/{registry}/                     # Raw OCI blobs (manifests, referrers, image indexes)
-├── layers/{registry}/                    # Extracted OCI tar layers (content-addressed, shared across packages)
-├── packages/{registry}/                  # Assembled packages (content/ hardlinked from layers/)
-├── tags/{registry}/                      # Tag-to-digest mappings (local metadata mirror)
-├── symlinks/{registry}/                  # Install symlinks (candidates + current)
-└── temp/                                 # Download staging directories
+~/.ocx/                    ← $OCX_HOME (default root; all zones collapse here by default)
+│  ← OCX_CACHE_DIR overrides blobs, layers, and layer-staging temp
+├── blobs/{registry}/      # Raw OCI blobs (manifests, referrers, image indexes)
+├── layers/{registry}/     # Extracted OCI tar layers (content-addressed, shared)
+│  ← OCX_PACKAGES_DIR overrides packages and package-staging temp (default = OCX_CACHE_DIR)
+├── packages/{registry}/   # Assembled packages (content/ from layers/: hardlinked same-volume, reflinked/copied cross-volume)
+├── tags/{registry}/       # Tag-to-digest mappings (OCX_INDEX or under OCX_CACHE_DIR)
+│  ← OCX_STATE_DIR overrides symlinks, state, and projects (per-instance; never shared)
+├── symlinks/{registry}/   # Install symlinks (candidates + current)
+├── state/                 # Persistent runtime state (update-check timestamps, etc.)
+├── projects/              # GC project ledger
+└── temp/                  # Download staging (two temp dirs when zones split)
 ```
 
 ## Technical Overview

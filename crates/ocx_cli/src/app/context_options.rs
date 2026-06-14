@@ -156,6 +156,22 @@ impl ContextOptions {
             project: self.project.clone(),
             global: self.global,
             index: self.index.clone(),
+            // Zone overrides are env-only (no flags). Read them directly from
+            // the process env and thread them into the view so they are
+            // forwarded to child ocx processes via `Env::apply_ocx_config`.
+            // An empty string is treated as unset (mirrors `context.rs` and
+            // `StoreLayout::resolve_from_env`) so an empty override is never
+            // forwarded as a `""` zone — which would resolve differently than
+            // "absent" in the child.
+            cache_dir: env::var(env::keys::OCX_CACHE_DIR)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+            packages_dir: env::var(env::keys::OCX_PACKAGES_DIR)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+            state_dir: env::var(env::keys::OCX_STATE_DIR)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
             // The resolved mirror map is not derivable from `ContextOptions`
             // alone — it merges `[mirrors]` config with the inherited
             // `OCX_MIRRORS` env. `Context::try_init` builds it and populates

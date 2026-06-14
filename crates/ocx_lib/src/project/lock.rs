@@ -218,6 +218,34 @@ pub enum LockedResolution {
     },
 }
 
+impl LockedResolution {
+    /// Digest strings to persist in the shared-roots ledger for this tool.
+    ///
+    /// V1 ([`LegacyIndex`](Self::LegacyIndex)): the single image-index manifest
+    /// digest (advisory-stripped); the reader resolves it through the index
+    /// blob to its on-disk platform children. V2
+    /// ([`PerPlatform`](Self::PerPlatform)): each shipped platform leaf as a
+    /// full `registry/repo@digest` string, reconstructed from the bare
+    /// `repository` plus the leaf digest. The shared-roots reader resolves each
+    /// string on read, so writing leaves directly is correct — a leaf is a
+    /// platform image manifest that resolves to its own package digest, and a
+    /// leaf whose blob is absent on a peer fails closed (retain-all) there (the
+    /// safe direction).
+    pub fn shared_root_digest_strings(&self) -> Vec<String> {
+        match self {
+            LockedResolution::LegacyIndex(pinned) => vec![pinned.strip_advisory().to_string()],
+            LockedResolution::PerPlatform { repository, platforms } => platforms
+                .values()
+                .filter_map(|leaf| {
+                    PinnedIdentifier::try_from(repository.clone_with_digest(leaf.clone()))
+                        .ok()
+                        .map(|pinned| pinned.strip_advisory().to_string())
+                })
+                .collect(),
+        }
+    }
+}
+
 /// V2 on-disk shape (read + write). The only format the writer emits.
 ///
 /// `repository` is a bare [`Identifier`] (no tag, no digest); the outer
@@ -469,9 +497,12 @@ impl ProjectLock {
     /// `registry/repo@digest` is the canonical on-disk form.
     /// Save the lock file and register its path in the per-user project registry.
     ///
-    /// `ocx_home` is the OCX data-home directory (e.g., `~/.ocx`) used to
-    /// locate the project ledger at `$OCX_HOME/projects/` (flat symlink store,
-    /// ADR: `adr_project_gc_symlink_ledger.md`). `config_path` is the
+    /// `ocx_home` is the per-instance STATE-zone root (`OCX_STATE_DIR`,
+    /// defaulting to `$OCX_HOME`) used to locate the project ledger at
+    /// `{state}/projects/` (flat symlink store,
+    /// ADR: `adr_project_gc_symlink_ledger.md`). The ledger lives in the state
+    /// zone, never the shared content store, so a fleet member with
+    /// `OCX_STATE_DIR` set keeps its ledger isolated. `config_path` is the
     /// originating project config file (typically `<dir>/ocx.toml`, but may
     /// carry a custom name when `--project=<custom>.toml` was used) — its
     /// parent directory is canonicalized and registered as the project dir.
@@ -513,6 +544,20 @@ impl ProjectLock {
         // registration failure never aborts the save (next `ocx lock`
         // re-registers).
         super::registry::register_project_dir_best_effort(config_path, ocx_home).await;
+
+        // Shared-roots ledger write (P3.6): the cross-instance sibling of the
+        // project registry. No-op (zero bytes) unless `OCX_SHARED_STORE=true`,
+        // so default-mode behavior is byte-identical. Persists this lock's
+        // ImageIndex digests (resolve-on-read), best-effort (WARN on failure,
+        // never aborts the save). `ocx_home` here is the per-instance STATE
+        // zone — the instance-id source; the ledger itself lands in the shared
+        // PACKAGES zone resolved from the env inside the helper.
+        let pinned_digests: Vec<String> = self
+            .tools
+            .iter()
+            .flat_map(|tool| tool.resolution.shared_root_digest_strings())
+            .collect();
+        super::shared_roots::write_shared_roots_best_effort(config_path, ocx_home, &pinned_digests).await;
 
         Ok(())
     }

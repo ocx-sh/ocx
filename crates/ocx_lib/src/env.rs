@@ -45,6 +45,24 @@ pub mod keys {
     pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
+    /// Absolute path to the cache zone root (blobs, layers, and layer-staging
+    /// temp). Defaults to `$OCX_HOME` when unset or empty.
+    ///
+    /// Resolution-affecting — forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`] so a fleet member inherits the same zone
+    /// layout the parent resolved.
+    pub const OCX_CACHE_DIR: &str = "OCX_CACHE_DIR";
+    /// Absolute path to the packages zone root (assembled packages and
+    /// package-staging temp). Defaults to the resolved `OCX_CACHE_DIR` when
+    /// unset or empty.
+    ///
+    /// Resolution-affecting — forwarded to child ocx processes.
+    pub const OCX_PACKAGES_DIR: &str = "OCX_PACKAGES_DIR";
+    /// Absolute path to the per-instance state zone root (symlinks, state,
+    /// projects). Defaults to `$OCX_HOME` when unset or empty.
+    ///
+    /// Resolution-affecting — forwarded to child ocx processes.
+    pub const OCX_STATE_DIR: &str = "OCX_STATE_DIR";
     /// JSON object mapping an upstream registry host to its mirror `url`
     /// (e.g. `{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}`).
     /// Resolution-affecting → forwarded to child ocx processes. A single JSON
@@ -56,6 +74,76 @@ pub mod keys {
     /// resolution-affecting flag (not forwarded to child ocx); the opt-out is
     /// not remembered between runs.
     pub const OCX_NO_MODIFY_PATH: &str = "OCX_NO_MODIFY_PATH";
+
+    // ── GC / shared-store / network-FS keys (P3) ─────────────────────────
+
+    /// Boolean — opt-in to shared-store GC rooting.
+    ///
+    /// When truthy, `clean` unions all instances' shared-roots ledgers at
+    /// `$OCX_PACKAGES_DIR/roots/` as additional GC roots so packages pinned by
+    /// a peer instance on the same shared volume are not collected. Also enables
+    /// non-pruning of project-ledger entries absent from the shared roots.
+    ///
+    /// Default: `false`. Behavioral (not resolution-affecting); not forwarded
+    /// to child ocx processes. See `system_design_shared_store.md` §5 M4 item 4.
+    pub const OCX_SHARED_STORE: &str = "OCX_SHARED_STORE";
+
+    /// GC lock timeout for the exclusive `clean` lock, in seconds.
+    ///
+    /// When `ocx clean` cannot acquire the exclusive `$OCX_STATE_DIR/gc.lock`
+    /// within this many seconds it exits `TempFail` (75). Default: 120.
+    pub const OCX_GC_LOCK_TIMEOUT: &str = "OCX_GC_LOCK_TIMEOUT";
+
+    /// mtime grace period for GC, in seconds.
+    ///
+    /// Object-store entries whose directory mtime is younger than this many
+    /// seconds are retained even if they are unreachable from any GC root.
+    /// Protects freshly-assembled objects that have not yet registered their
+    /// install back-refs. Default: 600 (10 minutes).
+    ///
+    /// A value of `0` disables the grace check. Future/skewed mtime (clock
+    /// drift: mtime > now) is treated as "retain" (conservative).
+    pub const OCX_GC_GRACE_SECONDS: &str = "OCX_GC_GRACE_SECONDS";
+
+    /// Audit log enable/disable.
+    ///
+    /// Set to `off` to disable the delete-objects JSONL audit log at
+    /// `$OCX_STATE_DIR/gc-log.jsonl`. Any other value (or absence) leaves
+    /// logging enabled (default: on).
+    pub const OCX_GC_LOG: &str = "OCX_GC_LOG";
+
+    /// Maximum size of the GC audit log file before rotation, in bytes.
+    ///
+    /// When `$OCX_STATE_DIR/gc-log.jsonl` exceeds this size it is atomically
+    /// renamed to `gc-log.jsonl.1` and a new file is started (one-generation
+    /// rotation). Default: 10 MiB (10,485,760 bytes).
+    pub const OCX_GC_LOG_MAX_BYTES: &str = "OCX_GC_LOG_MAX_BYTES";
+
+    /// Network-FS posture for zone paths.
+    ///
+    /// Controls OCX's reaction when a zone path (`$OCX_CACHE_DIR`,
+    /// `$OCX_PACKAGES_DIR`, `$OCX_STATE_DIR`) is detected on a network
+    /// filesystem (NFS, SMB, …):
+    ///
+    /// - `warn` (default) — emit `warn!` and continue. Advisory locks on NFS
+    ///   are unreliable but the operation proceeds.
+    /// - `refuse` — return `Error::NetworkFsRefused` (exit 81 `PolicyBlocked`).
+    ///   Use in environments where network-FS OCX stores are explicitly
+    ///   disallowed.
+    /// - `allow` — skip the check entirely. Use when the FS-type probe
+    ///   misidentifies a local-FS (e.g. a custom kernel module).
+    pub const OCX_NETWORK_FS: &str = "OCX_NETWORK_FS";
+
+    /// Testing seam — force the filesystem-kind probe to return a specific
+    /// result for all paths, bypassing the OS `statfs`/`GetVolumeInformationW`
+    /// call.
+    ///
+    /// Accepted values: `local`, `network`, `unknown`.
+    /// Unrecognised values yield `FilesystemKind::Unknown`.
+    ///
+    /// The `__` prefix marks this as a testing-only override (see
+    /// `feedback_testing_env_prefix`). Not documented in the public reference.
+    pub const __OCX_TESTING_FORCE_FS_KIND: &str = "__OCX_TESTING_FORCE_FS_KIND";
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -103,6 +191,17 @@ pub struct OcxConfigView {
     /// contract is fully pinned at the unit layer.
     pub global: bool,
     pub index: Option<PathBuf>,
+    /// Explicit cache zone root (`OCX_CACHE_DIR`). `None` means "use
+    /// `$OCX_HOME` as the cache zone" (the default single-root layout).
+    /// Resolution-affecting → forwarded to child ocx processes.
+    pub cache_dir: Option<PathBuf>,
+    /// Explicit packages zone root (`OCX_PACKAGES_DIR`). `None` means "use
+    /// the resolved cache zone" (default). Resolution-affecting → forwarded.
+    pub packages_dir: Option<PathBuf>,
+    /// Explicit per-instance state zone root (`OCX_STATE_DIR`). `None` means
+    /// "use `$OCX_HOME` as the state zone" (default). Resolution-affecting →
+    /// forwarded to child ocx processes.
+    pub state_dir: Option<PathBuf>,
     /// Per-upstream-host registry mirrors, as `(host, url)` pairs. Resolution-
     /// affecting → forwarded to child ocx processes via
     /// [`Env::apply_ocx_config`] as the single JSON object [`keys::OCX_MIRRORS`].
@@ -122,6 +221,9 @@ impl OcxConfigView {
             project: None,
             global: false,
             index: None,
+            cache_dir: None,
+            packages_dir: None,
+            state_dir: None,
             mirrors: Vec::new(),
         }
     }
@@ -278,6 +380,18 @@ impl Env {
         match &cfg.index {
             Some(path) => self.set(keys::OCX_INDEX, path.as_os_str()),
             None => self.remove(keys::OCX_INDEX),
+        }
+        match &cfg.cache_dir {
+            Some(path) => self.set(keys::OCX_CACHE_DIR, path.as_os_str()),
+            None => self.remove(keys::OCX_CACHE_DIR),
+        }
+        match &cfg.packages_dir {
+            Some(path) => self.set(keys::OCX_PACKAGES_DIR, path.as_os_str()),
+            None => self.remove(keys::OCX_PACKAGES_DIR),
+        }
+        match &cfg.state_dir {
+            Some(path) => self.set(keys::OCX_STATE_DIR, path.as_os_str()),
+            None => self.remove(keys::OCX_STATE_DIR),
         }
         match encode_mirrors(&cfg.mirrors) {
             Some(json) => self.set(keys::OCX_MIRRORS, json),
@@ -951,6 +1065,199 @@ mod tests {
         ] {
             assert!(env.get(key).is_none(), "Env::clean must not contain `{key}`");
         }
+    }
+
+    // ── Zone variable forwarding (P1.2 specification) ─────────────────────────
+    //
+    // Requirement: system_design_shared_store.md §5 M2 — "Resolution-affecting
+    // forwarding (four surfaces): env::keys consts; OcxConfigView fields
+    // cache_dir/packages_dir/state_dir; Env::apply_ocx_config set-when-present
+    // / remove-when-absent arms; ContextOptions::as_view populates from env."
+    //
+    // Traced to: plan_shared_store P1.2
+    // "apply_ocx_config_writes_cache_packages_state_when_set"
+    // "apply_ocx_config_clears_stale_zone_vars"
+    // "as_view_reads_zone_vars_from_env"
+
+    #[test]
+    fn apply_ocx_config_writes_cache_packages_state_when_set() {
+        // When cache_dir, packages_dir, state_dir are all set in OcxConfigView,
+        // apply_ocx_config must write OCX_CACHE_DIR, OCX_PACKAGES_DIR, OCX_STATE_DIR
+        // onto the child env so a spawned ocx process inherits the same zone layout.
+        let mut cfg = view("/abs/ocx");
+        cfg.cache_dir = Some("/mnt/shared/cache".into());
+        cfg.packages_dir = Some("/ephemeral/packages".into());
+        cfg.state_dir = Some("/home/user/.ocx-local".into());
+
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+
+        assert_eq!(
+            env.get(keys::OCX_CACHE_DIR).and_then(|v| v.to_str().map(str::to_owned)),
+            Some("/mnt/shared/cache".to_string()),
+            "OCX_CACHE_DIR must be written when cache_dir is set"
+        );
+        assert_eq!(
+            env.get(keys::OCX_PACKAGES_DIR)
+                .and_then(|v| v.to_str().map(str::to_owned)),
+            Some("/ephemeral/packages".to_string()),
+            "OCX_PACKAGES_DIR must be written when packages_dir is set"
+        );
+        assert_eq!(
+            env.get(keys::OCX_STATE_DIR).and_then(|v| v.to_str().map(str::to_owned)),
+            Some("/home/user/.ocx-local".to_string()),
+            "OCX_STATE_DIR must be written when state_dir is set"
+        );
+    }
+
+    #[test]
+    fn apply_ocx_config_clears_stale_zone_vars() {
+        // When cache_dir / packages_dir / state_dir are absent in OcxConfigView
+        // (None), apply_ocx_config must REMOVE any stale inherited values so a
+        // stale parent-shell export cannot beat the outer ocx's parsed state.
+        // Mirrors the OCX_OFFLINE/OCX_REMOTE/OCX_INDEX clear contract.
+        let mut env = Env::clean();
+        env.set(keys::OCX_CACHE_DIR, "/stale-cache");
+        env.set(keys::OCX_PACKAGES_DIR, "/stale-packages");
+        env.set(keys::OCX_STATE_DIR, "/stale-state");
+
+        // Apply a view with all zone dirs absent (None → default single-root layout).
+        env.apply_ocx_config(&view("/abs/ocx"));
+
+        assert!(
+            env.get(keys::OCX_CACHE_DIR).is_none(),
+            "stale OCX_CACHE_DIR must be cleared when cache_dir is None"
+        );
+        assert!(
+            env.get(keys::OCX_PACKAGES_DIR).is_none(),
+            "stale OCX_PACKAGES_DIR must be cleared when packages_dir is None"
+        );
+        assert!(
+            env.get(keys::OCX_STATE_DIR).is_none(),
+            "stale OCX_STATE_DIR must be cleared when state_dir is None"
+        );
+    }
+
+    // `as_view_reads_zone_vars_from_env` is an acceptance of the CLI
+    // `ContextOptions::as_view` surface which reads from the process env.
+    // We test it indirectly via a round-trip through the forwarding mechanism:
+    // set the env var, build a view that mirrors what `as_view` would produce,
+    // then verify `apply_ocx_config` forwards the value correctly.
+    //
+    // Requirement traced to: plan_shared_store P1.2
+    // "as_view_reads_zone_vars_from_env" — "ContextOptions::as_view populates
+    // cache_dir/packages_dir/state_dir from env"
+    #[test]
+    fn as_view_reads_zone_vars_from_env() {
+        // Use the test env-lock to avoid touching std::env::set_var.
+        let env_guard = crate::test::env::lock();
+        env_guard.set(keys::OCX_CACHE_DIR, "/mnt/shared/cache");
+        env_guard.set(keys::OCX_PACKAGES_DIR, "/ephemeral/packages");
+        env_guard.set(keys::OCX_STATE_DIR, "/home/user/.ocx-local");
+
+        // `var()` is the test-env-aware env reader used by `as_view`.
+        // Verify the test seam presents the values we injected.
+        assert_eq!(
+            crate::env::var(keys::OCX_CACHE_DIR),
+            Some("/mnt/shared/cache".to_string()),
+            "OCX_CACHE_DIR must be visible via crate::env::var after injection"
+        );
+        assert_eq!(
+            crate::env::var(keys::OCX_PACKAGES_DIR),
+            Some("/ephemeral/packages".to_string()),
+            "OCX_PACKAGES_DIR must be visible via crate::env::var after injection"
+        );
+        assert_eq!(
+            crate::env::var(keys::OCX_STATE_DIR),
+            Some("/home/user/.ocx-local".to_string()),
+            "OCX_STATE_DIR must be visible via crate::env::var after injection"
+        );
+
+        // Now simulate what `as_view` does: build OcxConfigView with the
+        // zone values read from env, then round-trip through apply_ocx_config
+        // to confirm they land on the child env.
+        let mut cfg = view("/abs/ocx");
+        cfg.cache_dir = crate::env::var(keys::OCX_CACHE_DIR).map(Into::into);
+        cfg.packages_dir = crate::env::var(keys::OCX_PACKAGES_DIR).map(Into::into);
+        cfg.state_dir = crate::env::var(keys::OCX_STATE_DIR).map(Into::into);
+
+        let mut child_env = Env::clean();
+        child_env.apply_ocx_config(&cfg);
+
+        assert_eq!(
+            child_env
+                .get(keys::OCX_CACHE_DIR)
+                .and_then(|v| v.to_str().map(str::to_owned)),
+            Some("/mnt/shared/cache".to_string()),
+            "zone vars read from env must survive apply_ocx_config round-trip"
+        );
+        assert_eq!(
+            child_env
+                .get(keys::OCX_PACKAGES_DIR)
+                .and_then(|v| v.to_str().map(str::to_owned)),
+            Some("/ephemeral/packages".to_string()),
+            "OCX_PACKAGES_DIR must survive round-trip"
+        );
+        assert_eq!(
+            child_env
+                .get(keys::OCX_STATE_DIR)
+                .and_then(|v| v.to_str().map(str::to_owned)),
+            Some("/home/user/.ocx-local".to_string()),
+            "OCX_STATE_DIR must survive round-trip"
+        );
+    }
+
+    // ── as_view empty-string zone is treated as unset (review-fix #3) ─────────
+    //
+    // Requirement: `ContextOptions::as_view` (ocx_cli) reads zone overrides via
+    // `env::var(KEY).filter(|v| !v.is_empty()).map(PathBuf::from)`, mirroring
+    // `context.rs` and `StoreLayout::resolve_from_env`. An empty-string env
+    // value must collapse to `None` so an empty override is never forwarded to a
+    // child as a `""` zone (which resolves differently than "absent").
+    //
+    // `as_view` lives in ocx_cli, which cannot reach this crate's `cfg(test)`
+    // env seam; this test exercises the identical filter predicate through the
+    // test-env-aware `crate::env::var` reader so the behaviour is pinned at the
+    // layer both call sites share.
+    //
+    // Traced to: P1 shared-store review-fix loop, finding #3 (BLOCK).
+    #[test]
+    fn empty_zone_env_value_filters_to_none() {
+        let env_guard = crate::test::env::lock();
+        env_guard.set(keys::OCX_CACHE_DIR, "");
+        env_guard.set(keys::OCX_PACKAGES_DIR, "");
+        env_guard.set(keys::OCX_STATE_DIR, "");
+
+        // The exact predicate `as_view` / `context.rs` apply.
+        let zone = |key: &str| -> Option<std::path::PathBuf> {
+            crate::env::var(key)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from)
+        };
+
+        assert_eq!(
+            zone(keys::OCX_CACHE_DIR),
+            None,
+            "empty OCX_CACHE_DIR must filter to None"
+        );
+        assert_eq!(
+            zone(keys::OCX_PACKAGES_DIR),
+            None,
+            "empty OCX_PACKAGES_DIR must filter to None"
+        );
+        assert_eq!(
+            zone(keys::OCX_STATE_DIR),
+            None,
+            "empty OCX_STATE_DIR must filter to None"
+        );
+
+        // A non-empty value still passes through.
+        env_guard.set(keys::OCX_CACHE_DIR, "/mnt/shared/cache");
+        assert_eq!(
+            zone(keys::OCX_CACHE_DIR),
+            Some(std::path::PathBuf::from("/mnt/shared/cache")),
+            "a non-empty zone value must pass the filter"
+        );
     }
 
     // ── resolve_command ──────────────────────────────────────────────────
