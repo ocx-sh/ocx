@@ -122,13 +122,16 @@ impl ReachabilityGraph {
             tasks.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
                 let liveness = has_live_refs(&pkg_dir).await;
-                let dep_refs = read_refs(&deps_dir, &pkgs_root).await;
-                let layer_refs = read_refs(&layers_dir, &lyrs_root).await;
-                let blob_refs = read_refs(&blobs_dir, &blbs_root).await;
+                // Forward-edge reads fail closed: a transient I/O error aborts
+                // the GC build rather than silently dropping this package's
+                // outgoing edges (see `read_refs` docs — forward-edge SEC-1).
+                let dep_refs = read_refs(&deps_dir, &pkgs_root).await?;
+                let layer_refs = read_refs(&layers_dir, &lyrs_root).await?;
+                let blob_refs = read_refs(&blobs_dir, &blbs_root).await?;
                 let mut all_edges = dep_refs;
                 all_edges.extend(layer_refs);
                 all_edges.extend(blob_refs);
-                (pkg_dir, liveness, all_edges)
+                Ok::<_, crate::Error>((pkg_dir, liveness, all_edges))
             });
         }
 
@@ -154,7 +157,7 @@ impl ReachabilityGraph {
         }
 
         while let Some(result) = tasks.join_next().await {
-            let (pkg_dir, liveness, pkg_edges) = result.expect("task panicked");
+            let (pkg_dir, liveness, pkg_edges) = result.expect("task panicked")?;
 
             // Retain both `Live` and `Unknown` as roots. `Unknown` means the
             // liveness probe hit a transient I/O error (NFS/automount) — failing
@@ -292,29 +295,66 @@ impl ReachabilityGraph {
 /// Each symlink target is expected to be a content path inside `store_root`.
 /// The parent of the target (the CAS entry directory) is returned.
 /// Symlinks pointing outside `store_root` are skipped (defence-in-depth).
-async fn read_refs(refs_dir: &Path, store_root: &Path) -> Vec<PathBuf> {
+///
+/// # Errors
+///
+/// Returns the underlying I/O error (as [`crate::Error::InternalFile`]) when the
+/// forward-edge set cannot be enumerated completely: a non-`NotFound` `read_dir`
+/// failure, a mid-iteration `read_dir` error, or a `read_link` failure on a
+/// confirmed symlink. A genuinely-absent directory (`NotFound`) is **not** an
+/// error — it means the package declares no edges of this kind and yields
+/// `Ok(empty)`.
+///
+/// This is the forward-edge mirror of the [`has_live_refs`] back-ref guard
+/// (SEC-1 silent-data-loss class). Collapsing a transient I/O error into an
+/// empty edge set would drop a live package's outgoing edges, making its still
+/// referenced deps/layers/blobs unreachable and therefore collectible while the
+/// package itself stays a live root. Failing closed (propagating) aborts `clean`
+/// rather than letting it collect against an incomplete reachability graph.
+async fn read_refs(refs_dir: &Path, store_root: &Path) -> crate::Result<Vec<PathBuf>> {
     let mut targets = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(refs_dir).await else {
-        return targets;
+    let mut entries = match tokio::fs::read_dir(refs_dir).await {
+        Ok(entries) => entries,
+        // A genuinely-absent refs subdir = no edges of this kind (e.g. a package
+        // with no dependencies has no refs/deps). This is the only safe "empty
+        // edge set": definitive absence.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(targets),
+        // Any OTHER error (EACCES/ESTALE/EIO on NFS/automount, …) leaves the
+        // forward-edge set indeterminate — fail closed (see fn doc).
+        Err(e) => return Err(crate::error::file_error(refs_dir, e)),
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            // A mid-iteration directory-read error truncates the edge set — same
+            // indeterminate-forward-edges hazard as the read_dir arm.
+            Err(e) => return Err(crate::error::file_error(refs_dir, e)),
+        };
         let entry_path = entry.path();
-        if crate::symlink::is_link(&entry_path)
-            && let Ok(ref_target) = tokio::fs::read_link(&entry_path).await
-            && let Some(entry_dir) = ref_target.parent()
-        {
-            let canon = canonicalize_or_keep(entry_dir);
-            if !canon.starts_with(store_root) {
-                log::warn!(
-                    "Skipping refs/ symlink pointing outside store: {}",
-                    ref_target.display()
-                );
-                continue;
-            }
-            targets.push(canon);
+        if !crate::symlink::is_link(&entry_path) {
+            continue;
         }
+        let ref_target = match tokio::fs::read_link(&entry_path).await {
+            Ok(target) => target,
+            // The entry IS a symlink (a declared edge) but its target cannot be
+            // read — we know an edge exists yet not where it points. Fail closed.
+            Err(e) => return Err(crate::error::file_error(&entry_path, e)),
+        };
+        let Some(entry_dir) = ref_target.parent() else {
+            continue;
+        };
+        let canon = canonicalize_or_keep(entry_dir);
+        if !canon.starts_with(store_root) {
+            log::warn!(
+                "Skipping refs/ symlink pointing outside store: {}",
+                ref_target.display()
+            );
+            continue;
+        }
+        targets.push(canon);
     }
-    targets
+    Ok(targets)
 }
 
 /// Three-state liveness of a package directory's install back-refs.
@@ -702,6 +742,64 @@ pub mod tests {
             RefLiveness::Dead,
             "a dangling back-ref (read_link OK, target absent) must be Dead, not Unknown — \
              only a read_link/try_exists I/O *error* yields Unknown"
+        );
+    }
+
+    // ── read_refs forward-edge fail-closed (data-loss guard) ───────────────────
+    //
+    // Forward-edge mirror of the SEC-1 back-ref guard. `read_refs` enumerates a
+    // package's outgoing edges (refs/deps, refs/layers, refs/blobs). If a
+    // transient I/O error is collapsed into an empty edge set, the package's
+    // still-referenced deps/layers/blobs become unreachable and collectible while
+    // the package itself stays a live root — silent data loss.
+    //
+    // Requirement traced to: /swarm-review max + Codex cross-model finding;
+    // symmetric to has_live_refs three-state (system_design_shared_store §5 M4).
+
+    /// A non-`NotFound` `read_dir` error (here `ENOTDIR`, from pointing at a
+    /// regular file) must propagate, never collapse the forward-edge set to
+    /// empty. Deterministic + root-safe: no permission trick — `ENOTDIR` fires
+    /// for any uid.
+    #[tokio::test]
+    async fn read_refs_non_notfound_error_propagates_not_empty() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store_root = dir.path().join("layers");
+        // A regular file where a refs subdir is expected: `read_dir` fails with
+        // ENOTDIR (≠ NotFound).
+        let not_a_dir = dir.path().join("refs_deps_is_a_file");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+
+        let result = super::read_refs(&not_a_dir, &store_root).await;
+
+        assert!(
+            result.is_err(),
+            "read_refs must propagate a non-NotFound I/O error (ENOTDIR) rather than collapse the \
+             forward-edge set to empty; collapsing makes a live package's deps/layers/blobs \
+             collectible (forward-edge mirror of the SEC-1 silent-data-loss guard)"
+        );
+    }
+
+    /// A genuinely-absent refs subdir (`NotFound`) is the one safe empty edge
+    /// set — the package declares no edges of this kind. Must be `Ok(empty)`,
+    /// not an error (an error would needlessly abort every `clean`).
+    #[tokio::test]
+    async fn read_refs_absent_dir_is_empty_not_error() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store_root = dir.path().join("layers");
+        // Never created.
+        let absent = dir.path().join("refs").join("deps");
+
+        let result = super::read_refs(&absent, &store_root).await;
+
+        assert_eq!(
+            result.expect("an absent (NotFound) refs subdir must be Ok, not Err"),
+            Vec::<PathBuf>::new(),
+            "a genuinely-absent refs subdir (NotFound) means the package declares no edges of \
+             this kind → Ok(empty)"
         );
     }
 }

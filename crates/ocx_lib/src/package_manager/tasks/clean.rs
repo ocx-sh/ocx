@@ -509,27 +509,36 @@ async fn collect_shared_root_digests(
 
     // Resolve each unioned digest string (ImageIndex manifest digest) to its
     // package-store digests via the same translation the project ledger uses,
-    // but FAIL CLOSED on unresolvable peer digests (a missing/unparseable blob
-    // would otherwise resolve to a no-op root and let `clean` delete the peer's
-    // package — see `resolve_shared_root`).
+    // but FAIL CLOSED on any peer digest we cannot fully account for:
     //
-    // A digest string that does not parse as a `PinnedIdentifier` is skipped
-    // with a debug line (it cannot key a package path, so it is a harmless
-    // no-op root — never an error that aborts clean).
+    //   * a missing/unresolvable blob (`resolve_shared_root` → `None`), and
+    //   * a digest STRING that does not parse as a `PinnedIdentifier`.
+    //
+    // The version discriminant already gated the ledger as readable + current,
+    // so an unparseable entry inside it signals identifier-grammar skew or
+    // corruption — not a benign no-op. Skipping it would silently drop a peer
+    // root and let `clean` delete a live peer package (the cross-instance
+    // data-loss class). Retain everything this run instead.
     let mut digests: Vec<oci::PinnedIdentifier> = Vec::new();
     for digest_str in union {
         let identifier = match oci::Identifier::parse(&digest_str) {
             Ok(id) => id,
             Err(e) => {
-                log::debug!("Shared-roots digest '{digest_str}' is not a valid identifier (skipped): {e}");
-                continue;
+                log::warn!(
+                    "Shared-roots digest '{digest_str}' is not a valid identifier ({e}); \
+                     failing closed (RetainAll) to avoid deleting a peer's package."
+                );
+                return Ok(CollectedRoots::RetainAll);
             }
         };
         let pinned = match oci::PinnedIdentifier::try_from(identifier) {
             Ok(p) => p,
             Err(_) => {
-                log::debug!("Shared-roots digest '{digest_str}' has no digest (skipped).");
-                continue;
+                log::warn!(
+                    "Shared-roots digest '{digest_str}' has no digest component; \
+                     failing closed (RetainAll) to avoid deleting a peer's package."
+                );
+                return Ok(CollectedRoots::RetainAll);
             }
         };
         match resolve_shared_root(&pinned, file_structure).await {

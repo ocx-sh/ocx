@@ -203,8 +203,10 @@ impl PackageManager {
 /// the per-instance state zone, so it serialises same-`$OCX_HOME` processes
 /// only (cross-instance safety rests on content-addressing + mtime grace).
 ///
-/// Free function per the task-module architecture rule.
-async fn acquire_shared_gc_lock(
+/// Free function per the task-module architecture rule. Visible to sibling task
+/// modules (`pull_local`) so every store-mutating pull path shares one acquire
+/// helper rather than duplicating the best-effort/timeout policy.
+pub async fn acquire_shared_gc_lock(
     file_structure: &file_structure::FileStructure,
 ) -> Option<package_manager::tasks::garbage_collection::GcLock> {
     use package_manager::tasks::garbage_collection::GcLock;

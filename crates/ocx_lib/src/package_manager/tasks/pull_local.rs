@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::super::PackageManager;
-use super::pull::{SetupGroups, setup_owned};
+use super::pull::{SetupGroups, acquire_shared_gc_lock, setup_owned};
 use super::resolve::{ChainBlob, ChainRole, ResolvedChain};
 
 /// Singleflight coordinator for blob writes within a single `pull_local` operation.
@@ -131,6 +131,21 @@ impl PackageManager {
     ) -> Result<InstallInfo, PackageErrorKind> {
         let fs = self.file_structure();
         let registry = info.identifier.registry().to_string();
+
+        // Shared GC lock (P3.3): a concurrent `ocx clean` on the same `$OCX_HOME`
+        // must not collect the blobs/layers this local pull stages or the package
+        // it assembles. Held for the whole operation via this RAII guard. Acquired
+        // BEFORE the per-digest L1 temp lock taken inside `setup_owned`
+        // (GC-before-L1 order — no deadlock with a concurrent exclusive `clean`).
+        // Best-effort: a stuck `clean` must never block a local pull, so a timeout
+        // yields `None` and the pull proceeds without the lock — same policy as
+        // `pull` / `pull_all`. `pull_local` is reached via `ocx package test`,
+        // which stages real store objects, so it must participate in the same lock
+        // protocol the registry pull paths use. Safety when the lock is skipped
+        // rests on the mtime grace window (`OCX_GC_GRACE_SECONDS`, default 600 s):
+        // a concurrent `clean` retains freshly-staged objects regardless of lock
+        // state, so the brief unlocked window cannot lose this pull's objects.
+        let _gc_lock = acquire_shared_gc_lock(fs).await;
 
         // Create a per-pull coordinator that coalesces concurrent same-digest
         // blob writes within this operation via singleflight dedup.
@@ -1462,5 +1477,92 @@ mod tests {
             crate::cli::ExitCode::PermissionDenied,
             "an unwritable (root-owned) zone dir must classify to PermissionDenied (77); got {exit:?}"
         );
+    }
+
+    // ── pull_local_holds_shared_gc_lock (P3.3, review-fix) ────────────────────
+    //
+    // `ocx package test` reaches `pull_local`, which stages blobs/layers and
+    // assembles a package — exactly the objects a concurrent `ocx clean` would
+    // GC. `pull_local` must hold the store-wide SHARED GC lock for the duration
+    // so a concurrent exclusive `clean` blocks (cannot delete mid-stage).
+    //
+    // Drive: install fresh, break install.json so the re-pull is forced down the
+    // broken-install swap path, arm the publish-pause fault hook (pauses INSIDE
+    // the swap — after `pull_local` has already taken the shared lock at entry),
+    // wait deterministically on the paused sentinel, then attempt an EXCLUSIVE
+    // GC-lock acquire with a short timeout: it MUST time out because `pull_local`
+    // holds the shared lock. Release the pause; `pull_local` completes and the
+    // exclusive lock becomes acquirable.
+    //
+    // Regression for the /swarm-review max + Codex finding: `pull_local`
+    // previously acquired no shared GC lock (the `pull`/`pull_all` paths did).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pull_local_holds_shared_gc_lock() {
+        use crate::package_manager::tasks::garbage_collection::GcLock;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (root_dir, mgr) = setup_offline_manager();
+        let mgr = Arc::new(mgr);
+        let state_zone = mgr.file_structure().state_zone_root().to_path_buf();
+
+        // Fresh install so a complete (then broken) package dir exists.
+        let info = fixture_info("gc-lock-tool");
+        let install_info = mgr
+            .pull_local(info.clone(), &[], None)
+            .await
+            .expect("fresh pull_local must succeed");
+        let install_json = install_info.dir().root().join("install.json");
+
+        // Break the install → re-pull forced down the broken-install swap path.
+        std::fs::remove_file(&install_json).unwrap();
+
+        // Arm the pause hook + sentinels via the in-process test env seam.
+        let paused_file = root_dir.path().join("__gc_lock_paused__");
+        let release_file = root_dir.path().join("__gc_lock_release__");
+        let env_guard = crate::test::env::lock();
+        env_guard.set("__OCX_TESTING_PUBLISH_PAUSE", "1");
+        env_guard.set("__OCX_TESTING_PUBLISH_PAUSED_FILE", paused_file.to_str().unwrap());
+        env_guard.set("__OCX_TESTING_PUBLISH_RELEASE_FILE", release_file.to_str().unwrap());
+
+        // Spawn the re-pull; it takes the shared GC lock at entry, then pauses
+        // inside the swap (writing the paused sentinel before it blocks).
+        let repull_mgr = mgr.clone();
+        let repull = tokio::spawn(async move { repull_mgr.pull_local(info, &[], None).await });
+
+        // Wait until pull_local has reached the paused state (shared lock held).
+        let mut waited = Duration::ZERO;
+        while !paused_file.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            waited += Duration::from_millis(10);
+            assert!(
+                waited < Duration::from_secs(10),
+                "pull_local never reached the publish-pause state"
+            );
+        }
+
+        // While pull_local holds the SHARED lock, an EXCLUSIVE acquire must time
+        // out. This is the property the fix establishes.
+        let exclusive = GcLock::acquire_exclusive_with_timeout(&state_zone, Duration::from_millis(300)).await;
+        assert!(
+            exclusive.is_err(),
+            "an exclusive GC-lock acquire must TIME OUT while pull_local holds the shared lock; \
+             a successful acquire here means pull_local took no shared lock (the regression)"
+        );
+
+        // Release the pause; pull_local completes.
+        std::fs::write(&release_file, b"go").unwrap();
+        let repull_result = repull.await.expect("re-pull task must not panic");
+        repull_result.expect("paused re-pull must succeed after release");
+
+        // With pull_local done, the exclusive lock is now acquirable.
+        let after = GcLock::acquire_exclusive_with_timeout(&state_zone, Duration::from_secs(2)).await;
+        assert!(
+            after.is_ok(),
+            "exclusive GC lock must be acquirable once pull_local has released the shared lock"
+        );
+
+        drop(env_guard);
+        drop(root_dir);
     }
 }
