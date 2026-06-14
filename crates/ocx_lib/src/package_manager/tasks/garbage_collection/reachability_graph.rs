@@ -291,41 +291,92 @@ impl ReachabilityGraph {
 ///
 /// Best-effort: unreadable or non-manifest blobs are skipped silently (a blob
 /// store holds layer archives, configs, and leaf manifests too).
+///
+/// The per-blob read+parse is fanned out across the same bounded-parallel
+/// pattern the package walk in [`ReachabilityGraph::build`] uses (a [`JoinSet`]
+/// gated by a shared [`Semaphore`] with [`BUILD_CONCURRENCY`] permits). Each
+/// task carries its `blob_dirs` index; results are reassembled in input order
+/// before edges are appended, so the resulting `edges` map is identical to the
+/// previous serial pass (and identical run-to-run despite completion-order
+/// `join_next`).
 async fn add_index_retention_edges(
     blob_dirs: &[crate::file_structure::BlobDir],
     edges: &mut HashMap<PathBuf, Vec<PathBuf>>,
 ) {
-    use crate::oci;
+    let sem = Arc::new(Semaphore::new(BUILD_CONCURRENCY));
+    let mut tasks = JoinSet::new();
 
-    for blob in blob_dirs {
+    for (order, blob) in blob_dirs.iter().enumerate() {
         // The registry slug is three levels up from the digest-suffix dir:
         // .../{registry_slug}/{algo}/{2hex}/{30hex}.
         let Some(registry_root) = blob.dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) else {
             continue;
         };
+        let registry_root = registry_root.to_path_buf();
+        let data_path = blob.data();
+        let blob_dir = blob.dir.clone();
+        let sem = Arc::clone(&sem);
 
-        // Read the blob in full when it is small enough to be a manifest, or
-        // skip it without reading when it exceeds the manifest ceiling (a layer
-        // tarball or config). A candidate index is never truncated, so a
-        // large-but-valid index cannot lose its retention edge.
-        let Some(bytes) = read_manifest_candidate_blob(&blob.data()).await else {
-            continue;
-        };
-        let Ok(oci::Manifest::ImageIndex(index)) = serde_json::from_slice::<oci::Manifest>(&bytes) else {
-            continue;
-        };
+        tasks.spawn(async move {
+            // `sem` is constructed in this function and outlives every spawned
+            // task (each holds an `Arc` clone); it is never closed before all
+            // permits release, so `acquire_owned` cannot fail.
+            let _permit = sem.acquire_owned().await.expect("semaphore closed");
+            let pairs = index_retention_pairs(&data_path, &blob_dir, &registry_root).await;
+            (order, pairs)
+        });
+    }
 
-        let index_dir = canonicalize_or_keep(&blob.dir);
-        for entry in &index.manifests {
-            let Ok(child_digest) = oci::Digest::try_from(entry.digest.as_str()) else {
-                continue;
-            };
-            let child_dir =
-                canonicalize_or_keep(&registry_root.join(crate::file_structure::cas_shard_path(&child_digest)));
+    // Collect completion-order results, then restore `blob_dirs` order so the
+    // appended edges match the serial pass byte-for-byte (the BFS only reads
+    // set membership, but deterministic ordering keeps the graph identical
+    // run-to-run, as required by quality-rust.md for `JoinSet` consumers).
+    let mut collected: Vec<(usize, Vec<(PathBuf, PathBuf)>)> = Vec::with_capacity(blob_dirs.len());
+    while let Some(result) = tasks.join_next().await {
+        collected.push(result.expect("task panicked"));
+    }
+    collected.sort_by_key(|(order, _)| *order);
+
+    for (_, pairs) in collected {
+        for (child_dir, index_dir) in pairs {
             // Reverse edge: a reachable child leaf blob retains its parent index.
-            edges.entry(child_dir).or_default().push(index_dir.clone());
+            edges.entry(child_dir).or_default().push(index_dir);
         }
     }
+}
+
+/// Read one candidate blob and, if it is an OCI image-index manifest, resolve
+/// every advertised child to its `(child_blob_dir, index_blob_dir)` retention
+/// pair.
+///
+/// Returns an empty vec when the blob is unreadable, too large to be a manifest,
+/// or not an image index — the same best-effort skip the serial pass performed.
+/// Pairs are emitted in the index's `manifests` order so the caller, appending
+/// them in `blob_dirs` order, reproduces the serial edge layout exactly.
+async fn index_retention_pairs(data_path: &Path, blob_dir: &Path, registry_root: &Path) -> Vec<(PathBuf, PathBuf)> {
+    use crate::oci;
+
+    // Read the blob in full when it is small enough to be a manifest, or skip
+    // it without reading when it exceeds the manifest ceiling (a layer tarball
+    // or config). A candidate index is never truncated, so a large-but-valid
+    // index cannot lose its retention edge.
+    let Some(bytes) = read_manifest_candidate_blob(data_path).await else {
+        return Vec::new();
+    };
+    let Ok(oci::Manifest::ImageIndex(index)) = serde_json::from_slice::<oci::Manifest>(&bytes) else {
+        return Vec::new();
+    };
+
+    let index_dir = canonicalize_or_keep(blob_dir);
+    let mut pairs = Vec::with_capacity(index.manifests.len());
+    for entry in &index.manifests {
+        let Ok(child_digest) = oci::Digest::try_from(entry.digest.as_str()) else {
+            continue;
+        };
+        let child_dir = canonicalize_or_keep(&registry_root.join(crate::file_structure::cas_shard_path(&child_digest)));
+        pairs.push((child_dir, index_dir.clone()));
+    }
+    pairs
 }
 
 /// Read a blob **in full** when it could be an OCI manifest, or skip it when it
@@ -677,5 +728,160 @@ pub mod tests {
             child_edges.contains(&index_dir),
             "the child leaf must retain its parent index blob; child_edges={child_edges:?}, want {index_dir:?}"
         );
+    }
+
+    // ── benchmark scaffolding (run explicitly: --ignored --nocapture) ───────
+
+    /// Serial reference implementation of the index-retention scan — a copy of
+    /// the pre-parallelization loop, kept only inside this `#[ignore]` bench so
+    /// the before/after numbers are measured against the real prior shape.
+    #[cfg(test)]
+    async fn add_index_retention_edges_serial(
+        blob_dirs: &[crate::file_structure::BlobDir],
+        edges: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    ) {
+        use crate::oci;
+        for blob in blob_dirs {
+            let Some(registry_root) = blob.dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) else {
+                continue;
+            };
+            let Some(bytes) = super::read_manifest_candidate_blob(&blob.data()).await else {
+                continue;
+            };
+            let Ok(oci::Manifest::ImageIndex(index)) = serde_json::from_slice::<oci::Manifest>(&bytes) else {
+                continue;
+            };
+            let index_dir = super::canonicalize_or_keep(&blob.dir);
+            for entry in &index.manifests {
+                let Ok(child_digest) = oci::Digest::try_from(entry.digest.as_str()) else {
+                    continue;
+                };
+                let child_dir = super::canonicalize_or_keep(
+                    &registry_root.join(crate::file_structure::cas_shard_path(&child_digest)),
+                );
+                edges.entry(child_dir).or_default().push(index_dir.clone());
+            }
+        }
+    }
+
+    /// Build a synthetic blob store: `index_count` small image-index blobs (each
+    /// advertising `children_per_index` leaves) plus `noise_count` non-manifest
+    /// "layer" blobs that the scan must stat-and-skip. Returns the `BlobDir`
+    /// list in store-walk order.
+    #[cfg(test)]
+    async fn build_synthetic_store(
+        root: &std::path::Path,
+        index_count: usize,
+        children_per_index: usize,
+        noise_count: usize,
+    ) -> Vec<crate::file_structure::BlobDir> {
+        use crate::file_structure::{BlobDir, cas_shard_path};
+        use crate::oci;
+
+        // `cas_shard_path` keys on the FIRST 32 hex chars of the digest, so a
+        // unique on-disk shard requires the counter to vary the leading hex —
+        // zero-padding on the right keeps every blob in its own directory.
+        let unique = |prefix: u8, counter: usize| -> oci::Digest {
+            oci::Digest::Sha256(format!("{prefix:02x}{counter:030x}{:032x}", 0u64))
+        };
+
+        let registry_root = root.join("registry_slug");
+        let mut blob_dirs = Vec::new();
+
+        for index_number in 0..index_count {
+            let manifests = (0..children_per_index)
+                .map(|child_number| oci::ImageIndexEntry {
+                    media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                    // `Digest` Display already renders as `sha256:<hex>`.
+                    digest: unique(0x0c, index_number * children_per_index + child_number).to_string(),
+                    size: 100,
+                    platform: None,
+                    annotations: None,
+                })
+                .collect();
+            let index = oci::Manifest::ImageIndex(oci::ImageIndex {
+                schema_version: 2,
+                media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+                artifact_type: None,
+                manifests,
+                annotations: None,
+            });
+            let index_json = serde_json::to_vec(&index).expect("serialize index");
+            let dir = registry_root.join(cas_shard_path(&unique(0x1a, index_number)));
+            tokio::fs::create_dir_all(&dir).await.expect("mkdir");
+            tokio::fs::write(dir.join("data"), &index_json).await.expect("write");
+            blob_dirs.push(BlobDir { dir });
+        }
+
+        // Non-manifest blobs: 8 KiB of bytes that fail to parse as a manifest
+        // but are still read in full (under the 4 MiB ceiling), exercising the
+        // read+parse cost on the common non-index blob.
+        let noise = vec![0u8; 8 * 1024];
+        for noise_number in 0..noise_count {
+            let dir = registry_root.join(cas_shard_path(&unique(0x2b, noise_number)));
+            tokio::fs::create_dir_all(&dir).await.expect("mkdir");
+            tokio::fs::write(dir.join("data"), &noise).await.expect("write");
+            blob_dirs.push(BlobDir { dir });
+        }
+
+        blob_dirs
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    async fn bench_index_retention_scan_serial_vs_parallel() {
+        const INDEX_COUNT: usize = 200;
+        const CHILDREN_PER_INDEX: usize = 8;
+        const NOISE_COUNT: usize = 2000;
+        const ITERATIONS: u32 = 5;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blob_dirs = build_synthetic_store(tmp.path(), INDEX_COUNT, CHILDREN_PER_INDEX, NOISE_COUNT).await;
+        let total_blobs = blob_dirs.len();
+
+        // Warm the page cache so both variants read from the same warm state.
+        let mut warm: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        super::add_index_retention_edges(&blob_dirs, &mut warm).await;
+        let edge_count: usize = warm.values().map(|v| v.len()).sum();
+        assert_eq!(
+            edge_count,
+            INDEX_COUNT * CHILDREN_PER_INDEX,
+            "synthetic store must produce one retention edge per advertised child"
+        );
+
+        let mut serial_total = std::time::Duration::ZERO;
+        let mut parallel_total = std::time::Duration::ZERO;
+        let mut serial_edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        let mut parallel_edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+
+        for _ in 0..ITERATIONS {
+            let mut edges = HashMap::new();
+            let start = std::time::Instant::now();
+            add_index_retention_edges_serial(&blob_dirs, &mut edges).await;
+            serial_total += start.elapsed();
+            serial_edges = edges;
+
+            let mut edges = HashMap::new();
+            let start = std::time::Instant::now();
+            super::add_index_retention_edges(&blob_dirs, &mut edges).await;
+            parallel_total += start.elapsed();
+            parallel_edges = edges;
+        }
+
+        // Equivalence proof: parallel output must equal serial output exactly.
+        assert_eq!(
+            serial_edges, parallel_edges,
+            "parallel scan must produce an identical edge map to the serial scan"
+        );
+
+        let serial_ms = serial_total.as_secs_f64() * 1000.0 / f64::from(ITERATIONS);
+        let parallel_ms = parallel_total.as_secs_f64() * 1000.0 / f64::from(ITERATIONS);
+        println!("\n=== index-retention scan benchmark ===");
+        println!("blobs scanned per pass : {total_blobs} ({INDEX_COUNT} indexes + {NOISE_COUNT} noise)");
+        println!("retention edges created: {edge_count}");
+        println!("iterations             : {ITERATIONS}");
+        println!("serial   (mean)        : {serial_ms:.2} ms");
+        println!("parallel (mean)        : {parallel_ms:.2} ms");
+        println!("speedup                : {:.2}x", serial_ms / parallel_ms);
     }
 }
