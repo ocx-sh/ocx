@@ -1133,4 +1133,92 @@ pinned = "localhost:5000/shfmt@sha256:bbbb00000000000000000000000000000000000000
              so the cleaner never deletes the peer's package"
         );
     }
+
+    /// `collect_shared_root_digests` must map a peer ledger entry whose string
+    /// does NOT parse as an `oci::Identifier` to `CollectedRoots::RetainAll`.
+    /// The version discriminant already gated the ledger as readable + current,
+    /// so an unparseable entry signals identifier-grammar skew or corruption —
+    /// skipping it would silently drop a peer root and let `clean` delete a live
+    /// peer package. This pins the `Identifier::parse` Err arm (the sibling of
+    /// the blob-unresolvable arm asserted above).
+    ///
+    /// `localhost:5000/Peer` fails to parse because the repository component is
+    /// uppercase (`UppercaseRepository`) — an unconditional grammar check, so
+    /// the input is deterministically rejected. (A naive "garbage" string like
+    /// `not a valid identifier` would instead parse as a repo under the default
+    /// registry — the parser is lenient — so a real grammar violation is
+    /// required to exercise this arm.)
+    #[tokio::test]
+    async fn collect_shared_roots_retain_all_on_unparseable_peer_identifier() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_SHARED_STORE, "true");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+
+        let packages_zone_root = file_structure
+            .packages
+            .root()
+            .parent()
+            .unwrap_or_else(|| file_structure.packages.root())
+            .to_path_buf();
+
+        // Plant a peer ledger whose entry does not parse as an identifier
+        // (uppercase repository — a deterministic grammar violation).
+        let peer = SharedRoots::new(&packages_zone_root, "instance-peer");
+        peer.write("peerproj", &["localhost:5000/Peer".to_string()])
+            .await
+            .unwrap();
+
+        let result = collect_shared_root_digests(&file_structure, file_structure.state_zone_root())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, CollectedRoots::RetainAll),
+            "an unparseable peer identifier must yield RetainAll (fail closed) so the cleaner \
+             never deletes a live peer package against a root set missing that peer"
+        );
+    }
+
+    /// `collect_shared_root_digests` must map a peer ledger entry that parses as
+    /// an `oci::Identifier` but carries no digest (a tag-only reference) to
+    /// `CollectedRoots::RetainAll`. This pins the `PinnedIdentifier::try_from`
+    /// Err arm: a digestless entry cannot key a package path, so failing closed
+    /// avoids dropping a peer root.
+    ///
+    /// `localhost:5000/peer:1.0` parses cleanly (registry `localhost:5000`, repo
+    /// `peer`, tag `1.0`) but has no `@digest`, so `PinnedIdentifier::try_from`
+    /// rejects it.
+    #[tokio::test]
+    async fn collect_shared_roots_retain_all_on_peer_identifier_without_digest() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_SHARED_STORE, "true");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+
+        let packages_zone_root = file_structure
+            .packages
+            .root()
+            .parent()
+            .unwrap_or_else(|| file_structure.packages.root())
+            .to_path_buf();
+
+        // Plant a peer ledger whose entry parses but has no digest component.
+        let peer = SharedRoots::new(&packages_zone_root, "instance-peer");
+        peer.write("peerproj", &["localhost:5000/peer:1.0".to_string()])
+            .await
+            .unwrap();
+
+        let result = collect_shared_root_digests(&file_structure, file_structure.state_zone_root())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, CollectedRoots::RetainAll),
+            "a digestless peer identifier must yield RetainAll (fail closed) so the cleaner \
+             never deletes a live peer package against a root set missing that peer"
+        );
+    }
 }
