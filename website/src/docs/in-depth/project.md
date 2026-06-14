@@ -38,10 +38,35 @@ The project file describes tools the project needs, not how a contributor's shel
 
 The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 8785 JCS][rfc-8785]). When you change `ocx.toml`, the hash changes; commands that depend on the lock ([`ocx pull`][cmd-pull], [`ocx run`][cmd-run]) detect the mismatch and refuse to run with stale digests. Re-run [`ocx lock`][cmd-lock] to regenerate the file.
 
-::: warning `ocx.lock` is machine-generated
-Do not hand-edit `ocx.lock`. The format is canonicalized — sort order, whitespace, and the per-entry `declaration_hash` are computed by `ocx lock` and may evolve across OCX versions. Manual edits will be overwritten on the next `ocx lock` run and may be rejected by future schema versions.
+### Lock format — per-platform leaf digests {#lock-format}
 
-Tooling that reads `ocx.lock` should validate against the published schema at [`https://ocx.sh/schemas/project-lock/v1.json`][schema-lock]; the schema's top-level `$comment` field carries a machine-readable do-not-edit marker recognizable to JSON Schema processors.
+Each `[[tool]]` entry in `ocx.lock` records the bare registry/repository coordinates (no tag, no digest) and a `[tool.platforms]` table mapping each platform the publisher ships to its per-platform leaf manifest digest:
+
+```toml
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "ocx.sh/cmake"           # registry/repo only — no tag, no digest
+
+[tool.platforms]
+"linux/amd64"  = "sha256:<leaf-amd64>"
+"linux/arm64"  = "sha256:<leaf-arm64>"
+"darwin/arm64" = "sha256:<leaf-darwin-arm64>"
+# darwin/amd64, windows/amd64 absent — publisher ships no such leaf
+```
+
+Only the platforms the publisher ships are recorded: a platform absent from the map means the publisher does not ship it at the locked version. `ocx lock` records every shipped platform at once, regardless of which OS the command runs on, so a lock committed on Linux is already complete for macOS and Windows CI runners — no re-resolution or re-commit is required on a different machine.
+
+At install and run time, OCX looks up the host platform key in `[tool.platforms]`, falling back to the `"any"` key for packages that ship a single platform-independent binary. A host key that is absent — and has no `"any"` fallback — produces a clean pre-network error naming the missing platform and pointing to `ocx update <tool>` to re-lock if the publisher has since added support.
+
+### Adding and dropping platforms {#lock-platforms-lifecycle}
+
+A newly-shipped platform becomes available after an explicit `ocx update <tool>`, which re-resolves the tag and adds the new platform key to the map. A dropped platform disappears as a removed key on the next re-lock. Both changes are visible as a plain-text diff to `ocx.lock` in pull-request review. There is no silent pickup at install time — the lock is the contract.
+
+::: warning `ocx.lock` is machine-generated
+Do not hand-edit `ocx.lock`. The format is canonicalized — sort order, whitespace, and the file-level `declaration_hash` are computed by `ocx lock` and may evolve across OCX versions. Manual edits will be overwritten on the next `ocx lock` run and may be rejected by future schema versions.
+
+Tooling that reads `ocx.lock` should validate against the published schema at [`https://ocx.sh/schemas/project-lock/v2.json`][schema-lock]; the schema's top-level `$comment` field carries a machine-readable do-not-edit marker recognizable to JSON Schema processors.
 :::
 
 ::: tip Commit `ocx.lock` and tame merge conflicts
@@ -57,6 +82,23 @@ Each `[[tool]]` entry is independent, so concatenation usually produces a syntac
 ### Concurrent writes {#lock-concurrency}
 
 Project-state writes (`ocx lock`, `ocx upgrade`, `ocx add`, `ocx remove`) serialize through an exclusive advisory [flock][flock] taken in-place on `ocx.toml` itself. No sentinel or sidecar file is created — the lock is invisible and leaves no artefact on disk. Concurrent readers ([`ocx pull`][cmd-pull], IDE integrations, `git`) never acquire any lock: they parse `ocx.lock` directly via an atomic read.
+
+## Pin preservation {#pin-preservation}
+
+`ocx add` and `ocx remove` are **partial mutators** — they touch only the binding they name and carry every other lock entry forward unchanged. Neither command re-resolves a surviving tool's live tag. This is the guarantee that adding a new tool or dropping an old one never silently advances the versions of everything else.
+
+The carry-forward has two modes depending on the lock format of the surviving entry. A V2 entry is passed through byte-identical — no registry contact. A V1 (legacy) entry is transcribed using the pinned index digest it already stores: OCX reads the exact same index manifest and extracts its per-platform leaf digests, producing a V2 entry with the identical pins. If the V1 index is no longer retrievable from the registry, the command fails with exit 78 and a message directing you to `ocx upgrade` — it never silently re-resolves against the live tag.
+
+The freshness gate runs before any carry-forward. If `ocx.toml` drifted from `ocx.lock` since the lock was last written (the `declaration_hash` does not match), the mutator fails with exit 65 before touching anything. The fix is a single `ocx lock` to reconcile the file, after which the add or remove succeeds.
+
+The two commands that intentionally advance version pins are:
+
+| Command | When it re-resolves |
+|---------|---------------------|
+| `ocx lock` | Only when `ocx.toml` drifted (whole-file reconcile; a moving tag may advance) |
+| `ocx upgrade` | Always, on every declared tag (whole-file forced bump) |
+
+Groups are a **composition concern** — they scope which tools `ocx run`, `ocx env`, and `ocx pull` see. They are not a lock or upgrade scope. `ocx lock` and `ocx upgrade` always operate on the whole file.
 
 ## Pulling and executing {#pull-exec}
 
@@ -251,7 +293,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [slsa-attestation]: https://slsa.dev/spec/v1.0/attestation-model
 [sigstore]: https://www.sigstore.dev/
 [schema-project]: https://ocx.sh/schemas/project/v1.json
-[schema-lock]: https://ocx.sh/schemas/project-lock/v1.json
+[schema-lock]: https://ocx.sh/schemas/project-lock/v2.json
 [composer-source]: https://github.com/ocx-sh/ocx/blob/main/crates/ocx_lib/src/package_manager/composer.rs
 
 <!-- commands -->

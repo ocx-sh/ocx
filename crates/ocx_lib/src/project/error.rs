@@ -74,6 +74,47 @@ pub enum ProjectErrorKind {
     #[error("TOML serialization error")]
     TomlSerialize(#[source] toml::ser::Error),
 
+    /// A V2 lock `[[tool]]` `repository` carried a tag or digest. The V2
+    /// shape stores bare registry/repo coordinates only — the per-platform
+    /// pull id is reconstructed from `repository` + the per-platform leaf
+    /// digest, so a tag or digest on `repository` is a malformed lock.
+    #[error("lock repository '{value}' must be bare (no tag, no digest)")]
+    LockRepositoryNotBare { value: String },
+
+    /// Two advertised index children stringified to the same V2 platform
+    /// map key while building the available-only `platforms` map. A
+    /// defensive guard against a silent `BTreeMap` overwrite — should never
+    /// fire under the lossless, injective [`crate::oci::Platform::lock_key`].
+    #[error("duplicate platform key '{key}' in resolved leaf map")]
+    DuplicatePlatformKey { key: String },
+
+    /// A lock-mutating command (`ocx add`/`remove`) carried forward an
+    /// untouched V1 entry whose legacy index digest is no longer retrievable,
+    /// so it could not be transcribed to V2 exact-only. The command refuses to
+    /// silently re-resolve the untouched tool's live tag (Codex R2); the user
+    /// must run the whole-file bump verb `ocx upgrade` to re-resolve instead.
+    ///
+    /// The remedy is **tier-neutral** (spec §4.1): the error layer has no tier
+    /// context, so a `ocx --global add/remove` user is told to add `--global`
+    /// rather than being handed a project-only `ocx upgrade` that would target
+    /// the wrong toolchain.
+    #[error(
+        "tool '{name}': locked entry can no longer be migrated exactly; run `ocx upgrade` to re-resolve (add `--global` for the global toolchain)"
+    )]
+    LockUpgradeRequired { name: String },
+
+    /// A V2 lock entry ships no leaf for the host platform (no host key and
+    /// no `"any"` fallback) at the locked version. Decided from local lock
+    /// bytes, so it surfaces at lock-read **pre-network** rather than as a
+    /// late `SelectResult::NotFound`. The publisher does not ship this
+    /// platform at the locked version (or the lock predates it) — run
+    /// `ocx upgrade` (the whole-file bump verb) to re-resolve if it has
+    /// since been added.
+    #[error(
+        "no '{platform}' leaf for tool '{name}' at the locked version; run `ocx upgrade` to re-resolve if it has since been added"
+    )]
+    NoHostLeaf { name: String, platform: String },
+
     /// A reserved group keyword (`default`, `all`) was declared as a
     /// `[group.<name>]` table in `ocx.toml`.
     ///
@@ -210,9 +251,9 @@ pub enum ProjectErrorKind {
     #[error("ocx.lock is missing; run `ocx lock`")]
     LockMissing,
 
-    /// A binding name passed to [`crate::project::resolve_lock_partial`]
-    /// is not declared in `ocx.toml`. Surfaced by `ocx update <name>`
-    /// when the user names a tool that does not exist.
+    /// A binding name passed to [`crate::project::resolve_lock_touched`]
+    /// as a touched `(group, name)` pair is not declared in `ocx.toml`.
+    /// Surfaced when a caller names a tool that does not exist.
     #[error("tool '{name}' not declared in ocx.toml")]
     ToolNotInConfig { name: String },
 
@@ -255,26 +296,30 @@ pub enum ProjectErrorKind {
     )]
     InvalidGroupName { name: String },
 
-    /// Partial-resolve refused: the predecessor lock's
+    /// Pin-preserving carry-forward refused: the predecessor lock's
     /// [`crate::project::lock::LockMetadata::declaration_hash`] does not
-    /// match the current declaration hash computed from `ocx.toml`.
+    /// match the **pre-mutation** declaration hash of `ocx.toml`.
     ///
-    /// Surfaced from [`crate::project::resolve_lock_partial`] when the
-    /// caller hands the resolver a stale predecessor — typically the
-    /// caller loaded `ocx.lock` before the in-memory `ocx.toml` mutation
-    /// landed, or two processes raced. The caller should fall back to a
-    /// full [`crate::project::resolve_lock`] (which rebuilds metadata
-    /// from the current config) rather than blindly stamping a fresh
-    /// hash over the merged carry-forward set, which would launder a
-    /// stale lock under a fresh hash and silently obscure drift.
+    /// Surfaced from [`crate::project::resolve_lock_touched`] (the
+    /// `ocx add`/`remove` freshness gate) when the lock was not current
+    /// with `ocx.toml` *before* this command's edit — typically the user
+    /// hand-edited `ocx.toml` since the last lock, or two processes raced.
+    /// The mutator refuses to carry untouched bindings forward against a
+    /// stale lock; the user reconciles the whole file with `ocx lock`,
+    /// then re-runs the add/remove.
+    ///
+    /// The remedy is **tier-neutral** (spec §4.1): the error layer has no tier
+    /// context, so a `ocx --global add/remove` user is told to add `--global`
+    /// rather than being handed a project-only `ocx lock` that would reconcile
+    /// the wrong toolchain.
     ///
     /// Both hashes are surfaced in the message so operators can diff the
     /// lock-on-disk against the live config without re-running the
     /// hasher manually. `previous_hash` is the value carried by the
-    /// supplied predecessor lock; `current_hash` is `declaration_hash`
-    /// of the config passed to `resolve_lock_partial`.
+    /// supplied predecessor lock; `current_hash` is the hash of the
+    /// pre-mutation `ocx.toml` snapshot.
     #[error(
-        "partial-resolve refused: lock metadata declaration_hash {previous_hash} does not match current declaration_hash {current_hash}; retry with `resolve_lock`"
+        "lock is out of sync with ocx.toml (declaration_hash {current_hash} != locked {previous_hash}); run `ocx lock` to reconcile (add `--global` for the global toolchain)"
     )]
     StaleLockOnPartial {
         previous_hash: String,
@@ -311,7 +356,8 @@ impl ClassifyExitCode for Error {
                 | ProjectErrorKind::UnsupportedDeclarationHashVersion { .. }
                 | ProjectErrorKind::FileTooLarge { .. }
                 | ProjectErrorKind::ToolValueMissingRegistry { .. }
-                | ProjectErrorKind::ToolValueInvalid { .. } => ExitCode::ConfigError,
+                | ProjectErrorKind::ToolValueInvalid { .. }
+                | ProjectErrorKind::LockRepositoryNotBare { .. } => ExitCode::ConfigError,
                 ProjectErrorKind::EmptyGroupFilter
                 | ProjectErrorKind::UnknownGroup { .. }
                 | ProjectErrorKind::DuplicateToolAcrossSelectedGroups { .. }
@@ -323,6 +369,13 @@ impl ClassifyExitCode for Error {
                     ExitCode::Unavailable
                 }
                 ProjectErrorKind::LockMissing => ExitCode::ConfigError,
+                // A carried-forward V1 entry cannot be migrated exactly —
+                // the lock needs an explicit `ocx upgrade` re-resolve.
+                ProjectErrorKind::LockUpgradeRequired { .. } => ExitCode::ConfigError,
+                // The locked version ships no leaf for the host platform —
+                // a pre-network config-state condition; the remedy is a
+                // whole-file re-resolve (`ocx upgrade`).
+                ProjectErrorKind::NoHostLeaf { .. } => ExitCode::ConfigError,
                 ProjectErrorKind::ToolNotInConfig { .. } => ExitCode::NotFound,
                 ProjectErrorKind::BindingAlreadyExists { .. } => ExitCode::UsageError,
                 ProjectErrorKind::BindingNotFound { .. } => ExitCode::NotFound,
@@ -335,6 +388,9 @@ impl ClassifyExitCode for Error {
                 // wrappers and scripts get a single signal regardless of
                 // which resolver path detected the mismatch.
                 ProjectErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError,
+                // A dup-key collision is a structural integrity violation in
+                // the resolved leaf map — classify as malformed data (65).
+                ProjectErrorKind::DuplicatePlatformKey { .. } => ExitCode::DataError,
                 // Offline / frozen refused an unpinned-tag resolve during lock
                 // building — same category as the index-layer policy block.
                 ProjectErrorKind::PolicyBlocked { .. } => ExitCode::PolicyBlocked,
@@ -430,6 +486,108 @@ mod tests {
         assert!(
             !rendered.starts_with(' '),
             "path-less error must not start with whitespace; got {rendered:?}"
+        );
+    }
+
+    // ── Whole-file model: fail-closed remedy message contract (spec §4.1) ────
+
+    /// `StaleLockOnPartial` (the `add`/`remove` drift gate, exit 65) must name
+    /// the user remedy `ocx lock`, name no internal function, and stay
+    /// tier-neutral (spec §4.1): because the error layer has no tier context, a
+    /// `ocx --global add/remove` user must be steered to add `--global` rather
+    /// than handed a bare project-only `ocx lock` that would target the wrong
+    /// toolchain. The pre-mutation hash mismatch on a mutator directs the user
+    /// to reconcile the whole file first.
+    #[test]
+    fn stale_lock_on_partial_names_ocx_lock_remedy() {
+        let kind = ProjectErrorKind::StaleLockOnPartial {
+            previous_hash: "sha256:aaa".to_string(),
+            current_hash: "sha256:bbb".to_string(),
+        };
+        let rendered = kind.to_string();
+        assert!(
+            rendered.contains("ocx.toml"),
+            "message must name the drifted file ocx.toml; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("`ocx lock`"),
+            "message must name the user remedy `ocx lock`; got {rendered:?}"
+        );
+        // Tier-neutral (spec §4.1): the remedy must point `--global` users at
+        // their tier rather than hard-coding a project-only `ocx lock`.
+        assert!(
+            rendered.contains("--global"),
+            "message must stay tier-neutral by naming `--global` for the global toolchain; got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("resolve_lock"),
+            "message must not name an internal function; got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("partial-resolve"),
+            "message must use the user-facing whole-file vocabulary, not 'partial-resolve'; got {rendered:?}"
+        );
+        // C-GOOD-ERR: lowercase first word, no trailing period.
+        assert!(
+            rendered.chars().next().is_some_and(|c| c.is_lowercase()),
+            "message must start lowercase per C-GOOD-ERR; got {rendered:?}"
+        );
+        assert!(
+            !rendered.trim_end().ends_with('.'),
+            "message must not end with a period per C-GOOD-ERR; got {rendered:?}"
+        );
+        // Both hashes surfaced for operator diffing.
+        assert!(
+            rendered.contains("sha256:aaa") && rendered.contains("sha256:bbb"),
+            "both the locked and current hashes must be surfaced; got {rendered:?}"
+        );
+    }
+
+    /// `LockUpgradeRequired` (a carried/survivor V1 index gone, exit 78) must
+    /// now name `ocx upgrade` — the whole-file bump verb that re-resolves —
+    /// not the deleted `ocx lock --upgrade`. It must name no internal function
+    /// and stay tier-neutral (spec §4.1): a `ocx --global add/remove` user must
+    /// be steered to add `--global` rather than handed a bare project-only
+    /// `ocx upgrade` that would re-resolve the wrong toolchain.
+    #[test]
+    fn lock_upgrade_required_names_ocx_upgrade_remedy() {
+        let kind = ProjectErrorKind::LockUpgradeRequired {
+            name: "cmake".to_string(),
+        };
+        let rendered = kind.to_string();
+        assert!(
+            rendered.contains("`ocx upgrade`"),
+            "message must name the user remedy `ocx upgrade`; got {rendered:?}"
+        );
+        // Tier-neutral (spec §4.1): the remedy must point `--global` users at
+        // their tier rather than hard-coding a project-only `ocx upgrade`.
+        assert!(
+            rendered.contains("--global"),
+            "message must stay tier-neutral by naming `--global` for the global toolchain; got {rendered:?}"
+        );
+        // `--upgrade` (substring) is intentionally present inside `--global`-free
+        // checks only via the bare verb; ensure the deleted `lock --upgrade`
+        // flag form does not appear.
+        assert!(
+            !rendered.contains("lock --upgrade"),
+            "message must not name the deleted `ocx lock --upgrade` verb; got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("transcribe"),
+            "message must not leak an internal function name; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("cmake"),
+            "message must name the affected tool; got {rendered:?}"
+        );
+        // C-GOOD-ERR: lowercase first word, no trailing period.
+        assert!(
+            rendered.chars().next().is_some_and(|c| c.is_lowercase()),
+            "message must start lowercase per C-GOOD-ERR; got {rendered:?}"
+        );
+        assert!(
+            !rendered.trim_end().ends_with('.'),
+            "message must not end with a period per C-GOOD-ERR; got {rendered:?}"
         );
     }
 }

@@ -188,7 +188,7 @@ Credentials are resolved against the **mirror** host, not the upstream. Configur
 | `[registry] default` / `OCX_DEFAULT_REGISTRY` | Default injection runs before mirror rewrite. A bare identifier expanded to the default registry is then mirrored if that registry has a `[mirrors]` entry. |
 | `--offline` | No network activity at all; mirrors are not consulted. |
 | `--remote` | Mutable lookups (tag list, tag→digest resolution) hit the **mirror**, not the origin. |
-| `ocx.lock` | Stores the canonical upstream host and digest — not the mirror host. A lock made behind a mirror is valid on a machine with direct egress, and vice versa. |
+| `ocx.lock` | Stores canonical upstream coordinates and per-platform leaf digests — not the mirror host. A lock made behind a mirror is valid on a machine with direct egress, and vice versa. |
 | `push` | Push is not mirror-redirected. The canonical upstream host is contacted. Remote/proxy repositories are read-only; redirecting push would fail confusingly. |
 | `ocx index catalog` | Against a proxy-type mirror, the catalog lists only repositories the proxy has cached. This is a registry-side constraint, not an OCX behavior. |
 
@@ -231,7 +231,7 @@ OCX publishes JSON Schemas for every config and project file at stable URLs. IDE
 |------|------------|
 | `config.toml` (any tier) | [`https://ocx.sh/schemas/config/v1.json`][schema-config] |
 | `ocx.toml` (project) | [`https://ocx.sh/schemas/project/v1.json`][schema-project] |
-| `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v1.json`][schema-project-lock] |
+| `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v2.json`][schema-project-lock] |
 | `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
 
 `ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
@@ -278,7 +278,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 <!-- schemas -->
 [schema-config]: https://ocx.sh/schemas/config/v1.json
 [schema-project]: https://ocx.sh/schemas/project/v1.json
-[schema-project-lock]: https://ocx.sh/schemas/project-lock/v1.json
+[schema-project-lock]: https://ocx.sh/schemas/project-lock/v2.json
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 
 <!-- in-depth -->

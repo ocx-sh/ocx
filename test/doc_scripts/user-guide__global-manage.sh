@@ -11,4 +11,4 @@ ocx --global add "$PKG_UV"
 # endregion cast
 ocx --global remove "$REPO_CMAKE"
 ocx --global lock
-ocx --global upgrade "$REPO_UV"
+ocx --global upgrade

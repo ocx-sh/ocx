@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::collections::BTreeMap;
+
 use ocx_lib::cli::Cell;
 use serde::Serialize;
 
@@ -10,24 +12,68 @@ use crate::api::Printable;
 ///
 /// `binding` is the TOML key in `ocx.toml` (the local binding name);
 /// `group` is `"default"` for entries from the top-level `[tools]`
-/// table or the named `[group.*]` key; `digest` is the canonical
-/// `registry/repo@digest` form with the advisory tag stripped.
+/// table or the named `[group.*]` key. `digest` is the host-platform
+/// leaf digest (the primary digest column). `platforms` maps each
+/// shipped platform's lossless key string to its leaf digest — the full
+/// available-only map surfaced in verbose / JSON output.
 #[derive(Serialize)]
 pub struct LockEntry {
     pub binding: String,
     pub group: String,
     pub digest: String,
+    pub platforms: BTreeMap<String, String>,
 }
 
 /// Report emitted by `ocx lock` after a successful resolve.
 ///
-/// Plain format: three-column table (Binding | Group | Digest).
+/// Plain format: three-column table (Binding | Group | Digest) where the
+/// digest column is the host-platform leaf digest.
 ///
-/// JSON format: array of `{ binding, group, digest }` objects.
+/// JSON format: array of `{ binding, group, digest, platforms }` objects,
+/// where `platforms` is the full available-only platform-key → digest map.
 #[derive(Serialize)]
 #[serde(transparent)]
 pub struct LockReport {
     entries: Vec<LockEntry>,
+}
+
+impl LockEntry {
+    /// Build a report entry from an in-memory [`LockedTool`], selecting the
+    /// host-platform leaf as the primary `digest` column and projecting the
+    /// full available-only map into `platforms`.
+    ///
+    /// For a V1 [`LockedResolution::LegacyIndex`] entry, the primary digest
+    /// is the legacy index digest and `platforms` is empty (the legacy
+    /// format carries no per-platform map). For a V2
+    /// [`LockedResolution::PerPlatform`] entry, the primary digest is the
+    /// host→`"any"` leaf and `platforms` is the full key→digest map.
+    pub fn from_tool(tool: &ocx_lib::project::LockedTool, host: &ocx_lib::oci::Platform) -> Self {
+        use ocx_lib::project::LockedResolution;
+
+        let (digest, platforms) = match &tool.resolution {
+            // V1: the legacy index digest is the primary column; the legacy
+            // format carries no per-platform map.
+            LockedResolution::LegacyIndex(pinned) => (pinned.digest().to_string(), BTreeMap::new()),
+            // V2: the host→`"any"` leaf is the primary digest column; the full
+            // available-only map surfaces in verbose / JSON output. When the
+            // host leaf is absent (the publisher does not ship this platform),
+            // fall back to an empty primary digest rather than fabricating one.
+            LockedResolution::PerPlatform { platforms, .. } => {
+                let primary = ocx_lib::project::lookup_host_leaf(platforms, host)
+                    .map(|d| d.to_string())
+                    .unwrap_or_default();
+                let map = platforms.iter().map(|(k, v)| (k.clone(), v.to_string())).collect();
+                (primary, map)
+            }
+        };
+
+        Self {
+            binding: tool.name.clone(),
+            group: tool.group.clone(),
+            digest,
+            platforms,
+        }
+    }
 }
 
 impl LockReport {

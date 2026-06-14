@@ -195,6 +195,89 @@ impl Platform {
         })
     }
 
+    /// Returns a lossless, injective key string for this platform, used as
+    /// the `ocx.lock` V2 `platforms` map key and for host-platform lookup.
+    ///
+    /// The common case is byte-identical to [`Display`](std::fmt::Display)
+    /// (`"any"`, `"linux/amd64"`, `"darwin/arm64/v8"`). Unlike `Display` —
+    /// which drops `os_features` and `features` — this encoding extends the
+    /// `Display` form with those fields **only when present**, so two
+    /// advertised platforms that differ solely in `os_features`/`features`
+    /// can never collide on the same key (Codex R1: a lossy key would
+    /// convert a `select`-installable multi-variant package into a hard lock
+    /// failure).
+    ///
+    /// # Injectivity
+    ///
+    /// The encoding is **structurally injective for arbitrary field values**,
+    /// not just for the common platforms. Every registry-controlled string —
+    /// `variant`, `os_version`, and each `os_features`/`features` value — is
+    /// percent-escaped ([`escape_feature_component`]) before it enters the key.
+    /// Escaping the base segments (not only the suffix values) is what closes
+    /// the marker-forging hole: a crafted `os_version` such as `"10;osf=win32k"`
+    /// encodes as `10%3Bosf%3Dwin32k`, so it cannot forge a `;osf=` marker and
+    /// collide with a genuine `os_version = "10"` + `os_features = ["win32k"]`
+    /// platform (Finding 2). The same base escaping covers `/`, the
+    /// base-segment separator: a `variant = "v8/10"` (no `os_version`) encodes
+    /// as `v8%2F10`, so it cannot forge the extra slash and collide with
+    /// `variant = "v8", os_version = "10"` (Block B). The `,` separator inside a single feature value is
+    /// likewise escaped, so `["a,b"]` (one element holding a comma) encodes as
+    /// `a%2Cb` while `["a","b"]` (two elements) encodes as `a,b` — distinct
+    /// keys. The `;osf=` / `;feat=` markers themselves are emitted only by this
+    /// method (never from an escaped value), so the encoding also never collides
+    /// with a marker-free base key.
+    ///
+    /// Escaping is **byte-transparent for the common case**: legitimate
+    /// `variant` (`v7`, `v8`), `os_version` (`10.0.14393.1066`), and feature
+    /// names (`win32k`, `sse4`, `aes`) contain none of `% , ; =`, so the
+    /// typical `linux/amd64` / `darwin/arm64/v8` keys are byte-identical to
+    /// [`Display`](std::fmt::Display).
+    ///
+    /// This is the only key encoding the lock uses; `Platform` is never
+    /// serialized as a value, so no `impl JsonSchema for Platform`, no
+    /// `Ord`, and no `canonical_set()` are required.
+    pub fn lock_key(&self) -> String {
+        let (os, arch, variant, os_version, os_features, features) = match self {
+            // `Any` carries no registry-controlled fields → nothing to escape.
+            Self::Any => return ANY_STR.to_string(),
+            Self::Specific {
+                os,
+                arch,
+                variant,
+                os_version,
+                os_features,
+                features,
+            } => (os, arch, variant, os_version, os_features, features),
+        };
+
+        // Base mirrors `Display` (`os/arch[/variant[/os_version]]`) but escapes
+        // the registry-controlled `variant` and `os_version` segments so they
+        // cannot forge a `;osf=`/`;feat=` marker. `os`/`arch` are closed enums
+        // (no special characters) and pass through verbatim.
+        let mut key = format!("{os}/{arch}");
+        if let Some(variant) = variant {
+            key.push('/');
+            key.push_str(&escape_feature_component(variant));
+        }
+        if let Some(os_version) = os_version {
+            key.push('/');
+            key.push_str(&escape_feature_component(os_version));
+        }
+
+        // `os_features`/`features` are appended as explicit, parseable suffixes
+        // only when present, so two children differing only in those fields get
+        // distinct keys.
+        if let Some(values) = os_features {
+            key.push_str(";osf=");
+            key.push_str(&join_feature_values(values));
+        }
+        if let Some(values) = features {
+            key.push_str(";feat=");
+            key.push_str(&join_feature_values(values));
+        }
+        key
+    }
+
     /// Returns the default supported-platform list for the current host.
     ///
     /// The list always contains at most two entries:
@@ -219,6 +302,49 @@ impl Default for Platform {
     fn default() -> Self {
         Self::any()
     }
+}
+
+/// Join a feature-value vector for [`Platform::lock_key`] with a `,` separator,
+/// percent-escaping each value first so the join is injective.
+///
+/// Without per-component escaping the `,` join is ambiguous: `["a,b"]` and
+/// `["a","b"]` both naively render `a,b`. Escaping the separator inside each
+/// value (`a%2Cb` vs `a,b`) restores injectivity over arbitrary values.
+fn join_feature_values(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| escape_feature_component(value))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Percent-escape every character that carries structural meaning anywhere in a
+/// [`Platform::lock_key`] — both the slash-separated base segments and the
+/// suffix feature values — so a registry-controlled string can never forge a
+/// separator or marker.
+///
+/// Escapes `%` (the escape introducer — first, so escapes are unambiguous),
+/// `/` (the base-segment separator), `,` (the suffix value separator), `;` (the
+/// marker separator), and `=` (the marker delimiter). Escaping `/` is what keeps
+/// the base injective: without it a `variant = "v8/10"` (no `os_version`) would
+/// stringify to `…/v8/10` and collide with `variant = "v8", os_version = "10"`,
+/// since the base joins segments with `/`. All other bytes pass through verbatim,
+/// so the common ASCII values — `variant` (`v7`, `v8`), `os_version`
+/// (`10.0.14393.1066`), feature names (`win32k`, `sse4`, `aes`) — are unchanged,
+/// preserving the `lock_key`-equals-`Display` common case.
+fn escape_feature_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '/' => out.push_str("%2F"),
+            ',' => out.push_str("%2C"),
+            ';' => out.push_str("%3B"),
+            '=' => out.push_str("%3D"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 impl std::fmt::Display for Platform {
@@ -534,6 +660,323 @@ mod tests {
         let current = Platform::current();
         assert!(current.is_some());
         assert!(!current.unwrap().is_any());
+    }
+
+    // --- lock_key (V2 map key encoding) ---
+
+    /// The common case is byte-identical to `Display` — `lock_key` must not
+    /// bloat the typical `linux/amd64` / `darwin/arm64/v8` / `any` keys.
+    #[test]
+    fn lock_key_common_case_equals_display() {
+        for case in ["any", "linux/amd64", "darwin/arm64", "windows/amd64", "linux/arm64/v8"] {
+            let platform: Platform = case.parse().unwrap();
+            assert_eq!(
+                platform.lock_key(),
+                platform.to_string(),
+                "lock_key must equal Display for the common case '{case}'"
+            );
+        }
+    }
+
+    /// Lossless + injective: two advertised children that differ ONLY in
+    /// `os_features` must produce DISTINCT keys — a lossy key (plain Display)
+    /// would collide them and convert a `select`-installable multi-variant
+    /// package into a hard lock failure (Codex R1).
+    #[test]
+    fn lock_key_distinguishes_os_features() {
+        let base = Platform::Specific {
+            os: OperatingSystem::Windows,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: None,
+            features: None,
+        };
+        let with_win32k = Platform::Specific {
+            os: OperatingSystem::Windows,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: Some(vec!["win32k".to_string()]),
+            features: None,
+        };
+        assert_ne!(
+            base.lock_key(),
+            with_win32k.lock_key(),
+            "platforms differing only in os_features must get distinct lock keys"
+        );
+    }
+
+    /// Lossless + injective: two advertised children that differ ONLY in CPU
+    /// `features` must produce DISTINCT keys.
+    #[test]
+    fn lock_key_distinguishes_cpu_features() {
+        let base = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: None,
+            features: None,
+        };
+        let with_sse4 = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: None,
+            features: Some(vec!["sse4".to_string()]),
+        };
+        assert_ne!(
+            base.lock_key(),
+            with_sse4.lock_key(),
+            "platforms differing only in CPU features must get distinct lock keys"
+        );
+    }
+
+    /// Injectivity for separator-bearing feature VALUES (Codex R1 / F4): a
+    /// single value that itself contains the `,` separator must NOT alias a
+    /// two-element vector. Without per-component escaping, `["a,b"]` and
+    /// `["a","b"]` both naively render `;feat=a,b` and collide — which turns a
+    /// VALID multi-variant manifest into a spurious `DuplicatePlatformKey` lock
+    /// failure. The escaped encoding keeps them distinct.
+    #[test]
+    fn lock_key_injective_for_separator_bearing_feature_values() {
+        let with_features = |features: Vec<String>| Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: None,
+            features: Some(features),
+        };
+        let one_element_with_comma = with_features(vec!["a,b".to_string()]);
+        let two_elements = with_features(vec!["a".to_string(), "b".to_string()]);
+        assert_ne!(
+            one_element_with_comma.lock_key(),
+            two_elements.lock_key(),
+            "`[\"a,b\"]` (one value containing a comma) must not collide with `[\"a\",\"b\"]` (two values)"
+        );
+
+        // Same hazard via the os_features vector and via a value that contains
+        // the literal marker text `;feat=` (which must be escaped, not forge a
+        // second marker).
+        let osf_one = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: Some(vec!["x,y".to_string()]),
+            features: None,
+        };
+        let osf_two = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: Some(vec!["x".to_string(), "y".to_string()]),
+            features: None,
+        };
+        assert_ne!(
+            osf_one.lock_key(),
+            osf_two.lock_key(),
+            "separator-bearing os_features values must not collide with a multi-element vector"
+        );
+
+        let forged_marker = with_features(vec![";feat=win32k".to_string()]);
+        let plain = with_features(vec!["win32k".to_string()]);
+        assert_ne!(
+            forged_marker.lock_key(),
+            plain.lock_key(),
+            "a feature value containing the literal `;feat=` marker text must not forge a collision"
+        );
+    }
+
+    /// Injectivity for marker-bearing `os_version` / `variant` VALUES (Codex
+    /// R1 backstop — Finding 2): the registry-controlled `variant` and
+    /// `os_version` strings enter the key base via `Display`. Without escaping
+    /// them, a crafted `os_version` such as `"10;osf=win32k"` forges a `;osf=`
+    /// marker, so a platform with that bare `os_version` (and no real
+    /// `os_features`) collides on one key with a DIFFERENT platform that has a
+    /// plain `os_version` plus a genuine `os_features = ["win32k"]`. Two
+    /// distinct advertised platforms must NOT share a `lock_key`.
+    #[test]
+    fn lock_key_injective_for_marker_bearing_os_version() {
+        // Platform A: os_version forges a `;osf=win32k` marker, no real os_features.
+        let forged = Platform::Specific {
+            os: OperatingSystem::Windows,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: Some("10;osf=win32k".to_string()),
+            os_features: None,
+            features: None,
+        };
+        // Platform B: plain os_version `10`, genuine os_features `["win32k"]`.
+        let genuine = Platform::Specific {
+            os: OperatingSystem::Windows,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: Some("10".to_string()),
+            os_features: Some(vec!["win32k".to_string()]),
+            features: None,
+        };
+        assert_ne!(
+            forged.lock_key(),
+            genuine.lock_key(),
+            "a marker-forging os_version must not collide with a genuine os_features platform"
+        );
+    }
+
+    /// Same hazard via the registry-controlled `variant` string: a crafted
+    /// `variant = "v8;feat=sse4"` must not forge a `;feat=` marker that
+    /// collides with a genuine `features = ["sse4"]` platform.
+    #[test]
+    fn lock_key_injective_for_marker_bearing_variant() {
+        let forged = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: Some("v8;feat=sse4".to_string()),
+            os_version: None,
+            os_features: None,
+            features: None,
+        };
+        let genuine = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: Some("v8".to_string()),
+            os_version: None,
+            os_features: None,
+            features: Some(vec!["sse4".to_string()]),
+        };
+        assert_ne!(
+            forged.lock_key(),
+            genuine.lock_key(),
+            "a marker-forging variant must not collide with a genuine features platform"
+        );
+    }
+
+    /// Injectivity for slash-bearing `variant` VALUES (Block B): the base is
+    /// joined with `/`, so a `variant = "v8/10"` (no `os_version`) would
+    /// stringify to `…/v8/10` — byte-identical to `variant = "v8",
+    /// os_version = "10"` — unless the base segments escape `/`. Two distinct
+    /// advertised platforms must NOT share a `lock_key`, or a valid
+    /// multi-variant manifest becomes a spurious `DuplicatePlatformKey` lock
+    /// failure.
+    #[test]
+    fn lock_key_injective_for_slash_bearing_variant() {
+        // Platform A: variant carries an embedded slash, no os_version.
+        let forged = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: Some("v8/10".to_string()),
+            os_version: None,
+            os_features: None,
+            features: None,
+        };
+        // Platform B: plain variant `v8`, separate os_version `10`.
+        let genuine = Platform::Specific {
+            os: OperatingSystem::Linux,
+            arch: Architecture::Amd64,
+            variant: Some("v8".to_string()),
+            os_version: Some("10".to_string()),
+            os_features: None,
+            features: None,
+        };
+        assert_ne!(
+            forged.lock_key(),
+            genuine.lock_key(),
+            "a slash-bearing variant must not forge an os_version segment and collide"
+        );
+    }
+
+    /// Same hazard via the registry-controlled `os_version` string: a crafted
+    /// `os_version` containing a `/` must not forge an extra base segment. A
+    /// platform with `os_version = "10/x"` (no `os_features`) must stay distinct
+    /// from any other platform whose base segments would otherwise align.
+    #[test]
+    fn lock_key_injective_for_slash_bearing_os_version() {
+        // Platform A: os_version itself contains a slash.
+        let forged = Platform::Specific {
+            os: OperatingSystem::Windows,
+            arch: Architecture::Amd64,
+            variant: Some("v3".to_string()),
+            os_version: Some("10/x".to_string()),
+            os_features: None,
+            features: None,
+        };
+        // Platform B: variant `v3/10`, os_version `x` — the naive (unescaped)
+        // base join of both is `windows/amd64/v3/10/x`, so they would collide
+        // without `/` escaping.
+        let genuine = Platform::Specific {
+            os: OperatingSystem::Windows,
+            arch: Architecture::Amd64,
+            variant: Some("v3/10".to_string()),
+            os_version: Some("x".to_string()),
+            os_features: None,
+            features: None,
+        };
+        assert_ne!(
+            forged.lock_key(),
+            genuine.lock_key(),
+            "a slash-bearing os_version must not forge an extra base segment and collide"
+        );
+    }
+
+    /// The escape is confined to feature values: a value with no structural
+    /// characters round-trips verbatim, so common feature names are unchanged
+    /// and the key stays human-readable.
+    #[test]
+    fn lock_key_leaves_plain_feature_values_unescaped() {
+        let plain = Platform::Specific {
+            os: OperatingSystem::Windows,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features: Some(vec!["win32k".to_string()]),
+            features: Some(vec!["sse4".to_string(), "aes".to_string()]),
+        };
+        assert_eq!(
+            plain.lock_key(),
+            "windows/amd64;osf=win32k;feat=sse4,aes",
+            "plain ASCII feature names must pass through unescaped"
+        );
+    }
+
+    /// Injectivity backstop: a set of platforms that are pairwise distinct
+    /// (including the features-only differences) must yield pairwise-distinct
+    /// keys — the structural no-collision guarantee the dup-key guard relies
+    /// on.
+    #[test]
+    fn lock_key_is_injective_over_distinct_platforms() {
+        let win = |os_features: Option<Vec<String>>, features: Option<Vec<String>>| Platform::Specific {
+            os: OperatingSystem::Windows,
+            arch: Architecture::Amd64,
+            variant: None,
+            os_version: None,
+            os_features,
+            features,
+        };
+        let platforms = vec![
+            "linux/amd64".parse::<Platform>().unwrap(),
+            "linux/arm64".parse::<Platform>().unwrap(),
+            "darwin/arm64".parse::<Platform>().unwrap(),
+            Platform::Any,
+            win(None, None),
+            win(Some(vec!["win32k".to_string()]), None),
+            win(None, Some(vec!["sse4".to_string()])),
+        ];
+        let mut keys = std::collections::HashSet::new();
+        for platform in &platforms {
+            assert!(
+                keys.insert(platform.lock_key()),
+                "lock_key collision for {platform:?}; keys so far: {keys:?}"
+            );
+        }
+        assert_eq!(
+            keys.len(),
+            platforms.len(),
+            "every distinct platform must get a distinct key"
+        );
     }
 
     #[test]

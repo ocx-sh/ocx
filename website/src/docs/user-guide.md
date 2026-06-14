@@ -413,10 +413,12 @@ Each value is a fully-qualified [OCI identifier][oci-identifier] — `registry/r
 
 <<< @/_scripts/user-guide/project-lifecycle.sh{sh}
 
-[`ocx lock`][cmd-lock] resolves every tag to an immutable digest and writes `ocx.lock`. Subsequent [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] runs read the lock, never the registry, so two machines on the same commit get the same bytes. The lock carries a hash of the canonicalized `ocx.toml`; if you edit `ocx.toml` and forget to re-run `ocx lock`, dependent commands refuse to run with stale digests.
+[`ocx lock`][cmd-lock] resolves every tag to per-platform leaf digests and writes `ocx.lock`. For each tool, the lock records every platform the publisher ships. Subsequent [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] runs read the lock for the host platform, never the registry, so two machines on the same commit get the same bytes. The lock carries a hash of the canonicalized `ocx.toml`; if you edit `ocx.toml` and forget to re-run `ocx lock`, dependent commands refuse to run with stale digests.
 
 ::: tip Edited `ocx.toml` by hand? Run `ocx lock`.
 [`ocx add`][cmd-add] / [`ocx remove`][cmd-remove] regenerate `ocx.lock` for you, but hand-edits to `ocx.toml` do not. The lock carries a hash over the canonicalized `ocx.toml`; commands that read the lock ([`ocx pull`][cmd-pull], [`ocx run`][cmd-run]) detect the drift and exit 65 telling you the lock is stale. Re-run [`ocx lock`][cmd-lock] to sync. The default is intentional: read paths never silently re-resolve, so CI cannot drift behind a stray editor save.
+
+Adding or removing a tool never silently upgrades your other tools — [`ocx add`][cmd-add] and [`ocx remove`][cmd-remove] carry every untouched lock entry forward unchanged. Only [`ocx upgrade`][cmd-upgrade] re-resolves surviving tags.
 :::
 
 ::: warning Commit your `ocx.lock`

@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use crate::file_structure::{FileStructure, StaleEntry};
 use crate::log;
 use crate::oci;
-use crate::project::{ProjectLock, ProjectRegistry};
+use crate::project::{LockedResolution, ProjectLock, ProjectRegistry};
 
 use super::super::PackageManager;
 use super::garbage_collection::{GarbageCollector, ProjectRootDigests};
@@ -72,6 +72,42 @@ pub struct CleanResult {
 /// the resulting path will not exist in the store and will therefore be a
 /// no-op root that does not affect GC decisions, but also does not raise an
 /// error that would abort the operation.
+/// Resolve a locked tool's [`LockedResolution`] into the set of
+/// package-store root digests it pins (presence-gated).
+///
+/// V2 ([`LockedResolution::PerPlatform`]): read the leaf digests straight
+/// from the `platforms` map and reconstruct `repository`+leaf for each,
+/// presence-gating against the on-disk package store. V1
+/// ([`LockedResolution::LegacyIndex`]): retain the index-blob-read walk via
+/// [`resolve_to_package_digests`]. Presence-gating is kept in both paths.
+async fn collect_tool_roots(
+    resolution: &LockedResolution,
+    file_structure: &FileStructure,
+) -> Vec<oci::PinnedIdentifier> {
+    match resolution {
+        LockedResolution::LegacyIndex(pinned) => resolve_to_package_digests(pinned, file_structure).await,
+        // V2: the lock already stores per-platform leaf digests — read them
+        // straight from the map (no index-blob read). Each leaf maps directly
+        // to a package-store key; presence-gate so a single-platform machine
+        // does not root phantom (never-pulled) platform leaves.
+        LockedResolution::PerPlatform { repository, platforms } => {
+            let mut roots = Vec::new();
+            for leaf in platforms.values() {
+                let child_id = repository.clone_with_digest(leaf.clone());
+                let child_pinned = match oci::PinnedIdentifier::try_from(child_id) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let pkg_path = file_structure.packages.path(&child_pinned);
+                if crate::utility::fs::path_exists_lossy(&pkg_path).await {
+                    roots.push(child_pinned);
+                }
+            }
+            roots
+        }
+    }
+}
+
 async fn resolve_to_package_digests(
     pinned: &oci::PinnedIdentifier,
     file_structure: &FileStructure,
@@ -306,7 +342,7 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
     for (index, loaded_lock) in loaded.iter().enumerate() {
         for tool in &loaded_lock.tools {
             let sem = Arc::clone(&sem);
-            let pinned = tool.pinned.clone();
+            let resolution = tool.resolution.clone();
             let group = tool.group.clone();
             let name = tool.name.clone();
             // Dense post-filter position in `loaded` (Bug-R3): the resolve
@@ -319,7 +355,7 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
             let fs = file_structure.clone();
             resolve_set.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
-                let resolved = resolve_to_package_digests(&pinned, &fs).await;
+                let resolved = collect_tool_roots(&resolution, &fs).await;
                 (index, group, name, resolved)
             });
         }

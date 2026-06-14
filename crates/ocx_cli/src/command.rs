@@ -84,7 +84,7 @@ pub enum Command {
     Login(login::Login),
     /// Remove credentials for a registry.
     Logout(logout::Logout),
-    /// Re-resolve advisory tags and rewrite ocx.lock for one or more tools.
+    /// Re-resolve every declared tag in the lock to its newest digest.
     Upgrade(upgrade::Upgrade),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]

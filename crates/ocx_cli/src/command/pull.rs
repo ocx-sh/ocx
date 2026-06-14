@@ -86,16 +86,25 @@ impl Pull {
         // No positional packages and no compose step: the lock is already
         // authoritative. Walk it directly, preserving lock order (sorted
         // by `(group, name)` at write time, so the result is deterministic).
-        let pinned: Vec<oci::PinnedIdentifier> = if self.groups.is_empty() {
-            ctx.lock.tools.iter().map(|t| t.pinned.clone()).collect()
+        //
+        // V2 ([`LockedResolution::PerPlatform`]): the pull id is the
+        // host→`"any"` leaf (`repository.clone_with_digest(leaf)`); absent
+        // host leaf → clean pre-network error. V1
+        // ([`LockedResolution::LegacyIndex`]): the legacy index-digest path.
+        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let selected: Vec<&ocx_lib::project::LockedTool> = if self.groups.is_empty() {
+            ctx.lock.tools.iter().collect()
         } else {
             ctx.lock
                 .tools
                 .iter()
                 .filter(|t| self.groups.iter().any(|g| g == &t.group))
-                .map(|t| t.pinned.clone())
                 .collect()
         };
+        let pinned: Vec<oci::PinnedIdentifier> = selected
+            .iter()
+            .map(|t| host_pull_pinned(t, &host))
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         // ── Phase 4b: dry-run preview ────────────────────────────────────
 
@@ -123,14 +132,22 @@ impl Pull {
         // inside `ProjectLock::save` freezes `generated_at` when content is
         // unchanged — atomic rename still advances mtime. Skipped under
         // `--dry-run` because dry-run must not cause any side effects.
-        ctx.lock
-            .save(
-                &ctx.lock_path,
-                Some(&ctx.lock),
-                context.file_structure().root(),
-                &ctx.config_path,
-            )
-            .await?;
+        //
+        // A committed V1 (legacy) lock is NEVER rewritten on a read path: the
+        // writer only emits V2, and the ADR forbids a read-path forced upgrade
+        // (the migration is an explicit `ocx lock --upgrade` / write command).
+        // The mtime bump is purely a direnv-refresh nicety, so skipping it for
+        // a V1 lock is harmless — direnv still re-fires on the next write.
+        if !lock_has_legacy_entry(&ctx.lock) {
+            ctx.lock
+                .save(
+                    &ctx.lock_path,
+                    Some(&ctx.lock),
+                    context.file_structure().root(),
+                    &ctx.config_path,
+                )
+                .await?;
+        }
 
         let entries: Vec<api::data::paths::PathEntry> = identifiers
             .iter()
@@ -145,6 +162,39 @@ impl Pull {
 
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// Return `true` when any tool in `lock` is a V1 legacy
+/// ([`ocx_lib::project::LockedResolution::LegacyIndex`]) entry. Such a lock
+/// must never be rewritten on a read path — the writer only emits V2 and the
+/// migration to V2 is an explicit `ocx lock --upgrade` / write command.
+fn lock_has_legacy_entry(lock: &ocx_lib::project::ProjectLock) -> bool {
+    lock.tools
+        .iter()
+        .any(|t| matches!(t.resolution, ocx_lib::project::LockedResolution::LegacyIndex(_)))
+}
+
+/// Resolve a locked tool to its host-platform pull [`oci::PinnedIdentifier`].
+///
+/// Delegates the V1/V2 host-leaf resolution to
+/// [`ocx_lib::project::host_leaf_identifier`] — the single source of the
+/// absent-host-leaf error ([`ProjectErrorKind::NoHostLeaf`], exit 78) — then
+/// asserts the resolved identifier is digest-pinned via `try_into`. The
+/// `ProjectError` is converted to `anyhow::Error` so the chain still classifies
+/// at the `main.rs` boundary.
+///
+/// [`ProjectErrorKind::NoHostLeaf`]: ocx_lib::project::error::ProjectErrorKind::NoHostLeaf
+fn host_pull_pinned(
+    tool: &ocx_lib::project::LockedTool,
+    host: &ocx_lib::oci::Platform,
+) -> anyhow::Result<oci::PinnedIdentifier> {
+    let id = ocx_lib::project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)?;
+    oci::PinnedIdentifier::try_from(id).map_err(|e| {
+        anyhow::anyhow!(
+            "locked leaf for tool '{}' is not a valid pinned identifier: {e}",
+            tool.name
+        )
+    })
 }
 
 /// Walks `pinned` and reports cached / would-fetch status without

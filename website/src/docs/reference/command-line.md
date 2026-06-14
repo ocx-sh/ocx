@@ -341,7 +341,7 @@ Appends a tool binding to the nearest `ocx.toml`, resolves its digest into `ocx.
 
 The command locates the project `ocx.toml` by walking the directory tree from the current working directory upward (same discovery as [`ocx lock`](#lock) and [`ocx pull`](#pull)). It fails with exit code 64 if no `ocx.toml` is found — it does **not** scaffold one implicitly. To create a project file first, run [`ocx init`](#init).
 
-After mutating `ocx.toml`, `ocx add` performs a partial lock update (preserving existing entries) followed by an install of the newly added tool.
+After mutating `ocx.toml`, `ocx add` resolves only the new binding and carries every existing lock entry forward unchanged, then installs the newly added tool.
 
 The same binding name may coexist in the default `[tools]` table and in any named `[group.*]` table — binding identity is `(group, name)`. This lets a project carry different versions of the same tool in different contexts:
 
@@ -380,10 +380,11 @@ See [`--global`][global-flag] for the full root-flag reference.
 |------|---------|
 | 0 | Binding added, lock updated, tool installed. |
 | 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, or `--global` combined with `--project`. |
+| 65 | `ocx.toml` drifted from `ocx.lock` before this add — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
-| 78 | `ocx.toml` schema invalid or TOML parse error. |
+| 78 | A carried legacy lock entry can no longer be migrated exactly — run `ocx upgrade` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error. |
 | 79 | Tag not found in the registry. |
 | 80 | Authentication failure against the registry. |
 
@@ -1095,11 +1096,17 @@ ocx --format json logout ghcr.io
 
 ### `lock` {#lock}
 
-Resolves every tool tag in the nearest `ocx.toml` to a pinned OCI manifest digest and writes the result to `ocx.lock` next to it. The command is fully transactional — either every tool resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
+Resolves every tool tag in the nearest `ocx.toml` to per-platform leaf digests and writes the result to `ocx.lock` next to it. The command is a **whole-file reconcile**: when the lock is already current (its `declaration_hash` matches the config), every pin is carried forward verbatim — a byte-identical, idempotent no-op that never advances a moving tag, even if it has moved upstream. When the config drifted, every declared tag is re-resolved and a moving tag may advance to wherever it points today. To force-advance pins on a current lock, use [`ocx upgrade`](#upgrade).
 
-The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) of `ocx.toml`. Downstream commands ([`ocx pull`](#pull), [`ocx exec`](#exec)) consult this hash to detect when the lock is stale relative to the source declaration. When the resolved content of every tool is unchanged between two `ocx lock` runs, the file's `generated_at` timestamp is preserved verbatim — the byte-stable output keeps version-control diffs minimal.
+For each tool, the lock records the bare registry/repository coordinates plus a `[tool.platforms]` table mapping every platform the publisher ships to its leaf manifest digest. The command records all shipped platforms regardless of which OS it runs on, so a lock committed on Linux is complete for macOS and Windows CI runners. The command is fully transactional — either every tool resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
+
+The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) of `ocx.toml`. Downstream commands ([`ocx pull`](#pull), [`ocx run`](#run)) consult this hash to detect when the lock is stale relative to the source declaration. When the resolved content of every tool is unchanged between two `ocx lock` runs, the file's `generated_at` timestamp is preserved verbatim — the byte-stable output keeps version-control diffs minimal.
 
 After a successful write, the command checks whether the project's `.gitattributes` declares `ocx.lock merge=union` and emits a one-line stderr advisory when it does not, helping prevent merge conflicts on team projects.
+
+::: tip `ocx lock` vs `ocx upgrade`
+`ocx lock` is an idempotent reconcile — it re-resolves only when `ocx.toml` changed. Use `ocx upgrade` to force a re-resolve of every tag regardless of drift.
+:::
 
 **Usage**
 
@@ -1111,7 +1118,6 @@ ocx lock [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--group <NAME>` | `-g` | Restrict resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. When omitted, every `[tools]` and `[group.*]` entry is resolved. | *(all groups)* |
 | `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
 | `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
@@ -1126,49 +1132,54 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written (or preserved if content was unchanged). |
-| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `--global` combined with `--project`. |
+| 64 | Missing `ocx.toml` or `--global` combined with `--project`. |
 | 65 | `--check` reported drift. |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
 | 78 | Existing `ocx.lock` is malformed (parse error), `ocx.toml` schema-invalid, or `--check` reported the lock is absent. |
 | 79 | Tag unresolvable during resolution (package not found in registry after retries). |
 | 80 | Authentication failure against the registry. |
+| 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
+
+**JSON output** (`--format json`)
+
+`ocx lock --format json` emits an array of objects, one per resolved tool:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `binding` | string | The binding name from `ocx.toml` (the left-hand key). |
+| `group` | string | Group the binding belongs to (`"default"` for the top-level `[tools]` table). |
+| `digest` | string | Host-platform leaf digest in `sha256:<hex>` form. |
+| `platforms` | object | Full available-only map: platform key string to leaf digest. Keys follow the lossless platform encoding (e.g. `"linux/amd64"`, `"darwin/arm64"`, `"any"`). |
 
 Concurrent invocations of `ocx lock` and `ocx upgrade` are serialised via an in-place exclusive flock on `ocx.toml`. Readers (`ocx pull`, `git`, IDE tooling) never acquire any lock and are never blocked by a running `ocx lock`.
 
 ### `upgrade` {#upgrade}
 
-Re-resolves advisory tags in `ocx.lock` and rewrites the file. Unlike `ocx lock`, which freezes whatever the registry surfaces at that moment for every tool, `upgrade` is an opt-in flow — you decide which tools to advance.
+Re-resolves every advisory tag in `ocx.toml` and rewrites `ocx.lock`. This is the **whole-file forced-bump verb**: every declared tag is re-resolved against the registry, even when the lock is already current. A moving tag (`:latest`, `:3`) advances to wherever it points today; an unchanged result rewrites the lock byte-identically. The operation is fully transactional — on any resolution failure nothing is written.
 
-With no arguments, `upgrade` re-resolves every tool declared in `ocx.toml` (equivalent to re-running `ocx lock` from scratch). With positional binding names or `--group` filters, it re-resolves only the named subset and preserves every other entry already in `ocx.lock`. The operation is fully transactional — on any resolution failure nothing is written.
-
-When a partial upgrade detects that `ocx.toml` has changed since the lock was written (the `declaration_hash` drifts), `upgrade` falls back to a full re-resolve automatically rather than silently mixing stale and fresh entries.
+::: tip `ocx upgrade` vs `ocx lock`
+`ocx upgrade` always re-resolves every tag. `ocx lock` only re-resolves when `ocx.toml` drifted (idempotent when clean). To advance versions, use `ocx upgrade`. To reconcile a changed config, use `ocx lock`.
+:::
 
 **Usage**
 
 ```shell
-ocx upgrade [OPTIONS] [BINDING...]
+ocx upgrade [OPTIONS]
 ```
-
-**Arguments**
-
-- `[BINDING...]`: Binding names from `ocx.toml` to re-resolve. Each value is the local TOML key (e.g. `cmake`, not `ocx.sh/cmake:3.28`). Names not declared in `ocx.toml` produce exit 79 and no lock write.
 
 **Options**
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--group <NAME>` | `-g` | Restrict re-resolution to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table. Combinable with positional binding names (intersection). | *(all groups)* |
 | `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
-| `--check` | — | Verify the candidate lock would match the predecessor and exit. Mirrors `lock --check`: re-resolves the requested subset (or the full toolchain when no positional names and no `-g` are supplied), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, candidate would change). When the predecessor lock is absent, exits 78. No writes, no commit. | off |
-| `--project <PATH>` | | Path to `ocx.toml`. Bypasses the CWD walk. | CWD walk |
-| `--config <PATH>` | | Extra config file layered on top of the discovered chain. | *(none)* |
+| `--check` | — | Re-resolves every declared tag, compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
 | `--remote` | | Route tag resolution to the remote registry instead of the local index. | false |
 | `-h`, `--help` | | Print help information. | |
 
 ::: tip Target the global toolchain
-Pass `--global` **before** the subcommand: `ocx --global upgrade ripgrep`. See [`--global`][global-flag].
+Pass `--global` **before** the subcommand: `ocx --global upgrade`. See [`--global`][global-flag].
 :::
 
 **Exit codes**
@@ -1176,29 +1187,23 @@ Pass `--global` **before** the subcommand: `ocx --global upgrade ripgrep`. See [
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.lock` written, or `--check` confirmed the candidate matches. |
-| 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, `ocx.lock` absent when a partial upgrade was requested, or `--global` combined with `--project`. |
-| 65 | `--check` reported the candidate would change pinned content (advisory tag moved upstream for a selected or preserved entry). |
+| 64 | Missing `ocx.toml` or `--global` combined with `--project`. |
+| 65 | `--check` reported the candidate would change pinned content (an advisory tag moved upstream). |
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient failure (rate limit, temporary network error) — retry. |
 | 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), or `--check` invoked when the lock is absent. |
-| 79 | Binding name not declared in `ocx.toml`. |
 | 80 | Authentication failure against the registry. |
+| 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
 **Examples**
 
 ```shell
-# Re-resolve all tools (equivalent to ocx lock):
+# Re-resolve every declared tag:
 ocx upgrade
 
-# Re-resolve only cmake and ninja:
-ocx upgrade cmake ninja
-
-# Re-resolve every tool in the ci group:
-ocx upgrade -g ci
-
-# Re-resolve ripgrep in the lint group with a live registry lookup:
-ocx upgrade --remote -g lint ripgrep
+# Re-resolve with a live registry lookup (bypass local index cache):
+ocx upgrade --remote
 ```
 
 Concurrent invocations of `ocx upgrade` and `ocx lock` are serialised via an in-place exclusive flock on `ocx.toml`.
@@ -1240,6 +1245,7 @@ Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`]
 | 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, or `--global` combined with `--project`. |
 | 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
 | 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. |
+| 78 | No leaf digest for the host platform at the locked version (and no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. |
 
 **Lock mtime touch**
 
@@ -1318,7 +1324,7 @@ The composer prepends env entries in iteration order, so the **last group listed
 | 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; or `--global` combined with `--project`. (OCX remaps clap's default exit 2 to 64.) |
 | 65 | `ocx.lock` is stale — run `ocx lock`. |
 | 69 | Registry unreachable during auto-install of a missing package. |
-| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error (e.g. `[group.all]` declared). |
+| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve. |
 | 79 | Package not found in registry during auto-install. |
 | 80 | Authentication failure during auto-install. |
 
@@ -1391,9 +1397,10 @@ Pass `--global` **before** the subcommand: `ocx --global remove ripgrep`. See [`
 |------|---------|
 | 0 | Binding removed, lock rewritten. |
 | 64 | No `ocx.toml` found in scope, binding name is ambiguous across groups (use `--group`), or `--global` combined with `--project`. |
+| 65 | `ocx.toml` drifted from `ocx.lock` before this remove — run `ocx lock` to reconcile. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`. Retry with backoff. |
-| 78 | `ocx.toml` schema invalid or TOML parse error. |
+| 78 | A survivor's legacy lock entry can no longer be migrated exactly — run `ocx upgrade` to re-resolve. Also: `ocx.toml` schema invalid or TOML parse error. |
 | 79 | Binding not found in the specified group (or any group when `--group` is omitted). |
 
 ### `select` {#select}

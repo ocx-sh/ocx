@@ -180,7 +180,8 @@ impl ToolchainEnv {
         } else {
             // Project tier: resolve + a SINGLE batched install (mirror run.rs).
             let ctx = load_project_with_lock(&context).await?;
-            let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &[DEFAULT_GROUP.to_owned()], &[])?;
+            let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+            let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &[DEFAULT_GROUP.to_owned()], &[], &host)?;
 
             let identifiers: Vec<ocx_lib::oci::Identifier> = composed.into_iter().map(|tool| tool.identifier).collect();
             let platforms = platforms_or_default(&[]);
@@ -295,11 +296,29 @@ pub(crate) async fn resolve_global_pinned_env(context: &crate::app::Context) -> 
         if tool.group != DEFAULT_GROUP {
             continue;
         }
-        // Resolve the lock's pinned digest offline against the local object
-        // store. `find` walks the (already-local) OCI chain from the pinned
-        // manifest digest to the assembled package — the lock pins the
-        // ImageIndex manifest digest, not the package content digest.
-        let identifier: ocx_lib::oci::Identifier = tool.pinned.clone().into();
+        // Resolve the lock entry to its host-platform identifier offline
+        // against the local object store. V1 ([`LockedResolution::LegacyIndex`]):
+        // the lock pins the ImageIndex manifest digest, so `find` walks the
+        // (already-local) OCI chain from it. V2 ([`LockedResolution::PerPlatform`]):
+        // reconstruct `repository`+host leaf and find that directly.
+        let identifier: ocx_lib::oci::Identifier = match &tool.resolution {
+            ocx_lib::project::LockedResolution::LegacyIndex(pinned) => pinned.clone().into(),
+            ocx_lib::project::LockedResolution::PerPlatform {
+                repository,
+                platforms: leaves,
+            } => {
+                // V2: reconstruct the host-platform leaf directly (host key →
+                // `"any"` fallback across the supported set). Absent leaf →
+                // skip silently (the login exporter must never block a shell).
+                let Some(leaf) = platforms
+                    .iter()
+                    .find_map(|platform| ocx_lib::project::lookup_host_leaf(leaves, platform))
+                else {
+                    continue;
+                };
+                repository.clone_with_digest(leaf.clone())
+            }
+        };
         match manager.find(&identifier, platforms.clone()).await {
             Ok(info) => infos.push(Arc::new(info)),
             // Pinned package not materialised locally — skip silently

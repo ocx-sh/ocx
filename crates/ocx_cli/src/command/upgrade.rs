@@ -5,28 +5,25 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::cli;
-use ocx_lib::project::error::ProjectErrorKind;
-use ocx_lib::project::{
-    DEFAULT_GROUP, LockedTool, ProjectLock, ResolveLockOptions, resolve_lock, resolve_lock_partial,
-};
+use ocx_lib::project::{LockedTool, ProjectLock, ResolveLockOptions, resolutions_content_equal, resolve_lock};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::CommandError;
 use crate::app::project_context::{load_project_for_mutate, materialize_lock};
 
-/// Re-resolve advisory tags for one or more tools and rewrite `ocx.lock`.
+/// Re-resolve every advisory tag in `ocx.toml` and rewrite `ocx.lock`.
 ///
-/// Opt-in mutation: never triggered automatically. With no arguments,
-/// re-resolves every tool in `ocx.toml` (equivalent to `ocx lock` from
-/// scratch). With positional binding names or `--group` filters,
-/// re-resolves only the matching subset and preserves every other entry
-/// already present in `ocx.lock`. Fully transactional — on any
-/// resolution failure nothing is written.
+/// The whole-file bump verb: every declared tag is re-resolved against the
+/// registry, even when the lock is already current. A moving tag (`:latest`,
+/// `:3`) advances to wherever it points today; an unchanged result rewrites
+/// the lock byte-identically. Use `ocx lock` for an idempotent reconcile that
+/// only re-resolves when `ocx.toml` drifted. Fully transactional — on any
+/// resolution failure nothing is written. Offline or frozen plus an uncached
+/// tag exits 81.
 ///
-/// **Behavior change:** this command now materializes packages by default
-/// after writing the lock (matching `ocx add`). Pass `--no-pull` to
-/// restore the prior lock-only behavior. The `--check` path is
-/// unaffected (read-only; never materializes regardless of flags).
+/// Materializes packages by default after writing the lock (matching
+/// `ocx add`). Pass `--no-pull` to write the lock without downloading. The
+/// `--check` path is read-only and never materializes.
 ///
 /// `--pull` is the affirmative form of the default (redundant but
 /// accepted). Both flags use POSIX last-wins semantics (`overrides_with`):
@@ -34,22 +31,12 @@ use crate::app::project_context::{load_project_for_mutate, materialize_lock};
 /// no-pull.
 #[derive(Parser, Clone)]
 pub struct Upgrade {
-    /// Restrict re-resolution to the named group(s).
-    ///
-    /// Repeatable and comma-separated: `-g ci,lint -g release`. The
-    /// reserved name `default` selects the top-level `[tools]` table.
-    /// Combinable with positional binding names (intersection).
-    #[arg(short = 'g', long = "group", value_delimiter = ',')]
-    pub groups: Vec<String>,
-
     /// Verify the candidate lock would match the predecessor and exit.
     ///
-    /// Mirrors `ocx lock --check`: re-resolves the requested subset
-    /// (or the full toolchain when no positional names and no `-g` are
-    /// supplied), compares the candidate to the predecessor, and exits
-    /// 0 (matches) or 65 (`DataError`, candidate would change). No
-    /// writes, no commit. When the predecessor lock is absent, exits
-    /// 78 (`ConfigError`).
+    /// Re-resolves every declared tag, compares the candidate to the
+    /// predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would
+    /// change). No writes, no commit. When the predecessor lock is absent,
+    /// exits 78 (`ConfigError`).
     #[arg(long = "check", default_value_t = false)]
     pub check: bool,
 
@@ -68,52 +55,12 @@ pub struct Upgrade {
     /// batch lock changes and materialize separately.
     #[arg(long = "no-pull", overrides_with = "pull")]
     pub no_pull: bool,
-
-    /// Binding names from `ocx.toml` to re-resolve.
-    ///
-    /// Each value is the local TOML key (e.g. `cmake`, not
-    /// `ocx.sh/cmake:3.28`). Names not declared in `ocx.toml` produce
-    /// `NotFound` (79) and no lock write.
-    #[arg(value_name = "BINDING")]
-    pub packages: Vec<String>,
 }
 
 impl Upgrade {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Pre-validate empty `--group` segments before any I/O.
-        for raw in &self.groups {
-            if raw.is_empty() {
-                return Err(
-                    cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
-                );
-            }
-        }
-
         // Errors propagate to the `main.rs` boundary (logged + classified).
         let guard = load_project_for_mutate(&context).await?;
-
-        // Validate group filter against the loaded snapshot.
-        for raw in &self.groups {
-            if raw == DEFAULT_GROUP {
-                continue;
-            }
-            if !guard.config().groups.contains_key(raw) {
-                return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
-            }
-        }
-
-        // Validate every positional binding exists in the snapshot.
-        for name in &self.packages {
-            let in_default = guard.config().tools.contains_key(name);
-            let in_groups = guard.config().groups.values().any(|tools| tools.contains_key(name));
-            if !in_default && !in_groups {
-                return Err(CommandError::new(
-                    format!("tool '{name}' not declared in ocx.toml"),
-                    cli::ExitCode::NotFound,
-                )
-                .into());
-            }
-        }
 
         // Stage as a lock-only mutation; the candidate config is
         // byte-identical to the snapshot.
@@ -121,68 +68,42 @@ impl Upgrade {
 
         let resolve_index = context.default_index();
 
-        let new_lock = if self.packages.is_empty() && self.groups.is_empty() {
-            resolve_lock(staged.config(), resolve_index, &[], ResolveLockOptions::default()).await?
-        } else {
-            let prev = match guard.previous_lock() {
-                Some(p) => p.clone(),
-                None => {
-                    return Err(CommandError::new(
-                        format!(
-                            "ocx.lock not found at {}; run `ocx lock` to create it before upgrading a subset",
-                            guard.lock_path().display()
-                        ),
-                        cli::ExitCode::ConfigError,
-                    )
-                    .into());
-                }
-            };
-            // Try the partial resolve first. When the predecessor's
-            // declaration_hash drifts from the current config (the user
-            // hand-edited `ocx.toml` between lock and update — common
-            // workflow), partial-resolve refuses with `StaleLockOnPartial`.
-            // Fall back to a full `resolve_lock` per the Cluster A plan
-            // ("Caller orchestrates fallback to `resolve_lock` on
-            // mismatch"): the gate prevents laundering, so on mismatch
-            // we rebuild from scratch.
-            match resolve_lock_partial(
-                staged.config(),
-                &prev,
-                resolve_index,
-                &self.packages,
-                &self.groups,
-                ResolveLockOptions::default(),
+        // ── --check missing-predecessor gate (spec §4.5) ───────────────
+        //
+        // For `--check`, verify a predecessor lock exists BEFORE the
+        // whole-file re-resolve. With no lock, the re-resolve would still
+        // hit the registry — a registry/auth/policy failure would then mask
+        // the intended exit 78 (and waste a network round-trip). Checking
+        // first makes "no lock to verify against" return ConfigError (78)
+        // deterministically, with no network attempted.
+        if self.check && guard.previous_lock().is_none() {
+            return Err(CommandError::new(
+                format!(
+                    "ocx.lock not found at {}; run `ocx lock` to create it",
+                    guard.lock_path().display()
+                ),
+                cli::ExitCode::ConfigError,
             )
-            .await
-            {
-                Ok(lock) => lock,
-                Err(ocx_lib::project::Error::Project(pe))
-                    if matches!(pe.kind, ProjectErrorKind::StaleLockOnPartial { .. }) =>
-                {
-                    resolve_lock(staged.config(), resolve_index, &[], ResolveLockOptions::default()).await?
-                }
-                Err(other) => return Err(other.into()),
-            }
-        };
+            .into());
+        }
+
+        // Whole-file bump (spec §4.5): bare `resolve_lock(&[])` re-resolves
+        // every declared tag. There is no subset, no carry-forward, nothing
+        // untouched — laundering and drift are impossible by construction.
+        let new_lock = resolve_lock(staged.config(), resolve_index, &[], ResolveLockOptions::default()).await?;
 
         // ── --check verify-only path ───────────────────────────────────
         //
-        // `--check` performs the partial-resolve dry-run above and exits
+        // `--check` performs the whole-file re-resolve above and exits
         // without writing: 0 when the candidate matches the predecessor,
         // 65 when any pinned content would change (an advisory tag moved
-        // upstream for a selected or preserved entry), 78 when there is
-        // no predecessor lock to compare against.
+        // upstream). The missing-predecessor case (78) was already handled
+        // above, before the re-resolve.
         if self.check {
-            let Some(prev) = guard.previous_lock() else {
-                return Err(CommandError::new(
-                    format!(
-                        "ocx.lock not found at {}; run `ocx lock` to create it",
-                        guard.lock_path().display()
-                    ),
-                    cli::ExitCode::ConfigError,
-                )
-                .into());
-            };
+            // The missing-predecessor gate above guarantees a predecessor here.
+            let prev = guard
+                .previous_lock()
+                .expect("missing-predecessor gate guarantees a predecessor lock for --check");
             if !lock_content_matches(&new_lock, prev) {
                 return Err(CommandError::new(
                     "ocx.lock candidate would change pinned content; \
@@ -205,15 +126,8 @@ impl Upgrade {
         let eager = !self.no_pull;
         materialize_lock(&context, &new_lock, eager).await?;
 
-        let entries: Vec<LockEntry> = new_lock
-            .tools
-            .iter()
-            .map(|t| LockEntry {
-                binding: t.name.clone(),
-                group: t.group.clone(),
-                digest: t.pinned.strip_advisory().to_string(),
-            })
-            .collect();
+        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
         let report = LockReport::new(entries);
         context.api().report(&report)?;
 
@@ -227,8 +141,8 @@ impl Upgrade {
 /// Advisory metadata (`generated_at`, `generated_by`) is ignored.
 ///
 /// Used by the `upgrade --check` verify-only path: a candidate that
-/// resolves to a different digest for any selected or preserved entry
-/// must surface as `DataError` (exit 65) without writing.
+/// resolves to a different digest for any entry must surface as
+/// `DataError` (exit 65) without writing.
 fn lock_content_matches(candidate: &ProjectLock, prev: &ProjectLock) -> bool {
     if candidate.metadata.declaration_hash != prev.metadata.declaration_hash
         || candidate.metadata.declaration_hash_version != prev.metadata.declaration_hash_version
@@ -245,7 +159,7 @@ fn lock_content_matches(candidate: &ProjectLock, prev: &ProjectLock) -> bool {
     b.sort_by(|x, y| (x.group.as_str(), x.name.as_str()).cmp(&(y.group.as_str(), y.name.as_str())));
     a.iter()
         .zip(b.iter())
-        .all(|(x, y)| x.name == y.name && x.group == y.group && x.pinned.eq_content(&y.pinned))
+        .all(|(x, y)| x.name == y.name && x.group == y.group && resolutions_content_equal(&x.resolution, &y.resolution))
 }
 
 #[cfg(test)]
@@ -308,5 +222,33 @@ mod tests {
         assert!(upgrade.pull, "pull must be true when --pull follows --no-pull");
         assert!(!upgrade.no_pull, "no_pull must be false when --pull overrides it");
         assert!(eager(&upgrade), "eager must be true when --pull wins");
+    }
+
+    // ── Whole-file model: the subset surface is gone (spec §4.5, §8.1) ──
+
+    /// `ocx upgrade --group ci` is rejected by clap — the `--group`/`-g` flag
+    /// no longer exists. `upgrade` is the whole-file bump verb; groups are a
+    /// composition concern only, never an upgrade scope. clap's unknown-arg
+    /// error maps to EX_USAGE (64) at the `main.rs` boundary.
+    #[test]
+    fn rejects_group_flag() {
+        assert!(
+            Upgrade::try_parse_from(["upgrade", "--group", "ci"]).is_err(),
+            "`ocx upgrade --group ci` must be rejected: the subset surface is gone"
+        );
+        assert!(
+            Upgrade::try_parse_from(["upgrade", "-g", "ci"]).is_err(),
+            "`ocx upgrade -g ci` must be rejected: the subset surface is gone"
+        );
+    }
+
+    /// `ocx upgrade <binding>` is rejected by clap — positional binding names
+    /// no longer exist. `upgrade` always re-resolves the whole file.
+    #[test]
+    fn rejects_positional_args() {
+        assert!(
+            Upgrade::try_parse_from(["upgrade", "cmake"]).is_err(),
+            "`ocx upgrade cmake` must be rejected: positional scoping is gone"
+        );
     }
 }

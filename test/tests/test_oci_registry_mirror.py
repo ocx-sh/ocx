@@ -43,13 +43,13 @@ from src.runner import OcxRunner
 # Helpers
 # ---------------------------------------------------------------------------
 
-_PINNED_RE = re.compile(
-    r'pinned\s*=\s*"([^"@]+)@sha256:([0-9a-f]{64})"'
-)
-"""Matches ``pinned = "<registry>/<repo>@sha256:<hex>"`` in ocx.lock.
+_REPOSITORY_RE = re.compile(r'repository\s*=\s*"([^"@:]+(?::\d+)?/[^"@:]+)"')
+"""Matches the V2 ``repository = "<registry>/<repo>"`` coordinate in ocx.lock.
 
-Reuses the regex shape from test_lock.py so the lockfile format is asserted
-consistently across the test suite.
+The V2 lock stores a bare registry/repo coordinate per tool (no tag, no
+digest) plus a per-platform leaf map; the canonical registry must appear here,
+never the mirror host. Reuses the regex shape from test_lock.py so the
+lockfile format is asserted consistently across the suite.
 """
 
 
@@ -342,12 +342,12 @@ def test_mirror_ocx_lock_records_canonical_host_and_digest(
     )
 
     lock_text = (project_dir / "ocx.lock").read_text()
-    matches = _PINNED_RE.findall(lock_text)
-    assert matches, "ocx.lock must contain at least one pinned entry"
+    matches = _REPOSITORY_RE.findall(lock_text)
+    assert matches, "ocx.lock must contain at least one repository coordinate"
 
-    for canonical_path, _ in matches:
+    for canonical_path in matches:
         assert canonical_path.startswith(registry), (
-            f"pinned entry must use canonical registry '{registry}', got "
+            f"repository coordinate must use canonical registry '{registry}', got "
             f"'{canonical_path}' — mirror host must NOT appear in lock"
         )
         assert mirror_registry not in canonical_path, (

@@ -159,7 +159,8 @@ impl Run {
 
         // ── Phase D: compose_tool_set ─────────────────────────────────────
 
-        let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[])?;
+        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[], &host)?;
 
         // ── Phase E: NAME filter ──────────────────────────────────────────
 

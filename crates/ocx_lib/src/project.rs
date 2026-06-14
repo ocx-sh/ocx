@@ -16,12 +16,17 @@ mod project_lock;
 pub mod registry;
 pub mod resolve;
 
-pub use compose::{Origin, PositionalPackage, ResolvedTool, compose_tool_set, expand_all_keyword, parse_positional};
+pub use compose::{
+    Origin, PositionalPackage, ResolvedTool, compose_tool_set, expand_all_keyword, host_leaf_identifier,
+    parse_positional,
+};
 pub use config::ProjectConfig;
 pub use error::{Error, ProjectError, ProjectErrorKind};
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use hook::{MissingState, ProjectState, load_project_state};
-pub use lock::{LockMetadata, LockVersion, LockedTool, ProjectLock};
+pub use lock::{
+    LockMetadata, LockVersion, LockedResolution, LockedTool, ProjectLock, ProjectLockV2, resolutions_content_equal,
+};
 pub use mutate::{
     add_binding, add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding,
     remove_binding_in_memory,
@@ -29,7 +34,7 @@ pub use mutate::{
 pub use mutation::{MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};
 pub use registry::ProjectRegistry;
-pub use resolve::{ResolveLockOptions, resolve_lock, resolve_lock_partial};
+pub use resolve::{ResolveLockOptions, lookup_host_leaf, resolve_lock, resolve_lock_touched};
 
 /// Reserved group name for the implicit default group (the top-level
 /// `[tools]` table in `ocx.toml`, the `"default"` group key in lock

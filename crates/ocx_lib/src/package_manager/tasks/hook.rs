@@ -65,34 +65,61 @@ pub async fn collect_applied(
             continue;
         }
 
-        // The lock pins the registry-side digest (image-index for
-        // multi-platform packages); the object store keys by the
-        // platform-selected manifest digest. Walk the cached chain
-        // through the offline-mode index to bridge the two.
-        let identifier: oci::Identifier = tool.pinned.clone().into();
-        let resolved_pinned = match manager.resolve(&identifier, platforms.to_vec()).await {
-            Ok(chain) => chain.pinned,
-            Err(_) => {
-                missing.push(tool.name.clone());
-                continue;
+        // V2 ([`LockedResolution::PerPlatform`]): the lock already pins the
+        // host-platform leaf digest — reconstruct `repository`+leaf and skip
+        // the `manager.resolve()` round-trip; the fingerprint is the resolved
+        // leaf (changes on upgrade — acceptable per release notes).
+        //
+        // V1 ([`LockedResolution::LegacyIndex`]): keep the legacy bridge —
+        // the lock pins the registry-side index digest while the object store
+        // keys by the platform-selected manifest digest, so walk the cached
+        // chain through the offline-mode index.
+        let (host_identifier, fingerprint_digest) = match &tool.resolution {
+            crate::project::LockedResolution::LegacyIndex(pinned) => {
+                let identifier: oci::Identifier = pinned.clone().into();
+                let resolved_pinned = match manager.resolve(&identifier, platforms.to_vec()).await {
+                    Ok(chain) => chain.pinned,
+                    Err(_) => {
+                        missing.push(tool.name.clone());
+                        continue;
+                    }
+                };
+                (resolved_pinned, pinned.digest().to_string())
+            }
+            crate::project::LockedResolution::PerPlatform {
+                repository,
+                platforms: leaves,
+            } => {
+                // The lock already pins the host-platform leaf — read it
+                // directly (host key → `"any"` fallback) and skip the
+                // `manager.resolve()` round-trip. The fingerprint is the
+                // resolved leaf digest (more correct than the old index
+                // digest, which churned when *any* platform changed). An
+                // absent host leaf is treated as "tool not installed".
+                let leaf = platforms
+                    .iter()
+                    .find_map(|platform| crate::project::lookup_host_leaf(leaves, platform));
+                let Some(leaf) = leaf else {
+                    missing.push(tool.name.clone());
+                    continue;
+                };
+                let host_id = repository.clone_with_digest(leaf.clone());
+                let pinned = match oci::PinnedIdentifier::try_from(host_id) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        missing.push(tool.name.clone());
+                        continue;
+                    }
+                };
+                let fingerprint = leaf.to_string();
+                (pinned, fingerprint)
             }
         };
-        match manager.find_plain(&resolved_pinned).await {
+        match manager.find_plain(&host_identifier).await {
             Ok(Some(info)) => {
-                // Fingerprint stability: the `manifest_digest` carried in
-                // `AppliedEntry` MUST match the one `hook-env`'s fast path
-                // computes from `lock.tools` directly, otherwise the
-                // unchanged-prompt path never short-circuits. The lock-side
-                // `tool.pinned.digest()` is the canonical choice — it's the
-                // identity the lock file commits to, stable across machines
-                // and platforms (image-index digest for multi-platform
-                // packages). Using `info.identifier.digest()` here would
-                // produce the platform-resolved manifest digest, which
-                // diverges on multi-platform packages and silently breaks
-                // the fast path.
                 entries.push(AppliedEntry {
                     name: tool.name.clone(),
-                    manifest_digest: tool.pinned.digest().to_string(),
+                    manifest_digest: fingerprint_digest,
                     group: tool.group.clone(),
                 });
                 infos.push(Arc::new(info));

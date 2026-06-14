@@ -23,6 +23,25 @@ use super::project_roots::ProjectRootDigests;
 /// Maximum concurrent I/O tasks for graph building.
 const BUILD_CONCURRENCY: usize = 50;
 
+/// Size ceiling, in bytes, for a blob considered as a possible OCI image-index
+/// manifest in [`add_index_retention_edges`]. A blob **larger** than this is
+/// skipped without being read (it cannot be a manifest — it is a layer tarball
+/// or config); a blob **at or under** this size is read in full and parsed.
+///
+/// This is a *whole-blob* ceiling, not a read prefix: a candidate index is read
+/// completely so a large-but-valid index (many child descriptors / annotations)
+/// is never truncated mid-JSON. Truncation would silently drop the
+/// `child_leaf_blob → index_blob` retention edge and let GC collect a live
+/// parent index blob. 4 MiB is far above any real OCI manifest/index (a few
+/// hundred descriptors with annotations is still well under 1 MiB) and far
+/// below a layer tarball, so the ceiling separates the two classes cleanly
+/// without slurping multi-hundred-MB archives.
+///
+/// The OCI distribution spec recommends registries cap manifest size at
+/// 4 MiB (`distribution` `maxManifestBytes`); matching that ceiling means any
+/// manifest a spec-compliant registry would accept is read whole here.
+const INDEX_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Pre-computed dependency graph with BFS reachability queries.
 ///
 /// Covers all three CAS tiers (packages, layers, blobs) in a single graph.
@@ -80,6 +99,9 @@ impl ReachabilityGraph {
             let sem = Arc::clone(&sem);
 
             tasks.spawn(async move {
+                // `sem` is constructed in this function and outlives every
+                // spawned task (each holds an `Arc` clone); it is never closed
+                // before all permits release, so `acquire_owned` cannot fail.
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
                 let is_root = has_live_refs(&pkg_dir).await;
                 let dep_refs = read_refs(&deps_dir, &pkgs_root).await;
@@ -133,6 +155,21 @@ impl ReachabilityGraph {
             let blob_dir = canonicalize_or_keep(&blob.dir);
             all_entries.insert(blob_dir, CasTier::Blob);
         }
+
+        // Index-manifest retention edges. An OCI image-index manifest blob
+        // (the outer multi-platform index) is not referenced by any package's
+        // `refs/blobs/` — packages reference only the per-platform leaf
+        // manifest they were assembled from. Under V2 per-platform pinning the
+        // index digest is never stored in `ocx.lock`, so the index blob has no
+        // GC root and would be collected on every `ocx clean`, even though the
+        // leaves it ties together are held.
+        //
+        // Add a `child_leaf_blob → index_blob` edge for every child the index
+        // advertises: when any child leaf blob is reachable (held by a rooted
+        // package), the BFS reaches the index blob and retains it. This is GC
+        // hygiene only — it never roots the index, and a fully-unreferenced
+        // index (no reachable child) is still collected.
+        add_index_retention_edges(&blob_dirs, &mut edges).await;
 
         // Propagate project-root attribution transitively through the edge
         // graph so that layers and blobs reachable from a project-root package
@@ -240,6 +277,100 @@ impl ReachabilityGraph {
     pub fn reachable(&self) -> HashSet<PathBuf> {
         self.bfs(self.roots.iter().cloned())
     }
+}
+
+/// Add `child_leaf_blob_dir → index_blob_dir` retention edges for every OCI
+/// image-index manifest blob in the store.
+///
+/// The index blob lives at `{blobs_root}/{registry_slug}/{algo}/{2hex}/{30hex}`;
+/// each child manifest the index advertises lives under the **same** registry
+/// slug at its own digest shard. Reading the index blob and resolving each
+/// child to its on-disk blob dir lets the GC retain the index when any child
+/// leaf is reachable (so a normal `ocx lock` + `ocx pull` leaves no orphan
+/// index blob), without ever storing the index digest in `ocx.lock`.
+///
+/// Best-effort: unreadable or non-manifest blobs are skipped silently (a blob
+/// store holds layer archives, configs, and leaf manifests too).
+async fn add_index_retention_edges(
+    blob_dirs: &[crate::file_structure::BlobDir],
+    edges: &mut HashMap<PathBuf, Vec<PathBuf>>,
+) {
+    use crate::oci;
+
+    for blob in blob_dirs {
+        // The registry slug is three levels up from the digest-suffix dir:
+        // .../{registry_slug}/{algo}/{2hex}/{30hex}.
+        let Some(registry_root) = blob.dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) else {
+            continue;
+        };
+
+        // Read the blob in full when it is small enough to be a manifest, or
+        // skip it without reading when it exceeds the manifest ceiling (a layer
+        // tarball or config). A candidate index is never truncated, so a
+        // large-but-valid index cannot lose its retention edge.
+        let Some(bytes) = read_manifest_candidate_blob(&blob.data()).await else {
+            continue;
+        };
+        let Ok(oci::Manifest::ImageIndex(index)) = serde_json::from_slice::<oci::Manifest>(&bytes) else {
+            continue;
+        };
+
+        let index_dir = canonicalize_or_keep(&blob.dir);
+        for entry in &index.manifests {
+            let Ok(child_digest) = oci::Digest::try_from(entry.digest.as_str()) else {
+                continue;
+            };
+            let child_dir =
+                canonicalize_or_keep(&registry_root.join(crate::file_structure::cas_shard_path(&child_digest)));
+            // Reverse edge: a reachable child leaf blob retains its parent index.
+            edges.entry(child_dir).or_default().push(index_dir.clone());
+        }
+    }
+}
+
+/// Read a blob **in full** when it could be an OCI manifest, or skip it when it
+/// is too large to be one, for the image-index probe in
+/// [`add_index_retention_edges`].
+///
+/// A blob whose size exceeds [`INDEX_MANIFEST_MAX_BYTES`] is a layer tarball or
+/// config, not a manifest — return `None` without reading it (so a
+/// multi-hundred-MB archive is never slurped into memory). A blob at or under
+/// the ceiling is read completely; a candidate index is therefore **never
+/// truncated**, so a large-but-valid index (many descriptors / annotations)
+/// keeps its `child_leaf_blob → index_blob` retention edge instead of being
+/// mis-classified as a non-manifest and silently collected.
+///
+/// `metadata().len()` is the size authority. The bounded `take(MAX + 1)` read
+/// is a defence-in-depth guard for synthetic files whose metadata reports 0 but
+/// whose read is unbounded (procfs, pipes) — mirrors the lock loader's pattern;
+/// a blob that grows past the ceiling between the stat and the read is dropped
+/// rather than partially parsed.
+///
+/// Returns `None` on any I/O error (best-effort: an unreadable blob is simply
+/// not treated as an index).
+async fn read_manifest_candidate_blob(path: &Path) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(path).await.ok()?;
+    // Stat first: skip a blob that is too large to be a manifest without
+    // reading any of its bytes.
+    if file.metadata().await.ok()?.len() > INDEX_MANIFEST_MAX_BYTES {
+        return None;
+    }
+
+    // Read the whole blob, bounded by `MAX + 1` so a synthetic 0-length-metadata
+    // file (procfs/pipe) cannot read unbounded. If the read reaches the bound,
+    // the blob is larger than the ceiling after all — drop it (a manifest never
+    // exceeds the ceiling).
+    let mut buf = Vec::new();
+    file.take(INDEX_MANIFEST_MAX_BYTES + 1)
+        .read_to_end(&mut buf)
+        .await
+        .ok()?;
+    if buf.len() as u64 > INDEX_MANIFEST_MAX_BYTES {
+        return None;
+    }
+    Some(buf)
 }
 
 /// Reads forward-refs from a refs subdirectory (deps/, layers/, or blobs/).
@@ -422,5 +553,129 @@ pub mod tests {
     fn unreferenced_blob_not_reachable() {
         let g = graph_with_tiers(&["A"], &[], &["orphan_blob"], &[("orphan_blob", CasTier::Blob)]);
         assert_eq!(g.reachable(), set(&["A"]));
+    }
+
+    // ── index-manifest retention (child_leaf_blob → index_blob edge) ────────
+
+    #[test]
+    fn index_blob_held_when_child_leaf_reachable() {
+        // A rooted package references its leaf manifest blob; the leaf carries a
+        // retention edge to the parent index blob. The index must be reachable.
+        let g = graph_with_tiers(
+            &["pkg"],
+            &[("pkg", &["leaf_blob"]), ("leaf_blob", &["index_blob"])],
+            &[],
+            &[("leaf_blob", CasTier::Blob), ("index_blob", CasTier::Blob)],
+        );
+        assert_eq!(g.reachable(), set(&["pkg", "leaf_blob", "index_blob"]));
+    }
+
+    #[test]
+    fn index_blob_collected_when_no_child_reachable() {
+        // No package references the leaf: neither the leaf nor the index blob
+        // is reachable. A fully-unreferenced index is still collectable — the
+        // retention edge only holds the index when a child leaf is held.
+        let g = graph_with_tiers(
+            &["pkg"],
+            &[("leaf_blob", &["index_blob"])],
+            &["leaf_blob", "index_blob"],
+            &[("leaf_blob", CasTier::Blob), ("index_blob", CasTier::Blob)],
+        );
+        assert_eq!(g.reachable(), set(&["pkg"]));
+    }
+
+    // ── index-manifest probe (F5: large index must not be truncated) ────────
+
+    /// F5 regression: an image-index manifest **larger than the old 16 KiB
+    /// probe bound** must still produce its `child_leaf_blob → index_blob`
+    /// retention edge. The previous code read only a 16 KiB prefix, so a large
+    /// valid index parsed as truncated JSON → was skipped → its parent index
+    /// blob lost the retention edge and GC could delete a live index.
+    ///
+    /// Drives [`add_index_retention_edges`] against a real on-disk blob holding
+    /// a > 16 KiB valid OCI image index (padded with many annotated child
+    /// descriptors). The retention edge for an advertised child must exist.
+    #[tokio::test]
+    async fn large_index_manifest_still_retains_via_child_edge() {
+        use crate::file_structure::{BlobDir, cas_shard_path};
+        use crate::oci;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Blob layout: {root}/{registry_slug}/{algo}/{2hex}/{30hex}/data — the
+        // index lives at its own digest shard; `add_index_retention_edges`
+        // resolves children under the SAME registry slug.
+        let registry_root = tmp.path().join("registry_slug");
+
+        // A child leaf digest the index advertises — its retention edge is the
+        // assertion target.
+        let child_hex = "a".repeat(64);
+        let child_digest = oci::Digest::Sha256(child_hex.clone());
+
+        // Build a valid OCI image index whose serialized JSON exceeds the old
+        // 16 KiB bound, by padding with many annotated child descriptors. The
+        // first child is the one we assert the edge for.
+        let mut manifests = vec![oci::ImageIndexEntry {
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            digest: format!("sha256:{child_hex}"),
+            size: 100,
+            platform: None,
+            annotations: Some(std::collections::BTreeMap::from([(
+                "org.opencontainers.image.title".to_string(),
+                "x".repeat(256),
+            )])),
+        }];
+        for i in 0..200 {
+            manifests.push(oci::ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{:064x}", i + 1),
+                size: 100,
+                platform: None,
+                annotations: Some(std::collections::BTreeMap::from([(
+                    "org.opencontainers.image.title".to_string(),
+                    "y".repeat(256),
+                )])),
+            });
+        }
+        let index = oci::Manifest::ImageIndex(oci::ImageIndex {
+            schema_version: 2,
+            media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+            artifact_type: None,
+            manifests,
+            annotations: None,
+        });
+        let index_json = serde_json::to_vec(&index).expect("serialize index");
+        assert!(
+            index_json.len() > 16 * 1024,
+            "the index fixture must exceed the old 16 KiB bound to exercise the regression; got {} bytes",
+            index_json.len()
+        );
+
+        // Write the index blob at an arbitrary digest shard under the registry.
+        let index_digest = oci::Digest::Sha256("c".repeat(64));
+        let index_blob_dir = registry_root.join(cas_shard_path(&index_digest));
+        tokio::fs::create_dir_all(&index_blob_dir)
+            .await
+            .expect("mkdir index dir");
+        tokio::fs::write(index_blob_dir.join("data"), &index_json)
+            .await
+            .expect("write index blob");
+
+        let blob_dirs = vec![BlobDir {
+            dir: index_blob_dir.clone(),
+        }];
+        let mut edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        super::add_index_retention_edges(&blob_dirs, &mut edges).await;
+
+        // The advertised child leaf's blob dir must carry an edge to the index
+        // blob dir — proving the large index was parsed (not truncated/skipped).
+        let child_dir = super::canonicalize_or_keep(&registry_root.join(cas_shard_path(&child_digest)));
+        let index_dir = super::canonicalize_or_keep(&index_blob_dir);
+        let child_edges = edges
+            .get(&child_dir)
+            .expect("a large valid index must still create the child_leaf_blob → index_blob retention edge");
+        assert!(
+            child_edges.contains(&index_dir),
+            "the child leaf must retain its parent index blob; child_edges={child_edges:?}, want {index_dir:?}"
+        );
     }
 }

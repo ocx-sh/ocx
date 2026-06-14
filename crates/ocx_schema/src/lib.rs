@@ -9,7 +9,7 @@
 
 use ocx_lib::Config;
 use ocx_lib::package::metadata::Metadata;
-use ocx_lib::project::{ProjectConfig, ProjectLock};
+use ocx_lib::project::{ProjectConfig, ProjectLockV2};
 use schemars::generate::SchemaSettings;
 
 /// Top-level `$comment` injected into the project-lock schema. Flags the
@@ -24,9 +24,10 @@ const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across 
 /// Known kinds: `metadata`, `config`, `project`, `project-lock`.
 ///
 /// The output JSON has its `$id` set to the canonical published URL
-/// (`https://ocx.sh/schemas/<kind>/v1.json`). The `project-lock` schema
-/// additionally carries a top-level `$comment` flagging the format as
-/// machine-generated.
+/// (`https://ocx.sh/schemas/<kind>/<version>.json`). Every schema is at
+/// `v1.json` except `project-lock`, which is at `v2.json` (in lock-step with
+/// `LockVersion::V2`). The `project-lock` schema additionally carries a
+/// top-level `$comment` flagging the format as machine-generated.
 pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
         "metadata" => Some(generate_schema::<Metadata>(
@@ -38,8 +39,8 @@ pub fn schema_for(kind: &str) -> Option<String> {
             "https://ocx.sh/schemas/project/v1.json",
             None,
         )),
-        "project-lock" => Some(generate_schema::<ProjectLock>(
-            "https://ocx.sh/schemas/project-lock/v1.json",
+        "project-lock" => Some(generate_schema::<ProjectLockV2>(
+            "https://ocx.sh/schemas/project-lock/v2.json",
             Some(PROJECT_LOCK_COMMENT),
         )),
         _ => None,

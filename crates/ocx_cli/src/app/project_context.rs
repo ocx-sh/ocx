@@ -326,7 +326,16 @@ pub async fn materialize_lock(
     if !eager {
         return Ok(());
     }
-    let identifiers: Vec<ocx_lib::oci::Identifier> = lock.tools.iter().map(|t| t.pinned.clone().into()).collect();
+    // Resolve each locked tool to its host-platform pull identifier. V2
+    // ([`LockedResolution::PerPlatform`]): host→`"any"` leaf via
+    // `repository.clone_with_digest(leaf)`. V1
+    // ([`LockedResolution::LegacyIndex`]): the legacy pinned index id.
+    let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+    let identifiers: Vec<ocx_lib::oci::Identifier> = lock
+        .tools
+        .iter()
+        .map(|t| host_materialize_identifier(t, &host))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     context
         .manager()
         .pull_all(
@@ -336,6 +345,24 @@ pub async fn materialize_lock(
         )
         .await?;
     Ok(())
+}
+
+/// Resolve a locked tool to its host-platform pull [`ocx_lib::oci::Identifier`]
+/// for materialization.
+///
+/// Delegates the V1/V2 host-leaf resolution to
+/// [`ocx_lib::project::host_leaf_identifier`] — the single source of the
+/// absent-host-leaf error ([`ProjectErrorKind::NoHostLeaf`], exit 78) — so the
+/// condition classifies identically across `compose_tool_set`, `ocx pull`, and
+/// this materialization path. The `ProjectError` is converted to
+/// `anyhow::Error` so the chain still classifies at the `main.rs` boundary.
+///
+/// [`ProjectErrorKind::NoHostLeaf`]: ocx_lib::project::error::ProjectErrorKind::NoHostLeaf
+fn host_materialize_identifier(
+    tool: &ocx_lib::project::LockedTool,
+    host: &ocx_lib::oci::Platform,
+) -> anyhow::Result<ocx_lib::oci::Identifier> {
+    ocx_lib::project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)
 }
 
 /// Mutation-side counterpart to [`load_project_with_lock`].
@@ -348,16 +375,16 @@ pub async fn materialize_lock(
 ///
 /// Unlike [`load_project_with_lock`], the staleness gate is NOT
 /// enforced here: mutators (`ocx add`, `ocx remove`, `ocx lock`,
-/// `ocx update`) are precisely the commands that *fix* a stale lock.
-/// The guard surfaces the predecessor lock verbatim and lets the
-/// resolver layer decide whether to fall back from
-/// `resolve_lock_partial` to `resolve_lock` based on the
-/// `StaleLockOnPartial` signal.
+/// `ocx upgrade`) are precisely the commands that *fix* a stale lock.
+/// The guard surfaces the predecessor lock verbatim. `add`/`remove`
+/// feed it to `resolve_lock_touched`, which carries untouched bindings
+/// forward and fails closed (no silent fallback) on pre-mutation drift;
+/// `ocx lock`/`ocx upgrade` re-resolve the whole file via `resolve_lock`.
 ///
 /// Bootstrapping case: when `ocx.toml` exists but `ocx.lock` does
 /// not, [`MutationGuard::previous_lock`] returns `None`. Callers
 /// must use [`ocx_lib::project::resolve_lock`] (full resolve) in
-/// that case rather than `resolve_lock_partial`.
+/// that case rather than `resolve_lock_touched`.
 ///
 /// # Errors
 ///
@@ -416,8 +443,25 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
     })?;
     let config = ProjectConfig::from_toml_bytes_with_path(&bytes, config_path.clone())?;
 
-    // Optional predecessor lock — `None` is the bootstrap case.
+    // Optional predecessor lock — `None` is the bootstrap case. Capture the
+    // raw on-disk bytes verbatim alongside the parsed lock so the commit
+    // rollback path can restore the predecessor byte-for-byte (a committed V1
+    // lock must roll back as V1 — the V2 writer cannot serialize it).
     let previous_lock = ProjectLock::from_path(&lock_path).await?;
+    let previous_lock_bytes = match &previous_lock {
+        Some(_) => match tokio::fs::read(&lock_path).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(ocx_lib::project::Error::Project(ProjectError::new(
+                    lock_path.clone(),
+                    ProjectErrorKind::Io(e),
+                ))
+                .into());
+            }
+        },
+        None => None,
+    };
 
     Ok(MutationGuard::from_parts(
         flock,
@@ -426,5 +470,6 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         home,
         config,
         previous_lock,
+        previous_lock_bytes,
     ))
 }

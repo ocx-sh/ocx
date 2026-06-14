@@ -1,21 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for ``ocx upgrade`` (plan Phase 5).
+"""Acceptance tests for ``ocx upgrade`` (whole-file lock model).
 
-Tests trace one-to-one to the four spec bullets in plan Phase 5:
+``ocx upgrade`` is the whole-file bump verb: it re-resolves EVERY declared
+tag, always, even when the lock is already current. There is no subset
+surface — ``--group`` / ``-g`` and positional binding names were removed.
+Groups are a composition concern only, never an upgrade scope.
 
-1. ``ocx upgrade cmake``               — only the ``cmake`` entry changes
-2. ``ocx upgrade`` (no args)           — full re-resolution, equivalent to ``ocx lock``
-3. ``ocx upgrade nonexistent``         — ``NotFound`` (79), no lock written
-4. ``ocx upgrade --group ci``          — only ci-group tools change
+1. ``ocx upgrade`` (no args)  — re-resolves the whole file (bumps every tag)
+2. ``ocx upgrade --group ci`` — rejected by clap (exit 64); subset surface gone
+3. ``ocx upgrade cmake``      — rejected by clap (exit 64); positional scoping gone
 
-Specification mode (contract-first TDD)
----------------------------------------
-All tests run against the current Phase 5 stub. Both the CLI command
-(``command/upgrade.rs``) and the library helper
-(``project/resolve.rs::resolve_lock_partial``) call ``unimplemented!()``.
-Every test is therefore expected to FAIL against the stub — the
-contract they encode is the Phase 5 implementation target.
+Spec: ``design_spec_partial_mutator_pin_preservation.md`` §2, §4.5, §8.2.
 """
 from __future__ import annotations
 
@@ -30,7 +26,8 @@ from src.runner import OcxRunner, registry_dir
 
 
 EXIT_SUCCESS = 0
-EXIT_NOT_FOUND = 79
+EXIT_USAGE = 64        # clap unknown-arg → EX_USAGE
+EXIT_POLICY_BLOCKED = 81
 
 
 def _ocx_cmd(ocx: OcxRunner, *args: str) -> list[str]:
@@ -67,21 +64,27 @@ def _read_lock_text(project_dir: Path) -> str:
     return (project_dir / "ocx.lock").read_text()
 
 
-_PINNED_RE = re.compile(r'pinned\s*=\s*"([^"@]+)@sha256:([0-9a-f]{64})"')
+# V2 lock shape: each ``[[tool]]`` carries a bare ``repository`` plus a
+# ``[tool.platforms]`` table of per-platform leaf digests. There is no single
+# ``pinned`` index digest — a tool's content fingerprint is its leaf set.
+_LEAF_RE = re.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
 
 
-def _pinned_for(lock_text: str, name: str) -> str | None:
-    """Return the pinned digest hex for the ``[[tool]]`` entry whose
-    ``name`` field equals ``name``; ``None`` when no entry matches.
+def _leaves_for(lock_text: str, name: str) -> list[str]:
+    """Return the sorted per-platform leaf digests for the ``[[tool]]`` entry
+    whose ``name`` field equals ``name``; ``[]`` when no entry matches.
+
+    Slices from the tool's ``name = "<name>"`` line to the next ``[[tool]]``
+    boundary so only that tool's ``[tool.platforms]`` leaves are collected.
     """
-    pat = re.compile(
-        rf'\[\[tool\]\]\s*\nname\s*=\s*"{re.escape(name)}"\s*\n'
-        rf'group\s*=\s*"[^"]+"\s*\n'
-        rf'pinned\s*=\s*"[^"@]+@sha256:([0-9a-f]{{64}})"',
-        re.MULTILINE,
-    )
-    m = pat.search(lock_text)
-    return m.group(1) if m else None
+    marker = f'name = "{name}"'
+    if marker not in lock_text:
+        return []
+    start = lock_text.index(marker)
+    rest = lock_text[start:]
+    next_tool = rest.find("[[tool]]", len("[[tool]]"))
+    slice_text = rest if next_tool == -1 else rest[:next_tool]
+    return sorted(_LEAF_RE.findall(slice_text))
 
 
 def _declaration_hash(lock_text: str) -> str:
@@ -97,23 +100,25 @@ def _generated_at(lock_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. ``ocx upgrade <name>`` — only the named entry changes
+# 1. ``ocx upgrade`` (whole file) — bumps every moving tag to its new digest
 # ---------------------------------------------------------------------------
 
 
-def test_update_named_tool_rewrites_only_that_entry(
+def test_upgrade_bumps_every_tag(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx upgrade a`` after swapping ``a``'s tag → only ``a``'s pinned
-    digest changes; ``b``'s entry stays byte-identical to the prior lock.
+    """``ocx upgrade`` (no args) re-resolves EVERY declared tag. With two
+    tools each declared at a moving ``:latest`` that has since advanced
+    upstream, both tools' leaf digests change — upgrade is whole-file, never
+    a subset.
     """
     short = uuid4().hex[:8]
-    repo_a = f"t_{short}_upd_a"
-    repo_b = f"t_{short}_upd_b"
+    repo_a = f"t_{short}_bump_a"
+    repo_b = f"t_{short}_bump_b"
 
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    # Cascade so ``:latest`` is a real moving tag for both tools.
+    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -121,40 +126,44 @@ def test_update_named_tool_rewrites_only_that_entry(
         project,
         f"""\
 [tools]
-a = "{ocx.registry}/{repo_a}:1.0.0"
-b = "{ocx.registry}/{repo_b}:1.0.0"
+a = "{ocx.registry}/{repo_a}:latest"
+b = "{ocx.registry}/{repo_b}:latest"
 """,
     )
 
     initial = _run_lock(ocx, project)
     assert initial.returncode == EXIT_SUCCESS, initial.stderr
     initial_text = _read_lock_text(project)
-    initial_a = _pinned_for(initial_text, "a")
-    initial_b = _pinned_for(initial_text, "b")
-    assert initial_a is not None and initial_b is not None
+    initial_a = _leaves_for(initial_text, "a")
+    initial_b = _leaves_for(initial_text, "b")
+    assert initial_a and initial_b, "both tools must record leaf digests"
 
-    # Swap 'a' tag in ocx.toml then run `ocx upgrade a`.
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-a = "{ocx.registry}/{repo_a}:2.0.0"
-b = "{ocx.registry}/{repo_b}:1.0.0"
-""",
-    )
+    # Advance both moving tags upstream (cascade re-points ``:latest``).
+    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_b, "2.0.0", tmp_path, new=False, cascade=True)
+    for repo in (repo_a, repo_b):
+        refresh = subprocess.run(
+            _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo}"),
+            cwd=project,
+            capture_output=True,
+            text=True,
+            env=ocx.env,
+        )
+        assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
 
-    result = _run_update(ocx, project, "a")
+    # Bare ``ocx upgrade`` re-resolves the whole file; both tags advance.
+    result = _run_update(ocx, project)
     assert result.returncode == EXIT_SUCCESS, (
-        f"ocx upgrade a failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+        f"ocx upgrade failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
 
     after_text = _read_lock_text(project)
-    after_a = _pinned_for(after_text, "a")
-    after_b = _pinned_for(after_text, "b")
-    assert after_a is not None and after_b is not None
+    after_a = _leaves_for(after_text, "a")
+    after_b = _leaves_for(after_text, "b")
+    assert after_a and after_b, "both tools must still record leaf digests"
 
-    assert after_a != initial_a, "'a' digest must change after `ocx upgrade a`"
-    assert after_b == initial_b, "'b' digest must be unchanged when not selected"
+    assert after_a != initial_a, "'a' leaves must change — upgrade bumps every tag"
+    assert after_b != initial_b, "'b' leaves must change — upgrade bumps every tag"
 
 
 # ---------------------------------------------------------------------------
@@ -188,22 +197,22 @@ b = "{ocx.registry}/{repo_b}:2.0.0"
     initial = _run_lock(ocx, project)
     assert initial.returncode == EXIT_SUCCESS, initial.stderr
     initial_text = _read_lock_text(project)
-    initial_pinned = sorted(_PINNED_RE.findall(initial_text))
+    initial_leaves = sorted(_LEAF_RE.findall(initial_text))
     initial_hash = _declaration_hash(initial_text)
 
     # `ocx upgrade` (no args) re-resolves everything against the same
-    # ocx.toml — every digest must match the initial lock and the
+    # ocx.toml — every leaf digest must match the initial lock and the
     # declaration_hash must be unchanged.
     result = _run_update(ocx, project)
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx upgrade failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     after_text = _read_lock_text(project)
-    after_pinned = sorted(_PINNED_RE.findall(after_text))
+    after_leaves = sorted(_LEAF_RE.findall(after_text))
     after_hash = _declaration_hash(after_text)
 
-    assert after_pinned == initial_pinned, (
-        "no-args `ocx upgrade` must keep every tool's pinned digest equal to `ocx lock`"
+    assert after_leaves == initial_leaves, (
+        "no-args `ocx upgrade` must keep every tool's leaf digests equal to `ocx lock`"
     )
     assert after_hash == initial_hash, (
         "declaration_hash must be unchanged when ocx.toml has not changed"
@@ -211,19 +220,18 @@ b = "{ocx.registry}/{repo_b}:2.0.0"
 
 
 # ---------------------------------------------------------------------------
-# 3. ``ocx upgrade <unknown>`` — exit 79, no lock changes
+# 3. The subset surface is gone — positional args and --group → exit 64
 # ---------------------------------------------------------------------------
 
 
-def test_update_unknown_binding_exits_79_no_lock_change(
+def test_upgrade_rejects_positional_args(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx upgrade nonexistent`` when ``nonexistent`` is not declared in
-    ``ocx.toml`` → exit 79 (NotFound); the existing ``ocx.lock`` is left
-    untouched (byte-identical).
+    """``ocx upgrade <binding>`` is rejected by clap (exit 64): positional
+    scoping no longer exists. The existing ``ocx.lock`` is left untouched.
     """
     short = uuid4().hex[:8]
-    repo = f"t_{short}_unknown"
+    repo = f"t_{short}_pos"
     make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
 
     project = tmp_path / "proj"
@@ -240,20 +248,99 @@ tool = "{ocx.registry}/{repo}:1.0.0"
     assert initial.returncode == EXIT_SUCCESS, initial.stderr
     before_bytes = (project / "ocx.lock").read_bytes()
 
-    result = _run_update(ocx, project, "nonexistent")
-    assert result.returncode == EXIT_NOT_FOUND, (
-        f"expected exit {EXIT_NOT_FOUND}; got {result.returncode}\nstderr:\n{result.stderr}"
+    result = _run_update(ocx, project, "tool")
+    assert result.returncode == EXIT_USAGE, (
+        f"`ocx upgrade tool` must be rejected (exit {EXIT_USAGE}); "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
 
     after_bytes = (project / "ocx.lock").read_bytes()
     assert after_bytes == before_bytes, (
-        "ocx.lock must NOT be rewritten when an unknown binding is passed"
+        "ocx.lock must NOT be rewritten when a positional arg is rejected"
     )
 
 
-# ---------------------------------------------------------------------------
-# 4. ``ocx upgrade --group ci`` — only ci-group tools change
-# ---------------------------------------------------------------------------
+def test_upgrade_rejects_group_flag(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx upgrade --group ci`` is rejected by clap (exit 64): the subset
+    surface is gone. ``-g`` is also rejected. Groups are a composition
+    concern only, never an upgrade scope.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_grpflag"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[group.ci]
+tool = "{ocx.registry}/{repo}:1.0.0"
+""",
+    )
+
+    for flag in ("--group", "-g"):
+        result = _run_update(ocx, project, flag, "ci")
+        assert result.returncode == EXIT_USAGE, (
+            f"`ocx upgrade {flag} ci` must be rejected (exit {EXIT_USAGE}); "
+            f"got {result.returncode}\nstderr:\n{result.stderr}"
+        )
+
+
+def test_upgrade_offline_uncached_policy_blocked(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx --offline upgrade`` with a moving tag absent from the local
+    index → exit 81 (PolicyBlocked). Offline + frozen refuse to re-resolve an
+    unpinned tag without touching the network.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_offline"
+    fake_registry = "fake.registry.invalid"  # unreachable by construction
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{fake_registry}/{repo}:latest"
+""",
+    )
+
+    # Hand-author a V2 lock so the predecessor exists but the tag is uncached.
+    (project / "ocx.lock").write_text(
+        f"""\
+[metadata]
+lock_version = 2
+declaration_hash_version = 1
+declaration_hash = "sha256:{"d" * 64}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "tool"
+group = "default"
+repository = "{fake_registry}/{repo}"
+
+[tool.platforms]
+"linux/amd64" = "sha256:{"a" * 64}"
+"""
+    )
+
+    result = subprocess.run(
+        _ocx_cmd(ocx, "--offline", "upgrade"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == EXIT_POLICY_BLOCKED, (
+        f"ocx --offline upgrade with an uncached moving tag must exit "
+        f"{EXIT_POLICY_BLOCKED}; got {result.returncode}\nstderr:\n{result.stderr}"
+    )
 
 
 def test_update_check_succeeds_on_current(
@@ -288,12 +375,55 @@ tool = "{ocx.registry}/{repo}:1.0.0"
     assert before == after, "ocx upgrade --check must NOT rewrite ocx.lock"
 
 
-def test_update_check_exits_65_on_subset_drift(
+def test_upgrade_check_no_lock_exits_78_without_network(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx upgrade --check`` with NO ``ocx.lock`` exits 78 (ConfigError)
+    BEFORE any resolution. The missing-predecessor check runs first, so a
+    registry/auth/policy failure can never mask the intended exit 78 and no
+    network call is attempted.
+
+    The ``ocx.toml`` points at an unreachable registry: if the command tried
+    to re-resolve before checking for the predecessor it would surface a
+    registry/policy error (not 78). Exit 78 proves the check runs first.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_check_no_lock"
+    fake_registry = "fake.registry.invalid"  # unreachable by construction
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{fake_registry}/{repo}:1.0.0"
+""",
+    )
+
+    # No ocx.lock written — the predecessor is absent.
+    assert not (project / "ocx.lock").exists()
+
+    result = _run_update(ocx, project, "--check")
+    assert result.returncode == 78, (
+        f"ocx upgrade --check with no lock must exit 78 (ConfigError) before "
+        f"any resolve; got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert not (project / "ocx.lock").exists(), (
+        "ocx upgrade --check must not create ocx.lock"
+    )
+
+
+def test_upgrade_check_exits_65_on_whole_file_drift(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx upgrade --check`` exits 65 (DataError) without writing when
     an advisory tag has moved upstream — even though ``ocx.toml`` is
     byte-identical to the lock's recorded ``declaration_hash``.
+
+    ``upgrade`` is a whole-file verb: ``--check`` compares the whole-file
+    re-resolve candidate against the recorded lock and refuses when any
+    declared tag has advanced. There is no subset scope.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_upd_check_drift"
@@ -332,73 +462,6 @@ mover = "{ocx.registry}/{repo}:latest"
     after_lock = (project / "ocx.lock").read_bytes()
     assert before_lock == after_lock, (
         "ocx upgrade --check must NOT rewrite ocx.lock when refusing"
-    )
-
-
-def test_update_group_filter_only_changes_named_group(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
-    """``ocx upgrade --group ci`` after swapping a ci-group tool's tag →
-    that ci-group entry's digest changes; the default-group entry stays
-    byte-identical.
-    """
-    short = uuid4().hex[:8]
-    repo_def = f"t_{short}_grp_def"
-    repo_ci = f"t_{short}_grp_ci"
-
-    make_package(ocx, repo_def, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_ci, "1.0.0", tmp_path, new=True, cascade=False)
-    # Second tag for the ci-group tool so we have a different digest to
-    # update to.
-    make_package(ocx, repo_ci, "2.0.0", tmp_path, new=False, cascade=False)
-
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-defaulttool = "{ocx.registry}/{repo_def}:1.0.0"
-
-[group.ci]
-citool = "{ocx.registry}/{repo_ci}:1.0.0"
-""",
-    )
-
-    initial = _run_lock(ocx, project)
-    assert initial.returncode == EXIT_SUCCESS, initial.stderr
-    initial_text = _read_lock_text(project)
-    initial_def = _pinned_for(initial_text, "defaulttool")
-    initial_ci = _pinned_for(initial_text, "citool")
-    assert initial_def is not None and initial_ci is not None
-
-    # Swap citool's tag to 2.0.0 then update only the ci group.
-    _write_ocx_toml(
-        project,
-        f"""\
-[tools]
-defaulttool = "{ocx.registry}/{repo_def}:1.0.0"
-
-[group.ci]
-citool = "{ocx.registry}/{repo_ci}:2.0.0"
-""",
-    )
-
-    result = _run_update(ocx, project, "--group", "ci")
-    assert result.returncode == EXIT_SUCCESS, (
-        f"ocx upgrade --group ci failed: rc={result.returncode}\nstderr:\n{result.stderr}"
-    )
-
-    after_text = _read_lock_text(project)
-    after_def = _pinned_for(after_text, "defaulttool")
-    after_ci = _pinned_for(after_text, "citool")
-    assert after_def is not None and after_ci is not None
-
-    assert after_ci != initial_ci, (
-        "citool digest must change after `ocx upgrade --group ci`"
-    )
-    assert after_def == initial_def, (
-        "defaulttool digest must be unchanged when not selected by --group"
     )
 
 

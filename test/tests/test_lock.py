@@ -41,7 +41,7 @@ from src.runner import OcxRunner, registry_dir
 # ---------------------------------------------------------------------------
 
 EXIT_SUCCESS = 0
-EXIT_USAGE = 64       # --group unknown / empty segment / no ocx.toml
+EXIT_USAGE = 64       # no ocx.toml / dropped flag (--group, -g, --upgrade)
 EXIT_UNAVAILABLE = 69
 EXIT_CONFIG = 78      # corrupt ocx.lock
 EXIT_NOT_FOUND = 79   # tag unresolvable
@@ -135,16 +135,39 @@ def _read_lock_bytes(project_dir: Path) -> bytes:
     return (project_dir / "ocx.lock").read_bytes()
 
 
-# Matches ``pinned = "<registry>/<repo>@sha256:<hex>"`` — the advisory
-# tag is stripped at write time, so the on-disk shape is canonical.
-_PINNED_RE = re.compile(
-    r'pinned\s*=\s*"([^"@]+)@sha256:([0-9a-f]{64})"'
-)
+# V2 lock shape: each ``[[tool]]`` carries a bare ``repository`` coordinate
+# (no tag, no digest) and a ``[tool.platforms]`` table mapping a lossless
+# platform key to a per-platform leaf digest. The outer image-index digest is
+# NOT stored (ADR per-platform leaf pinning). There is no ``pinned`` line.
+_REPOSITORY_RE = re.compile(r'repository\s*=\s*"([^"@:]+(?::\d+)?/[^"@:]+)"')
+_LEAF_RE = re.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
 
 
-def _pinned_values(lock_text: str) -> list[tuple[str, str]]:
-    """Return ``[(registry/repo, digest_hex), ...]`` for every locked tool."""
-    return [(m.group(1), m.group(2)) for m in _PINNED_RE.finditer(lock_text)]
+def _repository_values(lock_text: str) -> list[str]:
+    """Return ``[registry/repo, ...]`` for every locked tool's ``repository``."""
+    return _REPOSITORY_RE.findall(lock_text)
+
+
+def _leaf_digests(lock_text: str) -> list[str]:
+    """Return every per-platform leaf digest hex recorded under
+    ``[tool.platforms]``."""
+    return _LEAF_RE.findall(lock_text)
+
+
+def _tool_leaf_digests(lock_text: str, name: str) -> list[str]:
+    """Return the sorted per-platform leaf digests for the ``[[tool]]`` entry
+    whose ``name`` is ``name``.
+
+    Slices from the tool's ``name = "<name>"`` line to the next ``[[tool]]``
+    boundary (or end of file) and collects every leaf digest in that tool's
+    ``[tool.platforms]`` table. A V2 entry has no single ``pinned`` digest —
+    "did this tool's content change?" is answered by its leaf set.
+    """
+    start = lock_text.index(f'name = "{name}"')
+    rest = lock_text[start:]
+    next_tool = rest.find("[[tool]]", len("[[tool]]"))
+    slice_text = rest if next_tool == -1 else rest[:next_tool]
+    return sorted(_LEAF_RE.findall(slice_text))
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +179,9 @@ def test_lock_two_tools_produces_valid_lock_file(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx lock`` against a fixture registry with two tools → produces
-    a correctly shaped ``ocx.lock`` (3-field ``[[tool]]`` entries,
-    sorted by ``(group, name)``, valid declaration hash).
+    a correctly shaped V2 ``ocx.lock`` (``[[tool]]`` entries with a bare
+    ``repository`` + ``[tool.platforms]`` leaf map, sorted by ``(group,
+    name)``, valid declaration hash, ``lock_version = 2``).
     """
     repo_a, tag_a, repo_b, tag_b = _two_pushed_tools(ocx, tmp_path)
     project = tmp_path / "proj"
@@ -180,8 +204,8 @@ beta = "{ocx.registry}/{repo_b}:{tag_b}"
 
     lock_text = _read_lock_text(project)
 
-    # Metadata header: required fields present.
-    assert "lock_version = 1" in lock_text, "lock_version = 1 missing"
+    # Metadata header: required fields present. The writer only emits V2.
+    assert "lock_version = 2" in lock_text, "lock_version = 2 missing"
     assert "declaration_hash_version = 1" in lock_text, (
         "declaration_hash_version = 1 missing"
     )
@@ -196,24 +220,40 @@ beta = "{ocx.registry}/{repo_b}:{tag_b}"
     )
 
     # Exactly two tool entries, sorted by (group, name) → alpha before beta.
-    pinned = _pinned_values(lock_text)
-    assert len(pinned) == 2, f"expected 2 tool entries, got {len(pinned)}"
+    repositories = _repository_values(lock_text)
+    assert len(repositories) == 2, f"expected 2 tool entries, got {len(repositories)}"
     alpha_idx = lock_text.index('name = "alpha"')
     beta_idx = lock_text.index('name = "beta"')
     assert alpha_idx < beta_idx, "entries must be sorted by (group, name)"
 
-    # Each entry is the 3-field shape (name, group, pinned).
+    # Each entry is the V2 shape: name, group, a BARE repository (no tag, no
+    # digest), and a [tool.platforms] table with at least one leaf digest.
     for name, repo in [("alpha", repo_a), ("beta", repo_b)]:
         entry = re.search(
             r'\[\[tool\]\]\s*\n'
             rf'name\s*=\s*"{re.escape(name)}"\s*\n'
             r'group\s*=\s*"default"\s*\n'
-            rf'pinned\s*=\s*"{re.escape(ocx.registry + "/" + repo)}@sha256:[0-9a-f]{{64}}"\s*\n',
+            rf'repository\s*=\s*"{re.escape(ocx.registry + "/" + repo)}"\s*\n',
             lock_text,
         )
         assert entry is not None, (
-            f"missing or malformed [[tool]] entry for {name}; full lock:\n{lock_text}"
+            f"missing or malformed V2 [[tool]] entry for {name}; full lock:\n{lock_text}"
         )
+        # The repository coordinate must be bare — no tag, no embedded digest.
+        assert f'repository = "{ocx.registry}/{repo}@' not in lock_text, (
+            f"V2 repository for {name} must not carry a digest"
+        )
+        assert f'repository = "{ocx.registry}/{repo}:' not in lock_text, (
+            f"V2 repository for {name} must not carry a tag"
+        )
+
+    # The platforms map must carry at least one leaf digest per tool, and the
+    # legacy ``pinned`` index-digest line must be absent everywhere.
+    assert "[tool.platforms]" in lock_text, "V2 lock must carry a [tool.platforms] table"
+    assert len(_leaf_digests(lock_text)) >= 2, (
+        f"expected at least one leaf digest per tool; full lock:\n{lock_text}"
+    )
+    assert "pinned =" not in lock_text, "V2 lock must NOT carry a legacy `pinned` line"
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +296,139 @@ b = "{ocx.registry}/{repo_b}:{tag_b}"
     )
 
 
+def test_lock_clean_does_not_bump_moved_tag(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx lock`` on a CLEAN lock (``ocx.toml`` byte-identical, its
+    ``declaration_hash`` already matching the lock) leaves the pin UNCHANGED
+    even when the upstream advisory tag has moved.
+
+    A clean ``ocx lock`` is a reconcile, not a bump: it must carry the
+    predecessor forward verbatim and produce a byte-identical lock. The
+    lock-vs-upgrade distinction is the whole point — advancing a moved tag on
+    a clean lock collapses ``ocx lock`` into ``ocx upgrade``. Use ``ocx
+    upgrade`` to force-advance.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_clean_noop"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=True)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+mover = "{ocx.registry}/{repo}:latest"
+""",
+    )
+
+    initial = _run_lock(ocx, project)
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+    initial_bytes = _read_lock_bytes(project)
+    initial_leaves = _tool_leaf_digests(_read_lock_text(project), "mover")
+    assert initial_leaves, "mover must record leaf digests"
+
+    # Advance the moving tag upstream (cascade re-points ``:latest``). The
+    # ``ocx.toml`` text is unchanged, so the lock is still CLEAN (its stored
+    # declaration_hash still matches the config).
+    make_package(ocx, repo, "2.0.0", tmp_path, new=False, cascade=True)
+    refresh = subprocess.run(
+        _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo}"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
+
+    # Clean reconcile: bare `ocx lock` must NOT bump the moved tag.
+    result = _run_lock(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"clean ocx lock failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    after_bytes = _read_lock_bytes(project)
+    after_leaves = _tool_leaf_digests(_read_lock_text(project), "mover")
+    assert after_leaves == initial_leaves, (
+        "a clean ocx lock must NOT re-resolve the moved tag (pin preserved); "
+        "use `ocx upgrade` to force-advance"
+    )
+    assert after_bytes == initial_bytes, (
+        "a clean ocx lock must produce a byte-identical lock (idempotent no-op)"
+    )
+
+
+def test_lock_dirty_reresolves_all_declared_tags(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A whole-file ``ocx lock`` reconcile on a DIRTY lock (``ocx.toml``
+    changed since the last lock, so its ``declaration_hash`` no longer
+    matches) re-resolves every declared tag. Here a second tool is appended
+    to ``ocx.toml`` between the two lock runs: the config genuinely changed,
+    so the whole file is reconciled and the pre-existing tool is re-resolved
+    along with the new one.
+    """
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_dirty_a"
+    repo_b = f"t_{short}_dirty_b"
+    # `a` cascades so its `:latest` is a real moving tag we can advance.
+    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:latest"
+""",
+    )
+
+    initial = _run_lock(ocx, project)
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+    initial_a = _tool_leaf_digests(_read_lock_text(project), "a")
+    assert initial_a, "tool 'a' must record leaf digests"
+
+    # Advance `a`'s moving tag upstream, AND change `ocx.toml` by appending a
+    # second tool. The config change makes the lock DIRTY (declaration_hash
+    # mismatch), so a whole-file reconcile re-resolves every declared tag —
+    # including the moved `a`.
+    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
+    for repo in (repo_a, repo_b):
+        refresh = subprocess.run(
+            _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo}"),
+            cwd=project,
+            capture_output=True,
+            text=True,
+            env=ocx.env,
+        )
+        assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:latest"
+b = "{ocx.registry}/{repo_b}:1.0.0"
+""",
+    )
+
+    # Dirty whole-file reconcile: bare `ocx lock` re-resolves the moved tag
+    # for `a` (the config changed, so the bump is the intended whole-file
+    # behaviour) and locks the new tool `b`.
+    result = _run_lock(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"dirty ocx lock failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    after_a = _tool_leaf_digests(_read_lock_text(project), "a")
+    after_b = _tool_leaf_digests(_read_lock_text(project), "b")
+    assert after_a != initial_a, (
+        "a dirty whole-file lock must re-resolve the moved tag for 'a' "
+        "(leaves advance)"
+    )
+    assert after_b, "the newly declared tool 'b' must be locked"
+
+
 # ---------------------------------------------------------------------------
 # 3. Tag change rewrites only that entry
 # ---------------------------------------------------------------------------
@@ -265,8 +438,8 @@ def test_lock_tag_change_rewrites_only_that_entry(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Change a tool's tag in ``ocx.toml``, re-run → only that tool's
-    ``pinned`` field changes; ``generated_at`` and ``declaration_hash``
-    both update.
+    per-platform leaf digests change; ``generated_at`` and
+    ``declaration_hash`` both update.
     """
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_swap_a"
@@ -298,16 +471,10 @@ b = "{ocx.registry}/{repo_b}:1.0.0"
     first_generated_at = re.search(
         r'generated_at\s*=\s*"([^"]+)"', first_text
     ).group(1)
-    first_pinned_a = re.search(
-        rf'name\s*=\s*"a".*?pinned\s*=\s*"{re.escape(ocx.registry + "/" + repo_a)}@(sha256:[0-9a-f]{{64}})"',
-        first_text,
-        re.DOTALL,
-    ).group(1)
-    first_pinned_b = re.search(
-        rf'name\s*=\s*"b".*?pinned\s*=\s*"{re.escape(ocx.registry + "/" + repo_b)}@(sha256:[0-9a-f]{{64}})"',
-        first_text,
-        re.DOTALL,
-    ).group(1)
+    first_leaves_a = _tool_leaf_digests(first_text, "a")
+    first_leaves_b = _tool_leaf_digests(first_text, "b")
+    assert first_leaves_a, "tool 'a' must record at least one leaf digest"
+    assert first_leaves_b, "tool 'b' must record at least one leaf digest"
 
     # Swap 'a' tag 1.0.0 → 2.0.0.
     _write_ocx_toml(
@@ -327,22 +494,14 @@ b = "{ocx.registry}/{repo_b}:1.0.0"
     second_generated_at = re.search(
         r'generated_at\s*=\s*"([^"]+)"', second_text
     ).group(1)
-    second_pinned_a = re.search(
-        rf'name\s*=\s*"a".*?pinned\s*=\s*"{re.escape(ocx.registry + "/" + repo_a)}@(sha256:[0-9a-f]{{64}})"',
-        second_text,
-        re.DOTALL,
-    ).group(1)
-    second_pinned_b = re.search(
-        rf'name\s*=\s*"b".*?pinned\s*=\s*"{re.escape(ocx.registry + "/" + repo_b)}@(sha256:[0-9a-f]{{64}})"',
-        second_text,
-        re.DOTALL,
-    ).group(1)
+    second_leaves_a = _tool_leaf_digests(second_text, "a")
+    second_leaves_b = _tool_leaf_digests(second_text, "b")
 
-    assert second_pinned_a != first_pinned_a, (
-        "'a' digest must change when its tag changes"
+    assert second_leaves_a != first_leaves_a, (
+        "'a' leaf digests must change when its tag changes"
     )
-    assert second_pinned_b == first_pinned_b, (
-        "'b' digest must be unchanged (its tag did not change)"
+    assert second_leaves_b == first_leaves_b, (
+        "'b' leaf digests must be unchanged (its tag did not change)"
     )
     assert second_hash != first_hash, (
         "declaration_hash must update when ocx.toml changes"
@@ -390,9 +549,7 @@ tool = "{ocx.registry}/{repo}:1.0.0"
     first_generated_at = re.search(
         r'generated_at\s*=\s*"([^"]+)"', first_text
     ).group(1)
-    first_pinned = re.search(
-        r'pinned\s*=\s*"([^"]+)"', first_text
-    ).group(1)
+    first_leaves = _tool_leaf_digests(first_text, "tool")
 
     # Change advisory tag 1.0.0 → 1 (different tag, identical digest).
     _write_ocx_toml(
@@ -408,12 +565,10 @@ tool = "{ocx.registry}/{repo}:1"
     second_generated_at = re.search(
         r'generated_at\s*=\s*"([^"]+)"', second_text
     ).group(1)
-    second_pinned = re.search(
-        r'pinned\s*=\s*"([^"]+)"', second_text
-    ).group(1)
+    second_leaves = _tool_leaf_digests(second_text, "tool")
 
-    assert first_pinned == second_pinned, (
-        "pinned digest must be identical when tags point to the same manifest"
+    assert first_leaves == second_leaves, (
+        "leaf digests must be identical when tags point to the same manifest"
     )
     assert first_generated_at == second_generated_at, (
         "generated_at must be preserved when resolved content is unchanged"
@@ -487,67 +642,53 @@ def test_lock_no_toml_exits_64_usage_error(
 
 
 # ---------------------------------------------------------------------------
-# 7. --group filter includes only the named group
+# 7. The subset surface is gone — --group / -g / --upgrade → exit 64
 # ---------------------------------------------------------------------------
 
 
-def test_lock_group_filter_only_includes_selected_group(
+def test_lock_rejects_group_flag(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx lock --group ci`` → only ci-group tools in output; tools in
-    ``[tools]`` and other groups are left out.
+    """``ocx lock --group ci`` is rejected by clap (exit 64): ``lock`` is a
+    whole-file reconcile, never a subset. ``-g`` is also rejected. The
+    existing ``ocx.lock`` (if any) is left untouched.
+
+    Groups are a composition concern only, never a lock scope.
     """
     short = uuid4().hex[:8]
-    repo_default = f"t_{short}_default"
-    repo_ci = f"t_{short}_ci"
-    repo_lint = f"t_{short}_lint"
-    make_package(ocx, repo_default, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_ci, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_lint, "1.0.0", tmp_path, new=True, cascade=False)
+    repo = f"t_{short}_lock_grpflag"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(
         project,
         f"""\
-[tools]
-tool_default = "{ocx.registry}/{repo_default}:1.0.0"
-
 [group.ci]
-tool_ci = "{ocx.registry}/{repo_ci}:1.0.0"
-
-[group.lint]
-tool_lint = "{ocx.registry}/{repo_lint}:1.0.0"
+tool = "{ocx.registry}/{repo}:1.0.0"
 """,
     )
 
-    result = _run_lock(ocx, project, "--group", "ci")
-
-    assert result.returncode == EXIT_SUCCESS, (
-        f"--group ci must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
-    )
-    lock_text = _read_lock_text(project)
-
-    assert 'name = "tool_ci"' in lock_text, "ci-group tool must be present"
-    assert 'name = "tool_default"' not in lock_text, (
-        "[tools] entries must NOT be included when --group ci is passed"
-    )
-    assert 'name = "tool_lint"' not in lock_text, (
-        "lint-group entries must NOT be included when --group ci is passed"
-    )
+    for flag in ("--group", "-g"):
+        result = _run_lock(ocx, project, flag, "ci")
+        assert result.returncode == EXIT_USAGE, (
+            f"`ocx lock {flag} ci` must be rejected (exit {EXIT_USAGE}); "
+            f"got {result.returncode}\nstderr:\n{result.stderr}"
+        )
+        assert not (project / "ocx.lock").exists(), (
+            "ocx.lock must not be written when a dropped flag is rejected"
+        )
 
 
-# ---------------------------------------------------------------------------
-# 8. --group unknown → exit 64
-# ---------------------------------------------------------------------------
-
-
-def test_lock_unknown_group_exits_64(
+def test_lock_rejects_upgrade_flag(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx lock --group nonexistent`` → exit 64 (UsageError)."""
+    """``ocx lock --upgrade`` is rejected by clap (exit 64): the migration
+    flag was folded — V1 → V2 migration is automatic on any write. Use
+    ``ocx upgrade`` to force a re-resolve of every tag.
+    """
     short = uuid4().hex[:8]
-    repo = f"t_{short}_unknown_group"
+    repo = f"t_{short}_lock_upgflag"
     make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
 
     project = tmp_path / "proj"
@@ -560,59 +701,10 @@ tool = "{ocx.registry}/{repo}:1.0.0"
 """,
     )
 
-    result = _run_lock(ocx, project, "--group", "nonexistent")
-
+    result = _run_lock(ocx, project, "--upgrade")
     assert result.returncode == EXIT_USAGE, (
-        f"expected exit {EXIT_USAGE} for unknown group; "
+        f"`ocx lock --upgrade` must be rejected (exit {EXIT_USAGE}); "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
-    )
-    assert not (project / "ocx.lock").exists(), (
-        "ocx.lock must not be written when --group validation fails"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 9. -g ci,,lint empty segment → exit 64
-# ---------------------------------------------------------------------------
-
-
-def test_lock_empty_group_segment_exits_64(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
-    """``ocx lock -g ci,,lint`` → exit 64 (empty segment).
-
-    Companion to the Rust unit test
-    ``group_flag_clap_parses_comma_values_and_empties`` which asserts
-    that clap passes the empty string through at the parse layer. The
-    runtime validator is responsible for rejecting it with exit 64.
-    """
-    short = uuid4().hex[:8]
-    repo_ci = f"t_{short}_ci_seg"
-    repo_lint = f"t_{short}_lint_seg"
-    make_package(ocx, repo_ci, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_lint, "1.0.0", tmp_path, new=True, cascade=False)
-
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_ocx_toml(
-        project,
-        f"""\
-[group.ci]
-a = "{ocx.registry}/{repo_ci}:1.0.0"
-
-[group.lint]
-b = "{ocx.registry}/{repo_lint}:1.0.0"
-""",
-    )
-
-    result = _run_lock(ocx, project, "-g", "ci,,lint")
-
-    assert result.returncode == EXIT_USAGE, (
-        f"expected exit {EXIT_USAGE} for empty group segment; "
-        f"got {result.returncode}\nstderr:\n{result.stderr}"
-    )
-    assert not (project / "ocx.lock").exists(), (
-        "ocx.lock must not be written when --group validation fails"
     )
 
 
@@ -802,19 +894,16 @@ tool_b = "{ocx.registry}/{repo_b}:1.0.0"
 
 
 # ---------------------------------------------------------------------------
-# W16-2. -g default combined with -g <named-group> resolves both
+# W16-2. Whole-file lock resolves the root [tools] table AND every group
 # ---------------------------------------------------------------------------
 
 
-def test_lock_default_group_combined_with_named_group_resolves_both(
+def test_lock_resolves_root_and_all_groups(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx lock -g default -g dev`` must resolve both the root ``[tools]``
-    table AND the ``[group.dev]`` table, producing a merged lockfile.
-
-    Control assertions:
-    - ``ocx lock -g dev`` alone excludes root ``[tools]`` entries.
-    - ``ocx lock`` (no ``-g``) resolves everything (root + all groups).
+    """``ocx lock`` (whole-file) resolves both the root ``[tools]`` table AND
+    every ``[group.*]`` table, producing a merged lockfile. There is no
+    subset surface — every declared binding is locked.
     """
     short = uuid4().hex[:8]
     repo_cmake = f"t_{short}_cmake"
@@ -835,64 +924,31 @@ ruff = "{ocx.registry}/{repo_ruff}:0.11.0"
 """,
     )
 
-    # --- Combined: -g default -g dev → both tools present ---
-    combined = _run_lock(ocx, project, "-g", "default", "-g", "dev")
-    assert combined.returncode == EXIT_SUCCESS, (
-        f"-g default -g dev must succeed; rc={combined.returncode}\nstderr:\n{combined.stderr}"
+    # Whole-file `ocx lock` → both root [tools] and [group.dev] resolved.
+    result = _run_lock(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"whole-file lock must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
-    combined_text = _read_lock_text(project)
-    assert 'name = "cmake"' in combined_text, (
-        "root [tools] cmake must be in lockfile with -g default -g dev"
+    lock_text = _read_lock_text(project)
+    assert 'name = "cmake"' in lock_text, (
+        "root [tools] cmake must be present in the whole-file lock"
     )
-    assert 'name = "ruff"' in combined_text, (
-        "[group.dev] ruff must be in lockfile with -g default -g dev"
-    )
-
-    # Reset lock before next run.
-    (project / "ocx.lock").unlink()
-
-    # --- Control: -g dev alone → only dev group, no root tools ---
-    dev_only = _run_lock(ocx, project, "-g", "dev")
-    assert dev_only.returncode == EXIT_SUCCESS, (
-        f"-g dev must succeed; rc={dev_only.returncode}\nstderr:\n{dev_only.stderr}"
-    )
-    dev_text = _read_lock_text(project)
-    assert 'name = "ruff"' in dev_text, (
-        "[group.dev] ruff must be in lockfile with -g dev"
-    )
-    assert 'name = "cmake"' not in dev_text, (
-        "root [tools] cmake must NOT be in lockfile with -g dev only"
-    )
-
-    # Reset lock before next run.
-    (project / "ocx.lock").unlink()
-
-    # --- No -g flag → all groups resolved (root + dev) ---
-    all_groups = _run_lock(ocx, project)
-    assert all_groups.returncode == EXIT_SUCCESS, (
-        f"lock with no -g must succeed; rc={all_groups.returncode}\nstderr:\n{all_groups.stderr}"
-    )
-    all_text = _read_lock_text(project)
-    assert 'name = "cmake"' in all_text, (
-        "root [tools] cmake must be present when no -g filter is given"
-    )
-    assert 'name = "ruff"' in all_text, (
-        "[group.dev] ruff must be present when no -g filter is given"
+    assert 'name = "ruff"' in lock_text, (
+        "[group.dev] ruff must be present in the whole-file lock"
     )
 
 
 # ---------------------------------------------------------------------------
-# W16-3. Same binding name across groups: identical content collapses; differing
-#        content rejected at compose-time (UsageError, no lock written).
+# W16-3. Same binding name across groups: both group entries lock independently.
 # ---------------------------------------------------------------------------
 
 
-def test_lock_same_name_identical_content_across_groups_collapses(
+def test_lock_same_name_across_groups_locks_both_entries(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """The same binding name in ``[tools]`` and ``[group.dev]`` with identical
-    identifier content is no longer a parse-time error; ``compose_tool_set``
-    collapses the duplicate and ``ocx lock`` succeeds.
+    identifier content is not a parse-time error; whole-file ``ocx lock``
+    succeeds and records a ``(group, name)`` entry for each.
 
     Identity in ``ocx.toml`` is now ``(group, name)`` — see plan D1.
     """
@@ -913,10 +969,10 @@ cmake = "{ocx.registry}/{repo}:3.0.0"
 """,
     )
 
-    result = _run_lock(ocx, project, "-g", "default", "-g", "dev")
+    result = _run_lock(ocx, project)
 
     assert result.returncode == EXIT_SUCCESS, (
-        f"identical content across groups must collapse and succeed; "
+        f"same name across groups with identical content must succeed; "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
     assert (project / "ocx.lock").exists(), "ocx.lock must be written"
@@ -1186,3 +1242,473 @@ def test_lock_no_pull_then_pull_last_wins_installs(
     )
     candidate = _candidate_path(ocx, repo, tag)
     assert_not_exists(candidate)
+
+
+# ---------------------------------------------------------------------------
+# V1-read → V2-write forward migration (ADR: read both, write only V2)
+# ---------------------------------------------------------------------------
+
+
+def test_lock_rewrites_committed_v1_lock_to_v2(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A committed **V1** lock (``lock_version = 1`` with a single ``pinned``
+    index digest per tool) is rewritten as **V2** the moment any write
+    command touches it: ``ocx lock`` re-resolves and emits the V2 shape
+    (bare ``repository`` + ``[tool.platforms]`` leaf map, ``lock_version =
+    2``). No code path emits V1 (ADR: read both V1/V2, write only V2).
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_v1mig"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:1.0.0"
+""",
+    )
+
+    # Hand-author a legacy V1 lock with a single `pinned` index digest. The
+    # digest does not need to be the live one — `ocx lock` re-resolves the
+    # `ocx.toml` tag and overwrites it with the V2 shape.
+    fake_index_digest = "0" * 64
+    (project / "ocx.lock").write_text(
+        f"""\
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:{"d" * 64}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "tool"
+group = "default"
+pinned = "{ocx.registry}/{repo}@sha256:{fake_index_digest}"
+"""
+    )
+
+    result = _run_lock(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx lock on a V1 lock failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    lock_text = _read_lock_text(project)
+    assert "lock_version = 2" in lock_text, "the rewritten lock must be V2"
+    assert "lock_version = 1" not in lock_text, "no V1 marker may survive the rewrite"
+    assert "pinned =" not in lock_text, "the rewritten V2 lock must not carry a `pinned` line"
+    assert "[tool.platforms]" in lock_text, "the rewritten lock must carry a [tool.platforms] table"
+    assert f'repository = "{ocx.registry}/{repo}"' in lock_text, (
+        "the rewritten lock must record the bare repository coordinate"
+    )
+
+
+# ---------------------------------------------------------------------------
+# V1 → V2 migration is automatic on any write (no `--upgrade` verb)
+# ---------------------------------------------------------------------------
+
+
+def test_lock_auto_migrates_cached_v1_to_v2(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Bare ``ocx lock`` against a committed V1 lock whose index blobs are
+    cached locally rewrites it to V2 automatically. Migration-by-read happens
+    on any write — there is no separate ``--upgrade`` verb.
+
+    Setup: push a package → ``ocx lock`` to write a V2 lock and warm the
+    object store → hand-author a V1 lock pointing at the live (cached) index
+    digest → run bare ``ocx lock`` → assert exit 0, V2 shape, ``[tool.platforms]``
+    present.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_automig"
+    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:1.0.0"
+""",
+    )
+
+    # Write the V2 lock (and warm the object store / blob cache).
+    warm = _run_lock(ocx, project)
+    assert warm.returncode == EXIT_SUCCESS, (
+        f"setup lock failed: rc={warm.returncode}\nstderr:\n{warm.stderr}"
+    )
+    v2_text = _read_lock_text(project)
+
+    # Extract the declaration_hash and one leaf digest so we can build a
+    # syntactically-valid V1 lock that points at the cached index.
+    decl_match = re.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
+    leaf_match = _LEAF_RE.search(v2_text)
+    repo_match = _REPOSITORY_RE.search(v2_text)
+    assert decl_match and leaf_match and repo_match, (
+        f"V2 lock must carry declaration_hash + leaf + repository; got:\n{v2_text[:400]}"
+    )
+    bare_repo = repo_match.group(1)
+    leaf_hex = leaf_match.group(1)
+    decl_hash = decl_match.group(1)
+
+    # Overwrite with a hand-authored V1 lock using the live leaf digest as
+    # the `pinned` index digest.  Because ``ocx lock`` cached the blobs, the
+    # automatic migration transcribes from cache without a network round-trip.
+    (project / "ocx.lock").write_text(
+        f"""\
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "{decl_hash}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "tool"
+group = "default"
+pinned = "{bare_repo}@sha256:{leaf_hex}"
+"""
+    )
+
+    result = _run_lock(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"bare ocx lock on a cached V1 lock must exit 0; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    upgraded = _read_lock_text(project)
+    assert "lock_version = 2" in upgraded, (
+        "migration must produce a V2 lock"
+    )
+    assert "pinned =" not in upgraded, (
+        "migration must not carry a legacy `pinned` line"
+    )
+    assert "[tool.platforms]" in upgraded, (
+        "migration must emit a [tool.platforms] table"
+    )
+    assert f'repository = "{ocx.registry}/{repo}"' in upgraded, (
+        "migration must record the bare repository coordinate"
+    )
+    assert re.search(r'=\s*"sha256:[0-9a-f]{64}"', upgraded), (
+        "migration must record at least one per-platform leaf digest"
+    )
+
+
+def test_fault_injected_add_rolls_back_committed_v1_lock_without_panic(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A fault-injected ``ocx add`` on a project carrying a committed **V1**
+    lock must roll the lock back to its **byte-identical V1** predecessor —
+    not panic in the V2 writer.
+
+    Regression for F1: the rollback path used to re-``save`` the parsed
+    predecessor through ``ProjectLock::to_toml_string`` → ``serialize_tool_views``,
+    which hits ``unreachable!("LegacyIndex reached the V2 writer")`` for a V1
+    (``LegacyIndex``) predecessor. The mutation guard now captures the
+    predecessor lock's raw bytes at acquisition time and restores them verbatim,
+    so a rolled-back mutation leaves a V1 lock exactly as it was (still V1).
+
+    Setup mirrors ``test_lock_upgrade_pin_preserving_v1_to_v2``: publish a
+    package, run ``ocx lock`` to warm the blob cache and learn the live index
+    leaf, then overwrite ``ocx.lock`` with a hand-authored V1 lock pinned to
+    that cached digest. Publishing a SECOND package and running a
+    fault-injected ``ocx add`` (``OCX_TEST_FAULT=after_lock_write``) reaches the
+    commit's post-lock-rename rollback boundary with a V1 predecessor in hand.
+    """
+    short = uuid4().hex[:8]
+    repo_existing = f"t_{short}_v1pred"
+    repo_added = f"t_{short}_v1add"
+    make_package(ocx, repo_existing, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_added, "1.0.0", tmp_path, new=True, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+existing = "{ocx.registry}/{repo_existing}:1.0.0"
+""",
+    )
+
+    # Warm the object store / blob cache and learn the live index leaf so the
+    # hand-authored V1 lock points at a cached (fetchable) index.
+    warm = _run_lock(ocx, project)
+    assert warm.returncode == EXIT_SUCCESS, (
+        f"setup lock failed: rc={warm.returncode}\nstderr:\n{warm.stderr}"
+    )
+    v2_text = _read_lock_text(project)
+    decl_match = re.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
+    leaf_match = _LEAF_RE.search(v2_text)
+    repo_match = _REPOSITORY_RE.search(v2_text)
+    assert decl_match and leaf_match and repo_match, (
+        f"V2 lock must carry declaration_hash + leaf + repository; got:\n{v2_text[:400]}"
+    )
+    bare_repo = repo_match.group(1)
+    leaf_hex = leaf_match.group(1)
+    decl_hash = decl_match.group(1)
+
+    # Overwrite with a hand-authored V1 lock pinned to the cached index digest.
+    v1_lock_text = f"""\
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "{decl_hash}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "existing"
+group = "default"
+pinned = "{bare_repo}@sha256:{leaf_hex}"
+"""
+    (project / "ocx.lock").write_text(v1_lock_text)
+    v1_bytes_before = _read_lock_bytes(project)
+
+    # Fault-injected add of the SECOND package: resolution succeeds (both
+    # indexes are cached), the new lock is renamed into place, then the fault
+    # fires before the manifest rewrite → the commit rolls the lock back to the
+    # V1 predecessor. Old behaviour: panic in the V2 writer.
+    cmd = [str(ocx.binary), "add", f"{ocx.registry}/{repo_added}:1.0.0"]
+    failed = subprocess.run(
+        cmd,
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_TEST_FAULT": "after_lock_write"},
+    )
+
+    assert failed.returncode != EXIT_SUCCESS, (
+        f"fault-injected add must fail; got rc={failed.returncode}, "
+        f"stderr={failed.stderr!r}"
+    )
+    # The fault path must not panic in the V2 writer.
+    assert "unreachable" not in failed.stderr.lower(), (
+        f"rollback must not hit the V2-writer unreachable!(); stderr:\n{failed.stderr}"
+    )
+    assert "panic" not in failed.stderr.lower(), (
+        f"rollback must not panic; stderr:\n{failed.stderr}"
+    )
+
+    # The lock must be restored byte-for-byte to its V1 predecessor: still V1,
+    # no orphaned binding in ocx.toml.
+    v1_bytes_after = _read_lock_bytes(project)
+    assert v1_bytes_after == v1_bytes_before, (
+        "rollback must restore the committed V1 lock byte-for-byte; "
+        f"before={v1_bytes_before!r}\nafter={v1_bytes_after!r}"
+    )
+    assert "lock_version = 1" in v1_bytes_after.decode(), (
+        "the rolled-back lock must still be V1"
+    )
+    toml_after = (project / "ocx.toml").read_text()
+    assert repo_added not in toml_after, (
+        f"manifest must not contain the orphaned binding after rollback; got:\n{toml_after}"
+    )
+
+
+def test_lock_offline_uncached_dirty_exits_non_zero(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Bare ``ocx --offline lock`` against a dirty V1 lock whose index digest
+    is NOT in the local cache exits non-zero without making any network call.
+
+    Offline/frozen + uncached → ``PolicyResolutionBlocked`` (81) or
+    ``TagNotFound`` (79); both prove no network call succeeded. The lock the
+    fake declaration_hash makes dirty, so bare ``ocx lock`` re-resolves the
+    declared tag — refused offline rather than silently fetched.
+
+    Setup: hand-author an ``ocx.toml`` pointing at a fake registry path + a
+    V1 lock with a stale declaration_hash and a fake (never-fetched) index
+    digest.  No ``make_package`` or ``index update`` is called so OCX_HOME has
+    no index data for this tool.
+
+    We verify:
+    - exit code classifies as a no-network refusal (79 or 81)
+    - ``ocx.lock`` on disk is still V1 (no partial V2 was written)
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_upggone"
+    fake_registry = "fake.registry.invalid"  # unreachable by construction
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{fake_registry}/{repo}:1.0.0"
+""",
+    )
+
+    # Hand-author a V1 lock with a stale declaration_hash + fake index digest.
+    fake_index_digest = "a" * 64
+    v1_lock_text = f"""\
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:{"d" * 64}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "tool"
+group = "default"
+pinned = "{fake_registry}/{repo}@sha256:{fake_index_digest}"
+"""
+    (project / "ocx.lock").write_text(v1_lock_text)
+
+    cmd = [str(ocx.binary), "--offline", "lock"]
+    result = subprocess.run(
+        cmd,
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    # Pin the contract, not just "any error": offline + uncached must classify
+    # as PolicyResolutionBlocked (81) or TagNotFound (79) — both prove no network
+    # call succeeded.  A regression to generic Failure (1) or a 0 exit must fail
+    # this test.
+    assert result.returncode in (79, 81), (
+        f"ocx --offline lock with uncached index must exit 79 or 81; "
+        f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+    # The lock on disk must still be V1 — no partial V2 was committed.
+    lock_after = (project / "ocx.lock").read_text()
+    assert "lock_version = 1" in lock_after, (
+        "a failed lock must not rewrite the lock to V2; "
+        f"lock after:\n{lock_after}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gap 2 — re-lock platform appears/disappears (ADR validation item d)
+# ---------------------------------------------------------------------------
+
+
+def test_relock_new_platform_lock_is_noop_upgrade_adds_key(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Pushing a second platform under the same tag is a moving-content change
+    with a byte-identical ``ocx.toml``. A clean ``ocx lock`` must NOT pick it up
+    (pin preserved); ``ocx upgrade`` does (whole-file forced bump adds the new
+    platform key).
+
+    ADR per-platform-lock-pinning validation item (d), revised for the
+    lock-vs-upgrade distinction: a newly-shipped platform under an unchanged tag
+    appears as an added key on ``ocx upgrade`` — not on a clean ``ocx lock``,
+    which carries the existing pin forward verbatim.
+
+    Setup: push platform A (``new=True``) → ``ocx lock --no-pull`` → record the
+    set of leaf digests → push platform B under the same repo:tag
+    (``new=False``) → re-index → assert a clean ``ocx lock --no-pull`` is a
+    no-op (still one leaf) → ``ocx upgrade --no-pull`` → assert the lock now
+    carries TWO platform keys and ``generated_at`` advanced (content changed).
+
+    NOTE — ``test_lock_relock_dropped_platform_removes_key`` is NOT written
+    here because the registry harness has no delete/untag capability: OCX's
+    push pipeline calls ``retain(entry.platform != platform)`` on the existing
+    index and re-points the tag, so platforms can only be *added* via the
+    push API.  Simulating a drop would require the registry to expose a
+    manifest-delete endpoint, which ``registry:2`` does not surface to OCX.
+    The dropped-key signal is tested at the unit level by manipulating the
+    in-memory platforms map directly.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_relock"
+    tag = "1.0.0"
+
+    # Push the first platform (linux/amd64 or whatever the host is).
+    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+
+    first_lock = _run_lock(ocx, project, "--no-pull")
+    assert first_lock.returncode == EXIT_SUCCESS, (
+        f"first lock failed: rc={first_lock.returncode}\nstderr:\n{first_lock.stderr}"
+    )
+    first_text = _read_lock_text(project)
+    first_leaves = set(_leaf_digests(first_text))
+    first_at_match = re.search(r'generated_at\s*=\s*"([^"]+)"', first_text)
+    assert first_at_match, "generated_at must be present in first lock"
+    first_generated_at = first_at_match.group(1)
+    assert len(first_leaves) == 1, (
+        f"first push (one platform) must produce exactly one leaf; got {first_leaves}"
+    )
+
+    # Push a SECOND, distinct platform under the same repo:tag.  We use
+    # ``linux/arm64`` as a portable non-host alternative; ``new=False`` tells
+    # make_package to merge into the existing index rather than starting fresh.
+    # A distinct ``tmp_path`` subdirectory is required so that make_package
+    # does not try to re-create ``pkg-{repo}-{tag}/bin/`` which already
+    # exists from the first call.
+    second_platform = "linux/arm64"
+    make_package(
+        ocx, repo, tag, tmp_path / "second",
+        new=False,
+        cascade=False,
+        platform=second_platform,
+    )
+
+    # Re-index so the local index sees the updated manifest.
+    ocx.plain("index", "update", repo)
+
+    # A clean `ocx lock` (ocx.toml unchanged → declaration_hash still matches)
+    # must carry the existing pin forward verbatim — it must NOT pick up the
+    # newly-shipped platform. That is the moving-content advance reserved for
+    # `ocx upgrade`.
+    clean_relock = _run_lock(ocx, project, "--no-pull")
+    assert clean_relock.returncode == EXIT_SUCCESS, (
+        f"clean relock failed: rc={clean_relock.returncode}\nstderr:\n{clean_relock.stderr}"
+    )
+    clean_leaves = set(_leaf_digests(_read_lock_text(project)))
+    assert clean_leaves == first_leaves, (
+        "a clean `ocx lock` must NOT pick up the newly-shipped platform "
+        f"(pin preserved); got {clean_leaves}, expected {first_leaves}"
+    )
+
+    # `ocx upgrade` is the whole-file forced bump that re-resolves the tag and
+    # picks up the new platform key.
+    upgrade = subprocess.run(
+        _ocx_cmd(ocx, "upgrade", "--no-pull"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert upgrade.returncode == EXIT_SUCCESS, (
+        f"upgrade after adding platform failed: "
+        f"rc={upgrade.returncode}\nstderr:\n{upgrade.stderr}"
+    )
+    second_text = _read_lock_text(project)
+    second_leaves = set(_leaf_digests(second_text))
+
+    assert len(second_leaves) == 2, (
+        f"after adding {second_platform}, `ocx upgrade` must carry two platform "
+        f"leaves; got {second_leaves}"
+    )
+    assert first_leaves.issubset(second_leaves), (
+        "the original platform's leaf must be preserved when a new platform is added"
+    )
+
+    second_at_match = re.search(r'generated_at\s*=\s*"([^"]+)"', second_text)
+    assert second_at_match, "generated_at must be present in the upgraded lock"
+    second_generated_at = second_at_match.group(1)
+    assert second_generated_at != first_generated_at, (
+        "generated_at must advance when the platforms map content changes "
+        f"(first={first_generated_at!r}, second={second_generated_at!r})"
+    )

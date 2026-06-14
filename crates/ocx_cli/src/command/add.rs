@@ -8,8 +8,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::error::ProjectErrorKind;
-use ocx_lib::project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, resolve_lock_partial};
+use ocx_lib::project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{ensure_global_project_initialized, load_project_for_mutate, materialize_lock};
@@ -18,8 +17,12 @@ use crate::app::project_context::{ensure_global_project_initialized, load_projec
 ///
 /// Appends the given identifier to the implicit default `[tools]` table,
 /// or to a named `[group.<name>]` table when `--group` is supplied.
-/// After updating `ocx.toml`, rewrites `ocx.lock` for the affected
-/// group and installs the tool (default eager behavior).
+/// Resolves only the new binding, carries every existing lock entry
+/// forward unchanged, and installs the tool (default eager behavior).
+///
+/// Fails with exit 65 when `ocx.toml` drifted from `ocx.lock` before
+/// this add (run `ocx lock` to reconcile), or exit 78 when a carried
+/// legacy entry can no longer be migrated exactly (run `ocx upgrade`).
 ///
 /// Pass `--no-pull` to write only the manifest and lock without
 /// downloading; materialization is then deferred to `ocx pull` or the
@@ -96,52 +99,46 @@ impl Add {
             Ok(())
         })?;
 
-        // Resolve the new lock against the candidate config. When a
-        // predecessor exists, try the partial resolve first (cheaper —
-        // touches only the new binding). The candidate's
-        // `declaration_hash` necessarily differs from the predecessor's
-        // (we just inserted a binding), so `resolve_lock_partial` will
-        // refuse with [`ProjectErrorKind::StaleLockOnPartial`]. Catch
-        // that signal and fall back to a full `resolve_lock` per the
-        // Cluster A plan: the partial path's hash gate prevents
-        // laundering, so on mismatch we rebuild from scratch.
+        // Whole-file model (spec §4.3): re-resolve ONLY the new binding and
+        // carry every pre-existing lock entry forward verbatim (V2
+        // byte-identical; V1 via exact-only pinned-index transcribe). The
+        // freshness gate inside `resolve_lock_touched` anchors on the
+        // pre-mutation snapshot (`guard.config()`) — the inserted binding makes
+        // the candidate hash differ, so anchoring on the candidate would fail
+        // every clean add — and stamps the candidate hash into the produced
+        // lock. Drift on the pre-mutation snapshot surfaces as
+        // `StaleLockOnPartial` (65, run `ocx lock`); a carried V1 entry whose
+        // index is gone surfaces as `LockUpgradeRequired` (78, run
+        // `ocx upgrade`). Both propagate to the `main.rs` boundary.
         let binding_name = ocx_lib::project::binding_key(&identifier);
-        let new_lock = if let Some(prev) = guard.previous_lock().cloned() {
-            match resolve_lock_partial(
-                staged.config(),
-                &prev,
-                context.default_index(),
-                &[binding_name],
-                &[],
-                ResolveLockOptions::default(),
-            )
-            .await
-            {
-                Ok(lock) => lock,
-                Err(ocx_lib::project::Error::Project(pe))
-                    if matches!(pe.kind, ProjectErrorKind::StaleLockOnPartial { .. }) =>
-                {
-                    // Hash drifted — predecessor was computed before our
-                    // in-memory mutation. Full re-resolve rebuilds the
-                    // lock from the candidate config without laundering.
-                    resolve_lock(
-                        staged.config(),
-                        context.default_index(),
-                        &[],
-                        ResolveLockOptions::default(),
-                    )
-                    .await?
-                }
-                Err(other) => return Err(other.into()),
+        let group = self
+            .group
+            .clone()
+            .unwrap_or_else(|| ocx_lib::project::DEFAULT_GROUP.to_string());
+        let touched = [(group, binding_name)];
+        let new_lock = match guard.previous_lock().cloned() {
+            Some(prev) => {
+                resolve_lock_touched(
+                    staged.config(), // candidate (post-mutation)
+                    guard.config(),  // pre-mutation snapshot — freshness anchor
+                    &prev,
+                    context.default_index(),
+                    &touched,
+                    ResolveLockOptions::default(),
+                )
+                .await?
             }
-        } else {
-            resolve_lock(
-                staged.config(),
-                context.default_index(),
-                &[],
-                ResolveLockOptions::default(),
-            )
-            .await?
+            // Bootstrap: no predecessor to preserve, nothing to launder — a
+            // direct resolve that must never fail closed.
+            None => {
+                resolve_lock(
+                    staged.config(),
+                    context.default_index(),
+                    &[],
+                    ResolveLockOptions::default(),
+                )
+                .await?
+            }
         };
 
         // Commit: lock-first, manifest-second, both atomic.
@@ -169,15 +166,8 @@ impl Add {
         materialize_lock(&context, &new_lock, eager).await?;
 
         // Report the full resulting lock to the user.
-        let entries: Vec<LockEntry> = new_lock
-            .tools
-            .iter()
-            .map(|t| LockEntry {
-                binding: t.name.clone(),
-                group: t.group.clone(),
-                digest: t.pinned.strip_advisory().to_string(),
-            })
-            .collect();
+        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
         let report = LockReport::new(entries);
         context.api().report(&report)?;
 

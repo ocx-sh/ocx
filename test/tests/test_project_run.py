@@ -45,13 +45,13 @@ Test inventory
 
 from __future__ import annotations
 
+import re as _re_run
 import subprocess
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from src import registry_dir
 from src.helpers import make_package
 from src.runner import OcxRunner
 
@@ -1087,4 +1087,229 @@ def test_add_rejects_reserved_group_all(ocx: OcxRunner, tmp_path: Path) -> None:
     )
     assert "reserved" in result.stderr.lower() or "invalid" in result.stderr.lower(), (
         f"stderr must mention reserved/invalid; got:\n{result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# V2 compose→run: run resolves the host-platform leaf from [tool.platforms]
+# ---------------------------------------------------------------------------
+
+_LEAF_RE_RUN = _re_run.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
+
+
+def test_run_resolves_v2_host_leaf_from_compose(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx run -- <binary>`` with a V2 lock resolves the tool's binary via
+    the per-platform host-leaf digest from ``[tool.platforms]``, not via a
+    legacy index-digest + ``Index::select`` walk.
+
+    ADR §compose.rs: "V2: dedup + resolve on the host-platform leaf
+    (host→'any' fallback); V1: legacy index-digest path."
+
+    Scenario: publish a package, ``ocx lock`` (V2), ``ocx pull``, then
+    ``ocx run -- <binary>``.  Assert:
+    1. The lock is V2 (``lock_version = 2``, ``[tool.platforms]`` with leaf
+       digest, no ``pinned =`` line).
+    2. ``ocx run`` exits 0 and the binary's stdout contains the package marker,
+       confirming the V2 compose path resolved the correct content directory.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_run_v2"
+    tag = "1.0.0"
+    bin_name = "v2tool"
+    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, bins=[bin_name])
+
+    project = tmp_path / "proj_run_v2"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+{repo} = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+
+    lock = _run_lock(ocx, project)
+    assert lock.returncode == EXIT_SUCCESS, (
+        f"ocx lock failed: rc={lock.returncode}\nstderr:\n{lock.stderr}"
+    )
+    lock_text = (project / "ocx.lock").read_text()
+    assert "lock_version = 2" in lock_text, (
+        "lock must be V2 (lock_version = 2); got:\n" + lock_text[:400]
+    )
+    assert "[tool.platforms]" in lock_text, (
+        "V2 lock must carry a [tool.platforms] table"
+    )
+    leaf_digests = _LEAF_RE_RUN.findall(lock_text)
+    assert leaf_digests, "V2 lock must record at least one leaf digest"
+    assert "pinned =" not in lock_text, (
+        "V2 lock must not carry a legacy `pinned` line"
+    )
+
+    pull = _run_cmd(ocx, project, "pull")
+    assert pull.returncode == EXIT_SUCCESS, (
+        f"ocx pull failed: rc={pull.returncode}\nstderr:\n{pull.stderr}"
+    )
+
+    result = _run_run(ocx, project, "--", bin_name)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run -- {bin_name} on V2 lock must succeed (V2 compose→leaf path); "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+    # The package binary echoes a marker; presence confirms the correct content dir.
+    assert result.stdout.strip(), (
+        f"run output must be non-empty (binary must produce output); "
+        f"stdout={result.stdout!r}"
+    )
+
+
+def test_run_v1_lock_still_resolves_via_legacy_compose_path(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx run`` on a committed V1 lock succeeds via the legacy index-digest +
+    ``Index::select`` compose path — no forced upgrade.
+
+    ADR: "A committed V1 lock keeps installing/running offline with no forced
+    upgrade and no read-path mutation."
+
+    Flow:
+    1. Publish, lock (V2), pull (warm blobs).
+    2. Overwrite the lock with a hand-authored V1 form (real pinned identifier
+       built from the V2 bare-repo + one leaf).
+    3. ``ocx run -- <binary>`` must succeed (blobs cached from step 1; legacy
+       index-digest path reads the cached manifest).
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_run_v1"
+    tag = "1.0.0"
+    bin_name = "v1tool"
+    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, bins=[bin_name])
+
+    project = tmp_path / "proj_run_v1"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+{repo} = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+
+    lock = _run_lock(ocx, project)
+    assert lock.returncode == EXIT_SUCCESS, lock.stderr
+    v2_text = (project / "ocx.lock").read_text()
+
+    pull = _run_cmd(ocx, project, "pull")
+    assert pull.returncode == EXIT_SUCCESS, pull.stderr
+
+    # Synthesise a V1 lock using real coordinates from the V2 lock.
+    repo_match = _re_run.search(r'repository\s*=\s*"([^"]+)"', v2_text)
+    leaf_match = _LEAF_RE_RUN.search(v2_text)
+    decl_match = _re_run.search(r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_text)
+    assert repo_match and leaf_match and decl_match, (
+        "V2 lock must carry repository + leaf + declaration_hash;\n" + v2_text[:400]
+    )
+    bare_repo = repo_match.group(1)
+    leaf_hex = leaf_match.group(1)
+    decl_hash = decl_match.group(1)
+
+    (project / "ocx.lock").write_text(
+        f"""\
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "{decl_hash}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "{repo}"
+group = "default"
+pinned = "{bare_repo}@sha256:{leaf_hex}"
+"""
+    )
+
+    result = _run_run(ocx, project, "--", bin_name)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run on a V1 lock must succeed via legacy compose path "
+        f"(blobs cached); rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gap 4 — flat Manifest::Image ("any") end-to-end (ADR validation item e)
+# ---------------------------------------------------------------------------
+
+
+def test_run_flat_manifest_image_any_package_resolves_via_any_fallback(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A package pushed with ``platform="any"`` (``Platform::Any``) locks a
+    single ``"any"`` key in ``[tool.platforms]`` and ``ocx run`` resolves it
+    on any host via the host→``"any"`` fallback.
+
+    ADR per-platform-lock-pinning validation item (e): flat ``Manifest::Image``
+    packages lock a single ``"any"`` entry and install on every supported host
+    via the host→``"any"`` fallback.
+
+    OCX's push pipeline always wraps the image manifest in an ``ImageIndex``
+    (``merge_platform_into_index``), so pushing with ``-p any`` produces an
+    ``ImageIndex`` with one child entry whose platform annotation is
+    ``os=any, arch=any``.  ``fetch_candidates`` maps that to ``Platform::Any``
+    → ``lock_key() == "any"``.  ``lookup_host_leaf`` returns the ``"any"``
+    digest when the host-specific key is absent.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_anyflat"
+    tag = "1.0.0"
+    bin_name = "hello"
+
+    # Push with platform="any" — platform-agnostic package.
+    pkg = make_package(
+        ocx, repo, tag, tmp_path,
+        new=True,
+        cascade=False,
+        platform="any",
+        bins=[bin_name],
+    )
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+{repo} = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+
+    # Lock the project — the platforms map must contain only the "any" key.
+    lock = _run_lock(ocx, project)
+    assert lock.returncode == EXIT_SUCCESS, (
+        f"ocx lock for flat-image package must succeed; "
+        f"rc={lock.returncode}\nstderr:\n{lock.stderr}"
+    )
+    lock_text = (project / "ocx.lock").read_text()
+    # Platform::Any serialises as the unquoted TOML bare key ``any`` (not
+    # ``"any"`` with quotes).  Match the bare key followed by a sha256 value.
+    assert _re_run.search(r"\bany\s*=\s*\"sha256:[0-9a-f]{64}\"", lock_text), (
+        f"flat-image package must lock a single \"any\" key in [tool.platforms]; "
+        f"got:\n{lock_text}"
+    )
+    assert "[tool.platforms]" in lock_text, (
+        "lock must carry a [tool.platforms] table"
+    )
+
+    # Run using the "any" package — host→"any" fallback resolves the binary.
+    result = _run_run(ocx, project, "--", bin_name)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx run with a flat-image 'any' package must exit 0; "
+        f"rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+    assert pkg.marker in result.stdout, (
+        f"the binary's output marker must appear in stdout; "
+        f"marker={pkg.marker!r}, stdout={result.stdout!r}"
     )

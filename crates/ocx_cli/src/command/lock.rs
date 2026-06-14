@@ -5,22 +5,27 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::cli;
-use ocx_lib::project::{DEFAULT_GROUP, ResolveLockOptions, resolve_lock};
+use ocx_lib::project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{load_project_for_mutate, load_project_with_lock, materialize_lock};
 
 /// Resolve tool tags to digests and write `ocx.lock`.
 ///
-/// Walks the nearest `ocx.toml`, resolves each tool's advisory tag to a
-/// pinned OCI index-manifest digest, and writes a deterministic
-/// `ocx.lock` next to it. Fully transactional — either every tool
-/// resolves or nothing is written.
+/// Walks the nearest `ocx.toml` and reconciles the whole `ocx.lock` with
+/// it. When the lock is already current (its `declaration_hash` matches the
+/// config) the existing pins are carried forward verbatim — a byte-identical,
+/// idempotent no-op that never advances a moving tag. When the config drifted,
+/// every declared tag is re-resolved; a moving tag may advance to wherever it
+/// points today. Fully transactional — either every tool resolves or nothing
+/// is written. Use `ocx upgrade` to force a re-resolve of every tag regardless
+/// of drift.
 ///
-/// **Behavior change:** this command now materializes packages by default
-/// after writing the lock (matching `ocx add`). Pass `--no-pull` to
-/// restore the prior lock-only behavior.
+/// Migrates a legacy lock to the current per-platform format automatically
+/// on any write — no separate migration step is required.
+///
+/// Materializes packages by default after writing the lock (matching
+/// `ocx add`). Pass `--no-pull` to write the lock without downloading.
 ///
 /// `--pull` is the affirmative form of the default (redundant but
 /// accepted). Both flags use POSIX last-wins semantics (`overrides_with`):
@@ -28,14 +33,6 @@ use crate::app::project_context::{load_project_for_mutate, load_project_with_loc
 /// no-pull.
 #[derive(Parser, Clone)]
 pub struct Lock {
-    /// Restrict resolution to the named group(s).
-    ///
-    /// Repeatable and comma-separated: `-g ci,lint -g release`. The
-    /// reserved name `default` selects the top-level `[tools]` table.
-    /// When omitted, every `[tools]` and `[group.*]` entry is resolved.
-    #[arg(short = 'g', long = "group", value_delimiter = ',')]
-    pub groups: Vec<String>,
-
     /// Verify `ocx.lock` is current relative to `ocx.toml` and exit.
     ///
     /// Reads `ocx.toml` and `ocx.lock` from disk, compares the lock's
@@ -67,15 +64,6 @@ pub struct Lock {
 
 impl Lock {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Pre-validate empty comma segments before any I/O.
-        for raw in &self.groups {
-            if raw.is_empty() {
-                return Err(
-                    cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
-                );
-            }
-        }
-
         // ── --check fast path ────────────────────────────────────────────
         //
         // `--check` is a no-op verification: read ocx.toml + ocx.lock,
@@ -94,28 +82,52 @@ impl Lock {
         // Errors propagate to the `main.rs` boundary (logged + classified).
         let guard = load_project_for_mutate(&context).await?;
 
-        // Validate group filter against the loaded snapshot.
-        for raw in &self.groups {
-            if raw == DEFAULT_GROUP {
-                continue;
-            }
-            if !guard.config().groups.contains_key(raw) {
-                return Err(cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
-            }
-        }
-
         // Stage as a lock-only mutation — the candidate config is
         // byte-identical to the snapshot. `commit` will skip the
         // manifest write.
         let staged = guard.stage(|_cfg| Ok(()))?.lock_only();
 
-        let new_lock = resolve_lock(
-            staged.config(),
-            context.default_index(),
-            &self.groups,
-            ResolveLockOptions::default(),
-        )
-        .await?;
+        // Whole-file reconcile (spec §4.6) branched on predecessor freshness so
+        // a CLEAN lock is preserved verbatim — never silently bumped:
+        //
+        // - No predecessor → create the lock from scratch (`resolve_lock`).
+        // - Predecessor present AND clean (config hash == the lock's stored
+        //   `declaration_hash`) → carry every pin forward verbatim with NO live
+        //   resolve. `resolve_lock_touched` with an empty `touched` set resolves
+        //   nothing: V2 entries pass through byte-identical, V1 entries are
+        //   migrated by exact pinned-index transcription, and a gone V1 index
+        //   fails `LockUpgradeRequired` (78, "run `ocx upgrade`"). A moved
+        //   upstream tag must NOT change the pin on a clean lock — that is the
+        //   lock-vs-upgrade distinction.
+        // - Predecessor present AND dirty (config changed since the last lock)
+        //   → full whole-file re-resolve of every declared tag; advancing a
+        //   moved tag is the intended explicit whole-file reconcile behaviour.
+        //
+        // `save` preserves `generated_at` via `tools_content_equal`, so a clean
+        // reconcile is a byte-identical no-op. V1 → V2 migration falls out of
+        // the resolver writing V2 only.
+        let new_lock = match guard.previous_lock().cloned() {
+            Some(prev) if prev.metadata.declaration_hash == staged.config().declaration_hash_cached() => {
+                resolve_lock_touched(
+                    staged.config(), // candidate
+                    staged.config(), // pre-mutation snapshot (lock-only: identical to candidate)
+                    &prev,
+                    context.default_index(),
+                    &[], // empty touched ⇒ resolve nothing; carry every pin forward
+                    ResolveLockOptions::default(),
+                )
+                .await?
+            }
+            _ => {
+                resolve_lock(
+                    staged.config(),
+                    context.default_index(),
+                    &[],
+                    ResolveLockOptions::default(),
+                )
+                .await?
+            }
+        };
 
         let config_path = guard.config_path().to_path_buf();
         let commit = guard.commit(staged, new_lock.clone()).await?;
@@ -137,15 +149,8 @@ impl Lock {
                 .warn("add `ocx.lock merge=union` to .gitattributes to avoid merge conflicts");
         }
 
-        let entries: Vec<LockEntry> = new_lock
-            .tools
-            .iter()
-            .map(|t| LockEntry {
-                binding: t.name.clone(),
-                group: t.group.clone(),
-                digest: t.pinned.strip_advisory().to_string(),
-            })
-            .collect();
+        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
         let report = LockReport::new(entries);
         context.api().report(&report)?;
 

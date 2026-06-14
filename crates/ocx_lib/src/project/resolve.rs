@@ -9,9 +9,9 @@
 //! function returns an error and no lock is produced.
 //!
 //! Tuning knobs (per-tool timeout, retry attempts, initial backoff)
-//! default to the values specified in ADR Amendment D and plan Phase 3.
+//! default to conservative values tuned for transactional resolution.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,11 +19,16 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use super::error::{ProjectError, ProjectErrorKind};
+use super::lock::LockedResolution;
 use super::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
 use crate::oci::client::error::ClientError;
 use crate::oci::index::{Index, IndexOperation};
-use crate::oci::{Identifier, PinnedIdentifier};
+use crate::oci::{Digest, Identifier, PinnedIdentifier, Platform};
 use crate::project::hash::DECLARATION_HASH_VERSION;
+
+/// The V2 `platforms` map key for a platform-agnostic (flat `Manifest::Image`)
+/// package. Matches [`Platform::Any`]'s [`Platform::lock_key`].
+const ANY_KEY: &str = "any";
 
 /// Default per-tool timeout wrapping the entire retry chain.
 pub const DEFAULT_PER_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -143,115 +148,294 @@ async fn resolve_work(
     Ok(resolved)
 }
 
-/// Re-resolve a subset of tools against `index` and merge the result
-/// into `previous`, preserving every entry the caller did not select.
+/// Re-resolve exactly the `touched` `(group, name)` bindings and carry every
+/// other predecessor entry forward verbatim — the whole-file model's
+/// pin-preserving mutator path for `ocx add` / `ocx remove`.
 ///
-/// Selection rules:
-/// - When `bindings` is empty AND `groups` is empty, every tool in
-///   `config` is re-resolved (equivalent to [`resolve_lock`] with no
-///   group filter — but always uses the live [`Index`], not `previous`).
-/// - When `groups` is non-empty, the selection narrows to tools whose
-///   owning group is in `groups`. The reserved name `"default"`
-///   selects the top-level `[tools]` table.
-/// - When `bindings` is non-empty, the selection narrows further to
-///   tools whose local binding name is in `bindings`. Unknown binding
-///   names produce [`ProjectErrorKind::ToolNotInConfig`].
+/// Two distinct config snapshots are in flight and must never be conflated
+/// (spec §3):
 ///
-/// Untouched entries in `previous` are carried into the returned lock
-/// verbatim (same `name`, `group`, `pinned`). The metadata header is
-/// rebuilt from the current `config` (always reflects the live
-/// `declaration_hash`); the `generated_at` field is the resolver's
-/// timestamp at call time and only survives a [`ProjectLock::save`]
-/// round-trip when the merged content matches `previous` byte-for-byte
-/// via [`PinnedIdentifier::eq_content`].
+/// - `candidate` (post-mutation) drives the new-binding resolve and is stamped
+///   into the produced lock's `declaration_hash` via [`build_lock`].
+/// - `pre_mutation` (the `ocx.toml` snapshot taken *before* this command's
+///   staged edit) is the freshness anchor **only**: it is compared against the
+///   predecessor's `declaration_hash` so a clean `add` (whose `candidate`
+///   differs by the inserted binding) does not spuriously fail closed.
+///
+/// Contract:
+///
+/// 1. **Freshness gate (always on).** If `hash(pre_mutation)` does not equal
+///    `previous.metadata.declaration_hash`, return
+///    [`ProjectErrorKind::StaleLockOnPartial`] **before any resolve** (exit
+///    65). `current_hash` is `hash(pre_mutation)`; `previous_hash` is the
+///    lock's.
+/// 2. **Resolve exactly `touched`.** An empty set resolves nothing (the
+///    `remove` case); a single new binding resolves just it (the `add` case).
+///    This is the explicit-touched-set contract — it never falls back to
+///    "resolve everything" on an empty set.
+/// 3. **Carry forward** every predecessor entry whose `(group, name)` is not in
+///    `touched` AND is still declared in `candidate` (so a `remove`'s dropped
+///    binding falls out): V2 byte-identical; V1 via
+///    [`transcribe_v1_to_v2`]`(exact_only = true)`, which fails
+///    [`ProjectErrorKind::LockUpgradeRequired`] (exit 78) on a gone index —
+///    never a silent live-tag re-resolve (Codex R2).
+/// 4. **Stamp `hash(candidate)`** into the produced metadata.
 ///
 /// Fully transactional: any resolution failure aborts before the merge,
-/// returning an error with no `ProjectLock` produced.
+/// returning an error with no [`ProjectLock`] produced.
 ///
 /// # Errors
-/// Returns [`super::Error`] for the same reasons as [`resolve_lock`],
-/// plus [`ProjectErrorKind::ToolNotInConfig`] when a binding name
-/// passed in `bindings` is not declared in `config`.
-pub async fn resolve_lock_partial(
-    config: &ProjectConfig,
+/// Returns [`super::Error`]: [`ProjectErrorKind::StaleLockOnPartial`] on a
+/// drifted pre-mutation hash (65), [`ProjectErrorKind::LockUpgradeRequired`]
+/// on a carried V1 entry whose index is gone (78), plus the same
+/// tag-resolution / registry / auth / policy failures as [`resolve_lock`] for
+/// the touched bindings.
+pub async fn resolve_lock_touched(
+    candidate: &ProjectConfig,
+    pre_mutation: &ProjectConfig,
     previous: &ProjectLock,
     index: &Index,
-    bindings: &[String],
-    groups: &[String],
+    touched: &[(String, String)],
     options: ResolveLockOptions,
 ) -> Result<ProjectLock, super::Error> {
-    // Stale-lock laundering guard (Codex H1).
-    //
-    // A partial resolve carries forward unselected entries verbatim from
-    // `previous` and stamps the *current* `declaration_hash(config)` into
-    // the merged metadata. If `previous` was computed from an older
-    // `config`, the carry-forward entries are silently revalidated under
-    // a fresh hash — the on-disk lock then claims to match a config it
-    // does not, masking drift from operators.
-    //
-    // Refuse the partial-resolve here so callers fall back to a full
-    // `resolve_lock` (which rebuilds the lock from scratch and cannot
-    // launder anything).
-    let current = config.declaration_hash_cached();
-    if previous.metadata.declaration_hash != current {
+    // 1. Freshness gate (Codex H1) — anchored on the PRE-mutation snapshot, not
+    //    the candidate. A clean `add` differs from `pre_mutation` only by the
+    //    inserted binding, so anchoring on the candidate would always mismatch
+    //    and fail every clean add closed. Compare `hash(pre_mutation)` against
+    //    the predecessor's stamped hash; on drift, refuse before any resolve so
+    //    the carry-forward can never launder a stale lock under a fresh hash.
+    let pre_hash = pre_mutation.declaration_hash_cached();
+    if previous.metadata.declaration_hash != pre_hash {
         return Err(ProjectError::new(
             PathBuf::new(),
             ProjectErrorKind::StaleLockOnPartial {
                 previous_hash: previous.metadata.declaration_hash.clone(),
-                current_hash: current.to_string(),
+                current_hash: pre_hash.to_string(),
             },
         )
         .into());
     }
 
-    // Validate the group filter (defense-in-depth; the CLI layer
-    // pre-validates with a UsageError exit). `normalize_groups` returns
-    // `None` when `groups` is empty, which means "no group filter".
-    let selected = normalize_groups(groups, config)?;
+    // 2. Structural coherence gate (Block 2): the freshness gate above only
+    //    proves the predecessor described the same CONFIG — `declaration_hash`
+    //    is over `ocx.toml`, not the lock's `[[tool]]` entries. A corrupt or
+    //    hand-edited lock with the right metadata hash but a missing / extra /
+    //    duplicated / wrong-repository entry would otherwise pass, then be
+    //    laundered by the carry-forward under a fresh candidate hash. Validate
+    //    that every declared binding is covered by exactly one of {a touched
+    //    pair} ∪ {a carried predecessor entry}, and that each carried entry's
+    //    bare repository matches the candidate's declared identifier. Any
+    //    mismatch is `StaleLockOnPartial` (65) — refuse before any resolve.
+    validate_predecessor_coherence(candidate, previous, touched)?;
 
-    // Validate every binding is declared somewhere in the config.
-    // Cross-checks both the top-level `[tools]` table and every
-    // `[group.*]` table — bindings are unique across selected groups
-    // by construction, so a positive hit anywhere is sufficient.
-    for name in bindings {
-        let declared = config.tools.contains_key(name) || config.groups.values().any(|tools| tools.contains_key(name));
-        if !declared {
+    // 3. Resolve EXACTLY the touched `(group, name)` bindings against the live
+    //    index. The empty set resolves nothing (remove); the explicit-touched-
+    //    set contract never falls back to "resolve everything". Each binding's
+    //    identifier is looked up in `candidate` (the post-mutation config); a
+    //    touched pair absent from `candidate` is a `ToolNotInConfig` (79) error
+    //    rather than a silently dropped binding (Block 4).
+    // Deduplicate touched pairs before building the work list. The coherence gate
+    // above already collapses predecessor duplicates; the work vector must too so
+    // a duplicate (group, name) in the caller's touched slice resolves at most once.
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+    let mut work: Vec<(String, String, Identifier)> = Vec::with_capacity(touched.len());
+    for (group, name) in touched {
+        if !seen.insert((group.as_str(), name.as_str())) {
+            // Already queued this pair; skip before the declared_identifier lookup
+            // so a duplicate of a valid binding is dropped (resolved once), while
+            // a genuinely undeclared pair still returns ToolNotInConfig on its
+            // first occurrence.
+            continue;
+        }
+        let Some(identifier) = declared_identifier(candidate, group, name) else {
             return Err(
                 ProjectError::new(PathBuf::new(), ProjectErrorKind::ToolNotInConfig { name: name.clone() }).into(),
             );
-        }
-    }
-
-    // Build the work set: start from the group-filtered universe, then
-    // narrow to the named bindings when supplied.
-    let mut work = collect_work(config, &selected);
-    if !bindings.is_empty() {
-        work.retain(|(_g, name, _id)| bindings.iter().any(|b| b == name));
+        };
+        work.push((group.clone(), name.clone(), identifier));
     }
 
     // See `resolve_lock` for the rationale on wrapping `index` once in an `Arc`.
     let index = Arc::new(index.clone());
-    let resolved = resolve_work(work, index, &options).await?;
+    let resolved = resolve_work(work, Arc::clone(&index), &options).await?;
 
-    // Merge: carry forward every entry in `previous` whose `(group,
-    // name)` was NOT just resolved, then append the freshly resolved
-    // set. The block scope on `new_keys` ensures the borrow into
-    // `resolved` ends before we move `resolved` into `tools` below.
-    let mut tools: Vec<LockedTool> = {
+    // 4. Carry every untouched, still-declared predecessor entry forward
+    //    verbatim (V2) or exact-only-transcribed (V1), then append + sort.
+    let tools = merge_carry_forward(previous, resolved, candidate, index.as_ref(), &options).await?;
+
+    // 5. Stamp `hash(candidate)` into the produced metadata (`build_lock` reads
+    //    `candidate.declaration_hash_cached()`), so the commit-time coherence
+    //    gate — which compares `staged.candidate` hash vs the lock's metadata
+    //    hash — passes.
+    Ok(build_lock(tools, candidate))
+}
+
+/// Carry forward every predecessor entry the caller did not (re)resolve and is
+/// still declared in `candidate`, transcribing any carried V1 entry to V2
+/// exact-only, then append `resolved` and sort.
+///
+/// Shared by the carry-forward path of [`resolve_lock_touched`]. A predecessor
+/// entry is carried iff its `(group, name)` is:
+///
+/// - **not** among the freshly `resolved` keys (those entries are produced from
+///   the live registry, not carried), and
+/// - **still declared** in `candidate` (a binding `remove` dropped from
+///   `ocx.toml` must not survive in the lock).
+///
+/// V2 (`PerPlatform`) entries pass through byte-identical (zero registry
+/// contact). V1 (`LegacyIndex`) entries are transcribed via
+/// [`transcribe_v1_to_v2`]`(exact_only = true)` — reading the pinned, immutable
+/// index digest preserves the pin exactly, and a gone index fails
+/// [`ProjectErrorKind::LockUpgradeRequired`] (exit 78) rather than silently
+/// re-resolving the live tag (Codex R2).
+///
+/// # Errors
+/// Returns [`super::Error`] when an exact-only V1 transcription fails (the
+/// pinned index is gone → [`ProjectErrorKind::LockUpgradeRequired`], or a
+/// policy/registry failure on the digest fetch).
+async fn merge_carry_forward(
+    previous: &ProjectLock,
+    resolved: Vec<LockedTool>,
+    candidate: &ProjectConfig,
+    index: &Index,
+    options: &ResolveLockOptions,
+) -> Result<Vec<LockedTool>, super::Error> {
+    // Carry forward every predecessor entry whose `(group, name)` was NOT just
+    // resolved AND is still declared in `candidate`. The "still declared"
+    // filter is what drops a `remove`'s binding (absent from `candidate`) from
+    // the new lock. The block scope on `new_keys` ends its borrow into
+    // `resolved` before `resolved` is moved into `tools` below.
+    let carried: Vec<LockedTool> = {
         let new_keys: HashSet<(&str, &str)> = resolved.iter().map(|t| (t.group.as_str(), t.name.as_str())).collect();
         previous
             .tools
             .iter()
             .filter(|tool| !new_keys.contains(&(tool.group.as_str(), tool.name.as_str())))
+            .filter(|tool| declared_identifier(candidate, &tool.group, &tool.name).is_some())
             .cloned()
             .collect()
     };
+
+    // The writer only emits V2 — a carried-forward V1 (`LegacyIndex`) entry
+    // reaching the writer is a bug. Transcribe each carried V1 entry to V2
+    // **exact-only** (Codex R2): an unrelated `add`/`remove` must never silently
+    // re-resolve an untouched tool's live tag. If the legacy index is no longer
+    // retrievable, the transcription fails `LockUpgradeRequired` (78) and
+    // directs the user to run `ocx upgrade`.
+    let mut tools: Vec<LockedTool> = Vec::with_capacity(carried.len() + resolved.len());
+    for tool in carried {
+        match tool.resolution {
+            LockedResolution::PerPlatform { .. } => tools.push(tool),
+            LockedResolution::LegacyIndex(pinned) => {
+                // INVARIANT: the `carried` set above is pre-filtered to entries
+                // where `declared_identifier(candidate, group, name).is_some()`,
+                // so this lookup cannot return `None` (CWE-570: the prior
+                // `unwrap_or_else` fallback was unreachable).
+                let declared = declared_identifier(candidate, &tool.group, &tool.name)
+                    .expect("invariant: carried entries are filtered to declared bindings only");
+                let resolution =
+                    transcribe_v1_to_v2(index, &pinned, &declared, IndexOperation::Resolve, true, options).await?;
+                tools.push(LockedTool {
+                    name: tool.name,
+                    group: tool.group,
+                    resolution,
+                });
+            }
+        }
+    }
     tools.extend(resolved);
 
     // Deterministic output: same `(group, name)` order as `resolve_lock`.
     tools.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
 
-    Ok(build_lock(tools, config))
+    Ok(tools)
+}
+
+/// Validate that the `previous` lock structurally describes `candidate`'s
+/// declared bindings before any carry-forward laundering can occur (Codex
+/// Block 2).
+///
+/// The two-hash freshness gate proves the predecessor was current with the same
+/// *config* (`declaration_hash` is over `ocx.toml`, not the lock's `[[tool]]`
+/// entries). It cannot detect a corrupt or hand-edited lock that carries the
+/// right metadata hash but a missing, extra, duplicated, or wrong-repository
+/// entry. Such a lock would pass the freshness gate, then be carried forward and
+/// stamped with a fresh candidate hash — laundering the corruption.
+///
+/// This gate closes that gap. Every declared binding in `candidate` must be
+/// covered by **exactly one** of:
+///
+/// - a `touched` `(group, name)` pair (it will be resolved fresh), or
+/// - a single carried predecessor entry (it will be carried forward),
+///
+/// and each carried entry's bare `repository` must equal the bare repository of
+/// `candidate`'s declared identifier for that `(group, name)`. Any uncovered
+/// declared binding, duplicate carried entry, or repository divergence returns
+/// [`ProjectErrorKind::StaleLockOnPartial`] (exit 65) before any registry
+/// contact. Reuses the existing variant — no new error variant (KISS/YAGNI).
+///
+/// # Errors
+/// Returns [`super::Error`] with [`ProjectErrorKind::StaleLockOnPartial`] on any
+/// structural incoherence between `previous` and `candidate`.
+fn validate_predecessor_coherence(
+    candidate: &ProjectConfig,
+    previous: &ProjectLock,
+    touched: &[(String, String)],
+) -> Result<(), super::Error> {
+    let stale = || {
+        ProjectError::new(
+            PathBuf::new(),
+            ProjectErrorKind::StaleLockOnPartial {
+                previous_hash: previous.metadata.declaration_hash.clone(),
+                current_hash: candidate.declaration_hash_cached().to_string(),
+            },
+        )
+        .into()
+    };
+
+    let touched_keys: HashSet<(&str, &str)> = touched.iter().map(|(g, n)| (g.as_str(), n.as_str())).collect();
+
+    // Index the predecessor's carried entries by `(group, name)`, rejecting a
+    // duplicate key (a corrupt lock with two entries for the same binding).
+    let mut carried: BTreeMap<(&str, &str), &LockedTool> = BTreeMap::new();
+    for tool in &previous.tools {
+        let key = (tool.group.as_str(), tool.name.as_str());
+        // A binding that will be resolved fresh need not (and may not coherently)
+        // appear among the carried entries; only validate carry-set duplicates.
+        if touched_keys.contains(&key) {
+            continue;
+        }
+        if carried.insert(key, tool).is_some() {
+            return Err(stale());
+        }
+    }
+
+    // Every declared binding must be covered by exactly one of {touched} ∪
+    // {carried}, and carried entries must match the declared repository.
+    for (group, name, declared) in collect_work(candidate, &None) {
+        let key = (group.as_str(), name.as_str());
+        if touched_keys.contains(&key) {
+            continue;
+        }
+        let Some(tool) = carried.get(&key) else {
+            // Declared but neither touched nor carried — a missing entry.
+            return Err(stale());
+        };
+        if carried_repository(&tool.resolution) != declared.without_specifiers() {
+            return Err(stale());
+        }
+    }
+
+    Ok(())
+}
+
+/// Return the bare `repository` coordinate (no tag, no digest) a carried lock
+/// entry pins, for repository-coherence comparison against the declaration.
+fn carried_repository(resolution: &LockedResolution) -> Identifier {
+    match resolution {
+        LockedResolution::PerPlatform { repository, .. } => repository.clone(),
+        LockedResolution::LegacyIndex(pinned) => pinned.as_identifier().without_specifiers(),
+    }
 }
 
 /// Validate `groups` argument and return the set of group names to
@@ -325,8 +509,33 @@ fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(
     work
 }
 
-/// Resolve a single `(group, name, identifier)` to a [`LockedTool`],
-/// wrapping the retry chain in `tokio::time::timeout`.
+/// Look up the `ocx.toml` declared identifier for a `(group, name)` binding.
+///
+/// `"default"` maps to the top-level `[tools]` table; any other group maps to
+/// the matching `[group.<group>]` table. Returns `None` when the binding is no
+/// longer declared (e.g. the entry was carried forward from a lock whose
+/// `ocx.toml` declaration has since been removed).
+fn declared_identifier(config: &ProjectConfig, group: &str, name: &str) -> Option<Identifier> {
+    if group == super::internal::DEFAULT_GROUP {
+        config.tools.get(name).cloned()
+    } else {
+        config.groups.get(group).and_then(|tools| tools.get(name)).cloned()
+    }
+}
+
+/// Resolve a single `(group, name, identifier)` to a [`LockedTool`] in the
+/// V2 per-platform shape ([`LockedResolution::PerPlatform`]), wrapping the
+/// fetch in `tokio::time::timeout`.
+///
+/// Switches from a single `fetch_manifest_digest` (one index digest) to
+/// `fetch_candidates` (one entry per advertised index child): it stores the
+/// bare `repository` (`identifier` with tag and digest stripped) plus one
+/// leaf-digest entry per advertised child, keyed by the child's lossless
+/// [`Platform::lock_key`]. No omitted-platform rows are synthesized and the
+/// outer index digest is discarded. A flat `Manifest::Image` package yields
+/// a single `"any"` entry. An `Option::None`/empty candidate set on a
+/// `Resolve` miss surfaces as [`ProjectErrorKind::PolicyBlocked`] / a
+/// not-found error per the active routing policy.
 async fn resolve_one(
     index: Arc<Index>,
     group: String,
@@ -334,11 +543,15 @@ async fn resolve_one(
     identifier: Identifier,
     options: ResolveLockOptions,
 ) -> Result<LockedTool, super::Error> {
+    // Wrap the whole resolve (retry + policy classification + candidate
+    // fan-out into the available-only `platforms` map) in the per-tool
+    // timeout. `resolve_to_platforms` owns the retry/classification; the
+    // timeout here bounds the entire chain so a hung registry surfaces as
+    // `ResolveTimeout` rather than blocking the join set.
     let timeout = options.per_tool_timeout;
-    let retry_chain = retry_fetch(&index, identifier.clone(), options);
-
-    let digest = match tokio::time::timeout(timeout, retry_chain).await {
-        Ok(Ok(digest)) => digest,
+    let retry_chain = resolve_to_platforms(&index, identifier.clone(), options);
+    let platforms = match tokio::time::timeout(timeout, retry_chain).await {
+        Ok(Ok(platforms)) => platforms,
         Ok(Err(err)) => return Err(err),
         Err(_elapsed) => {
             return Err(ProjectError::new(
@@ -351,16 +564,127 @@ async fn resolve_one(
         }
     };
 
-    let pinned_id = identifier.clone_with_digest(digest);
-    // `PinnedIdentifierError` cannot fire here — `clone_with_digest` above
-    // unconditionally sets the digest — but guard with `.expect()` (not a
-    // library-tier `.unwrap()`) so any future regression surfaces loudly
-    // at this exact site rather than as a cryptic downstream panic. The
-    // message names the invariant being relied upon.
-    let pinned = PinnedIdentifier::try_from(pinned_id)
-        .expect("clone_with_digest unconditionally sets the digest; PinnedIdentifier cannot fail here");
+    Ok(LockedTool {
+        name,
+        group,
+        resolution: LockedResolution::PerPlatform {
+            // Bare repository coordinates — the outer index digest is
+            // discarded; per-platform pull ids are reconstructed from
+            // `repository` + each leaf digest.
+            repository: identifier.without_specifiers(),
+            platforms,
+        },
+    })
+}
 
-    Ok(LockedTool { name, group, pinned })
+/// Resolve `identifier`'s advertised index children into the available-only
+/// `platforms` map, applying the retry/policy classification first.
+///
+/// The retry chain (`retry_fetch`) validates the tag resolves and produces
+/// the policy-aware error classification (offline/frozen → PolicyBlocked,
+/// auth → AuthError, etc.). Its result (the outer index digest) is discarded.
+/// `fetch_candidates(Resolve)` then fans the parent manifest into one leaf per
+/// advertised child; a `None`/empty candidate set surfaces as `TagNotFound`.
+async fn resolve_to_platforms(
+    index: &Index,
+    identifier: Identifier,
+    options: ResolveLockOptions,
+) -> Result<BTreeMap<String, Digest>, super::Error> {
+    // Validate the tag resolves + classify policy/auth/transient failures.
+    // The returned index digest is discarded — only the per-platform leaves
+    // are durable (the index digest is orphaned on the next push).
+    retry_fetch(index, identifier.clone(), options).await?;
+    fan_out_candidates(index, &identifier, IndexOperation::Resolve).await
+}
+
+/// Fetch the advertised index children of `identifier` under `op` and build
+/// the available-only `platforms` map. A `None`/empty candidate set on a
+/// `Resolve` miss surfaces as [`ProjectErrorKind::TagNotFound`] — never a
+/// silent empty map.
+async fn fan_out_candidates(
+    index: &Index,
+    identifier: &Identifier,
+    op: IndexOperation,
+) -> Result<BTreeMap<String, Digest>, super::Error> {
+    let candidates = index
+        .fetch_candidates(identifier, op)
+        .await
+        .map_err(|err| candidate_fetch_error(err, identifier.clone()))?;
+
+    match candidates {
+        Some(children) if !children.is_empty() => build_platforms_map(children),
+        _ => Err(ProjectError::new(
+            PathBuf::new(),
+            ProjectErrorKind::TagNotFound {
+                identifier: Box::new(identifier.clone()),
+            },
+        )
+        .into()),
+    }
+}
+
+/// Map a `fetch_candidates` failure onto a project-tier error, preserving the
+/// policy-block classification (offline/frozen → PolicyBlocked) so a
+/// no-resolve policy refusal during the candidate fan-out is not laundered
+/// into a generic registry error.
+fn candidate_fetch_error(err: crate::Error, identifier: Identifier) -> super::Error {
+    if let Some(policy) = policy_block_label(&err) {
+        return ProjectError::new(
+            PathBuf::new(),
+            ProjectErrorKind::PolicyBlocked {
+                identifier: Box::new(identifier),
+                policy,
+            },
+        )
+        .into();
+    }
+    project_err_from_client(err, identifier, |id, src| ProjectErrorKind::RegistryUnreachable {
+        identifier: Box::new(id),
+        source: src,
+    })
+}
+
+/// Build the available-only `platforms` map from the advertised candidate
+/// children returned by `Index::fetch_candidates`.
+///
+/// Each entry's leaf digest is keyed by the child's lossless
+/// [`Platform::lock_key`]. The runtime dup-key guard ([`guard_unique_key`])
+/// fires cleanly (never silently overwrites) if two advertised children
+/// stringify to the same key — a defensive assertion that should never fire
+/// under an injective key.
+fn build_platforms_map(candidates: Vec<(Identifier, Platform)>) -> Result<BTreeMap<String, Digest>, super::Error> {
+    // Each child's leaf digest is inserted through `guard_unique_key` keyed
+    // by `platform.lock_key()`. A candidate without a digest is skipped: the
+    // resolver always pins each child to its leaf digest via
+    // `clone_with_digest`, so this never drops an advertised leaf in practice.
+    let mut map: BTreeMap<String, Digest> = BTreeMap::new();
+    for (candidate, platform) in candidates {
+        let key = platform.lock_key();
+        if let Some(digest) = candidate.digest() {
+            guard_unique_key(&mut map, key, digest)?;
+        }
+    }
+    Ok(map)
+}
+
+/// Insert `key → digest` into `map`, failing cleanly if `key` is already
+/// present (defensive dup-key guard — never a silent `BTreeMap` overwrite).
+fn guard_unique_key(map: &mut BTreeMap<String, Digest>, key: String, digest: Digest) -> Result<(), super::Error> {
+    if map.contains_key(&key) {
+        return Err(ProjectError::new(PathBuf::new(), ProjectErrorKind::DuplicatePlatformKey { key }).into());
+    }
+    map.insert(key, digest);
+    Ok(())
+}
+
+/// Shared host → `"any"` lookup over a V2 `platforms` map.
+///
+/// Tries the host platform's [`Platform::lock_key`] first, then the `"any"`
+/// key (flat `Manifest::Image` packages). Returns the matching leaf
+/// [`Digest`], or `None` when neither key is present (the caller raises a
+/// clean pre-network "no <host> leaf" error).
+pub fn lookup_host_leaf<'a>(platforms: &'a BTreeMap<String, Digest>, host: &Platform) -> Option<&'a Digest> {
+    platforms.get(&host.lock_key()).or_else(|| platforms.get(ANY_KEY))
 }
 
 /// Run the retry chain: up to `retry_attempts` retries on
@@ -682,7 +1006,9 @@ fn build_lock(tools: Vec<LockedTool>, config: &ProjectConfig) -> ProjectLock {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     ProjectLock {
         metadata: LockMetadata {
-            lock_version: LockVersion::V1,
+            // V2 is the only written shape — the resolver produces
+            // PerPlatform entries.
+            lock_version: LockVersion::V2,
             declaration_hash_version: DECLARATION_HASH_VERSION,
             declaration_hash: config.declaration_hash_cached().to_string(),
             generated_by: format!("ocx {}", env!("CARGO_PKG_VERSION")),
@@ -692,15 +1018,107 @@ fn build_lock(tools: Vec<LockedTool>, config: &ProjectConfig) -> ProjectLock {
     }
 }
 
+/// Transcribe a legacy V1 index pin into the V2 per-platform shape.
+///
+/// Used to upgrade carried-forward V1 lock entries to V2 before any write.
+/// Resolves the index children of `pinned` (cache-first → registry) and
+/// records one leaf per advertised child — pin-preserving when the V1 index
+/// is still retrievable.
+///
+/// - `pinned` — the V1 entry's locked index digest.
+/// - `declared` — the binding's `ocx.toml` identifier (registry/repo + tag),
+///   used as the re-resolve target in the non-exact fallback (Codex C4).
+/// - `policy` — the index routing operation ([`IndexOperation`]) for the
+///   active `ChainMode` (Codex C5).
+/// - `exact_only` — when `true` (mutator carry-forward), transcription is
+///   exact and **fails on miss** (the index is gone) so an unrelated
+///   `add`/`remove` never silently re-resolves an untouched entry's live tag
+///   (Codex R2): the user must run `ocx upgrade` to re-resolve. When `false`,
+///   a miss falls back to re-resolving `declared`'s tag and warns (offline /
+///   frozen + uncached → `PolicyResolutionBlocked`).
+pub async fn transcribe_v1_to_v2(
+    index: &Index,
+    pinned: &PinnedIdentifier,
+    declared: &Identifier,
+    policy: IndexOperation,
+    exact_only: bool,
+    options: &ResolveLockOptions,
+) -> Result<LockedResolution, super::Error> {
+    // Bare repository coordinates are shared by every platform leaf and by
+    // both the exact-pin and the re-resolve fallback.
+    let repository = pinned.as_identifier().without_specifiers();
+
+    // Exact, pin-preserving path: fan the V1 index digest's children out
+    // directly (cache-first → registry per the active `ChainMode`). The
+    // index manifest is digest-addressed, so `fetch_candidates` returns the
+    // exact locked leaves when the index is still retrievable.
+    let index_id = pinned.as_identifier();
+    match index.fetch_candidates(index_id, policy).await {
+        Ok(Some(children)) if !children.is_empty() => {
+            let platforms = build_platforms_map(children)?;
+            return Ok(LockedResolution::PerPlatform { repository, platforms });
+        }
+        // The V1 index is gone (orphaned + GC'd) — fall through to the miss
+        // handling below.
+        Ok(_) => {}
+        Err(err) => {
+            // A no-resolve policy refusal on the digest fetch is terminal in
+            // both modes: never silently downgrade to a re-resolve.
+            if let Some(policy_label) = policy_block_label(&err) {
+                return Err(ProjectError::new(
+                    PathBuf::new(),
+                    ProjectErrorKind::PolicyBlocked {
+                        identifier: Box::new(index_id.clone()),
+                        policy: policy_label,
+                    },
+                )
+                .into());
+            }
+            // A 404-class error means the locked V1 index manifest is no
+            // longer retrievable (orphaned + GC'd — the fragility this ADR
+            // fixes) — treat it as a miss and fall through. Any other class
+            // (transient registry, auth) is a genuine failure to surface.
+            if !matches!(classify_client_error(&err), ClientFailure::NotFound) {
+                return Err(candidate_fetch_error(err, index_id.clone()));
+            }
+        }
+    }
+
+    // Miss handling: the V1 index digest is no longer retrievable.
+    if exact_only {
+        // Mutator carry-forward (Codex R2): never silently re-resolve an
+        // untouched tool's live tag. Fail with guidance to run the explicit
+        // whole-file bump verb `ocx upgrade`.
+        return Err(ProjectError::new(
+            PathBuf::new(),
+            ProjectErrorKind::LockUpgradeRequired {
+                name: declared.name().to_string(),
+            },
+        )
+        .into());
+    }
+
+    // Non-exact fallback: re-resolve the declared `ocx.toml` tag
+    // (offline/frozen + uncached surfaces as PolicyBlocked via
+    // `resolve_to_platforms`) and warn that versions may move.
+    crate::log::warn!(
+        "lock upgrade: the locked index for '{}' is no longer retrievable; re-resolving the declared tag '{}' (versions may move)",
+        declared.repository(),
+        declared.tag_or_latest(),
+    );
+    let platforms = resolve_to_platforms(index, declared.clone(), options.clone()).await?;
+    Ok(LockedResolution::PerPlatform { repository, platforms })
+}
+
 #[cfg(test)]
 mod tests {
-    //! Specification tests for [`resolve_lock`] (plan Phase 3, lines 627–635).
+    //! Specification tests for [`resolve_lock`].
     //!
     //! Every test below traces to one design-record bullet:
     //!
     //! | # | Spec bullet                                         | Test                                                          |
     //! |---|-----------------------------------------------------|---------------------------------------------------------------|
-    //! | 1 | happy path                                          | [`resolve_lock_happy_path_single_tool`]                       |
+    //! | 1 | happy path                                          | [`resolve_lock_happy_path_records_one_leaf_per_child`]        |
     //! | 2 | retry-then-success                                  | [`resolve_lock_retry_then_success`]                           |
     //! | 3 | retry-exhausted → Unavailable                       | [`resolve_lock_retry_exhausted_classifies_as_unavailable`]    |
     //! | 4 | auth failure → AuthError without retry              | [`resolve_lock_auth_failure_no_retry_classifies_as_auth_error`] |
@@ -709,24 +1127,16 @@ mod tests {
     //! | 7 | `--group` flag parsing (comma-split, empty segment) | [`group_flag_parsing_and_validation`] (tombstone — Python E2E) |
     //! | 8 | `.gitattributes` detection helper (4 sub-cases)     | [`gitattributes_detection_helper`] (tombstone — see note)     |
     //!
-    //! All tests are expected to FAIL against the current stub (which
-    //! calls `unimplemented!()`). The contract they encode is the Phase 3
-    //! implementation target.
+    //! # Error-classification assertion strategy
     //!
-    //! # Finding F3 compliance
+    //! Error classification is asserted via two stable properties rather than
+    //! by matching a specific `ProjectErrorKind` variant, so the tests stay
+    //! robust across error-type refactors:
     //!
-    //! `ProjectErrorKind` does NOT yet have `TagNotFound` / `AuthFailure` /
-    //! `RegistryUnreachable` / `ResolveTimeout` variants — those are Phase 5
-    //! additions. Error classification is therefore asserted **only** via
-    //! one of two stable properties:
-    //!
-    //! 1. Walk `err.source()` chain and downcast to `ClientError` — present
-    //!    today, will remain present post-Phase 5 as the source cause.
-    //! 2. Assert `to_string()` pattern — surface representation stable
-    //!    across refactors.
-    //!
-    //! We do NOT assert on specific `ProjectErrorKind` variants so these
-    //! tests keep compiling when Phase 5 lands the new variants.
+    //! 1. Walk the `err.source()` chain and downcast to `ClientError` — the
+    //!    source cause is preserved regardless of the outer variant.
+    //! 2. Cross-check `ClassifyExitCode` — the exit code is the stable
+    //!    surface contract a script depends on.
 
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -738,7 +1148,7 @@ mod tests {
     use super::*;
     use crate::oci::client::error::ClientError;
     use crate::oci::index::IndexImpl;
-    use crate::oci::{Digest, Identifier, Manifest};
+    use crate::oci::{Digest, Identifier, ImageIndex, ImageIndexEntry, ImageManifest, Manifest};
 
     // ── Test fixtures ───────────────────────────────────────────────────────
 
@@ -766,9 +1176,41 @@ mod tests {
     }
 
     /// A second stable test digest distinct from [`test_digest`].
-    #[allow(dead_code, reason = "Phase 3 — kept available for multi-tool tests Phase 5 may add")]
+    #[allow(dead_code, reason = "kept available for multi-tool tests Phase 5 may add")]
     fn test_digest_b() -> Digest {
         Digest::Sha256("b".repeat(64))
+    }
+
+    /// Build a flat single-image manifest. `fetch_candidates` maps this to a
+    /// single `"any"` leaf entry (the flat `Manifest::Image` → `"any"` path).
+    fn flat_image_manifest() -> Manifest {
+        Manifest::Image(ImageManifest::default())
+    }
+
+    /// Build a multi-platform image index advertising the given
+    /// `(child-digest-string, optional-platform-string)` children. `None`
+    /// platform → an `"any"` child.
+    fn image_index_manifest(children: &[(String, Option<&str>)]) -> Manifest {
+        let manifests = children
+            .iter()
+            .map(|(digest, plat)| ImageIndexEntry {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: digest.clone(),
+                size: 1,
+                platform: plat.map(|p| {
+                    let ocx: Platform = p.parse().expect("valid platform string");
+                    crate::oci::native::Platform::from(&ocx)
+                }),
+                annotations: None,
+            })
+            .collect();
+        Manifest::ImageIndex(ImageIndex {
+            schema_version: 2,
+            media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+            manifests,
+            artifact_type: None,
+            annotations: None,
+        })
     }
 
     /// Build a minimal single-tool [`ProjectConfig`] whose `[tools]` table
@@ -945,6 +1387,98 @@ mod tests {
         (Index::from_impl(shared), counter)
     }
 
+    /// A mock that serves BOTH the digest-addressed retry path
+    /// (`fetch_manifest_digest`, consumed by `retry_fetch`) and the
+    /// candidate fan-out (`fetch_manifest`, consumed by `fetch_candidates`)
+    /// from a single scripted manifest. Used by the V2 resolve specs, which
+    /// need `resolve_one` to reach `build_platforms_map`.
+    ///
+    /// `box_clone` shares the counters and the manifest via `Arc` so the
+    /// production `Index`'s `Box<dyn IndexImpl>` cloning does not lose state.
+    #[derive(Clone)]
+    struct ManifestMock {
+        /// The head digest returned by `fetch_manifest_digest` (the index
+        /// digest the resolver must DISCARD) and as the `fetch_manifest` head.
+        head: Digest,
+        /// The manifest `fetch_candidates` fans out. `None` → tag not found.
+        manifest: Arc<Option<Manifest>>,
+        digest_calls: Arc<Mutex<usize>>,
+        manifest_calls: Arc<Mutex<usize>>,
+        /// Number of leading `fetch_manifest_digest` calls that return a
+        /// transient `ClientError::Registry` before succeeding — drives the
+        /// retry-chain spec.
+        transient_digest_failures: Arc<Mutex<usize>>,
+    }
+
+    impl ManifestMock {
+        fn new(head: Digest, manifest: Option<Manifest>) -> Self {
+            Self {
+                head,
+                manifest: Arc::new(manifest),
+                digest_calls: Arc::new(Mutex::new(0)),
+                manifest_calls: Arc::new(Mutex::new(0)),
+                transient_digest_failures: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        /// Configure the first `n` `fetch_manifest_digest` calls to fail with
+        /// a transient registry error before succeeding.
+        fn with_transient_digest_failures(self, n: usize) -> Self {
+            *self.transient_digest_failures.lock().unwrap() = n;
+            self
+        }
+
+        fn digest_call_count(&self) -> usize {
+            *self.digest_calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl IndexImpl for ManifestMock {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &Identifier,
+            _op: IndexOperation,
+        ) -> crate::Result<Option<(Digest, Manifest)>> {
+            *self.manifest_calls.lock().unwrap() += 1;
+            Ok(self.manifest.as_ref().clone().map(|m| (self.head.clone(), m)))
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> crate::Result<Option<Digest>> {
+            *self.digest_calls.lock().unwrap() += 1;
+            {
+                let mut remaining = self.transient_digest_failures.lock().unwrap();
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    return Err(ClientError::Registry(Box::new(std::io::Error::other("transient 503"))).into());
+                }
+            }
+            Ok(self.manifest.as_ref().as_ref().map(|_| self.head.clone()))
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn box_clone(&self) -> Box<dyn IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Extract a [`LockedTool`]'s V2 per-platform map, panicking if the
+    /// resolver produced a `LegacyIndex` (the resolver must emit V2).
+    fn resolved_platforms(tool: &LockedTool) -> (&Identifier, &BTreeMap<String, Digest>) {
+        match &tool.resolution {
+            LockedResolution::PerPlatform { repository, platforms } => (repository, platforms),
+            LockedResolution::LegacyIndex(_) => {
+                panic!("resolve_one must produce a PerPlatform resolution, got LegacyIndex")
+            }
+        }
+    }
+
     /// Default test options: short timeout, 2 retries, minimal backoff.
     ///
     /// Production defaults (30s timeout, 1s backoff) would make retry
@@ -960,18 +1494,27 @@ mod tests {
 
     // ── 1. Happy path ───────────────────────────────────────────────────────
 
-    /// Plan line 628: "`resolve_lock` happy path with a mock `Index` that
-    /// returns a known digest."
+    /// Plan Testing Strategy (`resolve_one` via `fetch_candidates`): records
+    /// one leaf per advertised child, keyed by the child's lossless platform
+    /// key; the outer index digest is DISCARDED, not stored; no omitted-
+    /// platform rows are synthesized.
     ///
-    /// One tool, mock returns `Ok(Some(digest))` on first call → resolves
-    /// to a single-tool `ProjectLock` whose entry carries the expected
-    /// digest.
+    /// A two-platform index (`linux/amd64`, `darwin/arm64`) → a `PerPlatform`
+    /// entry with a bare `repository` and exactly those two leaf keys.
     #[tokio::test]
-    async fn resolve_lock_happy_path_single_tool() {
+    async fn resolve_lock_happy_path_records_one_leaf_per_child() {
         let config = single_tool_config();
-        let digest = test_digest();
-        let mock = MockIndex::with_script(vec![Ok(Some(digest.clone()))]);
-        let (index, counter) = index_from_mock(&mock);
+        // The outer index digest must be DISCARDED — use a byte distinct from
+        // every child leaf so the discard assertion below is meaningful.
+        let index_digest = Digest::Sha256("f".repeat(64));
+        let amd64_leaf = "a".repeat(64);
+        let arm64_leaf = "b".repeat(64);
+        let manifest = image_index_manifest(&[
+            (format!("sha256:{amd64_leaf}"), Some("linux/amd64")),
+            (format!("sha256:{arm64_leaf}"), Some("darwin/arm64")),
+        ]);
+        let mock = ManifestMock::new(index_digest.clone(), Some(manifest));
+        let index = Index::from_impl(mock);
 
         let lock = resolve_lock(&config, &index, &[], fast_options())
             .await
@@ -981,15 +1524,53 @@ mod tests {
         let tool = &lock.tools[0];
         assert_eq!(tool.name, TOOL_NAME, "binding name preserved");
         assert_eq!(tool.group, "default", "[tools] maps to the reserved 'default' group");
+
+        let (repository, platforms) = resolved_platforms(tool);
         assert_eq!(
-            tool.pinned.digest(),
-            digest,
-            "locked digest must equal the one the mock returned"
+            repository.registry(),
+            TEST_REGISTRY,
+            "bare repository keeps the registry"
+        );
+        assert_eq!(repository.repository(), TOOL_REPO, "bare repository keeps the repo");
+        assert!(repository.tag().is_none(), "repository must be bare (no tag)");
+        assert!(repository.digest().is_none(), "repository must be bare (no digest)");
+
+        assert_eq!(platforms.len(), 2, "one leaf per advertised child; got {platforms:?}");
+        assert_eq!(
+            platforms.get("linux/amd64"),
+            Some(&Digest::Sha256(amd64_leaf)),
+            "linux/amd64 leaf recorded under its lossless key"
         );
         assert_eq!(
-            *counter.lock().unwrap(),
-            1,
-            "happy path must fetch exactly once (no retries)"
+            platforms.get("darwin/arm64"),
+            Some(&Digest::Sha256(arm64_leaf)),
+            "darwin/arm64 leaf recorded under its lossless key"
+        );
+        assert!(
+            !platforms.values().any(|d| *d == index_digest),
+            "the outer index digest must be DISCARDED, never stored as a leaf"
+        );
+    }
+
+    /// Plan Testing Strategy: a flat `Manifest::Image` (non-index) package
+    /// locks a single `"any"` entry — the host→`"any"` fallback path.
+    #[tokio::test]
+    async fn resolve_lock_flat_image_records_single_any_leaf() {
+        let config = single_tool_config();
+        let index_digest = test_digest();
+        let mock = ManifestMock::new(index_digest, Some(flat_image_manifest()));
+        let index = Index::from_impl(mock);
+
+        let lock = resolve_lock(&config, &index, &[], fast_options())
+            .await
+            .expect("flat-image resolve must succeed");
+
+        assert_eq!(lock.tools.len(), 1);
+        let (_repository, platforms) = resolved_platforms(&lock.tools[0]);
+        assert_eq!(platforms.len(), 1, "flat image locks exactly one entry");
+        assert!(
+            platforms.contains_key("any"),
+            "flat Manifest::Image must lock a single `any` leaf; got {platforms:?}"
         );
     }
 
@@ -998,27 +1579,36 @@ mod tests {
     /// Plan line 629: "retry-then-success: mock returns `Registry` error
     /// once, then succeeds → lock written."
     ///
-    /// Mock fails first with a transient `ClientError::Registry`, then
-    /// succeeds with a digest. Resolver must retry and succeed. Exactly
-    /// two calls recorded.
+    /// The digest-addressed retry chain fails once transiently then
+    /// succeeds; the resolver retries and then fans out the leaf map.
+    /// Exactly two `fetch_manifest_digest` calls recorded, and a V2 leaf
+    /// is locked.
     #[tokio::test]
     async fn resolve_lock_retry_then_success() {
         let config = single_tool_config();
-        let digest = test_digest();
-        let script = vec![
-            Err(ClientError::Registry(Box::new(std::io::Error::other("transient 503"))).into()),
-            Ok(Some(digest.clone())),
-        ];
-        let mock = MockIndex::with_script(script);
-        let (index, counter) = index_from_mock(&mock);
+        let leaf = "a".repeat(64);
+        let manifest = image_index_manifest(&[(format!("sha256:{leaf}"), Some("linux/amd64"))]);
+        let mock = ManifestMock::new(test_digest(), Some(manifest)).with_transient_digest_failures(1);
+        let probe = mock.clone();
+        let index = Index::from_impl(mock);
 
         let lock = resolve_lock(&config, &index, &[], fast_options())
             .await
             .expect("resolver must recover on second attempt");
 
         assert_eq!(lock.tools.len(), 1);
-        assert_eq!(lock.tools[0].pinned.digest(), digest);
-        assert_eq!(*counter.lock().unwrap(), 2, "one initial attempt + one retry expected");
+        let (_repository, platforms) = resolved_platforms(&lock.tools[0]);
+        assert_eq!(
+            platforms.get("linux/amd64"),
+            Some(&Digest::Sha256(leaf)),
+            "the leaf must be locked after the retry recovers"
+        );
+        assert_eq!(
+            probe.digest_call_count(),
+            2,
+            "one initial attempt + one retry expected; got {}",
+            probe.digest_call_count()
+        );
     }
 
     // ── 3. Retry exhausted classifies as Unavailable ───────────────────────
@@ -1275,91 +1865,6 @@ mod tests {
         panic!("error chain does not contain a ClientError::Registry cause; chain: {err:#}");
     }
 
-    // ── Predecessor-hash gate (Cluster A — Codex H1) ────────────────────────
-    //
-    // `resolve_lock_partial` MUST refuse a stale predecessor lock so the
-    // carry-forward merge cannot launder mismatched declaration hashes.
-    // Spec: `crates/ocx_lib/src/project/resolve.rs::resolve_lock_partial`
-    // doc comment, plus `ProjectErrorKind::StaleLockOnPartial` carrying
-    // (`previous_hash`, `current_hash`) for diagnostic surfacing.
-
-    /// Build a minimal predecessor `ProjectLock` with the given
-    /// `declaration_hash`. The lock body has no tools — irrelevant to the
-    /// hash gate, which fires before any tool is inspected.
-    fn predecessor_lock_with_hash(hash: &str) -> ProjectLock {
-        ProjectLock {
-            metadata: LockMetadata {
-                lock_version: LockVersion::V1,
-                declaration_hash_version: DECLARATION_HASH_VERSION,
-                declaration_hash: hash.to_string(),
-                generated_by: "ocx test".to_string(),
-                generated_at: "2026-01-01T00:00:00Z".to_string(),
-            },
-            tools: Vec::new(),
-        }
-    }
-
-    /// `resolve_lock_partial` returns `StaleLockOnPartial` when the
-    /// predecessor's `declaration_hash` does not match the current
-    /// config's hash. Both hashes are surfaced so operators can diff.
-    #[tokio::test]
-    async fn partial_resolve_rejects_stale_predecessor_hash() {
-        let config = single_tool_config();
-        let stale_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        let previous = predecessor_lock_with_hash(stale_hash);
-
-        // Mock index: never invoked in the stale path (gate fires first).
-        // Script with one Ok response so an accidental call is observable
-        // (the test would still fail on the unwrap path), but the test
-        // expects zero calls.
-        let mock = MockIndex::with_script(vec![Ok(Some(test_digest()))]);
-        let (index, counter) = index_from_mock(&mock);
-
-        let err = resolve_lock_partial(&config, &previous, &index, &[], &[], fast_options())
-            .await
-            .expect_err("stale predecessor must be rejected");
-
-        // Walk the error chain and assert StaleLockOnPartial with both
-        // hash fields surfaced.
-        let current_hash = declaration_hash(&config);
-        let mut found = false;
-        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
-        while let Some(c) = cause {
-            if let Some(kind) = c.downcast_ref::<ProjectErrorKind>() {
-                match kind {
-                    ProjectErrorKind::StaleLockOnPartial {
-                        previous_hash,
-                        current_hash: cur,
-                    } => {
-                        assert_eq!(previous_hash, stale_hash, "previous_hash carried verbatim");
-                        assert_eq!(cur, &current_hash, "current_hash matches declaration_hash(config)");
-                        found = true;
-                        break;
-                    }
-                    other => panic!("expected StaleLockOnPartial; got {other:?}"),
-                }
-            }
-            cause = c.source();
-        }
-        assert!(found, "error chain did not contain StaleLockOnPartial; chain: {err:#}");
-
-        // Gate must fire before any registry I/O.
-        assert_eq!(
-            *counter.lock().unwrap(),
-            0,
-            "stale-predecessor gate must short-circuit before fetch_manifest_digest is called"
-        );
-
-        // Cross-check exit-code classification: DataError (65).
-        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
-        assert_eq!(
-            code,
-            Some(crate::cli::ExitCode::DataError),
-            "StaleLockOnPartial must classify as DataError (exit 65); got {:?}",
-            code
-        );
-    }
-
     // ── #155 frozen / offline policy block is terminal ──────────────────────
 
     /// A no-resolve policy block from the index layer
@@ -1419,39 +1924,1132 @@ mod tests {
         }
     }
 
-    /// `resolve_lock_partial` does NOT return `StaleLockOnPartial` when
-    /// the predecessor's `declaration_hash` matches the current config.
-    /// The gate is the only assertion here; the merge / resolve path may
-    /// produce other errors or success — both are acceptable as proof
-    /// the gate did not fire.
+    // ── resolve_lock_touched: whole-file pin-preserving mutator (spec §3.1) ──
+    //
+    // These specs prove the two-hash contract and zero-registry-contact for
+    // untouched entries. The `PanicMock` index fake panics on EVERY method, so
+    // any carry-forward path that reaches the registry fails the test loudly —
+    // the structural proof of Codex R2 (untouched entries never re-resolve).
+
+    /// An [`IndexImpl`] that panics on every call. Used to prove the
+    /// carry-forward path makes **zero** registry contact for untouched V2
+    /// entries: if any predecessor entry were re-resolved, a panic surfaces.
+    #[derive(Clone)]
+    struct PanicMock;
+
+    #[async_trait]
+    impl IndexImpl for PanicMock {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            panic!("PanicMock: list_repositories called — untouched carry-forward must not contact the registry");
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            panic!("PanicMock: list_tags called — untouched carry-forward must not contact the registry");
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<(Digest, Manifest)>> {
+            panic!("PanicMock: fetch_manifest called — untouched carry-forward must not contact the registry");
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            panic!("PanicMock: fetch_manifest_digest called — untouched carry-forward must not contact the registry");
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            panic!("PanicMock: fetch_blob called — untouched carry-forward must not contact the registry");
+        }
+        fn box_clone(&self) -> Box<dyn IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Build a three-tool `[tools]` config whose bindings resolve to
+    /// `registry.test/<name>:1`.
+    fn three_tool_config() -> ProjectConfig {
+        let toml = format!(
+            r#"[tools]
+alpha = "{r}/alpha:1"
+beta = "{r}/beta:1"
+gamma = "{r}/gamma:1"
+"#,
+            r = TEST_REGISTRY
+        );
+        ProjectConfig::from_toml_str(&toml).expect("three-tool config parses")
+    }
+
+    /// A single V2 `LockedTool` pinning `default/<name>` to one `linux/amd64`
+    /// leaf digest, so carried-forward equality is observable per entry.
+    fn v2_tool(name: &str, leaf: &str) -> LockedTool {
+        let mut platforms = BTreeMap::new();
+        platforms.insert("linux/amd64".to_string(), Digest::Sha256(leaf.repeat(64)));
+        LockedTool {
+            name: name.to_string(),
+            group: "default".to_string(),
+            resolution: LockedResolution::PerPlatform {
+                repository: Identifier::new_registry(name, TEST_REGISTRY),
+                platforms,
+            },
+        }
+    }
+
+    /// Build a V2 predecessor lock stamping `config`'s declaration hash and
+    /// carrying `tools` verbatim.
+    fn v2_predecessor_lock(config: &ProjectConfig, tools: Vec<LockedTool>) -> ProjectLock {
+        ProjectLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V2,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: config.declaration_hash_cached().to_string(),
+                generated_by: "ocx test".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            tools,
+        }
+    }
+
+    /// Look up a locked tool by `(group, name)`.
+    fn locked<'a>(lock: &'a ProjectLock, group: &str, name: &str) -> &'a LockedTool {
+        lock.tools
+            .iter()
+            .find(|t| t.group == group && t.name == name)
+            .unwrap_or_else(|| panic!("missing locked tool {group}/{name} in {:?}", lock.tools))
+    }
+
+    /// Spec §8.1 — touched = {one} of 3 V2 entries: only that entry is
+    /// re-resolved; the other two are carried byte-identical; and the stamped
+    /// metadata hash is `hash(candidate)`, NOT `hash(pre_mutation)`.
+    ///
+    /// Here pre_mutation == candidate (the touched binding already existed at
+    /// the same value), so the freshness gate passes and we can resolve `beta`
+    /// fresh while `alpha`/`gamma` carry through the `PanicMock` untouched.
     #[tokio::test]
-    async fn partial_resolve_accepts_matching_predecessor_hash() {
+    async fn resolve_lock_touched_resolves_only_touched_carries_rest_v2() {
+        let config = three_tool_config();
+        let pre_mutation = three_tool_config();
+        let alpha = v2_tool("alpha", "a");
+        let beta_old = v2_tool("beta", "b");
+        let gamma = v2_tool("gamma", "g");
+        let previous = v2_predecessor_lock(&config, vec![alpha.clone(), beta_old.clone(), gamma.clone()]);
+
+        // Only `beta` is touched; its fresh resolve returns a NEW leaf so the
+        // change is observable. `alpha`/`gamma` must reach the PanicMock zero
+        // times — any contact panics.
+        let beta_new_leaf = "c".repeat(64);
+        let manifest = image_index_manifest(&[(format!("sha256:{beta_new_leaf}"), Some("linux/amd64"))]);
+        let index = Index::from_impl(ManifestMock::new(test_digest(), Some(manifest)));
+
+        let touched = vec![("default".to_string(), "beta".to_string())];
+        let lock = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &touched, fast_options())
+            .await
+            .expect("touched resolve must succeed when pre-mutation hash matches");
+
+        // alpha + gamma carried BYTE-IDENTICAL (full LockedTool equality).
+        assert_eq!(
+            locked(&lock, "default", "alpha"),
+            &alpha,
+            "untouched alpha carried verbatim"
+        );
+        assert_eq!(
+            locked(&lock, "default", "gamma"),
+            &gamma,
+            "untouched gamma carried verbatim"
+        );
+
+        // beta re-resolved to the new leaf — NOT the old "b" pin.
+        let beta = locked(&lock, "default", "beta");
+        let (_repo, platforms) = resolved_platforms(beta);
+        assert_eq!(
+            platforms.get("linux/amd64"),
+            Some(&Digest::Sha256(beta_new_leaf)),
+            "touched beta must carry the freshly resolved leaf"
+        );
+
+        // Two-hash contract: the stamped metadata hash is hash(candidate),
+        // explicitly NOT the (equal here, but conceptually distinct) value —
+        // assert it equals declaration_hash(&candidate).
+        assert_eq!(
+            lock.metadata.declaration_hash,
+            declaration_hash(&config),
+            "stamped metadata hash must be hash(candidate)"
+        );
+    }
+
+    /// Spec §8.1 — remove's case: touched = ∅, every survivor carried verbatim,
+    /// the `PanicMock` never fires (zero registry contact proven structurally).
+    #[tokio::test]
+    async fn resolve_lock_touched_empty_touched_carries_everything() {
+        let config = three_tool_config();
+        let pre_mutation = three_tool_config();
+        let alpha = v2_tool("alpha", "a");
+        let beta = v2_tool("beta", "b");
+        let gamma = v2_tool("gamma", "g");
+        let previous = v2_predecessor_lock(&config, vec![alpha.clone(), beta.clone(), gamma.clone()]);
+
+        // PanicMock: any resolve attempt panics — proves empty-touched resolves
+        // nothing and carries every survivor verbatim.
+        let index = Index::from_impl(PanicMock);
+
+        let lock = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &[], fast_options())
+            .await
+            .expect("empty-touched resolve must carry everything with zero registry contact");
+
+        assert_eq!(lock.tools.len(), 3, "all three survivors carried");
+        assert_eq!(locked(&lock, "default", "alpha"), &alpha);
+        assert_eq!(locked(&lock, "default", "beta"), &beta);
+        assert_eq!(locked(&lock, "default", "gamma"), &gamma);
+        assert_eq!(
+            lock.metadata.declaration_hash,
+            declaration_hash(&config),
+            "stamped metadata hash must be hash(candidate)"
+        );
+    }
+
+    /// Spec §8.1 — `add` on a clean lock: candidate has a new binding the
+    /// pre-mutation snapshot lacks; pre_mutation hash matches the predecessor;
+    /// only the new binding is resolved; the produced metadata hash is
+    /// hash(candidate). Proves no universal add-failure and the commit-gate
+    /// (which compares against hash(candidate)) will pass.
+    #[tokio::test]
+    async fn resolve_lock_touched_add_on_clean_lock_succeeds() {
+        // pre_mutation: one tool. candidate: pre_mutation + a new `delta`.
+        let pre_mutation = single_tool_config();
+        let candidate = {
+            let toml = format!(
+                r#"[tools]
+{TOOL_NAME} = "{r}/{TOOL_REPO}:{TOOL_TAG}"
+delta = "{r}/delta:1"
+"#,
+                r = TEST_REGISTRY
+            );
+            ProjectConfig::from_toml_str(&toml).expect("candidate config parses")
+        };
+
+        // Predecessor lock is current with the PRE-mutation config (one tool),
+        // carrying a V2 `cmake` entry. The freshness gate anchors on
+        // hash(pre_mutation) == previous hash, so a clean add passes.
+        let cmake = v2_tool(TOOL_NAME, "a");
+        // The predecessor's `cmake` repo must match the declared repository so
+        // it carries verbatim through the PanicMock; reuse v2_tool's shape but
+        // with the right repo coordinates.
+        let cmake = LockedTool {
+            resolution: LockedResolution::PerPlatform {
+                repository: Identifier::new_registry(TOOL_REPO, TEST_REGISTRY),
+                platforms: {
+                    let mut p = BTreeMap::new();
+                    p.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
+                    p
+                },
+            },
+            ..cmake
+        };
+        let previous = v2_predecessor_lock(&pre_mutation, vec![cmake.clone()]);
+
+        // Only `delta` is resolved fresh; `cmake` carries through untouched.
+        let delta_leaf = "d".repeat(64);
+        let manifest = image_index_manifest(&[(format!("sha256:{delta_leaf}"), Some("linux/amd64"))]);
+        let index = Index::from_impl(ManifestMock::new(test_digest(), Some(manifest)));
+
+        let touched = vec![("default".to_string(), "delta".to_string())];
+        let lock = resolve_lock_touched(&candidate, &pre_mutation, &previous, &index, &touched, fast_options())
+            .await
+            .expect("a clean add must NOT fail closed (two-hash contract)");
+
+        // cmake carried verbatim; delta resolved fresh.
+        assert_eq!(
+            locked(&lock, "default", TOOL_NAME),
+            &cmake,
+            "existing cmake carried verbatim"
+        );
+        let delta = locked(&lock, "default", "delta");
+        let (_repo, platforms) = resolved_platforms(delta);
+        assert_eq!(platforms.get("linux/amd64"), Some(&Digest::Sha256(delta_leaf)));
+
+        // Stamped hash is hash(candidate) — the commit-time coherence gate
+        // compares against exactly this value, so it must NOT be
+        // hash(pre_mutation).
+        assert_eq!(
+            lock.metadata.declaration_hash,
+            declaration_hash(&candidate),
+            "stamped metadata hash must be hash(candidate), proving the commit gate passes"
+        );
+        assert_ne!(
+            lock.metadata.declaration_hash,
+            declaration_hash(&pre_mutation),
+            "stamped hash must NOT be hash(pre_mutation) — the binding was inserted"
+        );
+    }
+
+    /// Spec §8.1 — a drifted pre-mutation hash fails `StaleLockOnPartial`
+    /// BEFORE any resolve (exit 65); the PanicMock proves the gate short-
+    /// circuits ahead of registry contact.
+    #[tokio::test]
+    async fn resolve_lock_touched_rejects_drifted_pre_mutation_hash() {
+        let config = three_tool_config();
+        // pre_mutation drifted: a DIFFERENT config whose hash will not match
+        // the predecessor stamped from `config`.
+        let pre_mutation = single_tool_config();
+        let previous = v2_predecessor_lock(&config, vec![v2_tool("alpha", "a")]);
+
+        // PanicMock: if the gate did not short-circuit, the resolve would panic.
+        let index = Index::from_impl(PanicMock);
+
+        let touched = vec![("default".to_string(), "beta".to_string())];
+        let err = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &touched, fast_options())
+            .await
+            .expect_err("a drifted pre-mutation hash must be rejected before any resolve");
+
+        let mut found = false;
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+        while let Some(c) = cause {
+            if let Some(ProjectErrorKind::StaleLockOnPartial {
+                previous_hash,
+                current_hash,
+            }) = c.downcast_ref::<ProjectErrorKind>()
+            {
+                assert_eq!(
+                    previous_hash,
+                    &config.declaration_hash_cached().to_string(),
+                    "previous_hash is the predecessor lock's hash"
+                );
+                assert_eq!(
+                    current_hash,
+                    &declaration_hash(&pre_mutation),
+                    "current_hash is hash(pre_mutation), the freshness anchor"
+                );
+                found = true;
+                break;
+            }
+            cause = c.source();
+        }
+        assert!(found, "error chain must contain StaleLockOnPartial; chain: {err:#}");
+
+        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::DataError),
+            "StaleLockOnPartial must classify as DataError (exit 65); got {code:?}"
+        );
+    }
+
+    /// Spec §8.1 — an untouched V1 (`LegacyIndex`) entry whose pinned index is
+    /// gone fails `LockUpgradeRequired` (exit 78); the carry-forward never
+    /// silently re-resolves the live tag.
+    #[tokio::test]
+    async fn resolve_lock_touched_untouched_v1_gone_fails_lock_upgrade_required() {
         let config = single_tool_config();
-        let matching = declaration_hash(&config);
-        let previous = predecessor_lock_with_hash(&matching);
+        let pre_mutation = single_tool_config();
+        // Predecessor carries a single V1 `cmake` entry pinned to a V1 index.
+        let previous = ProjectLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: config.declaration_hash_cached().to_string(),
+                generated_by: "ocx test".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            tools: vec![LockedTool {
+                name: TOOL_NAME.to_string(),
+                group: "default".to_string(),
+                resolution: LockedResolution::LegacyIndex(v1_pinned()),
+            }],
+        };
 
-        // Mock returns a valid digest so the resolve completes.
-        let mock = MockIndex::with_script(vec![Ok(Some(test_digest()))]);
-        let (index, _counter) = index_from_mock(&mock);
+        // The V1 index is gone (`fetch_candidates` → None), so exact-only
+        // transcription must FAIL rather than re-resolve.
+        let index = Index::from_impl(ManifestMock::new(v1_pinned().digest(), None));
 
-        // Empty `bindings` + empty `groups` → re-resolve every tool. The
-        // gate must accept; the call must NOT surface StaleLockOnPartial.
-        let outcome = resolve_lock_partial(&config, &previous, &index, &[], &[], fast_options()).await;
+        // touched = ∅ (a remove of an unrelated binding would leave this V1
+        // survivor in the carry set).
+        let err = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &[], fast_options())
+            .await
+            .expect_err("a carried V1 entry whose index is gone must fail, not re-resolve");
 
-        // If it errors, walk the chain and ensure StaleLockOnPartial is
-        // NOT the cause. Any other error path or Ok is acceptable —
-        // this test asserts the gate alone.
-        if let Err(err) = &outcome {
-            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(err);
-            while let Some(c) = cause {
-                if let Some(ProjectErrorKind::StaleLockOnPartial { .. }) = c.downcast_ref::<ProjectErrorKind>() {
-                    panic!(
-                        "matching predecessor hash must NOT trigger StaleLockOnPartial; \
-                         chain: {err:#}"
-                    );
-                }
-                cause = c.source();
+        let mut found = false;
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+        while let Some(c) = cause {
+            if let Some(ProjectErrorKind::LockUpgradeRequired { name }) = c.downcast_ref::<ProjectErrorKind>() {
+                assert_eq!(name, TOOL_NAME, "the gone-index tool is named in the error");
+                found = true;
+                break;
+            }
+            cause = c.source();
+        }
+        assert!(found, "error chain must contain LockUpgradeRequired; chain: {err:#}");
+
+        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::ConfigError),
+            "LockUpgradeRequired must classify as ConfigError (exit 78); got {code:?}"
+        );
+    }
+
+    /// Spec §8.1 — an untouched V1 entry whose pinned index IS retrievable is
+    /// transcribed to V2 exact (the pinned index digest's children become the
+    /// V2 leaf map) — pin-preserving, no live-tag re-resolve.
+    #[tokio::test]
+    async fn resolve_lock_touched_untouched_v1_present_transcribes_exact() {
+        let config = single_tool_config();
+        let pre_mutation = single_tool_config();
+        let previous = ProjectLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: config.declaration_hash_cached().to_string(),
+                generated_by: "ocx test".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            tools: vec![LockedTool {
+                name: TOOL_NAME.to_string(),
+                group: "default".to_string(),
+                resolution: LockedResolution::LegacyIndex(v1_pinned()),
+            }],
+        };
+
+        // The V1 index digest fans out into one linux/amd64 leaf — the exact,
+        // pin-preserving transcription (no live-tag lookup).
+        let leaf = "a".repeat(64);
+        let manifest = image_index_manifest(&[(format!("sha256:{leaf}"), Some("linux/amd64"))]);
+        let index = Index::from_impl(ManifestMock::new(v1_pinned().digest(), Some(manifest)));
+
+        let lock = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &[], fast_options())
+            .await
+            .expect("a retrievable V1 index transcribes exact, pin-preserving");
+
+        let tool = locked(&lock, "default", TOOL_NAME);
+        let (_repo, platforms) = resolved_platforms(tool);
+        assert_eq!(
+            platforms.get("linux/amd64"),
+            Some(&Digest::Sha256(leaf)),
+            "the V1 index child leaf is carried verbatim into V2 — pin-preserving"
+        );
+    }
+
+    /// Spec §8.1 — `merge_carry_forward` (exercised via `resolve_lock_touched`
+    /// with empty touched): a predecessor `(group, name)` absent from
+    /// `candidate` is NOT carried (the remove path). `beta` is removed from the
+    /// candidate config, so its survivor entry must fall out of the new lock.
+    #[tokio::test]
+    async fn merge_carry_forward_drops_undeclared_binding() {
+        // candidate: alpha + gamma only (beta removed). pre_mutation: all 3.
+        let pre_mutation = three_tool_config();
+        let candidate = {
+            let toml = format!(
+                r#"[tools]
+alpha = "{r}/alpha:1"
+gamma = "{r}/gamma:1"
+"#,
+                r = TEST_REGISTRY
+            );
+            ProjectConfig::from_toml_str(&toml).expect("two-tool candidate parses")
+        };
+        // Predecessor is current with pre_mutation (all 3 declared).
+        let previous = v2_predecessor_lock(
+            &pre_mutation,
+            vec![v2_tool("alpha", "a"), v2_tool("beta", "b"), v2_tool("gamma", "g")],
+        );
+
+        // PanicMock: empty touched ⇒ nothing resolved; survivors carried.
+        let index = Index::from_impl(PanicMock);
+
+        let lock = resolve_lock_touched(&candidate, &pre_mutation, &previous, &index, &[], fast_options())
+            .await
+            .expect("remove path must carry survivors and drop the undeclared binding");
+
+        assert_eq!(lock.tools.len(), 2, "beta must be dropped; only alpha + gamma survive");
+        assert!(
+            lock.tools.iter().all(|t| t.name != "beta"),
+            "the removed binding must NOT be carried forward; got {:?}",
+            lock.tools
+        );
+        assert_eq!(locked(&lock, "default", "alpha"), &v2_tool("alpha", "a"));
+        assert_eq!(locked(&lock, "default", "gamma"), &v2_tool("gamma", "g"));
+        assert_eq!(
+            lock.metadata.declaration_hash,
+            declaration_hash(&candidate),
+            "stamped metadata hash must be hash(candidate) (beta absent)"
+        );
+    }
+
+    // ── Block 2: structural coherence between predecessor and candidate ──────
+    //
+    // The two-hash freshness gate proves the predecessor described the same
+    // CONFIG (declaration_hash is over `ocx.toml`, not the lock entries). It
+    // does NOT prove the lock's `[[tool]]` entries are coherent: a corrupt or
+    // hand-edited lock with the right metadata hash but a missing / extra /
+    // wrong-repository entry would otherwise pass the gate, then be laundered by
+    // the carry-forward under a freshly stamped candidate hash. These specs pin
+    // the structural-coherence gate (StaleLockOnPartial/65) and prove it fires
+    // BEFORE any registry contact (PanicMock).
+
+    /// Spec — Block 2(a): a predecessor missing a declared (untouched) binding
+    /// must fail `StaleLockOnPartial` BEFORE any resolve. The candidate declares
+    /// three tools but the predecessor lock only carries two; `gamma` is
+    /// uncovered (not touched, not carried), so the carry-forward would silently
+    /// drop a declared binding — refuse instead.
+    #[tokio::test]
+    async fn resolve_lock_touched_rejects_predecessor_missing_declared_binding() {
+        let config = three_tool_config();
+        let pre_mutation = three_tool_config();
+        // Predecessor is missing `gamma` despite carrying the matching config
+        // declaration_hash — a corrupt/hand-edited lock.
+        let previous = v2_predecessor_lock(&config, vec![v2_tool("alpha", "a"), v2_tool("beta", "b")]);
+
+        // PanicMock: the coherence gate must short-circuit before any resolve.
+        let index = Index::from_impl(PanicMock);
+
+        // touched = ∅ (e.g. a remove of an unrelated binding) leaves `gamma` in
+        // the would-be carry set, but it is absent from the predecessor.
+        let err = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &[], fast_options())
+            .await
+            .expect_err("a predecessor missing a declared binding must be rejected before any resolve");
+
+        assert!(
+            chain_contains_stale_lock_on_partial(&err),
+            "error chain must contain StaleLockOnPartial; chain: {err:#}"
+        );
+        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::DataError),
+            "missing-declared-binding must classify as DataError (exit 65); got {code:?}"
+        );
+    }
+
+    /// Spec — Block 2(b): a carried entry whose bare `repository` differs from
+    /// the candidate's declared identifier for that `(group, name)` must fail
+    /// `StaleLockOnPartial` BEFORE any resolve. The lock pins `beta` to a
+    /// different repository than `ocx.toml` declares — the lock no longer
+    /// describes the config, so carrying it forward would launder a wrong pin.
+    #[tokio::test]
+    async fn resolve_lock_touched_rejects_carried_repository_divergence() {
+        let config = three_tool_config();
+        let pre_mutation = three_tool_config();
+        // `beta`'s carried entry points at a DIFFERENT repository than the
+        // candidate declares (`registry.test/beta`). A corrupt/hand-edited lock.
+        let mut beta_wrong = v2_tool("beta", "b");
+        if let LockedResolution::PerPlatform { repository, .. } = &mut beta_wrong.resolution {
+            *repository = Identifier::new_registry("wrong-repo", TEST_REGISTRY);
+        }
+        let previous = v2_predecessor_lock(&config, vec![v2_tool("alpha", "a"), beta_wrong, v2_tool("gamma", "g")]);
+
+        // PanicMock: the coherence gate must short-circuit before any resolve.
+        let index = Index::from_impl(PanicMock);
+
+        let err = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &[], fast_options())
+            .await
+            .expect_err("a carried entry whose repository diverges from the declaration must be rejected");
+
+        assert!(
+            chain_contains_stale_lock_on_partial(&err),
+            "error chain must contain StaleLockOnPartial; chain: {err:#}"
+        );
+        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::DataError),
+            "carried-repository divergence must classify as DataError (exit 65); got {code:?}"
+        );
+    }
+
+    /// Spec — Block 2: a predecessor carrying a DUPLICATE `(group, name)` entry
+    /// must fail `StaleLockOnPartial` BEFORE any resolve. Each declared binding
+    /// must be covered by exactly one carried entry; two entries for the same
+    /// key is a corrupt lock.
+    #[tokio::test]
+    async fn resolve_lock_touched_rejects_duplicate_carried_entry() {
+        let config = three_tool_config();
+        let pre_mutation = three_tool_config();
+        // Two `beta` entries — a duplicate the carry-forward must not launder.
+        let previous = v2_predecessor_lock(
+            &config,
+            vec![
+                v2_tool("alpha", "a"),
+                v2_tool("beta", "b"),
+                v2_tool("beta", "c"),
+                v2_tool("gamma", "g"),
+            ],
+        );
+
+        let index = Index::from_impl(PanicMock);
+
+        let err = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &[], fast_options())
+            .await
+            .expect_err("a duplicate carried entry must be rejected before any resolve");
+
+        assert!(
+            chain_contains_stale_lock_on_partial(&err),
+            "error chain must contain StaleLockOnPartial; chain: {err:#}"
+        );
+    }
+
+    /// Walk `err`'s source chain and report whether it carries a
+    /// [`ProjectErrorKind::StaleLockOnPartial`].
+    fn chain_contains_stale_lock_on_partial(err: &super::super::Error) -> bool {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(err);
+        while let Some(c) = cause {
+            if matches!(
+                c.downcast_ref::<ProjectErrorKind>(),
+                Some(ProjectErrorKind::StaleLockOnPartial { .. })
+            ) {
+                return true;
+            }
+            cause = c.source();
+        }
+        false
+    }
+
+    // ── Block 4: touched binding not declared in candidate ──────────────────
+
+    /// Spec — Block 4: a touched `(group, name)` absent from `candidate` must
+    /// fail `ToolNotInConfig` (exit 79) rather than being silently dropped. The
+    /// `PanicMock` proves the rejection fires before any registry contact.
+    #[tokio::test]
+    async fn resolve_lock_touched_rejects_undeclared_touched_binding() {
+        let config = three_tool_config();
+        let pre_mutation = three_tool_config();
+        let previous = v2_predecessor_lock(
+            &config,
+            vec![v2_tool("alpha", "a"), v2_tool("beta", "b"), v2_tool("gamma", "g")],
+        );
+
+        let index = Index::from_impl(PanicMock);
+
+        // `nonexistent` is not declared in the candidate config.
+        let touched = vec![("default".to_string(), "nonexistent".to_string())];
+        let err = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &touched, fast_options())
+            .await
+            .expect_err("a touched binding absent from candidate must be rejected, not dropped");
+
+        let mut found = false;
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+        while let Some(c) = cause {
+            if let Some(ProjectErrorKind::ToolNotInConfig { name }) = c.downcast_ref::<ProjectErrorKind>() {
+                assert_eq!(name, "nonexistent", "the undeclared tool is named in the error");
+                found = true;
+                break;
+            }
+            cause = c.source();
+        }
+        assert!(found, "error chain must contain ToolNotInConfig; chain: {err:#}");
+
+        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::NotFound),
+            "ToolNotInConfig must classify as NotFound (exit 79); got {code:?}"
+        );
+    }
+
+    // ── Block 4b: duplicate touched pair resolves at most once ─────────────
+
+    /// Regression — Block 4b: passing the SAME `(group, name)` twice in
+    /// `touched` must produce exactly ONE lock entry for that binding, not a
+    /// duplicate. The coherence gate already collapses predecessor duplicates;
+    /// the work vector must too (lib-contract gap closed by the seen-set).
+    #[tokio::test]
+    async fn resolve_lock_touched_duplicate_touched_pair_resolves_exactly_once() {
+        let config = three_tool_config();
+        let pre_mutation = three_tool_config();
+        let alpha = v2_tool("alpha", "a");
+        let beta_old = v2_tool("beta", "b");
+        let gamma = v2_tool("gamma", "g");
+        let previous = v2_predecessor_lock(&config, vec![alpha.clone(), beta_old, gamma.clone()]);
+
+        // `beta` is listed TWICE in touched — the dedup must ensure it is
+        // resolved only once, so the final lock carries exactly one `beta` entry.
+        let beta_new_leaf = "c".repeat(64);
+        let manifest = image_index_manifest(&[(format!("sha256:{beta_new_leaf}"), Some("linux/amd64"))]);
+        let index = Index::from_impl(ManifestMock::new(test_digest(), Some(manifest)));
+
+        let touched = vec![
+            ("default".to_string(), "beta".to_string()),
+            ("default".to_string(), "beta".to_string()),
+        ];
+        let lock = resolve_lock_touched(&config, &pre_mutation, &previous, &index, &touched, fast_options())
+            .await
+            .expect("duplicate touched pair must resolve successfully (deduped to one)");
+
+        // The lock must contain exactly three entries (alpha, beta, gamma) with
+        // no duplicate for beta.
+        assert_eq!(
+            lock.tools.len(),
+            3,
+            "duplicate touched entry must not produce an extra lock entry; got {:?}",
+            lock.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        let beta_entries: Vec<_> = lock.tools.iter().filter(|t| t.name == "beta").collect();
+        assert_eq!(
+            beta_entries.len(),
+            1,
+            "beta must appear exactly once in the lock, not duplicated; got {} entries",
+            beta_entries.len()
+        );
+        // Verify the resolved leaf is the freshly-resolved one.
+        let (_repo, platforms) = resolved_platforms(beta_entries[0]);
+        assert_eq!(
+            platforms.get("linux/amd64"),
+            Some(&Digest::Sha256(beta_new_leaf)),
+            "beta's lock entry must carry the freshly resolved leaf"
+        );
+    }
+
+    // ── resolve_one: candidate fan-out edge cases ───────────────────────────
+
+    /// Plan Testing Strategy (`resolve_one`): an unpinned-tag `Resolve` miss
+    /// (the manifest is not found) maps to a `NotFound`-classified error —
+    /// the resolver never produces an empty lock entry.
+    ///
+    /// Regression guard: this contract is already satisfied by the preserved
+    /// `retry_fetch` → `TagNotFound` machinery (a `None` manifest short-
+    /// circuits before the candidate fan-out), so this test passes against
+    /// the stub. It pins the NotFound exit code so the V2 fan-out work cannot
+    /// silently regress the miss path to a different code.
+    #[tokio::test]
+    async fn resolve_lock_candidate_miss_classifies_as_not_found() {
+        let config = single_tool_config();
+        // No manifest → fetch_manifest_digest returns Ok(None) → TagNotFound.
+        let mock = ManifestMock::new(test_digest(), None);
+        let index = Index::from_impl(mock);
+
+        let err = resolve_lock(&config, &index, &[], fast_options())
+            .await
+            .expect_err("a candidate miss must surface as an error, not an empty lock");
+
+        let code = <super::super::Error as crate::cli::ClassifyExitCode>::classify(&err);
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::NotFound),
+            "candidate miss must classify as NotFound (exit 79); got {code:?}"
+        );
+    }
+
+    // ── build_platforms_map / guard_unique_key ──────────────────────────────
+
+    /// `build_platforms_map` keys each advertised child's leaf digest by its
+    /// lossless [`Platform::lock_key`]. Two distinct platforms → two distinct
+    /// keys; the index digest is never part of the map.
+    #[test]
+    fn build_platforms_map_keys_by_lossless_platform() {
+        let amd64: Platform = "linux/amd64".parse().unwrap();
+        let arm64: Platform = "darwin/arm64".parse().unwrap();
+        let repo = Identifier::new_registry(TOOL_REPO, TEST_REGISTRY);
+        let candidates = vec![
+            (repo.clone_with_digest(Digest::Sha256("a".repeat(64))), amd64),
+            (repo.clone_with_digest(Digest::Sha256("b".repeat(64))), arm64),
+        ];
+
+        let map = build_platforms_map(candidates).expect("two distinct platforms must build cleanly");
+        assert_eq!(map.len(), 2, "one entry per advertised child");
+        assert_eq!(map.get("linux/amd64"), Some(&Digest::Sha256("a".repeat(64))));
+        assert_eq!(map.get("darwin/arm64"), Some(&Digest::Sha256("b".repeat(64))));
+    }
+
+    /// The runtime dup-key guard fails cleanly (never silently overwrites)
+    /// when two advertised children stringify to the same key. A defensive
+    /// assertion that should never fire under an injective key — exercised
+    /// here by feeding two children with the same platform string.
+    #[test]
+    fn build_platforms_map_dup_key_fails_cleanly() {
+        let amd64: Platform = "linux/amd64".parse().unwrap();
+        let repo = Identifier::new_registry(TOOL_REPO, TEST_REGISTRY);
+        let candidates = vec![
+            (repo.clone_with_digest(Digest::Sha256("a".repeat(64))), amd64.clone()),
+            (repo.clone_with_digest(Digest::Sha256("b".repeat(64))), amd64),
+        ];
+
+        let result = build_platforms_map(candidates);
+        assert!(
+            result.is_err(),
+            "a duplicate platform key must fail cleanly, never silently overwrite"
+        );
+    }
+
+    /// `guard_unique_key` inserts a fresh key and rejects a duplicate without
+    /// overwriting the first value.
+    #[test]
+    fn guard_unique_key_rejects_duplicate_without_overwrite() {
+        let mut map: BTreeMap<String, Digest> = BTreeMap::new();
+        guard_unique_key(&mut map, "linux/amd64".to_string(), Digest::Sha256("a".repeat(64)))
+            .expect("first insert succeeds");
+        let dup = guard_unique_key(&mut map, "linux/amd64".to_string(), Digest::Sha256("b".repeat(64)));
+        assert!(dup.is_err(), "second insert under the same key must fail");
+        assert_eq!(
+            map.get("linux/amd64"),
+            Some(&Digest::Sha256("a".repeat(64))),
+            "the original value must survive the rejected duplicate"
+        );
+    }
+
+    // ── lookup_host_leaf ────────────────────────────────────────────────────
+
+    /// Host key present → that leaf is returned directly.
+    #[test]
+    fn lookup_host_leaf_returns_host_key_when_present() {
+        let host: Platform = "linux/amd64".parse().unwrap();
+        let mut platforms = BTreeMap::new();
+        platforms.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
+        platforms.insert("any".to_string(), Digest::Sha256("z".repeat(64)));
+
+        let leaf = lookup_host_leaf(&platforms, &host).expect("host key present");
+        assert_eq!(*leaf, Digest::Sha256("a".repeat(64)), "host key wins over `any`");
+    }
+
+    /// Host key absent but `"any"` present → fall back to `"any"` (the flat
+    /// `Manifest::Image` host→`any` fallback; correctness gate).
+    #[test]
+    fn lookup_host_leaf_falls_back_to_any() {
+        let host: Platform = "windows/amd64".parse().unwrap();
+        let mut platforms = BTreeMap::new();
+        platforms.insert("any".to_string(), Digest::Sha256("z".repeat(64)));
+
+        let leaf = lookup_host_leaf(&platforms, &host).expect("any fallback present");
+        assert_eq!(
+            *leaf,
+            Digest::Sha256("z".repeat(64)),
+            "absent host key falls back to `any`"
+        );
+    }
+
+    /// Host key absent AND no `"any"` → `None` (the caller raises a clean
+    /// pre-network "no <host> leaf" error).
+    #[test]
+    fn lookup_host_leaf_none_when_host_and_any_absent() {
+        let host: Platform = "windows/amd64".parse().unwrap();
+        let mut platforms = BTreeMap::new();
+        platforms.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
+
+        assert!(
+            lookup_host_leaf(&platforms, &host).is_none(),
+            "neither the host key nor `any` is present → None"
+        );
+    }
+
+    // ── transcribe_v1_to_v2 ─────────────────────────────────────────────────
+
+    /// Build a V1 [`PinnedIdentifier`] for `registry/repo@sha256:<byte*64>`.
+    fn v1_pinned() -> PinnedIdentifier {
+        let id = Identifier::new_registry(TOOL_REPO, TEST_REGISTRY).clone_with_digest(Digest::Sha256("c".repeat(64)));
+        PinnedIdentifier::try_from(id).expect("carries a digest")
+    }
+
+    /// Plan Testing Strategy (`transcribe_v1_to_v2`, cached/live): the V1
+    /// index digest fans out into the V2 per-platform leaf map, pin-
+    /// preserving — exact, no re-resolve. The resulting resolution is
+    /// `PerPlatform`.
+    #[tokio::test]
+    async fn transcribe_v1_to_v2_pin_preserving_when_index_fetchable() {
+        let pinned = v1_pinned();
+        let declared = tool_identifier();
+        let amd64_leaf = "a".repeat(64);
+        let manifest = image_index_manifest(&[(format!("sha256:{amd64_leaf}"), Some("linux/amd64"))]);
+        let mock = ManifestMock::new(pinned.digest(), Some(manifest));
+        let index = Index::from_impl(mock);
+
+        // exact_only = true (partial carry-forward) and exact_only = false
+        // (explicit --upgrade) both pin-preserve when the index is fetchable.
+        let resolution = transcribe_v1_to_v2(
+            &index,
+            &pinned,
+            &declared,
+            IndexOperation::Resolve,
+            true,
+            &fast_options(),
+        )
+        .await
+        .expect("cached/live index transcribes pin-preserving");
+
+        let LockedResolution::PerPlatform { repository, platforms } = resolution else {
+            panic!("transcription must produce a PerPlatform resolution");
+        };
+        assert!(
+            repository.tag().is_none() && repository.digest().is_none(),
+            "bare repository"
+        );
+        assert_eq!(
+            platforms.get("linux/amd64"),
+            Some(&Digest::Sha256(amd64_leaf)),
+            "the V1 index child leaf is carried verbatim into V2"
+        );
+    }
+
+    /// Plan Testing Strategy (partial carry-forward, `exact_only = true`):
+    /// when the V1 index is gone (`fetch_candidates` → None) the transcription
+    /// **fails** rather than silently re-resolving the live tag (Codex R2 —
+    /// an unrelated `add`/`remove`/`update` must not drift an untouched
+    /// tool's platform set). The clean error, NOT an `unreachable!()`, is the
+    /// contract.
+    #[tokio::test]
+    async fn transcribe_exact_only_fails_when_index_gone() {
+        let pinned = v1_pinned();
+        let declared = tool_identifier();
+        // No manifest → the V1 index is no longer fetchable.
+        let mock = ManifestMock::new(pinned.digest(), None);
+        let index = Index::from_impl(mock);
+
+        let err = transcribe_v1_to_v2(
+            &index,
+            &pinned,
+            &declared,
+            IndexOperation::Resolve,
+            true,
+            &fast_options(),
+        )
+        .await
+        .expect_err("exact-only transcription must fail when the index is gone, not re-resolve");
+
+        // It must be a clean library error — assert it is not silently Ok and
+        // surfaces a project-tier error the CLI can route to guidance.
+        let crate::project::Error::Project(_) = err;
+    }
+
+    // ── transcribe_v1_to_v2: non-exact re-resolve fallback — unit tests ──────
+
+    /// A mock that dispatches on whether the requested identifier is digest-
+    /// addressed (the orphaned V1 index lookup) or tag-addressed (the
+    /// non-exact re-resolve fallback).
+    ///
+    /// `digest_manifest` is returned when the incoming identifier carries a
+    /// digest (exact V1 index fetch); `tag_manifest` is returned for
+    /// tag-addressed lookups (the declared-tag re-resolve path).
+    /// `None` in either slot simulates the corresponding miss.
+    #[derive(Clone)]
+    struct DispatchMock {
+        /// Digest returned by `fetch_manifest_digest` for the exact V1 index lookup.
+        digest_head: Digest,
+        /// Manifest returned for digest-addressed `fetch_manifest` (the V1 index).
+        /// `None` → the V1 index is gone (orphaned + GC'd).
+        digest_manifest: Option<Manifest>,
+        /// Manifest returned for tag-addressed `fetch_manifest` (the declared tag
+        /// re-resolve). `None` → the declared tag does not exist.
+        tag_manifest: Option<Manifest>,
+        /// Head digest returned by `fetch_manifest_digest` for tag-addressed calls.
+        tag_head: Digest,
+        digest_calls: Arc<Mutex<usize>>,
+    }
+
+    impl DispatchMock {
+        fn new(
+            digest_head: Digest,
+            digest_manifest: Option<Manifest>,
+            tag_head: Digest,
+            tag_manifest: Option<Manifest>,
+        ) -> Self {
+            Self {
+                digest_head,
+                digest_manifest,
+                tag_manifest,
+                tag_head,
+                digest_calls: Arc::new(Mutex::new(0)),
             }
         }
+    }
+
+    #[async_trait]
+    impl IndexImpl for DispatchMock {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> crate::Result<Option<(Digest, Manifest)>> {
+            // Dispatch based on whether the identifier is digest-addressed.
+            if identifier.digest().is_some() {
+                Ok(self.digest_manifest.clone().map(|m| (self.digest_head.clone(), m)))
+            } else {
+                Ok(self.tag_manifest.clone().map(|m| (self.tag_head.clone(), m)))
+            }
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &Identifier,
+            _op: IndexOperation,
+        ) -> crate::Result<Option<Digest>> {
+            *self.digest_calls.lock().unwrap() += 1;
+            if identifier.digest().is_some() {
+                Ok(self.digest_manifest.as_ref().map(|_| self.digest_head.clone()))
+            } else {
+                Ok(self.tag_manifest.as_ref().map(|_| self.tag_head.clone()))
+            }
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn box_clone(&self) -> Box<dyn IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Non-exact (`exact_only = false`) path: when the V1 index is gone
+    /// (`fetch_candidates` → None for the digest-addressed lookup) but the
+    /// declared tag is resolvable, the transcription falls back to re-resolving
+    /// the declared tag and returns a `PerPlatform` resolution whose leaves come
+    /// from the tag manifest.
+    #[tokio::test]
+    async fn transcribe_v1_to_v2_gone_online_resolves_declared_tag_and_warns() {
+        let pinned = v1_pinned();
+        let declared = tool_identifier();
+
+        // The V1 index manifest is gone (digest-addressed miss → None).
+        // The declared tag is live and returns a two-platform image index.
+        let amd64_leaf = "d".repeat(64);
+        let arm64_leaf = "e".repeat(64);
+        let tag_manifest = image_index_manifest(&[
+            (format!("sha256:{amd64_leaf}"), Some("linux/amd64")),
+            (format!("sha256:{arm64_leaf}"), Some("linux/arm64")),
+        ]);
+        let tag_head = Digest::Sha256("f".repeat(64));
+
+        let mock = DispatchMock::new(
+            pinned.digest(), // digest_head — irrelevant, digest_manifest is None
+            None,            // V1 index is gone
+            tag_head,        // tag_head
+            Some(tag_manifest),
+        );
+        let index = Index::from_impl(mock);
+
+        // exact_only = false → explicit --upgrade re-resolve fallback.
+        let resolution = transcribe_v1_to_v2(
+            &index,
+            &pinned,
+            &declared,
+            IndexOperation::Resolve,
+            false, // --upgrade path
+            &fast_options(),
+        )
+        .await
+        .expect("--upgrade must succeed by re-resolving the declared tag when the V1 index is gone");
+
+        // The result must be PerPlatform — the caller holds a re-resolved leaf
+        // set (from the declared tag), not a LegacyIndex.
+        let LockedResolution::PerPlatform { repository, platforms } = resolution else {
+            panic!("--upgrade fallback must produce a PerPlatform resolution; got LegacyIndex");
+        };
+
+        // Repository coordinates must be bare (no tag, no digest).
+        assert!(repository.tag().is_none(), "repository must be bare (no tag)");
+        assert!(repository.digest().is_none(), "repository must be bare (no digest)");
+
+        // The leaves must come from the declared tag's index children.
+        assert_eq!(
+            platforms.len(),
+            2,
+            "re-resolved platforms must match the declared tag's index children; got {platforms:?}"
+        );
+        assert_eq!(
+            platforms.get("linux/amd64"),
+            Some(&Digest::Sha256(amd64_leaf)),
+            "linux/amd64 leaf from the declared tag's index"
+        );
+        assert_eq!(
+            platforms.get("linux/arm64"),
+            Some(&Digest::Sha256(arm64_leaf)),
+            "linux/arm64 leaf from the declared tag's index"
+        );
+    }
+
+    // ── Finding 3b: the non-exact re-resolve fallback EMITS the warn ─────────
+
+    /// A thread-local, process-global capturing [`log::Log`] for asserting that
+    /// the non-exact re-resolve fallback actually emits its WARN line.
+    ///
+    /// The logger is installed exactly once per process (`log::set_boxed_logger`
+    /// is one-shot) and records every line on the *calling* thread into a
+    /// thread-local buffer, so parallel tests never observe each other's logs.
+    /// `crate::log::warn!` (the `log` facade re-exported via `tracing_log`)
+    /// routes through this logger when no other logger is installed in the test
+    /// binary.
+    mod warn_capture {
+        use std::cell::RefCell;
+
+        use crate::log::{self, Level, LevelFilter, Log, Metadata, Record};
+
+        thread_local! {
+            static CAPTURED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
+
+        struct ThreadLocalLogger;
+
+        impl Log for ThreadLocalLogger {
+            fn enabled(&self, metadata: &Metadata) -> bool {
+                metadata.level() <= Level::Warn
+            }
+
+            fn log(&self, record: &Record) {
+                if self.enabled(record.metadata()) {
+                    CAPTURED.with(|buffer| buffer.borrow_mut().push(format!("{}", record.args())));
+                }
+            }
+
+            fn flush(&self) {}
+        }
+
+        /// Install the capturing logger (idempotent across tests) and start a
+        /// fresh per-thread capture buffer. Call [`drain`] afterwards on the
+        /// SAME thread to read the lines logged in between.
+        ///
+        /// Split into install/drain (rather than a closure wrapper) so the
+        /// code under test can be `.await`-ed directly on the test thread —
+        /// nesting a `block_on` inside a `#[tokio::test]` would panic.
+        pub fn arm() {
+            // `set_boxed_logger` succeeds at most once; subsequent tests reuse
+            // the already-installed logger. The buffer is thread-local, so the
+            // single shared logger still isolates concurrent tests.
+            let _ = log::set_boxed_logger(Box::new(ThreadLocalLogger));
+            log::set_max_level(LevelFilter::Warn);
+            CAPTURED.with(|buffer| buffer.borrow_mut().clear());
+        }
+
+        /// Read the WARN lines captured on the current thread since [`arm`].
+        pub fn drain() -> Vec<String> {
+            CAPTURED.with(|buffer| buffer.borrow().clone())
+        }
+    }
+
+    /// Finding 3b — the non-exact re-resolve fallback (re-resolving a moved
+    /// advisory tag because the V1 index is gone) must EMIT a WARN that versions
+    /// may move — not silently re-pin. Asserting the warning is produced (not
+    /// merely that the lock changed) is the gap the existing
+    /// `..._resolves_declared_tag_and_warns` test left open.
+    #[tokio::test]
+    async fn upgrade_reresolve_fallback_emits_warn() {
+        let pinned = v1_pinned();
+        let declared = tool_identifier();
+
+        // V1 index gone (digest-addressed miss); declared tag live.
+        let amd64_leaf = "d".repeat(64);
+        let tag_manifest = image_index_manifest(&[(format!("sha256:{amd64_leaf}"), Some("linux/amd64"))]);
+        let mock = DispatchMock::new(
+            pinned.digest(),
+            None, // V1 index orphaned + GC'd
+            Digest::Sha256("f".repeat(64)),
+            Some(tag_manifest),
+        );
+        let index = Index::from_impl(mock);
+
+        // Arm the per-thread capture, drive the re-resolve fallback
+        // (`exact_only = false`) directly on the test thread (the
+        // single-threaded `#[tokio::test]` runtime runs the future here, so the
+        // synchronous WARN lands on this thread's buffer), then drain.
+        warn_capture::arm();
+        transcribe_v1_to_v2(
+            &index,
+            &pinned,
+            &declared,
+            IndexOperation::Resolve,
+            false, // explicit --upgrade re-resolve fallback
+            &fast_options(),
+        )
+        .await
+        .expect("--upgrade re-resolves the declared tag when the V1 index is gone");
+        let lines = warn_capture::drain();
+
+        assert!(
+            lines.iter().any(|line| line.contains("lock upgrade")
+                && line.contains("no longer retrievable")
+                && line.contains("versions may move")),
+            "the --upgrade re-resolve fallback must emit the 'versions may move' WARN; captured: {lines:?}"
+        );
     }
 }

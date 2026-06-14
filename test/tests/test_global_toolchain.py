@@ -26,6 +26,7 @@ isolation is by PATH precedence via ``ocx run``, not by subshell PATH strip.
 
 from __future__ import annotations
 
+import re as _re_gt
 import subprocess
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from src.shell_eval import run_after_sourcing
 
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64  # --global + --project conflict
+EXIT_DATA = 65  # StaleLockOnPartial → DataError (whole-file drift on a mutator)
 
 
 # ---------------------------------------------------------------------------
@@ -744,3 +746,221 @@ def test_no_self_link_for_global_file(
                 f"the global file (project dir = $OCX_HOME) must get NO "
                 f"projects/ self-link; found {link} -> {target}"
             )
+
+
+# ---------------------------------------------------------------------------
+# V2 global lock: ``ocx --global env`` resolves via per-platform leaf digest
+# ---------------------------------------------------------------------------
+
+_LEAF_RE_GT = _re_gt.compile(r'"[^"]+"\s*=\s*"sha256:([0-9a-f]{64})"')
+
+
+def test_global_env_resolves_v2_leaf_digest(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """``$OCX_HOME/ocx.lock`` is written in V2 shape after ``ocx --global add``;
+    ``ocx --global env --shell=sh`` resolves the package via the per-platform
+    leaf digest from ``[tool.platforms]`` — not a legacy ``pinned`` index digest.
+
+    ADR §toolchain_env.rs: "V2: host-platform leaf; V1: legacy index-digest path."
+
+    Assertions:
+    1. The global lock is V2 (``lock_version = 2``, ``[tool.platforms]`` present,
+       no ``pinned =`` line).
+    2. ``ocx --global env --shell=sh`` exits 0 and emits ``export`` lines.
+    3. The export lines reference a content path that exists on disk (proving
+       the V2 leaf was resolved to an installed package).
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+
+    add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
+    assert add.returncode == EXIT_SUCCESS, (
+        f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
+    )
+
+    # Verify the global lock is V2.
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    global_lock = ocx_home / "ocx.lock"
+    assert global_lock.is_file(), "ocx --global add must write $OCX_HOME/ocx.lock"
+    lock_text = global_lock.read_text()
+
+    assert "lock_version = 2" in lock_text, (
+        "global lock must be V2 after add --global; got:\n" + lock_text[:400]
+    )
+    assert "[tool.platforms]" in lock_text, (
+        "global V2 lock must carry a [tool.platforms] table"
+    )
+    leaf_digests = _LEAF_RE_GT.findall(lock_text)
+    assert leaf_digests, "global V2 lock must record at least one leaf digest"
+    assert "pinned =" not in lock_text, (
+        "global V2 lock must not carry a legacy `pinned` line"
+    )
+
+    # ``ocx --global env --shell=sh`` must resolve the V2 leaf and emit export lines.
+    env_result = _run_cmd(ocx, tmp_path, "--global", "env", "--shell=sh")
+    assert env_result.returncode == EXIT_SUCCESS, (
+        f"ocx --global env --shell=sh must succeed after add (V2 leaf path); "
+        f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
+    )
+    assert "export" in env_result.stdout, (
+        f"V2 --global env --shell=sh must emit export lines; got:\n{env_result.stdout!r}"
+    )
+
+
+def test_global_env_v1_lock_still_works_offline(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A committed V1 global lock (``lock_version = 1``, ``pinned`` field) still
+    lets ``ocx --global env`` work via the legacy index-digest path — no forced
+    upgrade, no network if the index is cached.
+
+    ADR: "Read both V1 and V2, write only V2. A committed V1 lock keeps
+    installing/running offline with no forced upgrade and no read-path mutation."
+
+    Flow:
+    1. ``ocx --global add`` writes a V2 global lock and pulls the package.
+    2. Overwrite the global lock with a hand-authored V1 form (preserving the
+       real declaration_hash so stale-check passes; using the real pinned
+       identifier from the V2 lock's bare-repo + one leaf).
+    3. ``ocx --global env --shell=sh`` must still exit 0 and emit ``export``
+       lines (the package blobs are cached from step 1).
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+
+    add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
+    assert add.returncode == EXIT_SUCCESS, (
+        f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
+    )
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    global_lock = ocx_home / "ocx.lock"
+    v2_lock_text = global_lock.read_text()
+
+    # Extract real coordinates from the V2 lock to build an honest V1 lock.
+    repo_match = _re_gt.search(r'repository\s*=\s*"([^"]+)"', v2_lock_text)
+    leaf_match = _LEAF_RE_GT.search(v2_lock_text)
+    decl_hash_match = _re_gt.search(
+        r'declaration_hash\s*=\s*"(sha256:[0-9a-f]{64})"', v2_lock_text
+    )
+    assert repo_match and leaf_match and decl_hash_match, (
+        "V2 global lock must carry repository + leaf + declaration_hash;\n"
+        + v2_lock_text[:400]
+    )
+    bare_repo = repo_match.group(1)
+    leaf_hex = leaf_match.group(1)
+    decl_hash = decl_hash_match.group(1)
+
+    # Overwrite with a V1 lock (this is what a consumer has if they committed
+    # a lock before V2 shipped).
+    global_lock.write_text(
+        f"""\
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "{decl_hash}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "{unique_repo}"
+group = "default"
+pinned = "{bare_repo}@sha256:{leaf_hex}"
+"""
+    )
+
+    # ``ocx --global env --shell=sh`` must succeed via the legacy path (blobs cached).
+    env_result = _run_cmd(ocx, tmp_path, "--global", "env", "--shell=sh")
+    assert env_result.returncode == EXIT_SUCCESS, (
+        "V1 global lock must still allow ocx --global env --shell=sh to succeed "
+        "(legacy index-digest path, blobs cached); "
+        f"rc={env_result.returncode}\nstderr:\n{env_result.stderr}"
+    )
+    assert "export" in env_result.stdout, (
+        "V1 global lock: --global env --shell=sh must emit export lines when "
+        f"blobs are cached; got:\n{env_result.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier-neutral fail-closed message (design spec §4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_global_partial_mutator_fail_closed_message_not_project_only(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A `ocx --global add` that drifts the global lock fails closed (exit 65)
+    and the stderr message is **tier-aware**: it must not hand a `--global`
+    user a bare project-only ``ocx lock`` that would reconcile the wrong
+    toolchain. Per design spec §4.1, the error layer has no tier context, so
+    the remedy names ``--global`` for the global toolchain.
+
+    Setup:
+    1. ``ocx --global add A`` — creates ``$OCX_HOME/ocx.{toml,lock}`` current
+       with A.
+    2. Hand-edit ``$OCX_HOME/ocx.toml`` to add an unrelated binding line —
+       the declaration_hash now drifts from the global lock's recorded hash.
+    3. ``ocx --global add B`` — the whole-file freshness gate refuses to carry
+       A forward against a stale lock → exit 65, tier-neutral remedy.
+    """
+    repo_a = f"{unique_repo}_a"
+    repo_b = f"{unique_repo}_b"
+    repo_extra = f"{unique_repo}_extra"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, bins=["atool"])
+    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, bins=["btool"])
+    make_package(ocx, repo_extra, "1.0.0", tmp_path, new=True, bins=["xtool"])
+
+    # Step 1: bind A into the global tier (auto-creates ocx.toml + ocx.lock).
+    add_a = _run_cmd(
+        ocx, tmp_path, "--global", "add", "--no-pull", f"{ocx.registry}/{repo_a}:1.0.0"
+    )
+    assert add_a.returncode == EXIT_SUCCESS, (
+        f"baseline --global add A must succeed; rc={add_a.returncode}\n"
+        f"stderr:\n{add_a.stderr}"
+    )
+
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    global_toml = ocx_home / "ocx.toml"
+    assert (ocx_home / "ocx.lock").exists(), "baseline --global add must write ocx.lock"
+
+    # Step 2: hand-edit the global ocx.toml — declare an unrelated binding
+    # INSIDE the [tools] table so the declaration_hash drifts from the lock's
+    # recorded hash WITHOUT re-locking. This is the "edited since lock"
+    # condition. Insert immediately after the `[tools]` header so the new key
+    # belongs to that table (a bare top-level key would be invalid TOML).
+    original = global_toml.read_text()
+    assert "[tools]" in original, (
+        f"auto-created global ocx.toml must carry a [tools] table; got:\n{original}"
+    )
+    drifted = original.replace(
+        "[tools]\n",
+        f'[tools]\nextra = "{ocx.registry}/{repo_extra}:1.0.0"\n',
+        1,
+    )
+    assert drifted != original, "drift edit must change the global ocx.toml"
+    global_toml.write_text(drifted)
+
+    # Step 3: a second --global add must fail closed against the stale lock.
+    add_b = _run_cmd(
+        ocx, tmp_path, "--global", "add", "--no-pull", f"{ocx.registry}/{repo_b}:1.0.0"
+    )
+    assert add_b.returncode == EXIT_DATA, (
+        f"--global add on a drifted global ocx.toml must exit {EXIT_DATA}; "
+        f"rc={add_b.returncode}\nstderr:\n{add_b.stderr}"
+    )
+
+    combined = (add_b.stderr + add_b.stdout).lower()
+    # The remedy must be tier-aware: it names `--global` so a global user is not
+    # handed a project-only reconcile command (spec §4.1).
+    assert "--global" in combined, (
+        "fail-closed remedy under --global must be tier-aware (name `--global` "
+        "for the global toolchain), not a bare project-only `ocx lock`; "
+        f"stderr:\n{add_b.stderr}\nstdout:\n{add_b.stdout}"
+    )
+    # It still names the reconcile verb so the user knows what to run.
+    assert "ocx lock" in combined, (
+        "fail-closed remedy must still name the `ocx lock` reconcile verb; "
+        f"stderr:\n{add_b.stderr}\nstdout:\n{add_b.stdout}"
+    )

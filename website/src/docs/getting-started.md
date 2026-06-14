@@ -137,7 +137,7 @@ Three commands set up the toolchain:
 
 <<< @/_scripts/getting-started/project-toolchain.sh{sh}
 
-[`ocx init`][cmd-init] writes a minimal `ocx.toml`. [`ocx add`][cmd-add] appends a binding, resolves the tag to a digest, and writes `ocx.lock`. [`ocx run`][cmd-run] reads `ocx.lock` and spawns the command with the locked toolchain's environment — no manual `export` or PATH manipulation needed.
+[`ocx init`][cmd-init] writes a minimal `ocx.toml`. [`ocx add`][cmd-add] appends a binding, resolves the tag to per-platform digests, and writes `ocx.lock`. [`ocx run`][cmd-run] reads `ocx.lock` and spawns the command with the locked toolchain's environment — no manual `export` or PATH manipulation needed.
 
 See [Pin a project's tools][user-guide-project] in the User Guide for groups, lifecycle commands, and CI setup.
 

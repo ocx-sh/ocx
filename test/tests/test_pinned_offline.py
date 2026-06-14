@@ -71,12 +71,25 @@ def test_pinned_id_exec_offline_succeeds(ocx: OcxRunner, tmp_path: Path) -> None
     pull = _run(ocx, "pull", cwd=project)
     assert pull.returncode == 0, f"ocx pull failed: rc={pull.returncode}\nstderr:\n{pull.stderr}"
 
-    # Read the pinned digest from ocx.lock so the offline exec uses a
-    # digest-bearing identifier (no tag-store reach-back needed).
+    # Read the host-platform LEAF digest from the V2 ocx.lock so the offline
+    # exec uses a digest-bearing identifier (no tag-store reach-back needed).
+    # This is the orphan/404 regression the per-platform-leaf ADR fixes: the
+    # leaf survives across publish-pipeline index rewrites where the outer
+    # index digest would 404. We reconstruct the pull id as
+    # ``repository@sha256:<leaf>`` (the lock no longer stores a `pinned`
+    # index digest at all).
     import tomllib
+
     lock_data = tomllib.loads((project / "ocx.lock").read_text())
     locked_tool = next(t for t in lock_data["tool"] if t["name"] == bin_name)
-    pinned_id = locked_tool["pinned"]
+    repository = locked_tool["repository"]
+    platforms = locked_tool["platforms"]
+    assert platforms, "V2 lock entry must carry at least one platform leaf"
+    # Prefer a single-arch leaf (this single-platform fixture ships exactly
+    # one); fall back to `any` for flat images. Either way the leaf — never an
+    # index digest — drives resolution.
+    leaf_digest = platforms.get("any") or next(iter(platforms.values()))
+    pinned_id = f"{repository}@{leaf_digest}"
 
     # Wipe the local tag store. The pinned-id flow must not need it for
     # exec — any reach-back to the tag store would fail this assertion

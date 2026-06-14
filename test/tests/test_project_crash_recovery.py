@@ -106,12 +106,15 @@ def test_kill_mid_add_leaves_recoverable_state(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """SIGKILL during ``ocx add`` between lock-write and manifest-write must
-    leave both files in a state where the next mutator can recover.
+    leave both files in a state recoverable with a single ``ocx lock``.
 
-    Recovery contract: a subsequent ``ocx add`` (or ``ocx lock``) must
-    succeed without manual file removal — the staleness gate fires, the
-    next mutator's ``MutationGuard`` rolls back the orphaned lock, and
-    the next commit proceeds.
+    Recovery contract (whole-file model, spec §3 / flow #5): the SIGKILL
+    leaves ``ocx.lock`` carrying a declaration_hash for a config the
+    (unchanged) ``ocx.toml`` does not match — exactly the drift shape. The
+    next mutator (``ocx add``) refuses to carry forward against the stale lock
+    and fails closed with exit 65, naming ``ocx lock`` as the remedy. A single
+    ``ocx lock`` reconciles the whole file, after which ``ocx add`` proceeds —
+    no manual file removal required.
     """
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_kill_a"
@@ -140,10 +143,28 @@ def test_kill_mid_add_leaves_recoverable_state(
     proc.send_signal(signal.SIGKILL)
     proc.wait(timeout=10)
 
-    # The next mutator must succeed without intervention.
+    # The next mutator fails closed against the orphaned (stale) lock and
+    # names `ocx lock` as the remedy — never a silent self-heal re-resolve.
+    stale = _run_in(ocx, project, "add", fq_b)
+    assert stale.returncode == EXIT_DATA, (
+        f"recovery `ocx add` against an orphaned lock must fail closed (exit "
+        f"{EXIT_DATA}); rc={stale.returncode}, stderr={stale.stderr!r}"
+    )
+    assert "ocx lock" in (stale.stderr + stale.stdout).lower(), (
+        f"the fail-closed error must direct the user to `ocx lock`; stderr={stale.stderr!r}"
+    )
+
+    # A single `ocx lock` reconciles the whole file — no manual cleanup.
+    relock = _run_in(ocx, project, "lock")
+    assert relock.returncode == EXIT_SUCCESS, (
+        f"`ocx lock` must reconcile the orphaned lock; rc={relock.returncode}, "
+        f"stderr={relock.stderr!r}"
+    )
+
+    # Now the recovery add proceeds.
     result = _run_in(ocx, project, "add", fq_b)
     assert result.returncode == EXIT_SUCCESS, (
-        f"recovery `ocx add` must succeed after SIGKILL mid-write; "
+        f"recovery `ocx add` must succeed after `ocx lock`; "
         f"rc={result.returncode}, stderr={result.stderr!r}"
     )
     toml_text = (project / "ocx.toml").read_text()

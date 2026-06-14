@@ -43,7 +43,8 @@
 //! ```ignore
 //! let guard = load_project_for_mutate(&context).await?;
 //! let staged = guard.stage(|cfg| { /* in-memory mutation */ Ok(()) })?;
-//! let new_lock = resolve_lock_partial(staged.config(), guard.previous_lock().unwrap(), index, &[name], &[], opts).await?;
+//! let touched = [(group, name)];
+//! let new_lock = resolve_lock_touched(staged.config(), guard.config(), guard.previous_lock().unwrap(), index, &touched, opts).await?;
 //! guard.commit(staged, new_lock).await?;
 //! ```
 
@@ -97,13 +98,20 @@ pub struct MutationGuard {
     /// yet (bootstrapping path: `ocx add` on a freshly initialised
     /// project, `ocx init` itself).
     previous_lock: Option<ProjectLock>,
+    /// Raw on-disk bytes of the predecessor `ocx.lock`, captured verbatim at
+    /// guard-acquisition time. `None` mirrors [`Self::previous_lock`] (no lock
+    /// existed). Used by the rollback path to restore the predecessor
+    /// byte-for-byte — including a V1 (`LegacyIndex`) lock, which the V2 writer
+    /// refuses to serialize. Restoring the original bytes keeps a rolled-back
+    /// mutation from converting (or panicking on) a committed V1 lock.
+    previous_lock_bytes: Option<Vec<u8>>,
 }
 
 /// In-memory candidate [`ProjectConfig`] produced by
 /// [`MutationGuard::stage`].
 ///
 /// Owns the candidate config by value so the resolver layer can borrow
-/// it for the entire `resolve_lock` / `resolve_lock_partial` await
+/// it for the entire `resolve_lock` / `resolve_lock_touched` await
 /// without aliasing the guard. CLI mutators stage → resolve → commit
 /// in three logically distinct steps; tying `StagedMutation`'s lifetime
 /// to the guard would force the resolve call to outlive the guard
@@ -163,10 +171,11 @@ impl MutationGuard {
     /// on disk at guard-acquisition time.
     ///
     /// `None` indicates a bootstrapping case: the lock file has never
-    /// been materialised. CLI callers that resolve a partial lock
-    /// (e.g. `ocx add` on a fresh project) inspect this to choose
-    /// between [`crate::project::resolve_lock_partial`] (predecessor
-    /// present) and [`crate::project::resolve_lock`] (full bootstrap).
+    /// been materialised. CLI callers (`ocx add`/`remove`) inspect this
+    /// to choose between [`crate::project::resolve_lock_touched`]
+    /// (predecessor present — carries untouched bindings forward,
+    /// fail-closed on drift) and [`crate::project::resolve_lock`]
+    /// (full bootstrap — nothing to preserve, never fails closed).
     pub fn previous_lock(&self) -> Option<&ProjectLock> {
         self.previous_lock.as_ref()
     }
@@ -329,13 +338,7 @@ impl MutationGuard {
         .await;
 
         if let Err(primary) = post_rename {
-            rollback_lock_after_failure(
-                &self.lock_path,
-                self.previous_lock.as_ref(),
-                &self.home,
-                &self.config_path,
-            )
-            .await;
+            rollback_lock_after_failure(&self.lock_path, self.previous_lock_bytes.as_deref()).await;
             return Err(primary);
         }
 
@@ -370,7 +373,7 @@ impl MutationGuard {
 impl StagedMutation {
     /// Read-only access to the candidate config produced by the
     /// staging closure. CLI callers feed this into the resolver
-    /// (`resolve_lock` / `resolve_lock_partial`) before
+    /// (`resolve_lock` / `resolve_lock_touched`) before
     /// [`MutationGuard::commit`].
     pub fn config(&self) -> &ProjectConfig {
         &self.candidate
@@ -416,7 +419,10 @@ impl MutationGuard {
     /// Callers MUST have already acquired the exclusive advisory flock on
     /// `ocx.toml` via [`crate::project::acquire_project_lock`]
     /// and loaded both the current [`ProjectConfig`] and the optional
-    /// predecessor [`ProjectLock`]. The constructor does not re-validate
+    /// predecessor [`ProjectLock`]. `previous_lock_bytes` carries the raw
+    /// on-disk bytes of that predecessor (captured verbatim so the rollback
+    /// path can restore a V1 lock byte-for-byte); it MUST be `Some` exactly
+    /// when `previous_lock` is `Some`. The constructor does not re-validate
     /// these inputs — it merely packages them into a guard whose drop glue
     /// releases the flock.
     ///
@@ -433,6 +439,7 @@ impl MutationGuard {
         home: PathBuf,
         config: ProjectConfig,
         previous_lock: Option<ProjectLock>,
+        previous_lock_bytes: Option<Vec<u8>>,
     ) -> Self {
         Self {
             flock,
@@ -441,6 +448,7 @@ impl MutationGuard {
             home,
             config,
             previous_lock,
+            previous_lock_bytes,
         }
     }
 }
@@ -533,29 +541,29 @@ async fn maybe_inject_fault(fault: Option<&str>, stage: CommitStage) -> Result<(
 ///
 /// Behaviour:
 ///
-/// - `previous_lock = Some(prev)` → re-`save` the predecessor under the
-///   same atomic-rename + parent-fsync primitive used by the forward path.
-/// - `previous_lock = None`        → delete the just-created lock file.
+/// - `previous_lock_bytes = Some(bytes)` → write the captured predecessor
+///   bytes back **verbatim** under the same atomic-rename + parent-fsync
+///   primitive used by the forward path. Writing the raw bytes (rather than
+///   re-serializing the parsed predecessor through `ProjectLock::save`) is
+///   what lets a committed **V1** (`LegacyIndex`) lock roll back correctly: the
+///   V2 writer would hit `unreachable!()` on a `LegacyIndex`, so a re-`save`
+///   would panic instead of restoring. The captured bytes restore the
+///   predecessor exactly as it was on disk (a V1 lock stays V1).
+/// - `previous_lock_bytes = None`        → delete the just-created lock file.
 ///
 /// Rollback failures log at ERROR but never replace the original error —
 /// callers must always see the first thing that went wrong (the
 /// `quality-rust-errors.md` "first cause" rule). The lock path may end up
 /// in an inconsistent on-disk state if rollback itself fails; the WARN
 /// log surfaces the divergence so an operator can recover by hand.
-async fn rollback_lock_after_failure(
-    lock_path: &Path,
-    previous_lock: Option<&ProjectLock>,
-    home: &Path,
-    config_path: &Path,
-) {
-    match previous_lock {
-        Some(prev) => {
-            // Re-save the predecessor lock. `prev` was loaded from this
-            // exact path at guard-acquisition time, so a `save` with
-            // `previous = Some(prev)` produces a byte-identical file
-            // (the `tools_content_equal` short-circuit preserves
-            // `generated_at`).
-            if let Err(e) = prev.save(lock_path, Some(prev), home, config_path).await {
+async fn rollback_lock_after_failure(lock_path: &Path, previous_lock_bytes: Option<&[u8]>) {
+    match previous_lock_bytes {
+        Some(bytes) => {
+            // Restore the predecessor lock byte-for-byte. The bytes were
+            // captured verbatim at guard-acquisition time, so the restored
+            // file is identical to the pre-commit on-disk state — including
+            // a V1 lock, which the V2 serializer cannot emit.
+            if let Err(e) = super::lock::restore_lock_bytes_verbatim(lock_path, bytes.to_vec()).await {
                 log::error!(
                     "MutationGuard rollback: failed to restore predecessor ocx.lock at '{}': {e:#}",
                     lock_path.display()

@@ -7,7 +7,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ResolveLockOptions, remove_binding_in_memory, resolve_lock};
+use ocx_lib::project::{ResolveLockOptions, remove_binding_in_memory, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::load_project_for_mutate;
@@ -16,7 +16,14 @@ use crate::app::project_context::load_project_for_mutate;
 ///
 /// Searches the implicit default `[tools]` table and all named groups for
 /// a binding whose key or identifier matches the given identifier, removes
-/// it, rewrites `ocx.lock` for the affected group, and uninstalls the tool.
+/// it, rewrites `ocx.lock` with every surviving entry carried forward
+/// unchanged, and uninstalls the tool.
+///
+/// Removing a binding never re-resolves the surviving tools: their pins
+/// are preserved exactly. Fails with exit 65 when `ocx.toml` drifted from
+/// `ocx.lock` before this remove (run `ocx lock` to reconcile), or exit 78
+/// when a survivor's legacy entry can no longer be migrated exactly (run
+/// `ocx upgrade`).
 ///
 /// When the same binding name exists in multiple groups, use `--group` to
 /// target a specific group. `--group default` targets the implicit
@@ -113,16 +120,39 @@ impl Remove {
             Ok(())
         })?;
 
-        // Full atomic rewrite of ocx.lock from the post-mutation config
-        // (research §6.3: add/remove always write a complete fresh
-        // lockfile).
-        let new_lock = resolve_lock(
-            staged.config(),
-            context.default_index(),
-            &[],
-            ResolveLockOptions::default(),
-        )
-        .await?;
+        // Whole-file model (spec §4.4): `remove` re-resolves NOTHING. Every
+        // survivor is carried forward verbatim (V2 byte-identical; V1 via
+        // exact-only pinned-index transcribe), and the dropped binding falls
+        // out of the carry-forward because it is no longer declared in the
+        // candidate config. The freshness gate anchors on the pre-mutation
+        // snapshot (`guard.config()`, which still contains the removed binding)
+        // so a clean lock passes; drift surfaces as `StaleLockOnPartial` (65,
+        // run `ocx lock`) and a survivor's gone V1 index as `LockUpgradeRequired`
+        // (78, run `ocx upgrade`). Both propagate to the `main.rs` boundary.
+        let new_lock = match guard.previous_lock().cloned() {
+            Some(prev) => {
+                resolve_lock_touched(
+                    staged.config(), // candidate — removed binding already absent
+                    guard.config(),  // pre-mutation snapshot — freshness anchor
+                    &prev,
+                    context.default_index(),
+                    &[], // EMPTY touched set — resolve nothing
+                    ResolveLockOptions::default(),
+                )
+                .await?
+            }
+            // No predecessor lock to preserve — resolve the post-mutation
+            // config directly (never fails closed).
+            None => {
+                resolve_lock(
+                    staged.config(),
+                    context.default_index(),
+                    &[],
+                    ResolveLockOptions::default(),
+                )
+                .await?
+            }
+        };
 
         let commit = guard.commit(staged, new_lock.clone()).await?;
         let _ = commit;
@@ -149,15 +179,8 @@ impl Remove {
             }
         }
 
-        let entries: Vec<LockEntry> = new_lock
-            .tools
-            .iter()
-            .map(|t| LockEntry {
-                binding: t.name.clone(),
-                group: t.group.clone(),
-                digest: t.pinned.strip_advisory().to_string(),
-            })
-            .collect();
+        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
         let report = LockReport::new(entries);
         context.api().report(&report)?;
 

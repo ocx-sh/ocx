@@ -14,7 +14,7 @@ mod temp_store;
 pub use blob_store::{BlobDir, BlobStore};
 #[cfg(test)]
 pub(crate) use blob_store::{WRITE_BLOB_CALL_COUNT, WRITE_BLOB_TEST_LOCK};
-pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, read_digest_file, write_digest_file};
+pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, cas_shard_path, read_digest_file, write_digest_file};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore};
 pub use state_store::StateStore;
