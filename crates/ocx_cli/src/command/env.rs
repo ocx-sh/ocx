@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use crate::{api, conventions::*, options};
@@ -131,13 +130,8 @@ impl Env {
         // `<name>.exe` shim, and `.EXE` is unconditionally in the default
         // Windows PATHEXT — nothing to inject for bare-name resolution.
 
-        // Backend channel is stdout; if a human is watching a TTY, hint that
-        // the default report output is not eval-safe (stderr only — stdout
-        // stays a pure machine channel).
-        if std::io::stdout().is_terminal() {
-            context
-                .ui()
-                .warn("default output is not eval-safe; use --shell=bash to activate");
+        if !context.api().is_json() {
+            ocx_lib::log::warn!("default output is not eval-safe; use --shell=bash to activate");
         }
 
         // Structured report. Format is a context-level concern (root
