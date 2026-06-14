@@ -28,6 +28,24 @@ jobs:
           command: check
           args: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
+  workflow-lint:
+    name: Workflow Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup OCX
+        uses: ./.github/actions/setup-ocx
+        with:
+          version: '0.3.7'
+      - name: Lint workflows
+        # `ocx run` composes the project toolchain (actionlint + shellcheck +
+        # go-task) from ocx.lock and runs the task hermetically — same gate as
+        # local `task ci:actionlint`.
+        run: ocx run -- task ci:actionlint
+
   smoke:
     name: Smoke (Linux)
     runs-on: ubuntu-latest

@@ -123,7 +123,7 @@ jobs:
         shell: bash
         run: |
           docker run -d --name test-registry -p 5000:5000 registry:2
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -sf http://localhost:5000/v2/ > /dev/null 2>&1; then
               echo "Registry is ready"
               exit 0

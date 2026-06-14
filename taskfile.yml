@@ -8,6 +8,7 @@ vars:
 includes:
   rust: ./taskfiles/rust.taskfile.yml
   shell: ./taskfiles/shell.taskfile.yml
+  ci: ./taskfiles/ci.taskfile.yml
   coverage: ./taskfiles/coverage.taskfile.yml
   duplo: ./taskfiles/duplo.taskfile.yml
   release: ./taskfiles/release.taskfile.yml
@@ -112,6 +113,7 @@ tasks:
       - task: rust:format:check
       - task: rust:clippy:check
       - task: shell:verify
+      - task: ci:verify
       - task: claude:verify
 
   .verify:build-test:

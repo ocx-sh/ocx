@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# CI / GitHub Actions quality tasks. actionlint comes from the project
+# toolchain (`ocx.toml` -> direnv -> PATH); no `ocx package exec` wrapping.
+# When running outside direnv, prefix with `direnv exec . <task>` or
+# `ocx run -- <task>` so the project tools (actionlint + its embedded
+# shellcheck) are on PATH.
+
+version: '3'
+
+tasks:
+  verify:
+    desc: CI workflow quality gate (actionlint)
+    cmds:
+      - task: actionlint
+
+  actionlint:
+    desc: Lint GitHub Actions workflows with actionlint (shellcheck severity warning+; see subsystem-ci.md)
+    env:
+      # Match the shell subsystem's `shellcheck -S warning` floor so the
+      # scripts actionlint extracts from `run:` blocks are linted at the same
+      # severity project-wide (info/style findings are not gated). The
+      # generated release.yml is excluded via .github/actionlint.yaml.
+      SHELLCHECK_OPTS: '--severity=warning'
+    cmd: actionlint

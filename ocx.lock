@@ -1,14 +1,19 @@
 [metadata]
 lock_version = 1
 declaration_hash_version = 1
-declaration_hash = "sha256:1a64930ecf3b4780159ccec5134fc1d6df6c69ad249c071ce6d6a7c024c5bbfe"
-generated_by = "ocx 0.3.1"
-generated_at = "2026-05-28T15:23:24Z"
+declaration_hash = "sha256:67d0abff62f8ee06d53fcc19b8dddaf7e8caa02d3d136762475bef869d06d83c"
+generated_by = "ocx 0.3.7"
+generated_at = "2026-06-14T23:29:57Z"
+
+[[tool]]
+name = "actionlint"
+group = "default"
+pinned = "ocx.sh/actionlint@sha256:11c0d69ada3a90fce0047d738fe106093c14d3cb3764b512058fe355bd28ce33"
 
 [[tool]]
 name = "bun"
 group = "default"
-pinned = "ocx.sh/bun@sha256:83acea5455ed13df3aa1e2e4b7574a71fa5164c0c029f03b03209e2a1312af02"
+pinned = "ocx.sh/bun@sha256:192ac96de23a041242e955b20ca18414e327ca381196aa0818a2ceca6bc7bd23"
 
 [[tool]]
 name = "git-cliff"
@@ -38,4 +43,4 @@ pinned = "ocx.sh/shfmt@sha256:011244340dd2ab9e216c44c0da8ae3e1efede1fad713fa8e2e
 [[tool]]
 name = "uv"
 group = "default"
-pinned = "ocx.sh/uv@sha256:b72aa090d385d194ee4ba3723397b8cfb6ee49cd49a6ad5dd9b79decdaa4a74a"
+pinned = "ocx.sh/uv@sha256:98ea612d787e9eb4ea8a9478a5002df631946d9ef20d626a055fe60d654eeba6"
