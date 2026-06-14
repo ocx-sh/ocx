@@ -96,6 +96,13 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 ```
 
+### 7. Lint workflows with actionlint
+
+Workflow YAML is linted by [actionlint](https://github.com/rhysd/actionlint) (project toolchain via `ocx.toml`). Local + CI gate = `task ci:actionlint`; the `workflow-lint` job in `verify-basic.yml` runs it on push + PR via `ocx run -- task ci:actionlint` (dogfoods `setup-ocx` + the composed toolchain). actionlint catches invalid contexts (e.g. `matrix` on a step's `shell:` key), unpinned/typo'd expressions, and runs shellcheck over `run:` scripts. Conventions:
+
+- Embedded shellcheck severity floor = `--severity=warning` (`SHELLCHECK_OPTS` in the task), matching `shell:shellcheck`. Info/style findings are not gated.
+- The cargo-dist-generated `release.yml` is excluded via `.github/actionlint.yaml` (`paths:` ignore-all) — never hand-edited, drift policed by `verify-release-ci.yml`.
+
 ## Cost Factors
 
 | Factor | Impact | Guidance |
@@ -223,6 +230,7 @@ When `crates/ocx_shim` source changes:
 | Binary rebuilt in every job | `upload-artifact` + `download-artifact` |
 | Default 90-day artifact retention | `retention-days: 1` inter-job |
 | No concurrency control | Add `concurrency:` block |
+| Invalid context in a workflow (e.g. `matrix` on a step's `shell:` key) | Run `task ci:actionlint`; for matrixed shells use job-level `defaults.run.shell` |
 | `fetch-depth: 0` when not needed | Default `fetch-depth: 1` |
 | `pull_request_target` + checkout of PR head | Use `pull_request` trigger for untrusted code |
 | `cargo test` instead of `cargo nextest` | nextest is ~40% faster in CI |

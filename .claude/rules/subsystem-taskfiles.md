@@ -17,6 +17,7 @@ paths:
 | `.taskrc.yml` | root | project config -- `failfast: true` |
 | `taskfiles/rust.taskfile.yml` | Rust subsystem | `rust:` -- format, clippy, license, build, test:unit |
 | `taskfiles/shell.taskfile.yml` | Shell subsystem | `shell:` -- shellcheck + shfmt called directly off the project toolchain |
+| `taskfiles/ci.taskfile.yml` | CI subsystem | `ci:` -- actionlint (workflow lint) off the project toolchain |
 | `taskfiles/xwin.taskfile.yml` | Rust subsystem | Windows MSVC cross-compile template; included with `(TARGET, SUBCOMMAND)` vars |
 | `taskfiles/coverage.taskfile.yml` | cross-cutting | `coverage:` |
 | `taskfiles/duplo.taskfile.yml` | cross-cutting | `duplo:` |
@@ -33,7 +34,7 @@ paths:
 
 `task verify` run as two-phase pipeline via internal `.verify:lint` + `.verify:build-test` tasks:
 
-1. **Phase 1 (parallel `deps:`)**: `rust:format:check`, `rust:clippy:check`, `shell:verify`, `claude:verify`
+1. **Phase 1 (parallel `deps:`)**: `rust:format:check`, `rust:clippy:check`, `shell:verify`, `ci:verify`, `claude:verify`
 2. **Phase 2 (sequential `cmds:`)**: `rust:license:check`, `rust:license:deps`, `rust:build`, `rust:test:unit`, `test:parallel`
 
 ## AI Quality Gate Pattern
