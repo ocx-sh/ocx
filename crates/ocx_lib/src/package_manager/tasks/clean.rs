@@ -1221,4 +1221,55 @@ pinned = "localhost:5000/shfmt@sha256:bbbb00000000000000000000000000000000000000
              never deletes a live peer package against a root set missing that peer"
         );
     }
+
+    /// `collect_shared_root_digests` must propagate the union-level fail-closed
+    /// signal: when `union_all_digests` itself returns
+    /// [`SharedRootsUnion::RetainAll`] — because a peer ledger file is
+    /// unparseable or carries an unknown/future version — the cleaner retains
+    /// every object this run. This pins the `SharedRootsUnion::RetainAll` arm
+    /// (the union-boundary fail-closed path, distinct from the per-identifier
+    /// `Identifier::parse` / `PinnedIdentifier::try_from` arms above).
+    /// `union_all_digests` is unit-tested in isolation in `shared_roots.rs`
+    /// (`unknown_version_is_fail_closed`, `malformed_json_is_fail_closed`), but
+    /// this asserts the one-line passthrough at the `collect_shared_root_digests`
+    /// boundary so a refactor that mishandles `RetainAll` (e.g. treats it as an
+    /// empty digest set) is caught here too — the same cross-instance data-loss
+    /// class as the sibling arms.
+    ///
+    /// A hand-written `{"v":2,…}` ledger triggers the unknown-version branch:
+    /// `serde_repr` rejects the discriminant at deserialize time, which
+    /// `union_all_digests` converts to `RetainAll`. (Written directly rather
+    /// than via `SharedRoots::write`, which always emits the current v1 envelope.)
+    #[tokio::test]
+    async fn collect_shared_roots_retain_all_on_unparseable_peer_ledger() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_SHARED_STORE, "true");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+
+        let packages_zone_root = file_structure
+            .packages
+            .root()
+            .parent()
+            .unwrap_or_else(|| file_structure.packages.root())
+            .to_path_buf();
+
+        // Plant a peer ledger carrying an unknown/future version (`v:2`) that
+        // `union_all_digests` cannot parse and escalates to RetainAll.
+        let peer = SharedRoots::new(&packages_zone_root, "instance-peer");
+        let peer_dir = peer.instance_dir();
+        std::fs::create_dir_all(&peer_dir).unwrap();
+        std::fs::write(peer_dir.join("peerproj"), br#"{"v":2,"digests":["sha256:dead"]}"#).unwrap();
+
+        let result = collect_shared_root_digests(&file_structure, file_structure.state_zone_root())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, CollectedRoots::RetainAll),
+            "an unparseable / unknown-version peer ledger must yield RetainAll (fail closed) \
+             so the cleaner never deletes a live peer package against a root set it cannot enumerate"
+        );
+    }
 }
