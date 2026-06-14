@@ -19,11 +19,11 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Run install.sh
         run: |
-          version_arg=""
+          set --
           if [ -n "${{ inputs.release_tag }}" ]; then
-            version_arg="--version $(echo '${{ inputs.release_tag }}' | sed 's/^v//')"
+            set -- --version "$(echo '${{ inputs.release_tag }}' | sed 's/^v//')"
           fi
-          OCX_NO_MODIFY_PATH=1 bash website/src/public/install.sh $version_arg
+          OCX_NO_MODIFY_PATH=1 bash website/src/public/install.sh "$@"
       - name: Verify installation
         run: |
           export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/bin:$PATH"
@@ -61,11 +61,11 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Run install.sh
         run: |
-          version_arg=""
+          set --
           if [ -n "${{ inputs.release_tag }}" ]; then
-            version_arg="--version $(echo '${{ inputs.release_tag }}' | sed 's/^v//')"
+            set -- --version "$(echo '${{ inputs.release_tag }}' | sed 's/^v//')"
           fi
-          OCX_NO_MODIFY_PATH=1 bash website/src/public/install.sh $version_arg
+          OCX_NO_MODIFY_PATH=1 bash website/src/public/install.sh "$@"
       - name: Verify installation
         run: |
           export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/bin:$PATH"
