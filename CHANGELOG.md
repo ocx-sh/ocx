@@ -5,17 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-06-15
+
+### Added
+
+- Typed Starlark host API for package testing *(script)*
+- `ocx package test --script` embedded Starlark runner *(cli)*
+- Pipeline subcommand + per-platform applicability + Discord/JUnit reporting *(mirror)*
+- Drift guard ignores action-pin bumps; SHA-pin setup-ocx *(mirror)*
+- Add --frozen flag to freeze tag resolution to the local index *(cli)* **BREAKING**
+- Add version pinning to ocx self setup (#156) *(cli)*
+- Per-platform lock pinning with whole-file lock/upgrade model *(project)* **BREAKING**
+
+### Changed
+
+- Make ChainMode matching exhaustive *(oci)*
+- Move ocx-mirror to its own repository **BREAKING**
+- Quick wins on the install hot path *(install)*
+- Streaming single-pass pull pipeline *(oci)* **BREAKING**
+- Collapse redundant create_dir_all in tar extraction *(archive)*
+- Parallelize V2 index-retention scan *(gc)*
+
+### Documentation
+
+- Fix digest-verification callout for streaming pull *(website)*
+
+### Fixed
+
+- Stop baking metadata.json into bundle content *(mirror)*
+- Parallelize per-tag digest fetch in index update *(oci)*
+- Fail-safe target-registry reads in discover and sync *(mirror)*
+- Stop prepare legs re-crawling the source (N+1 crawls) *(mirror)*
+- Bound decompression budget and reject zero-size layers *(oci)*
+- Deterministic exit code on concurrent symlink failures *(install)*
+- Route eval-safe-output advisory through the log module *(cli)*
+- Use job-level defaults.run.shell for matrixed Windows shells *(ci)*
+
 ## [0.3.7] - 2026-06-07
 
 ### Fixed
 
 - Guard shell activation against an unset OCX_HOME *(setup)*
-- Repair the elvish env shim and activation fence *(setup)*
-- Fall back to $HOME in the PowerShell activation fence on non-Windows *(setup)*
-
-### Changed
-
-- `ocx self update` heals the managed shell activation block *(setup)*
 
 ## [0.3.6] - 2026-06-07
 
@@ -42,6 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden ZDOTDIR + document ocx-owned dedicated files *(self-setup)*
 - Report current path on install --select *(cli)*
 - Error on conflicting versions in one environment *(package)*
+
+### Release
+
+- V0.3.6
 
 ## [0.3.5] - 2026-06-02
 
@@ -447,6 +481,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.3.8]: https://github.com/ocx-sh/ocx/compare/v0.3.7..v0.3.8
+[0.3.7]: https://github.com/ocx-sh/ocx/compare/v0.3.6..v0.3.7
 [0.3.6]: https://github.com/ocx-sh/ocx/compare/v0.3.5..v0.3.6
 [0.3.5]: https://github.com/ocx-sh/ocx/compare/v0.3.4..v0.3.5
 [0.3.4]: https://github.com/ocx-sh/ocx/compare/v0.3.3..v0.3.4
