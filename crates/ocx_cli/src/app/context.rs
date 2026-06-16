@@ -126,14 +126,38 @@ impl Context {
                 Some(index::RemoteIndex::new(index::RemoteConfig { client })),
             )
         };
-        let file_structure = file_structure::FileStructure::new();
-        let tag_root = options
-            .index
-            .clone()
-            .or_else(|| env::var(env::keys::OCX_INDEX).map(std::path::PathBuf::from))
-            .unwrap_or_else(|| file_structure.tags.root().to_path_buf());
+        // Resolve the zone layout once: home (OCX_HOME ▸ ~/.ocx) plus the
+        // env-only zone overrides (cache/packages/state), and the index
+        // override with `--index` winning over `OCX_INDEX`. Empty-string env
+        // values are treated as unset by `StoreLayout::resolve`'s helper, so
+        // re-read them here through the same `non_empty` filter.
+        let home_root = file_structure::default_ocx_root()
+            .ok_or_else(|| anyhow::anyhow!("could not determine the OCX home directory"))?;
+        let index_override = options.index.clone().or_else(|| {
+            env::var(env::keys::OCX_INDEX)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        });
+        let layout = file_structure::StoreLayout::resolve(
+            home_root,
+            env::var(env::keys::OCX_CACHE_DIR)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            env::var(env::keys::OCX_PACKAGES_DIR)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            env::var(env::keys::OCX_STATE_DIR)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            index_override,
+        );
+        let file_structure = file_structure::FileStructure::with_layout(layout);
+        // The local index reads tags + blobs straight from the resolved file
+        // structure — `with_layout` already folded the `OCX_INDEX`/`--index`
+        // override into `file_structure.tags`, so there is no second tag-root
+        // derivation seam here.
         let local_index = index::LocalIndex::new(index::LocalConfig {
-            tag_store: TagStore::new(tag_root),
+            tag_store: TagStore::new(file_structure.tags.root().to_path_buf()),
             blob_store: BlobStore::new(file_structure.blobs.root().to_path_buf()),
         });
 

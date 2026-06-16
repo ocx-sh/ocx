@@ -1,15 +1,130 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+//! Concurrency-safe garbage collection for the OCX object store.
+//!
+//! # Concurrency safety
+//!
+//! `ocx clean` is safe to run alongside concurrent `ocx install` and `ocx pull`
+//! invocations.  Before scanning for unreachable objects the GC acquires an
+//! **exclusive** advisory lock at `$OCX_STATE_DIR/gc.lock`; install and pull
+//! take a **shared** lock on the same file.  Timeout behaviour:
+//!
+//! - Exclusive (clean): waits up to `OCX_GC_LOCK_TIMEOUT` seconds
+//!   ([`DEFAULT_EXCLUSIVE_TIMEOUT`] = 120 s).  On timeout the process exits
+//!   with [`crate::Error::GcLockTimeout`] which the CLI maps to exit code 75
+//!   (`TempFail`) — the caller may retry.
+//! - Shared (install/pull): waits up to 10 s ([`gc_lock::DEFAULT_SHARED_TIMEOUT`]).
+//!   On timeout the caller proceeds **without** the lock (debug-logged only).
+//!
+//! The lock is per-instance — it lives in `$OCX_STATE_DIR` which is always
+//! local to the current user/machine.  Cross-machine or cross-container safety
+//! on shared content volumes is provided by content-addressing, the mtime grace
+//! window, and (when `OCX_SHARED_STORE=true`) the shared-roots ledger.
+//!
+//! # mtime grace window
+//!
+//! Objects younger than [`DEFAULT_GRACE_SECONDS`] (600 s, controlled by
+//! `OCX_GC_GRACE_SECONDS`) are retained even when they appear unreachable.
+//! This closes the TOCTOU window between `ocx install` placing a package
+//! directory and registering its install back-ref.  A future mtime (clock
+//! skew) is treated as "retain" — the conservative direction.  Setting
+//! `OCX_GC_GRACE_SECONDS=0` collects immediately.
+//!
+//! # Audit log
+//!
+//! Every deletion (real or `--dry-run`) is appended as a JSONL record to
+//! `$OCX_STATE_DIR/gc-log.jsonl` via [`AuditLog`].  The log rotates when it
+//! reaches `OCX_GC_LOG_MAX_BYTES` (default 10 MiB); only one previous
+//! generation (`gc-log.jsonl.1`) is kept.  Set `OCX_GC_LOG=off` to disable.
+//! Failures are best-effort (warn, never fatal).
+//!
+//! # Shared-roots ledger
+//!
+//! When `OCX_SHARED_STORE=true`, [`ProjectRootDigests`] is built from
+//! `$OCX_PACKAGES_DIR/roots/<instance_id>/` — a per-instance directory of
+//! JSON files, one per project.  The GC unions all peer directories before
+//! determining what to collect so no object held by a peer container is
+//! removed.  Fail-closed: an unreadable committed peer file retains all of
+//! that peer's objects rather than risking a spurious deletion.
+//!
+//! # Network-filesystem posture
+//!
+//! Before touching any zone `ocx clean` calls
+//! [`NetworkFsPosture::from_env`](crate::utility::fs::filesystem_kind::NetworkFsPosture::from_env)
+//! (controlled by `OCX_NETWORK_FS`).  `warn` (default) logs and continues;
+//! `refuse` returns [`crate::Error::NetworkFsRefused`] → exit 81
+//! (`PolicyBlocked`); `allow` skips the detection check.
+
+pub mod audit_log;
+pub mod gc_lock;
 mod project_roots;
 mod reachability_graph;
 
+#[allow(unused_imports)]
+pub use audit_log::{AuditAction, AuditLog, AuditRecord, ObjectKind};
+pub use gc_lock::{GcLock, lock_timeouts_from_env};
 pub use project_roots::ProjectRootDigests;
+#[allow(unused_imports)]
+pub use reachability_graph::RefLiveness;
+
+/// Returns `true` when the entry at `path` should be **retained** because its
+/// directory mtime is within the grace window.
+///
+/// Grace period: `OCX_GC_GRACE_SECONDS` (default 600). If the mtime is in the
+/// future (clock skew) or is zero the entry is also retained (conservative
+/// clock-skew guard). A grace of zero disables the check (`always_collect`).
+///
+/// This predicate is I/O-free given a pre-fetched `mtime` (the caller reads
+/// the metadata once and passes the `SystemTime`). This keeps the hot path
+/// testable without touching the filesystem.
+///
+/// Used by [`GarbageCollector::delete_objects`] to skip freshly-assembled
+/// objects that have not yet registered their install back-refs — the TOCTOU
+/// window that could otherwise cause `clean` to collect a live object that
+/// was just installed by a concurrent `ocx install`.
+pub fn is_within_grace(mtime: std::time::SystemTime, grace_seconds: u64) -> bool {
+    use std::time::SystemTime;
+
+    // A grace of zero disables the window — every entry is immediately
+    // collectible regardless of mtime.
+    if grace_seconds == 0 {
+        return false;
+    }
+
+    let now = SystemTime::now();
+    match now.duration_since(mtime) {
+        // mtime is in the past: retain iff the elapsed age is strictly less
+        // than the grace window (an entry exactly at the boundary is collected).
+        Ok(age) => age.as_secs() < grace_seconds,
+        // `duration_since` errors when mtime is in the FUTURE (clock skew on a
+        // shared volume). Retain conservatively — never collect an object whose
+        // mtime we cannot trust.
+        Err(_) => true,
+    }
+}
+
+/// Default GC mtime grace window (10 minutes) — spares freshly-assembled
+/// objects whose install back-refs are not yet registered.
+pub const DEFAULT_GRACE_SECONDS: u64 = 600;
+
+/// Reads `OCX_GC_GRACE_SECONDS` from the environment.
+///
+/// Returns the default ([`DEFAULT_GRACE_SECONDS`]) when the variable is absent,
+/// empty, or unparseable. A value of `0` disables the grace window.
+pub fn grace_seconds_from_env() -> u64 {
+    crate::env::var(crate::env::keys::OCX_GC_GRACE_SECONDS)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GRACE_SECONDS)
+}
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::{file_structure::FileStructure, log};
+use crate::{
+    file_structure::{CasTier, FileStructure},
+    log,
+};
 
 use reachability_graph::ReachabilityGraph;
 
@@ -94,16 +209,42 @@ impl GarbageCollector {
 
     /// Deletes the given CAS entry directories from disk.
     ///
+    /// Thin wrapper over [`Self::delete_objects_with_policy`] with grace disabled
+    /// and audit logging off — preserves the original signature for callers that
+    /// do not need the mtime-grace TOCTOU guard or the audit trail (e.g.
+    /// `purge`).
+    pub async fn delete_objects(&self, targets: &HashSet<PathBuf>, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+        self.delete_objects_with_policy(targets, dry_run, 0, &AuditLog::disabled())
+            .await
+    }
+
+    /// Deletes the given CAS entry directories, honouring the mtime grace window
+    /// and recording each delete (or would-delete) in the audit log.
+    ///
     /// For packages: unlinks dependency, layer, and blob forward-refs via
     /// [`ReferenceManager`], then removes the directory. For layers and blobs:
     /// removes the directory directly (they have no outgoing refs).
     ///
+    /// **Grace window** (`grace_seconds`): an entry whose directory mtime is
+    /// younger than the window is retained (skipped) even when unreachable —
+    /// the primary TOCTOU defence against collecting an object a concurrent
+    /// `ocx install` just assembled but not yet back-referenced. Future/zero
+    /// mtime is retained (clock-skew guard); `grace_seconds == 0` disables the
+    /// window. Dry-run honours grace identically.
+    ///
+    /// **Audit log**: every collected (or would-be-collected in dry-run) entry
+    /// emits an [`AuditRecord`]. Logging is best-effort — a log-write failure is
+    /// a WARN, never fatal.
+    ///
     /// Handles `NotFound` errors from `remove_dir_all` gracefully — a
     /// concurrent deletion or external cleanup is not treated as failure.
-    ///
-    /// **Note:** No guard against concurrent installs. Do not run `clean`
-    /// while other OCX operations are in progress.
-    pub async fn delete_objects(&self, targets: &HashSet<PathBuf>, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+    pub async fn delete_objects_with_policy(
+        &self,
+        targets: &HashSet<PathBuf>,
+        dry_run: bool,
+        grace_seconds: u64,
+        audit: &AuditLog,
+    ) -> crate::Result<Vec<PathBuf>> {
         if targets.is_empty() {
             return Ok(Vec::new());
         }
@@ -119,9 +260,34 @@ impl GarbageCollector {
         let mut sorted_targets: Vec<&PathBuf> = targets.iter().collect();
         sorted_targets.sort();
 
+        let action = if dry_run {
+            AuditAction::WouldDelete
+        } else {
+            AuditAction::Deleted
+        };
+
         for target in sorted_targets {
+            // mtime grace: spare entries younger than the grace window. Reading
+            // the dir metadata once here keeps the predicate I/O-free.
+            if grace_seconds > 0
+                && let Some(mtime) = entry_mtime(target).await
+                && is_within_grace(mtime, grace_seconds)
+            {
+                log::debug!(
+                    "Retaining '{}' — within {grace_seconds}s grace window.",
+                    target.display()
+                );
+                continue;
+            }
+
+            let object_kind = self.object_kind(target);
+            let digest = read_entry_digest(target).await;
+
             if dry_run {
                 log::info!("Would remove unreferenced entry: {}", target.display());
+                audit
+                    .record_delete(action, object_kind, target, digest.as_deref())
+                    .await;
                 removed.push(target.clone());
                 continue;
             }
@@ -135,6 +301,9 @@ impl GarbageCollector {
                 }
                 Err(e) => return Err(crate::Error::InternalFile(target.clone(), e)),
             }
+            audit
+                .record_delete(action, object_kind, target, digest.as_deref())
+                .await;
             removed.push(target.clone());
         }
 
@@ -146,6 +315,39 @@ impl GarbageCollector {
 
         Ok(removed)
     }
+
+    /// Maps a target path's CAS tier to the audit-log [`ObjectKind`].
+    ///
+    /// Entries not present in `all_entries` (should not happen for collection
+    /// targets) default to [`ObjectKind::Package`].
+    fn object_kind(&self, target: &std::path::Path) -> ObjectKind {
+        match self.graph.all_entries.get(target) {
+            Some(CasTier::Layer) => ObjectKind::Layer,
+            Some(CasTier::Blob) => ObjectKind::Blob,
+            _ => ObjectKind::Package,
+        }
+    }
+}
+
+/// Reads the directory mtime of `path`, swallowing I/O errors as `None`.
+///
+/// A `None` result means "could not determine age" — the caller proceeds to
+/// collect (the grace guard only applies when an mtime is available and fresh).
+async fn entry_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    tokio::fs::metadata(path).await.ok().and_then(|m| m.modified().ok())
+}
+
+/// Reads the full digest string from the entry's sibling `digest` file.
+///
+/// Returns `None` when the file is absent or unreadable (e.g. a stale temp
+/// entry) — the audit record then carries a `null` digest.
+async fn read_entry_digest(entry_dir: &std::path::Path) -> Option<String> {
+    let digest_file = entry_dir.join(crate::file_structure::DIGEST_FILENAME);
+    tokio::fs::read_to_string(&digest_file)
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -434,5 +636,71 @@ mod tests {
             &[("L1", CasTier::Layer)],
         );
         assert_eq!(collector.orphaned_by_seeds(&[path("A")]), set(&["A"]));
+    }
+
+    // ── is_within_grace ─────────────────────────────────────────────────────
+    //
+    // Requirement: system_design_shared_store.md §5 M4 item 3 —
+    // "skip entry-dir mtime younger than OCX_GC_GRACE_SECONDS (default 600);
+    //  future/zero mtime → retain; grace == 0 disables (collect immediately)."
+    // Traced to: plan_shared_store P3.2s grace predicate tests.
+
+    #[test]
+    fn grace_younger_than_window_is_retained() {
+        // An object whose mtime is well within the grace window must be retained.
+        // Requirement: plan_shared_store P3.2s "younger-than-grace retained".
+        let recent_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(100);
+        assert!(
+            is_within_grace(recent_mtime, 600),
+            "object mtime 100 s ago must be within a 600 s grace window (retain)"
+        );
+    }
+
+    #[test]
+    fn grace_older_than_window_is_collected() {
+        // An object whose mtime is past the grace window must NOT be retained.
+        // Requirement: plan_shared_store P3.2s "older collected".
+        let old_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(700);
+        assert!(
+            !is_within_grace(old_mtime, 600),
+            "object mtime 700 s ago must be outside a 600 s grace window (collect)"
+        );
+    }
+
+    #[test]
+    fn grace_future_mtime_is_retained() {
+        // An mtime in the future (clock skew) must be retained conservatively.
+        // Requirement: plan_shared_store P3.2s "future mtime retained (clock-skew guard)".
+        let future_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(
+            is_within_grace(future_mtime, 600),
+            "future mtime must be retained (clock-skew guard)"
+        );
+    }
+
+    #[test]
+    fn grace_zero_disables_grace_period() {
+        // grace_seconds == 0 means "collect immediately" — no grace window.
+        // Requirement: plan_shared_store P3.2s "grace_seconds == 0 disables grace".
+        let recent_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
+        assert!(
+            !is_within_grace(recent_mtime, 0),
+            "grace_seconds == 0 must disable grace: even a 1 s old object is collected"
+        );
+    }
+
+    #[test]
+    fn grace_exactly_at_boundary_is_collected() {
+        // An object whose mtime is exactly at the grace boundary must be COLLECTED.
+        // The predicate is `age.as_secs() < grace_seconds` — strictly less than.
+        // An entry at exactly 600 s satisfies `age == grace_seconds`, which is NOT
+        // `< grace_seconds`, so it is outside the window and must be collected.
+        //
+        // Requirement: plan_shared_store P3.2s "older collected" — strict < boundary.
+        let boundary_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        assert!(
+            !is_within_grace(boundary_mtime, 600),
+            "object at exactly the grace boundary must be collected (strict < predicate)"
+        );
     }
 }

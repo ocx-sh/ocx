@@ -23,7 +23,8 @@ use crate::prelude::*;
 /// Creates any missing parent directories. Fails if `link` already exists.
 /// Fails with `io::ErrorKind::CrossesDevices` (or the platform equivalent)
 /// if `source` and `link` are on different filesystems — callers must keep
-/// `$OCX_HOME` on a single volume to guarantee success.
+/// `$OCX_HOME` on a single volume to guarantee success. For cross-filesystem
+/// file placement see [`crate::reflink::create`].
 pub fn create(source: impl AsRef<std::path::Path>, link: impl AsRef<std::path::Path>) -> Result<()> {
     let source = source.as_ref();
     let link = link.as_ref();

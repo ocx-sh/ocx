@@ -262,6 +262,8 @@ def test_clean_collects_orphaned_chain_after_uninstall_purge(
     We install, then uninstall --purge, then inject a fake orphan blob and
     verify clean removes it.
     """
+    # P3.4 grace defaults to 600s; this test asserts immediate collection, so disable it.
+    ocx.env["OCX_GC_GRACE_SECONDS"] = "0"
     pkg = published_package
     _install_content(ocx, pkg)
     ocx.plain("package", "uninstall", "--purge", pkg.short)
@@ -457,6 +459,8 @@ def test_failed_install_leaves_collectable_orphans(
     We simulate the orphan by writing a fake blob directly — there is no
     installed package that references it, so it must be collected.
     """
+    # P3.4 grace defaults to 600s; this test asserts immediate collection, so disable it.
+    ocx.env["OCX_GC_GRACE_SECONDS"] = "0"
     _install_content(ocx, published_package)
 
     # Inject a fake orphan blob (simulates a blob written by a crashed install

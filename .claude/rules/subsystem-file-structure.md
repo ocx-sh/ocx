@@ -18,11 +18,25 @@ Old `objects/` tree mix three concerns: raw OCI blobs, extracted layer files, as
 
 Split `refs/` into four named subdirs (`symlinks/`, `deps/`, `layers/`, `blobs/`) → GC do single BFS pass over all three tiers. Only packages can be roots or have outgoing edges; layers and blobs reachable only via package `refs/layers/` and `refs/blobs/` links.
 
+## Zone Model (P1 — landed)
+
+`StoreLayout` (`store_layout.rs`) resolves zone roots once; `FileStructure::with_layout` maps each store to the correct zone. `with_root(root)` is a thin shim over `with_layout(StoreLayout::from_root(root))`.
+
+| Env var | Zone | Stores | Default |
+|---------|------|--------|---------|
+| `OCX_CACHE_DIR` | cache | `blobs/`, `layers/`, `layer_temp/` | `$OCX_HOME` |
+| `OCX_PACKAGES_DIR` | packages | `packages/`, `temp/` | resolved `OCX_CACHE_DIR` |
+| `OCX_STATE_DIR` | state | `symlinks/`, `state/`, `projects/` | `$OCX_HOME` |
+| `OCX_INDEX` | tags override | `tags/` | `{cache}/tags` |
+
+All zones collapse to `$OCX_HOME` by default — byte-identical to the pre-P1 layout. **Two temp stores:** `temp` (packages zone) and `layer_temp` (cache zone) are co-located with their tier for intra-volume atomic renames; they are the same directory in the unified layout. **`state_zone_root()` accessor** returns `OCX_STATE_DIR` (default `$OCX_HOME`) — `ProjectRegistry` must use this, not `root()`, so the `projects/` ledger stays per-instance when zones diverge.
+
 ## Module Map
 
 | File | Purpose | Key Types |
 |------|---------|-----------|
 | `file_structure.rs` | Composite root; `slugify()`, `repository_path()` | `FileStructure` |
+| `store_layout.rs` | Zone resolver; `from_root` (single-root), `resolve` (zone overrides), `resolve_from_env` | `StoreLayout` |
 | `blob_store.rs` | Raw OCI blob storage; stateless `write_blob` / `read_blob` (tempfile + atomic rename + Windows-cfg retry-with-backoff) | `BlobStore`, `BlobDir` |
 | `layer_store.rs` | Extracted layer storage | `LayerStore`, `LayerDir` |
 | `package_store.rs` | Assembled package storage | `PackageStore`, `PackageDir` |
@@ -39,7 +53,8 @@ These modules sit at `crates/ocx_lib/src/` root — consumed across subsystems.
 | Module | Purpose | Used by |
 |--------|---------|---------|
 | `symlink.rs` | Symlink create/update/remove/is_link; Windows junction aware | ReferenceManager, pull, assemble walker, archive extractor |
-| `hardlink.rs` | Hardlink create/update — THE ONE place `std::fs::hard_link` lives | assemble walker, codesign |
+| `hardlink.rs` | Hardlink create/update — THE ONE place `std::fs::hard_link` lives; same-filesystem only | assemble walker, codesign |
+| `reflink.rs` | Cross-filesystem file placement: CoW reflink or full-copy fallback; independent inode | assemble walker (`AssemblyMode::Reflink` path) |
 | `utility/fs/path.rs` | Lexical path helpers: `lexical_normalize`, `escapes_root`, `validate_symlinks_in_dir` | symlink, archive extractor, assemble walker |
 
 ## FileStructure (composite root)
@@ -51,19 +66,31 @@ pub struct FileStructure {
     pub packages: PackageStore,
     pub tags: TagStore,
     pub symlinks: SymlinkStore,
-    pub temp: TempStore,
+    pub state: StateStore,
+    pub temp: TempStore,       // packages zone — co-located with packages/
+    pub layer_temp: TempStore, // cache zone — co-located with layers/
 }
 ```
 
-One instance per session. Sub-stores public fields. `root()` return OCX home path.
+One instance per session. Sub-stores public fields. `root()` returns `$OCX_HOME`. `state_zone_root()` returns the per-instance state-zone root (see Zone Model above).
 
-**Root-level state files under `$OCX_HOME`:**
+**State-zone files (under `OCX_STATE_DIR`, default `$OCX_HOME`):**
 
 | Path | Purpose |
 |------|---------|
-| `projects/` | Project GC ledger — flat directory of one symlink per registered project. Name = first 16 hex chars of `SHA-256(canonical_abs_project_dir)`; target = the project directory. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` via `ProjectRegistry::live_projects()` to retain cross-project packages. ADR: `adr_project_gc_symlink_ledger.md`. |
+| `projects/` | Project GC ledger — flat directory of one symlink per registered project. Name = first 16 hex chars of `SHA-256(canonical_abs_project_dir)`; target = the project directory. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` via `ProjectRegistry::live_projects()` to retain cross-project packages. Lives in the STATE zone (not the cache zone) so each fleet member keeps its own GC roots when `OCX_STATE_DIR` is set. ADR: `adr_project_gc_symlink_ledger.md`. |
 | `state/` | Persistent runtime state. Distinct from `cache/` (regenerable bulk). Subdirectory entries are small files whose existence or mtime IS the data — no content structure required. Never regenerated; persisted across sessions. |
 | `state/update-check/<slug>` | Update-check throttle state file. `<slug>` = `to_slug(identifier)` — strict no-dot slug, for example `ocx_sh_ocx_cli` for `ocx.sh/ocx/cli`. File is always zero-byte; mtime is the only datum (time of last registry probe). Touched after every registry probe (success or error); NOT touched on throttle short-circuit. Parent directory created lazily on first touch. Written atomically via PID-suffixed temp file + `std::fs::rename`. |
+| `gc.lock` | Store-wide GC advisory lock. `ocx clean` acquires exclusive; `install`/`pull` acquire shared. Lock path: `state_zone_root().join("gc.lock")`. Exclusive timeout from `OCX_GC_LOCK_TIMEOUT` (default 120 s, `DEFAULT_EXCLUSIVE_TIMEOUT`); shared timeout fixed at 10 s (`DEFAULT_SHARED_TIMEOUT`) — on shared timeout the caller proceeds without the lock (debug log). Exclusive timeout → `Error::GcLockTimeout` → exit 75 (`TempFail`). Advisory only: degrades silently on NFS v2/v3 (see `OCX_NETWORK_FS`). |
+| `gc-log.jsonl` | GC delete-objects audit log. JSONL, one record per deleted (or dry-run would-delete) object. Schema v1 fields: `schema_version`, `run_id` (UUID per clean invocation), `instance_id` (from `instance-id`), `timestamp` (ISO-8601 UTC), `action` (`Deleted`\|`WouldDelete`), `object_kind` (`Package`\|`Layer`\|`Blob`\|`Temp`), `path`, `digest` (null for Temp). Best-effort: write failure → `log::warn!`, never fatal. Controlled by `OCX_GC_LOG` (`off` disables). |
+| `gc-log.jsonl.1` | One-generation rotation of `gc-log.jsonl`. Rotated when log reaches `OCX_GC_LOG_MAX_BYTES` (default 10,485,760 bytes). Rename is atomic; previous `.1` is overwritten. |
+| `instance-id` | Per-instance UUID, generated on first use. Used as the namespace for this instance's subdirectory in the packages-zone shared-roots ledger (`$OCX_PACKAGES_DIR/roots/<instance_id>/`). Written once, never rotated. |
+
+**Packages-zone files (under `OCX_PACKAGES_DIR`, default resolved `OCX_CACHE_DIR`):**
+
+| Path | Purpose |
+|------|---------|
+| `roots/<instance_id>/<project_hash>` | Opt-in shared-roots ledger entry. Active only when `OCX_SHARED_STORE=true`. Each instance writes its live project root digests as JSON (`{"v":1,"digests":["sha256:...",...]}`) under its own `instance_id` subdirectory. File name = first 16 hex chars of `SHA-256(canonical_abs_project_dir)`. Writes are atomic (tempfile + same-directory rename). `ocx clean` unions all peer instance directories before GC to prevent cross-instance deletion. Unknown schema version → `RetainAll` (fail-closed). Unreadable committed file → `RetainAll`. NotFound race → debug skip. |
 
 `$OCX_HOME/projects.json` and `$OCX_HOME/.projects.lock` from the prior JSON ledger are obsolete — safe to delete. `ocx clean` removes them opportunistically with a single debug log if encountered.
 
@@ -213,6 +240,21 @@ Low-level primitives for file-level dedup during layer assembly:
 - `create(source, link)` — hardlink; create parent dirs; fail if link exists or cross-device
 - `update(source, link)` — create or replace
 
-Cross-device hardlinks fail with `io::ErrorKind::CrossesDevices`. `$OCX_HOME` must sit on single volume — required by `temp → packages/` atomic rename.
+Cross-device hardlinks fail with `io::ErrorKind::CrossesDevices`. The `temp → packages/` atomic rename within the packages zone requires same-filesystem. When `OCX_PACKAGES_DIR` and `OCX_CACHE_DIR` are on different volumes, the assembly walker falls back to `reflink::create` — see reflink Module below.
 
-**Assembly walker**: `utility/fs/assemble_from_layer(source_content, dest_content)` mirror layer's `content/` tree into package's `content/` dir — hardlink regular files via `hardlink::create`, create real subdirs, recreate intra-layer symlinks verbatim. `packages/{P}/content/` is real dir, not symlink into `layers/`. Walker fan out dir-level tasks through semaphore-bounded `JoinSet`; per-task stats return-and-summed (no shared mutex). Windows layer symlinks return `io::ErrorKind::Unsupported`.
+**Assembly walker**: `utility/fs/assemble_from_layer(source_content, dest_content)` mirror layer's `content/` tree into package's `content/` dir. Per-layer assembly mode (`AssemblyMode`) is computed by probing `utility::fs::same_filesystem(source, dest)`:
+- **Same filesystem** → `hardlink::create` (shared inode, zero extra disk)
+- **Different filesystem** → `reflink::create` (independent inode, CoW clone or byte-copy fallback)
+
+Probe failure defaults to `Reflink` (safe across devices). Walker fan out dir-level tasks through semaphore-bounded `JoinSet`; per-task stats return-and-summed as `AssemblyStats`. `is_fully_independent()` on stats gates macOS re-signing after cross-volume assembly. Windows layer symlinks return `io::ErrorKind::Unsupported`.
+
+## reflink Module
+
+`crates/ocx_lib/src/reflink.rs` — THE ONE place `reflink_copy::reflink_or_copy` is called. Mirrors the `hardlink` module for the cross-device case.
+
+- `create(source, link)` — reflink (CoW clone) or full byte-copy fallback; independent inode; create parent dirs; fail if link exists
+- `Ok(None)` from underlying `reflink_or_copy` = CoW reflink succeeded (btrfs cross-subvolume, APFS); `Ok(Some(bytes))` = full copy performed (ext4, tmpfs, no CoW support)
+
+**When to use vs `hardlink::create`:** same-filesystem → `hardlink::create` (shared inode, zero-copy). Different filesystem → `reflink::create` (independent inode, CoW or copy). The assembly walker probes `same_filesystem` and dispatches through `AssemblyMode`.
+
+**macOS re-signing:** packages assembled cross-volume have `AssemblyStats::is_fully_independent() == true`; the pull pipeline gates ad-hoc codesign on this flag. Re-signing is suppressed by `OCX_NO_CODESIGN`.

@@ -27,6 +27,15 @@ use crate::{Result, log};
 ///
 /// Hardlinked files (same inode) are signed only once. Symlinks are not followed.
 ///
+/// **Cross-device packages (P2.4):** files placed via [`crate::reflink::create`]
+/// have independent inodes (cross-volume copies), so on macOS the pull pipeline
+/// re-signs the package content after assembly. The caller MUST gate this on
+/// [`crate::utility::fs::AssemblyStats::is_fully_independent`], never on
+/// `used_independent_inode`: this function signs Mach-O files in place, so
+/// signing a file that is hardlinked to a layer (a mixed assembly) would mutate
+/// the shared layer-store inode and corrupt every package linked to it.
+/// Whole-tree signing is only safe when EVERY file is an independent copy.
+///
 /// On non-macOS platforms this is a no-op.
 ///
 /// Signing failures are logged as warnings — they do not abort the installation.
@@ -594,5 +603,94 @@ mod tests {
             verify_signature(&binary).await,
             "binary should be signed after sign_extracted_content"
         );
+    }
+
+    // ── P2.2 codesign contract tests (macOS-gated) ────────────────────────────
+    //
+    // C1: A Mach-O placed on an independent inode (simulated by full copy, the
+    // cross-device fallback) then signed via `sign_extracted_content` must pass
+    // `codesign --verify`.  This validates that the P2.4 re-sign path (triggered
+    // when `stats.used_independent_inode()`) produces a valid ad-hoc signature
+    // on an independently-inoded copy — not just the original layer copy.
+    //
+    // PASSES now (same as sign_extracted_content_signs_real_binaries but
+    // explicitly documents the independent-inode scenario).  C1 is really a
+    // statement that sign_extracted_content works on copied files, not just
+    // hardlinked ones.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn c1_independent_inode_mach_o_can_be_signed_and_verified() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_NO_CODESIGN");
+
+        let dir = TempDir::new().unwrap();
+        // "Independent inode" is simulated by std::fs::copy (which the cross-device
+        // reflink fallback also produces on non-CoW filesystems).
+        let source_dir = dir.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_binary = build_unsigned_binary(&source_dir, "source_tool");
+
+        let content_dir = dir.path().join("pkg/content/bin");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let copy_binary = content_dir.join("copy_tool");
+
+        // Full copy = independent inode (same as reflink fallback on ext4/HFS+).
+        std::fs::copy(&source_binary, &copy_binary).unwrap();
+
+        // Verify the copy is unsigned before signing.
+        assert!(
+            !verify_signature(&copy_binary).await,
+            "copied binary should start unsigned"
+        );
+
+        // Sign via the same path P2.4 will call.
+        let pkg_content = dir.path().join("pkg/content");
+        let result = super::sign_extracted_content(&pkg_content).await;
+        assert!(
+            result.is_ok(),
+            "sign_extracted_content must succeed on an independently-inoded file"
+        );
+
+        assert!(
+            verify_signature(&copy_binary).await,
+            "independently-inoded Mach-O must pass codesign --verify after sign_extracted_content"
+        );
+    }
+
+    // C4: The hardlink assembly path must NOT trigger a package re-sign.
+    //
+    // When files are placed via hardlink (same-device assembly), the destination
+    // file SHARES the layer's inode — and the layer was already signed at extract
+    // time.  Re-signing a hardlinked file would modify the inode shared by the
+    // layer store, potentially corrupting other packages that share the same
+    // layer content.
+    //
+    // This test documents the contract with an `#[ignore]` placeholder.  The
+    // actual assertion (that `pull_all` with same-device assembly does NOT call
+    // `sign_extracted_content` on the package content) requires the P2.4 seam
+    // in `pull.rs` / `pull_local.rs` — which is added in P2.4, not P2.2.
+    //
+    // The placeholder is intentionally `#[ignore]` so it does not block CI;
+    // it will be filled in by the P2.4 implementer.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "P2.4 placeholder: hardlink assembly must not re-sign; requires P2.4 seam in pull.rs"]
+    async fn c4_hardlink_assembly_does_not_trigger_package_resign() {
+        // Contract:
+        // 1. Assemble a package from a layer on the SAME device as the package
+        //    store (stats.used_independent_inode() == false).
+        // 2. The pull pipeline must NOT call sign_extracted_content on the
+        //    assembled package content.
+        // 3. Verify: the layer's inode is unchanged (not re-signed independently).
+        //
+        // Implementation note for P2.4:
+        //   In pull_local.rs (or pull.rs), after `assemble_from_layers`:
+        //     if stats.used_independent_inode() {
+        //         sign_extracted_content(pkg.content()).await?;
+        //     }
+        //   // else: skip — hardlinks share the layer inode, already signed.
+        //
+        // This guard prevents accidental re-sign of hardlinked content.
+        unimplemented!("P2.4: implement this test once the conditional re-sign seam exists in pull.rs");
     }
 }

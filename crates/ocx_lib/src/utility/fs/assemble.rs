@@ -103,26 +103,62 @@ const MAX_WALK_DEPTH: usize = 4096;
 /// exhausting file descriptors.
 const DEFAULT_CONCURRENCY: usize = 50;
 
+/// How a regular file is placed into the destination tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssemblyMode {
+    /// Same filesystem: `hardlink::create` — destination shares the source inode.
+    Hardlink,
+    /// Different filesystem: `reflink::create` — destination is an independent
+    /// inode (CoW clone or full copy).
+    Reflink,
+}
+
 /// Summary of what the walker did during a single `assemble_from_layer`
 /// invocation. Useful for progress reporting and as a test observable.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AssemblyStats {
-    /// Regular files placed via `hardlink::create`.
-    pub files_hardlinked: usize,
+    /// Regular files placed into the destination tree (via `hardlink::create`
+    /// on the same filesystem; reflink/copy across filesystems is added in P2).
+    pub files_placed: usize,
     /// Intra-layer symlinks recreated verbatim in the destination (Unix).
     pub symlinks_recreated: usize,
     /// Real directories created in the destination tree.
     pub dirs_created: usize,
-    /// Total bytes across the files that were hardlinked. Informational.
-    pub bytes_hardlinked: u64,
+    /// Total bytes across the files that were placed. Informational.
+    pub bytes_placed: u64,
+    /// Files placed on an independent inode via `reflink::create`
+    /// (cross-filesystem). Zero on a same-filesystem assembly.
+    pub independent_inode_files: usize,
 }
 
 impl AssemblyStats {
     fn merge(&mut self, other: AssemblyStats) {
-        self.files_hardlinked += other.files_hardlinked;
+        self.files_placed += other.files_placed;
         self.symlinks_recreated += other.symlinks_recreated;
         self.dirs_created += other.dirs_created;
-        self.bytes_hardlinked += other.bytes_hardlinked;
+        self.bytes_placed += other.bytes_placed;
+        self.independent_inode_files += other.independent_inode_files;
+    }
+
+    /// Returns `true` when any files in this assembly were placed via
+    /// `reflink::create` (cross-filesystem, independent inode).
+    pub fn used_independent_inode(&self) -> bool {
+        self.independent_inode_files > 0
+    }
+
+    /// Returns `true` when EVERY placed file is on an independent inode (the
+    /// whole tree was reflinked/copied, nothing hardlinked to a layer).
+    ///
+    /// This is the only safe precondition for whole-tree in-place mutation of
+    /// package content (e.g. macOS re-signing): a hardlinked file still shares
+    /// the layer-store inode, so mutating it would corrupt the shared layer and
+    /// every other package linked to it. A package is fully independent
+    /// (single- or multi-layer, all on a different volume than the cache) or
+    /// fully hardlinked (same volume) in the normal pull pipeline, because all
+    /// of a package's layers live in one cache zone; this guard makes the
+    /// mixed case (which whole-tree mutation must never touch) explicit.
+    pub fn is_fully_independent(&self) -> bool {
+        self.files_placed > 0 && self.independent_inode_files == self.files_placed
     }
 }
 
@@ -152,9 +188,9 @@ impl AssemblyStats {
 /// # Errors
 ///
 /// - `Error::InternalFile` wrapping the underlying `io::Error` if a
-///   filesystem operation fails. Cross-device hardlink attempts surface as
-///   `io::ErrorKind::CrossesDevices` — see the `$OCX_HOME` single-volume
-///   invariant in the plan.
+///   filesystem operation fails. Cross-device sources are handled by
+///   `AssemblyMode::Reflink` (CoW clone or copy), not rejected — only a
+///   same-volume layer takes the hardlink path.
 /// - Walker invariant violations (entry cap, depth cap, scheduler failure)
 ///   surface as `Error::InternalFile` wrapping an [`AssemblyError`] via
 ///   `io::Error::other`. Callers can downcast the `io::Error` source to
@@ -236,6 +272,31 @@ async fn assemble_from_layers_with_cap(
         return Ok(AssemblyStats::default());
     }
 
+    // ── Compute per-source assembly mode. ───────────────────────────────────
+    // Probe each source against dest_content to determine whether they reside
+    // on the same filesystem. Same fs → Hardlink (shared inode, dedup). Cross
+    // fs → Reflink (CoW clone or byte copy). Probe FAILURE → Reflink, not
+    // Hardlink: reflink_or_copy succeeds on both same-fs and cross-fs (it
+    // copies when it must), whereas hardlink fails hard with EXDEV across
+    // devices. Defaulting to Reflink on an unprovable relationship trades a
+    // little dedup for a guaranteed-correct install.
+    let mut src_dirs_with_mode: Vec<(PathBuf, AssemblyMode)> = Vec::with_capacity(sources.len());
+    for src in sources {
+        let mode = match crate::utility::fs::same_filesystem(src, dest_content).await {
+            Ok(true) => AssemblyMode::Hardlink,
+            Ok(false) => AssemblyMode::Reflink,
+            Err(error) => {
+                tracing::debug!(
+                    source = %src.display(),
+                    %error,
+                    "same_filesystem probe failed; defaulting to reflink/copy (safe across devices)"
+                );
+                AssemblyMode::Reflink
+            }
+        };
+        src_dirs_with_mode.push((src.to_path_buf(), mode));
+    }
+
     // ── Parallel directory-level fan-out (multi-layer). ─────────────────────
     let semaphore = Arc::new(Semaphore::new(DEFAULT_CONCURRENCY));
     let entries_seen = Arc::new(AtomicUsize::new(0));
@@ -246,7 +307,7 @@ async fn assemble_from_layers_with_cap(
 
     // Seed with the root directory set.
     tx.send(SpawnRequest {
-        src_dirs: sources.iter().map(|s| s.to_path_buf()).collect(),
+        src_dirs: src_dirs_with_mode,
         dest_dir: dest_content.to_path_buf(),
         depth: 0,
     })
@@ -361,9 +422,16 @@ enum EntryKind {
 
 /// Work item for the scheduler. Each request represents one directory level
 /// that needs to be walked across one or more source layers.
+///
+/// Each entry in `src_dirs` pairs a source directory path with the
+/// [`AssemblyMode`] computed for that source at the root of the walk. The
+/// mode travels with the path so that subdirectory `SpawnRequest`s carry
+/// the correct mode for each contributing layer without requiring a global
+/// layer-index lookup (which would be incorrect because child requests
+/// contain only the *contributing subset* of layers).
 #[derive(Debug)]
 struct SpawnRequest {
-    src_dirs: Vec<PathBuf>,
+    src_dirs: Vec<(PathBuf, AssemblyMode)>,
     dest_dir: PathBuf,
     depth: usize,
 }
@@ -372,9 +440,11 @@ struct SpawnRequest {
 ///
 /// Reads entries from all `src_dirs`, merges by name into a `BTreeMap`,
 /// detects overlaps, and places files/symlinks. Directories are posted
-/// back to the scheduler with only the contributing layers.
+/// back to the scheduler with only the contributing layers (each carrying
+/// their [`AssemblyMode`] so the mode travels down the tree without a
+/// global layer-index lookup).
 async fn process_directory(
-    src_dirs: Vec<PathBuf>,
+    src_dirs: Vec<(PathBuf, AssemblyMode)>,
     dest_dir: PathBuf,
     dest_root: PathBuf,
     depth: usize,
@@ -385,9 +455,11 @@ async fn process_directory(
     let mut stats = AssemblyStats::default();
 
     // ── Phase 1: Collect entries from all source layers. ────────────────────
-    let mut merged: BTreeMap<OsString, Vec<(usize, EntryKind, PathBuf)>> = BTreeMap::new();
+    // Each contributor tuple carries (layer_idx, kind, src_path, mode) so the
+    // assembly mode travels with the path into the placement phase.
+    let mut merged: BTreeMap<OsString, Vec<(usize, EntryKind, PathBuf, AssemblyMode)>> = BTreeMap::new();
 
-    for (layer_idx, src_dir) in src_dirs.iter().enumerate() {
+    for (layer_idx, (src_dir, mode)) in src_dirs.iter().enumerate() {
         let mut entries = tokio::fs::read_dir(src_dir)
             .await
             .map_err(|e| crate::error::file_error(src_dir, e))?;
@@ -415,7 +487,7 @@ async fn process_directory(
                 merged
                     .entry(file_name)
                     .or_default()
-                    .push((layer_idx, EntryKind::Symlink, src_path));
+                    .push((layer_idx, EntryKind::Symlink, src_path, *mode));
                 continue;
             }
 
@@ -428,7 +500,7 @@ async fn process_directory(
                 merged
                     .entry(file_name)
                     .or_default()
-                    .push((layer_idx, EntryKind::Dir, src_path));
+                    .push((layer_idx, EntryKind::Dir, src_path, *mode));
             } else if file_type.is_file() {
                 let size = entry
                     .metadata()
@@ -438,7 +510,7 @@ async fn process_directory(
                 merged
                     .entry(file_name)
                     .or_default()
-                    .push((layer_idx, EntryKind::File { size }, src_path));
+                    .push((layer_idx, EntryKind::File { size }, src_path, *mode));
             }
             // Other entry types (sockets, fifos, block/char devices) are
             // skipped silently — OCI layers should never contain them.
@@ -449,14 +521,14 @@ async fn process_directory(
     for (name, contributors) in &merged {
         let dest_path = dest_dir.join(name);
 
-        // Partition into dirs and non-dirs.
-        let mut dirs: Vec<&PathBuf> = Vec::new();
-        let mut non_dirs: Vec<(&EntryKind, &PathBuf)> = Vec::new();
+        // Partition into dirs and non-dirs; carry mode alongside each entry.
+        let mut dirs: Vec<(&PathBuf, AssemblyMode)> = Vec::new();
+        let mut non_dirs: Vec<(&EntryKind, &PathBuf, AssemblyMode)> = Vec::new();
 
-        for (_layer_idx, kind, src_path) in contributors {
+        for (_layer_idx, kind, src_path, mode) in contributors {
             match kind {
-                EntryKind::Dir => dirs.push(src_path),
-                _ => non_dirs.push((kind, src_path)),
+                EntryKind::Dir => dirs.push((src_path, *mode)),
+                _ => non_dirs.push((kind, src_path, *mode)),
             }
         }
 
@@ -474,18 +546,39 @@ async fn process_directory(
             ));
         }
 
-        if let Some((kind, src_path)) = non_dirs.first() {
+        if let Some((kind, src_path, mode)) = non_dirs.first() {
             // Single non-directory entry.
             match kind {
                 EntryKind::File { size } => {
-                    // `dest_dir` is always pre-created: subdirectories are
-                    // created in the Dir branch below (or by the pre-condition
-                    // setup for the root `dest_content` dir). Skip the
-                    // `create_dir_all` inside `hardlink::create` to avoid one
-                    // redundant no-op syscall per file.
-                    crate::hardlink::create_in_existing_parent(src_path, &dest_path)?;
-                    stats.files_hardlinked += 1;
-                    stats.bytes_hardlinked += size;
+                    match mode {
+                        AssemblyMode::Hardlink => {
+                            // `dest_dir` is always pre-created: subdirectories are
+                            // created in the Dir branch below (or by the pre-condition
+                            // setup for the root `dest_content` dir). Skip the
+                            // `create_dir_all` inside `hardlink::create` to avoid one
+                            // redundant no-op syscall per file.
+                            crate::hardlink::create_in_existing_parent(src_path, &dest_path)?;
+                        }
+                        AssemblyMode::Reflink => {
+                            // reflink_or_copy can move large bytes — blocking I/O,
+                            // must not run on the async executor thread.
+                            // `src_path` is `&&PathBuf` (ref into the non_dirs tuple); deref + own it
+                            // for the move into the blocking closure.
+                            let src = (*src_path).to_path_buf();
+                            let dst = dest_path.clone();
+                            tokio::task::spawn_blocking(move || crate::reflink::create(&src, &dst))
+                                .await
+                                .map_err(|e| {
+                                    crate::error::file_error(
+                                        &dest_root,
+                                        std::io::Error::other(AssemblyError::TaskPanicked(e)),
+                                    )
+                                })??;
+                            stats.independent_inode_files += 1;
+                        }
+                    }
+                    stats.files_placed += 1;
+                    stats.bytes_placed += size;
                 }
                 EntryKind::Symlink => {
                     handle_symlink_entry(src_path, &dest_path, &dest_root, &mut stats).await?;
@@ -524,8 +617,9 @@ async fn process_directory(
                 ));
             }
 
-            // Post subdirectory request with only the contributing layers.
-            let child_src_dirs: Vec<PathBuf> = dirs.into_iter().cloned().collect();
+            // Post subdirectory request with only the contributing layers,
+            // each carrying their mode so the correct placement path is taken.
+            let child_src_dirs: Vec<(PathBuf, AssemblyMode)> = dirs.into_iter().map(|(p, m)| (p.clone(), m)).collect();
             if join_set_tx
                 .send(SpawnRequest {
                     src_dirs: child_src_dirs,
@@ -645,7 +739,7 @@ mod tests {
 
         assert!(dest.exists(), "dest content/ must be created by the walker");
         assert!(dest.is_dir(), "dest content/ must be a real directory, not a symlink");
-        assert_eq!(stats.files_hardlinked, 0, "empty layer yields zero hardlinked files");
+        assert_eq!(stats.files_placed, 0, "empty layer yields zero hardlinked files");
         assert_eq!(
             stats.symlinks_recreated, 0,
             "empty layer yields zero recreated symlinks"
@@ -677,7 +771,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "all three files must be hardlinked");
+        assert_eq!(stats.files_placed, 3, "all three files must be hardlinked");
         assert_eq!(stats.symlinks_recreated, 0, "no symlinks in a flat file layer");
         // `dirs_created` counts subdirectories encountered during the walk.
         // A flat layer has files only at the root — zero subdirectories.
@@ -717,7 +811,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "three files across three subdirs");
+        assert_eq!(stats.files_placed, 3, "three files across three subdirs");
         assert_eq!(stats.symlinks_recreated, 0, "no symlinks in this layer");
         // `dirs_created` counts subdirectories encountered during the walk:
         // `bin`, `lib`, `share`, and `share/doc` = 4. `dest_content` itself
@@ -771,7 +865,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 1, "one file at depth 5");
+        assert_eq!(stats.files_placed, 1, "one file at depth 5");
         // `dirs_created` counts subdirectories encountered during the walk:
         // `a`, `a/b`, `a/b/c`, `a/b/c/d`, `a/b/c/d/e` = 5 subdirs.
         // `dest_content` itself is NOT counted.
@@ -808,7 +902,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 1, "one file outside the empty dir");
+        assert_eq!(stats.files_placed, 1, "one file outside the empty dir");
         // `dirs_created` counts subdirectories encountered during the walk:
         // `bin` (holding `tool`) and `empty` (the preserved empty dir) = 2.
         // `dest_content` itself is NOT counted.
@@ -855,7 +949,7 @@ mod tests {
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "one symlink must be recreated");
-        assert_eq!(stats.files_hardlinked, 1, "one real file must be hardlinked");
+        assert_eq!(stats.files_placed, 1, "one real file must be hardlinked");
 
         let dest_link = dest.join("lib/libfoo.so.1");
 
@@ -904,7 +998,7 @@ mod tests {
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "one cross-dir symlink recreated");
-        assert_eq!(stats.files_hardlinked, 1, "one real file hardlinked");
+        assert_eq!(stats.files_placed, 1, "one real file hardlinked");
 
         let dest_link = dest.join("bin/link");
 
@@ -955,7 +1049,7 @@ mod tests {
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "one absolute symlink must be recreated");
-        assert_eq!(stats.files_hardlinked, 0, "no regular files in this layer");
+        assert_eq!(stats.files_placed, 0, "no regular files in this layer");
 
         let dest_link = dest.join("abs_link");
 
@@ -1001,7 +1095,7 @@ mod tests {
 
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 1, "one real file at the end of the chain");
+        assert_eq!(stats.files_placed, 1, "one real file at the end of the chain");
         assert_eq!(stats.symlinks_recreated, 3, "all three chain links recreated");
 
         // All four entries must exist in dest.
@@ -1053,7 +1147,7 @@ mod tests {
         let stats = assemble_from_layer(&src, &dest).await.unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "broken symlink must be recreated");
-        assert_eq!(stats.files_hardlinked, 0, "no real files in this layer");
+        assert_eq!(stats.files_placed, 0, "no real files in this layer");
 
         let dest_link = dest.join("foo");
 
@@ -1271,12 +1365,12 @@ mod tests {
         assert_eq!(mode, 0o755, "executable bits must be preserved");
     }
 
-    /// AssemblyStats invariant: `files_hardlinked` counts every regular file
+    /// AssemblyStats invariant: `files_placed` counts every regular file
     /// placed in the destination, including files in subdirectories.
     ///
     /// Directories and symlinks are not counted here; only regular files.
     #[tokio::test]
-    async fn stats_files_hardlinked_counts_regular_files() {
+    async fn stats_files_placed_counts_regular_files() {
         let (_dir, root) = setup();
         let layer = make_dir(&root, "layer/content");
         make_file(&layer, "a.txt", b"a");
@@ -1287,15 +1381,15 @@ mod tests {
         let dest = root.join("pkg/content");
         let stats = assemble_from_layer(&layer, &dest).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "must count three files");
+        assert_eq!(stats.files_placed, 3, "must count three files");
         // Intra-layer symlinks count separately — none here.
         assert_eq!(stats.symlinks_recreated, 0);
     }
 
-    /// AssemblyStats invariant: `bytes_hardlinked` is the sum of the source
+    /// AssemblyStats invariant: `bytes_placed` is the sum of the source
     /// file sizes across all hardlinked files.
     #[tokio::test]
-    async fn stats_bytes_hardlinked_sums_source_file_sizes() {
+    async fn stats_bytes_placed_sums_source_file_sizes() {
         let (_dir, root) = setup();
         let layer = make_dir(&root, "layer/content");
         make_file(&layer, "a.txt", b"12345"); // 5 bytes
@@ -1305,7 +1399,7 @@ mod tests {
         let dest = root.join("pkg/content");
         let stats = assemble_from_layer(&layer, &dest).await.unwrap();
 
-        assert_eq!(stats.bytes_hardlinked, 15);
+        assert_eq!(stats.bytes_placed, 15);
     }
 
     // ── error paths + Windows ───────────────────────────────────────────────
@@ -1397,7 +1491,7 @@ mod tests {
         let stats = assemble_from_layer(&layer_b, &dest).await.unwrap();
 
         // Both layer B files must be hardlinked into dest.
-        assert_eq!(stats.files_hardlinked, 2);
+        assert_eq!(stats.files_placed, 2);
 
         // Layer A files must still be present and their inodes unchanged.
         assert_eq!(std::fs::read(dest.join("bin/tool_a")).unwrap(), b"tool A binary");
@@ -1601,7 +1695,7 @@ mod tests {
         let stats = assemble_from_layer(&layer, &dest).await.unwrap();
 
         assert_eq!(
-            stats.files_hardlinked, 1000,
+            stats.files_placed, 1000,
             "all 1000 files across 100 dirs must be hardlinked"
         );
         assert_eq!(stats.dirs_created, 100, "100 subdirectories must be created");
@@ -1696,7 +1790,7 @@ mod tests {
         let dest_ml = root.join("pkg_ml/content");
         let stats = assemble_from_layers(&[src_a.as_path()], &dest_ml).await.unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "single-source must hardlink all files");
+        assert_eq!(stats.files_placed, 2, "single-source must hardlink all files");
         assert_eq!(stats.dirs_created, 2, "single-source must create bin/ and lib/");
         assert!(dest_ml.join("bin/tool").exists(), "bin/tool must appear in dest");
         assert!(
@@ -1745,10 +1839,10 @@ mod tests {
             .unwrap();
 
         assert!(dest.exists(), "dest must be created even for two empty layers");
-        assert_eq!(stats.files_hardlinked, 0, "no files in empty layers");
+        assert_eq!(stats.files_placed, 0, "no files in empty layers");
         assert_eq!(stats.symlinks_recreated, 0, "no symlinks in empty layers");
         assert_eq!(stats.dirs_created, 0, "no subdirectories in empty layers");
-        assert_eq!(stats.bytes_hardlinked, 0, "no bytes in empty layers");
+        assert_eq!(stats.bytes_placed, 0, "no bytes in empty layers");
         assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "dest must be empty");
     }
 
@@ -1771,7 +1865,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both disjoint files must be hardlinked");
+        assert_eq!(stats.files_placed, 2, "both disjoint files must be hardlinked");
         assert!(dest.join("a.txt").exists(), "a.txt from layer A must appear");
         assert!(dest.join("b.txt").exists(), "b.txt from layer B must appear");
         assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"file from A");
@@ -1795,7 +1889,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both disjoint files must be hardlinked");
+        assert_eq!(stats.files_placed, 2, "both disjoint files must be hardlinked");
         assert_eq!(stats.dirs_created, 2, "lib/ and bin/ must be created separately");
         assert!(dest.join("lib/a.so").exists(), "lib/a.so from A must appear");
         assert!(dest.join("bin/b").exists(), "bin/b from B must appear");
@@ -1823,7 +1917,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both tools must be hardlinked");
+        assert_eq!(stats.files_placed, 2, "both tools must be hardlinked");
         // bin/ should be created exactly once despite appearing in both layers
         assert_eq!(stats.dirs_created, 1, "shared bin/ must be created only once");
         assert!(dest.join("bin").is_dir(), "bin/ must be a real directory");
@@ -1854,7 +1948,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both deep files must be hardlinked");
+        assert_eq!(stats.files_placed, 2, "both deep files must be hardlinked");
         // a/, a/b/, a/b/c/ — 3 shared directories each created once
         assert_eq!(
             stats.dirs_created, 3,
@@ -1885,7 +1979,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 4, "all 4 files must be hardlinked");
+        assert_eq!(stats.files_placed, 4, "all 4 files must be hardlinked");
         // bin/ (shared, once), lib/ (A-only), share/ (B-only) = 3 directories
         assert_eq!(stats.dirs_created, 3, "bin/, lib/, share/ = 3 directories");
         assert!(dest.join("bin/a").exists());
@@ -1947,7 +2041,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "one file from each of 3 disjoint layers");
+        assert_eq!(stats.files_placed, 3, "one file from each of 3 disjoint layers");
         assert_eq!(stats.dirs_created, 3, "a/, b/, c/ = 3 disjoint directories");
         assert!(dest.join("a/x").exists());
         assert!(dest.join("b/y").exists());
@@ -1973,7 +2067,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "all three files must be hardlinked");
+        assert_eq!(stats.files_placed, 3, "all three files must be hardlinked");
         assert_eq!(stats.dirs_created, 1, "shared bin/ must be created exactly once");
         assert!(dest.join("bin/a").exists());
         assert!(dest.join("bin/b").exists());
@@ -2003,10 +2097,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            stats.files_hardlinked, 6,
-            "all 6 files across 3 layers must be hardlinked"
-        );
+        assert_eq!(stats.files_placed, 6, "all 6 files across 3 layers must be hardlinked");
         // bin/ (A+B), lib/ (A+C), share/ (B+C) = 3 directories each created once
         assert_eq!(stats.dirs_created, 3, "bin/, lib/, share/ = 3 directories");
         assert!(dest.join("bin/a").exists());
@@ -2037,7 +2128,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 3, "x, y, z all placed");
+        assert_eq!(stats.files_placed, 3, "x, y, z all placed");
         // a/ (all 3 contribute), a/b/ (A+B contribute), a/b/c/ (A only) = 3 dirs
         assert_eq!(stats.dirs_created, 3, "a/, a/b/, a/b/c/ = 3 directories");
         assert!(dest.join("a/b/c/x").exists(), "deepest file from A must be present");
@@ -2229,7 +2320,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(stats.symlinks_recreated, 1, "one symlink from A must be recreated");
-        assert_eq!(stats.files_hardlinked, 1, "one file from B must be hardlinked");
+        assert_eq!(stats.files_placed, 1, "one file from B must be hardlinked");
 
         let dest_link = dest.join("lib/libfoo.so");
         assert!(dest_link.is_symlink(), "lib/libfoo.so must be a symlink");
@@ -2316,10 +2407,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            stats.files_hardlinked, 1,
-            "real file libfoo.so.1 from A must be hardlinked"
-        );
+        assert_eq!(stats.files_placed, 1, "real file libfoo.so.1 from A must be hardlinked");
         assert_eq!(
             stats.symlinks_recreated, 1,
             "symlink libfoo.so from B must be recreated"
@@ -2391,7 +2479,7 @@ mod tests {
 
     // ── 3.6: Stats accumulation ──────────────────────────────────────────────
 
-    /// ML-23: files_hardlinked sums correctly across multiple layers.
+    /// ML-23: files_placed sums correctly across multiple layers.
     /// Layer A: 3 files; Layer B: 2 files → total 5.
     #[tokio::test]
     async fn ml_stats_sum_files_across_layers() {
@@ -2411,10 +2499,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 5, "3 from A + 2 from B = 5 total files");
+        assert_eq!(stats.files_placed, 5, "3 from A + 2 from B = 5 total files");
     }
 
-    /// ML-24: bytes_hardlinked sums correctly across layers.
+    /// ML-24: bytes_placed sums correctly across layers.
     /// Layer A: 100 bytes; Layer B: 50 bytes → total 150.
     #[tokio::test]
     async fn ml_stats_sum_bytes_across_layers() {
@@ -2433,7 +2521,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.bytes_hardlinked, 150, "100 from A + 50 from B = 150 total bytes");
+        assert_eq!(stats.bytes_placed, 150, "100 from A + 50 from B = 150 total bytes");
     }
 
     /// ML-25: dirs_created counts each unique directory exactly once, even when
@@ -2501,8 +2589,8 @@ mod tests {
         assert_eq!(stats.symlinks_recreated, 3, "1 from A + 2 from B = 3 symlinks");
     }
 
-    /// ML-27: Zero-byte files are counted in files_hardlinked but contribute
-    /// 0 to bytes_hardlinked.
+    /// ML-27: Zero-byte files are counted in files_placed but contribute
+    /// 0 to bytes_placed.
     #[tokio::test]
     async fn ml_stats_zero_length_files_counted() {
         let (_dir, root) = setup();
@@ -2518,11 +2606,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "two zero-byte files must still be counted");
-        assert_eq!(
-            stats.bytes_hardlinked, 0,
-            "zero-byte files contribute 0 to bytes_hardlinked"
-        );
+        assert_eq!(stats.files_placed, 2, "two zero-byte files must still be counted");
+        assert_eq!(stats.bytes_placed, 0, "zero-byte files contribute 0 to bytes_placed");
     }
 
     // ── 3.7: Error paths — overlap detection ─────────────────────────────────
@@ -2856,7 +2941,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 500, "250 from A + 250 from B = 500 files");
+        assert_eq!(stats.files_placed, 500, "250 from A + 250 from B = 500 files");
         assert_eq!(
             stats.dirs_created, 50,
             "50 shared directories must each be created exactly once"
@@ -2896,7 +2981,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stats.files_hardlinked, 2, "both deep files must be assembled");
+        assert_eq!(stats.files_placed, 2, "both deep files must be assembled");
         // 20 shared directories, each created once
         assert_eq!(stats.dirs_created, 20, "20 shared directory levels each created once");
 
@@ -2905,5 +2990,507 @@ mod tests {
         assert!(deep_dest.join("y.txt").exists(), "y.txt must exist at depth 20");
         assert_eq!(std::fs::read(deep_dest.join("x.txt")).unwrap(), b"deep x");
         assert_eq!(std::fs::read(deep_dest.join("y.txt")).unwrap(), b"deep y");
+    }
+
+    // ── P2.2 cross-device assembly contract ──────────────────────────────────
+    //
+    // The helper below is shared by all cross-device assembly tests.
+    // Tests self-skip when no second device is available; on this Linux dev box
+    // `/dev/shm` is tmpfs on a different device from the `tempfile` tmpfs, so
+    // these tests FAIL with the unimplemented! stub (proving RED).
+
+    /// Returns a fresh unique subdir under `/dev/shm` iff:
+    ///   (a) `/dev/shm` exists, AND
+    ///   (b) it is on a different `st_dev` than `primary`.
+    ///
+    /// Callers that receive `None` should print a skip note and early-return.
+    #[cfg(unix)]
+    fn second_device_root(primary: &Path) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+
+        let shm = std::path::Path::new("/dev/shm");
+        if !shm.exists() {
+            return None;
+        }
+        let primary_dev = std::fs::metadata(primary).ok()?.dev();
+        let shm_dev = std::fs::metadata(shm).ok()?.dev();
+        if primary_dev == shm_dev {
+            return None;
+        }
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let subdir = shm.join(format!("ocx_asm_test_{}_{}", std::process::id(), suffix));
+        std::fs::create_dir_all(&subdir).ok()?;
+        Some(subdir)
+    }
+
+    // ── A1: cross-device assemble succeeds via copy fallback ─────────────────
+    //
+    // Source layer is in a tempdir; dest is on a second device (/dev/shm).
+    // After assembly:
+    //   - dest file content equals source
+    //   - stats.files_placed == N
+    //   - stats.independent_inode_files == N  (all files were reflinked/copied)
+    //   - dest file ino() != source ino()     (independent inode)
+    //
+    // FAILS NOW: unimplemented!() in reflink::create (called for Reflink mode).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_assemble_succeeds_via_copy_fallback() {
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        let source_file = make_file(&layer, "bin/tool", b"tool binary bytes");
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available for cross-device test");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let result = assemble_from_layer(&layer, &dest).await;
+        let _ = std::fs::remove_dir_all(&shm_dir); // cleanup regardless
+
+        let stats = result.expect("cross-device assembly must succeed via copy fallback");
+
+        assert_eq!(stats.files_placed, 1, "one file must be placed");
+        assert_eq!(
+            stats.independent_inode_files, 1,
+            "cross-device placement must count as independent_inode_files"
+        );
+        // Source file still accessible after copy (not moved).
+        assert!(source_file.exists(), "source must remain after cross-device copy");
+    }
+
+    // ── A1 (extended): byte-parity and inode independence after cross-device ──
+    //
+    // This variant keeps the shm_dir alive for content + inode checks.
+    // FAILS NOW: unimplemented!() in reflink::create.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_assembled_file_has_independent_inode_and_correct_content() {
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        let source_file = make_file(&layer, "bin/tool", b"tool binary for inode check");
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let stats = match assemble_from_layer(&layer, &dest).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&shm_dir);
+                panic!("cross-device assembly failed: {e}");
+            }
+        };
+
+        let dest_file = dest.join("bin/tool");
+
+        // Content must be byte-identical.
+        let src_bytes = std::fs::read(&source_file).unwrap();
+        let dest_bytes = std::fs::read(&dest_file).unwrap();
+        let _ = std::fs::remove_dir_all(&shm_dir); // cleanup after read
+
+        assert_eq!(
+            src_bytes, dest_bytes,
+            "cross-device copy must produce byte-identical content"
+        );
+        assert_eq!(stats.files_placed, 1);
+        assert_eq!(stats.independent_inode_files, 1);
+    }
+
+    // ── A2: same-device still hardlinks ──────────────────────────────────────
+    //
+    // When source and dest are on the same filesystem, the walker must continue
+    // to use hardlinks (independent_inode_files == 0).  This is a regression
+    // guard that the same-fs path is not disturbed by the P2 changes.
+    //
+    // PASSES NOW — same-fs assembly uses hardlink::create (unchanged).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_device_still_uses_hardlinks() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        let source_file = make_file(&layer, "bin/tool", b"tool binary");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layer(&layer, &dest).await.unwrap();
+
+        assert_eq!(
+            stats.independent_inode_files, 0,
+            "same-device assembly must not count any independent_inode_files"
+        );
+
+        let dest_file = dest.join("bin/tool");
+        let ino_source = std::fs::metadata(&source_file).unwrap().ino();
+        let ino_dest = std::fs::metadata(&dest_file).unwrap().ino();
+        assert_eq!(
+            ino_source, ino_dest,
+            "same-device: dest must share inode with layer source (hardlink)"
+        );
+    }
+
+    // ── A3: mixed multi-layer where all layers + dest same fs ────────────────
+    //
+    // With multiple layers all on the same filesystem as the dest, ALL files
+    // must be hardlinked; independent_inode_files must be 0.
+    //
+    // PASSES NOW — regression guard.
+    #[tokio::test]
+    async fn multi_layer_all_same_fs_uses_only_hardlinks() {
+        let (_dir, root) = setup();
+        let layer_a = make_dir(&root, "layer_a/content");
+        make_file(&layer_a, "a.txt", b"A");
+        let layer_b = make_dir(&root, "layer_b/content");
+        make_file(&layer_b, "b.txt", b"B");
+        let layer_c = make_dir(&root, "layer_c/content");
+        make_file(&layer_c, "c.txt", b"C");
+
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let stats = assemble_from_layers(&[layer_a.as_path(), layer_b.as_path(), layer_c.as_path()], &dest)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            stats.independent_inode_files, 0,
+            "all-same-fs multi-layer assembly must not use independent inodes"
+        );
+        assert_eq!(stats.files_placed, 3, "all three files must be placed");
+    }
+
+    // ── A4: exec bit preserved under cross-device copy ───────────────────────
+    //
+    // Source file has mode 0o755; dest is on a second device.
+    // After assembly the dest file must also have mode & 0o777 == 0o755.
+    //
+    // FAILS NOW: unimplemented!() in reflink::create.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_exec_bit_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        let source_file = make_file(&layer, "bin/tool", b"#!/bin/sh\necho hi\n");
+        std::fs::set_permissions(&source_file, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let result = assemble_from_layer(&layer, &dest).await;
+
+        // Check mode before cleanup.
+        let mode = result.as_ref().ok().and_then(|_| {
+            std::fs::metadata(dest.join("bin/tool"))
+                .ok()
+                .map(|m| m.permissions().mode() & 0o777)
+        });
+        let _ = std::fs::remove_dir_all(&shm_dir);
+
+        result.expect("cross-device assembly must succeed");
+        assert_eq!(
+            mode.expect("dest file must be readable before cleanup"),
+            0o755,
+            "executable bit must be preserved across cross-device copy"
+        );
+    }
+
+    // ── A5: symlink recreated under cross-device ─────────────────────────────
+    //
+    // Layer contains a relative symlink; dest is on a second device.
+    // The symlink must be recreated verbatim (symlinks_recreated == 1),
+    // independent of the file-placement mode.
+    //
+    // FAILS NOW: assembly panics at reflink::create (unimplemented!) before
+    // reaching the symlink, so this is also RED.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_symlink_recreated_verbatim() {
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+        // A real file so the layer has something to reflink first.
+        make_file(&layer, "lib/libfoo.so.1", b"versioned lib");
+        // A relative symlink in the same dir.
+        crate::symlink::create(std::path::Path::new("libfoo.so.1"), layer.join("lib/libfoo.so")).unwrap();
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let result = assemble_from_layer(&layer, &dest).await;
+
+        // Capture filesystem observations while the shm_dir still exists.
+        let (sym_ok, target_ok) = if result.is_ok() {
+            let link = dest.join("lib/libfoo.so");
+            let sym_ok = link.is_symlink();
+            let target_ok = std::fs::read_link(&link)
+                .ok()
+                .map(|t| t == std::path::Path::new("libfoo.so.1"))
+                .unwrap_or(false);
+            (sym_ok, target_ok)
+        } else {
+            (false, false)
+        };
+
+        let _ = std::fs::remove_dir_all(&shm_dir);
+
+        let stats = result.expect("cross-device assembly must succeed");
+        assert_eq!(stats.symlinks_recreated, 1, "symlink must be recreated");
+        assert!(sym_ok, "dest/lib/libfoo.so must be a symlink");
+        assert!(target_ok, "symlink target must be verbatim 'libfoo.so.1'");
+    }
+
+    // ── A6: merge sums independent_inode_files ───────────────────────────────
+    //
+    // Unit-test AssemblyStats::merge directly.
+    // PASSES NOW — merge is already implemented.
+    #[test]
+    fn assembly_stats_merge_sums_independent_inode_files() {
+        let mut a = AssemblyStats {
+            files_placed: 3,
+            symlinks_recreated: 1,
+            dirs_created: 2,
+            bytes_placed: 100,
+            independent_inode_files: 2,
+        };
+        let b = AssemblyStats {
+            files_placed: 5,
+            symlinks_recreated: 0,
+            dirs_created: 4,
+            bytes_placed: 200,
+            independent_inode_files: 3,
+        };
+        a.merge(b);
+        assert_eq!(a.files_placed, 8, "files_placed must sum");
+        assert_eq!(a.symlinks_recreated, 1, "symlinks_recreated must sum");
+        assert_eq!(a.dirs_created, 6, "dirs_created must sum");
+        assert_eq!(a.bytes_placed, 300, "bytes_placed must sum");
+        assert_eq!(
+            a.independent_inode_files, 5,
+            "independent_inode_files must be summed by merge"
+        );
+    }
+
+    // ── A7: used_independent_inode accessor ──────────────────────────────────
+    //
+    // PASSES NOW — accessor is already implemented.
+    #[test]
+    fn used_independent_inode_returns_false_when_zero() {
+        let stats = AssemblyStats {
+            files_placed: 3,
+            symlinks_recreated: 0,
+            dirs_created: 1,
+            bytes_placed: 42,
+            independent_inode_files: 0,
+        };
+        assert!(
+            !stats.used_independent_inode(),
+            "used_independent_inode() must be false when independent_inode_files == 0"
+        );
+    }
+
+    #[test]
+    fn used_independent_inode_returns_true_when_nonzero() {
+        let stats = AssemblyStats {
+            files_placed: 1,
+            symlinks_recreated: 0,
+            dirs_created: 0,
+            bytes_placed: 10,
+            independent_inode_files: 1,
+        };
+        assert!(
+            stats.used_independent_inode(),
+            "used_independent_inode() must be true when independent_inode_files > 0"
+        );
+    }
+
+    /// `is_fully_independent()` gates whole-tree in-place mutation (macOS
+    /// re-sign). It must be true ONLY when every placed file is independent —
+    /// a mixed assembly (some hardlinked to a layer) must return false so the
+    /// caller never mutates a shared layer inode.
+    #[test]
+    fn is_fully_independent_true_only_when_all_files_independent() {
+        let all_independent = AssemblyStats {
+            files_placed: 3,
+            independent_inode_files: 3,
+            ..AssemblyStats::default()
+        };
+        assert!(
+            all_independent.is_fully_independent(),
+            "all files independent → fully independent"
+        );
+
+        let all_hardlinked = AssemblyStats {
+            files_placed: 3,
+            independent_inode_files: 0,
+            ..AssemblyStats::default()
+        };
+        assert!(
+            !all_hardlinked.is_fully_independent(),
+            "all files hardlinked → NOT fully independent (re-sign would corrupt layers)"
+        );
+
+        let mixed = AssemblyStats {
+            files_placed: 3,
+            independent_inode_files: 1,
+            ..AssemblyStats::default()
+        };
+        assert!(
+            !mixed.is_fully_independent(),
+            "mixed hardlink+independent → NOT fully independent (whole-tree re-sign unsafe)"
+        );
+
+        let empty = AssemblyStats::default();
+        assert!(
+            !empty.is_fully_independent(),
+            "empty assembly → NOT fully independent (nothing to sign)"
+        );
+    }
+
+    // ── TC6: mixed same-fs + cross-fs layers dispatch per layer ─────────────
+    //
+    // Two layers assembled in one `assemble_from_layers` call:
+    //   - Layer A: tempdir (same device as dest) → Hardlink
+    //   - Layer B: /dev/shm (different device from dest) → Reflink/copy
+    //
+    // Assertions:
+    //   - Both files present with correct content in dest.
+    //   - stats.independent_inode_files == 1 (layer B's file).
+    //   - stats.files_placed - stats.independent_inode_files == 1 (layer A's file).
+    //   - Layer A file shares inode with its source (hardlinked).
+    //   - Layer B file has an independent inode.
+    //
+    // Self-skips when no second device is available.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mixed_same_and_cross_device_layers_dispatch_per_layer() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, root) = setup();
+
+        // Layer A — same tempdir as dest → Hardlink mode.
+        let layer_a = make_dir(&root, "layer_a/content");
+        let source_a = make_file(&layer_a, "same_fs_file.txt", b"same fs content");
+
+        // Layer B — /dev/shm (different device) → Reflink mode.
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available for mixed same/cross-device test");
+            return;
+        };
+
+        // Build layer B under shm_dir.
+        let layer_b = shm_dir.join("layer_b/content");
+        let source_b_path = layer_b.join("cross_fs_file.txt");
+        std::fs::create_dir_all(&layer_b).unwrap();
+        std::fs::write(&source_b_path, b"cross fs content").unwrap();
+
+        // Dest is in the primary tempdir (same device as layer A).
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        let dest = root.join("pkg/content");
+
+        let result = assemble_from_layers(&[layer_a.as_path(), layer_b.as_path()], &dest).await;
+        let _ = std::fs::remove_dir_all(&shm_dir); // cleanup regardless
+
+        let stats = result.expect("mixed same/cross-device assembly must succeed");
+
+        // Both files present with correct content.
+        assert_eq!(
+            std::fs::read(dest.join("same_fs_file.txt")).unwrap(),
+            b"same fs content",
+            "layer A file must be present with correct content"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("cross_fs_file.txt")).unwrap(),
+            b"cross fs content",
+            "layer B file must be present with correct content"
+        );
+
+        // Stats: one file from each layer placed; layer B counted as independent inode.
+        assert_eq!(stats.files_placed, 2, "both files must be counted in files_placed");
+        assert_eq!(
+            stats.independent_inode_files, 1,
+            "only the cross-device layer B file must be counted as independent_inode_files"
+        );
+        assert_eq!(
+            stats.files_placed - stats.independent_inode_files,
+            1,
+            "same-device layer A file must not be counted as independent inode"
+        );
+
+        // Layer A file shares inode with its source (hardlinked).
+        let ino_src_a = std::fs::metadata(&source_a).unwrap().ino();
+        let ino_dest_a = std::fs::metadata(dest.join("same_fs_file.txt")).unwrap().ino();
+        assert_eq!(
+            ino_src_a, ino_dest_a,
+            "layer A file must share inode with its source (hardlinked)"
+        );
+
+        // Layer B file has an independent inode (reflinked/copied).
+        // We compare against the original source_b_path which was on shm_dir —
+        // after cleanup we can only assert the dest inode differs from source_a's inode.
+        // Since the dest file is on a different device than shm_dir was, the dest
+        // file's inode must differ from dest layer A's inode (different files).
+        assert_ne!(
+            ino_dest_a,
+            std::fs::metadata(dest.join("cross_fs_file.txt")).unwrap().ino(),
+            "layer B file must have a different inode from layer A file"
+        );
+    }
+
+    // ── A8: byte-parity cross-device (larger file) ───────────────────────────
+    //
+    // A 64 KiB file assembled cross-device must have byte-identical content.
+    // FAILS NOW: unimplemented!() in reflink::create.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cross_device_large_file_byte_parity() {
+        let (_dir, root) = setup();
+        let layer = make_dir(&root, "layer/content");
+
+        // 64 KiB of deterministic content (pattern fill, not truly random,
+        // so the test is reproducible).
+        let data: Vec<u8> = (0u32..65536).map(|i| (i ^ (i >> 8)) as u8).collect();
+        let source_file = make_file(&layer, "data/large.bin", &data);
+
+        let Some(shm_dir) = second_device_root(&root) else {
+            eprintln!("skip: no second device available");
+            return;
+        };
+        let dest = shm_dir.join("pkg/content");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+        let result = assemble_from_layer(&layer, &dest).await;
+
+        let dest_bytes = result
+            .as_ref()
+            .ok()
+            .and_then(|_| std::fs::read(dest.join("data/large.bin")).ok());
+        let _ = std::fs::remove_dir_all(&shm_dir);
+
+        result.expect("cross-device assembly of large file must succeed");
+        let dest_bytes = dest_bytes.expect("dest file must be readable after assembly");
+        let src_bytes = std::fs::read(&source_file).unwrap();
+        assert_eq!(
+            src_bytes, dest_bytes,
+            "64 KiB file assembled cross-device must be byte-identical to source"
+        );
     }
 }

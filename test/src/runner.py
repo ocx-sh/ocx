@@ -66,7 +66,13 @@ class OcxRunner:
     leak host state into ocx.
     """
 
-    def __init__(self, binary: Path, ocx_home: Path, registry: str):
+    def __init__(
+        self,
+        binary: Path,
+        ocx_home: Path,
+        registry: str,
+        extra_env: dict[str, str] | None = None,
+    ):
         self.binary = binary
         self.registry = registry
         self.ocx_home = ocx_home
@@ -81,6 +87,11 @@ class OcxRunner:
         for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT"):
             if key in os.environ:
                 self.env[key] = os.environ[key]
+        # Overlay caller-supplied overrides last so they win over defaults.
+        # Follows the same shape as the `extra_env` pattern used in
+        # `test_project_concurrency.py::_spawn_in`.
+        if extra_env:
+            self.env.update(extra_env)
 
     def run(
         self,

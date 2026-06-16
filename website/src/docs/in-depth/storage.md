@@ -95,7 +95,7 @@ A dependency is protected by the liveness of its dependents, not by a back-refer
 
 ## Layers {#layers}
 
-A package on disk looks monolithic — one `content/` directory under one digest — but the bytes inside can come from more than one upstream archive. Each archive is a <Tooltip term="layer">An OCI image layer: a single tar archive (gzip or xz compressed) addressed in the registry by its own SHA-256 digest. The OCI image manifest lists all layers that compose a package; on pull, OCX extracts each layer once into the shared layer store and assembles them into the package's `content/` directory via hardlinks.</Tooltip>, stored once in `~/.ocx/layers/` and shared across every package that references it.
+A package on disk looks monolithic — one `content/` directory under one digest — but the bytes inside can come from more than one upstream archive. Each archive is a <Tooltip term="layer">An OCI image layer: a single tar archive (gzip or xz compressed) addressed in the registry by its own SHA-256 digest. The OCI image manifest lists all layers that compose a package; on pull, OCX extracts each layer once into the shared layer store and assembles them into the package's `content/` directory via hardlinks (or reflinks/copies when the packages zone is on a different volume than the cache zone).</Tooltip>, stored once in `~/.ocx/layers/` and shared across every package that references it.
 
 <Tree>
   <Node name="~/.ocx/layers/" icon="🗂️" open>
@@ -103,14 +103,14 @@ A package on disk looks monolithic — one `content/` directory under one digest
       <Node name="sha256/ab/c123…/" icon="📁" open-icon="📂" open>
         <Description>one directory per unique layer blob</Description>
         <Node name="content/" icon="📂">
-          <Description>extracted layer files — hardlink source for assembled packages</Description>
+          <Description>extracted layer files — source for assembled packages (hardlinked on the same filesystem, reflinked or copied across volumes)</Description>
         </Node>
       </Node>
     </Node>
   </Node>
 </Tree>
 
-The layer store enables a different kind of dedup than the package store. The package store dedups whole builds — two tags pointing at the exact same binary share one directory. The layer store dedups *parts* of builds: a 200 MB shared base layer used by ten packages is downloaded, extracted, and stored exactly once. Each package's `content/` is then assembled by hardlinking files from one or more layer directories, so the package looks complete even though no bytes were copied.
+The layer store enables a different kind of dedup than the package store. The package store dedups whole builds — two tags pointing at the exact same binary share one directory. The layer store dedups *parts* of builds: a 200 MB shared base layer used by ten packages is downloaded, extracted, and stored exactly once. Each package's `content/` is then assembled from one or more layer directories — hardlinked when the package and layers share a filesystem, so the package looks complete even though no bytes were copied, or reflinked/copied (independent inodes) when the packages zone is on a different volume than the cache zone.
 
 ::: info Similar to Docker image layers and pnpm's content store
 [Docker image layers][docker-layers] are the same concept at the registry level: an image is a stack of layers, each addressed by digest, downloaded only when missing from the local cache. OCX applies this to binary packages instead of containers. [pnpm][pnpm] uses a comparable trick on the install side, storing every package version once in a content-addressed store and hardlinking them into individual `node_modules/` trees.

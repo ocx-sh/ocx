@@ -7,6 +7,8 @@ def test_clean_removes_unreferenced_objects(
     ocx: OcxRunner, published_package: PackageInfo
 ):
     """ocx install <pkg>; ocx uninstall <pkg>; ocx clean"""
+    # P3.4 grace defaults to 600s; this test asserts immediate collection, so disable it.
+    ocx.env["OCX_GC_GRACE_SECONDS"] = "0"
     pkg = published_package
     result = ocx.json("package", "install", pkg.short)
     candidate = Path(result[pkg.short]["path"])

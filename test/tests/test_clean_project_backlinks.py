@@ -283,6 +283,9 @@ def test_force_flag_bypasses_registry(
 
     _setup_project_a(ocx, tmp_path, proj_a)
 
+    # P3.4 grace defaults to 600s; this test asserts immediate collection, so disable it.
+    ocx.env["OCX_GC_GRACE_SECONDS"] = "0"
+
     # Run ``ocx clean --force --dry-run --format json`` from project B.
     entries = _run_clean_json(ocx, proj_b, "--force")
 
