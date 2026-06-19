@@ -120,7 +120,8 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 **`self update` / `self update --check` notes:**
 - Both always bypass the auto-check throttle (explicit user intent).
-- `--check` calls `self_check_update(Some(Duration::ZERO))` and reports without installing.
+- Both are **ChainMode-aware** (`TagProbe::Index`): version discovery resolves the latest tag through the configured local index, honouring `--offline`/`--frozen`/`--remote` + `OCX_INDEX` like every other tag-resolving command. Plain `ocx self update` in default mode reads the local index; `ocx --remote self update` forces a live registry probe. (The background auto-check `app/update_check.rs` is the only caller that passes `TagProbe::Remote` — it must surface fresh upstream releases regardless of ambient ChainMode.)
+- `--check` calls `self_check_update(Some(Duration::ZERO), TagProbe::Index)` and reports without installing.
 - Without `--check` calls `self_update()` which routes the install through `install_all`.
 - A `sha256:` digest pin in `self setup` selects a platform-specific package digest; the same tag resolves to a different digest per OS/arch. For CI matrices, pin by tag (each runner resolves its own platform digest) rather than sharing a single digest across platforms.
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use ocx_lib::cli::ExitCode as OcxExitCode;
-use ocx_lib::package_manager::{SelfUpdateResult, UpdateCheckResult};
+use ocx_lib::package_manager::{SelfUpdateResult, TagProbe, UpdateCheckResult};
 use ocx_lib::setup;
 
 use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
@@ -14,8 +14,14 @@ use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 /// Update OCX to the latest available version.
 ///
 /// Without `--check`, downloads and installs the latest release if a newer
-/// version exists. With `--check`, only queries the registry and reports
-/// whether an update is available — no installation.
+/// version exists. With `--check`, only reports whether an update is
+/// available — no installation.
+///
+/// Version discovery is ChainMode-aware (`TagProbe::Index`): the latest tag is
+/// resolved through the configured local index, so `--offline` / `--frozen` /
+/// `--remote` and `OCX_INDEX` all apply, like every other tag-resolving
+/// command. (User-facing copy of this lives on the `SelfGroup::Update` variant,
+/// which is the surface clap renders; this struct doc is rustdoc-only.)
 ///
 /// Both forms always bypass the throttle (explicit user intent).
 ///
@@ -31,12 +37,14 @@ use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 /// distinguished from a "couldn't determine" one (UX-W1).
 #[derive(Parser)]
 pub struct SelfUpdate {
-    /// Query the registry for a newer ocx version without installing it.
+    /// Check for a newer ocx version without installing it.
     ///
     /// Behaviour:
     ///
+    /// * Resolves the latest version through the local index (add `--remote`
+    ///   to query the registry directly).
     /// * Always bypasses the 24h auto-check throttle (explicit user intent).
-    /// * Exit status: 0 if the registry was reached (whether or not a newer
+    /// * Exit status: 0 if the lookup succeeded (whether or not a newer
     ///   version was found); 75 (`EX_TEMPFAIL`) if the check was skipped.
     /// * Output: status, identifier (when an update is available), and
     ///   structured skip reason. JSON shape:
@@ -51,7 +59,14 @@ pub struct SelfUpdate {
 impl SelfUpdate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         if self.check {
-            let result = context.manager().self_check_update(Some(Duration::ZERO)).await?;
+            // Explicit user intent → resolve the latest through the configured
+            // index + ChainMode (honours --offline/--frozen/--remote + OCX_INDEX),
+            // like every other tag-resolving command. `--remote` forces a live
+            // registry probe.
+            let result = context
+                .manager()
+                .self_check_update(Some(Duration::ZERO), TagProbe::Index)
+                .await?;
             let exit = exit_code_for_check(&result);
             context.api().report(&UpdateCheckData::from_result(&result))?;
             Ok(exit)

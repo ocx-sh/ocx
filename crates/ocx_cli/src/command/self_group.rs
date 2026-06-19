@@ -28,9 +28,12 @@ pub enum SelfGroup {
     /// `--force` to overwrite a block you have edited (otherwise exit 82).
     Setup(setup::SelfSetup),
     /// Update ocx itself to the latest released version. Without `--check`,
-    /// installs the new binary if one is available. With `--check`, queries only
-    /// and reports the result without installing. Both forms always bypass the
-    /// auto-check throttle.
+    /// installs the new binary if one is available. With `--check`, reports the
+    /// result without installing.
+    ///
+    /// The latest version is resolved through the local index, so `--offline`,
+    /// `--frozen`, and `OCX_INDEX` apply; pass `--remote` to query the registry
+    /// directly. Both forms always bypass the auto-check throttle.
     Update(update::SelfUpdate),
 }
 

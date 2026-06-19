@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::file_structure::FileStructure;
 use crate::package_manager::concurrency::Concurrency;
 use crate::package_manager::error::{Error as PmError, PackageError, PackageErrorKind};
-use crate::package_manager::{PackageManager, SkippedReason, UpdateCheckResult};
+use crate::package_manager::{PackageManager, SkippedReason, TagProbe, UpdateCheckResult};
 use crate::setup::error::Error as SetupError;
 use crate::setup::version_spec::VersionSpec;
 use crate::{log, oci};
@@ -119,10 +119,15 @@ pub async fn ensure_self_installed(
     let identifier = oci::ocx_cli_identifier();
 
     // `Some(Duration::ZERO)` bypasses the throttle and performs a live tag
-    // probe. The offline case surfaces as `Skipped(Offline)` (not an error),
-    // which `decide` maps based on whether the package is already present.
+    // probe ([`TagProbe::Remote`]). Bootstrap deliberately stays remote-only:
+    // its offline-tolerance contract (`map_skipped`) keys on `Skipped(Offline)`
+    // so a re-run on an already-installed machine works offline and an empty
+    // CAS surfaces as exit 81. The offline case surfaces as `Skipped(Offline)`
+    // (not an error), which `decide` maps based on whether the package is
+    // already present. (The *pinned* `self setup X` path resolves through the
+    // index/ChainMode separately — see `ensure_pinned`.)
     let check = manager
-        .check_update(&identifier, Some(Duration::ZERO))
+        .check_update(&identifier, Some(Duration::ZERO), TagProbe::Remote)
         .await
         .map_err(|kind| PmError::InstallFailed(vec![PackageError::new(identifier.clone(), kind)]))?;
 

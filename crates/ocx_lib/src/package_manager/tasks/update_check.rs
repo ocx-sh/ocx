@@ -9,7 +9,8 @@
 //! same convention:
 //!
 //! - `None` → 24-hour default (the normal auto-check path from `app.rs`).
-//! - `Some(Duration::ZERO)` → bypass; always query the registry.
+//! - `Some(Duration::ZERO)` → bypass; always run the probe (the tag source is
+//!   chosen by the [`TagProbe`] argument, not the throttle).
 //! - `Some(d)` → custom interval.
 //!
 //! The `self_update` convenience always bypasses throttle (explicit user intent).
@@ -129,17 +130,43 @@ pub enum SelfUpdateResult {
     Skipped(SkippedReason),
 }
 
+/// Where the update-check probe lists candidate tags from.
+///
+/// Tag discovery has two callers with genuinely different needs, so the source
+/// is explicit rather than always-remote:
+///
+/// - Explicit `ocx self update` / `ocx self setup` resolve "the latest version"
+///   through the manager's configured index, exactly like every other
+///   tag-resolving command. The user's `--offline` / `--frozen` / `--remote`
+///   policy and the `OCX_INDEX` local index all apply.
+/// - The background auto-check exists to surface fresh *upstream* releases, so
+///   it forces a live remote listing regardless of the ambient ChainMode (a
+///   default-mode local read would only ever echo a stale local index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagProbe {
+    /// Resolve through the manager's configured index + ChainMode. Honours
+    /// `--offline` / `--frozen` / `--remote` and the `OCX_INDEX` local index.
+    Index,
+    /// Force a live remote tag listing regardless of ChainMode. An offline
+    /// manager (no client) short-circuits to [`SkippedReason::Offline`].
+    Remote,
+}
+
 impl PackageManager {
-    /// Checks whether a newer version of `identifier` is available in the
-    /// remote index.
+    /// Checks whether a newer version of `identifier` is available.
     ///
-    /// The `throttle` parameter controls how long between registry probes:
+    /// The `throttle` parameter controls how long between probes:
     /// `None` = 24-hour default, `Some(Duration::ZERO)` = always query,
     /// `Some(d)` = custom interval.
     ///
+    /// The `probe` parameter selects where candidate tags are listed from:
+    /// [`TagProbe::Index`] resolves through the manager's configured index +
+    /// ChainMode (honours `--offline` / `--frozen` / `--remote` and `OCX_INDEX`),
+    /// [`TagProbe::Remote`] forces a live registry listing.
+    ///
     /// Returns [`UpdateCheckResult::Skipped`] when throttle short-circuits
     /// (without touching the state file). Returns [`UpdateCheckResult::UpdateAvailable`]
-    /// after a live probe if a release tag is found; the state file is touched
+    /// after a probe if a release tag is found; the state file is touched
     /// in both cases (success or error).
     ///
     /// # Errors
@@ -149,6 +176,7 @@ impl PackageManager {
         &self,
         identifier: &oci::Identifier,
         throttle: Option<Duration>,
+        probe: TagProbe,
     ) -> Result<UpdateCheckResult, package_manager::error::PackageErrorKind> {
         let state_path = self.file_structure().state.update_check_file(identifier);
         let interval = throttle.unwrap_or(DEFAULT_THROTTLE);
@@ -165,21 +193,30 @@ impl PackageManager {
             return Ok(UpdateCheckResult::Skipped(SkippedReason::Throttled));
         }
 
-        // Build a remote-only index for the probe. If we're offline, treat as
-        // probe error: touch the state file to avoid hammering on every invocation,
-        // then return Skipped.
-        let client = match self.client() {
-            Some(c) => c,
-            None => {
-                touch_state_async(state_path.clone()).await;
-                return Ok(UpdateCheckResult::Skipped(SkippedReason::Offline));
+        // Acquire the candidate tag list. `Remote` forces a live registry
+        // listing (auto-check freshness); `Index` resolves through the
+        // manager's configured index + ChainMode so an explicit `ocx self
+        // update` honours `--offline` / `--frozen` / `--remote` and the
+        // `OCX_INDEX` local index, like every other tag-resolving command.
+        let probe_result = match probe {
+            TagProbe::Remote => {
+                // No client → offline. Touch the state file to avoid hammering
+                // on every invocation, then return Skipped.
+                let Some(client) = self.client() else {
+                    touch_state_async(state_path.clone()).await;
+                    return Ok(UpdateCheckResult::Skipped(SkippedReason::Offline));
+                };
+                let remote_index =
+                    oci::index::Index::from_remote(oci::index::RemoteIndex::new(oci::index::RemoteConfig {
+                        client: client.clone(),
+                    }));
+                remote_index.list_tags(identifier).await
             }
+            // ChainMode decides where this reads (local index in
+            // Default/Offline/Frozen, sources under `--remote`); an empty local
+            // index surfaces as `Ok(None)` → `Skipped(NotFound)` below.
+            TagProbe::Index => self.index().list_tags(identifier).await,
         };
-        let remote_index = oci::index::Index::from_remote(oci::index::RemoteIndex::new(oci::index::RemoteConfig {
-            client: client.clone(),
-        }));
-
-        let probe_result = remote_index.list_tags(identifier).await;
 
         // Touch state file after probe (success or error), never on short-circuit.
         touch_state_async(state_path.clone()).await;
@@ -209,9 +246,8 @@ impl PackageManager {
     /// Self-flavored convenience wrapper around [`check_update`].
     ///
     /// Resolves the well-known OCX CLI identifier (`ocx.sh/ocx/cli`) and
-    /// compares the remote latest tag against the version reported by the
-    /// currently installed `ocx` binary via subprocess
-    /// (`ocx --format json version`).
+    /// compares the latest tag against the version reported by the currently
+    /// installed `ocx` binary via subprocess (`ocx --format json version`).
     ///
     /// If the subprocess invocation fails (binary absent — bootstrap mode, exec
     /// fail, non-zero exit, or malformed JSON), returns
@@ -222,19 +258,24 @@ impl PackageManager {
     /// (24-hour default); `ocx self update --check` passes
     /// `Some(Duration::ZERO)` (always query).
     ///
+    /// `probe` selects the tag source: explicit `ocx self update[ --check]`
+    /// passes [`TagProbe::Index`] (ChainMode-aware, honours `OCX_INDEX`); the
+    /// background auto-check passes [`TagProbe::Remote`] (live registry).
+    ///
     /// # Errors
     ///
     /// Returns `PackageErrorKind` on registry or I/O failure.
     pub async fn self_check_update(
         &self,
         throttle: Option<Duration>,
+        probe: TagProbe,
     ) -> Result<UpdateCheckResult, package_manager::error::PackageErrorKind> {
         let ocx_id = oci::ocx_cli_identifier();
 
         // Throttle gate first — on the hot path (every non-static CLI invocation)
         // the check is throttled ~24/25 times. Avoid the subprocess round-trip
-        // until we know the registry probe actually returned a newer release.
-        let check_result = self.check_update(&ocx_id, throttle).await?;
+        // until we know the probe actually returned a newer release.
+        let check_result = self.check_update(&ocx_id, throttle, probe).await?;
 
         // Only proceed to installed-version resolution when we have a candidate to
         // compare against. All other variants (Skipped, AlreadyUpToDate) propagate
@@ -294,6 +335,10 @@ impl PackageManager {
     /// Self-flavored install: check for update (always bypasses throttle,
     /// explicit user intent) and install the new version if one is available.
     ///
+    /// Version discovery uses [`TagProbe::Index`] — the latest tag is resolved
+    /// through the configured index + ChainMode, so `--offline` / `--frozen` /
+    /// `--remote` and `OCX_INDEX` apply, like every other tag-resolving command.
+    ///
     /// The current version is queried via subprocess (`ocx --format json version`)
     /// on the binary resolved through the composed env's PATH
     /// (`PackageManager::resolve_env`). Returns `None` when the package is not
@@ -323,12 +368,15 @@ impl PackageManager {
         // still proceed with the update check.
         let current_version = query_installed_version(self, &ocx_id).await;
 
-        let check_result = self.self_check_update(Some(Duration::ZERO)).await.map_err(|kind| {
-            package_manager::error::Error::SelfCheckFailed(Box::new(package_manager::error::PackageError {
-                identifier: oci::ocx_cli_identifier(),
-                kind,
-            }))
-        })?;
+        let check_result = self
+            .self_check_update(Some(Duration::ZERO), TagProbe::Index)
+            .await
+            .map_err(|kind| {
+                package_manager::error::Error::SelfCheckFailed(Box::new(package_manager::error::PackageError {
+                    identifier: oci::ocx_cli_identifier(),
+                    kind,
+                }))
+            })?;
 
         match check_result {
             UpdateCheckResult::Skipped(reason) => Ok(SelfUpdateResult::Skipped(reason)),
@@ -801,7 +849,9 @@ mod tests {
         let mtime_before = std::fs::metadata(&state_path).unwrap().modified().unwrap();
 
         let short_interval = Duration::from_secs(3600); // 1h — file is fresh
-        let result = manager.check_update(&identifier, Some(short_interval)).await;
+        let result = manager
+            .check_update(&identifier, Some(short_interval), super::TagProbe::Remote)
+            .await;
 
         // Must return Skipped (throttle short-circuit), not an error.
         assert!(
@@ -831,7 +881,9 @@ mod tests {
 
         // Duration::ZERO = always bypass throttle; probe path reached.
         // Offline manager → fails to get client → returns Skipped (offline).
-        let result = manager.check_update(&identifier, Some(Duration::ZERO)).await;
+        let result = manager
+            .check_update(&identifier, Some(Duration::ZERO), super::TagProbe::Remote)
+            .await;
         // Throttle was bypassed (Duration::ZERO); offline manager has no client →
         // returns Skipped("offline mode").
         assert!(
@@ -853,7 +905,9 @@ mod tests {
         let state_path = manager.file_structure().state.update_check_file(&identifier);
         assert!(!state_path.exists(), "precondition: state file absent");
 
-        let _ = manager.check_update(&identifier, Some(Duration::ZERO)).await;
+        let _ = manager
+            .check_update(&identifier, Some(Duration::ZERO), super::TagProbe::Remote)
+            .await;
 
         assert!(
             state_path.exists(),
@@ -886,7 +940,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
         // None → 24h default.  Offline manager short-circuits in check_update.
-        let result = manager.self_check_update(None).await;
+        let result = manager.self_check_update(None, super::TagProbe::Remote).await;
         assert!(
             result.is_ok(),
             "self_check_update must not return hard error on offline manager; got: {result:?}"
@@ -916,7 +970,9 @@ mod tests {
         std::fs::write(&state_path, b"").unwrap();
 
         // 1-hour interval — the freshly-written file is within the window.
-        let result = manager.self_check_update(Some(Duration::from_secs(3600))).await;
+        let result = manager
+            .self_check_update(Some(Duration::from_secs(3600)), super::TagProbe::Remote)
+            .await;
 
         assert!(
             result.is_ok(),
@@ -938,7 +994,9 @@ mod tests {
 
         // Duration::ZERO bypasses throttle; offline manager → no client →
         // probe path returns Skipped("offline mode") before subprocess query.
-        let result = manager.self_check_update(Some(Duration::ZERO)).await;
+        let result = manager
+            .self_check_update(Some(Duration::ZERO), super::TagProbe::Remote)
+            .await;
         assert!(
             result.is_ok(),
             "self_check_update must not return hard error; got: {result:?}"
@@ -946,6 +1004,49 @@ mod tests {
         assert!(
             matches!(result, Ok(super::UpdateCheckResult::Skipped(_))),
             "offline bypass must return Skipped; got: {result:?}"
+        );
+    }
+
+    // ── TagProbe routing ─────────────────────────────────────────────────────
+
+    /// `TagProbe` selects the tag source. On an offline manager (no client):
+    /// `Remote` short-circuits to `Skipped(Offline)` (it needs a client),
+    /// whereas `Index` resolves through the manager's index — an empty local
+    /// index surfaces as `Skipped(NotFound)`, proving the local index (not the
+    /// absent client) was consulted.
+    ///
+    /// Regression guard for the OCX_INDEX-ignored bug: explicit `ocx self
+    /// update` must route version discovery through the configured index, not a
+    /// throwaway remote-only probe.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tag_probe_index_consults_local_index_not_client() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = make_offline_manager(tmp.path());
+        let identifier = oci::Identifier::new_registry("ocx/cli", oci::OCX_SH_REGISTRY);
+
+        // Remote probe: no client → Skipped(Offline) before touching the index.
+        let remote = manager
+            .check_update(&identifier, Some(Duration::ZERO), super::TagProbe::Remote)
+            .await;
+        assert!(
+            matches!(
+                remote,
+                Ok(super::UpdateCheckResult::Skipped(super::SkippedReason::Offline))
+            ),
+            "Remote probe on an offline manager must short-circuit to Skipped(Offline); got: {remote:?}"
+        );
+
+        // Index probe: routes through the (empty) local index → NotFound, never
+        // Offline — the client is never consulted.
+        let index = manager
+            .check_update(&identifier, Some(Duration::ZERO), super::TagProbe::Index)
+            .await;
+        assert!(
+            matches!(
+                index,
+                Ok(super::UpdateCheckResult::Skipped(super::SkippedReason::NotFound))
+            ),
+            "Index probe must consult the empty local index (→ NotFound), not the absent client; got: {index:?}"
         );
     }
 

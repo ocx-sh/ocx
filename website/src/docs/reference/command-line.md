@@ -1754,7 +1754,9 @@ Completions load only for **interactive** sessions. The installer's `env.sh`/`en
 
 Check for a newer version of OCX and, if found, install it.
 
-Both forms bypass the [auto-check throttle][env-ocx-update-check-interval] — explicit user intent always queries the registry regardless of when the last automatic check ran.
+Both forms bypass the [auto-check throttle][env-ocx-update-check-interval] — explicit user intent always runs the lookup regardless of when the last automatic check ran.
+
+Version discovery is resolved through the [local index][fs-index] like every other command, so the latest version honours `--offline`, `--frozen`, and [`OCX_INDEX`][env-ocx-index]. To force a live lookup of the newest published release from the registry, pass [`--remote`][arg-remote]. (The background update notice that ocx prints on other commands always queries the registry, independent of this command.)
 
 **Usage**
 
@@ -1766,22 +1768,22 @@ ocx self update [--check]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--check` | — | Query the registry and report whether an update is available, without installing anything. | off |
+| `--check` | — | Report whether an update is available, without installing anything. | off |
 | `-h`, `--help` | | Print help information. | — |
 
 **Behavior without `--check`**
 
-Queries the registry for the latest `major.minor.patch` release tag (rolling tags like `1`, `1.2`, build-tagged versions like `1.2.3+build`, and pre-releases like `1.2.3-rc1` are filtered out). If the remote version is greater than the running binary, installs via the same path as `ocx package install --select`. Reports one of three outcomes:
+Resolves the latest `major.minor.patch` release tag (rolling tags like `1`, `1.2`, build-tagged versions like `1.2.3+build`, and pre-releases like `1.2.3-rc1` are filtered out) through the [local index][fs-index] — add [`--remote`][arg-remote] to query the registry directly. If the resolved version is greater than the running binary, installs via the same path as `ocx package install --select`. Reports one of three outcomes:
 
 - **Already up to date** — the running version is the latest.
 - **Installed** — a newer version was downloaded and selected.
-- **Skipped** — a soft failure (registry unreachable, version unparseable) prevented the check; the running binary is unchanged.
+- **Skipped** — a soft failure (lookup unreachable, version unparseable) prevented the check; the running binary is unchanged.
 
 After a successful install, `ocx self update` also refreshes the shell integration that `ocx self setup` owns: it regenerates the `$OCX_HOME/env.*` shims and re-applies the managed activation block in your shell profiles when its body has drifted from the current form. This refresh only *heals* an existing block — it never adds one where you have none (so a `--no-modify-path` install stays untouched) and never overwrites a block you have edited (it advises `ocx self setup --force` instead). When a block or shim is updated, it prints a one-line hint to re-source your profile.
 
 **Behavior with `--check`**
 
-Same registry probe, no installation. Exits 0 when the probe completes (including "already up to date" and "update available") — the result is printed to stdout. Exits 75 when the check is skipped (registry unreachable, version unparseable, throttled). Use `ocx --format json self update --check` for machine-readable output.
+Same lookup, no installation. Exits 0 when the lookup completes (including "already up to date" and "update available") — the result is printed to stdout. Exits 75 when the check is skipped (source unreachable, version unparseable, throttled). Use `ocx --format json self update --check` for machine-readable output.
 
 **Exit codes**
 

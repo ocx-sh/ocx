@@ -208,15 +208,100 @@ def _publish_two_versions(ocx: OcxRunner, repo: str, tmp_path: Path) -> None:
     ocx.plain("index", "update", repo)
 
 
-def _run_self_update_via_seam(ocx: OcxRunner, repo: str) -> subprocess.CompletedProcess[str]:
-    """Run ``ocx --format json self update`` with the ``__OCX_SELF_IMAGE`` seam."""
+def _run_self_update_via_seam(
+    ocx: OcxRunner, repo: str, *extra_flags: str
+) -> subprocess.CompletedProcess[str]:
+    """Run ``ocx --format json [extra_flags] self update`` with the ``__OCX_SELF_IMAGE`` seam."""
     env = dict(ocx.env)
     env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
     return subprocess.run(
-        [str(ocx.binary), "--format", "json", "self", "update"],
+        [str(ocx.binary), "--format", "json", *extra_flags, "self", "update"],
         capture_output=True,
         text=True,
         env=env,
+    )
+
+
+def _curate_local_index_to_v1(custom_index: Path) -> None:
+    """Drop the ``0.0.2`` tag from the local index so it blesses only ``0.0.1``.
+
+    Diverges the local index from the registry (which still holds both tags) so
+    a test can prove whether a code path consults the local index or the
+    registry for tag discovery.
+    """
+    idx_file = next(custom_index.rglob("*.json"))
+    data = json.loads(idx_file.read_text())
+    data["tags"].pop("0.0.2", None)
+    idx_file.write_text(json.dumps(data))
+
+
+@_skip_on_windows
+def test_self_update_default_mode_respects_local_index(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    unique_repo: str,
+) -> None:
+    """Default-mode ``ocx self update`` discovers the latest version through the
+    local index (``OCX_INDEX``), not a live registry probe.
+
+    Regression for the OCX_INDEX-ignored bug: version discovery used to build a
+    throwaway remote-only index (`check_update` → `Index::from_remote`), so it
+    saw registry tags the curated local index deliberately omitted — every other
+    tag-resolving command honours the local index in default mode, but self
+    update did not. With the local index blessing only ``0.0.1`` while the
+    registry also holds ``0.0.2``, default-mode self update must report
+    ``up_to_date`` (honouring OCX_INDEX), never jump to ``0.0.2``.
+    """
+    repo = unique_repo
+    custom_index = tmp_path / "custom_index"
+    custom_index.mkdir()
+    ocx.env["OCX_INDEX"] = str(custom_index)
+
+    _publish_two_versions(ocx, repo, tmp_path)  # indexes BOTH tags into custom_index
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    _curate_local_index_to_v1(custom_index)
+
+    result = _run_self_update_via_seam(ocx, repo)
+    assert result.returncode == 0, (
+        f"self update must exit 0; rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    assert payload.get("status") == "up_to_date", (
+        f"default-mode self update must honour the curated local index (only 0.0.1 blessed) and report "
+        f"up_to_date, not install the registry-only 0.0.2; got: {payload!r}"
+    )
+
+
+@_skip_on_windows
+def test_self_update_remote_mode_queries_registry(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    unique_repo: str,
+) -> None:
+    """``ocx --remote self update`` forces a live registry probe, finding versions
+    the local index omits.
+
+    The escape hatch for the default-mode local-index behaviour: a user who wants
+    the freshest upstream release passes ``--remote`` (consistent with every other
+    tag-resolving command). With the local index blessing only ``0.0.1`` but the
+    registry holding ``0.0.2``, ``--remote`` must install ``0.0.2``.
+    """
+    repo = unique_repo
+    custom_index = tmp_path / "custom_index"
+    custom_index.mkdir()
+    ocx.env["OCX_INDEX"] = str(custom_index)
+
+    _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    _curate_local_index_to_v1(custom_index)
+
+    result = _run_self_update_via_seam(ocx, repo, "--remote")
+    assert result.returncode == 0, (
+        f"--remote self update must exit 0; rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    assert payload.get("status") == "installed" and payload.get("to") == "0.0.2", (
+        f"--remote self update must query the registry and install 0.0.2; got: {payload!r}"
     )
 
 

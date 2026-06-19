@@ -4,7 +4,10 @@
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use ocx_lib::{env, log, package_manager::UpdateCheckResult};
+use ocx_lib::{
+    env, log,
+    package_manager::{TagProbe, UpdateCheckResult},
+};
 
 use super::Context;
 
@@ -52,7 +55,11 @@ pub async fn check_for_update(ctx: &Context) {
         },
     };
 
-    match ctx.manager().self_check_update(throttle).await {
+    // The background auto-check exists to surface fresh *upstream* releases, so
+    // it forces a live remote probe regardless of the ambient ChainMode (a
+    // default-mode local read would only echo a stale local index). Explicit
+    // `ocx self update` is the ChainMode-aware path (honours OCX_INDEX).
+    match ctx.manager().self_check_update(throttle, TagProbe::Remote).await {
         Ok(UpdateCheckResult::AlreadyUpToDate) => {
             log::debug!("Already up to date.");
         }
