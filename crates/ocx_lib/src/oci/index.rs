@@ -6,7 +6,6 @@ use crate::package::tag::Tag;
 use crate::{oci, prelude::*};
 
 pub mod error;
-pub mod snapshot;
 
 pub use local_index::Config as LocalConfig;
 pub use local_index::LocalIndex;
