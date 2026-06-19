@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,11 @@ pub(crate) enum Version {
 
 /// Versioned envelope for persisted tag-to-digest lock maps.
 ///
+/// `tags` is a [`BTreeMap`] so the serialized JSON emits keys in sorted
+/// order. A `HashMap` would serialize in per-process SipHash iteration
+/// order, churning the on-disk bytes on every `ocx index update` even when
+/// no tag changed — git noise on committed index snapshots.
+///
 /// ```json
 /// {
 ///   "version": 1,
@@ -32,16 +37,18 @@ pub(crate) enum Version {
 pub(crate) struct TagLock {
     pub(crate) version: Version,
     pub(crate) repository: oci::Repository,
-    pub(crate) tags: HashMap<String, oci::Digest>,
+    pub(crate) tags: BTreeMap<String, oci::Digest>,
 }
 
 impl TagLock {
-    /// Creates a new tag lock from an identifier and its tags.
+    /// Creates a new tag lock from an identifier and its tags. The in-memory
+    /// `HashMap` is collected into a sorted `BTreeMap` for deterministic
+    /// serialization.
     pub(crate) fn new(identifier: &oci::Identifier, tags: HashMap<String, oci::Digest>) -> Self {
         Self {
             version: Version::V1,
             repository: oci::Repository::from(identifier),
-            tags,
+            tags: tags.into_iter().collect(),
         }
     }
 
@@ -60,7 +67,7 @@ impl TagLock {
             }
             .into());
         }
-        Ok(self.tags)
+        Ok(self.tags.into_iter().collect())
     }
 }
 
@@ -86,7 +93,7 @@ mod tests {
         let lock = TagLock::new(&id, tags.clone());
         assert_eq!(lock.version, Version::V1);
         assert_eq!(lock.repository, oci::Repository::new("ghcr.io", "cmake"));
-        assert_eq!(lock.tags, tags);
+        assert_eq!(lock.tags, tags.into_iter().collect::<BTreeMap<_, _>>());
     }
 
     #[test]
@@ -122,6 +129,42 @@ mod tests {
         let other_id = oci::Identifier::new_registry("other", "ghcr.io");
         let err = lock.into_tags(&other_id, Path::new("/test/tags.json")).unwrap_err();
         assert!(err.to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn tags_serialize_in_sorted_key_order() {
+        // Regression: TagLock previously stored tags in a HashMap, so the
+        // serialized key order followed HashMap iteration order — randomized
+        // per process by the SipHash seed. Identical tag data produced
+        // different bytes on every `ocx index update`, causing git churn on
+        // committed index snapshots. The on-disk representation must be
+        // deterministic; sorted keys are the contract.
+        // Insert in a deliberately unsorted order so the test visibly demonstrates
+        // that serialization — not insertion — establishes the key order. (HashMap
+        // iteration is SipHash-randomized regardless of insertion order, but the
+        // explicit shuffle keeps the intent legible, matching the api/data tests.)
+        let id = make_id();
+        let names = [
+            "tag07", "tag01", "tag13", "tag04", "tag10", "tag02", "tag15", "tag08", "tag05", "tag11", "tag03", "tag14",
+            "tag06", "tag09", "tag00", "tag12",
+        ];
+        let mut tags = HashMap::new();
+        for name in names {
+            tags.insert(name.to_string(), oci::Digest::Sha256("a".repeat(64)));
+        }
+        let lock = TagLock::new(&id, tags);
+        let json = serde_json::to_string_pretty(&lock).unwrap();
+
+        let mut by_position: Vec<&str> = names.to_vec();
+        by_position.sort_by_key(|key| json.find(&format!("\"{key}\"")).expect("key present in json"));
+
+        let mut sorted = names.to_vec();
+        sorted.sort_unstable();
+
+        assert_eq!(
+            by_position, sorted,
+            "tag keys must serialize in deterministic sorted order"
+        );
     }
 
     #[test]
