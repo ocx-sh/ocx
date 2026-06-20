@@ -752,24 +752,27 @@ echo '# noop'
     )
 
 
-def test_activate_batch_keeps_ocx_activated_guard(ocx: OcxRunner) -> None:
-    """Batch is the ONE shell that retains the OCX_ACTIVATED guard.
+def test_activate_batch_is_guard_free_and_idempotent(ocx: OcxRunner) -> None:
+    """Batch carries NO OCX_ACTIVATED guard now that its PATH emit is idempotent.
 
-    Unlike the idempotent shells, cmd `export_path` is prepend-only (no
-    move-to-front primitive), so dropping the guard would re-prepend the global
-    toolchain on every activation and grow %PATH% toward the Windows length
-    limit. cmd can't run on Linux, so this pins the contract at the emitted-text
-    level: the guard line and the marker that satisfies it must both be present.
+    cmd `export_path` moves the entry to the front via substring deletion
+    (`%PATH:value;=%`), so re-activation never grows %PATH% and the guard is
+    unnecessary — the same guard-free contract as every other shell. cmd can't
+    run on Linux, so this pins the contract at the emitted-text level: no guard,
+    no marker, but the global-env-eval and the move-to-front delete must be present.
     """
     result = _run_activate(ocx, "--shell=batch")
     stdout = result.stdout
-    assert "if not defined OCX_ACTIVATED" in stdout, (
-        "batch activation must KEEP the OCX_ACTIVATED guard (prepend-only PATH); "
-        f"got:\n{stdout}"
+    assert "OCX_ACTIVATED" not in stdout, (
+        "batch activation must NOT carry an OCX_ACTIVATED guard or marker "
+        f"(idempotent move-to-front makes it unnecessary); got:\n{stdout}"
     )
-    assert "set OCX_ACTIVATED=1" in stdout, (
-        "batch activation must emit the OCX_ACTIVATED marker that its guard checks; "
-        f"got:\n{stdout}"
+    assert "FOR /F" in stdout and "ocx --global env --shell=batch" in stdout, (
+        f"batch activation must still run the global-env-eval; got:\n{stdout}"
+    )
+    assert "%PATH:" in stdout, (
+        "batch PATH prepend must use substring-delete move-to-front "
+        f"(`%PATH:value;=%`); got:\n{stdout}"
     )
 
 
