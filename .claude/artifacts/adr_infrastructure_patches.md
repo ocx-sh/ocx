@@ -47,16 +47,35 @@ This was first designed on `feature/patches` (2026-03-22). Since then two things
 
 ## Decision Drivers
 
-The six load-bearing requirements (R-numbers used throughout):
+The load-bearing requirements (C-numbers used throughout):
 
 | # | Requirement |
 |---|---|
 | **C1** | **Compositional load.** A site package's *interface* environment composes into the *root execution environment*, overriding the publisher's values for the same key (infra intent wins). |
 | **C2** | **Entry-point tiering.** Entry points run in their own composed environment (`self_view=true`) and must inherit the root's patches; entry-point-owned packages may carry their own patches. |
 | **C3** | **Visibility tiering.** A patch for a dependency that reaches the root only on the *private* surface must load **only** into the private surface. Patches inherit the interface/private visibility of the target they patch. |
-| **C4** | **Independent offline update.** Patches churn (URL change, license renewal) far faster than packages. Refreshing a patch must (a) work offline at exec time once synced, (b) **not** require re-installing the base packages in use — patch identity is decoupled from base-package digest. |
+| **C4** | **Site policy floats; identity does not.** Patches are an **ambient site tier** (the execution-env twin of `[mirrors]`), not lockfile content. The active policy refreshes **independently of base-package installs** and works offline once synced. Reproducibility of *tools* (the lock) and of *site policy* are orthogonal domains — patch identity is deliberately **not** folded into base-package identity. (Validated by Nix `impureEnvVars`, Cargo `config.toml` source-replacement, Spack site scope, Lmod `SitePackage.lua`, containerd `hosts.toml` — see Industry Context.) |
 | **C5** | **Loading guarantee.** Every applicable patch is *always* loaded when its target loads — including patches for transitive deps, including encapsulated entry-point deps needing the patch on their private surface. No silent skips. |
 | **C6** | **CAS persistence + GC.** Patch descriptors and companion packages persist in the blob/layer CAS so the offline contract holds (zip `OCX_HOME` → unzip elsewhere → reinstall → identical patched env), and GC must keep them reachable. |
+| **C7** | **Operator enforcement + fail-closed.** A security patch (corp CA, truststore) must be enforceable by the *operator* (not silently suppressible by a user) and must **fail closed** when unavailable — a tool that runs without its CA overlay would do TLS to untrusted endpoints, strictly worse than refusing to launch. (K8s mutating+validating-webhook pattern.) |
+| **C8** | **Opt-in determinism.** A consumer may freeze the *whole site tier* (companion digests) into a snapshot for reproducible CI — **without** per-package lock pinning. (Spack inline policy / Nix `flake.lock` narHash pattern.) |
+
+---
+
+## Industry Context & Research
+
+A cross-ecosystem SOTA pass (`research_infrastructure_patches_overlays.md`, 2026-06-19) found **convergent agreement** across six independent systems: each maintains a hard split between *artifact identity* (content hash / version) and *site/host execution policy*, placing the policy at a **config tier, never in per-artifact identity**.
+
+| System | Site-policy layer | Kept out of identity by | Lesson for OCX |
+|---|---|---|---|
+| **Nix / NixOS** | `nix.conf` `ssl-cert-file`, `impureEnvVars` (`NIX_SSL_CERT_FILE`) | impure env explicitly *not* a derivation input → output hash unchanged when cert rotates | The corp-CA case is a **named, blessed impurity**; float it, don't hash it. |
+| **Cargo** | `config.toml` `[source]` replacement, `[net]` proxy/CA | not recorded in `Cargo.lock`; lock portable across mirror/direct | Direct precedent for "site policy orthogonal to lock." |
+| **Spack** | `system`/`site` scope `packages.yaml` | not in `spack.lock`; determinism via inline `spack.yaml` snapshot | **Whole-tier snapshot** is the determinism escape hatch, not per-pkg pin. |
+| **Lmod (HPC)** | `SitePackage.lua` global hooks (license/env vars) | invisible to `module save/restore` | Site policy is ambient host state, operator-owned. |
+| **K8s / Istio** | `MutatingWebhookConfiguration`, sidecar injection | separate cluster object; namespace-label opt-in, `inject:"false"` opt-out | **Fail-closed** security mutations (mutating+validating pair); per-workload opt-out. |
+| **containerd** | `hosts.toml` mirror/CA (OCX's own `[mirrors]`) | OCI digest unchanged; only endpoint redirected | Patches are the **execution-env twin** of this existing tier. |
+
+The reframe — *patches = ambient site tier like `[mirrors]`, float-default, whole-tier freeze for determinism, fail-closed for security* — is validated by all six, and reuses a model OCX already ships for transport policy.
 
 ---
 
@@ -74,11 +93,11 @@ At install, after building the base package's declared-dependency TC (`pull.rs:4
 
 ### Option B — Compose-time site overlay ("site layer") **(RECOMMENDED)**
 
-Keep base-package TCs **pure** (publisher-declared deps only). Maintain a **separate, mutable, independently-synced site layer**: for each base identifier, a persisted `__ocx.patch` descriptor (CAS blob) + the companion packages it names (regular installed packages) + a mutable pointer (`artifacts/{patch_registry}/{repo}/patch` symlink + `tags/` index entry). At compose time the composer, **for each TC entry it already visits** (and for the root), consults the site layer for that identifier and emits the matched companion packages' interface env **gated by the same surface boolean** the TC entry resolved to.
+Keep base-package TCs **pure** (publisher-declared deps only). Maintain a **separate, independently-synced site layer** that is **derived, not cached**: the companion packages are **ordinary installed packages** (in `packages/`, hardlinked from `layers/`, blobs in `blobs/` — no new store), discovery state is the existing **tag store** (`tags/`), and the descriptor is a **persisted blob** (`blobs/`). At compose time the composer, **for each TC entry it already visits** (and for the root), re-derives the matched companions from the persisted descriptor blob + unified match and emits their interface env **gated by the same surface boolean** the TC entry resolved to. No ledger.
 
 - **C1** ✓ companion interface vars appended after the base's own vars → infra overrides publisher by append-order (Constant replaces, Path prepends).
 - **C3** ✓ companion env emitted under the *visited TC entry's* `want` (`has_interface()`/`has_private()`); a private-only dep's patch lands only on the private surface, for free.
-- **C4** ✓ the site layer is re-synced independently (`ocx patch update`); base `resolve.json` is never touched; companion packages are their own CAS installs addressed by their own digest.
+- **C4** ✓ the site layer is re-synced independently (`ocx patch sync`); base `resolve.json` is never touched; companion packages are their own CAS installs addressed by their own digest.
 - **C5** ✓ the composer visits *every* TC entry + root on the active surface; each visit does a site-layer lookup → no patch skipped, including private entry-point deps under `self_view=true`.
 - **C6** ✓ descriptor persisted as a real CAS blob; companions are normal packages; both GC-anchored (see GC section).
 
@@ -112,16 +131,18 @@ PHASE 1 — base compose (unchanged): for each root, emit TC-entry interface var
 
 PHASE 2 — site overlay (new), appended AFTER all Phase-1 output:
   for each admitted identifier I (TC entries + roots, in deterministic order):
-      for companion in site_layer.patches_for(I):   // descriptor rules matched against I's tag
+      for companion in site_patches.for(I):         // pre-resolved SitePatchSet, passed into compose
           emit companion's INTERFACE vars only       // never the companion's private surface
 ```
+
+The overlay needs `[patches]` config + tag/descriptor reads to know which companions apply — which `composer::compose(roots, store, self_view)` does **not** have (it sees only `PackageStore`). So the overlay is **not** derived inside the composer. The `PackageManager`/`Context` layer (where `resolve_env` lives, and which holds the resolved `PatchConfig`) builds a **`SitePatchSet`** via `SitePatchResolver` and passes it in: `compose(roots, store, self_view, &site_patches)` (or, equivalently, Phase 2 runs in `resolve_env` *after* `compose` returns Phase 1's admitted set). Inside compose, `site_patches.for(I)` is a pure lookup into the pre-resolved set — no config read, no I/O. This mirrors how the mirror feature resolves a `MirrorMap` at `Context` (`resolve_mirror_map`) and hands it to the client rather than having the client read config.
 
 Two invariants make this correct:
 
 - **Global-last ordering (C1).** Every companion var is emitted after *all* publisher vars (deps and roots), so infra always overrides publisher for shared keys, regardless of whether the patched package is a deep transitive dep or the root. Deterministic companion order: targets in Phase-1 visit order, then descriptor rule order, then companion-list order.
 - **Interface-only projection (no private leak).** A companion is emitted exactly like a dependency — only its `has_interface()` vars cross into the target env (`emit_interface_vars` semantics, `composer.rs:343`). The **target's** surface (`want`) decides *whether* the companion block is emitted; it never decides *which of the companion's surfaces* is read. Even under a launcher's `self_view=true`, the companion contributes only its interface vars — its own private env / private deps stay sealed. (This corrects an earlier "companion as visibility-inherited sub-root" framing, which would have leaked the companion's private surface under `self_view=true`.) A companion's *own* transitive deps contribute through the companion's interface projection, resolved when the companion was installed.
 
-`site_layer.patches_for(I)` resolves entirely from local state (descriptor symlink under `artifacts/`, companion installs under `packages/`) — no network at compose time.
+The `SitePatchSet` itself resolves entirely from local state (`[patches]` config + tag store + persisted descriptor blobs → companion installs under `packages/`) — no ledger, no network. It is built once per `resolve_env` call and reused for every root.
 
 **Why "the visited entry's surface gates the block" is the whole of C3.** The composer already computed, per root, whether identifier `I` reaches the interface or private surface (`composer.rs:122`). The patch is *for* `I`, so its block is emitted iff `I` was admitted — a private-only dep's patch is therefore present only under `self_view=true` and absent from the default interface env. No new visibility algebra: the gate reuses the boolean the composer already has; the projection reuses the interface-only dep emission.
 
@@ -134,19 +155,40 @@ Entry-point launchers call `manager.resolve_env(&[pkg], self_view=true)` (`crate
 
 No per-entry-point patch config is introduced (the launcher model has no per-entry env to attach it to). If future need arises, it is additive.
 
-### Independent update mechanism (C4) — the new work
+### The site tier — abstraction, scopes, update, enforcement, freeze (C4/C7/C8)
 
-This is the capability the old ADR lacked. Design:
+**Patches are a third configuration tier**, sibling to `[mirrors]`, orthogonal to the two toolchain systems (project `ocx.toml`/`ocx.lock` and global `ocx --global add/remove`) and to package space. They are *not* a dependency, *not* a lockfile entry, *not* added to `ocx.toml`. The right mental model is *host/site policy that adapts whatever runs* — the execution-env twin of the mirror tier (which adapts where bytes come from). This dissolves the earlier per-package-pinning awkwardness and the "`ocx patch update <which package>`" ambiguity: a site tier is refreshed and frozen **as a whole**, at the host level, never per package.
 
-- **Immutable vs mutable split.** The descriptor *manifest+layer* and each companion *package* are immutable content-addressed CAS objects (one digest per version). What is **mutable** is the *pointer*: the `__ocx.patch` tag → descriptor-digest mapping in the `tags/` index, and the `artifacts/{patch_registry}/{repo}/patch` symlink → current descriptor content. Updating patches re-points these without touching any base-package install.
-- **`ocx patch update [<pkg>|--all]`** (and a piggyback on `ocx index update`): for each configured/known base repo, re-resolve the patch repo (via the `[patches]` path template), fetch the `__ocx.patch` tag, and if the digest advanced: persist the new descriptor blob, install any newly-named companion versions, re-point the `artifacts/.../patch` symlink, and update back-refs. The base package's `resolve.json` and install dir are **never rewritten**.
-- **Decoupled from base digest.** The site layer is keyed by base **identifier** (`registry/repo` + tag-glob), not base **digest**. A base package pinned at digest X keeps running; only the overlay refreshes. A company that re-points `zscaler-root:latest` to a new cert bundle: `ocx patch update` pulls the new companion digest, re-points; next `ocx exec` composes the new value; the JDK install is untouched.
-- **Offline at exec.** Once synced, compose reads only local state. Cold + offline + patches-configured + never-synced → hard error (patches are integral; see three-state index). Warm + offline → full success.
+**Immutable identity; state is derived at the manager layer (no ledger).** The descriptor blobs and each companion *package* are immutable content-addressed CAS objects (one digest per version) in the **existing** `blobs/`/`layers/`/`packages/` stores — a companion is just a package; **no new store, and no `state/patches.json` ledger.** The set of patches that apply is a **pure function** of state already on disk: installed bases (`symlinks/`) + `[patches]` config + the tag three-state (`tags/{patch_registry}/{repo}.json`) + descriptor blobs (`blobs/`). It is computed by a **`SitePatchResolver` at the `PackageManager`/`Context` layer — which holds both the resolved `PatchConfig` and the `FileStructure`** — and the resulting **`SitePatchSet`** (per-base + global → companion/descriptor digests) is passed **explicitly** into the two consumers: `composer::compose` (the overlay) and `clean`/GC (extra roots). Leaf `compose`/GC do **not** read config themselves; the command layer that already has `Context` resolves the set and hands it down — the same way `resolve_mirror_map` resolves mirrors at `Context` and hands a `MirrorMap` to the client. The *content* is always digest-verified — what floats is *which policy is active*. The **only** persisted patch-specific artifact is the opt-in freeze snapshot (below). (This corrects an over-clever earlier claim that GC could derive patch roots with *no* config: `collect_project_roots` is config-free because project roots live in the symlink store, but a base→companion mapping needs the patch registry/template from `[patches]`, so the resolver runs where config is available — at the command layer, not inside the GC leaf.)
+
+**Discovery is lazy, not eager (corrects an earlier "load all patches" framing).** Three sources:
+
+- **Package-specific — lazy, on base install** (pull-through, like index tag-resolution). Installing a base package computes its patch repo (path template), looks up `__ocx.patch`, records the outcome in the **tag store** (`tags/{patch_registry}/{repo}.json`): tag present → pull + persist descriptor blobs, install matched companions; tag absent → the tag file exists without an `__ocx.patch` key, i.e. *"looked, no patch"* (not re-checked until a sync). OCX never enumerates "all patches in the registry" — that set is unknowable and mostly irrelevant.
+- **Global — a descriptor at the root of the patch namespace** (not a config list): the `__ocx.patch` at the configured patch path's root, checked once per sync, auto-loaded if present, silent if absent. See "Patch scope" below.
+- **Re-check — explicit sync** (below).
+
+**Config scopes (C7 enforcement).** `[patches]` is read through OCX's existing tier stack, with one enforcement rule added:
+
+- **System scope** (`/etc/ocx/config.toml`, root-owned) — operator-enforced patches. A `required` patch declared here is **non-overridable**: the normal last-wins merge is replaced by *system-required entries are additive and cannot be removed or redirected by a lower tier*. A user cannot suppress the corporate CA.
+- **User scope** (`$OCX_HOME/config.toml`, `--config`, `OCX_CONFIG`) — personal/non-enforced patches and `required = false` overrides.
+
+**Fail posture (C7).** Each patch entry carries `required: bool`, **default `true`**:
+
+- `required = true` + companion unavailable / never-looked offline → **fail closed**: `ocx exec` errors at launch (a tool that runs without its CA overlay would silently do TLS to untrusted endpoints — strictly worse). Mirrors the K8s mutating+validating-webhook pair.
+- `required = false` → **fail open**: skip with a warning (license-server URL, metrics endpoint — non-security).
+
+**Update = re-check the known set (C4).** **`ocx patch sync`** (and a piggyback inside `ocx index update`) re-checks the patch repos for the **packages you actually have** + the root global descriptor — not the whole registry. For each installed base repo (and the root), re-resolve the patch repo, fetch `__ocx.patch`, and where the digest advanced: persist the new descriptor blobs (re-pointing the tag file) and install newly-named companion digests. **No per-package `update <pkg>` verb** (the category error) and **no whole-registry crawl** (unknowable); the unit is "refresh what this host uses," like `puppet apply` / module refresh. `sync` is also how patches are discovered for packages installed *before* `[patches]` was configured. Base `resolve.json` and install dirs are **never rewritten** — decoupled from base digest (a JDK pinned at digest X keeps running; re-pointing `zscaler-root:latest` only updates the tag file + pulls the new companion; the next exec re-derives).
+
+**Determinism = whole-tier freeze, mirroring `OCX_INDEX` (C8).** **`ocx patch freeze`** resolves the current site tier and writes the **companion + descriptor digests** into a **site-scoped** snapshot (sibling to `ocx.lock`, e.g. `patches.snapshot.json`) — *not* per-package lock entries, *not* the globally-portable base lock. Selection mirrors the existing index-snapshot mechanism (`OCX_INDEX`, `env.rs:47`, forwarded only when explicitly set, `env.rs:279`): an analogous `OCX_PATCH_SNAPSHOT`-style selector points at a frozen snapshot → compose **prefers the snapshot's pinned digests**; absent → compose re-derives from live tags (floating). The snapshot is **policy, not truth**: it can go stale vs live tags and is advanced only by `ocx patch sync` / re-`freeze`; compose precedence is *snapshot-under-selector wins, else live*. Two portability domains stay clean: the base lock is globally portable (public, content-addressed); the patch snapshot is **site-scoped** (valid only inside the org that owns the patch registry). This is the Spack-inline-policy / Nix-`flake.lock` whole-graph-snapshot pattern.
+
+**Per-package opt-out.** A package that manages its own trust stack can decline patches via `[package."<id>"] no-patches = true` in `ocx.toml` (Istio `inject:"false"` analog). Orthogonal to the descriptor `match`, which already scopes *which* base packages a patch targets.
+
+**Offline at exec.** Once synced (or frozen), compose reads only local state (tag store + descriptor blobs + companions). Warm + offline → full success. Cold + offline + a `required` patch never-looked → fail-closed error (three-state discovery below). Floating, not auto-updating: like the index, the site tier never refreshes itself behind your back — `ocx patch sync` is always explicit, honoring the offline-first / never-auto-update-index principle.
 
 ### Settled open questions
 
-1. **`artifacts/` store name.** Adopt `artifacts/` as the 8th `FileStructure` store (confirmed free; `packages/`, `tags/`, `symlinks/`, `state/`, `temp/`, `blobs/`, `layers/`, plus the `projects/` ledger exist — `artifacts/` does not collide). Generic enough to later host `desc`/`sbom` pointers. Layout: `artifacts/{registry_slug}/{repo}/patch` symlink → descriptor content. (Follow-up: `subsystem-file-structure.md` documents only 6 stores and omits `state` — stale; correct it when `ArtifactStore` lands.)
-2. **Descriptor CAS persistence.** **Required.** `pull_description` (`oci/client.rs:1030`) reads layer blobs into memory and never persists them — that gap is acceptable for READMEs but **not** for a patch descriptor, which must be a GC-anchored on-disk object for the offline contract. The `__ocx.patch` pull path persists via `BlobStore::write_blob` + `ReferenceManager::link_blobs`, mirroring the normal manifest-chain pull (`local_index.rs` `persist_manifest_chain`).
+1. **No new store, no ledger — companions are packages; state is derived.** The earlier `artifacts/` symlink store **and** the proposed `state/patches.json` ledger are both **dropped**. A companion lives in `packages/` (hardlinked from `layers/`, blobs in `blobs/`) like any package — a patch is not a new *kind* of content. Discovery state lives in the existing **tag store** (`tags/{patch_registry}/{repo}.json`, three states); descriptor blobs in `blobs/`. Everything else (which companions apply, the GC roots, the compose overlay) is **re-derived** from those + `[patches]` config + installed bases. The only persisted patch-specific artifact is the **opt-in freeze snapshot**. No 8th store, no ledger to keep coherent. (Follow-up: `subsystem-file-structure.md` documents only 6 stores and omits `state` — stale; correct it independently.)
+2. **Descriptor persistence (light) + how GC finds companions.** `pull_description` (`oci/client.rs:1030`) reads layer blobs into memory and never persists them. For patches, persist the descriptor's blobs via `BlobStore::write_blob` (so they survive offline + are auditable). The descriptor is **not** assembled into a full installed package — nothing execs it. **How GC enumerates a base's companions:** not by walking the base's refs (a descriptor blob has no outgoing companion ref, and tag files are not CAS — so a "reachable-from-base-refs" invariant is *not* achievable; an earlier draft wrongly asserted it). Instead the `SitePatchResolver` recomputes the mapping at the command layer from `[patches]` config + tag file + descriptor blob (next section). The companions are full packages; the resolver yields their digests, which `clean` seeds as roots.
 3. **Mirror interaction.** The patch registry is treated as any other registry: **subject to `[mirrors]` rewriting** (no special exemption). In practice the patch registry is an internal host rarely present in the mirror map, but exempting it would be a surprising special case; consistency wins. The operator owns both `[patches]` and `[mirrors]`.
 4. **`ConstantTracker` role.** Under two-env compose, override resolution is **append-order last-wins** (`Modifier::Constant` replaces, `Modifier::Path` prepends) — the overlay appends companion vars after the base, so "patch overrides publisher" is intentional and automatic, needing **no** `EdgeKind`-aware tracker. Per-var info/warn conflict reporting is demoted to a **display concern** surfaced by `ocx env --show-patches` annotations, not a composition gate. This deletes the bulk of the old Phase 4. (`ConstantTracker` at `package/metadata/env/conflict.rs` stays as-is for the CI flavors that already use it.)
 
@@ -156,31 +198,40 @@ Add `patches: Option<PatchConfig>` (resolved form) to `OcxConfigView` (`env.rs:7
 
 ### Consequences
 
-**Positive:** reuses the two-env composer (no graph machinery); visibility tiering is free; patch updates decouple cleanly from base installs; offline/GC reuse existing CAS + reachability; old Phases 3–5 shrink (no `EdgeKind`, no Kahn, no `ConstantTracker` rework).
-**Negative:** a genuinely new independent-update path (`ocx patch update`, three-state sync) that the old ADR hand-waved; descriptor CAS-persistence is new code (closes the `pull_description` gap); composer gains an overlay pass touching a hot path.
+**Positive:** reuses the two-env composer (no graph machinery), the `[mirrors]` site-tier precedent, the existing CAS (companions are just packages — **no new store, no ledger**), and the GC's existing re-derive-roots-from-`FileStructure` pattern (`collect_project_roots`); visibility tiering is free; the site tier decouples cleanly from base installs and the project/global toolchains; old Phases 3–5 shrink (no `EdgeKind`, no Kahn, no `ConstantTracker` rework).
+**Negative:** a genuinely new site-tier surface (`ocx patch sync` / `ocx patch freeze` / `ocx patch publish` / `ocx patch test`, scopes, `required` fail-posture, lazy three-state discovery) the old ADR hand-waved; a new GC root re-derivation to wire (no persisted pin list, but a per-base derive step); descriptor blob-persistence is new code (closes the `pull_description` gap); the unified flat matcher; composer gains an overlay pass touching a hot path.
 **Risks:**
 
 | Risk | Mitigation |
 |---|---|
-| Patch registry cold + offline + patches configured | Three-state index: never-synced → hard error ("patch index not synced"); patches are integral, not optional |
-| Companion tag drift (`:latest` re-pointed) | `ocx patch update` is the intended refresh; document pinning companion tags; descriptor may pin by digest |
-| Composer hot-path cost of per-entry site lookup | Lookup is a local map probe keyed by identifier; site layer loaded once per compose, not per entry |
-| Forgotten forwarding → entry points lose patches | `OCX_PATCHES` forwarding is a Phase-1 acceptance criterion + a Block-tier review item (mirrors the `OCX_MIRRORS` rule) |
+| `required` patch cold + offline + never-looked | Three-state discovery → fail-closed error (C7). `required=false` patches warn + skip. |
+| Companion tag drift (`:latest` re-pointed) | `ocx patch sync` refreshes; `ocx patch freeze` pins digests for determinism (C8). |
+| User suppresses an enforced corp-CA patch | System-scope `required` entries are additive + non-overridable by lower tiers (C7). |
+| Composer hot-path cost of per-entry overlay lookup | `SitePatchSet` built once per `resolve_env` at the manager layer; in-compose lookup is a pure map probe (no I/O). |
+| GC over-collects companions | `clean` (which has `Context`/config) builds the `SitePatchSet` via `SitePatchResolver` and passes companion digests as an extra root set to `ReachabilityGraph::build` — companions of installed bases survive (see GC section). |
+| Forgotten forwarding → entry points lose patches | `OCX_PATCHES` forwarding is a Phase-1 acceptance criterion + a Block-tier review item (mirrors the `OCX_MIRRORS` rule). |
 
 ---
 
 ## Technical Details
 
-### Configuration (`[patches]`) — unchanged from old ADR, still valid
+### Configuration (`[patches]`)
 
 ```toml
+# System scope (/etc/ocx/config.toml) — operator-enforced. required=true entries
+# are additive + non-overridable by lower tiers.
 [patches]
 registry = "internal.company.com/ocx-patches"
 path = "{registry}/{repository}"   # default; {registry} slugified via to_relaxed_slug()
+required = true                    # default; fail-closed if a matched companion is unavailable
 # ocx.sh/java:21 → internal.company.com/ocx-patches/ocx_sh/java:__ocx.patch
+
+# A package that manages its own trust stack opts out (in project ocx.toml):
+[package."ocx.sh/some-tool"]
+no-patches = true
 ```
 
-`PatchConfig { registry: Option<String>, path: Option<String> }` mirrors `config/mirror.rs:26`; `resolve_patch_config(&config, env)` mirrors `resolve_mirror_map`; both re-exported from `lib.rs`. The placeholder tripwire test `parse_unknown_future_patches_section_silently_ignored` (`config.rs`) flips to positive parse tests.
+`PatchConfig { registry: Option<String>, path: Option<String>, required: Option<bool> }` mirrors `config/mirror.rs:26`; `resolve_patch_config(&config, env)` mirrors `resolve_mirror_map`; both re-exported from `lib.rs`. `required` defaults to `true`. There is **no** `global = [...]` field — global patches are a descriptor at the patch path's root (see "Patch scope"). Tier merge is last-wins **except** that a system-scope `required` entry cannot be removed or redirected by a lower tier (enforcement, C7). `[patches]` env selection (registry, snapshot) mirrors `OCX_INDEX` so dev vs CI is chosen by **which config/registry the host points at** — not a schema field on the descriptor. The placeholder tripwire test `parse_unknown_future_patches_section_silently_ignored` (`config.rs`) flips to positive parse tests.
 
 ### Patch descriptor (`__ocx.patch`)
 
@@ -188,48 +239,94 @@ OCI ImageManifest, `artifactType: application/vnd.sh.ocx.patch.v1`, single layer
 
 ```json
 { "version": 1, "rules": [
-  { "match": "*",  "packages": ["internal.company.com/certs/zscaler-root:latest"] },
-  { "match": "21", "packages": ["internal.company.com/java-config/jdk21-truststore:1.0"] }
+  { "match": "*",                "packages": ["internal.company.com/certs/zscaler-root:latest"] },
+  { "match": "ocx.sh/java:*",    "packages": ["internal.company.com/java-config/jdk21-truststore:1.0"] }
 ] }
 ```
 
-`PatchDescriptor { version: u32, rules: Vec<PatchRule> }`, `PatchRule { match_pattern: String, packages: Vec<Identifier> }`. Rules matched against the base tag (glob via the `glob` crate, already a dep); matches accumulate (union, dedup by identifier, first wins). Companion packages are ordinary OCX packages (env-only or content-bearing, e.g. a CA bundle exposing `SSL_CERT_FILE`).
+`PatchDescriptor { version: u32, rules: Vec<PatchRule> }`, `PatchRule { match_pattern: String, packages: Vec<Identifier>, required: Option<bool> }`. Per-rule `required` overrides the tier default. Companion packages are ordinary OCX packages (env-only or content-bearing, e.g. a CA bundle exposing `SSL_CERT_FILE`). Matches accumulate (union, dedup by identifier, first wins).
 
-### `ArtifactStore` + filesystem layout
+#### One match semantic — no global/package-specific drift
 
-8th `FileStructure` store (`file_structure.rs:65`, follow the `XyzStore::new(root.join("artifacts"))` pattern), CAS-sharded like the others:
+`match` is a glob over the **full canonical identifier string** `registry/repository:tag[@digest]` (the `Identifier` Display form, `oci/identifier.rs:264`), used **identically** for the root global descriptor and every package-specific sub-path descriptor. There is **no** path-glob-for-global vs tag-glob-for-package split — that was the drift to avoid.
+
+The engine is a **flat matcher** (not `glob::Pattern`, which is path-aware and stops `*` at `/`): `*` spans any run of characters *including* `/`, `:`, `@`; `?` = one char; `[set]` = class; everything else literal; case-sensitive; first-match-wins. ~20 lines, no `**`, no new dep.
+
+| `match` | matches | does not |
+|---|---|---|
+| `*` | everything | — |
+| `ghcr.io/*` | `ghcr.io/acme/cli:v1` | `ocx.sh/java:21` |
+| `*/java:*` | `ocx.sh/java:21`, `ghcr.io/java:latest` | `ghcr.io/cmake:3.28` |
+| `*:21` | `ocx.sh/java:21`, `ghcr.io/jdk:21` | `ocx.sh/java:3.28` |
+| `*zscaler*` | `internal.company.com/certs/zscaler-root:latest` | `ocx.sh/java:21` |
+
+Edge cases (state in the descriptor-author docs): a registry **port** (`localhost:5000/...`) and a **digest** (`@sha256:…`) contain `:` — the flat matcher treats `:` as a literal, so they are safe (no field parsing). An **untagged** identifier (`ghcr.io/cmake`, no `:`) will *not* match `*:*` by design — explicitness over silent match.
+
+### Patch scope: global vs package-specific — one mechanism, scope = location
+
+Both kinds are the **same artifact** (a `__ocx.patch` descriptor) and the **same match** (§ above); they differ only in **where the descriptor lives** and **when it is fetched** — there is no separate "global" config concept and no magic `__global__` token:
+
+| Scope | Descriptor location | Fetched | Example |
+|---|---|---|---|
+| **Global / site** | `__ocx.patch` at the **root** of the configured patch path (`<patch-registry>:__ocx.patch`) | once per `sync`; **auto-load-if-exists, silent if absent** | every tool gets the corp CA bundle |
+| **Package-specific** | `__ocx.patch` at a **sub-path** via the template (`<patch-registry>/<template(base)>:__ocx.patch`) | **lazily, on that base's install** | Java gets the JDK truststore |
+
+The path template always emits a non-empty sub-path, so the root can never collide with a package-specific repo — the root is reserved for the global descriptor by construction. A **global patch is a descriptor**, so it naturally carries **multiple companion packages** (multiple `rules`, multiple `packages`) — no separate "always-load list" needed. At compose, the global descriptor's matched companions overlay every root's interface surface (Phase 2, **before** package-specific overlays so the latter can still override). One artifact type, one match engine, one overlay path; scope is just discovery location.
+
+### Storage — existing CAS only (no new store, no ledger)
 
 ```
 $OCX_HOME/
-  artifacts/{patch_registry_slug}/{repo}/patch     # → descriptor content; roots the descriptor via its refs/symlinks/
-  packages/internal.company.com_ocx-patches/.../    # descriptor object: content/descriptor.json + refs/deps/→companions + refs/blobs/
-  packages/internal.company.com/certs/zscaler-root/ # companion package content + refs/ (anchored by descriptor refs/deps/, NOT by a user install symlink)
+  packages/.../zscaler-root/...          # companion = ordinary package (hardlinked from layers/)
+  layers/...  blobs/...                   # companion + descriptor blobs — existing CAS, deduped
+  tags/{patch_registry}/{repo}.json      # three-state discovery (existing TagStore): looked? has __ocx.patch?
+  patches.snapshot.json                  # ONLY persisted patch artifact — opt-in `ocx patch freeze` (sibling to ocx.lock)
 ```
 
-A patch companion is pulled like a package but is **not** placed under `symlinks/` (no `candidates/`/`current`) — it is not user-selected; its only root is the descriptor's `refs/deps/` edge. If an operator *also* runs `ocx install <companion>` explicitly, that adds an independent install-symlink root, which is fine and orthogonal.
+Nothing else is persisted. Which companions apply to a base, the GC roots, and the compose overlay are all **re-derived** from `tags/` + descriptor blobs + `[patches]` config + installed bases. Companions are **not** placed under `symlinks/` (not user-selected) unless an operator also runs `ocx install <companion>` (an orthogonal, independent root).
 
 ### GC reachability (C6)
 
-Reuses the BFS in `reachability_graph.rs` — no new algorithm — but **the companion is anchored through the descriptor, never through the base install symlink.** An earlier model rooted a companion by writing a `refs/symlinks/` back-ref to the base's `candidates/<tag>` symlink; that is unimplementable with the current `ReferenceManager` contract: `link()` owns *both* sides and would repoint the forward (base install) symlink at the companion's content, corrupting the base install (`reference_manager.rs:64`). And any live `refs/symlinks/` target is treated as a GC *root* (`reachability_graph.rs`), so a hand-written companion back-ref would root the companion permanently. The correct model uses only the two existing edge kinds:
+Reuses the BFS in `reachability_graph.rs` with **one new root set, computed by the `clean` command (which holds `Context`/config) and passed into the build — no persisted pin list, no config inside the GC leaf.** Today `ReachabilityGraph::build(file_structure, project_roots)` takes a pre-computed `project_roots` set (`reachability_graph.rs:71`; `clean.rs:214` `collect_project_roots`). The change: `clean` *also* builds a `SitePatchSet` via `SitePatchResolver` (config + FileStructure) and passes its companion + descriptor digests as an **additional root set** — `build(file_structure, project_roots, patch_roots)`. This **supersedes** both the `artifacts/`-symlink anchoring and the proposed ledger, and avoids the two dead ends: a `refs/symlinks/` back-ref against the base install symlink is unimplementable (`ReferenceManager::link()` owns both sides and would repoint the base install, `reference_manager.rs:64`), and mutating the base's content-addressed `resolve.json` is barred (C4). Deriving the set at the command layer needs neither.
 
-- **The descriptor is the single GC anchor for its companions.** The descriptor is persisted as a package-shaped object and holds a forward `refs/deps/{digest}` → each companion's content (`ReferenceManager::link_dependency`, which creates *no* back-ref — exactly the dependency model). The descriptor itself is rooted by the `artifacts/{patch_registry}/{repo}/patch` symlink: that symlink's `link()` writes a `refs/symlinks/` back-ref on the descriptor object, making the descriptor a root **iff** patch config currently references that repo.
-- **Lifecycle (config-driven, independent of base install — reinforces C4).** Companions live as long as their descriptor is rooted, i.e. as long as `[patches]` resolves that repo and the `__ocx.patch` tag matches. Removing `[patches]`, or the repo ceasing to match, removes the `artifacts/.../patch` symlink → descriptor loses its only root → on `ocx clean` the descriptor is collected, its `refs/deps/` edges drop, and any companion not referenced by another live descriptor (or an explicit user `ocx install`) is collected with its layers/blobs via the normal BFS. Companions are therefore **not** tied to whether a base package is currently installed — a deliberate choice: the site layer's lifetime is the *config's* lifetime, matching the independent-update model.
-- **`ocx patch update` and old companion digests.** When an update re-points a descriptor to a new digest, `link_dependency` updates the descriptor's `refs/deps/` to the new companion digests; the previous descriptor object loses its `artifacts/.../patch` root (symlink re-pointed to the new descriptor content) and becomes collectible, and any companion digest no longer referenced by the new descriptor falls out of reachability on the next `ocx clean`. No dangling roots, no manual ref bookkeeping outside `ReferenceManager`.
-- **Descriptor blob persistence** (the `pull_description` gap): the `__ocx.patch` manifest + layer blobs are written via `BlobStore::write_blob` and linked via `link_blobs`, so they sit in the descriptor object's `refs/blobs/` and survive GC like any package's manifest chain.
+- **Roots derived per installed base, at the command layer.** `SitePatchResolver` enumerates installed bases (symlink store), and for each computes its patch repo from `[patches]` (registry + template), reads the local tag file + persisted descriptor blob, applies the unified match → companion + descriptor digests. The **root global descriptor** is resolved once. `clean` seeds all of these as roots; the normal BFS then walks each companion's `refs/deps`/`refs/layers`/`refs/blobs`. Offline-safe: config is local, tags + descriptor blobs are local CAS reads — no network. (Tag files are plain metadata, never GC'd; descriptor blobs survive because their digest is a seeded root.)
+- **Package-specific lifetime = tied to base install (chosen).** Uninstall the last base that resolves a companion → the resolver no longer yields it → on `ocx clean` it (and its descriptor, if not rooted by another live base, the global descriptor, or an explicit `ocx install`) is collected with its layers/blobs. Uninstalling the last patched JDK collects its truststore companion — dependency-like.
+- **Global lifetime = tied to config.** The root descriptor's companions are roots while `[patches]` resolves the path and the root `__ocx.patch` exists. Remove `[patches]` → the resolver yields nothing for the root → collected on next `ocx clean`.
+- **`ocx patch sync` and old digests.** Sync re-points tag files + pulls new descriptor/companion blobs; superseded digests stop being resolved → fall out on the next `ocx clean`. No back-ref juggling, no base-install mutation, no ledger to drift.
 
-If a future requirement genuinely needs companion lifetime tied to *base-install* presence (collect the CA bundle the moment the last patched JDK is uninstalled, even with config intact), that requires a **first-class `refs/patches` edge** with explicit `ReachabilityGraph` + `ReferenceManager` support — explicitly out of scope for v1, recorded here so the choice is visible.
+### Three-state discovery (C4/C5 offline contract)
 
-### Three-state patch index (C4/C5 offline contract)
+Discovery is **lazy, recorded on base install in the existing TagStore** `tags/{patch_registry}/{repo}.json` — no bespoke ledger. Presence + the `__ocx.patch` key encode all three states, disambiguating the two meanings of "missing patch":
 
-Reuse `tags/{patch_registry}/{repo}.json`:
+| State | TagStore | Meaning | Behavior |
+|---|---|---|---|
+| **Never looked** | tags file absent | patch repo never checked (offline before first sync, or brand-new package) | Look it up if online. Offline + a `required` patch → **fail closed**; `required = false` → warn + skip. |
+| **Looked, no patch** | tags file present, `__ocx.patch` key absent | *"We simply don't patch this package."* — normal, valid | **Skip silently.** Not re-checked until a sync. |
+| **Looked, has patch** | tags file present, `__ocx.patch` → digest | Patch applies | Re-derive + compose companions from the persisted descriptor blob. |
 
-| State | File / key | Meaning |
-|---|---|---|
-| Never synced | file absent | Patch repo never checked. Offline + patches configured → **hard error**. |
-| Synced, no patch | file present, `__ocx.patch` absent | Valid; not every base has a patch. Skip silently. |
-| Synced, has patch | file present, `__ocx.patch` → digest | Resolve descriptor + companions. |
+"Looked, no patch" vs "never looked" is exactly *"this package isn't patched"* vs *"we don't yet know."* The fail-closed vs skip decision keys off the patch's `required` flag (C7). `ChainMode::Offline` (`oci/index.rs`) already blocks unpinned-tag resolves with `PolicyBlocked` (exit 81); the never-looked `required` case maps to the same contract. Zipping a warm `OCX_HOME` carries companions (`packages/`) + descriptor blobs (`blobs/`) + tag state (`tags/`) → fully self-contained offline; nothing to derive needs network.
 
-`ChainMode::Offline` (`oci/index.rs`) already blocks unpinned-tag resolves with `PolicyBlocked` (exit 81); the never-synced patch case maps to the same contract. Zipping a warm `OCX_HOME` carries descriptors + companions + tag state → fully self-contained offline.
+### Patch maintainer workflow — authoring, testing, publishing
+
+A patch maintainer authors a descriptor + companion packages, **tests** the composition locally, then **publishes** to the operator's patch registry. Both new commands reuse existing pipelines; almost nothing is net-new machinery.
+
+**`ocx patch publish`** — descriptor + companions to the patch registry.
+```
+ocx patch publish <patch-repo|--root> --descriptor-file patch.json \
+  [--companion <pkg> <archive> ...] [--cascade]
+```
+- **Reused:** companion packages push via `Publisher::push` + cascade (`publisher.rs:24-137`, push `:74`, cascade `:84`). The descriptor manifest is a near-copy of the `__ocx.desc` publish path — `Client::push_description` (`oci/client.rs:943-1024`; blob push `:960`, manifest push `:1017`) + `ManifestBuilder::artifact_type` (`oci/manifest_builder.rs`). Layer-ref CLI parsing precedent at `command/package_push.rs:62`.
+- **New (small):** the descriptor JSON schema/parser; build the manifest with `artifact_type("application/vnd.sh.ocx.patch.v1")` + single layer `…descriptor.v1+json` + empty `{}` config; push to the **root** `__ocx.patch` tag (global) or the template sub-path tag (package-specific). No new OCI machinery.
+
+**`ocx patch test`** — dry-run compose onto a base, locally, no publish.
+```
+ocx patch test <base-id> --descriptor-file patch.json \
+  [--script test.star | -- <cmd>...]
+```
+- **Reused (~90%):** the `ocx package test` materialize→compose→exec pipeline (`command/package_test.rs:98-202`) + the Starlark host API with `expect.*` assertions (`script/expect_module.rs`, `ScriptOutcome` `script.rs:64`) + Phase-1 composer. A maintainer asserts the resulting env keys/values, or just inspects via `ocx env --show-patches`.
+- **New (small):** load the descriptor from a local file and inject its matched companions into the Phase-2 overlay (the same overlay Phase 4 adds) **instead of** deriving from live tags — i.e. a local-descriptor override seam for pre-publish testing (analogous to how `OCX_MIRRORS`/`OCX_INDEX` override resolution, `env.rs:248`).
+
+This closes the authoring loop: write descriptor → `ocx patch test` (assert env) → `ocx patch publish` → operators `ocx patch sync`.
 
 ---
 
@@ -243,31 +340,34 @@ Mapping to issues #112–#117. **Shrinks** vs the old graph plan are marked ↓;
 - Flip the placeholder tripwire test to positive parse/expansion tests.
 - *Validity under reframe: unchanged and confirmed.* Low risk.
 
-### Phase 2 — Descriptor types + persisted `__ocx.patch` pull + `ArtifactStore` (#113)
-- `PatchDescriptor`/`PatchRule` serde types; glob matching.
-- `ArtifactStore` (8th store) + `artifacts/.../patch` symlink via `ReferenceManager::link`.
-- ✚ **Persist** descriptor blob (`BlobStore::write_blob` + `link_blobs`) — close the `pull_description` in-memory gap. Slightly bigger than the old plan.
+### Phase 2 — Descriptor types + unified match + persisted `__ocx.patch` pull (#113)
+- `PatchDescriptor`/`PatchRule` serde types.
+- ✚ **Unified flat matcher** `glob_match(pattern, identifier)` over the canonical `Identifier` Display string — `*` spans `/`/`:`/`@`, no `**`, **not** `glob::Pattern` (path-aware). ~20 lines + table tests (the `*`, `ghcr.io/*`, `*/java:*`, `*:21` cases + port/digest/untagged edges).
+- ✚ **Persist** descriptor blobs (`BlobStore::write_blob`) — close the `pull_description` in-memory gap (blobs only, no package assembly). **No ledger, no new store** — companions use existing CAS; discovery state is the tag file.
 - `__ocx.patch` auto-hidden already (no work).
 
-### Phase 3 — Site-layer resolution + companion install (#114) ↓
-- `SitePatchResolver`: base identifier → descriptor → matched companion identifiers (union/dedup).
-- Install companions as regular packages; create back-refs (descriptor `refs/deps/` → companion; companion `refs/symlinks/` ← base install symlink).
-- **No `EdgeKind`, no Kahn, no graph.** Large shrink vs old Phase 3.
+### Phase 3 — Lazy discovery + companion install (#114) ↓
+- `SitePatchResolver`: on base install, base identifier → patch repo (template) → `__ocx.patch` (sub-path) + always the **root** `__ocx.patch` (global); persist descriptor blobs; apply the unified match; install matched companions as regular packages.
+- Three-state is the **tag file** (present/absent + `__ocx.patch` key). No ledger written.
+- **No `EdgeKind`, no Kahn, no graph, no `artifacts/` store, no ledger.** Large shrink vs old Phase 3.
 
-### Phase 4 — Compose-time overlay + visibility tiering + display (#115) ↓
-- Add the **Phase-2 overlay** to `composer::compose`: Phase 1 records the admitted-identifier set per active surface; Phase 2 appends, globally last, each matched companion's **interface-only** vars (gate = target admitted; projection = interface). Covers root + entry-point (`self_view=true`) paths.
+### Phase 4 — `SitePatchResolver` + compose-time overlay + display (#115) ↓
+- ✚ `SitePatchResolver` at the `PackageManager`/`Context` layer → `SitePatchSet` (from `[patches]` config + tag store + descriptor blobs). `resolve_env` builds it and threads it into the overlay.
+- Add the **Phase-2 overlay**: extend `compose(roots, store, self_view, &site_patches)` (or run Phase 2 in `resolve_env` after `compose` returns the admitted set). Phase 1 records the admitted-identifier set per active surface; Phase 2 appends, globally last, each matched companion's **interface-only** vars (gate = target admitted; projection = interface). `site_patches.for(I)` is a pure lookup — **no config/I-O inside `compose`**. Global (root) descriptor overlays every root's interface surface, before package-specific. Covers root + entry-point (`self_view=true`) paths.
 - `ocx env`/`ocx deps` `[patch]` annotations + `--show-patches`.
-- **`ConstantTracker` rework dropped** (append-order last-wins handles overrides). Large shrink.
+- **`ConstantTracker` rework dropped** (append-order last-wins). Large shrink.
 
-### Phase 5 — Independent update + lifecycle + GC + three-state (#116) ✚↓
-- ✚ `ocx patch update [<pkg>|--all]` + piggyback on `ocx index update`; mutable-pointer re-point without base reinstall.
-- Three-state index handling (never-synced offline → error; synced-no-patch → skip).
-- `ocx uninstall` removes companion back-refs; verify `ocx clean` collects orphan companions + descriptors (no new GC code).
-- GC reuse confirmed by test, not new algorithm.
+### Phase 5 — Site tier: sync + freeze + scopes + fail posture + GC re-derivation (#116) ✚↓
+- ✚ **`ocx patch sync`** — re-check the **known set** (installed base repos + root global), re-point tag files + pull new descriptor/companion blobs; + piggyback on `ocx index update`. No per-package `update <pkg>` verb, no whole-registry crawl.
+- ✚ **`ocx patch freeze`** → site-scoped `patches.snapshot.json` of companion+descriptor digests; selection mirrors `OCX_INDEX` (`OCX_PATCH_SNAPSHOT`-style) — compose prefers snapshot under the selector, else live. Optionally project-scoped.
+- ✚ Config **scopes** (system `/etc/ocx/config.toml` enforced vs user, non-overridable `required`) + **`required`** fail posture (default true → fail-closed; false → warn/skip) + per-package `no-patches` opt-out.
+- ✚ **Patch GC roots from the command layer.** `clean` builds the `SitePatchSet` (config + FileStructure) and passes companion+descriptor digests as an extra root set: `ReachabilityGraph::build(file_structure, project_roots, patch_roots)` (extends `clean.rs:214` / `reachability_graph.rs:71`). **No persisted pin list, no base mutation, no config inside the GC leaf** — the command resolves roots, the leaf consumes them (same shape as `project_roots`).
+- Three-state handling (never-looked offline + `required` → error; looked-no-patch → skip).
 
-### Phase 6 — Acceptance tests + docs (#117)
-- `test/tests/test_patches.py`: compose order + override; visibility tiering (private-only dep patch absent on interface, present under `--self`); entry-point inheritance; **independent update** (re-point companion `:latest`, no base reinstall, env changes); offline zip/unzip parity; GC collect/retain; three-state index.
-- Docs: user-guide "Patching packages for your infrastructure"; `[patches]` + `ocx patch update` reference; cross-link env-composition page; schema regen.
+### Phase 6 — Acceptance tests + docs + maintainer commands (#117)
+- ✚ **`ocx patch publish`** + **`ocx patch test`** (reuse `Publisher::push` / `push_description` / `package test` + Starlark `expect`; see "Patch maintainer workflow").
+- `test/tests/test_patches.py`: compose order + override (incl. global-last over root); unified-match table incl. port/digest/untagged edges; global (root) vs package-specific (sub-path); visibility tiering (private-only dep patch absent on interface, present under `--self`); entry-point inheritance; `ocx patch sync` (re-point `:latest`, no base reinstall); `ocx patch freeze` + `OCX_PATCH_SNAPSHOT` pin/float; `required` fail-closed vs `required=false` skip vs looked-no-patch skip; system-scope enforcement non-overridable; offline zip/unzip parity; GC collect/retain (derive-only, no over-collect); `ocx patch test` dry-run asserts composed env.
+- Docs: user-guide "Patching packages for your infrastructure"; `[patches]` (scopes, `required`) + `ocx patch sync`/`freeze`/`publish`/`test` reference; cross-link env-composition + `[mirrors]` (sibling tier); schema regen.
 
 ---
 
@@ -277,11 +377,18 @@ Mapping to issues #112–#117. **Shrinks** vs the old graph plan are marked ↓;
 - [ ] **Global-last ordering:** a patch on a *transitive dependency* overrides a `Constant` **and** a `Path` var that the **root** package itself declares — patch wins (C1; the Phase-2 regression Codex flagged).
 - [ ] **Interface-only projection:** a companion carrying a private-only env var (and a private-only dep) never appears in the patched target's env, even when the target is reached under `--self`/launcher `self_view=true` (no private-surface leak).
 - [ ] Private-only dep's patch absent from default (interface) env, present under `--self` (C3); entry-point launcher inherits root patches (C2/C5).
-- [ ] **GC anchoring:** companion is reachable while its descriptor is config-rooted; `ocx patch update` re-point drops the old descriptor + any now-unreferenced old companion digest on `ocx clean`; no `refs/symlinks/` root is ever written for a companion against a base install symlink (C6; the GC-contract blocker Codex flagged).
-- [ ] `ocx patch update` re-points a companion `:latest` to a new digest; base install dir + `resolve.json` byte-unchanged; next `ocx exec` reflects new value (C4).
+- [ ] **No new store, no ledger:** companion lands in `packages/` (deduped via `layers/`), descriptor blobs in `blobs/`, discovery state in `tags/` — no `artifacts/` dir and no `state/patches.json` created; only `ocx patch freeze` writes `patches.snapshot.json`.
+- [ ] **GC roots from `SitePatchResolver` (no pin list):** `clean` derives companion roots from config + tags + descriptor blobs and passes them to `ReachabilityGraph::build`; no `refs/symlinks/` root written against a base install symlink; base `resolve.json` never mutated (C6).
+- [ ] **No over-collection (the Codex-flagged break):** install a patched base, run `ocx clean`, then compose **offline** — the companion is **retained** and the patched env reproduces; only when *no* installed base (nor the root descriptor) resolves a companion is it collected.
+- [ ] **Unified match — no drift:** the same `match` glob behaves identically in the root (global) descriptor and a sub-path (package-specific) descriptor; table cases pass incl. `ghcr.io/*` crossing `/`, `*:21`, port `localhost:5000/x:1` (`:` literal), digest `@sha256:` (`:` literal), untagged not matching `*:*`.
+- [ ] **Global = root descriptor:** `__ocx.patch` at the patch path root overlays every exec and carries multiple companions; a sub-path descriptor overlays only the matching base; package-specific overrides global on a shared key.
+- [ ] **Site sync (C4):** `ocx patch sync` re-points a companion `:latest` to a new digest; base install dir + `resolve.json` byte-unchanged; next `ocx exec` re-derives the new value.
+- [ ] **Freeze (C8):** `ocx patch freeze` pins digests into `patches.snapshot.json`; under the `OCX_PATCH_SNAPSHOT` selector a later `ocx patch sync` upstream change does **not** alter exec env until re-frozen; without the selector, exec floats; base lock byte-unchanged.
+- [ ] **Maintainer loop:** `ocx patch test <base> --descriptor-file` composes a local (unpublished) descriptor onto a base and a Starlark `expect` asserts the env; `ocx patch publish` round-trips a descriptor + companions to a registry and a client `sync` picks them up.
+- [ ] **Enforcement (C7):** system-scope `required` patch cannot be suppressed by a user-scope override; `required` unavailable → fail-closed; `required=false` unavailable → warn + skip.
 - [ ] Zip warm `OCX_HOME`, unzip elsewhere, `ocx exec --offline` → identical patched env (C6).
-- [ ] `ocx clean` collects companion + descriptor when last patched base uninstalled; retains when another patched base still references (C6).
-- [ ] Cold + offline + patches configured + never-synced → clear "patch index not synced" error; synced-no-patch → passes through.
+- [ ] **Lazy discovery:** patch resolved on base install (not by enumerating the registry); a base with no patch records "looked, no patch" and is not re-checked until `ocx patch sync`.
+- [ ] **Missing-patch disambiguation:** "looked, no patch" passes through silently; "never looked" + `required` + offline → fail-closed — distinct states.
 - [ ] `OCX_PATCHES` forwarded; grandchild `ocx` (launcher) applies same patches (C5).
 - [ ] No regression for unconfigured patches (no `[patches]` → byte-identical behavior).
 
@@ -293,7 +400,7 @@ Mapping to issues #112–#117. **Shrinks** vs the old graph plan are marked ↓;
 - `adr_two_env_composition.md` — the composition model patches slot into.
 - `adr_oci_registry_mirror.md` — mirror interaction.
 - `adr_oci_artifact_enrichment.md` — `__ocx.` well-known tag convention.
-- `research_infrastructure_patches_overlays.md` — Kustomize / mise overlay analogs (retained).
+- `research_infrastructure_patches_overlays.md` — Kustomize / mise overlay analogs (original) + **2026-06-19 SOTA pass**: Nix `impureEnvVars`, Cargo `config.toml`, Spack scopes, Lmod `SitePackage.lua`, K8s/Istio, containerd `hosts.toml`.
 - Milestone #111; sub-issues #112–#117.
 
 ## Changelog
@@ -303,3 +410,7 @@ Mapping to issues #112–#117. **Shrinks** vs the old graph plan are marked ↓;
 | 2026-03-22 | mherwig | Initial draft (EdgeKind/Kahn graph model) — on `feature/patches`. |
 | 2026-06-19 | architect | Rebase onto two-env composition; reframe patches as site-loaded packages via compose-time overlay (Option B); add independent-update mechanism; settle artifacts-name / descriptor-persistence / mirror / ConstantTracker. Supersedes the draft. |
 | 2026-06-19 | architect (post-Codex) | Fix 3 cross-model blockers: (1) overlay is a **two-phase global-last** append, not per-entry interleave (else root vars clobber dep patches, breaking C1); (2) companions projected **interface-only** regardless of target surface (else private-surface leak under `self_view=true`); (3) companions GC-anchored via the **descriptor's `refs/deps/`** rooted by the `artifacts/.../patch` symlink — never a `refs/symlinks/` back-ref to the base install symlink (unimplementable under `ReferenceManager`). |
+| 2026-06-19 | architect (post-SOTA) | Add the **site-tier model** (C4 reframed; C7 enforcement+fail-closed; C8 opt-in determinism), validated by a 6-ecosystem SOTA pass. `ocx patch update <pkg>` → host-level **`ocx patch sync`** (whole tier); **`ocx patch freeze`** = whole-tier digest snapshot (site/optionally project-scoped), not per-package lock pins; system vs user config **scopes** with non-overridable enforced `required`; **`required`** fail posture (default fail-closed); per-package `no-patches` opt-out; **global vs package-specific** patches (`global = [...]` list vs `__ocx.patch` descriptor rules); missing-patch disambiguation (no-patch-for-pkg vs tier-never-synced). |
+| 2026-06-19 | architect (storage/discovery rework) | **Drop the `artifacts/` store** — a companion *is* a package (`packages/`/`layers/`/`blobs/`); descriptor = persisted blobs only. (Superseded below: the interim `state/patches.json` ledger is also dropped.) **Discovery is lazy** (resolved on base install, three-state in the tag store), not a whole-registry crawl; `ocx patch sync` re-checks the **known set**. **Companion lifetime tied to base install** (global tied to config). |
+| 2026-06-19 | architect (grounded rework, post-workflow) | **Drop the ledger too — derive, don't cache.** State = tag store (`tags/`) + descriptor blobs (`blobs/`); only persisted patch artifact is the opt-in freeze snapshot. **Unified match**: one flat glob over the full canonical identifier for global *and* package-specific (not `glob::Pattern`); kills the global/package match drift. **Global = the `__ocx.patch` at the patch path root** (auto-load-if-exists, silent if absent) — no `__global__` token, no `global=[]` config list; it is a descriptor → multi-companion for free. **Pin/float mirrors `OCX_INDEX`** (`OCX_PATCH_SNAPSHOT` selector). **dev/CI via host config**, not a schema field. Added the **patch-maintainer workflow** (`ocx patch publish` / `ocx patch test`) reusing `Publisher::push` / `push_description` / `package test` + Starlark `expect`. |
+| 2026-06-19 | architect (post-Codex #2) | Fix the critical "derive + no-config-in-GC + no-base-mutation" inconsistency Codex flagged: that triple is unsatisfiable (GC has no `PatchConfig`; tag files aren't CAS; blobs have no companion ref). Resolution: a **`SitePatchResolver` at the `PackageManager`/`Context` layer** (which holds resolved `PatchConfig` + `FileStructure`) builds a **`SitePatchSet`** that is passed **explicitly** into both consumers — `compose(roots, store, self_view, &site_patches)` and `clean` → `ReachabilityGraph::build(file_structure, project_roots, patch_roots)`. Keeps "no ledger / no base mutation"; corrects the false "no config" claim (config is read at the command layer, like `resolve_mirror_map`→`MirrorMap`, not inside leaf compose/GC). Dropped the unachievable "descriptor+tag CAS-reachable from base refs" invariant. |
