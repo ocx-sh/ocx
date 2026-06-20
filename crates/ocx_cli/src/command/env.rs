@@ -78,6 +78,18 @@ pub struct Env {
     /// `$GITHUB_PATH` / `$GITHUB_ENV`. Point this at GitLab's export file.
     #[arg(long, value_name = "PATH", requires = "ci")]
     export_file: Option<std::path::PathBuf>,
+
+    /// Annotate each entry with its origin package or companion identifier.
+    ///
+    /// When `[patches]` is configured, companion overlay entries are appended
+    /// after the package's own entries.  `--show-patches` adds a Source column
+    /// to the plain table (or a `"source"` field in JSON) so the origin of each
+    /// entry is visible.
+    ///
+    /// Has no effect when `[patches]` is not configured.  Cannot be combined
+    /// with `--shell` or `--ci`; use the plain or JSON structured report instead.
+    #[arg(long, default_value_t = false, conflicts_with = "shell", conflicts_with = "ci")]
+    show_patches: bool,
 }
 
 impl Env {
@@ -102,7 +114,11 @@ impl Env {
 
         let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
             info.into_iter().map(std::sync::Arc::new).collect();
-        let entries = manager.resolve_env(&info, self.self_view).await?;
+        // Use `resolve_env_with_patch_boundary` when `--show-patches` is requested so
+        // the CLI can annotate which entries came from companion overlays. For all
+        // other paths (--ci, --shell, structured report without --show-patches) the
+        // boundary information is unused and `resolve_env` would be equivalent.
+        let (entries, patch_start) = manager.resolve_env_with_patch_boundary(&info, self.self_view).await?;
         // `--ci=<provider>` → CI sink path (persists env for later pipeline
         // steps). Branch BEFORE consuming `entries` via `into_iter()`.
         if let Some(provider) = ci {
@@ -119,10 +135,21 @@ impl Env {
 
         let all_entries: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
-            .map(|e| api::data::env::EnvEntry {
-                key: e.key,
-                value: e.value,
-                kind: e.kind,
+            .enumerate()
+            .map(|(i, e)| {
+                // Annotate origin when `--show-patches` is enabled. Entries at index
+                // `>= patch_start` came from companion overlay projections.
+                let source = if self.show_patches && i >= patch_start {
+                    Some(api::data::env::SOURCE_PATCH.to_owned())
+                } else {
+                    None
+                };
+                api::data::env::EnvEntry {
+                    key: e.key,
+                    value: e.value,
+                    kind: e.kind,
+                    source,
+                }
             })
             .collect();
 
