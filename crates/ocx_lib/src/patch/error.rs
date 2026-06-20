@@ -3,6 +3,8 @@
 
 //! Error variants for the patch domain (descriptor types, matcher, persistence).
 
+use crate::cli::{ClassifyExitCode, ExitCode};
+
 /// Errors raised while working with patch descriptors.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -133,4 +135,27 @@ pub enum PatchError {
         #[source]
         source: crate::Error,
     },
+}
+
+impl ClassifyExitCode for PatchError {
+    fn classify(&self) -> Option<ExitCode> {
+        match self {
+            // Network fetch failures delegate to the inner OCI client error's
+            // classification so auth (80), unavailable (69), etc. propagate.
+            Self::FetchFailed { source } => source.classify(),
+            // Blob-write failures are I/O errors.
+            Self::BlobWriteFailed { .. } => Some(ExitCode::IoError),
+            // Descriptor shape / version / parse issues = malformed data.
+            Self::InvalidDescriptorJson { .. }
+            | Self::UnsupportedVersion { .. }
+            | Self::UnexpectedManifest { .. }
+            | Self::UnexpectedArtifactType { .. }
+            | Self::WrongLayerCount { .. }
+            | Self::UnexpectedLayerMediaType { .. }
+            | Self::LayerSizeExceeded { .. }
+            | Self::LayerDigestMismatch { .. }
+            | Self::ManifestDigestMismatch { .. }
+            | Self::DescriptorTooLarge { .. } => Some(ExitCode::DataError),
+        }
+    }
 }

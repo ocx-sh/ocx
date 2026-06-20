@@ -12,6 +12,7 @@ pub mod hook;
 pub mod inspect;
 pub mod install;
 pub mod layer_staging;
+pub mod patch_discovery;
 pub mod pull;
 pub mod pull_local;
 pub mod purge;
