@@ -1,0 +1,101 @@
+name: Shell Activation (Deep)
+
+# Cross-platform `ocx self setup` + `ocx self activate` coverage for the platforms
+# the per-PR `shell-activation.yml` (Linux shell-zoo) cannot reach: macOS and
+# Windows. Runs on demand and weekly, NOT per-PR, because macOS/Windows runner
+# minutes are far more expensive than Linux (see subsystem-ci.md "Cost Factors").
+#
+# - macOS: reuses the self-contained `test/tests/test_shell_activation.py` matrix
+#   (POSIX-family + the ocx-packaged shells nushell/elvish/pwsh installed via ocx).
+# - Windows: runs the `test/manual/test-windows-activation.ps1` env.ps1 gate under
+#   the built-in Windows PowerShell 5.1, the built-in PowerShell 7, AND the
+#   ocx-installed PowerShell 7 ("Core") — the user-facing dogfood path.
+#
+# cmd/batch PATH idempotency is covered separately by the `live_batch_*` unit test
+# on the windows-latest `nextest --workspace` leg of `verify-deep.yml`.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 06:00 UTC — catches platform drift without per-PR cost.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  macos:
+    name: Activation (macOS arm64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Build ocx (aarch64-apple-darwin)
+        uses: ./.github/actions/build-rust
+        with:
+          target: aarch64-apple-darwin
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Install ocx-packaged shells and run the activation matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          ocx="$PWD/ocx-aarch64-apple-darwin"
+          chmod +x "$ocx"
+
+          # Put the ocx-packaged shells (nushell/elvish/pwsh) on PATH so the
+          # matrix's shutil.which discovers them. `package env` auto-installs.
+          # fish is Linux-only on ocx.sh, so it is simply skipped by the matrix.
+          export OCX_HOME="$RUNNER_TEMP/ocx-shells"
+          eval "$("$ocx" --remote package env nushell elvish pwsh --shell=bash)"
+          echo "resolved shells:"
+          for s in nu elvish pwsh; do command -v "$s" || echo "  ($s absent)"; done
+
+          # Run the self-contained matrix in isolation from test/conftest.py
+          # (its session fixtures start a Docker registry, unavailable on macOS).
+          work="$RUNNER_TEMP/matrix"
+          mkdir -p "$work"
+          cp test/tests/test_shell_activation.py "$work/"
+          cd "$work"
+          OCX_ACTIVATION_BINARY="$ocx" \
+            uv run --no-project --with pytest -- \
+            python -m pytest test_shell_activation.py -v -p no:cacheprovider
+
+  windows:
+    name: Activation (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Build ocx (x86_64-pc-windows-msvc)
+        uses: ./.github/actions/build-rust
+        with:
+          target: x86_64-pc-windows-msvc
+      - name: env.ps1 gate — Windows PowerShell 5.1 (built-in)
+        shell: powershell
+        run: .\test\manual\test-windows-activation.ps1 -OcxBin .\ocx-x86_64-pc-windows-msvc.exe
+      - name: env.ps1 gate — PowerShell 7 (built-in)
+        shell: pwsh
+        run: .\test\manual\test-windows-activation.ps1 -OcxBin .\ocx-x86_64-pc-windows-msvc.exe
+      - name: env.ps1 gate — PowerShell 7 (ocx-installed Core)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ocx = ".\ocx-x86_64-pc-windows-msvc.exe"
+          $env:OCX_HOME = "$env:RUNNER_TEMP\ocx-shells"
+          # Put the ocx-packaged pwsh first on PATH (move-to-front), then run the
+          # same gate under it — proves the dogfood "install pwsh via ocx" path.
+          & $ocx --remote package env pwsh --shell=powershell | Out-String | Invoke-Expression
+          $pwshCmd = (Get-Command pwsh).Source
+          Write-Host "ocx-resolved pwsh: $pwshCmd"
+          & $pwshCmd -NoProfile -File .\test\manual\test-windows-activation.ps1 -OcxBin $ocx

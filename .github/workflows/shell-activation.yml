@@ -18,7 +18,10 @@ on:
       - crates/ocx_lib/src/setup.rs
       - crates/ocx_lib/src/setup/**
       - crates/ocx_lib/src/shim.rs
+      - crates/ocx_lib/src/shell.rs
+      - crates/ocx_cli/src/command/self_group/**
       - test/tests/test_shell_activation.py
+      - test/tests/test_self_activate.py
       - test/docker/**
       - test/taskfile.yml
       - website/src/public/install.sh
