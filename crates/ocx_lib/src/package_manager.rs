@@ -249,7 +249,7 @@ pub use tasks::inspect::InspectResult;
 pub use tasks::resolve::{ChainBlob, ChainRole, ResolvedChain};
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
 
-use crate::{file_structure, oci};
+use crate::{config::patch::ResolvedPatchConfig, file_structure, oci};
 
 /// Central facade for package operations (find, install, uninstall, etc.).
 ///
@@ -263,6 +263,10 @@ use crate::{file_structure, oci};
 /// (`crate::cli::progress`); task code creates RAII bar/spinner guards
 /// from it. See ADR adr_progress_architecture for why progress no longer
 /// rides the `tracing` span tree.
+///
+/// The optional [`ResolvedPatchConfig`] enables the patch-discovery hook
+/// after a user-requested base install. When `None`, the patch tier is
+/// disabled and `discover_and_install_patches` is a no-op.
 #[derive(Clone)]
 pub struct PackageManager {
     file_structure: file_structure::FileStructure,
@@ -270,9 +274,20 @@ pub struct PackageManager {
     client: Option<oci::Client>,
     default_registry: String,
     progress: crate::cli::progress::ProgressManager,
+    /// Site-tier patch registry configuration.
+    ///
+    /// `None` = no patch tier configured (the `[patches]` section is absent
+    /// from every loaded config tier). When `Some`, `discover_and_install_patches`
+    /// runs after every user-requested base install (online only).
+    patches: Option<ResolvedPatchConfig>,
 }
 
 impl PackageManager {
+    /// Construct a new `PackageManager`.
+    ///
+    /// `patches` comes from `config_view.patches` — pass `None` when no
+    /// `[patches]` section is configured. The patch tier is disabled when
+    /// `None`; discovery is a no-op.
     pub fn new(
         file_structure: file_structure::FileStructure,
         index: oci::index::Index,
@@ -286,7 +301,22 @@ impl PackageManager {
             client,
             default_registry,
             progress: crate::cli::progress::ProgressManager::disabled(),
+            patches: None,
         }
+    }
+
+    /// Inject the resolved patch configuration into this manager.
+    ///
+    /// Called from `Context::try_init` after `config_view.patches` is resolved.
+    /// Returns `self` for builder-style chaining alongside `with_progress`.
+    pub fn with_patches(mut self, patches: Option<ResolvedPatchConfig>) -> Self {
+        self.patches = patches;
+        self
+    }
+
+    /// Returns the resolved patch configuration, if any.
+    pub fn patches(&self) -> Option<&ResolvedPatchConfig> {
+        self.patches.as_ref()
     }
 
     /// Sets the shared span-free progress manager. The CLI injects its
@@ -467,6 +497,13 @@ impl PackageManager {
             client: None,
             default_registry: self.default_registry.clone(),
             progress: self.progress.clone(),
+            // Offline view drops the patch config: discovery only runs online.
+            // A caller that forces offline mode has already decided no network
+            // operations are permitted; running patch discovery would violate
+            // that contract. The hook at install-boundary skips when offline
+            // (self.is_offline() returns true regardless of patches being set),
+            // but zeroing patches here makes the intent explicit.
+            patches: None,
         }
     }
 }

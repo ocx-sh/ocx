@@ -172,13 +172,24 @@ impl Context {
                 .unwrap_or_else(|| ocx_lib::oci::DEFAULT_REGISTRY.into()),
         );
 
+        // Resolve the [patches] site-tier config before constructing the manager
+        // so the resolved form can be threaded in at construction time.
+        // The two-step resolution (config-file tier then env fallback) must happen
+        // here — the manager constructor receives the already-resolved form and does
+        // not read config itself.
+        let resolved_patches = match ocx_lib::resolve_patch_config(&config).map_err(anyhow::Error::new)? {
+            Some(resolved) => Some(resolved),
+            None => ocx_lib::patches_from_env().map_err(anyhow::Error::new)?,
+        };
+
         let manager = package_manager::PackageManager::new(
             file_structure.clone(),
             selected_index.clone(),
             remote_client.clone(),
             &default_registry,
         )
-        .with_progress(progress.clone());
+        .with_progress(progress.clone())
+        .with_patches(resolved_patches.clone());
 
         // Capture the absolute path of the running ocx so subprocess spawns
         // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
@@ -194,18 +205,12 @@ impl Context {
         // Feed the same resolved mirror map into the forwarding view so a child
         // ocx inherits `OCX_MIRRORS` matching the parent's transport rewrite.
         config_view.mirrors = mirror_pairs;
-        // Resolve the [patches] site-tier config and populate the forwarding
-        // view so child ocx processes (launcher exec) inherit the same patch
-        // tier via `OCX_PATCHES` (C5 — forwarding across process boundaries).
-        // Two-step: (1) config-file tier, (2) env tier via `OCX_PATCHES` when
-        // the child ocx has no [patches] in its own config.toml (the common CI
-        // case — the parent had it from the system config). Config wins when
-        // present; env fallback ensures the forwarding chain survives into
-        // grandchildren. Mirrors the `mirrors` / `env::mirrors()` two-step.
-        config_view.patches = match ocx_lib::resolve_patch_config(&config).map_err(anyhow::Error::new)? {
-            Some(resolved) => Some(resolved),
-            None => ocx_lib::patches_from_env().map_err(anyhow::Error::new)?,
-        };
+        // Thread the already-resolved patches into the config forwarding view
+        // so child ocx processes (launcher exec) inherit the same patch tier
+        // via `OCX_PATCHES` (C5 — forwarding across process boundaries).
+        // `resolved_patches` was resolved above (config-file tier then env
+        // fallback) before being passed to the manager constructor.
+        config_view.patches = resolved_patches;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);

@@ -159,6 +159,11 @@ pub async fn ensure_self_installed(
             // Mirror `self_update`: no candidate symlink, update `current`.
             let candidate = false;
             let select = true;
+            // skip_discovery=true: bootstrap installs ocx itself via `ocx self setup`.
+            // Patch discovery is not applicable here — the ocx binary is not a
+            // user-requested tool and looking up its patch descriptor could abort the
+            // bootstrap with a spurious required-companion error.
+            let skip_discovery = true;
             manager
                 .install_all(
                     vec![identifier],
@@ -166,6 +171,7 @@ pub async fn ensure_self_installed(
                     candidate,
                     select,
                     Concurrency::default(),
+                    skip_discovery,
                 )
                 .await?;
             Ok(BootstrapOutcome {
@@ -249,6 +255,9 @@ async fn ensure_pinned(
     let install_id = id.clone_with_digest(resolved.clone());
     let candidate = false;
     let select = true;
+    // skip_discovery=true: pinned bootstrap installs ocx itself via `ocx self setup`.
+    // Patch discovery is not applicable here — same rationale as ensure_latest above.
+    let skip_discovery = true;
     manager
         .install_all(
             vec![install_id],
@@ -256,6 +265,7 @@ async fn ensure_pinned(
             candidate,
             select,
             Concurrency::default(),
+            skip_discovery,
         )
         .await?;
 

@@ -34,9 +34,15 @@ impl PackageManager {
         candidate: bool,
         select: bool,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        let install_info = self.pull(package, platforms).await?;
+        let install_info = self.pull(package, platforms.clone()).await?;
 
         create_install_symlinks(self, package, &install_info, candidate, select).await?;
+
+        // Fire patch discovery after the base install and its symlinks are
+        // materialized. This is the user-requested-install boundary — the only
+        // site that triggers discovery. Companion installs (install_companion)
+        // and transitive-dep pulls (setup_dependencies) do NOT call this.
+        self.discover_and_install_patches(package, &platforms).await?;
 
         Ok(install_info)
     }
@@ -54,6 +60,15 @@ impl PackageManager {
     /// by the per-repo `.select.lock` inside
     /// [`super::common::wire_selection`]. Results are collected in completion
     /// order and all errors are gathered before returning.
+    ///
+    /// ## `skip_discovery` flag
+    ///
+    /// When `skip_discovery` is `true`, Phase 3 (patch discovery) is skipped
+    /// entirely. Pass `true` for internal-engine paths — `self_update`,
+    /// `bootstrap` — where discovery is nonsensical (the package being
+    /// installed is `ocx` itself, not a user-requested tool). Pass `false`
+    /// at the user-facing `ocx package install` boundary so companions are
+    /// discovered after every user-requested install.
     pub async fn install_all(
         &self,
         packages: Vec<oci::Identifier>,
@@ -61,9 +76,12 @@ impl PackageManager {
         candidate: bool,
         select: bool,
         concurrency: Concurrency,
+        skip_discovery: bool,
     ) -> Result<Vec<InstallInfo>, package_manager::error::Error> {
         // Phase 1: Pull all packages with shared singleflight group.
-        let infos = self.pull_all(&packages, platforms, concurrency).await?;
+        // Clone platforms so Phase 3 (patch discovery) can still borrow it
+        // after pull_all() consumes the owned Vec.
+        let infos = self.pull_all(&packages, platforms.clone(), concurrency).await?;
 
         // Phase 2: Create symlinks in parallel.
         if candidate || select {
@@ -104,6 +122,32 @@ impl PackageManager {
             if !indexed_errors.is_empty() {
                 indexed_errors.sort_by_key(|(index, _)| *index);
                 let errors: Vec<PackageError> = indexed_errors.into_iter().map(|(_, error)| error).collect();
+                return Err(package_manager::error::Error::InstallFailed(errors));
+            }
+        }
+
+        // Phase 3: Patch discovery — run after all base installs and their
+        // symlinks are materialized. This is the user-requested-install
+        // boundary for install_all(); each package gets its own discovery
+        // call so the tag-store three-state is recorded per-identifier.
+        //
+        // Skipped when skip_discovery=true — internal-engine paths
+        // (self_update, bootstrap) pass true because looking up a patch
+        // descriptor for ocx itself is nonsensical and could trigger spurious
+        // required-companion errors that abort the self-update.
+        //
+        // Required-companion failures collected with spawn index to preserve
+        // input-order classification, matching the symlink-error pattern above.
+        if !skip_discovery {
+            let mut indexed_discovery_errors: Vec<(usize, PackageError)> = Vec::new();
+            for (index, pkg) in packages.iter().enumerate() {
+                if let Err(kind) = self.discover_and_install_patches(pkg, &platforms).await {
+                    indexed_discovery_errors.push((index, PackageError::new(pkg.clone(), kind)));
+                }
+            }
+            if !indexed_discovery_errors.is_empty() {
+                indexed_discovery_errors.sort_by_key(|(index, _)| *index);
+                let errors: Vec<PackageError> = indexed_discovery_errors.into_iter().map(|(_, error)| error).collect();
                 return Err(package_manager::error::Error::InstallFailed(errors));
             }
         }

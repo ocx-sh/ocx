@@ -143,6 +143,32 @@ pub enum PackageErrorKind {
         owners: Vec<oci::PinnedIdentifier>,
     },
 
+    /// A required companion package install failed during patch discovery.
+    ///
+    /// The base install succeeded, but a companion marked `required = true`
+    /// could not be fetched or installed. Fail-closed: the install as a whole
+    /// is considered failed so the caller does not run with an incomplete
+    /// environment overlay. Optional companions (required = false) are logged
+    /// as warnings and do not produce this variant.
+    #[error("required companion install failed for '{companion}': {source}")]
+    RequiredCompanionFailed {
+        /// Identifier of the companion package that failed to install.
+        companion: crate::oci::Identifier,
+        /// The underlying package error kind from the companion's install.
+        #[source]
+        source: Box<PackageErrorKind>,
+    },
+
+    /// Patch discovery failed due to a domain-level patch error (fetch, parse,
+    /// persist, or structural validation of a `__ocx.patch` descriptor).
+    ///
+    /// Carries the full [`crate::patch::PatchError`] chain via `#[source]` so
+    /// the error chain is preserved for exit-code classification and diagnostics.
+    /// This replaces the former `Internal(io::Error::other(patch_error.to_string()))`
+    /// workaround that erased the structured source chain.
+    #[error("patch discovery error: {0}")]
+    PatchDiscovery(#[source] crate::patch::PatchError),
+
     /// An underlying internal error (I/O, OCI, network, etc.).
     #[error(transparent)]
     Internal(#[from] crate::Error),
@@ -220,6 +246,19 @@ impl ClassifyExitCode for PackageErrorKind {
             | Self::DigestMissing
             | Self::EntrypointCollision { .. } => ExitCode::DataError,
             Self::TaskPanicked => ExitCode::Failure,
+            // Required companion failure: delegate to the inner error's
+            // classification so the exit code reflects the root cause (e.g.
+            // NotFound if the companion is not published, Unavailable for
+            // network errors, etc.). The `Box<PackageErrorKind>` source
+            // implements `ClassifyExitCode` so we can recurse without walking
+            // `std::error::Error::source()`.
+            Self::RequiredCompanionFailed { source, .. } => return source.classify(),
+            // Patch discovery errors delegate to the classify_error chain walker
+            // so the inner PatchError's source chain (e.g. ClientError::Authentication
+            // → AuthError, ClientError::Registry → Unavailable) is fully inspected.
+            Self::PatchDiscovery(inner) => {
+                return Some(crate::cli::classify_error(inner as &(dyn std::error::Error + 'static)));
+            }
             // Internal wraps a full `crate::Error` — walk through classify_error
             // so the inner chain is inspected via the generic entry point.
             Self::Internal(inner) => return Some(crate::cli::classify_error(inner)),
