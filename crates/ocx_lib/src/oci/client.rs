@@ -1114,6 +1114,93 @@ impl Client {
         }))
     }
 
+    // ── Patch descriptor fetch ───────────────────────────────────────
+
+    /// Fetches the raw manifest bytes and the parsed [`oci::Manifest`] for
+    /// `patch_identifier`.
+    ///
+    /// Returns `Ok(None)` when the tag does not exist (`ManifestNotFound`).
+    /// Unlike [`Self::fetch_manifest`], this method also returns the raw
+    /// manifest bytes so callers can persist them to the CAS blob store
+    /// without re-serialisation — the round-trip bytes must be byte-identical
+    /// to what the registry served to ensure the stored digest is consistent.
+    pub(crate) async fn fetch_patch_manifest_raw(
+        &self,
+        patch_identifier: &Identifier,
+    ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
+        let image = self.transport_reference(patch_identifier);
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+
+        let (raw_bytes, digest_str) = match self
+            .transport
+            .pull_manifest_raw(&image, ACCEPTED_MANIFEST_MEDIA_TYPES)
+            .await
+        {
+            Ok(pair) => pair,
+            Err(ClientError::ManifestNotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+
+        let manifest: oci::Manifest = serde_json::from_slice(&raw_bytes).map_err(ClientError::Serialization)?;
+        let digest: Digest =
+            Digest::try_from(digest_str.as_str()).map_err(|e| ClientError::InvalidManifest(format!("{e}")))?;
+        Ok(Some((raw_bytes, digest, manifest)))
+    }
+
+    /// Fetches the raw bytes of a single blob for the patch descriptor layer.
+    ///
+    /// The blob is identified by `(identifier_for_auth, layer_digest)`. Auth is
+    /// established against the registry of `identifier_for_auth` before the
+    /// pull.
+    ///
+    /// # Size cap (CWE-400)
+    ///
+    /// `max_bytes` is a hard ceiling on the number of bytes that will be
+    /// buffered in memory. The stream is capped at `max_bytes + 1` via
+    /// [`AsyncReadExt::take`]; if the registry delivers more than `max_bytes`
+    /// bytes (ignoring its own declared-size field), the function returns
+    /// [`ClientError::DecompressionCapExceeded`] (repurposed for stream-level
+    /// oversized blobs) and no allocation beyond `max_bytes + 1` occurs.
+    ///
+    /// The caller in `patch::persistence::fetch_patch_descriptor_blobs` already
+    /// rejects manifests whose *declared* layer size exceeds the ceiling; this
+    /// cap closes the gap where a malicious registry ignores its own declaration
+    /// and streams more bytes than it declared.
+    pub(crate) async fn fetch_patch_layer_blob(
+        &self,
+        identifier_for_auth: &Identifier,
+        layer_digest: &Digest,
+        max_bytes: u64,
+    ) -> std::result::Result<Vec<u8>, ClientError> {
+        let image = self.transport_reference(identifier_for_auth);
+        // Auth was already established by the caller in fetch_patch_manifest_raw,
+        // but call ensure_auth again for robustness (it is a no-op on cache hit).
+        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+
+        // Stream the blob with a hard byte cap so a malicious registry that
+        // sends more bytes than its declared layer size cannot OOM the process.
+        // We read up to (max_bytes + 1) to detect overflow: if we fill the
+        // buffer to that length, the registry sent too many bytes.
+        use tokio::io::AsyncReadExt as _;
+        let stream = self.transport.pull_blob_streaming(&image, layer_digest).await?;
+        // Cap sentinel: read one byte beyond the allowed ceiling to detect overflow.
+        let cap_sentinel = max_bytes.saturating_add(1);
+        let mut buf = Vec::with_capacity(max_bytes as usize);
+        stream
+            .take(cap_sentinel)
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| ClientError::Io {
+                path: std::path::PathBuf::from("<patch layer blob>"),
+                source: e,
+            })?;
+        if buf.len() as u64 > max_bytes {
+            // Registry streamed more bytes than the declared + cap ceiling.
+            return Err(ClientError::DecompressionCapExceeded { cap: max_bytes });
+        }
+        Ok(buf)
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────
 
     /// Pulls and parses a manifest from the registry.
