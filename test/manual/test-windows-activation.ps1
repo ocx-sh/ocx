@@ -81,11 +81,10 @@ Write-Host "  env.ps1 written: $envPs1"
 # env.ps1 must be dot-sourceable without throwing
 # "Cannot bind argument to parameter 'Command' because it is null".
 # The binary is present, so the `self activate` path runs end-to-end.
-# After sourcing: OCX_ACTIVATED must be set and content\bin must be on PATH.
+# After sourcing: content\bin must be on PATH (activation actually ran).
 # ---------------------------------------------------------------------------
 Write-Host ''
 Write-Host '[Gap D] env.ps1 null-bind guard + PATH + activation ...'
-Remove-Item Env:_OCX_ENV_LOADED -ErrorAction SilentlyContinue
 
 try {
     . $envPs1
@@ -93,17 +92,13 @@ try {
     throw "Gap D FAIL: env.ps1 threw on dot-source: $($_.Exception.Message)"
 }
 
-# env.ps1 captures `self activate` output and Invoke-Expressions it.
-# The `self activate` stream sets $env:OCX_ACTIVATED = '1'.
-if ($env:OCX_ACTIVATED -ne '1') {
-    throw "Gap D FAIL: `$env:OCX_ACTIVATED not set to '1' after dot-sourcing env.ps1 (got: '$env:OCX_ACTIVATED')"
-}
-
 # content\bin directory must now be on PATH (added by the activation stream).
+# Activation carries no guard variable; the PATH prepend is the observable
+# proof the `self activate` stream ran end-to-end.
 if ($env:PATH -notlike "*$contentBinDir*") {
     throw "Gap D FAIL: content\bin dir not found on `$env:PATH after activation"
 }
-Write-Host '[Gap D] PASS - env.ps1 dot-sourced cleanly; OCX_ACTIVATED=1; content\bin on PATH'
+Write-Host '[Gap D] PASS - env.ps1 dot-sourced cleanly; content\bin on PATH'
 
 # ---------------------------------------------------------------------------
 # Second bug - the --no-completion activation stream (PATH + global env only)

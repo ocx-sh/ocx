@@ -201,20 +201,19 @@ impl Env {
         self.vars.insert(EnvKey::new(key), value.into());
     }
 
+    /// Prepends `value` to the path-style variable `key` with **move-to-front**
+    /// semantics: any existing occurrence of `value` is removed and `value` is
+    /// placed at the front, so re-applying the same value never duplicates an
+    /// entry. Empty segments are dropped. See
+    /// [`utility::path::move_to_front`](crate::utility::path::move_to_front).
     pub fn add_path(&mut self, key: impl Into<OsString>, value: impl Into<OsString>) {
         let key = EnvKey::new(key);
         let value = value.into();
-        match self.vars.get(&key).filter(|v| !v.is_empty()) {
-            Some(existing) => {
-                let mut new_value = value;
-                new_value.push(PATH_SEPARATOR);
-                new_value.push(existing);
-                self.vars.insert(key, new_value);
-            }
-            None => {
-                self.vars.insert(key, value);
-            }
-        }
+        let new_value = match self.vars.get(&key) {
+            Some(existing) => utility::path::move_to_front(existing, &value),
+            None => value,
+        };
+        self.vars.insert(key, new_value);
     }
 
     /// Borrowing iterator over `(key, value)` pairs.

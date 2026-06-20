@@ -25,10 +25,10 @@ Per shell the test:
 2. runs ``ocx --offline self setup`` targeting that shell's profile / dedicated
    file,
 3. launches the shell with ``OCX_HOME`` **unset** and a *clean* environment (no
-   ``_OCX_ENV_LOADED`` / ``OCX_*`` leakage from the parent), sourcing the managed
-   block twice, and asserts: exit 0, no "No such file"/"not found" for ``env.*``
-   on stderr, the ocx bin dir lands on ``PATH`` (activation actually ran), and a
-   second source does not duplicate it (the ``_OCX_ENV_LOADED`` guard holds).
+   ``OCX_*`` leakage from the parent, e.g. a stale ``OCX_HOME``), sourcing the
+   managed block twice, and asserts: exit 0, no "No such file"/"not found" for
+   ``env.*`` on stderr, the ocx bin dir lands on ``PATH`` (activation actually
+   ran), and a second source does not duplicate it (idempotent move-to-front).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def _seed_candidate(ocx_home: Path, binary: Path) -> None:
 
 
 def _clean_env(home: Path, shell_abs: str, *, ocx_home: Path | None = None, shell_name: str | None = None) -> dict[str, str]:
-    """Build a clean child env: HOME + minimal PATH only, no OCX_* / _OCX_ENV_LOADED.
+    """Build a clean child env: HOME + minimal PATH only, no OCX_* leakage.
 
     The shell's own directory is appended to PATH so a shell that re-execs a
     helper still resolves it; the ocx bin dir is deliberately NOT present so the
