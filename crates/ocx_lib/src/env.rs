@@ -51,6 +51,12 @@ pub mod keys {
     /// object is used (not a comma/`=` list) because mirror values are
     /// structured URLs with no delimiter-safe separator.
     pub const OCX_MIRRORS: &str = "OCX_MIRRORS";
+    /// JSON object encoding the resolved `[patches]` config
+    /// (`ResolvedPatchConfig`). Resolution-affecting → forwarded to child ocx
+    /// processes so launchers re-apply the same patch tier (C5 across process
+    /// boundaries). Forwarded only when `[patches]` is configured; absent
+    /// otherwise. Mirrors `OCX_MIRRORS` in forwarding semantics.
+    pub const OCX_PATCHES: &str = "OCX_PATCHES";
     /// Boolean — when truthy, `ocx self setup` writes the env shims but does
     /// NOT modify any shell profile. Mirrors `--no-modify-path`. Not a
     /// resolution-affecting flag (not forwarded to child ocx); the opt-out is
@@ -109,6 +115,11 @@ pub struct OcxConfigView {
     /// The resolved map merges `[mirrors]` config with the inherited
     /// `OCX_MIRRORS` env, env winning per-host key.
     pub mirrors: Vec<(String, String)>,
+    /// Resolved `[patches]` site-tier config. Resolution-affecting → forwarded
+    /// to child ocx processes via [`Env::apply_ocx_config`] as a JSON object
+    /// in [`keys::OCX_PATCHES`] so launchers apply the same patch tier (C5).
+    /// `None` when no `[patches]` registry is configured.
+    pub patches: Option<crate::config::patch::ResolvedPatchConfig>,
 }
 
 impl OcxConfigView {
@@ -123,6 +134,7 @@ impl OcxConfigView {
             global: false,
             index: None,
             mirrors: Vec::new(),
+            patches: None,
         }
     }
 }
@@ -282,6 +294,10 @@ impl Env {
         match encode_mirrors(&cfg.mirrors) {
             Some(json) => self.set(keys::OCX_MIRRORS, json),
             None => self.remove(keys::OCX_MIRRORS),
+        }
+        match crate::config::patch::encode_patches(cfg.patches.as_ref()) {
+            Some(json) => self.set(keys::OCX_PATCHES, json),
+            None => self.remove(keys::OCX_PATCHES),
         }
     }
 
@@ -1097,6 +1113,108 @@ mod tests {
         assert!(
             matches!(result, Err(MirrorConfigError::NonStringEnvValue { ref host }) if host == "ghcr.io"),
             "non-string OCX_MIRRORS value must yield NonStringEnvValue naming ghcr.io, got: {result:?}"
+        );
+    }
+
+    // ── OCX_PATCHES forwarding via apply_ocx_config ──────────────────────────
+
+    /// `apply_ocx_config` with `patches = None` does NOT set `OCX_PATCHES` and
+    /// removes any stale inherited value.
+    ///
+    /// Traces: Phase 1 — "No `[patches]` -> apply_ocx_config does NOT set
+    /// OCX_PATCHES (no-op / byte-identical env)"; stub manifest — "forwarded
+    /// ONLY when present (mirror OCX_MIRRORS exactly)".
+    #[test]
+    fn apply_ocx_config_does_not_set_ocx_patches_when_patches_none() {
+        let cfg = view("/abs/ocx");
+        // patches is None by default in OcxConfigView::new()
+        assert!(cfg.patches.is_none());
+
+        let mut env = Env::clean();
+        // Pre-set a stale value to confirm it is removed.
+        env.set(
+            keys::OCX_PATCHES,
+            r#"{"registry":"stale","path_template":"x","required":true}"#,
+        );
+        env.apply_ocx_config(&cfg);
+
+        assert!(
+            env.get(keys::OCX_PATCHES).is_none(),
+            "patches=None must remove any stale OCX_PATCHES from the child env"
+        );
+    }
+
+    /// `apply_ocx_config` with `patches = Some(resolved)` sets `OCX_PATCHES` to
+    /// a non-empty JSON string.
+    ///
+    /// Traces: Phase 1 — "OCX_PATCHES round-trip: an OcxConfigView carrying
+    /// resolved patches -> apply_ocx_config sets OCX_PATCHES to JSON".
+    #[test]
+    fn apply_ocx_config_sets_ocx_patches_when_patches_some() {
+        let mut cfg = view("/abs/ocx");
+        cfg.patches = Some(crate::config::patch::ResolvedPatchConfig {
+            registry: "corp.example.com/patches".to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: true,
+        });
+
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+
+        let raw = env
+            .get(keys::OCX_PATCHES)
+            .expect("OCX_PATCHES must be set when patches is Some")
+            .to_str()
+            .expect("OCX_PATCHES must be valid UTF-8");
+        // Must be parseable JSON containing the registry.
+        assert!(
+            raw.contains("corp.example.com/patches"),
+            "OCX_PATCHES JSON must contain the registry; got: {raw}"
+        );
+    }
+
+    /// OCX_PATCHES full round-trip through `apply_ocx_config` then
+    /// `patches_from_env`: child env carries the same `ResolvedPatchConfig`.
+    ///
+    /// Traces: Phase 1 — "OCX_PATCHES round-trip: an OcxConfigView carrying
+    /// resolved patches -> apply_ocx_config sets OCX_PATCHES to JSON -> parsing
+    /// OCX_PATCHES back yields the same resolved patches"; block-tier requirement
+    /// C5.
+    #[test]
+    fn apply_ocx_config_ocx_patches_round_trip_via_patches_from_env() {
+        use crate::config::patch::patches_from_env;
+
+        let env_guard = crate::test::env::lock();
+
+        let original = crate::config::patch::ResolvedPatchConfig {
+            registry: "internal.company.com/ocx-patches".to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: true,
+        };
+
+        let mut cfg = OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
+        cfg.patches = Some(original.clone());
+
+        let mut child_env = Env::clean();
+        child_env.apply_ocx_config(&cfg);
+
+        // Inject the encoded OCX_PATCHES from child_env into the test env override
+        // so patches_from_env() can read it.
+        let encoded = child_env
+            .get(keys::OCX_PATCHES)
+            .expect("OCX_PATCHES must be set when patches is Some")
+            .to_str()
+            .expect("OCX_PATCHES must be valid UTF-8")
+            .to_string();
+        env_guard.set(keys::OCX_PATCHES, encoded);
+
+        let parsed = patches_from_env()
+            .expect("well-formed OCX_PATCHES must parse")
+            .expect("non-empty OCX_PATCHES must yield Some(resolved)");
+
+        assert_eq!(
+            parsed, original,
+            "patches_from_env must recover the same ResolvedPatchConfig forwarded by apply_ocx_config"
         );
     }
 

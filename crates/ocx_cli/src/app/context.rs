@@ -194,6 +194,18 @@ impl Context {
         // Feed the same resolved mirror map into the forwarding view so a child
         // ocx inherits `OCX_MIRRORS` matching the parent's transport rewrite.
         config_view.mirrors = mirror_pairs;
+        // Resolve the [patches] site-tier config and populate the forwarding
+        // view so child ocx processes (launcher exec) inherit the same patch
+        // tier via `OCX_PATCHES` (C5 — forwarding across process boundaries).
+        // Two-step: (1) config-file tier, (2) env tier via `OCX_PATCHES` when
+        // the child ocx has no [patches] in its own config.toml (the common CI
+        // case — the parent had it from the system config). Config wins when
+        // present; env fallback ensures the forwarding chain survives into
+        // grandchildren. Mirrors the `mirrors` / `env::mirrors()` two-step.
+        config_view.patches = match ocx_lib::resolve_patch_config(&config).map_err(anyhow::Error::new)? {
+            Some(resolved) => Some(resolved),
+            None => ocx_lib::patches_from_env().map_err(anyhow::Error::new)?,
+        };
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
         let concurrency = resolve_concurrency(options.jobs);

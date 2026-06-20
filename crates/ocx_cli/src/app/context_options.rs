@@ -161,6 +161,12 @@ impl ContextOptions {
             // `OCX_MIRRORS` env. `Context::try_init` builds it and populates
             // this field on the returned view; the parser tier starts empty.
             mirrors: Vec::new(),
+            // The resolved patch config is not derivable from `ContextOptions`
+            // alone — it merges the `[patches]` config tier with the inherited
+            // `OCX_PATCHES` env. `Context::try_init` builds it via
+            // `resolve_patch_config` and populates this field on the returned
+            // view; the parser tier starts empty.
+            patches: None,
         }
     }
 }
