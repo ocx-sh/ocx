@@ -234,12 +234,15 @@ fn format_global_env_eval(shell: Shell) -> String {
         Shell::PowerShell => format!(
             "if (Get-Command ocx -ErrorAction SilentlyContinue) {{ $__ocx_global_env = (& ocx --global env --shell={shell_name} | Out-String); if ($__ocx_global_env) {{ Invoke-Expression $__ocx_global_env }} }}"
         ),
-        // CMD: `FOR /F` evaluates each line of the subprocess output. Batch PATH
-        // emission is now idempotent move-to-front (substring-delete, see
+        // CMD: `FOR /F` evaluates each line of the subprocess output. `delims=`
+        // is required so `%i` is the WHOLE line — the default whitespace split
+        // would leave `%i` as just the first token (`SET`), executing a bare
+        // `SET` and dropping the assignment. Batch PATH emission is now idempotent
+        // move-to-front (single-statement substring-delete, see
         // `Shell::export_path`), so like every other shell it runs unguarded —
         // no `OCX_ACTIVATED` session guard, no marker.
         Shell::Batch => {
-            format!("FOR /F \"usebackq\" %i IN (`ocx --global env --shell={shell_name}`) DO @%i")
+            format!("FOR /F \"usebackq delims=\" %i IN (`ocx --global env --shell={shell_name}`) DO @%i")
         }
         Shell::Elvish => {
             format!("if (has-external ocx) {{ ocx --global env --shell={shell_name} | slurp | eval }}")
