@@ -4,6 +4,7 @@
 pub mod error;
 pub mod loader;
 pub mod mirror;
+pub mod patch;
 pub mod registry;
 
 use std::collections::HashMap;
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 pub use self::mirror::MirrorConfig;
+pub use self::patch::PatchConfig;
 pub use self::registry::RegistryConfig;
 
 /// Root configuration struct.
@@ -46,6 +48,17 @@ pub struct Config {
     /// unchanged, so an `ocx.lock` produced behind the mirror remains valid
     /// with direct egress and vice versa.
     pub mirrors: Option<HashMap<String, MirrorConfig>>,
+
+    /// Site-tier patch configuration (`[patches]`).
+    ///
+    /// Points at an operator-controlled patch registry that provides companion
+    /// packages (CA bundles, proxy env vars, license-server endpoints) layered
+    /// onto unmodified upstream packages at compose time. The patch tier is the
+    /// execution-env twin of `[mirrors]`: `[mirrors]` adapts transport, patches
+    /// adapt the execution environment.
+    ///
+    /// Absent → no patch tier configured (opt-in, not required).
+    pub patches: Option<PatchConfig>,
 }
 
 /// Global registry-subsystem settings (`[registry]` section).
@@ -89,6 +102,12 @@ impl Config {
             let map = self.mirrors.get_or_insert_with(HashMap::new);
             for (host, entry) in other_mirrors {
                 map.entry(host).or_default().merge(entry);
+            }
+        }
+        if let Some(other_patches) = other.patches {
+            match self.patches.as_mut() {
+                Some(self_patches) => self_patches.merge(other_patches),
+                None => self.patches = Some(other_patches),
             }
         }
     }
@@ -176,11 +195,36 @@ mod tests {
         );
     }
 
+    /// Replaces the former tripwire `parse_unknown_future_patches_section_silently_ignored`.
+    /// `[patches]` is now a RECOGNIZED section — parses into `Config.patches`.
+    ///
+    /// Traces: Phase 1 — "flip the placeholder tripwire test to positive parse tests";
+    /// impl map — "tripwire test → flip to positive parse/expansion tests".
     #[test]
-    fn parse_unknown_future_patches_section_silently_ignored() {
-        // Plan: Step 3.1 — Unknown future section [patches] → silently ignored
-        let result: Result<Config, _> = toml::from_str("[patches]\na = \"b\"");
-        assert!(result.is_ok(), "unknown [patches] should not fail: {result:?}");
+    fn parse_patches_section_is_recognized() {
+        let result: Result<Config, _> = toml::from_str("[patches]\nregistry = \"corp.example.com/patches\"\n");
+        assert!(result.is_ok(), "[patches] section must parse successfully: {result:?}");
+        let config = result.unwrap();
+        let patches = config.patches.expect("[patches] must populate Config.patches");
+        assert_eq!(
+            patches.registry.as_deref(),
+            Some("corp.example.com/patches"),
+            "registry field must be populated from [patches] TOML"
+        );
+    }
+
+    /// Unknown fields inside `[patches]` are silently ignored (no `deny_unknown_fields`).
+    ///
+    /// Traces: stub manifest — "no `deny_unknown_fields`"; Phase 1 forward-compat requirement.
+    #[test]
+    fn parse_patches_section_ignores_unknown_fields() {
+        // PatchConfig has no deny_unknown_fields, so unknown keys inside [patches]
+        // must be silently ignored (forward compat for future Phase 2+ fields).
+        let result: Result<Config, _> = toml::from_str("[patches]\na = \"b\"\n");
+        assert!(
+            result.is_ok(),
+            "[patches] with unknown fields must not fail (no deny_unknown_fields): {result:?}"
+        );
     }
 
     #[test]

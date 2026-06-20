@@ -11,6 +11,9 @@ mod media_type;
 pub use config::error::Error as ConfigError;
 pub use config::loader::{ConfigInputs, ConfigLoader};
 pub use config::mirror::{MirrorConfig, MirrorConfigError, ParsedMirror, ResolvedMirrors, resolve_mirror_map};
+pub use config::patch::{
+    PatchConfig, PatchConfigError, ResolvedPatchConfig, expand_patch_path, patches_from_env, resolve_patch_config,
+};
 pub use config::{Config, RegistryConfig, RegistryDefaults};
 
 #[cfg(test)]
