@@ -46,17 +46,18 @@ elif [ -n "${ZSH_VERSION:-}" ]; then
     _ocx_shell=zsh
 fi
 
-# PATH + global toolchain env: apply once per shell. The `_OCX_ENV_LOADED`
-# guard keeps the PATH prepend and the (subprocess-spawning) global-env eval
-# from repeating when the user re-sources their profile. `--no-completion`
-# keeps completions out of this one-shot block; they are handled separately
-# below so they survive a completion system that initializes later.
-if [ -z "${_OCX_ENV_LOADED:-}" ]; then
-    _OCX_ENV_LOADED=1
-    export _OCX_ENV_LOADED
-    if [ -x "$_ocx_bin" ]; then
-        eval "$("$_ocx_bin" self activate --shell="$_ocx_shell" --no-completion 2>/dev/null)" || true
-    fi
+# PATH + global toolchain env. The emitted activation is idempotent
+# move-to-front by construction, so it is safe to run on EVERY source: a
+# re-source (or a snippet captured into a profile) never duplicates a PATH
+# entry. There is deliberately no double-source guard variable — an exported
+# one-shot guard leaks into child processes (e.g. a VS Code Remote server whose
+# terminals inherit it) and would wrongly suppress activation in a shell that
+# needs it, while a clean SSH login would still work. Running unconditionally
+# also lets a re-source pick up a changed global toolchain. `--no-completion`
+# keeps completions out of this block; they are handled separately below so they
+# survive a completion system that initializes later.
+if [ -x "$_ocx_bin" ]; then
+    eval "$("$_ocx_bin" self activate --shell="$_ocx_shell" --no-completion 2>/dev/null)" || true
 fi
 
 # Shell completions: re-inject on EVERY interactive source, NOT once. zsh's
@@ -82,12 +83,9 @@ unset _ocx_bin _ocx_shell
 ///
 /// Byte-identical to the former `install.sh` `env.fish` heredoc body.
 pub const ENV_FISH: &str = r#"# Managed by ocx installer - do not edit.
-# Double-source guard - prevents PATH duplication on re-source.
-# Set before any side effects so re-source after partial failure also short-circuits.
-if set -q _OCX_ENV_LOADED
-    return
-end
-set -gx _OCX_ENV_LOADED 1
+# No double-source guard: the emitted activation is idempotent move-to-front, so
+# re-sourcing never duplicates a PATH entry. An exported guard would leak into
+# child shells (e.g. VS Code Remote terminals) and wrongly suppress activation.
 
 if not set -q OCX_HOME
     set -gx OCX_HOME "$HOME/.ocx"
@@ -111,10 +109,9 @@ end
 /// Byte-identical to the former `install.sh` `env.ps1` heredoc body, which in
 /// turn matched the `install.ps1` `Create-EnvFile` here-string line-for-line.
 pub const ENV_PS1: &str = r#"# Managed by ocx installer - do not edit.
-# Double-source guard - prevents PATH duplication on re-source.
-# Set before any side effects so re-source after partial failure also short-circuits.
-if ($env:_OCX_ENV_LOADED) { return }
-$env:_OCX_ENV_LOADED = '1'
+# No double-source guard: the emitted activation is idempotent move-to-front, so
+# re-sourcing never duplicates a PATH entry. An exported guard would leak into
+# child shells (e.g. VS Code Remote terminals) and wrongly suppress activation.
 
 if (-not $env:OCX_HOME) {
     # $env:USERPROFILE is null on Linux/macOS pwsh; fall back to $HOME so this
@@ -155,10 +152,9 @@ Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxArgs, _ocxActivate -ErrorAction 
 ///
 /// Byte-identical to the former `install.sh` `env.nu` heredoc body.
 pub const ENV_NU: &str = r#"# Managed by ocx installer - do not edit.
-# Double-source guard - prevents PATH duplication on re-source.
-# Set before any side effects so re-source after partial failure also short-circuits.
-if ($env._OCX_ENV_LOADED? | default '') != '' { return }
-$env._OCX_ENV_LOADED = '1'
+# No double-source guard: the emitted activation is idempotent move-to-front, so
+# re-sourcing never duplicates a PATH entry. An exported guard would leak into
+# child shells (e.g. VS Code Remote terminals) and wrongly suppress activation.
 
 $env.OCX_HOME = ($env.OCX_HOME? | default ($env.HOME | path join '.ocx'))
 
@@ -173,12 +169,9 @@ if ($_ocx_bin | path exists) {
 ///
 /// Byte-identical to the former `install.sh` `env.elv` heredoc body.
 pub const ENV_ELV: &str = r#"# Managed by ocx installer - do not edit.
-# Double-source guard - prevents PATH duplication on re-source.
-# Set before any side effects so re-source after partial failure also short-circuits.
-if (has-env _OCX_ENV_LOADED) {
-    return
-}
-set-env _OCX_ENV_LOADED 1
+# No double-source guard: the emitted activation is idempotent move-to-front, so
+# re-sourcing never duplicates a PATH entry. An exported guard would leak into
+# child shells (e.g. VS Code Remote terminals) and wrongly suppress activation.
 
 if (not (has-env OCX_HOME)) {
     set-env OCX_HOME $E:HOME/.ocx
@@ -380,6 +373,23 @@ mod tests {
             assert!(
                 !body.contains("{OCX_HOME}") && !body.contains("{{") && !body.contains("@OCX_HOME@"),
                 "{name} must not contain a substitution placeholder"
+            );
+        }
+    }
+
+    /// No shim may carry a `_OCX_ENV_LOADED`-style activation guard. An exported
+    /// one-shot guard leaks into child processes (e.g. a VS Code Remote server
+    /// whose terminals inherit it) and suppresses activation in a shell that
+    /// needs it, while a clean SSH login still works — the exact divergence this
+    /// removal fixes. Idempotent move-to-front makes re-running activation safe,
+    /// so no guard is needed for correctness.
+    #[test]
+    fn no_shim_carries_an_activation_guard() {
+        for (name, body) in SHIMS {
+            assert!(
+                !body.contains("_OCX_ENV_LOADED"),
+                "{name} must not carry a _OCX_ENV_LOADED activation guard (it leaks across \
+                 process boundaries; idempotency makes it unnecessary)"
             );
         }
     }

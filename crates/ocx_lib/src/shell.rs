@@ -114,8 +114,36 @@ impl Shell {
         }
     }
 
-    /// Emit a shell line that prepends `value` (via `PATH_SEPARATOR`) to the
-    /// existing value of the environment variable named `key`.
+    /// Emit a **self-contained, idempotent, move-to-front** shell statement that
+    /// prepends `value` to the path-style variable named `key`.
+    ///
+    /// Re-sourcing the emitted statement never duplicates `value`; re-adding a
+    /// value already present removes the stale occurrence and moves it to the
+    /// front ("last activation wins" for lookup). The statement depends on no
+    /// ocx process, no ocx-set guard variable, and no helper function — so it
+    /// keeps working when captured into a profile
+    /// (`ocx package env cmake --shell bash >> ~/.bashrc`) and re-sourced with
+    /// ocx absent. This is the contract that unblocks the per-prompt shell hook.
+    ///
+    /// Each native shell (bash/zsh, fish, PowerShell, elvish, nushell) does the
+    /// dedup with zero subprocesses; the strict-POSIX family (ash/ksh/dash) uses
+    /// a single `awk`. A throwaway `__ocx_p` variable carries the value through
+    /// one escape context and is `unset` within the same statement, so the
+    /// value's match position references the quoted variable rather than a
+    /// re-interpolated literal — closing the glob / second-escape gap. The
+    /// shells whose `__ocx_p` is matched byte-for-byte against an existing PATH
+    /// segment use a **single-quoted literal** (bash/zsh/POSIX via `'\''`,
+    /// elvish/PowerShell via `''`) so `$`, backtick, `\`, `!`, and glob chars
+    /// stay exact; fish and nushell keep [`Self::escape_value`] (their
+    /// double-quoted form round-trips those bytes). `batch` remains prepend-only
+    /// (cmd.exe lacks a tractable dedup primitive).
+    ///
+    /// **Precondition:** `value` is a single directory with no embedded
+    /// `PATH_SEPARATOR` (the env resolver yields one resolved `bin/` dir per
+    /// entry). The split-based emitters (POSIX `awk`, fish, PowerShell, elvish,
+    /// nushell) treat a separator inside `value` as a segment boundary and would
+    /// not recognise it for dedup — the same precondition as
+    /// [`utility::path::move_to_front`](crate::utility::path::move_to_front).
     ///
     /// Returns `None` when `key` is not a valid POSIX environment-variable
     /// name (`[A-Za-z_][A-Za-z0-9_]*`). Caller decides how to surface that —
@@ -127,18 +155,94 @@ impl Shell {
         if !env::is_valid_env_key(key) {
             return None;
         }
-        let value = self.escape_value(value);
+        let raw = value.as_ref();
         let separator = env::PATH_SEPARATOR;
         Some(match self {
-            Self::Ash | Self::Ksh | Self::Dash | Self::Bash | Self::Zsh => {
-                format!("export {key}=\"{value}{separator}${{{key}}}\"")
+            // bash / zsh — pure-builtin colon-sentinel removal, zero subprocess.
+            // The value is a single-quoted literal so `$`, backtick, `\`, `!`,
+            // and glob chars stay byte-exact (a double-quoted `\!` would not
+            // match a real `!`-bearing segment). Quoting `"$__ocx_p"` inside
+            // `${var//pat/repl}` forces a *literal* match (no glob). The `while`
+            // loops the replacement to a fixed point so even pre-existing
+            // *adjacent* duplicates collapse (one non-overlapping `${//}` pass
+            // leaves one). zsh keeps its `path` array tied to `PATH` on every
+            // assignment, so the scalar form updates both. `${KEY-}` is
+            // `set -u`-safe.
+            Self::Bash | Self::Zsh => {
+                let value = escape_posix_single_quoted(raw);
+                format!(
+                    "__ocx_p='{value}'; {key}=\":${{{key}-}}:\"; while [ \"${key}\" != \"${{{key}//:\"$__ocx_p\":/:}}\" ]; do {key}=\"${{{key}//:\"$__ocx_p\":/:}}\"; done; {key}=\"${{{key}#:}}\"; {key}=\"${{{key}%:}}\"; export {key}=\"$__ocx_p${{{key}:+:${{{key}}}}}\"; unset __ocx_p"
+                )
             }
-            Self::Fish => format!("set -x {key} \"{value}{separator}\" ${key}"),
-            Self::PowerShell => format!("$env:{key} = \"{value}{separator}$env:{key}\""),
-            Self::Batch => format!("SET \"{key}={value}{separator}%{key}%\""),
-            Self::Elvish => format!("set E:{key} = \"{value}{separator}\"$E:{key}"),
+            // strict POSIX (ash / ksh / dash) — one `awk`, literal key name (no
+            // non-POSIX `${!var}` indirection). The value is a single-quoted
+            // literal (byte-exact: `!`, `\`, `$` all literal) and is read by awk
+            // through `ENVIRON["__ocx_p"]` (an exported shell var) rather than
+            // `-v d=...`, because `awk -v` decodes backslash escapes in its
+            // value — `-v d=/a\b` would set `d` to `/a<BS>b` and fail to match a
+            // real `/a\b` segment. `ENVIRON` carries the bytes verbatim, `RS=":"`
+            // is the POSIX path separator, and the compare is exact string
+            // equality, so no glob/pattern escaping is needed. (`awk` collapses
+            // adjacent duplicates in one pass, so no fixpoint loop is needed.)
+            Self::Ash | Self::Ksh | Self::Dash => {
+                let value = escape_posix_single_quoted(raw);
+                format!(
+                    "__ocx_p='{value}'; export __ocx_p; export {key}=\"$__ocx_p$(printf %s \"${{{key}-}}\" | awk 'BEGIN{{ORS=\"\";RS=\":\";d=ENVIRON[\"__ocx_p\"]}} $0!=d && $0!=\"\"{{printf \":%s\",$0}}')\"; unset __ocx_p"
+                )
+            }
+            // fish — rebuild the list keeping the new value first and dropping any
+            // exact-string duplicate. `test "$e" != "$p"` is exact (no glob), so
+            // bracket/glob paths are safe; works for any key (not just `$PATH`).
+            // The `fish_add_path` builtin is deliberately avoided: it skips
+            // non-existent dirs and mangles bracket paths.
+            Self::Fish => {
+                let value = self.escape_value(raw);
+                format!(
+                    "set __ocx_p \"{value}\"; set __ocx_r; for __ocx_e in ${key}; test \"$__ocx_e\" != \"$__ocx_p\"; and set -a __ocx_r $__ocx_e; end; set -gx {key} $__ocx_p $__ocx_r; set -e __ocx_p __ocx_r __ocx_e"
+                )
+            }
+            // PowerShell — split on the OS path separator, drop empties + the
+            // value, prepend. The value is a single-quoted literal (`''` escapes
+            // an embedded quote) so no `$`/backtick interpolation can fire.
+            // `[IO.Path]::PathSeparator` is `;` on Windows, `:` elsewhere.
+            Self::PowerShell => {
+                let value = escape_single_quoted_doubled(raw);
+                format!(
+                    "$__ocx_p='{value}'; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(@($__ocx_p)+($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and $_ -ne $__ocx_p}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
+                )
+            }
+            // elvish — split the env string, filter empties + the value, prepend,
+            // re-join. The value is a single-quoted raw string (`'` doubled):
+            // elvish double-quoted strings reject `\$` / `` \` `` as *invalid
+            // escape sequences* (a parse error), so a `$`/backtick-bearing path
+            // must use the raw form. `not-eq` is exact (no glob). Works for any
+            // key and is empty-safe (the `$paths` list view is `$nil` when
+            // `PATH` is empty). `use str` is idempotent across repeated emits.
+            // Requires elvish with the `str:` module (0.16+).
+            Self::Elvish => {
+                let value = escape_single_quoted_doubled(raw);
+                format!(
+                    "use str; set E:{key} = (str:join \"{separator}\" ['{value}' (str:split \"{separator}\" $E:{key} | each {{|p| if (and (not-eq $p '{value}') (not-eq $p \"\")) {{ put $p }} }})])"
+                )
+            }
+            // nushell — normalise to a list (`$env.PATH` is auto-listified since
+            // 0.101, other path vars stay strings), drop the value, prepend. The
+            // `$env.KEY? | default ""` guard treats an unset variable as empty
+            // (parity with the POSIX `${KEY-}`); the `describe` guard then
+            // tolerates both string and list inputs. Plain (non-interpolating)
+            // double-quoted literals, so `$`/`(` cannot fire.
             Self::Nushell => {
-                format!("$env.{key} = $\"{value}{separator}($env.{key}? | default '')\"")
+                let value = self.escape_value(raw);
+                format!(
+                    "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| $p != \"{value}\" and $p != \"\" }} | prepend \"{value}\")"
+                )
+            }
+            // batch (cmd.exe) — prepend only. cmd has no array/list primitive and
+            // `FOR /F` + delayed expansion corrupts `!`-bearing values, so dedup
+            // is impractical (documented limitation; chocolatey/scoop do the same).
+            Self::Batch => {
+                let value = self.escape_value(raw);
+                format!("SET \"{key}={value}{separator}%{key}%\"")
             }
         })
     }
@@ -249,6 +353,29 @@ impl Shell {
                 .replace('|', "^|"),
         }
     }
+}
+
+/// Escape `value` for a single-quoted literal in shells where a quote is
+/// written by **doubling** it (`'` → `''`): PowerShell and elvish. Inside
+/// `'...'` neither shell interpolates, so `$`, backtick, `\`, `;`, and glob
+/// metacharacters are all literal and only the quote needs escaping. This is
+/// the strongest injection guard for the move-to-front emit — the value can
+/// never start a subexpression — and (for elvish) it also avoids the
+/// double-quote arm's `\$` / `` \` `` *invalid-escape* parse errors.
+fn escape_single_quoted_doubled(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+/// Escape `value` for a POSIX `sh` single-quoted literal. A literal quote is
+/// written by closing the quote, emitting an escaped quote, and reopening
+/// (`'` → `'\''`); every other byte — `$`, backtick, `\`, `!`, glob chars,
+/// spaces — is literal inside `'...'`. Used by the bash/zsh and ash/ksh/dash
+/// move-to-front emit so the value matches its existing PATH segment byte for
+/// byte (the double-quoted form would turn `!` into `\!` and break the
+/// comparison, leaving a stale duplicate) and cannot trigger interpolation,
+/// history expansion, or globbing.
+fn escape_posix_single_quoted(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }
 
 impl std::fmt::Display for Shell {
@@ -818,5 +945,291 @@ mod tests {
             msg.contains("Nushell"),
             "expected error to reference Nushell, got: {msg:?}"
         );
+    }
+
+    // ══ Idempotent move-to-front export_path (issue #26) ═════════════════
+    //
+    // Two layers: (1) exact-shape tests lock the emitted bytes so a `format!`
+    // brace regression fails loudly; (2) `live_*` tests run the *real* emitted
+    // statement through an actual interpreter (skipped when the interpreter is
+    // absent) to prove idempotency / move-to-front / injection-safety end to end.
+
+    fn sep() -> &'static str {
+        crate::env::PATH_SEPARATOR
+    }
+
+    #[test]
+    fn export_path_bash_zsh_exact_shape() {
+        // bash and zsh share the single-quoted colon-sentinel + fixpoint form.
+        let expected = "__ocx_p='/opt/bin'; PATH=\":${PATH-}:\"; while [ \"$PATH\" != \"${PATH//:\"$__ocx_p\":/:}\" ]; do PATH=\"${PATH//:\"$__ocx_p\":/:}\"; done; PATH=\"${PATH#:}\"; PATH=\"${PATH%:}\"; export PATH=\"$__ocx_p${PATH:+:${PATH}}\"; unset __ocx_p";
+        assert_eq!(Shell::Bash.export_path("PATH", "/opt/bin").as_deref(), Some(expected));
+        assert_eq!(Shell::Zsh.export_path("PATH", "/opt/bin").as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn export_path_posix_exact_shape() {
+        // ash / ksh / dash share the single-awk POSIX form.
+        let expected = "__ocx_p='/opt/bin'; export __ocx_p; export PATH=\"$__ocx_p$(printf %s \"${PATH-}\" | awk 'BEGIN{ORS=\"\";RS=\":\";d=ENVIRON[\"__ocx_p\"]} $0!=d && $0!=\"\"{printf \":%s\",$0}')\"; unset __ocx_p";
+        for shell in [Shell::Ash, Shell::Ksh, Shell::Dash] {
+            assert_eq!(
+                shell.export_path("PATH", "/opt/bin").as_deref(),
+                Some(expected),
+                "{shell}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_path_fish_exact_shape() {
+        let expected = "set __ocx_p \"/opt/bin\"; set __ocx_r; for __ocx_e in $PATH; test \"$__ocx_e\" != \"$__ocx_p\"; and set -a __ocx_r $__ocx_e; end; set -gx PATH $__ocx_p $__ocx_r; set -e __ocx_p __ocx_r __ocx_e";
+        assert_eq!(Shell::Fish.export_path("PATH", "/opt/bin").as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn export_path_powershell_exact_shape() {
+        let expected = "$__ocx_p='/opt/bin'; $__ocx_s=[IO.Path]::PathSeparator; $env:PATH=(@($__ocx_p)+($env:PATH -split [regex]::Escape($__ocx_s) | Where-Object {$_ -and $_ -ne $__ocx_p})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s";
+        assert_eq!(
+            Shell::PowerShell.export_path("PATH", "/opt/bin").as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn export_path_elvish_exact_shape() {
+        let s = sep();
+        let expected = format!(
+            "use str; set E:PATH = (str:join \"{s}\" ['/opt/bin' (str:split \"{s}\" $E:PATH | each {{|p| if (and (not-eq $p '/opt/bin') (not-eq $p \"\")) {{ put $p }} }})])"
+        );
+        assert_eq!(Shell::Elvish.export_path("PATH", "/opt/bin"), Some(expected));
+    }
+
+    #[test]
+    fn export_path_nushell_exact_shape() {
+        let expected = "$env.PATH = (($env.PATH? | default \"\") | (if ($in | describe) == 'string' { split row (char esep) } else { $in }) | where {|p| $p != \"/opt/bin\" and $p != \"\" } | prepend \"/opt/bin\")";
+        assert_eq!(
+            Shell::Nushell.export_path("PATH", "/opt/bin").as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn export_path_batch_is_prepend_only() {
+        let expected = format!("SET \"PATH=/opt/bin{}%PATH%\"", sep());
+        assert_eq!(Shell::Batch.export_path("PATH", "/opt/bin"), Some(expected));
+    }
+
+    #[test]
+    fn export_path_is_generic_over_key() {
+        // The emitter must work for any path-style key, not just `PATH`
+        // (package metadata declares `LD_LIBRARY_PATH`, `MANPATH`, etc. as path).
+        let line = Shell::Bash.export_path("LD_LIBRARY_PATH", "/x/lib").unwrap();
+        assert!(line.contains("export LD_LIBRARY_PATH="), "got: {line}");
+        assert!(!line.contains("PATH=\":${PATH-}:\""), "must not hardcode PATH: {line}");
+    }
+
+    #[test]
+    fn export_path_rejects_invalid_key_all_shells() {
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Ash,
+            Shell::Ksh,
+            Shell::Dash,
+            Shell::Fish,
+            Shell::PowerShell,
+            Shell::Elvish,
+            Shell::Nushell,
+            Shell::Batch,
+        ] {
+            assert!(shell.export_path("PATH; rm -rf /", "/x").is_none(), "{shell}");
+        }
+    }
+
+    #[test]
+    fn export_path_bash_neutralizes_injection() {
+        // A metadata value `/x;$(touch evil)` is carried as a single-quoted
+        // literal, where `$`, `;`, and `(` are all inert — no command
+        // substitution can fire and the value never reaches a command position.
+        let line = Shell::Bash.export_path("PATH", "/x;$(touch evil)").unwrap();
+        assert!(line.contains("__ocx_p='/x;$(touch evil)'"), "got: {line}");
+    }
+
+    #[test]
+    fn export_path_posix_single_quote_escapes_embedded_quote() {
+        // A value with a literal `'` must close/escape/reopen (`'\''`) so the
+        // single-quoted literal stays balanced across bash and the POSIX family.
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Dash, Shell::Ksh, Shell::Ash] {
+            let line = shell.export_path("PATH", "/o'brien/bin").unwrap();
+            assert!(line.contains("__ocx_p='/o'\\''brien/bin'"), "{shell}: {line}");
+        }
+    }
+
+    #[test]
+    fn export_path_posix_value_with_bang_is_literal_not_escaped() {
+        // History-expansion safety must not corrupt the value: a `!`-bearing dir
+        // stays byte-exact inside `'...'` (no `\!`), so it matches its real PATH
+        // segment and dedups instead of leaving a stale copy.
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Dash] {
+            let line = shell.export_path("PATH", "/x!y/bin").unwrap();
+            assert!(line.contains("__ocx_p='/x!y/bin'"), "{shell}: {line}");
+            assert!(
+                !line.contains("\\!"),
+                "{shell}: value must not be backslash-escaped: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_path_powershell_single_quote_escapes_embedded_quote() {
+        let line = Shell::PowerShell.export_path("PATH", "/o'brien/bin").unwrap();
+        assert!(line.contains("$__ocx_p='/o''brien/bin'"), "got: {line}");
+    }
+
+    // ── live-interpreter tests (skip when the shell is unavailable) ──────
+    //
+    // These run the *actual* emitted statement so the format!-built bytes are
+    // exercised by a real parser, proving the three invariants end to end:
+    // move-to-front, idempotency (source twice), and injection safety.
+
+    use std::process::Command;
+
+    /// Run `script` under `argv` (interpreter + flags), returning trimmed stdout,
+    /// or `None` if the interpreter is not installed (so CI without it stays green).
+    fn run_script(argv: &[&str], script: &str) -> Option<String> {
+        let (bin, head) = argv.split_first()?;
+        let mut command = Command::new(bin);
+        command.args(head).arg(script);
+        match command.output() {
+            Ok(output) => Some(String::from_utf8_lossy(&output.stdout).trim_end().to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("failed to spawn {bin}: {error}"),
+        }
+    }
+
+    /// POSIX-style readback: seed PATH with the dir mid-list, source twice, print.
+    fn posix_roundtrip(argv: &[&str], real_bin_dir: &str) {
+        let line = Shell::from_argv(argv).export_path("PATH", "/opt/bin").unwrap();
+        let script = format!("export PATH=/a:/opt/bin:/b:{real_bin_dir}; {line}; {line}; printf '%s' \"$PATH\"");
+        if let Some(out) = run_script(argv, &script) {
+            assert_eq!(out, format!("/opt/bin:/a:/b:{real_bin_dir}"), "argv={argv:?}");
+        }
+    }
+
+    impl Shell {
+        /// Map a live-test interpreter argv back to the `Shell` whose emit we test.
+        fn from_argv(argv: &[&str]) -> Shell {
+            match argv[0] {
+                "bash" => Shell::Bash,
+                "zsh" => Shell::Zsh,
+                "dash" => Shell::Dash,
+                "ksh" => Shell::Ksh,
+                "busybox" => Shell::Ash,
+                other => panic!("unmapped interpreter {other}"),
+            }
+        }
+    }
+
+    fn awk_dir() -> String {
+        // The POSIX awk form needs `awk` resolvable on PATH; keep the real bin dir.
+        std::path::Path::new(&run_script(&["bash", "-c"], "command -v awk").unwrap_or_default())
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "/usr/bin".to_string())
+    }
+
+    #[test]
+    fn live_bash_zsh_idempotent_move_to_front() {
+        let dir = awk_dir();
+        posix_roundtrip(&["bash", "-c"], &dir);
+        posix_roundtrip(&["zsh", "-c"], &dir);
+    }
+
+    #[test]
+    fn live_posix_idempotent_move_to_front() {
+        let dir = awk_dir();
+        posix_roundtrip(&["dash", "-c"], &dir);
+        posix_roundtrip(&["ksh", "-c"], &dir);
+        posix_roundtrip(&["busybox", "ash", "-c"], &dir);
+    }
+
+    #[test]
+    fn live_adjacent_duplicates_collapse() {
+        // Pre-existing ADJACENT duplicates of the added dir must collapse to one
+        // (regression: one non-overlapping `${//}` pass leaves a stale copy).
+        let dir = awk_dir();
+        for argv in [
+            &["bash", "-c"][..],
+            &["zsh", "-c"][..],
+            &["dash", "-c"][..],
+            &["busybox", "ash", "-c"][..],
+        ] {
+            let line = Shell::from_argv(argv).export_path("PATH", "/opt/bin").unwrap();
+            let script = format!("export PATH=/opt/bin:/opt/bin:/a:{dir}; {line}; printf '%s' \"$PATH\"");
+            if let Some(out) = run_script(argv, &script) {
+                assert_eq!(
+                    out,
+                    format!("/opt/bin:/a:{dir}"),
+                    "argv={argv:?}: adjacent dup not collapsed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_bang_path_dedups() {
+        // A `!`-bearing dir present mid-PATH must move to front and dedup.
+        // Regression: a double-quoted `\!` escape broke the exact-segment match.
+        let dir = awk_dir();
+        for argv in [&["bash", "-c"][..], &["dash", "-c"][..]] {
+            let line = Shell::from_argv(argv).export_path("PATH", "/x!y/bin").unwrap();
+            let script = format!("export PATH=/a:/x!y/bin:/b:{dir}; {line}; printf '%s' \"$PATH\"");
+            if let Some(out) = run_script(argv, &script) {
+                assert_eq!(
+                    out,
+                    format!("/x!y/bin:/a:/b:{dir}"),
+                    "argv={argv:?}: bang-path dedup failed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_bash_empty_path_has_no_separators() {
+        let line = Shell::Bash.export_path("PATH", "/opt/bin").unwrap();
+        let script = format!("export PATH=; {line}; printf '%s' \"$PATH\"");
+        if let Some(out) = run_script(&["bash", "-c"], &script) {
+            assert_eq!(out, "/opt/bin", "empty PATH must not gain leading/trailing separators");
+        }
+    }
+
+    #[test]
+    fn live_bash_injection_does_not_execute() {
+        let marker = std::env::temp_dir().join("ocx_inj_live_bash");
+        let _ = std::fs::remove_file(&marker);
+        let value = format!("/x;touch {}", marker.display());
+        let line = Shell::Bash.export_path("PATH", &value).unwrap();
+        let script = format!("export PATH=/a:/b; {line}; true");
+        if run_script(&["bash", "-c"], &script).is_some() {
+            assert!(!marker.exists(), "injection executed: {} was created", marker.display());
+        }
+    }
+
+    #[test]
+    fn live_fish_idempotent_move_to_front() {
+        let line = Shell::Fish.export_path("PATH", "/opt/bin").unwrap();
+        let script = format!("set -gx PATH /a /opt/bin /b; {line}; {line}; string join : $PATH");
+        if let Some(out) = run_script(&["fish", "-c"], &script) {
+            assert_eq!(out, "/opt/bin:/a:/b");
+        }
+    }
+
+    #[test]
+    fn live_powershell_idempotent_move_to_front() {
+        let line = Shell::PowerShell.export_path("PATH", "/opt/bin").unwrap();
+        let script = format!("$env:PATH='/a:/opt/bin:/b'; {line}; {line}; $env:PATH");
+        if let Some(out) = run_script(&["pwsh", "-NoProfile", "-Command"], &script) {
+            assert_eq!(out, "/opt/bin:/a:/b");
+        }
     }
 }

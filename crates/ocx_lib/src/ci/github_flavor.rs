@@ -56,6 +56,14 @@ impl GitHubFlavor {
 
     /// Flushes all buffered entries to their respective files.
     fn flush_inner(&mut self) -> crate::Result<()> {
+        // Dedup `$GITHUB_PATH` lines keeping the LAST occurrence, preserving
+        // order. The runner prepends each line to `PATH` as it reads the file,
+        // so the last line written wins precedence (LIFO); keeping the last
+        // occurrence matches the in-process move-to-front semantics and avoids
+        // emitting duplicate directory lines on re-export. See
+        // <https://docs.github.com/actions/reference/workflow-commands-for-github-actions#adding-a-system-path>.
+        use crate::utility::vec_ext::VecExt;
+        self.path_entries.unique_last();
         for entry in self.path_entries.drain(..) {
             append_line(&self.path_file, &entry)?;
         }
@@ -481,6 +489,24 @@ mod tests {
             content, "DROP_TEST=drop-value\n",
             "Drop must flush buffered entries without an explicit flush() call"
         );
+    }
+
+    #[test]
+    fn duplicate_path_dir_dedups_keeping_last() {
+        // Two packages contributing the same PATH dir must collapse to a single
+        // `$GITHUB_PATH` line (keep-last order), so re-export does not grow it.
+        let env = crate::test::env::lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut targets = setup_github_env(&env, &tmp);
+
+        targets.write_entry("PATH", "/shared/bin", &ModifierKind::Path).unwrap();
+        targets.write_entry("PATH", "/pkg/bin", &ModifierKind::Path).unwrap();
+        targets.write_entry("PATH", "/shared/bin", &ModifierKind::Path).unwrap();
+        targets.flush().unwrap();
+
+        // keep-last: the first `/shared/bin` is dropped, leaving `/pkg/bin`
+        // then `/shared/bin` — each directory appears exactly once.
+        assert_eq!(read(&targets.path_file), "/pkg/bin\n/shared/bin\n");
     }
 
     #[test]

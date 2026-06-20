@@ -140,13 +140,24 @@ fn emit_activation(shell: Shell, bin_path: &std::path::Path, completion: Option<
     // they contain no shell metacharacters).
     emit_path_prepend(shell, bin_path);
 
-    // ── Global toolchain env (guarded) ───────────────────────────────────────
-    // Evaluate the global toolchain env once per shell — re-sourcing the user's
-    // shell profile must not re-run the expensive `ocx --global env` subprocess
-    // (SOTA-W3, mirrors mise's `MISE_SHELL` guard).  The guard line and the
-    // marker line are emitted together so a re-source becomes a cheap no-op.
+    // ── Global toolchain env ─────────────────────────────────────────────────
+    // Evaluate the global toolchain env. For the idempotent shells the emitted
+    // env lines never duplicate — PATH uses move-to-front, constants are
+    // absolute sets — so the eval runs unconditionally with NO `OCX_ACTIVATED`
+    // state guard: an exported guard leaks into child processes (e.g. a VS Code
+    // Remote server whose terminals inherit it) and wrongly suppresses
+    // activation in a shell that needs it. Running unconditionally also lets a
+    // re-source pick up a changed global toolchain.
+    //
+    // Batch is the exception: cmd PATH emission is prepend-only (no move-to-front
+    // primitive — see `Shell::export_path`), so its eval keeps the
+    // `OCX_ACTIVATED` session guard plus the marker below to avoid PATH growth on
+    // repeated activation. cmd has no auto-sourced profile, so that guard never
+    // crosses the auto-activation boundary the removed POSIX guards did.
     emit_global_env_eval(shell);
-    emit_activated_marker(shell);
+    if shell == Shell::Batch {
+        println!("set OCX_ACTIVATED=1");
+    }
 }
 
 /// Emit the PATH prepend line for the given shell using an absolute `bin_path`.
@@ -199,30 +210,28 @@ fn generate_completion_inline(shell: Shell) -> Option<String> {
     ))
 }
 
-/// Emit the eval line that loads the global toolchain env, gated on
-/// `OCX_ACTIVATED` so re-sourcing the user's shell profile becomes a no-op.
+/// Emit the eval line that loads the global toolchain env.
 fn emit_global_env_eval(shell: Shell) {
     println!("{}", format_global_env_eval(shell));
 }
 
-/// Emit the marker line that sets `OCX_ACTIVATED=1`.
-fn emit_activated_marker(shell: Shell) {
-    println!("{}", format_activated_marker(shell));
-}
-
-/// Format the gated global-env-eval line for `shell` without emitting.
+/// Format the global-env-eval line for `shell` without emitting.
 ///
-/// Mirrors the `MISE_SHELL` double-activation guard pattern. The marker is set
-/// separately by [`format_activated_marker`] after this line so a fresh shell
-/// runs the eval exactly once and a re-source becomes a cheap no-op.
+/// For the idempotent shells this runs `ocx --global env` guarded only by an
+/// `ocx`-existence probe — PATH uses move-to-front and constants are absolute
+/// sets, so there is no `OCX_ACTIVATED` state guard (an exported guard would
+/// leak into child shells, e.g. a VS Code Remote server whose terminals inherit
+/// it, and suppress activation where it is needed). Batch is the exception: its
+/// PATH emission is prepend-only, so it retains the `OCX_ACTIVATED` session
+/// guard to avoid PATH growth on repeated activation.
 fn format_global_env_eval(shell: Shell) -> String {
     let shell_name = shell_name_for_eval(shell);
     match shell {
-        Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Bash | Shell::Zsh => format!(
-            r#"if [ -z "${{OCX_ACTIVATED:-}}" ] && command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell={shell_name})"; fi"#
-        ),
+        Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Bash | Shell::Zsh => {
+            format!(r#"if command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell={shell_name})"; fi"#)
+        }
         Shell::Fish => {
-            format!("if not set -q OCX_ACTIVATED; and type -q ocx; ocx --global env --shell={shell_name} | source; end")
+            format!("if type -q ocx; ocx --global env --shell={shell_name} | source; end")
         }
         // Capture the exporter output into a variable and only evaluate it when
         // non-empty. `& ocx …` yields `$null` when the command emits nothing
@@ -233,38 +242,24 @@ fn format_global_env_eval(shell: Shell) -> String {
         // `Invoke-Expression` would join lines with spaces and corrupt the
         // script. Works in both Windows PowerShell 5.1 and PowerShell 7+.
         Shell::PowerShell => format!(
-            "if (-not $env:OCX_ACTIVATED -and (Get-Command ocx -ErrorAction SilentlyContinue)) {{ $__ocx_global_env = (& ocx --global env --shell={shell_name} | Out-String); if ($__ocx_global_env) {{ Invoke-Expression $__ocx_global_env }} }}"
+            "if (Get-Command ocx -ErrorAction SilentlyContinue) {{ $__ocx_global_env = (& ocx --global env --shell={shell_name} | Out-String); if ($__ocx_global_env) {{ Invoke-Expression $__ocx_global_env }} }}"
         ),
+        // CMD: `FOR /F` evaluates each line of the subprocess output. Batch
+        // PATH emission is prepend-only (cmd has no move-to-front primitive), so
+        // unlike the idempotent shells it KEEPS the `OCX_ACTIVATED` session guard
+        // to avoid re-prepending the global toolchain on a repeated activation.
+        // The marker is set by `emit_activation` after this line.
         Shell::Batch => {
-            // CMD: skip if OCX_ACTIVATED is already set. `FOR /F` evaluates each
-            // line of the subprocess output.
             format!(
                 "if not defined OCX_ACTIVATED FOR /F \"usebackq\" %i IN (`ocx --global env --shell={shell_name}`) DO @%i"
             )
         }
-        Shell::Elvish => format!(
-            "if (and (not (has-env OCX_ACTIVATED)) (has-external ocx)) {{ ocx --global env --shell={shell_name} | slurp | eval }}"
-        ),
-        Shell::Nushell => format!(
-            "if ($env.OCX_ACTIVATED? == null) and (which ocx | length) > 0 {{ ocx --global env --shell={shell_name} | nu -c $in }}"
-        ),
-    }
-}
-
-/// Format the per-shell line that sets the `OCX_ACTIVATED` marker.
-///
-/// Always emitted after [`format_global_env_eval`] — so the first activation
-/// runs the eval and then sets the marker, while a re-source skips the eval
-/// (its `OCX_ACTIVATED` guard now sees the marker) and only re-sets the marker
-/// (idempotent).
-fn format_activated_marker(shell: Shell) -> String {
-    match shell {
-        Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Bash | Shell::Zsh => "export OCX_ACTIVATED=1".to_string(),
-        Shell::Fish => "set -gx OCX_ACTIVATED 1".to_string(),
-        Shell::PowerShell => r#"$env:OCX_ACTIVATED = "1""#.to_string(),
-        Shell::Batch => "set OCX_ACTIVATED=1".to_string(),
-        Shell::Elvish => "set-env OCX_ACTIVATED 1".to_string(),
-        Shell::Nushell => "$env.OCX_ACTIVATED = '1'".to_string(),
+        Shell::Elvish => {
+            format!("if (has-external ocx) {{ ocx --global env --shell={shell_name} | slurp | eval }}")
+        }
+        Shell::Nushell => {
+            format!("if (which ocx | length) > 0 {{ ocx --global env --shell={shell_name} | nu -c $in }}")
+        }
     }
 }
 
@@ -291,9 +286,23 @@ mod tests {
     use ocx_lib::shell::Shell;
 
     use super::{
-        completion_clap_shell, emit_path_prepend, format_activated_marker, format_global_env_eval,
-        generate_completion_inline, ocx_install_bin_path,
+        completion_clap_shell, emit_path_prepend, format_global_env_eval, generate_completion_inline,
+        ocx_install_bin_path,
     };
+
+    /// Every shell variant — the activation surface is generic over the full set.
+    const ALL_SHELLS: [Shell; 10] = [
+        Shell::Ash,
+        Shell::Ksh,
+        Shell::Dash,
+        Shell::Bash,
+        Shell::Zsh,
+        Shell::Fish,
+        Shell::PowerShell,
+        Shell::Batch,
+        Shell::Elvish,
+        Shell::Nushell,
+    ];
 
     // ── PATH prepend: absolute path via Shell::export_path ──────────────────
     //
@@ -362,23 +371,54 @@ mod tests {
         }
     }
 
-    // ── OCX_ACTIVATED double-activation guard (SOTA-W3) ─────────────────────
+    // ── No OCX_ACTIVATED guard (idempotent activation, no cross-process leak) ─
 
-    /// POSIX shells must guard the eval on `OCX_ACTIVATED` and probe `ocx`
-    /// existence. Removing the guard turns every re-source into a redundant
-    /// `ocx --global env` subprocess.
+    /// No shell's global-env-eval line may carry an `OCX_ACTIVATED` state guard.
+    /// An exported guard leaks into child processes (e.g. a VS Code Remote
+    /// server whose terminals inherit it) and suppresses activation in a shell
+    /// that needs it — the exact SSH-vs-VS-Code divergence this removal fixes.
+    /// Idempotent env emission (PATH move-to-front, constants absolute) makes
+    /// the guard unnecessary for correctness — for every shell EXCEPT Batch,
+    /// whose PATH emission is prepend-only (see `global_env_eval_batch_keeps_
+    /// activated_guard`).
     #[test]
-    fn global_env_eval_guards_posix_shells_on_ocx_activated() {
-        for shell in [Shell::Ash, Shell::Ksh, Shell::Dash, Shell::Bash, Shell::Zsh] {
+    fn global_env_eval_has_no_activated_guard_for_idempotent_shells() {
+        for shell in ALL_SHELLS {
+            if shell == Shell::Batch {
+                continue;
+            }
             let line = format_global_env_eval(shell);
             assert!(
-                line.contains(r#"[ -z "${OCX_ACTIVATED:-}" ]"#),
-                "{shell:?} eval line must check OCX_ACTIVATED is unset; got: {line:?}"
+                !line.contains("OCX_ACTIVATED"),
+                "{shell:?} eval line must not reference OCX_ACTIVATED; got: {line:?}"
             );
-            assert!(
-                line.contains("command -v ocx"),
-                "{shell:?} eval line must probe ocx via command -v; got: {line:?}"
-            );
+        }
+    }
+
+    /// Batch is the one shell whose PATH emission is prepend-only (cmd has no
+    /// move-to-front primitive), so it KEEPS the `OCX_ACTIVATED` session guard —
+    /// removing it would re-prepend the global toolchain on every activation and
+    /// grow `%PATH%` toward the Windows length limit. The marker that satisfies
+    /// the guard is emitted separately by `emit_activation`.
+    #[test]
+    fn global_env_eval_batch_keeps_activated_guard() {
+        let line = format_global_env_eval(Shell::Batch);
+        assert!(
+            line.contains("if not defined OCX_ACTIVATED"),
+            "Batch eval line must keep the OCX_ACTIVATED guard (prepend-only PATH); got: {line:?}"
+        );
+        assert!(
+            line.contains("ocx --global env --shell=batch"),
+            "Batch eval line must still invoke ocx --global env; got: {line:?}"
+        );
+    }
+
+    /// Every shell still invokes `ocx --global env` — removing the guard must
+    /// strip only the state gate, never the eval itself.
+    #[test]
+    fn global_env_eval_invokes_global_env_for_any_shell() {
+        for shell in ALL_SHELLS {
+            let line = format_global_env_eval(shell);
             assert!(
                 line.contains("ocx --global env --shell="),
                 "{shell:?} eval line must invoke ocx --global env; got: {line:?}"
@@ -386,32 +426,30 @@ mod tests {
         }
     }
 
-    /// Fish must use `not set -q OCX_ACTIVATED` to gate the eval.
+    /// The eval stays gated on an `ocx`-existence probe (not a state guard) for
+    /// every shell that has one, so a shell with ocx uninstalled is a clean
+    /// no-op rather than an error. Batch has no probe — `FOR /F` runs ocx and a
+    /// missing binary simply emits nothing.
     #[test]
-    fn global_env_eval_guards_fish_on_ocx_activated() {
-        let line = format_global_env_eval(Shell::Fish);
-        assert!(
-            line.contains("not set -q OCX_ACTIVATED"),
-            "fish eval line must check OCX_ACTIVATED is unset; got: {line:?}"
-        );
-        assert!(
-            line.contains("type -q ocx"),
-            "fish eval line must probe ocx via type -q; got: {line:?}"
-        );
-    }
-
-    /// PowerShell must use `-not $env:OCX_ACTIVATED` to gate the eval.
-    #[test]
-    fn global_env_eval_guards_powershell_on_ocx_activated() {
-        let line = format_global_env_eval(Shell::PowerShell);
-        assert!(
-            line.contains("-not $env:OCX_ACTIVATED"),
-            "pwsh eval line must check $env:OCX_ACTIVATED is falsy; got: {line:?}"
-        );
-        assert!(
-            line.contains("Get-Command ocx"),
-            "pwsh eval line must probe ocx via Get-Command; got: {line:?}"
-        );
+    fn global_env_eval_probes_ocx_existence() {
+        let probes = [
+            (Shell::Bash, "command -v ocx"),
+            (Shell::Zsh, "command -v ocx"),
+            (Shell::Dash, "command -v ocx"),
+            (Shell::Ash, "command -v ocx"),
+            (Shell::Ksh, "command -v ocx"),
+            (Shell::Fish, "type -q ocx"),
+            (Shell::PowerShell, "Get-Command ocx"),
+            (Shell::Elvish, "has-external ocx"),
+            (Shell::Nushell, "which ocx"),
+        ];
+        for (shell, probe) in probes {
+            let line = format_global_env_eval(shell);
+            assert!(
+                line.contains(probe),
+                "{shell:?} eval line must probe ocx via `{probe}`; got: {line:?}"
+            );
+        }
     }
 
     /// The pwsh eval line must capture the exporter output, collapse it with
@@ -505,62 +543,6 @@ mod tests {
                 "{shell:?} completion must be ASCII-only; first non-ASCII byte at offset {:?}. \
                  Find the help text with a non-ASCII char and replace it (e.g. `→` -> `->`).",
                 bad
-            );
-        }
-    }
-
-    /// CMD must use `if not defined OCX_ACTIVATED` to gate the eval.
-    #[test]
-    fn global_env_eval_guards_batch_on_ocx_activated() {
-        let line = format_global_env_eval(Shell::Batch);
-        assert!(
-            line.contains("if not defined OCX_ACTIVATED"),
-            "CMD eval line must check OCX_ACTIVATED is undefined; got: {line:?}"
-        );
-    }
-
-    /// Elvish + Nushell each emit an env-existence guard.
-    #[test]
-    fn global_env_eval_guards_elvish_nushell_on_ocx_activated() {
-        let line_elv = format_global_env_eval(Shell::Elvish);
-        assert!(
-            line_elv.contains("not (has-env OCX_ACTIVATED)"),
-            "elvish eval line must check OCX_ACTIVATED via has-env; got: {line_elv:?}"
-        );
-
-        let line_nu = format_global_env_eval(Shell::Nushell);
-        assert!(
-            line_nu.contains("$env.OCX_ACTIVATED? == null"),
-            "nushell eval line must check $env.OCX_ACTIVATED is null; got: {line_nu:?}"
-        );
-    }
-
-    /// Every shell must emit a marker line that sets `OCX_ACTIVATED=1` — the
-    /// re-source no-op contract relies on it. New shell variants must be added
-    /// here in the same commit that adds them to the `Shell` enum.
-    #[test]
-    fn activated_marker_emitted_for_every_shell() {
-        let shells = [
-            Shell::Ash,
-            Shell::Ksh,
-            Shell::Dash,
-            Shell::Bash,
-            Shell::Zsh,
-            Shell::Fish,
-            Shell::PowerShell,
-            Shell::Batch,
-            Shell::Elvish,
-            Shell::Nushell,
-        ];
-        for shell in shells {
-            let line = format_activated_marker(shell);
-            assert!(
-                line.contains("OCX_ACTIVATED"),
-                "{shell:?} marker must reference OCX_ACTIVATED; got: {line:?}"
-            );
-            assert!(
-                line.contains('1'),
-                "{shell:?} marker must set the value to 1; got: {line:?}"
             );
         }
     }

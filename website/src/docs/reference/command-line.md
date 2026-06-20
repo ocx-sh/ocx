@@ -1698,7 +1698,7 @@ if command -v ocx >/dev/null 2>&1; then
 fi
 ```
 
-*Simplified illustration; the installer writes a byte-identical `env.sh` shim — `OCX_HOME` is resolved at runtime via `${OCX_HOME:=$HOME/.ocx}`, not substituted at install time — plus a [`_OCX_ENV_LOADED`][env-ocx-env-loaded] double-source guard. See the [environment reference][env-ocx-env-loaded].*
+*Simplified illustration; the installer writes a byte-identical `env.sh` shim — `OCX_HOME` is resolved at runtime via `${OCX_HOME:=$HOME/.ocx}`, not substituted at install time. Re-running the shim is safe because the emitted `PATH` updates are idempotent (move-to-front).*
 
 **Usage**
 
@@ -2507,7 +2507,6 @@ On Windows, `package env` prepends `.CMD` to `PATHEXT` in its output when the ho
 [env-ocx-home]: ./environment.md#ocx-home
 [env-ocx-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-no-completions]: ./environment.md#ocx-no-completions
-[env-ocx-env-loaded]: ./environment.md#ocx-env-loaded
 [env-ocx-update-check-interval]: ./environment.md#ocx-update-check-interval
 [env-github-actions]: ./environment.md#external-github-actions
 [env-github-env]: ./environment.md#external-github-env

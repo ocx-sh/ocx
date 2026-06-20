@@ -62,13 +62,21 @@ impl CiFlavor {
 /// [`PATH_SEPARATOR`](crate::env::PATH_SEPARATOR). This is the one place the
 /// env-read + separator-join semantics live, so GitHub's `$GITHUB_ENV` path
 /// case and GitLab's flattened path case stay byte-identical.
+///
+/// Move-to-front: a value already present in the existing variable is removed
+/// from its old position and kept at the front (the buffered `values` precede
+/// `existing`, then [`VecExt::unique`](crate::utility::vec_ext::VecExt::unique)
+/// keeps the first occurrence). Empty segments are dropped. Re-running an export
+/// against an already-exported variable therefore does not grow it.
 fn prepend_existing(key: &str, values: &[String]) -> String {
+    use crate::utility::vec_ext::VecExt;
     let existing = crate::env::var(key).unwrap_or_default();
-    let mut parts: Vec<&str> = values.iter().map(String::as_str).collect();
-    if !existing.is_empty() {
-        parts.push(&existing);
-    }
-    parts.join(crate::env::PATH_SEPARATOR)
+    let separator = crate::env::PATH_SEPARATOR;
+    let mut parts: Vec<String> = values.to_vec();
+    parts.extend(existing.split(separator).map(str::to_string));
+    parts.retain(|segment| !segment.is_empty());
+    parts.unique();
+    parts.join(separator)
 }
 
 impl std::fmt::Display for CiFlavor {
@@ -116,5 +124,41 @@ mod tests {
     #[test]
     fn value_enum_rejects_unknown() {
         assert!(CiFlavor::from_str("jenkins", false).is_err());
+    }
+
+    // ── prepend_existing move-to-front (idempotency) ─────────────────────
+    use crate::env::PATH_SEPARATOR as SEP;
+
+    #[test]
+    fn prepend_existing_does_not_re_add_present_value() {
+        let env = crate::test::env::lock();
+        env.set("PREPEND_TEST", format!("/pkg/bin{SEP}/usr/bin"));
+        // `/pkg/bin` is already present → it is moved to front, not duplicated.
+        let result = super::prepend_existing("PREPEND_TEST", &["/pkg/bin".to_string()]);
+        assert_eq!(result, format!("/pkg/bin{SEP}/usr/bin"));
+    }
+
+    #[test]
+    fn prepend_existing_new_values_precede_existing() {
+        let env = crate::test::env::lock();
+        env.set("PREPEND_TEST", "/usr/bin");
+        let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/b/bin".to_string()]);
+        assert_eq!(result, format!("/a/bin{SEP}/b/bin{SEP}/usr/bin"));
+    }
+
+    #[test]
+    fn prepend_existing_drops_empty_segments() {
+        let env = crate::test::env::lock();
+        env.set("PREPEND_TEST", format!("/usr/bin{SEP}{SEP}/bin"));
+        let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string()]);
+        assert_eq!(result, format!("/a/bin{SEP}/usr/bin{SEP}/bin"));
+    }
+
+    #[test]
+    fn prepend_existing_collapses_duplicate_new_values() {
+        let env = crate::test::env::lock();
+        env.remove("PREPEND_TEST");
+        let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/a/bin".to_string()]);
+        assert_eq!(result, "/a/bin");
     }
 }

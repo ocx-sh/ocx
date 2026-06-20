@@ -357,11 +357,10 @@ def test_activate_emits_global_env_eval_bash(
 ) -> None:
     """stdout must contain the --global env eval line for bash.
 
-    Plan: "emit the eval line that loads the global toolchain env" via
-    `emit_global_env_eval`.  For sh-family shells the form is gated on
-    OCX_ACTIVATED so re-sourcing the user's shell profile becomes a cheap
-    no-op (mirrors mise's MISE_SHELL double-activation guard):
-      if [ -z "${OCX_ACTIVATED:-}" ] && command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell=bash)"; fi
+    The sh-family form runs `ocx --global env` behind an ocx-existence probe,
+    with NO OCX_ACTIVATED state guard — idempotent env emission makes re-running
+    safe and an exported guard would leak across process boundaries:
+      if command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell=bash)"; fi
 
     The literal substring "--global env" is the discriminating token.
     """
@@ -372,14 +371,14 @@ def test_activate_emits_global_env_eval_bash(
         "stdout must contain the '--global env' eval line for --shell=bash; "
         f"got (rc={result.returncode}):\n{stdout}\nstderr:\n{result.stderr}"
     )
-    # Verify the sh-family OCX_ACTIVATED guard + ocx-existence probe.
-    assert '[ -z "${OCX_ACTIVATED:-}" ]' in stdout, (
-        "stdout must contain the OCX_ACTIVATED guard for --shell=bash; "
-        f"got:\n{stdout}"
-    )
+    # The eval is gated only by an ocx-existence probe, never a state guard.
     assert "command -v ocx" in stdout, (
         "stdout must contain 'command -v ocx' conditional for --shell=bash; "
         f"got:\n{stdout}"
+    )
+    assert "OCX_ACTIVATED" not in stdout, (
+        "bash activation output must NOT carry an OCX_ACTIVATED guard "
+        f"(it leaks across process boundaries); got:\n{stdout}"
     )
 
 
@@ -388,9 +387,9 @@ def test_activate_emits_global_env_eval_fish(
 ) -> None:
     """stdout must contain the --global env eval line for fish.
 
-    Fish form gated on OCX_ACTIVATED so re-sourcing the user's shell profile
-    becomes a no-op (mirrors mise's MISE_SHELL double-activation guard):
-      if not set -q OCX_ACTIVATED; and type -q ocx; ocx --global env --shell=fish | source; end
+    Fish form runs `ocx --global env` behind a `type -q ocx` probe, with no
+    OCX_ACTIVATED state guard:
+      if type -q ocx; ocx --global env --shell=fish | source; end
     """
     result = _run_activate(ocx, "--shell=fish")
     stdout = result.stdout
@@ -399,13 +398,13 @@ def test_activate_emits_global_env_eval_fish(
         "stdout must contain the '--global env' eval line for --shell=fish; "
         f"got (rc={result.returncode}):\n{stdout}\nstderr:\n{result.stderr}"
     )
-    # Verify the fish-specific OCX_ACTIVATED guard + ocx-existence probe.
-    assert "not set -q OCX_ACTIVATED" in stdout, (
-        "stdout must contain the OCX_ACTIVATED guard for --shell=fish; "
-        f"got:\n{stdout}"
-    )
+    # The eval is gated only by an ocx-existence probe, never a state guard.
     assert "type -q ocx" in stdout, (
         "stdout must contain 'type -q ocx' conditional for --shell=fish; "
+        f"got:\n{stdout}"
+    )
+    assert "OCX_ACTIVATED" not in stdout, (
+        "fish activation output must NOT carry an OCX_ACTIVATED guard; "
         f"got:\n{stdout}"
     )
 
@@ -647,24 +646,26 @@ def test_activate_sh_output_uses_exact_ocx_home_path(
 
 
 # ---------------------------------------------------------------------------
-# OCX_ACTIVATED double-activation guard (SOTA-W3)
+# No OCX_ACTIVATED guard — activation is idempotent, never a cross-process leak
 # ---------------------------------------------------------------------------
 
 
-def test_activate_global_env_eval_guarded_on_ocx_activated_bash(
+def test_activate_global_env_eval_unguarded_bash(
     ocx: OcxRunner,
 ) -> None:
-    """The bash global-env-eval line must be guarded on $OCX_ACTIVATED.
+    """The bash global-env-eval line must NOT carry an OCX_ACTIVATED guard.
 
-    Mirrors mise's MISE_SHELL pattern: re-sourcing the user's shell profile
-    must not re-run the expensive `ocx --global env` subprocess. Removing the
-    guard turns every `source ~/.bashrc` into a redundant subprocess fan-out.
+    An exported guard leaks into child processes (e.g. a VS Code Remote server
+    whose terminals inherit it) and suppresses activation in a shell that needs
+    it, while a clean SSH login still works. Idempotent env emission (PATH
+    move-to-front, constants absolute) makes the guard unnecessary; the eval is
+    gated only on `command -v ocx`.
     """
     result = _run_activate(ocx, "--shell=bash")
     stdout = result.stdout
     assert result.returncode == 0, f"rc={result.returncode}\nstderr:\n{result.stderr}"
-    assert '[ -z "${OCX_ACTIVATED:-}" ]' in stdout, (
-        "bash activation output must guard global-env-eval on OCX_ACTIVATED; "
+    assert "OCX_ACTIVATED" not in stdout, (
+        "bash activation output must NOT guard global-env-eval on OCX_ACTIVATED; "
         f"got:\n{stdout}"
     )
     assert "ocx --global env --shell=bash" in stdout, (
@@ -673,34 +674,38 @@ def test_activate_global_env_eval_guarded_on_ocx_activated_bash(
     )
 
 
-def test_activate_emits_ocx_activated_marker_bash(
+def test_activate_emits_no_ocx_activated_marker_bash(
     ocx: OcxRunner,
 ) -> None:
-    """The marker `export OCX_ACTIVATED=1` must appear in the bash output.
+    """No `OCX_ACTIVATED` marker may appear in the bash output.
 
-    The first activation runs the eval and sets the marker; a re-source then
-    sees OCX_ACTIVATED set and skips the eval. Asserting the marker is emitted
-    is the canary that the re-source no-op contract holds.
+    The marker existed only to make a re-source a no-op. Activation is now
+    idempotent and runs on every source, so there is no marker — and nothing to
+    leak into child shells.
     """
     result = _run_activate(ocx, "--shell=bash")
     stdout = result.stdout
-    assert "export OCX_ACTIVATED=1" in stdout, (
-        "bash activation output must emit `export OCX_ACTIVATED=1` marker; "
+    assert "OCX_ACTIVATED" not in stdout, (
+        "bash activation output must NOT emit an OCX_ACTIVATED marker; "
         f"got:\n{stdout}"
     )
 
 
-def test_activate_resource_is_noop_for_global_env_eval_bash(
+def test_activate_global_env_eval_runs_despite_inherited_ocx_activated_bash(
     ocx: OcxRunner,
     tmp_path: Path,
 ) -> None:
-    """Sourcing the bash activation output twice must run the eval line exactly
-    once, even though the activation output itself runs each source.
+    """An inherited `OCX_ACTIVATED=1` must NOT suppress the global-env eval.
 
-    Executes the activation output in a subshell with `OCX_ACTIVATED` unset on
-    the first pass and set on the second; asserts the guard short-circuits the
-    second pass. Counts grep-matches against a stand-in `ocx` command so the
-    test does not need a live registry.
+    Regression for the VS Code Remote divergence: a persistent server exports
+    OCX_ACTIVATED; every child terminal inherits it; the old guard then skipped
+    activation so tools went missing — while a clean SSH login still worked.
+    With the guard removed, the eval runs regardless of an inherited
+    OCX_ACTIVATED.
+
+    Sources the activation output once in a subshell with `OCX_ACTIVATED=1`
+    preset and asserts a stand-in `ocx` shim still ran the `--global env` eval
+    (no live registry needed).
     """
     activation = _run_activate(ocx, "--shell=bash")
     assert activation.returncode == 0, (
@@ -711,9 +716,8 @@ def test_activate_resource_is_noop_for_global_env_eval_bash(
     script.write_text(activation.stdout)
     counter = tmp_path / "global-env-eval-count"
 
-    # Stand-in `ocx` shim: each invocation increments a counter and prints a
-    # no-op env line. The bash guard line invokes `ocx --global env` only when
-    # OCX_ACTIVATED is empty.
+    # Stand-in `ocx` shim: each invocation appends to a counter and prints a
+    # no-op env line, so we can count `ocx --global env` runs without a registry.
     shim_dir = tmp_path / "bin"
     shim_dir.mkdir()
     shim = shim_dir / "ocx"
@@ -725,25 +729,47 @@ echo '# noop'
     )
     shim.chmod(0o755)
 
-    # Run twice: first source increments counter once, second source must not.
-    sh_script = (
-        f'export PATH="{shim_dir}:$PATH"\n'
-        f'. "{script}"\n'
-        f'. "{script}"\n'
-    )
+    # Source once with OCX_ACTIVATED already exported — the leaked-guard case.
+    sh_script = f'export PATH="{shim_dir}:$PATH"\n. "{script}"\n'
     result = subprocess.run(
         ["/bin/bash", "-c", sh_script],
         capture_output=True,
         text=True,
-        env={"OCX_HOME": ocx.env["OCX_HOME"], "PATH": "/usr/bin:/bin"},
+        env={
+            "OCX_HOME": ocx.env["OCX_HOME"],
+            "PATH": "/usr/bin:/bin",
+            "OCX_ACTIVATED": "1",
+        },
     )
     assert result.returncode == 0, (
-        f"sourcing twice must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
+        f"sourcing must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
 
     count = counter.read_text().count("invoked") if counter.exists() else 0
-    assert count == 1, (
-        f"global-env-eval shim must run exactly once across two sources; got {count} runs"
+    assert count >= 1, (
+        "global-env-eval must run even when OCX_ACTIVATED is inherited "
+        f"(the VS Code Remote leak case); got {count} runs"
+    )
+
+
+def test_activate_batch_keeps_ocx_activated_guard(ocx: OcxRunner) -> None:
+    """Batch is the ONE shell that retains the OCX_ACTIVATED guard.
+
+    Unlike the idempotent shells, cmd `export_path` is prepend-only (no
+    move-to-front primitive), so dropping the guard would re-prepend the global
+    toolchain on every activation and grow %PATH% toward the Windows length
+    limit. cmd can't run on Linux, so this pins the contract at the emitted-text
+    level: the guard line and the marker that satisfies it must both be present.
+    """
+    result = _run_activate(ocx, "--shell=batch")
+    stdout = result.stdout
+    assert "if not defined OCX_ACTIVATED" in stdout, (
+        "batch activation must KEEP the OCX_ACTIVATED guard (prepend-only PATH); "
+        f"got:\n{stdout}"
+    )
+    assert "set OCX_ACTIVATED=1" in stdout, (
+        "batch activation must emit the OCX_ACTIVATED marker that its guard checks; "
+        f"got:\n{stdout}"
     )
 
 
@@ -771,9 +797,10 @@ def _generate_real_env_sh(ocx_binary: Path, ocx_home: Path) -> tuple[Path, dict[
     This is the production path for env.sh generation after the install scripts
     were slimmed to delegate scaffold creation to the binary.
 
-    The returned env carries only HOME/OCX_HOME/PATH — deliberately NOT
-    ``_OCX_ENV_LOADED``, whose presence would make env.sh's double-source guard
-    ``return`` before it activates anything.
+    The returned env carries only HOME/OCX_HOME/PATH — a clean child env, as a
+    real login shell would have. env.sh no longer carries a double-source guard
+    (activation is idempotent move-to-front), so a re-source simply re-runs
+    activation without duplicating anything.
     """
     bin_dir = ocx_home / "symlinks" / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)

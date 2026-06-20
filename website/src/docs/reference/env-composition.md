@@ -34,6 +34,22 @@ There is no PATH strip, no `# ocx: global toolchain suppressed` comment, and no 
 
 For `ocx direnv`, the `.envrc` evaluates [`ocx direnv export`][cmd-direnv-export] on every directory entry. This emits only the project tools' PATH entries, which [direnv](https://direnv.net/) prepends before the ambient `PATH` — global tools remain reachable for tools not declared by the project, but project-declared tools take priority.
 
+### Idempotent re-application {#strict-isolation-idempotent}
+
+Every `PATH` prepend OCX emits is **idempotent with move-to-front semantics**. Re-applying the same output — direnv re-evaluating `.envrc` on each directory change, a captured snippet re-read from a profile, or a tool re-running [`ocx env --shell`][cmd-env-root] — never grows `PATH`. A directory already present is removed from its old position and placed at the front, so the most recent activation wins lookup and the variable stays a fixed length.
+
+The emitted shell statements are **self-contained**: they depend on no `ocx` process, no guard variable, and no helper function. That makes them safe to capture into a profile —
+
+```sh
+ocx package env cmake --shell bash >> ~/.bashrc
+```
+
+— where every later shell re-sources the block with `ocx` possibly absent and the directory still lands exactly once, at the front. The same move-to-front dedup applies to the in-process environment ([`ocx run`][cmd-run], [`ocx exec`][cmd-exec]) and to CI exports (`--ci=github`, `--ci=gitlab`).
+
+::: warning Batch (cmd.exe) is prepend-only
+`--shell=batch` prepends without deduplication: `cmd.exe` has no list primitive and `FOR /F` with delayed expansion corrupts values containing `!`. Re-sourcing a batch block can therefore grow `PATH`. Every other shell — bash, zsh, ash, ksh, dash, fish, PowerShell, elvish, nushell — is fully idempotent. elvish needs the `str:` module (0.16+); nushell needs the auto-list `PATH` conversion (0.101+).
+:::
+
 ### What "hermetic" means for `ocx run` {#strict-isolation-run}
 
 `ocx run` reads exactly two files: `ocx.toml` and its sibling `ocx.lock`. The resolved environment consists of the tools those files declare — no more. If a tool is not in `ocx.toml`, it is not in the child environment, regardless of what is installed globally or what is on the parent shell's PATH.

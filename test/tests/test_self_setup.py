@@ -206,11 +206,12 @@ def test_setup_env_sh_uses_runtime_ocx_home_not_literal(ocx: OcxRunner) -> None:
 def test_setup_env_sh_double_source_no_path_duplication(ocx: OcxRunner) -> None:
     """Sourcing ``env.sh`` twice in one session must not duplicate the OCX bin.
 
-    The ``_OCX_ENV_LOADED`` guard wraps the PATH prepend so a re-source (e.g. a
-    login shell that sources ``.zprofile`` then ``.zshrc``) is a no-op. This is
-    the behavioral check — not just the textual presence of the guard line —
-    that the former ``test_install_sh.py`` double-source tests verified. The
-    seeded candidate makes ``ocx self activate`` resolve, so the prepend runs.
+    env.sh runs activation on every source (there is no guard); the emitted PATH
+    prepend is idempotent move-to-front, so a re-source (e.g. a login shell that
+    sources ``.zprofile`` then ``.zshrc``) removes the prior occurrence and
+    re-prepends — leaving exactly one. This is the behavioral check that the
+    former ``test_install_sh.py`` double-source tests verified. The seeded
+    candidate makes ``ocx self activate`` resolve, so the prepend runs.
     """
     _seed_candidate(ocx)
     result = _setup(ocx, "--no-modify-path")
@@ -235,7 +236,7 @@ def test_setup_env_sh_double_source_no_path_duplication(ocx: OcxRunner) -> None:
     occurrences = sourced.stdout.split(":").count(bin_segment)
     assert occurrences == 1, (
         f"the OCX bin path must appear exactly once after double-source "
-        f"(the _OCX_ENV_LOADED guard prevents a second prepend); "
+        f"(idempotent move-to-front, not a guard, prevents duplication); "
         f"found {occurrences} in PATH:\n{sourced.stdout}"
     )
 

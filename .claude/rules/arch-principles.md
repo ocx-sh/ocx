@@ -170,6 +170,7 @@ These `crates/ocx_lib/src/` modules have no dedicated subsystem rule — serve m
 | Assemble layer's content tree into package (hardlinks + symlinks) | `utility::fs::assemble_from_layer(s)` | `utility/fs/assemble.rs` |
 | Boolean-like env string (`true/1/yes/on`) | `utility::boolean_string::BooleanString` | `utility/boolean_string.rs` |
 | Forward child `ExitStatus` to process `ExitCode` (Unix passthrough, Windows saturate) | `utility::child_process::propagate_exit_code` | `utility/child_process.rs` |
+| Move-to-front dedup of a `PATH`-style value (drop empties + existing occurrence, prepend; `OsStr`-native via `std::env::split_paths`) | `utility::path::move_to_front` | `utility/path.rs` |
 | File error with path context | `error::file_error(path, io_err)` | `crates/ocx_lib/src/error.rs` |
 
 **Check std first, then this catalog, then invent.** Most "small helper" needs already covered by `std::path`, `tokio::fs`, or existing entry above. If add new entry here, keep row to one line and put impl details in target module's doc comment, not this table.

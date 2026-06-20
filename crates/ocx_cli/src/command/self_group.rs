@@ -19,7 +19,8 @@ pub enum SelfGroup {
     /// Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the
     /// current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects
     /// completions (unless `OCX_NO_COMPLETIONS=1`), and evaluates the global
-    /// toolchain env. Guarded on `$OCX_ACTIVATED` so re-sourcing is a no-op.
+    /// toolchain env. Safe to re-source: the PATH updates are idempotent
+    /// (move-to-front), so a re-source never duplicates an entry.
     Activate(activate::SelfActivate),
     /// Create or refresh ocx shell integration. Installs the latest published
     /// ocx into the content store, writes the per-shell env shims, and adds a
