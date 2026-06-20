@@ -20,7 +20,7 @@ pub use compose::{
     Origin, PositionalPackage, ResolvedTool, compose_tool_set, expand_all_keyword, host_leaf_identifier,
     parse_positional,
 };
-pub use config::ProjectConfig;
+pub use config::{PackageSettings, ProjectConfig};
 pub use error::{Error, ProjectError, ProjectErrorKind};
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use hook::{MissingState, ProjectState, load_project_state};

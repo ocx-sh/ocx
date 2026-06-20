@@ -435,10 +435,20 @@ impl ConfigLoader {
                 }
                 .into());
             }
-            let parsed: Config = toml::from_str(&contents).map_err(|source| Error::Parse {
+            let mut parsed: Config = toml::from_str(&contents).map_err(|source| Error::Parse {
                 path: path.to_path_buf(),
                 source,
             })?;
+            // C7 enforcement: lock a system-scope `[patches]` tier that declares
+            // `required = true` as non-overridable BEFORE merging it into the
+            // accumulator. Only the system file (`/etc/ocx/config.toml`) is
+            // locked; the system tier folds in first as the accumulator base, so
+            // a locked `self.patches` then ignores all lower-tier overrides.
+            if path == Self::system_path().as_path()
+                && let Some(patches) = parsed.patches.as_mut()
+            {
+                patches.lock_as_system();
+            }
             config.merge(parsed);
         }
         Ok(config)

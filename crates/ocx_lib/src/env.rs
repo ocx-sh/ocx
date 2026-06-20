@@ -45,6 +45,14 @@ pub mod keys {
     pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
+    /// Path to the active patch snapshot file (`patches.snapshot.json`).
+    ///
+    /// When set, the compose overlay prefers the snapshot's pinned digests
+    /// over live tag lookups for companions — enabling reproducible builds
+    /// without a network round-trip.  Written by `ocx patch freeze`.
+    /// Resolution-affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`] so launchers apply the same frozen tier.
+    pub const OCX_PATCH_SNAPSHOT: &str = "OCX_PATCH_SNAPSHOT";
     /// JSON object mapping an upstream registry host to its mirror `url`
     /// (e.g. `{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}`).
     /// Resolution-affecting → forwarded to child ocx processes. A single JSON
@@ -120,6 +128,11 @@ pub struct OcxConfigView {
     /// in [`keys::OCX_PATCHES`] so launchers apply the same patch tier (C5).
     /// `None` when no `[patches]` registry is configured.
     pub patches: Option<crate::config::patch::ResolvedPatchConfig>,
+    /// Path to the active patch snapshot file. Resolution-affecting →
+    /// forwarded to child ocx processes via [`Env::apply_ocx_config`] as
+    /// [`keys::OCX_PATCH_SNAPSHOT`] so launchers resolve the same frozen
+    /// companion digests. `None` when no snapshot is active.
+    pub patch_snapshot: Option<PathBuf>,
 }
 
 impl OcxConfigView {
@@ -135,6 +148,7 @@ impl OcxConfigView {
             index: None,
             mirrors: Vec::new(),
             patches: None,
+            patch_snapshot: None,
         }
     }
 }
@@ -298,6 +312,10 @@ impl Env {
         match crate::config::patch::encode_patches(cfg.patches.as_ref()) {
             Some(json) => self.set(keys::OCX_PATCHES, json),
             None => self.remove(keys::OCX_PATCHES),
+        }
+        match &cfg.patch_snapshot {
+            Some(path) => self.set(keys::OCX_PATCH_SNAPSHOT, path.as_os_str()),
+            None => self.remove(keys::OCX_PATCH_SNAPSHOT),
         }
     }
 
@@ -1153,6 +1171,7 @@ mod tests {
     fn apply_ocx_config_sets_ocx_patches_when_patches_some() {
         let mut cfg = view("/abs/ocx");
         cfg.patches = Some(crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: "corp.example.com/patches".to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -1187,6 +1206,7 @@ mod tests {
         let env_guard = crate::test::env::lock();
 
         let original = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
             registry: "internal.company.com/ocx-patches".to_string(),
             path_template: "{registry}/{repository}".to_string(),
             required: true,
@@ -1215,6 +1235,59 @@ mod tests {
         assert_eq!(
             parsed, original,
             "patches_from_env must recover the same ResolvedPatchConfig forwarded by apply_ocx_config"
+        );
+    }
+
+    // ── OCX_PATCH_SNAPSHOT forwarding via apply_ocx_config ───────────────────
+
+    /// `apply_ocx_config` with `patch_snapshot = Some(path)` must set
+    /// `OCX_PATCH_SNAPSHOT` to that path on the child env.
+    ///
+    /// Traceability: Phase 5B spec test 3 — OCX_PATCH_SNAPSHOT forwarded when Some.
+    ///
+    /// NOTE: This test PASSES against the current code because `apply_ocx_config`
+    /// already forwards `patch_snapshot` (the implementation is already in place).
+    /// The test is included here as a pinning guard to prevent regression and to
+    /// satisfy the spec test contract.
+    #[test]
+    fn apply_ocx_config_sets_ocx_patch_snapshot_when_some() {
+        let mut cfg = view("/abs/ocx");
+        cfg.patch_snapshot = Some(std::path::PathBuf::from("/project/patches.snapshot.json"));
+
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+
+        let value = env
+            .get(keys::OCX_PATCH_SNAPSHOT)
+            .expect("OCX_PATCH_SNAPSHOT must be set when patch_snapshot is Some");
+        assert_eq!(
+            value.to_str().unwrap(),
+            "/project/patches.snapshot.json",
+            "OCX_PATCH_SNAPSHOT must equal the configured path"
+        );
+    }
+
+    /// `apply_ocx_config` with `patch_snapshot = None` must remove any stale
+    /// `OCX_PATCH_SNAPSHOT` value from the child env, so the outer ocx's state
+    /// (no snapshot) wins over any inherited value.
+    ///
+    /// Traceability: Phase 5B spec test 3 — OCX_PATCH_SNAPSHOT removed when None.
+    ///
+    /// NOTE: This test PASSES against the current code. Included as a regression guard.
+    #[test]
+    fn apply_ocx_config_removes_ocx_patch_snapshot_when_none() {
+        // Build a view with patch_snapshot = None (the default).
+        let cfg = view("/abs/ocx");
+        assert!(cfg.patch_snapshot.is_none());
+
+        let mut env = Env::clean();
+        // Pre-set a stale value to confirm it is cleared.
+        env.set(keys::OCX_PATCH_SNAPSHOT, "/stale/patches.snapshot.json");
+        env.apply_ocx_config(&cfg);
+
+        assert!(
+            env.get(keys::OCX_PATCH_SNAPSHOT).is_none(),
+            "patch_snapshot=None must remove any stale OCX_PATCH_SNAPSHOT from the child env"
         );
     }
 

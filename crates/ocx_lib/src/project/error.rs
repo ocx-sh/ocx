@@ -185,6 +185,25 @@ pub enum ProjectErrorKind {
         source: IdentifierError,
     },
 
+    /// A `[package."<key>"]` table key is missing an explicit registry.
+    ///
+    /// Per-package settings (`no-patches`) key on a fully-qualified
+    /// identifier (`registry/repo[:tag]`); a bare key like
+    /// `[package."cmake"]` is rejected, mirroring the `[tools]` value rule.
+    #[error("package key '{key}' is missing a registry; expected 'registry/repo[:tag]' (e.g. 'ocx.sh/cmake')")]
+    PackageKeyMissingRegistry { key: String },
+
+    /// A `[package."<key>"]` table key failed to parse as an
+    /// [`crate::oci::Identifier`] for a reason other than missing registry
+    /// (invalid characters, malformed digest, uppercase repo, etc.). Carries
+    /// the underlying [`IdentifierError`] for diagnostic context.
+    #[error("package key '{key}' is not a valid identifier")]
+    PackageKeyInvalid {
+        key: String,
+        #[source]
+        source: IdentifierError,
+    },
+
     /// Resolution failed because the identifier's tag does not exist on
     /// the registry (404 from the manifest endpoint, or `Ok(None)` from
     /// the index layer). Distinct from [`Self::RegistryUnreachable`] so
@@ -357,6 +376,8 @@ impl ClassifyExitCode for Error {
                 | ProjectErrorKind::FileTooLarge { .. }
                 | ProjectErrorKind::ToolValueMissingRegistry { .. }
                 | ProjectErrorKind::ToolValueInvalid { .. }
+                | ProjectErrorKind::PackageKeyMissingRegistry { .. }
+                | ProjectErrorKind::PackageKeyInvalid { .. }
                 | ProjectErrorKind::LockRepositoryNotBare { .. } => ExitCode::ConfigError,
                 ProjectErrorKind::EmptyGroupFilter
                 | ProjectErrorKind::UnknownGroup { .. }

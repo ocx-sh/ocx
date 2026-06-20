@@ -12,6 +12,8 @@ pub mod lock;
 pub mod login;
 pub mod package_description;
 pub mod package_inspect;
+pub mod patch_freeze;
+pub mod patch_sync;
 pub mod paths;
 pub mod pull_dry_run;
 pub mod push;

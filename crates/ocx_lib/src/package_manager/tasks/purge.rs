@@ -7,6 +7,7 @@ use crate::oci;
 
 use super::super::PackageManager;
 use super::garbage_collection::GarbageCollector;
+use super::resolve::SitePatchRoots;
 
 impl PackageManager {
     /// Purge a single object and its orphaned transitive dependencies.
@@ -15,7 +16,7 @@ impl PackageManager {
     /// if the object is still reachable from another root).
     pub async fn purge(&self, identifier: &oci::PinnedIdentifier) -> crate::Result<Vec<PathBuf>> {
         let obj_dir = self.file_structure().packages.path(identifier);
-        let gc = GarbageCollector::build(self.file_structure(), &[]).await?;
+        let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default()).await?;
         gc.purge(&[obj_dir]).await
     }
 
@@ -28,7 +29,7 @@ impl PackageManager {
             .iter()
             .map(|id| self.file_structure().packages.path(id))
             .collect();
-        let gc = GarbageCollector::build(self.file_structure(), &[]).await?;
+        let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default()).await?;
         gc.purge(&obj_dirs).await
     }
 }
