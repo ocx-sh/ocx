@@ -433,8 +433,15 @@ emission and guard check removed); `crates/ocx_cli/src/command/self_group/activa
   so every shell activates unguarded.
 - The batch emit uses cmd's `%VAR:search=%` **substring substitution** (normal,
   non-delayed expansion) to delete every occurrence of the entry, then prepends
-  once. Four statements, each on its own line (cmd re-expands `%KEY%` per
-  statement): trailing-separator normalize → delete-all → prepend → strip-sep.
+  once — in a **single statement**: `SET "PATH=value;%PATH:value;=%"`. A single
+  statement is required because the activation stream is consumed both via `call
+  file.bat` and via `FOR /F ... DO @%i` (how `ocx --global env` is applied), and a
+  FOR/F eval does not re-expand `%KEY%` between statements. The batch global-env
+  eval itself uses `FOR /F "usebackq delims="` so `%i` captures the whole emitted
+  line (default whitespace split would leave `%i` as the bare `SET` token).
+  Caveats, both benign and matching the prior prepend-only form: an entry that was
+  the unanchored last segment is not relocated (one-time non-dedup, never growth),
+  and an empty `%PATH%` yields a trailing separator (an empty segment cmd ignores).
 
 **Why the earlier "impractical" verdict was wrong:** it assumed the only cmd dedup
 path was `FOR /F` + `setlocal enabledelayedexpansion`, which mangles `!`-bearing

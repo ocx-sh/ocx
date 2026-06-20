@@ -238,30 +238,26 @@ impl Shell {
                     "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| $p != \"{value}\" and $p != \"\" }} | prepend \"{value}\")"
                 )
             }
-            // batch (cmd.exe) — idempotent move-to-front via substring substitution.
+            // batch (cmd.exe) — idempotent move-to-front in a SINGLE statement.
             // cmd has no list primitive, but `%VAR:search=%` deletes every literal
-            // occurrence of `search` using *normal* (non-delayed) expansion, so it
-            // never corrupts a `!`-bearing segment the way `FOR /F` + delayed
-            // expansion would. Four statements, each on its OWN line because cmd
-            // re-expands `%KEY%` per statement (an `&`-chained one-liner expands the
-            // whole line once and would read the pre-edit value):
-            //   1. append a trailing separator so the final segment also ends in one,
-            //      letting step 2 match a value that was the last entry;
-            //   2. delete every boundary-anchored `value<sep>` occurrence;
-            //   3. prepend `value<sep>` once (move-to-front);
-            //   4. strip the helper trailing separator if it survived.
-            // Substitution is case-insensitive, matching Windows' case-insensitive
-            // PATH semantics (the exact-match parity the POSIX arms keep). The value
-            // is escaped (`%`->`%%`, `^&<>|`) so it can neither break the SET parse
-            // nor inject a command.
+            // occurrence of `search` using *normal* (non-delayed) expansion, so a
+            // `!`-bearing segment stays intact (the `FOR /F` + delayed-expansion form
+            // would corrupt it). One statement is essential: this line is consumed
+            // both via `call file.bat` AND via `FOR /F ... DO @%i` (how `ocx --global
+            // env` is applied), and a FOR/F eval does not re-expand `%KEY%` between
+            // statements — a multi-statement form would read a stale value. So delete
+            // every existing `value<sep>` occurrence and prepend `value<sep>` once, in
+            // place. Re-running is stable: the front occurrence is deleted and
+            // re-prepended (the work the removed OCX_ACTIVATED guard used to do).
+            // Match is case-insensitive — Windows PATH semantics. Caveats, both
+            // benign and matching the prior prepend-only behaviour: an entry that was
+            // the unanchored *last* segment is not relocated (a one-time non-dedup,
+            // never unbounded growth), and an empty `%KEY%` yields a trailing
+            // separator (an empty PATH segment cmd ignores). `escape_value`
+            // neutralises `%`, `^`, `&`, `<`, `>`, `|`.
             Self::Batch => {
                 let value = self.escape_value(raw);
-                format!(
-                    "SET \"{key}=%{key}%{separator}\"\n\
-                     SET \"{key}=%{key}:{value}{separator}=%\"\n\
-                     SET \"{key}={value}{separator}%{key}%\"\n\
-                     IF \"%{key}:~-1%\"==\"{separator}\" SET \"{key}=%{key}:~0,-1%\""
-                )
+                format!("SET \"{key}={value}{separator}%{key}:{value}{separator}=%\"")
             }
         })
     }
@@ -1033,14 +1029,9 @@ mod tests {
 
     #[test]
     fn export_path_batch_idempotent_move_to_front() {
-        // Four statements: trailing-sep normalize, delete-all, prepend, strip-sep.
+        // Single statement: delete every `value<sep>` occurrence, prepend once.
         let s = sep();
-        let expected = format!(
-            "SET \"PATH=%PATH%{s}\"\n\
-             SET \"PATH=%PATH:/opt/bin{s}=%\"\n\
-             SET \"PATH=/opt/bin{s}%PATH%\"\n\
-             IF \"%PATH:~-1%\"==\"{s}\" SET \"PATH=%PATH:~0,-1%\""
-        );
+        let expected = format!("SET \"PATH=/opt/bin{s}%PATH:/opt/bin{s}=%\"");
         assert_eq!(Shell::Batch.export_path("PATH", "/opt/bin"), Some(expected));
     }
 
@@ -1285,7 +1276,7 @@ mod tests {
         // the work the removed `OCX_ACTIVATED` guard used to do for prepend-only.
         let separator = sep();
         let value = r"C:\opt\bin";
-        let line = Shell::Batch.export_path("PATH", value).unwrap().replace('\n', "\r\n");
+        let line = Shell::Batch.export_path("PATH", value).unwrap();
         let seed = format!(r"C:\sys{separator}{value}{separator}C:\other");
         let body = format!("SET \"PATH={seed}\"\r\n{line}\r\n{line}\r\necho %PATH%");
         if let Some(out) = run_batch(&body) {
@@ -1293,6 +1284,25 @@ mod tests {
                 out,
                 format!(r"{value}{separator}C:\sys{separator}C:\other"),
                 "batch move-to-front not idempotent across a double source"
+            );
+        }
+    }
+
+    #[test]
+    fn live_batch_empty_path_has_entry_first() {
+        // Documented batch contract on an empty PATH: a single statement cannot
+        // conditionally drop the separator, so the result is `value<sep>` (a
+        // trailing empty segment cmd ignores). The entry must lead and the form
+        // must stay stable across a double source.
+        let separator = sep();
+        let value = r"C:\opt\bin";
+        let line = Shell::Batch.export_path("PATH", value).unwrap();
+        let body = format!("SET \"PATH=\"\r\n{line}\r\n{line}\r\necho %PATH%");
+        if let Some(out) = run_batch(&body) {
+            assert_eq!(
+                out,
+                format!(r"{value}{separator}"),
+                "batch empty-PATH form must be `value<sep>` and stable"
             );
         }
     }
