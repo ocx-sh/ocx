@@ -36,6 +36,7 @@ pub mod log;
 pub mod oci;
 pub mod package;
 pub mod package_manager;
+pub mod patch;
 pub mod project;
 pub mod publisher;
 pub mod reference_manager;
